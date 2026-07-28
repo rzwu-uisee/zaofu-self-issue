@@ -61,6 +61,7 @@ from zf.runtime.run_manager import (
     _candidate_rework_shadowed_by_workflow,
     _action_seen,
     _emit_no_progress_run_terminal,
+    _execute_repair_closeout_apply,
     _outcome_no_progress_break,
     _operation_precondition_holds,
     _post_verify_action,
@@ -83,6 +84,17 @@ def _state(tmp_path: Path) -> tuple[Path, EventLog, EventWriter]:
     (state_dir / "feature_list.json").write_text("[]\n", encoding="utf-8")
     log = EventLog(state_dir / "events.jsonl")
     return state_dir, log, EventWriter(log)
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 class _RespawnRecordingTransport:
@@ -4183,6 +4195,413 @@ def test_run_manager_executes_repair_closeout_validation_plan(tmp_path: Path) ->
     assert queue["items"][0]["next_allowed_action"] == "operator_merge_or_reject"
 
 
+def test_verified_checkpoint_apply_is_opt_in_and_requires_passed_validation(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    closeout_payload = {
+        "fingerprint": "stall:verified-apply",
+        "candidate_id": "C-APPLY",
+        "branch": "self-repair/apply",
+        "worktree": str(tmp_path / "repair"),
+        "base_commit": "base-1",
+        "source_commit": "repair-1",
+        "repair_commit": "repair-1",
+        "risk_classification": {
+            "risk": "medium",
+            "controlled_apply_allowed": False,
+        },
+        "verification_plan": [{
+            "kind": "diff_integrity",
+            "command": "git diff --check",
+            "required": "true",
+        }],
+        "continuation": {
+            "resume_original_workflow": True,
+            "checkpoint_id": "wfres-apply-1",
+            "safe_resume_action": "needs_stage_dispatch",
+        },
+    }
+    log.append(ZfEvent(
+        type="autoresearch.repair.closeout.required",
+        payload=closeout_payload,
+    ))
+    log.append(ZfEvent(
+        type=RUN_MANAGER_ACTION_APPLIED,
+        payload={
+            "action": "repair-closeout-validate",
+            "queue_id": "C-APPLY",
+            "candidate_id": "C-APPLY",
+            "checkpoint_id": "repair-validate-1",
+            "validation_result": {"status": "passed"},
+        },
+    ))
+
+    default_projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    assert not any(
+        item.get("action") == "repair-closeout-apply"
+        for item in default_projection["pending_actions"]
+    )
+    enabled = _config()
+    enabled.runtime = RuntimeConfig(
+        run_manager=RuntimeRunManagerConfig(
+            source_repair=RuntimeRunManagerSourceRepairConfig(
+                enabled=True,
+                apply_policy="verified_checkpoint_apply",
+            ),
+        ),
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=enabled,
+    )
+
+    action = next(
+        item for item in projection["pending_actions"]
+        if item.get("action") == "repair-closeout-apply"
+    )
+    assert action["policy_decision"]["decision"] == "auto_decide"
+    assert action["continuation_checkpoint_id"] == "wfres-apply-1"
+    assert action["validation_event_id"]
+
+
+def test_verified_checkpoint_apply_fails_closed_when_continuation_is_stale(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    log.append(ZfEvent(
+        type="autoresearch.repair.closeout.required",
+        payload={
+            "fingerprint": "stall:stale-apply",
+            "candidate_id": "C-STALE",
+            "branch": "self-repair/stale",
+            "worktree": str(tmp_path / "repair"),
+            "base_commit": "base-1",
+            "source_commit": "repair-1",
+            "repair_commit": "repair-1",
+            "risk_classification": {"risk": "medium"},
+            "verification_plan": [{
+                "kind": "diff_integrity",
+                "command": "git diff --check",
+                "required": "true",
+            }],
+            "continuation": {
+                "resume_original_workflow": True,
+                "checkpoint_id": "wfres-stale-apply",
+                "safe_resume_action": "needs_stage_dispatch",
+            },
+        },
+    ))
+    log.append(ZfEvent(
+        type=RUN_MANAGER_ACTION_APPLIED,
+        payload={
+            "action": "repair-closeout-validate",
+            "queue_id": "C-STALE",
+            "candidate_id": "C-STALE",
+            "checkpoint_id": "repair-validate-stale",
+            "validation_result": {"status": "passed"},
+        },
+    ))
+    log.append(ZfEvent(
+        type="workflow.resume.applied",
+        payload={
+            "checkpoint_id": "wfres-stale-apply",
+            "safe_resume_action": "needs_stage_dispatch",
+        },
+    ))
+    enabled = _config()
+    enabled.runtime = RuntimeConfig(
+        run_manager=RuntimeRunManagerConfig(
+            source_repair=RuntimeRunManagerSourceRepairConfig(
+                enabled=True,
+                apply_policy="verified_checkpoint_apply",
+            ),
+        ),
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=enabled,
+    )
+    action = next(
+        item for item in projection["pending_actions"]
+        if item.get("action") == "repair-closeout-apply"
+    )
+    assert action["continuation_stale_reason"] == "already_applied"
+    assert action["policy_decision"]["decision"] == "needs_approval"
+    assert (
+        "continuation_checkpoint_stale:already_applied"
+        in action["preflight"]["failures"]
+    )
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=enabled,
+        spawn_repairs=False,
+        action_filter={"repair-closeout-apply"},
+    )
+
+    assert result.actions_blocked == 1
+    blocked = next(
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_ACTION_BLOCKED
+        and event.payload.get("action") == "repair-closeout-apply"
+    )
+    assert blocked.payload["continuation_stale_reason"] == "already_applied"
+
+
+def test_verified_checkpoint_apply_emits_receipt_restart_and_waits_for_rebind(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    root = tmp_path / "harness"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "init")
+    base_commit = _git(root, "rev-parse", "HEAD")
+    worktree = tmp_path / "repair"
+    _git(root, "worktree", "add", "-q", "-b", "repair-apply", str(worktree), "HEAD")
+    target = worktree / "src/zf/fix.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("fixed = True\n", encoding="utf-8")
+    _git(worktree, "add", "src/zf/fix.py")
+    _git(worktree, "commit", "-q", "-m", "fix: repair runtime")
+    repair_commit = _git(worktree, "rev-parse", "HEAD")
+    action = {
+        "action": "repair-closeout-apply",
+        "checkpoint_id": "repair-apply-checkpoint",
+        "safe_resume_action": "repair_closeout_apply",
+        "queue_id": "C-APPLY-LIVE",
+        "candidate_id": "C-APPLY-LIVE",
+        "fingerprint": "stall:apply-live",
+        "branch": "repair-apply",
+        "worktree_path": str(worktree),
+        "base_commit": base_commit,
+        "repair_commit": repair_commit,
+        "source_commit": repair_commit,
+        "validation_event_id": "evt-validation-passed",
+        "continuation_checkpoint_id": "wfres-original",
+        "continuation_safe_resume_action": "needs_stage_dispatch",
+        "continuation": {
+            "resume_original_workflow": True,
+            "checkpoint_id": "wfres-original",
+            "safe_resume_action": "needs_stage_dispatch",
+        },
+        "allow_paths": ["src/zf/**", "tests/**"],
+        "deny_paths": [".env", "**/events.jsonl", "**/session.yaml"],
+        "risk_classification": {"risk": "medium"},
+    }
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+
+    with patch(
+        "zf.runtime.self_repair_runner.harness_root",
+        return_value=root,
+    ), patch(
+        "zf.runtime.run_manager._spawn_source_repair_restart_actuator",
+        return_value=4242,
+    ):
+        status = _execute_repair_closeout_apply(
+            state_dir=state_dir,
+            writer=writer,
+            project_root=project_root,
+            action=action,
+            causation_id="evt-cause",
+        )
+
+    assert status == "applied"
+    events = log.read_all()
+    assert (root / "src/zf/fix.py").exists()
+    assert sum(
+        event.type == "runtime.restart.requested" for event in events
+    ) == 1
+    assert sum(
+        event.type == RUN_MANAGER_REPAIR_MERGE_MERGED for event in events
+    ) == 1
+    assert sum(
+        event.type == RUN_MANAGER_ACTION_APPLIED
+        and event.payload.get("action") == "repair-closeout-apply"
+        for event in events
+    ) == 1
+    merged = next(
+        event for event in events
+        if event.type == RUN_MANAGER_REPAIR_MERGE_MERGED
+    )
+    assert merged.payload["control_plane_restart_required"] is True
+    assert not any(
+        item.get("action") == "workflow-batch-resume"
+        for item in build_run_manager_projection(
+            state_dir,
+            events=events,
+            config=_config(),
+        )["pending_actions"]
+    )
+    assert not any(
+        item.get("action") == "repair-closeout-apply"
+        for item in build_run_manager_projection(
+            state_dir,
+            events=events,
+            config=_config(),
+        )["pending_actions"]
+    )
+
+    log.append(ZfEvent(
+        type="session.started",
+        payload={"control_plane_only": True, "workers_preserved": True},
+    ))
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    resume = next(
+        item for item in projection["pending_actions"]
+        if item.get("action") == "workflow-batch-resume"
+    )
+    assert resume["checkpoint_id"] == "wfres-original"
+    assert resume["safe_resume_action"] == "needs_stage_dispatch"
+
+
+def test_goal_identity_failure_uses_one_aggregate_rebuild_before_autoresearch(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    fanout_id = "fanout-goal-identity"
+    manifest_path = state_dir / "fanouts" / fanout_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps({
+            "fanout_id": fanout_id,
+            "children": [
+                {"child_id": "scan-1", "status": "completed"},
+                {"child_id": "scan-2", "status": "completed"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    log.append(ZfEvent(
+        id="evt-discovery-bad",
+        type="flow.discovery.completed",
+        payload={
+            "fanout_id": fanout_id,
+            "workflow_run_id": "run-goal-1",
+            "goal_id": "child-alias",
+        },
+    ))
+    for index in range(2):
+        log.append(ZfEvent(
+            id=f"evt-identity-invalid-{index}",
+            type="goal.closure.identity.invalid",
+            payload={
+                "fingerprint": "goal-identity:run-goal-1",
+                "workflow_run_id": "run-goal-1",
+                "source_event_id": "evt-discovery-bad",
+                "source_event_type": "flow.discovery.completed",
+                "fanout_id": fanout_id,
+                "reason": "goal identity mismatch",
+            },
+        ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+    rebuilds = [
+        item for item in projection["pending_actions"]
+        if item.get("action") == "fanout-aggregate-rebuild"
+    ]
+
+    assert len(rebuilds) == 1
+    assert rebuilds[0]["policy_decision"]["decision"] == "auto_decide"
+    first = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        project_root=tmp_path,
+        spawn_repairs=False,
+        action_filter={"fanout-aggregate-rebuild"},
+    )
+    second = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        project_root=tmp_path,
+        spawn_repairs=False,
+        action_filter={"fanout-aggregate-rebuild"},
+    )
+
+    events = log.read_all()
+    assert first.actions_applied == 1
+    assert second.actions_applied == 0
+    assert sum(
+        event.type == "fanout.aggregate.rebuild.requested"
+        for event in events
+    ) == 1
+    rebuild = next(
+        event for event in events
+        if event.type == "fanout.aggregate.rebuild.requested"
+    )
+    assert rebuild.payload["source_event_id"] == "evt-discovery-bad"
+    assert rebuild.payload["identity_invalid_event_id"] in {
+        "evt-identity-invalid-0",
+        "evt-identity-invalid-1",
+    }
+    assert not any(
+        event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+        for event in events
+    )
+    effect = next(
+        event for event in events
+        if event.type == "run.manager.action.effect.pending"
+    )
+    assert effect.payload["required_sequence"] == [
+        ["flow.goal.closed"],
+        ["judge.requested"],
+        ["run.goal.completed", "run.goal.blocked"],
+    ]
+
+    from zf.runtime.run_manager import _settle_pending_action_effects
+
+    writer.emit(
+        "flow.goal.closed",
+        correlation_id="run-goal-1",
+        payload={"workflow_run_id": "run-goal-1"},
+    )
+    assert _settle_pending_action_effects(log.read_all(), writer) == 0
+    writer.emit(
+        "judge.requested",
+        correlation_id="run-goal-1",
+        payload={"workflow_run_id": "run-goal-1"},
+    )
+    assert _settle_pending_action_effects(log.read_all(), writer) == 0
+    writer.emit(
+        "run.goal.completed",
+        correlation_id="run-goal-1",
+        payload={"workflow_run_id": "run-goal-1"},
+    )
+    assert _settle_pending_action_effects(log.read_all(), writer) == 1
+    assert any(
+        event.type == "run.manager.action.effect.passed"
+        for event in log.read_all()
+    )
+
+
 def test_run_manager_tick_executes_only_continuation_next_operation(
     tmp_path: Path,
 ) -> None:
@@ -4650,6 +5069,67 @@ def test_action_receipt_and_candidate_effect_are_settled_separately(
         event.type == "run.manager.action.effect.passed"
         for event in log.read_all()
     )
+
+
+def test_ordered_action_effect_settles_goal_blocked_as_failure(
+    tmp_path: Path,
+) -> None:
+    from zf.runtime.run_manager import (
+        _post_verify_action,
+        _settle_pending_action_effects,
+    )
+
+    _state_dir, log, writer = _state(tmp_path)
+    receipt = writer.emit(
+        "fanout.aggregate.rebuild.requested",
+        correlation_id="run-goal-blocked",
+        payload={"workflow_run_id": "run-goal-blocked"},
+    )
+    action = {
+        "action": "fanout-aggregate-rebuild",
+        "checkpoint_id": "checkpoint-goal-blocked",
+        "workflow_run_id": "run-goal-blocked",
+        "expected_downstream_events": ["fanout.aggregate.rebuild.requested"],
+        "effect_expected_events": ["run.goal.completed"],
+        "effect_failure_events": ["run.goal.blocked"],
+        "effect_required_sequence": [
+            ["flow.goal.closed"],
+            ["judge.requested"],
+            ["run.goal.completed", "run.goal.blocked"],
+        ],
+    }
+    _post_verify_action(
+        writer,
+        action,
+        {"emitted_event_ids": [receipt.id]},
+        causation_id=receipt.id,
+    )
+    writer.emit("flow.goal.closed", payload={})
+    writer.emit("judge.requested", payload={})
+    writer.emit("run.goal.completed", payload={})
+    assert _settle_pending_action_effects(log.read_all(), writer) == 0
+    writer.emit(
+        "flow.goal.closed",
+        correlation_id="run-goal-blocked",
+        payload={"workflow_run_id": "run-goal-blocked"},
+    )
+    writer.emit(
+        "judge.requested",
+        correlation_id="run-goal-blocked",
+        payload={"workflow_run_id": "run-goal-blocked"},
+    )
+    writer.emit(
+        "run.goal.blocked",
+        correlation_id="run-goal-blocked",
+        payload={"workflow_run_id": "run-goal-blocked"},
+    )
+
+    assert _settle_pending_action_effects(log.read_all(), writer) == 1
+    failed = next(
+        event for event in log.read_all()
+        if event.type == "run.manager.action.effect.failed"
+    )
+    assert failed.payload["observed_event_type"] == "run.goal.blocked"
 
 
 def test_later_candidate_supersedes_failed_effect_from_old_fanout() -> None:

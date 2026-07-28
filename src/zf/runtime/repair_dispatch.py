@@ -103,7 +103,15 @@ def build_repair_briefing(req: RepairRequest) -> str:
     )
 
 
-def dispatched_event_payload(req: RepairRequest, *, branch: str, worktree: str, briefing_path: str) -> dict[str, Any]:
+def dispatched_event_payload(
+    req: RepairRequest,
+    *,
+    branch: str,
+    worktree: str,
+    briefing_path: str,
+    base_commit: str = "",
+) -> dict[str, Any]:
+    continuation = req.repair_task_payload.get("continuation")
     return {
         "fingerprint": req.fingerprint,
         "attempt": req.attempt,
@@ -111,5 +119,7 @@ def dispatched_event_payload(req: RepairRequest, *, branch: str, worktree: str, 
         "branch": branch,
         "worktree": worktree,
         "briefing_path": briefing_path,
+        "base_commit": str(base_commit or ""),
+        "continuation": continuation if isinstance(continuation, dict) else {},
         "skill": "zf-self-repair",
     }

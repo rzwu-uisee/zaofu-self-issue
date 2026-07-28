@@ -78,6 +78,18 @@ def build_run_contract(
         if isinstance(metadata.get("result_protocol"), Mapping)
         else {}
     )
+    artifact_package = (
+        dict(metadata.get("artifact_package") or {})
+        if isinstance(metadata.get("artifact_package"), Mapping)
+        else {}
+    )
+    artifact_package_mode = str(
+        artifact_package.get("mode")
+        or metadata.get("artifact_package_mode")
+        or "shadow"
+    ).strip().lower()
+    if artifact_package_mode not in {"off", "shadow", "blocking"}:
+        artifact_package_mode = "shadow"
     from zf.runtime.call_result_admission import CALL_RESULT_ADAPTER_VERSION
     from zf.runtime.call_result_envelope import CALL_RESULT_CANONICALIZATION
     from zf.runtime.workflow_operation import WORKFLOW_OPERATION_CANONICALIZATION
@@ -142,6 +154,10 @@ def build_run_contract(
                 "schema_version": "input-consumption-policy.v1",
                 "policy_ref": str(result_protocol.get("read_policy_ref") or ""),
                 "policy_digest": str(result_protocol.get("read_policy_digest") or ""),
+            },
+            "artifact_package": {
+                "schema_version": "plan-artifact-package.v1",
+                "mode": artifact_package_mode,
             },
             "goal_closure": {
                 "schema_version": "goal-closure-protocol.v1",

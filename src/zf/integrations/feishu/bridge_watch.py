@@ -27,6 +27,7 @@ import threading
 from typing import Any, Callable
 
 from zf.cli.feishu_consume import dispatch_inbound_async
+from zf.integrations.feishu.thread_scope import feishu_debounce_scope
 from zf.integrations.feishu.transport import MockFeishuTransport
 
 DEFAULT_DEBOUNCE_MS = 600
@@ -77,7 +78,7 @@ class BridgeWatch:
     def on_message(self, normalized: dict[str, Any]) -> int:
         """Feed one normalized inbound message {text, message_id, user_id, chat_id}
         into the per-chat debounce queue. Returns queued count (0 if no chat_id)."""
-        scope = str(normalized.get("chat_id") or "")
+        scope = feishu_debounce_scope(normalized)
         if not scope:
             return 0
         return self.queue.push(scope, normalized)

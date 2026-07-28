@@ -971,9 +971,53 @@
 .headless-composer-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 10px;
   padding: 0 7px 7px;
+}
+
+.agent-permission-segments {
+  display: inline-grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.agent-permission-segments button {
+  min-width: 42px;
+  min-height: 28px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted-foreground);
+  padding: 4px 6px;
+  font-size: var(--text-10);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.agent-permission-segments button:last-child {
+  border-right: 0;
+}
+
+.agent-permission-segments button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.agent-permission-segments button.active {
+  background: var(--text);
+  color: var(--panel);
+}
+
+.agent-permission-segments button:focus-visible {
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--brand);
+  outline: none;
 }
 
 .headless-send-button {

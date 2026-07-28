@@ -149,6 +149,7 @@ def _admit_package(
     *,
     payload: dict,
     source_event_id: str,
+    mode: str = "blocking",
 ) -> dict:
     return admit_plan_artifact_package_for_payload(
         state_dir=runtime.state_dir,
@@ -162,7 +163,7 @@ def _admit_package(
         goal_id="DOC152-MOCK",
         metadata={
             "artifact_package": {
-                "mode": "blocking",
+                "mode": mode,
                 "required_ports": [
                     "requirement_spec",
                     "goal_claim_set",
@@ -222,6 +223,7 @@ def test_doc152_package_currentness_and_restart_closure(tmp_path: Path) -> None:
             test_matrix_ref=test_matrix_ref,
         ),
         source_event_id="evt-plan-r0",
+        mode="shadow",
     )
     old_call_payload = {
         "workflow_run_id": WORKFLOW_RUN_ID,

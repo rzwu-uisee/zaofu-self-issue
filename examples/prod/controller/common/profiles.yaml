@@ -87,6 +87,69 @@ spec:
 apiVersion: zaofu.dev/v1
 kind: ConfigProfile
 metadata:
+  name: kanban-collaboration/v1
+spec:
+  roles:
+    - &research_reader
+      name: source_researcher
+      instance_id: source_researcher
+      role_kind: reader
+      backend: claude-code
+      permission_mode: allowlist
+      allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"]
+      transport: tmux
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      skills: [source-verification, zf-project-suggest]
+    - <<: *research_reader
+      name: product_analyst
+      instance_id: product_analyst
+      skills: [zf-project-suggest]
+    - <<: *research_reader
+      name: technical_analyst
+      instance_id: technical_analyst
+      skills: [source-verification, zf-cr]
+    - <<: *research_reader
+      name: risk_critic
+      instance_id: risk_critic
+      skills: [zf-yoke-critic-role-context]
+    - <<: *research_reader
+      name: synthesizer
+      instance_id: synthesizer
+      skills: [zf-project-suggest]
+  workflow:
+    stages:
+      - id: research-fanout
+        trigger: workflow.invoke.requested
+        topology: fanout_reader
+        roles:
+          - source_researcher
+          - product_analyst
+          - technical_analyst
+          - risk_critic
+          - synthesizer
+        fanout:
+          children:
+            - role_instance: source_researcher
+              payload: {child_id: source_researcher}
+            - role_instance: product_analyst
+              payload: {child_id: product_analyst}
+            - role_instance: technical_analyst
+              payload: {child_id: technical_analyst}
+            - role_instance: risk_critic
+              payload: {child_id: risk_critic}
+        aggregate:
+          mode: wait_for_all
+          child_success_event: research.child.completed
+          child_failure_event: research.child.failed
+          synth_role: synthesizer
+          success_event: research.fanout.completed
+          failure_event: research.fanout.failed
+        timeout_seconds: 1800
+---
+apiVersion: zaofu.dev/v1
+kind: ConfigProfile
+metadata:
   name: refactor-controller-runtime/v3
 spec:
   goal:

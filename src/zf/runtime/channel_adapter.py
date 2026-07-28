@@ -13,6 +13,11 @@ from zf.core.security.redaction import redact_obj
 from zf.core.state.session import SessionStore, ZfNotInitialized
 from zf.runtime.channel_openclaw import dispatch_openclaw_channel_reply
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_reply_contract import (
+    channel_reply_response_contract,
+    emit_structured_reply_events,
+    fake_channel_reply_text,
+)
 from zf.runtime.channel_contracts import (
     normalize_permission_profile,
     permission_profile_write_policy,
@@ -171,7 +176,7 @@ def dispatch_reply_request(
 
     backend = str(member.get("backend") or request.get("backend") or "").strip().lower()
     if backend in FAKE_BACKENDS or str(member.get("member_type") or "") in {"persona", "persona_agent"}:
-        response = _fake_reply_text(member, message)
+        response = fake_channel_reply_text(member, message)
         reply_payload = channel_message_event_payload(Path(state_dir), {
             "channel_id": channel_id,
             "thread_id": str(request.get("thread_id") or "main"),
@@ -192,7 +197,7 @@ def dispatch_reply_request(
             correlation_id=channel_id,
             payload=reply_payload,
         )
-        writer.emit(
+        completed_event = writer.emit(
             "channel.agent.reply.completed",
             actor=actor,
             task_id=str(request.get("task_id") or "") or None,
@@ -209,6 +214,17 @@ def dispatch_reply_request(
                 **run_fields,
                 "source": source,
             },
+        )
+        emit_structured_reply_events(
+            state_dir=Path(state_dir),
+            writer=writer,
+            channel=channel,
+            request=request,
+            message=message,
+            reply=response,
+            reply_event_id=completed_event.id,
+            actor=actor,
+            source=source,
         )
         return ChannelDispatchResult(dispatched=[request_id], completed=[request_id])
 
@@ -444,14 +460,6 @@ def _worker_session(member: dict[str, Any]) -> str:
     ).strip()
 
 
-def _fake_reply_text(member: dict[str, Any], message: dict[str, Any]) -> str:
-    member_id = str(member.get("member_id") or "agent")
-    text = str(message.get("text") or "").strip()
-    if len(text) > 220:
-        text = text[:217] + "..."
-    return str(redact_obj(f"{member_id} received the channel request: {text}"))
-
-
 def _permission_drift_block_reason(drift: dict[str, Any]) -> str:
     fields = [
         str(item.get("field") or "")
@@ -556,7 +564,7 @@ def _dispatch_headless_reply(
         correlation_id=channel_id,
         payload=redact_obj(reply_payload),
     )
-    writer.emit(
+    completed_event = writer.emit(
         "channel.agent.reply.completed",
         actor=actor,
         task_id=str(request.get("task_id") or "") or None,
@@ -574,6 +582,17 @@ def _dispatch_headless_reply(
             **run_fields,
             "source": source,
         },
+    )
+    emit_structured_reply_events(
+        state_dir=Path(state_dir),
+        writer=writer,
+        channel=channel,
+        request=request,
+        message=message,
+        reply=reply,
+        reply_event_id=completed_event.id,
+        actor=actor,
+        source=source,
     )
     return ChannelDispatchResult(dispatched=[request_id], completed=[request_id])
 
@@ -854,6 +873,11 @@ def _build_channel_prompt(
         for item in (channel.get("messages") or channel.get("recent_messages") or [])[-8:]
         if isinstance(item, dict)
     ]
+    response_contract = channel_reply_response_contract(
+        channel,
+        request,
+        message,
+    )
     return "\n".join([
         "ZaoFu Agent Channel reply request",
         f"channel_id: {channel_id}",
@@ -866,6 +890,7 @@ def _build_channel_prompt(
         f"skill_refs: {redact_obj(member.get('skill_refs') or [])}",
         f"context_pack: {redact_obj(context_pack)}",
         f"recent_messages: {redact_obj(recent)}",
+        f"response_contract: {response_contract}",
         "",
         "Trigger message:",
         str(message.get("text") or message.get("message") or ""),

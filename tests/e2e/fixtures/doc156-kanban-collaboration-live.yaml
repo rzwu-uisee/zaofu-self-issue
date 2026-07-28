@@ -1,0 +1,83 @@
+version: "1.0"
+preset: doc156-kanban-collaboration-live
+
+project:
+  name: doc156-kanban-collaboration-live
+  state_dir: ${ZF_STATE_DIR:-.zf}
+
+session:
+  tmux_session: ${ZF_TMUX_SESSION:-zf-doc156-kanban-live}
+  tmux_layout: pane_grid
+
+orchestrator:
+  backend: python
+
+runtime:
+  workdirs:
+    enabled: false
+
+workflow:
+  stages:
+    - id: research-fanout
+      trigger: workflow.invoke.requested
+      topology: fanout_reader
+      roles:
+        - source_researcher
+        - product_analyst
+        - technical_analyst
+        - risk_critic
+        - synthesizer
+      fanout:
+        children:
+          - role_instance: source_researcher
+            payload: {child_id: source_researcher}
+          - role_instance: product_analyst
+            payload: {child_id: product_analyst}
+          - role_instance: technical_analyst
+            payload: {child_id: technical_analyst}
+          - role_instance: risk_critic
+            payload: {child_id: risk_critic}
+      aggregate:
+        mode: wait_for_all
+        child_success_event: research.child.completed
+        child_failure_event: research.child.failed
+        synth_role: synthesizer
+        success_event: research.fanout.completed
+        failure_event: research.fanout.failed
+      timeout_seconds: 300
+    - id: delivery-smoke
+      trigger: workflow.invoke.requested
+      topology: fanout_reader
+      roles: [delivery_worker]
+      fanout:
+        children:
+          - role_instance: delivery_worker
+            payload: {child_id: delivery_worker}
+      aggregate:
+        mode: wait_for_all
+        child_success_event: workflow.child.completed
+        child_failure_event: workflow.child.failed
+        success_event: workflow.stage.completed
+        failure_event: workflow.stage.failed
+      timeout_seconds: 300
+
+roles:
+  - name: source_researcher
+    backend: mock
+    role_kind: reader
+  - name: product_analyst
+    backend: mock
+    role_kind: reader
+  - name: technical_analyst
+    backend: mock
+    role_kind: reader
+  - name: risk_critic
+    backend: mock
+    role_kind: reader
+  - name: synthesizer
+    backend: mock
+    role_kind: reader
+  - name: delivery_worker
+    backend: codex
+    role_kind: reader
+    permission_mode: restricted

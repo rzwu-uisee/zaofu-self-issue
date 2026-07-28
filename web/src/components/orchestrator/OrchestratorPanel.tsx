@@ -51,6 +51,31 @@ interface HeadlessPendingMessage extends HeadlessQueueItem {
   turnId: string;
 }
 
+type PermissionProfile =
+  | "read_only"
+  | "operator"
+  | "workspace_writer"
+  | "isolated_writer"
+  | "dangerous_full";
+
+const PERMISSION_PROFILES: Array<{ id: PermissionProfile; label: string; title: string }> = [
+  { id: "read_only", label: "Read", title: "Read only" },
+  { id: "operator", label: "Operate", title: "Controlled actions" },
+  { id: "workspace_writer", label: "Write", title: "Write current workspace" },
+  { id: "isolated_writer", label: "Isolate", title: "Write linked worktree" },
+  { id: "dangerous_full", label: "Full", title: "Full shell and Git access" },
+];
+
+
+function storedPermissionProfile(): PermissionProfile {
+  if (typeof window === "undefined") return "read_only";
+  const stored = window.localStorage.getItem("zf.kanbanPermissionProfile");
+  if (stored === "dangerous_full") return "read_only";
+  return PERMISSION_PROFILES.some((item) => item.id === stored)
+    ? stored as PermissionProfile
+    : "read_only";
+}
+
 
 function slashAction(message: string): { action: string; payload: Record<string, unknown> } | null {
   const trimmed = message.trim();
@@ -328,6 +353,9 @@ export function OrchestratorPanel({
   const [operatorBackendTouched, setOperatorBackendTouched] = useState(() => (
     Boolean(storedHeadlessBackend())
   ));
+  const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>(
+    storedPermissionProfile,
+  );
   const [operatorError, setOperatorError] = useState("");
   const [headlessMessage, setHeadlessMessage] = useState("");
   const [headlessSubmitting, setHeadlessSubmitting] = useState(false);
@@ -682,11 +710,18 @@ export function OrchestratorPanel({
       setOperatorError("Agent backend list is still loading; try again in a moment.");
       return;
     }
+    const directAction = slashAction(message);
+    if (
+      !directAction
+      && permissionProfile === "dangerous_full"
+      && !window.confirm("Grant this Kanban Agent turn full shell and Git access?")
+    ) {
+      return;
+    }
     setHeadlessSubmitting(true);
     setHeadlessMessage("");
     let pendingTurnId = "";
     try {
-      const directAction = slashAction(message);
       if (directAction) {
         if (!canUseAction(directAction.action)) {
           setOperatorError(`action ${directAction.action} is ${actionState}`);
@@ -723,6 +758,8 @@ export function OrchestratorPanel({
       const result = await Promise.resolve(onAction("chat-orchestrator", {
         ...contextPayload(),
         backend: operatorBackend,
+        permission_profile: permissionProfile,
+        dangerous_ack: permissionProfile === "dangerous_full" || undefined,
         scope: desiredOperatorScope,
         message,
         turn_id: turnId,
@@ -763,6 +800,7 @@ export function OrchestratorPanel({
         thread_id: textValue(proposal.payload.thread_id) || headlessThreadKey,
         run_id: textValue(proposal.payload.run_id) || key.replace(/^proposal-/, ""),
         source: textValue(proposal.payload.source) || "kanban-agent-proposal",
+        proposal_event_id: proposal.proposalEventId || undefined,
       };
       if (!("task_id" in payload) && proposal.action !== "create-task" && context.taskId) {
         payload.task_id = context.taskId;
@@ -877,6 +915,16 @@ export function OrchestratorPanel({
     changeOperatorBackend(value);
     setOperatorError("");
     setBackendMenuOpen(false);
+  }
+
+  function selectPermissionProfile(profile: PermissionProfile) {
+    setPermissionProfile(profile);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(
+        "zf.kanbanPermissionProfile",
+        profile === "dangerous_full" ? "read_only" : profile,
+      );
+    }
   }
 
   function saveToken() {
@@ -1365,6 +1413,30 @@ export function OrchestratorPanel({
               }}
             />
             <div className="headless-composer-footer">
+              <div
+                className="agent-permission-segments"
+                role="radiogroup"
+                aria-label="Kanban Agent permission profile"
+              >
+                {PERMISSION_PROFILES
+                  .filter((profile) => (
+                    !agentSurface?.permission_profiles?.length
+                    || agentSurface.permission_profiles.includes(profile.id)
+                  ))
+                  .map((profile) => (
+                    <button
+                      key={profile.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={permissionProfile === profile.id}
+                      className={permissionProfile === profile.id ? "active" : ""}
+                      title={profile.title}
+                      onClick={() => selectPermissionProfile(profile.id)}
+                    >
+                      {profile.label}
+                    </button>
+                  ))}
+              </div>
               <ComposerSubmitButton
                 className="headless-send-button"
                 disabled={!headlessMessage.trim()}

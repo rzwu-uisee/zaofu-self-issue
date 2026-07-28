@@ -64,6 +64,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Projection component to diagnose.",
     )
     doctor.add_argument("--json", action="store_true", help="Print JSON")
+    doctor.add_argument(
+        "--repair",
+        action="store_true",
+        help="Quarantine corrupt files and rebuild the selected projection.",
+    )
     doctor.set_defaults(func=run_doctor)
 
 
@@ -106,15 +111,20 @@ def run_doctor(args: argparse.Namespace) -> int:
     context = _context(args)
     if context is None:
         return 1
+    target = str(getattr(args, "projection", "all") or "all")
     status = _status(
         context,
-        target=str(getattr(args, "projection", "all") or "all"),
+        target=target,
         count_source=True,
     )
+    repairs: list[dict] = []
+    if bool(getattr(args, "repair", False)):
+        repairs = _repair(context, target=target, status=status)
+        status = _status(context, target=target, count_source=True)
     findings: list[dict[str, str]] = []
     for name, item in (status.get("projections") or {}).items():
         state = str(item.get("projection_state") or "")
-        if state in {"missing", "stale", "corrupt"}:
+        if state in {"missing", "stale", "corrupt", "rebuild_required"}:
             findings.append({
                 "severity": "error" if state == "corrupt" else "warning",
                 "code": f"{name.replace('-', '_')}_{state}",
@@ -134,6 +144,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         "schema_version": "projection-doctor.v1",
         "status": "ok" if not findings else "attention",
         "findings": findings,
+        "repairs": repairs,
         "projection": status,
     }
     if getattr(args, "json", False):
@@ -202,7 +213,10 @@ def _status(context, *, target: str, count_source: bool) -> dict:
             event_index["projection_state"] = "missing"
         projections["event-index"] = event_index
     if target in {"all", "artifact-catalog"}:
-        catalog = catalog_status(context.state_dir)
+        catalog = catalog_status(
+            context.state_dir,
+            count_source=count_source,
+        )
         catalog["db_path"] = str(
             context.state_dir / "projections" / "read_model.sqlite"
         )
@@ -213,7 +227,13 @@ def _status(context, *, target: str, count_source: bool) -> dict:
     ]
     overall = next(
         (
-            state for state in ("corrupt", "stale", "missing")
+            state
+            for state in (
+                "corrupt",
+                "rebuild_required",
+                "stale",
+                "missing",
+            )
             if state in states
         ),
         "ready",
@@ -224,6 +244,60 @@ def _status(context, *, target: str, count_source: bool) -> dict:
         "overall_state": overall,
         "projections": projections,
     }
+
+
+def _repair(context, *, target: str, status: dict) -> list[dict]:
+    from zf.runtime.artifact_query.store import (
+        rebuild_catalog,
+        recover_catalog_projection,
+    )
+    from zf.web.projections import read_model
+
+    normalized = _normalized_target(target)
+    projections = status.get("projections") or {}
+    repairs: list[dict] = []
+    catalog = projections.get("artifact-catalog") or {}
+    catalog_state = str(catalog.get("projection_state") or "")
+    shared_db_recovered = False
+    if normalized in {"all", "artifact-catalog"} and catalog_state == "corrupt":
+        repairs.append(recover_catalog_projection(
+            context.state_dir,
+            project_root=context.project_root,
+            config=context.config,
+        ))
+        shared_db_recovered = True
+    elif (
+        normalized in {"all", "artifact-catalog"}
+        and catalog_state in {"missing", "stale", "rebuild_required"}
+    ):
+        repairs.append({
+            "schema_version": "artifact-catalog-recovery.v1",
+            "projection_state": "ready",
+            "quarantined": [],
+            "affected_components": ["artifact-catalog"],
+            "rebuild": rebuild_catalog(
+                context.state_dir,
+                project_root=context.project_root,
+                config=context.config,
+                force=True,
+            ),
+        })
+
+    event_index = projections.get("event-index") or {}
+    event_state = str(event_index.get("projection_state") or "")
+    if (
+        normalized in {"all", "event-index"}
+        and (shared_db_recovered or event_state in {"missing", "stale", "corrupt"})
+    ):
+        repairs.append({
+            "schema_version": "event-index-recovery.v1",
+            "projection_state": "ready",
+            "rebuild": read_model.rebuild(
+                context.state_dir,
+                config=context.config,
+            ),
+        })
+    return repairs
 
 
 def _rebuild(context, *, target: str) -> dict:

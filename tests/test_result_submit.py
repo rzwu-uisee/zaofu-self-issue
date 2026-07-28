@@ -15,6 +15,8 @@ from zf.runtime.call_result_runtime import (
 from zf.runtime.result_submit import (
     ResultSubmitError,
     SemanticResultSubmitService,
+    _compatibility_projection,
+    is_authorized_result_scratch_write,
     provision_role_submit_credential,
 )
 from zf.runtime.call_result_adapters import hydrate_profiled_control_result_event
@@ -85,6 +87,21 @@ def _semantic() -> dict:
         "known_gaps": [],
         "summary": "implemented",
     }
+
+
+def test_verification_projection_preserves_evidence_refs() -> None:
+    projection = _compatibility_projection(
+        "verification_result",
+        {
+            "verification_result": {
+                "verdict": "passed",
+                "summary": "verified",
+                "evidence_refs": ["receipt:verify"],
+            },
+        },
+    )
+
+    assert projection["report"]["evidence_refs"] == ["receipt:verify"]
 
 
 def test_stdin_semantic_submit_fills_identity_and_emits_canonical_event(tmp_path: Path) -> None:
@@ -168,6 +185,97 @@ def test_result_file_requires_exact_regular_scratch_path(tmp_path: Path) -> None
             credential=token,
         )
     assert symlink.value.code == "result_file_unsafe"
+
+
+def test_result_scratch_write_authorization_is_exact_and_current(
+    tmp_path: Path,
+) -> None:
+    runtime, prepared, service, token = _running_operation(tmp_path)
+    del service, token
+    scratch = runtime.state_dir / prepared.result_scratch_ref
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("{}\n", encoding="utf-8")
+    sibling = scratch.with_name("other.json")
+    sibling.write_text("{}\n", encoding="utf-8")
+
+    assert is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="dev-1",
+        target=scratch,
+    )
+    assert not is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="verify-1",
+        target=scratch,
+    )
+    assert not is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="dev-1",
+        target=sibling,
+    )
+
+    scratch.unlink()
+    scratch.symlink_to(sibling)
+    assert not is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="dev-1",
+        target=scratch,
+    )
+
+
+def test_new_attempt_supersedes_previous_result_scratch_write(
+    tmp_path: Path,
+) -> None:
+    runtime, previous, service, token = _running_operation(tmp_path)
+    del service, token
+    previous_scratch = runtime.state_dir / previous.result_scratch_ref
+    previous_scratch.parent.mkdir(parents=True, exist_ok=True)
+    previous_scratch.write_text("{}\n", encoding="utf-8")
+    current = prepare_call_operation(
+        runtime,
+        payload={
+            "workflow_run_id": "run-1",
+            "role_instance": "dev-1",
+            "fanout_id": "fanout-1",
+            "stage_id": "impl",
+            "child_id": "dev-1-T1-retry",
+            "run_id": "attempt-2",
+            "task_id": "T1",
+            "canonical_success_event": "dev.build.done",
+            "canonical_failure_event": "dev.blocked",
+        },
+        operation_type="fanout_writer_child",
+        operation_key="dev-1-T1-retry",
+        stage_id="impl",
+        task_id="T1",
+        dispatch_id="attempt-2",
+    )
+    mark_call_operation_started(
+        runtime,
+        current,
+        task_id="T1",
+        dispatch_id="attempt-2",
+    )
+    current_scratch = runtime.state_dir / current.result_scratch_ref
+    current_scratch.parent.mkdir(parents=True, exist_ok=True)
+    current_scratch.write_text("{}\n", encoding="utf-8")
+
+    assert not is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="dev-1",
+        target=previous_scratch,
+    )
+    assert is_authorized_result_scratch_write(
+        runtime.state_dir,
+        runtime.event_log,
+        role_instance="dev-1",
+        target=current_scratch,
+    )
 
 
 def test_result_submit_cli_requires_one_input_mode() -> None:

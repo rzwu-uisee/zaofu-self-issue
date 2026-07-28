@@ -2,6 +2,7 @@
 import { search } from "../../api/client";
 import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TraceSummary } from "../../api/types";
 import { LogsPanel } from "../../components/observability/LogsPanel";
+import { RunDossierPanel } from "../../components/observability/RunDossierPanel";
 import { formatTokens } from "../../lib/format";
 import { buildObservabilityEventWindow } from "../../app/observabilityModel";
 import { Archive, Bell, Boxes, ChevronRight, FolderGit2, Gauge, GitFork, Map as MapIcon, PauseCircle, PlayCircle, Radio, SkipBack, SkipForward, Wrench, X } from "lucide-react";
@@ -177,7 +178,9 @@ export function ObservabilityPage({
   const [replayIndex, setReplayIndex] = useState(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [requestedTraceId, setRequestedTraceId] = useState("");
+  const [requestedRunId, setRequestedRunId] = useState("");
   const deepLinkTraceId = useMemo(() => readTraceExplorerDeepLink(), []);
+  const deepLinkRunId = useMemo(() => readRunDossierDeepLink(), []);
   useEffect(() => {
     setTab(activePage === "observability" ? readInitialObservabilityTab(activePage) : observabilityTabForPage(activePage));
   }, [activePage]);
@@ -290,12 +293,26 @@ export function ObservabilityPage({
   const truncatedEventCount = eventWindow.truncatedEventCount;
   const replayEvents = useMemo(() => visibleEventItems.slice().reverse(), [visibleEventItems]);
   const selectedTraceId = textValue(projectionDetail?.trace_id);
+  const selectedRunId = (
+    textValue(projectionDetail?.run_id)
+    || (tab === "runs" ? requestedRunId || deepLinkRunId : "")
+  );
   const traceDetailReady = Boolean(selectedTraceId);
   useEffect(() => {
     if (tab !== "traces" || !deepLinkTraceId || selectedTraceId === deepLinkTraceId || requestedTraceId === deepLinkTraceId) return;
     setRequestedTraceId(deepLinkTraceId);
     onOpenProjection("trace", deepLinkTraceId);
   }, [deepLinkTraceId, onOpenProjection, requestedTraceId, selectedTraceId, tab]);
+  useEffect(() => {
+    if (
+      tab !== "runs"
+      || !deepLinkRunId
+      || selectedRunId === deepLinkRunId
+      || requestedRunId === deepLinkRunId
+    ) return;
+    setRequestedRunId(deepLinkRunId);
+    onOpenProjection("run", deepLinkRunId);
+  }, [deepLinkRunId, onOpenProjection, requestedRunId, selectedRunId, tab]);
   const openTrace = (traceId: string) => {
     writeTraceExplorerDeepLink(traceId);
     onOpenProjection("trace", traceId);
@@ -551,14 +568,22 @@ export function ObservabilityPage({
       ) : null}
 
       {tab === "runs" ? (
-        <ProjectionList
-          emptyState={{ title: "No workflow runs yet", description: "Runs appear after zf start, workflow invoke events, or archived runtime execution records.", icon: PlayCircle, compact: true }}
-          title="Runs"
-          rows={runs}
-          idKey="run_id"
-          onOpen={(id) => onOpenProjection("run", id)}
-          detail={textValue(projectionDetail?.run_id) ? projectionDetail : null}
-        />
+        <div className="run-dossier-workspace">
+          <ProjectionList
+            emptyState={{ title: "No workflow runs yet", description: "Runs appear after zf start, workflow invoke events, or archived runtime execution records.", icon: PlayCircle, compact: true }}
+            title="Runs"
+            rows={runs}
+            idKey="run_id"
+            onOpen={(id) => onOpenProjection("run", id)}
+            detail={selectedRunId ? projectionDetail : null}
+          />
+          {selectedRunId ? (
+            <RunDossierPanel
+              projectId={activeProjectId}
+              runId={selectedRunId}
+            />
+          ) : null}
+        </div>
       ) : null}
       {tab === "fanouts" ? (
         <ProjectionList
@@ -612,7 +637,6 @@ export function ObservabilityPage({
     </div>
   );
 }
-
 
 function IntegrationQueuePanel({ queue }: { queue: IntegrationQueueProjection | null }) {
   const summary = queue?.summary;
@@ -1080,6 +1104,11 @@ function readInitialTraceFilters(): TraceFilters {
 function readTraceExplorerDeepLink(): string {
   if (typeof window === "undefined") return "";
   return new URLSearchParams(window.location.search).get("trace_id") ?? "";
+}
+
+function readRunDossierDeepLink(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("obs_run_id") ?? "";
 }
 
 function writeTraceExplorerDeepLink(traceId: string) {

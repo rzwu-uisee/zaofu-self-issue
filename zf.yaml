@@ -24,8 +24,7 @@ metadata:
 spec:
   profile_sources:
     - examples/prod/controller/common/profiles.yaml
-  uses:
-    - prod-runtime/v1
+  uses: [prod-runtime/v1, kanban-collaboration/v1]
   version: "1.0"
   project:
     name: zaofu
@@ -67,6 +66,7 @@ spec:
     plan_approval: false
     kind_routes:
       prd:
+        pattern_id: prd-scan
         default_tier: standard
     dag:
       external_triggers: [prd.requested]

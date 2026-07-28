@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import os
 import time
-from multiprocessing import Process
+from multiprocessing import Event, Process
 from pathlib import Path
+
+import pytest
 
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.state.locks import FileLock
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
@@ -26,6 +29,12 @@ def _register_session(path: str, project_root: str, instance_id: str) -> None:
     RoleSessionRegistry(Path(path), project_root=project_root).get_or_create(
         instance_id
     )
+
+
+def _hold_file_lock(path: str, ready: Event) -> None:
+    with FileLock(Path(path)):
+        ready.set()
+        time.sleep(0.5)
 
 
 def _run_processes(processes: list[Process]) -> None:
@@ -81,3 +90,20 @@ def test_role_session_registry_concurrent_writes_preserve_all_entries(
 
     sessions = RoleSessionRegistry(path, project_root="/project").all()
     assert sorted(sessions) == [f"dev-{i}" for i in range(8)]
+
+
+def test_file_lock_optional_timeout_is_bounded(tmp_path: Path):
+    path = tmp_path / "bounded.lock"
+    ready = Event()
+    process = Process(target=_hold_file_lock, args=(str(path), ready))
+    process.start()
+    assert ready.wait(timeout=2)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="timed out acquiring lock"):
+        with FileLock(path, timeout_seconds=0.05):
+            pass
+    assert time.monotonic() - started < 0.4
+
+    process.join(timeout=2)
+    assert process.exitcode == 0

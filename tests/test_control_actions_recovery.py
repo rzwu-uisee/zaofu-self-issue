@@ -106,6 +106,131 @@ def test_stage_retrigger_idempotent_and_generational(tmp_path: Path) -> None:
     assert r3["ok"] is False
 
 
+def test_fanout_aggregate_rebuild_requires_terminal_manifest_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+    log = svc.writer.event_log
+    fanout_id = "fanout-rebuild-1"
+    manifest_path = svc.state_dir / "fanouts" / fanout_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({
+        "fanout_id": fanout_id,
+        "children": [{"child_id": "child-1", "status": "completed"}],
+    }), encoding="utf-8")
+    source = svc.writer.append(ZfEvent(
+        type="flow.discovery.completed",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={"fanout_id": fanout_id, "goal_id": "wrong"},
+    ))
+    invalid = svc.writer.append(ZfEvent(
+        type="goal.closure.identity.invalid",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={"source_event_id": source.id, "goal_id": "goal-1"},
+    ))
+
+    result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": invalid.id},
+    )
+    duplicate = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": invalid.id},
+    )
+
+    assert result["ok"] is True
+    requests = [
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    ]
+    assert len(requests) == 1
+    assert requests[0].payload["source_event_id"] == source.id
+    assert requests[0].payload["identity_invalid_event_id"] == invalid.id
+    assert duplicate["ok"] is False
+
+
+def test_fanout_aggregate_rebuild_fails_closed_for_invalid_source_state(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+    log = svc.writer.event_log
+
+    missing = svc.writer.append(ZfEvent(
+        type="flow.discovery.completed",
+        payload={"fanout_id": "fanout-missing"},
+    ))
+    missing_result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": missing.id},
+    )
+    assert missing_result["ok"] is False
+    assert "manifest" in missing_result["reason"]
+
+    pending_id = "fanout-pending"
+    pending_path = svc.state_dir / "fanouts" / pending_id / "manifest.json"
+    pending_path.parent.mkdir(parents=True)
+    pending_path.write_text(json.dumps({
+        "fanout_id": pending_id,
+        "children": [{"child_id": "child-1", "status": "dispatched"}],
+    }), encoding="utf-8")
+    pending = svc.writer.append(ZfEvent(
+        type="flow.discovery.completed",
+        payload={"fanout_id": pending_id},
+    ))
+    pending_result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": pending.id},
+    )
+    assert pending_result["ok"] is False
+    assert pending_result["reason"] == "fanout children are not terminal"
+
+    stale_id = "fanout-stale"
+    replacement_id = "fanout-current"
+    stale_path = svc.state_dir / "fanouts" / stale_id / "manifest.json"
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_text(json.dumps({
+        "fanout_id": stale_id,
+        "children": [{"child_id": "child-1", "status": "completed"}],
+    }), encoding="utf-8")
+    for fanout_id in (stale_id, replacement_id):
+        log.append(ZfEvent(
+            type="fanout.started",
+            payload={
+                "fanout_id": fanout_id,
+                "stage_id": "goal-discovery",
+                "target_ref": "goal/G-1",
+                "pdd_id": "G-1",
+                "feature_id": "G-1",
+            },
+        ))
+    stale = svc.writer.append(ZfEvent(
+        type="flow.discovery.completed",
+        payload={"fanout_id": stale_id},
+    ))
+    stale_result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": stale.id},
+    )
+    assert stale_result["ok"] is False
+    assert "stale" in stale_result["reason"]
+    assert not [
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    ]
+
+
 def test_rescan_grant_requires_exhaustion(tmp_path: Path) -> None:
     svc = _service(tmp_path)
     log = svc.writer.event_log

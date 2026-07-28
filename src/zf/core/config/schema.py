@@ -1237,6 +1237,9 @@ class FeishuRouteConfig:
     # directly to a coding agent + codebase, no channel/member to create.
     backend: str = ""   # claude-code | codex | ...
     cwd: str = ""       # codebase the agent works on
+    permission_profile: str = "read_only"
+    dangerous_ack: bool = False
+    allowed_senders: list[str] = field(default_factory=list)
 
 
 @dataclass

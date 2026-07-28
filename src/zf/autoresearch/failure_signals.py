@@ -17,7 +17,11 @@ from typing import Any, Iterable
 
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
-from zf.runtime.event_problem_registry import RUN_MANAGER_PENDING_EVENT_TYPES, spec_for_event
+from zf.runtime.event_problem_registry import (
+    RUN_MANAGER_PENDING_EVENT_TYPES,
+    event_is_recovery_actionable,
+    spec_for_event,
+)
 from zf.runtime.terminal_events import latest_quiescent_run_terminal
 from zf.runtime.fanout_identity import fanout_current_status
 
@@ -543,6 +547,8 @@ def detect_semantic_flow_failures(
         if spec.problem_class not in {"artifact_contract", "product_gap"}:
             continue
         payload = _payload(event)
+        if not event_is_recovery_actionable(event.type, payload):
+            continue
         # Plan admission is a bounded planner/task-map correction, including
         # fault-injection drills.  It must remain observable to Supervisor but
         # must never become a source-repair candidate through the generic

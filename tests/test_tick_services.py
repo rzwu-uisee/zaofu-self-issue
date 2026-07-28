@@ -220,6 +220,63 @@ def test_standard_tick_services_runs_supervisor_and_autoresearch(tmp_path: Path)
     assert (state_dir / "projections" / "control_plane_health.json").exists()
 
 
+def test_standard_tick_materializes_blocked_goal_before_quiescent_return(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    config = ZfConfig(project=ProjectConfig(name="demo"))
+    orch = _FakeOrchestrator(state_dir, config)
+    orch.event_log.append(ZfEvent(
+        id="evt-start",
+        type="run.goal.started",
+        correlation_id="run-terminal",
+        payload={
+            "run_id": "run-terminal",
+            "goal_id": "GOAL-TERMINAL",
+            "objective": "close owner delivery",
+        },
+    ))
+    orch.event_log.append(ZfEvent(
+        id="evt-blocked",
+        type="run.goal.blocked",
+        correlation_id="run-terminal",
+        payload={
+            "run_id": "run-terminal",
+            "goal_id": "GOAL-TERMINAL",
+            "reason": "owner input required",
+        },
+    ))
+
+    result = run_standard_tick_services(
+        orch,
+        state=TickServiceState(),
+        now=1.0,
+        intervals=TickServiceIntervals(
+            heartbeat_sweep_s=999,
+            bug_scan_s=999,
+            supervisor_inspection_s=999,
+            spine_projection_s=999,
+            cost_blackout_check_s=999,
+            stillness_audit_s=999,
+        ),
+    )
+
+    assert result.goal_dossier_delivery is True
+    assert (
+        state_dir
+        / "projections"
+        / "goals"
+        / "run-terminal"
+        / "goal-dossier.v1.json"
+    ).is_file()
+    requests = [
+        event for event in orch.event_log.read_all()
+        if event.type == "owner.visible_message.requested"
+        and event.payload.get("message_kind") == "run_terminal_delivery"
+    ]
+    assert len(requests) == 1
+
+
 def test_standard_tick_services_coalesces_healthy_run_manager_ticks(
     tmp_path: Path,
 ) -> None:

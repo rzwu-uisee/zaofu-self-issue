@@ -551,6 +551,7 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
         member["legacy_member_type"] = legacy_member_type
     member["provider"] = provider
     member["backend"] = _payload_str(payload, "backend") or provider or member.get("backend", "")
+    member["model"] = _payload_str(payload, "model") or member.get("model", "")
     member["provider_binding_id"] = (
         _payload_str(payload, "provider_binding_id")
         or member.get("provider_binding_id", "")
@@ -583,6 +584,8 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
         payload.get("skill_refs") if "skill_refs" in payload else member.get("skill_refs", []),
     )
     member["scope"] = _payload_str(payload, "scope") or member.get("scope", "")
+    if isinstance(payload.get("writer_scope"), list):
+        member["writer_scope"] = _string_list(payload.get("writer_scope"))
     member["permissions"] = normalize_permissions(
         payload.get("permissions") if "permissions" in payload else member.get("permissions", []),
         member_type=member_type,

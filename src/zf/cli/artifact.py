@@ -184,6 +184,7 @@ def _run_attempt_read(args: argparse.Namespace) -> int:
             actor=os.environ.get("ZF_ROLE_INSTANCE", ""),
             role=os.environ.get("ZF_ROLE_NAME", ""),
             provider=os.environ.get("ZF_ROLE_BACKEND", ""),
+            purpose=os.environ.get("ZF_ARTIFACT_PURPOSE", ""),
         )
     except (ConfigError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

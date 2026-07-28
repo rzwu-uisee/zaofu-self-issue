@@ -1195,6 +1195,8 @@ export interface RuntimeSummary {
     }>;
     descriptor?: Record<string, unknown>;
     profile: string;
+    permission_profile?: string;
+    permission_profiles?: string[];
     terminal_backed: boolean;
     delivery: string;
     capabilities: string[];
@@ -1905,6 +1907,43 @@ export interface RunDetail {
   empty?: boolean;
 }
 
+export interface GoalDossier {
+  schema_version: "goal-dossier.v1" | string;
+  is_derived_projection: boolean;
+  run_id: string;
+  project_id?: string;
+  goal_id: string;
+  generated_at: string;
+  source_fingerprint: string;
+  freshness: {
+    status?: string;
+    source_event_count?: number;
+    last_event_id?: string;
+    last_event_at?: string;
+    diagnostics?: Array<Record<string, unknown>>;
+  };
+  goal: Record<string, unknown>;
+  terminal?: Record<string, unknown>;
+  roadmap: Record<string, unknown>;
+  state: {
+    task_counts?: Record<string, number>;
+    tasks?: Array<Record<string, unknown>>;
+    current_overlay?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  claim_to_evidence?: {
+    status?: string;
+    summary?: Record<string, number>;
+    rows?: Array<Record<string, unknown>>;
+    diagnostics?: Array<Record<string, unknown>>;
+  };
+  evidence_index: Array<Record<string, unknown>>;
+  gaps: Array<Record<string, unknown>>;
+  incident_history: Array<Record<string, unknown>>;
+  closure: Record<string, unknown>;
+  operations: Array<Record<string, unknown>>;
+}
+
 export interface DiagnosticsDetail {
   trace_id: string;
   path?: string;
@@ -2215,6 +2254,15 @@ export interface OperatorInboxItem {
   checkpoint_id?: string;
   fingerprint?: string;
   attention_id?: string;
+  message_id?: string;
+  run_id?: string;
+  goal_id?: string;
+  terminal_status?: string;
+  task_counts?: Record<string, number>;
+  claim_counts?: Record<string, number>;
+  gap_count?: number;
+  next_action?: string;
+  deep_link?: string;
   category?: "action_required" | "automation_diagnostic" | "runtime_attention" | "notification" | "resolved" | string;
   actionability?: "human_required" | "automation_owned" | "informational" | "resolved" | string;
   source_role?: string;
@@ -2236,9 +2284,11 @@ export interface OperatorInboxProjection {
     pending: number;
     action_required_pending?: number;
     noise_pending?: number;
+    notification_pending?: number;
     plan_approvals: number;
     attention: number;
     human_decisions?: number;
+    run_deliveries?: number;
     suppressed_acknowledged?: number;
   };
   items: OperatorInboxItem[];

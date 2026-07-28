@@ -147,6 +147,17 @@ def evaluate_workdir_write_guard(
             any(_path_is_within(target, root) for root in project_roots)
             and not _path_is_within(target, assigned_root)
         ):
+            from zf.runtime.result_submit import (
+                is_authorized_result_scratch_write,
+            )
+
+            if is_authorized_result_scratch_write(
+                state_dir,
+                event_log,
+                role_instance=actor,
+                target=target,
+            ):
+                continue
             offending.append(str(target))
     if tool_name.lower() in {"bash", "shell"}:
         command = str(tool_input.get("command") or "")
@@ -182,8 +193,9 @@ def evaluate_workdir_write_guard(
     print(
         "ZaoFu blocked this write: use the assigned writer workdir only: "
         + str(assigned_root)
-        + ". For handoff artifacts, write a workdir-relative file and emit "
-        "that ref; the kernel relocates it into runtime artifact storage.",
+        + ". The only state-dir exception is the exact current result scratch "
+        "declared by the Kernel. For handoff artifacts, write a workdir-relative "
+        "file and emit that ref; the kernel relocates it into runtime artifact storage.",
         file=sys.stderr,
     )
     return 2

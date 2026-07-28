@@ -16,9 +16,10 @@ from zf.core.feature.store import FeatureStore
 from zf.core.security.redaction import redact_obj
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.task.store import TERMINAL_STATES, TaskStore
+from zf.core.workspace.registry import stable_project_id
 from zf.runtime.attempt_handoff_reducer import reduce_attempt_handoffs
-from zf.runtime.attempt_ledger import failure_fingerprint
 from zf.runtime.goal_closure_projection import build_goal_closure_loop
+from zf.runtime.goal_dossier_history import build_goal_dossier_history
 from zf.runtime.operation_projection import project_task_operations
 from zf.runtime.plan_artifact_package import (
     hydrate_plan_artifact_package,
@@ -26,49 +27,13 @@ from zf.runtime.plan_artifact_package import (
 )
 from zf.runtime.progress_projection import project_task_progress
 from zf.runtime.run_archive import RunArchiveError, validate_run_id
+from zf.runtime.run_incident_projection import project_run_failure_incidents
 from zf.runtime.run_manager import build_run_goal_projection
 from zf.runtime.run_scope import events_for_run, resolve_run_id
-from zf.runtime.terminal_events import is_successful_run_terminal
 from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
 
 
 SCHEMA_VERSION = "goal-dossier.v1"
-_FAILURE_EVENTS = frozenset({
-    "candidate.failed",
-    "candidate.quality.failed",
-    "integration.failed",
-    "judge.failed",
-    "review.rejected",
-    "run.delivery.blocked",
-    "run.delivery.failed",
-    "run.goal.blocked",
-    "run.goal.completion.blocked",
-    "run.goal.completion.rejected",
-    "task.rework.capped",
-    "test.failed",
-    "verify.failed",
-})
-_FAILURE_SETTLEMENT_EVENTS = {
-    "candidate.failed": frozenset({
-        "candidate.integration.completed", "candidate.ready", "candidate.updated",
-    }),
-    "candidate.quality.failed": frozenset({
-        "candidate.integration.completed", "candidate.ready", "candidate.updated",
-    }),
-    "integration.failed": frozenset({
-        "candidate.integration.completed", "candidate.ready", "candidate.updated",
-    }),
-    "judge.failed": frozenset({"judge.passed"}),
-    "review.rejected": frozenset({"review.approved"}),
-    "run.delivery.blocked": frozenset({"run.delivery.completed", "ship.completed", "ship.done"}),
-    "run.delivery.failed": frozenset({"run.delivery.completed", "ship.completed", "ship.done"}),
-    "run.goal.blocked": frozenset({"run.goal.completed", "run.completed"}),
-    "run.goal.completion.blocked": frozenset({"run.goal.completed", "run.completed"}),
-    "run.goal.completion.rejected": frozenset({"run.goal.completed", "run.completed"}),
-    "task.rework.capped": frozenset({"task.done.accepted", "task.attempt.succeeded"}),
-    "test.failed": frozenset({"test.passed"}),
-    "verify.failed": frozenset({"verify.passed"}),
-}
 
 
 class GoalDossierError(ValueError):
@@ -81,6 +46,7 @@ def build_goal_dossier(
     *,
     events: list[ZfEvent] | None = None,
     now: datetime | None = None,
+    project_id: str = "",
 ) -> dict[str, Any]:
     """Compose one run from canonical stores and existing replay reducers."""
 
@@ -99,6 +65,7 @@ def build_goal_dossier(
     scoped_events = events_for_run(all_events, run_id=canonical_run_id)
     if not scoped_events:
         raise GoalDossierError(f"run has no readable events: {requested!r}")
+    scoped_events = _terminal_event_prefix(scoped_events)
 
     generated_at = (now or datetime.now(timezone.utc)).isoformat()
     goal_id = _goal_id(scoped_events)
@@ -107,9 +74,32 @@ def build_goal_dossier(
     workflow_anchor_task_ids = _workflow_anchor_task_ids(
         state_dir, discovered_task_ids,
     )
-    tasks = _task_rows(state_dir, discovered_task_ids)
-    task_ids = [str(task.get("id") or "") for task in tasks]
+    current_tasks = _task_rows(state_dir, discovered_task_ids)
     feature = _feature_row(state_dir, goal_id)
+    package_roadmap, package_diagnostics = _plan_package_roadmap(
+        state_dir,
+        scoped_events,
+        canonical_run_id,
+    )
+    history = build_goal_dossier_history(
+        state_dir,
+        run_id=canonical_run_id,
+        goal_id=goal_id,
+        events=scoped_events,
+        current_tasks=current_tasks,
+        package_roadmap=package_roadmap,
+        project_id=project_id,
+        excluded_task_ids=workflow_anchor_task_ids,
+    )
+    terminal = history.get("terminal")
+    terminal = terminal if isinstance(terminal, dict) else {}
+    historical_tasks = history.get("historical_tasks")
+    tasks = (
+        list(historical_tasks)
+        if terminal and isinstance(historical_tasks, list)
+        else current_tasks
+    )
+    task_ids = [str(task.get("id") or "") for task in tasks]
     progress = {
         task_id: project_task_progress(
             state_dir,
@@ -130,7 +120,10 @@ def build_goal_dossier(
         feature_id=goal_id,
     )
     artifact_refs, digests = _source_refs(scoped_events)
-    task_digest = _digest(tasks)
+    task_digest = _digest(
+        _terminal_task_sources(tasks) if terminal else tasks
+    )
+    current_task_digest = _digest(current_tasks)
     feature_digest = _digest(feature) if feature else ""
     event_fingerprint = _digest([_event_source(event) for event in scoped_events])
     source_manifest = {
@@ -140,22 +133,18 @@ def build_goal_dossier(
         "store_generations": {
             "events": event_fingerprint,
             "tasks": task_digest,
-            "feature": feature_digest,
+            "current_tasks_overlay": current_task_digest,
+            "current_feature_overlay": feature_digest,
         },
     }
     source_fingerprint = _digest({
         "run_id": canonical_run_id,
         "events": event_fingerprint,
         "tasks": task_digest,
-        "feature": feature_digest,
+        "feature": "" if terminal else feature_digest,
         "artifact_digests": digests,
     })
-    incident_history = _failure_incidents(scoped_events)
-    package_roadmap, package_diagnostics = _plan_package_roadmap(
-        state_dir,
-        scoped_events,
-        canonical_run_id,
-    )
+    incident_history = project_run_failure_incidents(scoped_events)
     gaps = _gaps(goal, tasks, handoff, incident_history)
     task_counts = _task_counts(tasks)
     diagnostics = [
@@ -167,11 +156,13 @@ def build_goal_dossier(
         if task.get("missing")
     ]
     diagnostics.extend(package_diagnostics)
+    diagnostics.extend(history.get("diagnostics") or [])
     dossier = {
         "schema_version": SCHEMA_VERSION,
         "is_derived_projection": True,
         "run_id": canonical_run_id,
         "requested_run_id": requested,
+        "project_id": project_id,
         "goal_id": goal_id,
         "generated_at": generated_at,
         "source_fingerprint": source_fingerprint,
@@ -183,6 +174,7 @@ def build_goal_dossier(
             "diagnostics": diagnostics,
         },
         "goal": goal,
+        "terminal": terminal,
         "roadmap": {
             "feature": feature,
             "task_order": task_ids,
@@ -203,9 +195,13 @@ def build_goal_dossier(
         "state": {
             "task_counts": task_counts,
             "tasks": tasks,
+            "current_overlay": history.get("current_overlay") or {},
             "progress": progress,
             "handoff": handoff,
         },
+        "task_contracts": history.get("task_contracts") or {},
+        "claim_to_evidence": history.get("claim_to_evidence") or {},
+        "instruction_context": history.get("instruction_context") or [],
         "evidence_index": _evidence_index(scoped_events),
         "gaps": gaps,
         "incident_history": incident_history,
@@ -234,7 +230,16 @@ def build_cached_goal_dossier(
     )
     return service.cached_goal_dossier(
         run_id,
-        builder=lambda: build_goal_dossier(state_dir, run_id),
+        builder=lambda: build_goal_dossier(
+            state_dir,
+            run_id,
+            project_id=stable_project_id(
+                name=str(
+                    getattr(getattr(config, "project", None), "name", "") or ""
+                ),
+                root=project_root,
+            ),
+        ),
     )
 
 
@@ -380,6 +385,11 @@ def goal_dossier_view(
             "task_counts": state.get("task_counts") or {},
             "gap_count": len(dossier.get("gaps") or []),
             "evidence_count": len(dossier.get("evidence_index") or []),
+            "claim_summary": (
+                dossier.get("claim_to_evidence", {}).get("summary", {})
+                if isinstance(dossier.get("claim_to_evidence"), dict)
+                else {}
+            ),
             "operation_count": len(dossier.get("operations") or []),
             "closure_status": closure.get("status"),
         })
@@ -388,8 +398,12 @@ def goal_dossier_view(
         return redact_obj(dossier)
     allowed = {
         "goal",
+        "terminal",
         "roadmap",
         "state",
+        "task_contracts",
+        "claim_to_evidence",
+        "instruction_context",
         "evidence_index",
         "gaps",
         "incident_history",
@@ -422,6 +436,21 @@ def render_goal_dossier_markdown(dossier: dict[str, Any]) -> str:
     closure = dossier.get("closure") if isinstance(dossier.get("closure"), dict) else {}
     operations = dossier.get("operations") if isinstance(dossier.get("operations"), list) else []
     evidence = dossier.get("evidence_index") if isinstance(dossier.get("evidence_index"), list) else []
+    claim_matrix = (
+        dossier.get("claim_to_evidence")
+        if isinstance(dossier.get("claim_to_evidence"), dict)
+        else {}
+    )
+    claim_rows = (
+        claim_matrix.get("rows")
+        if isinstance(claim_matrix.get("rows"), list)
+        else []
+    )
+    overlay = (
+        state.get("current_overlay")
+        if isinstance(state.get("current_overlay"), dict)
+        else {}
+    )
     lines = [
         f"# Goal Dossier: {dossier.get('run_id', '')}",
         "",
@@ -444,6 +473,7 @@ def render_goal_dossier_markdown(dossier: dict[str, Any]) -> str:
         f"- Pending handoffs: {goal.get('pending_handoff_count', 0)}",
         f"- Operations: {len(operations)}",
         f"- Failure incidents: {len(incidents)}",
+        f"- Current-store drift: {overlay.get('drift_count', 0)}",
         "",
         "## Tasks",
         "",
@@ -500,6 +530,24 @@ def render_goal_dossier_markdown(dossier: dict[str, Any]) -> str:
                 )
     else:
         lines.append("- None")
+    lines.extend([
+        "",
+        "## Claim to Evidence",
+        "",
+        "| Claim | Tasks | Verification | Verdict |",
+        "|---|---|---|---|",
+    ])
+    for row in claim_rows:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"| `{row.get('goal_claim_id', '')}` {row.get('claim', '')} | "
+            f"{', '.join(row.get('task_ids') or []) or '-'} | "
+            f"{row.get('task_verification', 'unverified')} | "
+            f"{row.get('verdict', 'unknown')} |"
+        )
+    if not claim_rows:
+        lines.append("| - | - | - | - |")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -628,6 +676,34 @@ def _task_counts(tasks: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _terminal_task_sources(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude mutable display overlays from a terminal Dossier fingerprint."""
+
+    return [
+        {
+            "id": str(task.get("id") or ""),
+            "status": str(task.get("status") or ""),
+            "status_source": str(task.get("status_source") or ""),
+            "task_ref": str(task.get("task_ref") or ""),
+            "contract_snapshot_ref": str(task.get("contract_snapshot_ref") or ""),
+            "contract_snapshot_digest": str(
+                task.get("contract_snapshot_digest") or ""
+            ),
+        }
+        for task in tasks
+    ]
+
+
+def _terminal_event_prefix(events: list[ZfEvent]) -> list[ZfEvent]:
+    """Freeze a terminal Dossier before read-side delivery events are emitted."""
+
+    terminal_index = -1
+    for index, event in enumerate(events):
+        if event.type in {"run.goal.completed", "run.goal.blocked"}:
+            terminal_index = index
+    return events[:terminal_index + 1] if terminal_index >= 0 else events
+
+
 def _gaps(
     goal: dict[str, Any],
     tasks: list[dict[str, Any]],
@@ -670,88 +746,6 @@ def _gaps(
             "source_event_id": str(goal.get("source_event_id") or ""),
         })
     return redact_obj(gaps)
-
-
-def _failure_incidents(events: list[ZfEvent]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str, str]] = []
-    for index, event in enumerate(events):
-        if event.type not in _FAILURE_EVENTS:
-            continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        task_id = str(event.task_id or payload.get("task_id") or "")
-        scope_id = _incident_scope_id(event)
-        fingerprint = failure_fingerprint(event)
-        key = (scope_id, event.type, fingerprint)
-        summary = str(
-            payload.get("reason")
-            or payload.get("message")
-            or payload.get("summary")
-            or event.type
-        )
-        incident = grouped.get(key)
-        if incident is None:
-            incident = {
-                "incident_id": "incident-" + hashlib.sha256(
-                    "\0".join(key).encode("utf-8")
-                ).hexdigest()[:16],
-                "status": "active",
-                "event_type": event.type,
-                "task_id": task_id,
-                "scope_id": scope_id,
-                "failure_fingerprint": fingerprint,
-                "summary": summary,
-                "count": 0,
-                "first_event_id": event.id,
-                "first_event_at": event.ts,
-                "last_event_id": event.id,
-                "last_event_at": event.ts,
-                "resolved_by_event_id": "",
-                "resolved_by_event_type": "",
-                "_last_index": index,
-            }
-            grouped[key] = incident
-            order.append(key)
-        incident["count"] = int(incident["count"]) + 1
-        incident["summary"] = summary
-        incident["last_event_id"] = event.id
-        incident["last_event_at"] = event.ts
-        incident["_last_index"] = index
-
-    for key in order:
-        incident = grouped[key]
-        allowed = _FAILURE_SETTLEMENT_EVENTS.get(
-            str(incident["event_type"]), frozenset(),
-        )
-        for event in events[int(incident["_last_index"]) + 1:]:
-            if not is_successful_run_terminal(event) and event.type not in allowed:
-                continue
-            if (
-                not is_successful_run_terminal(event)
-                and _incident_scope_id(event) != incident["scope_id"]
-            ):
-                continue
-            incident["status"] = "resolved"
-            incident["resolved_by_event_id"] = event.id
-            incident["resolved_by_event_type"] = event.type
-            break
-        incident.pop("_last_index", None)
-    return redact_obj([grouped[key] for key in order])
-
-
-def _incident_scope_id(event: ZfEvent) -> str:
-    payload = event.payload if isinstance(event.payload, dict) else {}
-    for value in (
-        event.task_id,
-        payload.get("task_id"),
-        payload.get("pdd_id"),
-        payload.get("feature_id"),
-        payload.get("goal_id"),
-    ):
-        text = str(value or "").strip()
-        if text:
-            return text
-    return "run"
 
 
 def _evidence_index(events: Iterable[ZfEvent]) -> list[dict[str, str]]:

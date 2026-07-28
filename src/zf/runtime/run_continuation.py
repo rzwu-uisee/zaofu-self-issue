@@ -21,6 +21,11 @@ _PROGRESS_EVENTS = frozenset({
     "plan.artifact_package.admitted",
     "plan.artifact_package.rejected",
     "plan.artifact_package.superseded",
+    "workflow.fragment.proposed",
+    "workflow.fragment.admitted",
+    "workflow.fragment.rejected",
+    "workflow.fragment.superseded",
+    "workflow.fragment.cancelled",
     "task.assigned",
     "task.dispatched",
     "task.done",
@@ -138,6 +143,7 @@ def operation_key_for_action(
             "fanout_id",
             "stage_id",
             "trace_id",
+            "fragment_id",
         )
         if str(action.get(key) or "")
     }
@@ -150,6 +156,12 @@ def operation_key_for_action(
         "action": str(action.get("action") or ""),
         "safe_resume_action": str(action.get("safe_resume_action") or ""),
         "checkpoint_id": str(action.get("checkpoint_id") or ""),
+        "continuation_key": str(action.get("continuation_key") or ""),
+        "parent_operation_id": str(action.get("parent_operation_id") or ""),
+        "pattern_id": str(action.get("pattern_id") or ""),
+        "plan_artifact_package_digest": str(
+            action.get("plan_artifact_package_digest") or ""
+        ),
         "failure_fingerprint": str(
             action.get("fingerprint")
             or envelope.get("fingerprint")
@@ -246,6 +258,15 @@ def build_run_continuation_projection(
                 "operation_attempt_cap",
                 "operation_deadline",
                 "operation_terminal_fallback",
+                "fragment_id",
+                "fragment_digest",
+                "continuation_key",
+                "parent_operation_id",
+                "pattern_id",
+                "plan_artifact_package_id",
+                "plan_artifact_package_ref",
+                "plan_artifact_package_digest",
+                "task_map_generation",
             )
             if selected.get(key) not in (None, "")
         }

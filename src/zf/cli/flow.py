@@ -3043,19 +3043,63 @@ def _infer_prd_surfaces(source_text: str, *, target_root: str = "") -> list[str]
 _COMMAND_START_RE = re.compile(
     r"^(?:npm|pnpm|yarn|bun|node|python|python3|uv|pytest|npx|docker|curl|go|cargo|deno)\b"
 )
+_COMMAND_SECTION_TERMS = (
+    "acceptance",
+    "test",
+    "testing",
+    "validation",
+    "verification",
+    "验收",
+    "测试",
+    "验证",
+)
+_EXAMPLE_SECTION_TERMS = (
+    "usage",
+    "synopsis",
+    "example",
+    "examples",
+    "用法",
+    "示例",
+)
+_COMMAND_PLACEHOLDER_RE = re.compile(
+    r"(?:<[^>]+>|\{[^}]+\}|\[[^\]]+\]|\.\.\.|"
+    r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_-]*(?:=[A-Z][A-Z0-9_|-]*)?(?![A-Za-z0-9_]))"
+)
 
 
 def _extract_verification_commands(source_text: str) -> list[str]:
     commands: list[str] = []
+    trusted_section = False
+    example_section = False
     for raw_line in (source_text or "").splitlines():
         line = raw_line.strip()
         if not line:
+            continue
+        if line.startswith("#"):
+            header = line.lstrip("#").strip().lower()
+            trusted_section = any(term in header for term in _COMMAND_SECTION_TERMS)
+            example_section = any(term in header for term in _EXAMPLE_SECTION_TERMS)
+            continue
+        if example_section:
+            continue
+        explicit_prefix = bool(
+            re.match(r"^(?:run|command|执行|命令)\s*:\s*", line, re.IGNORECASE)
+        )
+        if explicit_prefix:
+            line = re.sub(
+                r"^(?:run|command|执行|命令)\s*:\s*",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+        explicit_shell = line.startswith("$ ")
+        if not trusted_section and not explicit_prefix and not explicit_shell:
             continue
         inline = re.findall(r"`([^`]+)`", raw_line)
         inline_commands = [
             item.strip()
             for item in inline
-            if _COMMAND_START_RE.match(item.strip())
+            if _is_declared_verification_command(item.strip())
         ]
         if inline_commands:
             commands.extend(inline_commands)
@@ -3065,10 +3109,17 @@ def _extract_verification_commands(source_text: str) -> list[str]:
         line = line.strip("`")
         if line.startswith("$ "):
             line = line[2:].strip()
-        if _COMMAND_START_RE.match(line):
+        if _is_declared_verification_command(line):
             commands.append(line)
             continue
     return list(dict.fromkeys(commands))
+
+
+def _is_declared_verification_command(value: str) -> bool:
+    command = str(value or "").strip()
+    if not _COMMAND_START_RE.match(command):
+        return False
+    return _COMMAND_PLACEHOLDER_RE.search(command) is None
 
 
 def _extract_acceptance_criteria(source_text: str) -> list[str]:

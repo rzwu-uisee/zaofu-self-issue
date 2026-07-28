@@ -65,7 +65,10 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # canonical Goal claim set from it, so it cannot wait for a later tick.
     "task_map.ready",
     "workflow.invoke.requested",
+    "channel.synthesis.requested",
+    "workflow.fragment.proposed",
     "workflow.reconcile.requested",
+    "fanout.aggregate.rebuild.requested",
     # Tier-2 诊断(task 2026-07-06-0930):requested 唤醒诊断 stage 派发,
     # completed 唤醒结论消费(rework feedback / needs_owner 升级)。
     "diagnosis.requested",

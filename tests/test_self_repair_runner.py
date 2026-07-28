@@ -204,6 +204,7 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
     (root / "README.md").write_text("base\n", encoding="utf-8")
     _git(root, "add", "README.md")
     _git(root, "commit", "-q", "-m", "init")
+    base_commit = _git(root, "rev-parse", "HEAD")
     branch = "self-repair/stall-X-a0"
     worktree = tmp_path / "worktree"
     _git(root, "worktree", "add", "-B", branch, str(worktree), "HEAD")
@@ -219,6 +220,11 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
             "candidate_id": "C-1",
             "branch": branch,
             "worktree": str(worktree),
+            "base_commit": base_commit,
+            "continuation": {
+                "checkpoint_id": "checkpoint-1",
+                "safe_resume_action": "needs_stage_dispatch",
+            },
         },
     )
 
@@ -228,6 +234,8 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
     closeout = [event for event in log.read_all() if event.type == CLOSEOUT_REQUIRED][-1]
     assert closeout.payload["fingerprint"] == "stall:X"
     assert closeout.payload["source_title"] == "fix: repair stall"
+    assert closeout.payload["base_commit"] == base_commit
+    assert closeout.payload["repair_commit"] == closeout.payload["source_commit"]
     assert closeout.payload["restart_required"] is False
     assert (
         closeout.payload["restart_strategy"]
@@ -242,6 +250,11 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
     assert closeout.payload["changed_files"] == ["fix.txt"]
     assert closeout.payload["verification_plan"][0]["command"] == "git diff --check"
     assert closeout.payload["continuation"]["resume_original_workflow"] is True
+    assert closeout.payload["continuation"]["checkpoint_id"] == "checkpoint-1"
+    assert (
+        closeout.payload["continuation"]["safe_resume_action"]
+        == "needs_stage_dispatch"
+    )
     assert closeout.payload["continuation"]["restart_required"] is False
     assert (
         closeout.payload["continuation"]["resume_strategy"]

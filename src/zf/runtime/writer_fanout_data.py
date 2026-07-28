@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from zf.runtime.fanout_parent_identity import parent_flow_identity
 from zf.runtime.task_contract_snapshot import criterion_text
 
 from zf.core.config.schema import RoleConfig
@@ -28,7 +29,6 @@ _FANOUT_AFFINITY_METADATA_KEYS = (
     "upstream_task_id",
     "upstream_stage_slot",
 )
-
 
 class WriterFanoutDataMixin:
     @staticmethod
@@ -454,6 +454,13 @@ class WriterFanoutDataMixin:
                 if isinstance(manifest.get("trigger_payload"), dict)
                 else {}
             )
+            parent_identity, identity_conflicts = parent_flow_identity(
+                manifest,
+                aggregate_payload=payload,
+                payloads=payloads,
+            )
+            if identity_conflicts:
+                payload["identity_conflicts"] = identity_conflicts
             gap_tasks: list[dict] = []
             for child_payload in payloads:
                 for source in (child_payload, child_payload.get("report")):
@@ -505,11 +512,11 @@ class WriterFanoutDataMixin:
                 "closure_status",
                 "goal_status",
             ):
-                value = (
-                    self._first_child_value(manifest, payloads, key)
-                    or trigger_payload.get(key)
-                    or manifest.get(key)
-                )
+                value = parent_identity.get(key)
+                if value in (None, ""):
+                    value = self._first_child_value(manifest, payloads, key)
+                if value in (None, ""):
+                    value = trigger_payload.get(key) or manifest.get(key)
                 if value not in (None, ""):
                     payload[key] = value
             for key in ("affected_task_ids", "supersedes_task_ids"):

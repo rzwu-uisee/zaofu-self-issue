@@ -309,6 +309,28 @@ def test_load_runtime_run_manager_resident_agent_config(tmp_path: Path):
     assert source_repair.deny_paths == [".env", "**/events.jsonl"]
 
 
+def test_load_runtime_run_manager_verified_checkpoint_apply_policy(tmp_path: Path):
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n"
+        "  name: test\n"
+        "runtime:\n"
+        "  run_manager:\n"
+        "    source_repair:\n"
+        "      enabled: true\n"
+        "      apply_policy: verified_checkpoint_apply\n"
+    )
+
+    cfg = load_config(p)
+
+    assert cfg.runtime.run_manager.source_repair.enabled is True
+    assert (
+        cfg.runtime.run_manager.source_repair.apply_policy
+        == "verified_checkpoint_apply"
+    )
+
+
 def test_load_runtime_feishu_inbound_config(tmp_path: Path):
     p = tmp_path / "zf.yaml"
     p.write_text(
@@ -1066,8 +1088,28 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
         "verify-lane-0",
         "verify-lane-1",
         "orchestrator",
+        "source_researcher",
+        "product_analyst",
+        "technical_analyst",
+        "risk_critic",
+        "synthesizer",
     }
+    research_stage = next(
+        stage
+        for stage in cfg.workflow.stages
+        if stage.id == "research-fanout"
+    )
+    assert research_stage.topology == "fanout_reader"
+    assert [
+        child.role_instance for child in research_stage.children
+    ] == [
+        "source_researcher",
+        "product_analyst",
+        "technical_analyst",
+        "risk_critic",
+    ]
     assert [stage.id for stage in cfg.workflow.stages] == [
+        "research-fanout",
         "prd-scan",
         "prd-plan",
         "prd-post-verify-discovery",

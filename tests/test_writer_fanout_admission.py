@@ -431,6 +431,7 @@ def test_load_writer_task_map_preserves_complete_plan_package_identity(tmp_path)
                 "plan_artifact_package_id": "planpkg-abc",
                 "plan_artifact_package_ref": "artifacts/plan-packages/abc.json",
                 "plan_artifact_package_digest": "abc",
+                "task_map_generation": "G-abc",
             },
         ),
         pdd_id="PDD-A",
@@ -441,6 +442,7 @@ def test_load_writer_task_map_preserves_complete_plan_package_identity(tmp_path)
     assert loaded.plan_artifact_package_id == "planpkg-abc"
     assert loaded.plan_artifact_package_ref == "artifacts/plan-packages/abc.json"
     assert loaded.plan_artifact_package_digest == "abc"
+    assert loaded.task_map_generation == "G-abc"
 
 
 def test_load_writer_task_map_requires_run_scoped_verification(tmp_path):

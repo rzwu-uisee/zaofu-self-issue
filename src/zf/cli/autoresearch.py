@@ -40,7 +40,7 @@ from zf.autoresearch.loop import (
     run_loop,
 )
 from zf.autoresearch.orchestrator import (
-    AutoresearchRunConfig,
+    AutoresearchRunConfig, cleanup_autoresearch_run,
     default_run_id,
     run_autoresearch,
     start_tmux_supervisor,
@@ -516,6 +516,9 @@ def _run(args) -> int:
     except (FileExistsError, FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}")
         return 2
+    finally:
+        if cfg.confirm and not cfg.keep_running:
+            cleanup_autoresearch_run(cfg, run_id=run_id)
 
     print(
         f"Autoresearch {result.status}: "
@@ -796,13 +799,7 @@ def _refresh_health_cache(parent_state_dir: Path) -> None:
 
 
 def _real_autoresearch_fn(*, scenario: str, run_id: str, cfg: LoopConfig) -> dict:
-    """Adapter: zf.autoresearch.orchestrator.run_autoresearch wrapped to
-    return the dict shape the loop driver expects.
-
-    confirm=True so each iter actually executes the inner harness rather
-    than landing in dry-run. reuse_worktree=True so a single worktree is
-    reused across iters (otherwise prepare_worktree refuses non-empty dir).
-    """
+    """Run one loop iteration in the reusable isolated worktree."""
     ar_cfg = AutoresearchRunConfig(
         scenario_name=scenario,
         worktree=cfg.worktree,
@@ -813,16 +810,20 @@ def _real_autoresearch_fn(*, scenario: str, run_id: str, cfg: LoopConfig) -> dic
         backlog_on_failure=cfg.backlog_on_failure,
         backlog_state_dir=cfg.parent_state_dir,
         review_gate=cfg.review_gate,
+        sync_dirty=False,
     )
-    result = run_autoresearch(ar_cfg)
-    return {
-        "status": result.status,
-        "tasks_done": result.tasks_done,
-        "expected_done": result.expected_done,
-        "fatal_event": result.fatal_event,
-        "report_path": str(result.report_path),
-        "review_gate": result.review_gate or {},
-    }
+    try:
+        result = run_autoresearch(ar_cfg)
+        return {
+            "status": result.status,
+            "tasks_done": result.tasks_done,
+            "expected_done": result.expected_done,
+            "fatal_event": result.fatal_event,
+            "report_path": str(result.report_path),
+            "review_gate": result.review_gate or {},
+        }
+    finally:
+        cleanup_autoresearch_run(ar_cfg, run_id=run_id)
 
 
 def _real_eval_collector(state_dir: Path):

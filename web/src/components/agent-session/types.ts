@@ -55,6 +55,10 @@ export interface AgentSessionPart {
 }
 
 export interface AgentSessionActionProposal {
+  proposalEventId?: string;
+  proposalId?: string;
+  proposalDigest?: string;
+  revision?: number;
   action: string;
   requestedAction: string;
   payload: Record<string, unknown>;

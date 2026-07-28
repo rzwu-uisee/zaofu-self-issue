@@ -209,13 +209,30 @@ def test_synthesized_task_map_preserves_workflow_refs() -> None:
     assert task["acceptance_matrix_ref"].endswith("acceptance-matrix.json")
     assert task["test_matrix_ref"].endswith("test-matrix.json")
     assert task["real_e2e_matrix_ref"].endswith("real-e2e-matrix.json")
-    assert payload["required_plan_ports"][-3:] == [
-        "acceptance_matrix",
-        "test_matrix",
-        "real_e2e_matrix",
+    assert payload["required_plan_ports"] == [
+        "requirement_spec",
+        "goal_claim_set",
+        "task_map",
+        "planning_result",
     ]
     assert "referenced acceptance/test/real-e2e matrix" in " ".join(task["acceptance_criteria"])
     assert "verification" not in task
+
+
+def test_synthesized_task_map_binds_only_explicit_ready_matrix_ports() -> None:
+    payload = synthesize_light_task_map(
+        pdd_id="default",
+        objective="交付 textstat CLI",
+        prd_ref="docs/prd/textstat-prd.md",
+        target_root="app",
+        workflow_refs={
+            "acceptance_matrix_ref": "artifacts/workflow/wf/acceptance-matrix.json",
+        },
+        ready_plan_ports=["acceptance_matrix"],
+    )
+
+    assert payload["acceptance_matrix_ref"].endswith("acceptance-matrix.json")
+    assert payload["required_plan_ports"][-1] == "acceptance_matrix"
 
 
 def _light_config():
@@ -305,6 +322,35 @@ def test_entry_uses_config_quality_checks_without_matrix_commands(tmp_path: Path
     )
 
 
+def test_entry_preserves_direct_requirement_refs_without_manifest(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+
+    emitted = maybe_synthesize_light_task_map(
+        event=ZfEvent(
+            type="prd.requested",
+            actor="operator",
+            payload={
+                "pdd_id": "direct",
+                "workflow_run_id": "run-direct",
+                "prd_ref": "docs/prd/direct.md",
+                "objective": "Deliver direct requirement",
+            },
+        ),
+        config=_light_config(),
+        state_dir=state_dir,
+        event_writer=EventWriter(log),
+        events=[],
+    )
+
+    assert emitted is not None
+    assert emitted.payload["workflow_run_id"] == "run-direct"
+    assert emitted.payload["prd_ref"] == "docs/prd/direct.md"
+
+
 def test_entry_is_idempotent(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -347,7 +393,11 @@ def test_entry_mints_run_goal_when_goal_enabled(tmp_path: Path) -> None:
     state_dir.mkdir()
     log = EventLog(state_dir / "events.jsonl")
     entry = ZfEvent(type="prd.requested", actor="operator",
-                    payload={"pdd_id": "default", "objective": "交付 X"})
+                    payload={
+                        "pdd_id": "default",
+                        "workflow_run_id": "run-light-explicit",
+                        "objective": "交付 X",
+                    })
     emitted = maybe_synthesize_light_task_map(
         event=entry, config=_light_goal_config(), state_dir=state_dir,
         event_writer=EventWriter(log), events=[],
@@ -356,7 +406,9 @@ def test_entry_mints_run_goal_when_goal_enabled(tmp_path: Path) -> None:
     started = [e for e in log.read_all() if e.type == "run.goal.started"]
     assert len(started) == 1
     payload = started[0].payload
-    assert payload["run_id"].startswith("run-light-default-")
+    assert payload["run_id"] == "run-light-explicit"
+    assert payload["workflow_run_id"] == "run-light-explicit"
+    assert started[0].correlation_id == "run-light-explicit"
     assert payload["objective"] == "交付 X"
     assert payload["source"] == "light_flow_kernel"
 
@@ -380,20 +432,71 @@ def test_entry_minted_goal_completes_on_judge_passed(tmp_path: Path) -> None:
     state_dir.mkdir()
     log = EventLog(state_dir / "events.jsonl")
     entry = ZfEvent(type="prd.requested", actor="operator",
-                    payload={"pdd_id": "default", "objective": "交付 X"})
+                    payload={
+                        "pdd_id": "default",
+                        "workflow_run_id": "run-light-explicit",
+                        "objective": "交付 X",
+                    })
     maybe_synthesize_light_task_map(
         event=entry, config=_light_goal_config(), state_dir=state_dir,
         event_writer=EventWriter(log), events=[],
     )
     judge = ZfEvent(type="judge.passed", actor="zf-cli",
-                    payload={"fanout_id": "f", "stage_id": "s",
-                             "status": "passed"})
+                    correlation_id="run-light-explicit",
+                    payload={
+                        "workflow_run_id": "run-light-explicit",
+                        "fanout_id": "f",
+                        "stage_id": "s",
+                        "status": "passed",
+                    })
     completion = run_goal_completion_event(
         [*log.read_all(), judge], cause=judge,
     )
     assert completion is not None
     assert completion.type == "run.goal.completed"
-    assert completion.payload["run_id"].startswith("run-light-default-")
+    assert completion.payload["run_id"] == "run-light-explicit"
+
+
+def test_entry_allows_distinct_workflow_runs_in_same_state(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    first = ZfEvent(
+        type="prd.requested",
+        actor="operator",
+        payload={"pdd_id": "first", "workflow_run_id": "run-light-first"},
+    )
+    second = ZfEvent(
+        type="prd.requested",
+        actor="operator",
+        payload={"pdd_id": "second", "workflow_run_id": "run-light-second"},
+    )
+
+    first_ready = maybe_synthesize_light_task_map(
+        event=first,
+        config=_light_goal_config(),
+        state_dir=state_dir,
+        event_writer=writer,
+        events=[],
+    )
+    second_ready = maybe_synthesize_light_task_map(
+        event=second,
+        config=_light_goal_config(),
+        state_dir=state_dir,
+        event_writer=writer,
+        events=log.read_all(),
+    )
+
+    assert first_ready is not None
+    assert second_ready is not None
+    assert second_ready.payload["workflow_run_id"] == "run-light-second"
+    started_run_ids = {
+        event.payload["run_id"]
+        for event in log.read_all()
+        if event.type == "run.goal.started"
+    }
+    assert started_run_ids == {"run-light-first", "run-light-second"}
 
 
 def test_entry_without_goal_enabled_mints_no_goal(tmp_path: Path) -> None:

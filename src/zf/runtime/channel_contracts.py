@@ -49,14 +49,22 @@ CHANNEL_ROLES = {
 CHANNEL_VISIBILITY_PROFILES = {"minimal", "planner", "reviewer", "owner_report", "full_audit"}
 CHANNEL_PERMISSION_PROFILES = {
     "read_only",
+    "operator",
     "artifact_writer",
     "project_writer",
+    "workspace_writer",
+    "isolated_writer",
     "dangerous_full",
 }
 CHANNEL_PERMISSION_PROFILE_DEFAULT = "read_only"
 CHANNEL_PERMISSION_PROFILE_WRITE_POLICY = {
     "read_only": {
         "mode": "read_only",
+        "allowed_write_paths": [],
+        "requires_gate": True,
+    },
+    "operator": {
+        "mode": "operator",
         "allowed_write_paths": [],
         "requires_gate": True,
     },
@@ -80,6 +88,17 @@ CHANNEL_PERMISSION_PROFILE_WRITE_POLICY = {
             "backlogs/",
         ],
         "requires_gate": True,
+    },
+    "workspace_writer": {
+        "mode": "workspace_writer",
+        "allowed_write_paths": ["*"],
+        "requires_gate": True,
+    },
+    "isolated_writer": {
+        "mode": "isolated_writer",
+        "allowed_write_paths": ["*"],
+        "requires_gate": True,
+        "requires_isolated_worktree": True,
     },
     "dangerous_full": {
         "mode": "dangerous_full",

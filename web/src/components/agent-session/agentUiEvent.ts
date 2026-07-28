@@ -144,6 +144,10 @@ export function parseActionProposal(payload: Record<string, unknown>): AgentSess
   const nestedPayload = recordValue(proposal.payload);
   if (!action || !nestedPayload) return undefined;
   return {
+    proposalEventId: textValue(proposal.proposal_event_id).trim(),
+    proposalId: textValue(proposal.proposal_id).trim(),
+    proposalDigest: textValue(proposal.proposal_digest).trim(),
+    revision: Number(proposal.revision || 1),
     action,
     requestedAction: textValue(proposal.requested_action || proposal.action).trim(),
     payload: nestedPayload,

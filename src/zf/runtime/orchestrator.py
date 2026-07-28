@@ -49,6 +49,7 @@ from zf.runtime.transport import (
 from zf.runtime.orchestrator_lifecycle import LifecycleManagerMixin
 from zf.runtime.orchestrator_fanout import FanoutCoordinationMixin
 from zf.runtime.orchestrator_dispatch import DispatchMixin
+from zf.runtime.orchestrator_event_cursor import EventCursorMixin
 from zf.runtime.orchestrator_reactor import EventReactorMixin
 from zf.runtime.orchestrator_module_parity import ModuleParityBridgeMixin
 from zf.runtime.agent_view_runtime import AgentViewRuntimeMixin
@@ -135,7 +136,7 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     # in orchestrator_reactor.py and the inline dispatch chain is in
     # channel_router.route_channel_message.
     "channel.message.posted",
-    "channel.agent.reply.requested",
+    "channel.agent.reply.requested", "channel.synthesis.requested",
     # 2026-07-03: channel discussion progression (blind-fanout ->
     # phase2_relay -> phase3_synthesis, doc 122) is likewise mechanical and
     # taskless — channel_discussion.py emits these with correlation_id=
@@ -301,7 +302,7 @@ def _parse_event_ts(value: object) -> datetime | None:
 
 class Orchestrator(
     FanoutCoordinationMixin,
-    
+    EventCursorMixin,
     DispatchMixin,
     EventReactorMixin,
     ModuleParityBridgeMixin,
@@ -808,7 +809,9 @@ class Orchestrator(
                 file=sys.stderr,
             )
 
-    def run_once(self, events: list[ZfEvent] | None = None) -> list[OrchestratorDecision]:
+    def run_once(
+        self, events: list[ZfEvent] | None = None, *, consumed_offset: int | None = None,
+    ) -> list[OrchestratorDecision]:
         """Run one orchestration cycle.
 
         If `events` is given (push from EventWatcher), react to those.
@@ -820,7 +823,9 @@ class Orchestrator(
         # interval has elapsed (driven by either a new event or the idle tick).
         self._flush_pending_layer2_wake()
         decisions.extend(self._capture_logs())
-        decisions.extend(self._react_to_events(events))
+        decisions.extend(
+            self._react_to_events(events, consumed_offset=consumed_offset)
+        )
         decisions.extend(self._reconcile_pending_handoffs())
         self._safe_housekeeping(
             "writer_fanout_task_bindings",
@@ -2400,20 +2405,8 @@ class Orchestrator(
             return bool(getattr(transport, "allow_dispatch", False))
         return True
 
-    def _load_offset(self) -> int:
-        try:
-            return self.session_store.load().latest_event_offset
-        except Exception:
-            return 0
-
-    def _persist_offset(self, offset: int) -> None:
-        try:
-            self.session_store.update(latest_event_offset=offset)
-        except Exception:
-            pass
-
     def _react_to_events(
-        self, pushed: list[ZfEvent] | None = None
+        self, pushed: list[ZfEvent] | None = None, *, consumed_offset: int | None = None,
     ) -> list[OrchestratorDecision]:
         """React to events.
 
@@ -2431,7 +2424,11 @@ class Orchestrator(
         decisions: list[OrchestratorDecision] = []
         if pushed is not None:
             recent = pushed
-            new_offset = self.event_log.current_offset()
+            # The watcher acknowledges its immutable batch boundary only
+            # after every callback has completed.
+            if consumed_offset is not None and consumed_offset < 0:
+                raise ValueError("consumed event offset must be non-negative")
+            new_offset = consumed_offset
         else:
             offset = self._load_offset()
             recent, new_offset = self.event_log.read_from_offset(offset)
@@ -2485,6 +2482,8 @@ class Orchestrator(
             # lost. Hook never blocks compaction.
             self._handle_precompact_signal(event)
 
+            if self._handle_fanout_aggregate_rebuild(event):
+                continue
             # Candidate/PDD-level judge.passed (PRD/issue/refactor fanout)
             # carries no task_id, so both the Layer 2 terminal-ownership check
             # and the Layer 1 primary-handler path — each gated on task_id —
@@ -2714,7 +2713,7 @@ class Orchestrator(
         # _notify_orchestrator_agent.
         if layer2_active:
             self._flush_layer2_batch()
-        if new_offset:
+        if new_offset is not None:
             self._persist_offset(new_offset)
         return decisions
 

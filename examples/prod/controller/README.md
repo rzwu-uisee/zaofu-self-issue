@@ -54,6 +54,11 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
   operation 合入 `ship_target_branch`，成功后产生唯一
   `run.goal.completed`。`auto_ship_on_judge_passed` 仅供 legacy active run
   恢复，兼容投影不得触发新运行交付。
+- **Artifact handoff blocking**:8 个入口显式
+  `artifactPackageMode: blocking`。新 Run 缺 current Package、Contract、
+  TaskRef、target 或 required-read evidence 时 fail-closed；mode 同时固定在
+  Run Contract 与 immutable Plan Artifact Package。升级前没有 mode 字段的
+  Package 保持 legacy shadow，配置回退也不会改写既有 Package/EventLog。
 - **evidencePolicy 驱动执法**:`evidencePolicy: strict_refs` 由 loader
   派生 `event_schema.mode: blocking` + `report_evidence_gate: fail_closed`
   (单一控制点;显式 `verification.*` 配置优先,是逃生门)。

@@ -15,6 +15,8 @@ from zf.core.config.schema import ZfConfig
 EXTERNAL_EVENTS: frozenset[str] = frozenset({
     # User / human input
     "user.message", "human.escalate", "human.resolved", "human.note",
+    # Token-gated ControlledActionService / CLI workflow ingress
+    "workflow.invoke.requested",
     # Kernel lifecycle
     "session.started", "loop.started", "loop.stopped",
     "loop.shutdown_requested", "loop.pause_requested", "loop.resume_requested",

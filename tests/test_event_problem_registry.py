@@ -6,6 +6,7 @@ from zf.runtime.event_problem_registry import (
     EVENT_PROBLEM_SPECS,
     NOTIFICATION_POLICIES,
     RECOVERY_POLICIES,
+    autoresearch_eligible_failure_classes,
     event_consumer_contract_gaps,
     spec_for_event,
 )
@@ -51,6 +52,21 @@ def test_goal_closure_rejected_is_owned_by_semantic_router_only() -> None:
     assert blocked is not None
     assert blocked.owner_route == "run_manager"
     assert "pending_action" in blocked.run_manager_semantics
+
+
+def test_goal_identity_invalid_tries_run_manager_rebuild_before_autoresearch() -> None:
+    identity = spec_for_event("goal.closure.identity.invalid")
+
+    assert identity is not None
+    assert identity.owner_route == "run_manager"
+    assert identity.suggested_action_kind == "fanout-aggregate-rebuild"
+    assert identity.run_manager_semantics == ("pending_action",)
+    assert identity.autoresearch_eligible is False
+    assert identity.effective_recovery_policy == "run_manager_then_autoresearch"
+    assert (
+        "goal_closure_identity_invalid"
+        not in autoresearch_eligible_failure_classes()
+    )
 
 
 def test_known_flow_failure_events_do_not_have_consumer_contract_gaps() -> None:

@@ -28,6 +28,10 @@ from zf.runtime.fanout_evidence_queries import FanoutEvidenceQueriesMixin
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.call_result_runtime import admit_runtime_call_result
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.run_manager import (
+    RUN_MANAGER_AUTORESEARCH_REQUESTED,
+    run_manager_tick,
+)
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import write_task_contract_snapshot
 from zf.core.workflow.lane_pipeline import parse_lane_pipeline
@@ -426,6 +430,42 @@ def test_selected_reader_restart_projects_settled_result_without_provider_call(
     assert restarted_transport.sent == []
 
 
+def test_blocking_reader_evidence_gate_uses_admitted_control_result(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _transport, orch, _config, child = _durable_reader_state(tmp_path)
+    orch.config.verification.report_evidence_gate = "fail_closed"
+    child_payload = dict(child.get("payload") or {})
+    source_manifest = hydrate_sidecar_ref(
+        state_dir,
+        child_payload["attempt_source_manifest"],
+    ).payload
+    read_attempt_artifact(
+        state_dir,
+        manifest=source_manifest,
+        source_id="context",
+        artifact_id="context",
+        json_path="$.facts",
+    )
+    payload = _durable_verification_payload(child, verdict="passed")
+    payload["report"].pop("evidence_refs")
+    terminal = ZfEvent(
+        type="verify.child.completed",
+        actor="verify-1",
+        task_id="T-VERIFY",
+        correlation_id="run-durable",
+        payload=payload,
+    )
+
+    orch.run_once(events=[terminal])
+
+    types = [event.type for event in log.read_all()]
+    assert "workflow.call.result.admitted" in types
+    assert "fanout.child.completed" in types
+    assert "stage.report.evidence_missing" not in types
+    assert "fanout.child.failed" not in types
+
+
 def test_trigger_creates_one_fanout_and_dispatches_children(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -554,6 +594,174 @@ def test_flow_discovery_aggregate_strips_invalid_gap_tasks(
         "gap-render.acceptance is required",
         "gap-render.verify_commands is required",
     ]
+
+
+def test_flow_discovery_aggregate_preserves_parent_goal_identity(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    stage = orch.config.workflow.stages[0]
+    stage.roles = ["review-a"]
+    stage.aggregate.child_success_event = "flow.discovery.child.completed"
+    stage.aggregate.child_failure_event = "flow.discovery.child.failed"
+    stage.aggregate.success_event = "flow.discovery.completed"
+    stage.aggregate.failure_event = "flow.discovery.failed"
+    _start_fanout(orch)
+    dispatched = next(
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatched"
+    )
+
+    orch.run_once(events=[ZfEvent(
+        type="flow.discovery.child.completed",
+        actor="review-a",
+        correlation_id="trace-1",
+        payload={
+            "fanout_id": dispatched.payload["fanout_id"],
+            "stage_id": dispatched.payload["stage_id"],
+            "child_id": dispatched.payload["child_id"],
+            "run_id": dispatched.payload["run_id"],
+            "role_instance": "review-a",
+            "status": "completed",
+            "report": {
+                "status": "passed",
+                "summary": "no remaining gaps",
+                "recommendation": "approve",
+                "findings": [],
+                "goal_id": "trace-1",
+                "pdd_id": "child-must-not-replace-parent",
+                "feature_id": "child-must-not-replace-parent",
+                "open_p0_p1_gap_count": 0,
+                "evidence_refs": ["git:abc"],
+                "test_refs": ["pytest"],
+            },
+        },
+    )])
+
+    completed = next(
+        event for event in log.read_all()
+        if event.type == "flow.discovery.completed"
+    )
+    assert completed.payload["workflow_run_id"] == "trace-1"
+    assert completed.payload["pdd_id"] == "F-11111111"
+    assert completed.payload["feature_id"] == "F-11111111"
+    assert completed.payload["goal_id"] == "F-11111111"
+    assert {
+        item["key"] for item in completed.payload["identity_conflicts"]
+    } == {"pdd_id", "feature_id", "goal_id"}
+
+    orch.run_once(events=[ZfEvent(
+        type="fanout.aggregate.rebuild.requested",
+        actor="run-manager",
+        correlation_id="trace-1",
+        payload={
+            "fanout_id": dispatched.payload["fanout_id"],
+            "source_event_id": completed.id,
+            "reason": "regression drill",
+        },
+    )])
+
+    rebuilt = [
+        event for event in log.read_all()
+        if event.type == "flow.discovery.completed"
+    ]
+    assert len(rebuilt) == 2
+    assert rebuilt[-1].payload["rebuild_of"] == completed.id
+    assert rebuilt[-1].payload["recovery_generation"] == 1
+    assert rebuilt[-1].payload["goal_id"] == "F-11111111"
+
+
+def test_goal_identity_recovery_drill_rebuilds_legacy_aggregate_without_agent(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _transport, orch = _state(tmp_path)
+    stage = orch.config.workflow.stages[0]
+    stage.roles = ["review-a"]
+    stage.aggregate.child_success_event = "flow.discovery.child.completed"
+    stage.aggregate.child_failure_event = "flow.discovery.child.failed"
+    stage.aggregate.success_event = "flow.discovery.completed"
+    stage.aggregate.failure_event = "flow.discovery.failed"
+    _start_fanout(orch)
+    dispatched = next(
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatched"
+    )
+    orch.run_once(events=[ZfEvent(
+        type="flow.discovery.child.completed",
+        actor="review-a",
+        correlation_id="trace-1",
+        payload={
+            "fanout_id": dispatched.payload["fanout_id"],
+            "stage_id": dispatched.payload["stage_id"],
+            "child_id": dispatched.payload["child_id"],
+            "run_id": dispatched.payload["run_id"],
+            "role_instance": "review-a",
+            "status": "completed",
+            "report": {
+                "status": "passed",
+                "summary": "complete",
+                "recommendation": "approve",
+                "findings": [],
+                "goal_id": "child-alias",
+                "open_p0_p1_gap_count": 0,
+            },
+        },
+    )])
+    legacy = ZfEvent(
+        id="evt-legacy-malformed-aggregate",
+        type="flow.discovery.completed",
+        actor="legacy-reducer",
+        correlation_id="trace-1",
+        payload={
+            "fanout_id": dispatched.payload["fanout_id"],
+            "stage_id": dispatched.payload["stage_id"],
+            "workflow_run_id": "trace-1",
+            "pdd_id": "F-11111111",
+            "feature_id": "F-11111111",
+            "goal_id": "child-alias",
+        },
+    )
+    log.append(legacy)
+    log.append(ZfEvent(
+        id="evt-legacy-identity-invalid",
+        type="goal.closure.identity.invalid",
+        actor="zf-cli",
+        payload={
+            "fingerprint": "goal-identity:trace-1",
+            "source_event_id": legacy.id,
+            "source_event_type": legacy.type,
+            "fanout_id": dispatched.payload["fanout_id"],
+            "reason": "legacy child alias replaced parent goal",
+        },
+    ))
+
+    tick = run_manager_tick(
+        state_dir=state_dir,
+        writer=EventWriter(log),
+        config=orch.config,
+        project_root=tmp_path,
+        spawn_repairs=False,
+        action_filter={"fanout-aggregate-rebuild"},
+    )
+    rebuild_request = next(
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    )
+    orch.run_once(events=[rebuild_request])
+
+    rebuilt = [
+        event for event in log.read_all()
+        if event.type == "flow.discovery.completed"
+        and event.payload.get("rebuild_of") == legacy.id
+    ]
+    assert tick.actions_applied == 1
+    assert len(rebuilt) == 1
+    assert rebuilt[0].payload["goal_id"] == "F-11111111"
+    assert rebuilt[0].payload["workflow_run_id"] == "trace-1"
+    assert not any(
+        event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+        for event in log.read_all()
+    )
 
 
 def test_reader_fanout_stage_success_criteria_can_fail_aggregate(

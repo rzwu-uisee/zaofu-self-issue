@@ -29,6 +29,7 @@ from zf.core.config.schema import (
 )
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.core.state.session import SessionStore
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.orchestrator import Orchestrator
@@ -249,3 +250,142 @@ def test_non_final_reply_completed_does_not_advance(
     assert _phase_changes(log) == []
     detail = project_channel(state_dir, CHANNEL_ID)
     assert detail["discussions"]["main"]["state"] == "phase1_blind"
+
+
+def test_synthesis_request_dispatches_live_through_layer2_kernel_path(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+) -> None:
+    """A taskless synthesis request is a mechanical Channel side effect.
+
+    It must execute through the real Layer-2-active ``run_once`` path instead
+    of being forwarded to an orchestrator role that does not own Channel
+    runtime state.
+    """
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        type="channel.created",
+        actor="web",
+        payload={"channel_id": CHANNEL_ID, "name": "disc", "source": "web"},
+        correlation_id=CHANNEL_ID,
+    ))
+    log.append(ZfEvent(
+        type="channel.member.added",
+        actor="web",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "member_id": "pm-1",
+            "member_type": "provider_agent",
+            "provider": "fake",
+            "backend": "fake",
+            "permissions": ["read", "message"],
+            "source": "web",
+        },
+        correlation_id=CHANNEL_ID,
+    ))
+
+    orch = Orchestrator(state_dir, config, transport)
+    requested = orch.event_writer.emit(
+        "channel.synthesis.requested",
+        actor="channel-discussion",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-live-1",
+            "target_member_id": "pm-1",
+            "prompt": "Synthesize the decision.",
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    )
+
+    orch.run_once(events=[requested])
+
+    events = log.read_all()
+    synthesis_messages = [
+        event for event in events
+        if event.type == "channel.message.posted"
+        and isinstance(event.payload.get("refs"), dict)
+        and event.payload["refs"].get("synthesis_request_id") == "synth-live-1"
+    ]
+    assert len(synthesis_messages) == 1
+    proposals = [
+        event for event in events
+        if event.type == "channel.synthesis.proposed"
+        and event.payload.get("request_id") == "synth-live-1"
+    ]
+    assert len(proposals) == 1
+
+
+def test_synthesis_replay_routes_message_left_before_reply_request(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id=CHANNEL_ID,
+        payload={"channel_id": CHANNEL_ID, "name": "disc", "source": "web"},
+    )
+    writer.emit(
+        "channel.member.added",
+        actor="web",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "member_id": "pm-1",
+            "member_type": "provider_agent",
+            "provider": "fake",
+            "backend": "fake",
+            "permissions": ["read", "message"],
+            "source": "web",
+        },
+    )
+    requested = writer.emit(
+        "channel.synthesis.requested",
+        actor="channel-discussion",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-replay-1",
+            "target_member_id": "pm-1",
+            "prompt": "Synthesize the decision.",
+            "source": "runtime",
+        },
+    )
+    writer.emit(
+        "channel.message.posted",
+        actor="orchestrator-reactor",
+        causation_id=requested.id,
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "message_id": "msg-synth-replay-1",
+            "member_id": "operator",
+            "role": "user",
+            "source": "runtime",
+            "text": "@pm-1 Synthesize the decision.",
+            "mentions": ["pm-1"],
+            "refs": {"synthesis_request_id": "synth-replay-1"},
+        },
+    )
+    orch = Orchestrator(state_dir, config, transport)
+
+    orch.run_once(events=[requested])
+
+    events = log.read_all()
+    assert len([
+        event for event in events
+        if event.type == "channel.message.posted"
+        and event.payload.get("refs", {}).get("synthesis_request_id")
+        == "synth-replay-1"
+    ]) == 1
+    assert len([
+        event for event in events
+        if event.type == "channel.synthesis.proposed"
+        and event.payload.get("request_id") == "synth-replay-1"
+    ]) == 1

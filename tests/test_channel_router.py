@@ -156,6 +156,11 @@ def test_channel_contract_accepts_facilitator_synthesizer_and_project_skill_refs
 
 def test_channel_contract_profiles_require_explicit_dangerous_ack() -> None:
     assert permission_profile_write_policy("artifact-writer")["mode"] == "artifact_writer"
+    assert normalize_permission_profile("workspace-writer") == "workspace_writer"
+    assert permission_profile_write_policy("operator")["allowed_write_paths"] == []
+    assert permission_profile_write_policy("workspace_writer")["allowed_write_paths"] == ["*"]
+    isolated_policy = permission_profile_write_policy("isolated_writer")
+    assert isolated_policy["requires_isolated_worktree"] is True
     project_policy = permission_profile_write_policy("project-writer")
     assert project_policy["mode"] == "project_writer"
     assert "skills/" in project_policy["allowed_write_paths"]

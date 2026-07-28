@@ -100,6 +100,45 @@ def test_owner_visible_delivery_sends_feishu_receipt_once(tmp_path: Path) -> Non
     assert event_types.count(OWNER_MESSAGE_DELIVERED) == 1
 
 
+def test_terminal_delivery_can_finish_after_runtime_stops(tmp_path: Path) -> None:
+    log, writer = _state(tmp_path)
+    (tmp_path / ".zf" / "session.yaml").write_text(
+        "runtime_state: stopped\nsession_id: sess-terminal\n",
+        encoding="utf-8",
+    )
+    log.append(ZfEvent(
+        type="owner.visible_message.requested",
+        actor="zf-goal-dossier-delivery",
+        payload={
+            "message_id": "goal-delivery-1",
+            "message_kind": "run_terminal_delivery",
+            "delivery_class": "run_terminal",
+            "notification_policy": "owner_terminal_delivery",
+            "source": "goal-dossier",
+            "handled_by": "goal-dossier",
+            "severity": "info",
+            "human_action_required": False,
+            "title": "目标已完成",
+            "summary": "Run terminal delivery",
+            "delivery_targets": ["web", "feishu"],
+        },
+    ))
+    transport = MockFeishuTransport()
+
+    result = deliver_owner_visible_messages_once(
+        event_log=log,
+        writer=writer,
+        transport=transport,
+        routing=RoutingConfig(
+            channels={"owner": "ou-owner"},
+            receive_id_types={"owner": "open_id"},
+        ),
+    )
+
+    assert result.delivered == 1
+    assert len(transport.sent_messages) == 1
+
+
 def test_owner_visible_delivery_records_failed_receipt(tmp_path: Path) -> None:
     log, writer = _state(tmp_path)
     _owner_message(log)

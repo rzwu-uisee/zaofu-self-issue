@@ -16,6 +16,11 @@ spec:
   qualityFloor: product-demo
   evidencePolicy: strict_refs
   deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
+  semanticSubmitProfiles:
+    thin-judge-goal-closure: blocking
+    task-verify: blocking
+    candidate-verify: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig
@@ -78,6 +83,7 @@ spec:
     # 会被 schema fail-closed 拒绝。
     kind_routes:
       prd:
+        pattern_id: prd-lanes-impl
         default_tier: light
     dag:
       external_triggers: [prd.requested, task_map.ready]

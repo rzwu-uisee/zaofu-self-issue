@@ -84,6 +84,7 @@ def dispatch_pending_self_repairs(
     if not pending:
         return 0
     hroot = harness_root(root)
+    base_commit = _git_stdout(hroot, "rev-parse", "HEAD")
     base = Path(tmp_root) if tmp_root else Path(tempfile.gettempdir())
     prepared = 0
     for req in pending:
@@ -119,7 +120,11 @@ def dispatch_pending_self_repairs(
             type=DISPATCHED,
             actor=dispatch_actor,
             payload=dispatched_event_payload(
-                req, branch=branch, worktree=str(worktree), briefing_path=str(briefing_path),
+                req,
+                branch=branch,
+                worktree=str(worktree),
+                briefing_path=str(briefing_path),
+                base_commit=base_commit,
             ),
         ))
         if spawn:
@@ -215,9 +220,17 @@ def emit_self_repair_closeouts(
         if not worktree.exists():
             continue
         branch_head = _git_stdout(worktree, "rev-parse", "HEAD")
-        if not branch_head or branch_head == root_head:
+        base_commit = str(payload.get("base_commit") or "").strip()
+        comparison_base = base_commit or root_head
+        if not branch_head or branch_head == comparison_base:
             continue
-        ahead = _git_stdout(worktree, "rev-list", "--count", "HEAD", f"^{root_head}")
+        ahead = _git_stdout(
+            worktree,
+            "rev-list",
+            "--count",
+            "HEAD",
+            f"^{comparison_base}",
+        )
         try:
             ahead_count = int(ahead or "0")
         except ValueError:
@@ -225,11 +238,46 @@ def emit_self_repair_closeouts(
         if ahead_count <= 0:
             continue
         title = _git_stdout(worktree, "log", "-1", "--format=%s", "HEAD")
-        changed_files = _git_lines(worktree, "diff", "--name-only", f"{root_head}..HEAD")
+        changed_files = _git_lines(
+            worktree,
+            "diff",
+            "--name-only",
+            f"{comparison_base}..HEAD",
+        )
         risk = _classify_closeout_risk(changed_files, commits_ahead=ahead_count)
         verification_plan = _closeout_verification_plan(risk)
         restart = _closeout_restart_policy(risk)
         causation_id = str(getattr(event, "id", "") or "")
+        requested_continuation = payload.get("continuation")
+        requested_continuation = (
+            requested_continuation
+            if isinstance(requested_continuation, dict)
+            else {}
+        )
+        continuation = {
+            "schema_version": "self-repair.closeout-continuation.v1",
+            "restart_required": restart["restart_required"],
+            "restart_strategy": restart["restart_strategy"],
+            "safe_boundary": restart["safe_boundary"],
+            "state_snapshot_required": restart["state_snapshot_required"],
+            "replay_required": restart["replay_required"],
+            "resume_original_workflow": True,
+            "resume_strategy": restart["resume_strategy"],
+            "blocked_until": "verification_passed_and_apply_decision_recorded",
+        }
+        for name in (
+            "checkpoint_id",
+            "safe_resume_action",
+            "workflow_run_id",
+            "run_id",
+            "pdd_id",
+            "feature_id",
+            "fanout_id",
+            "task_id",
+            "source_event_ids",
+        ):
+            if requested_continuation.get(name) not in (None, "", []):
+                continuation[name] = requested_continuation[name]
         writer.append(ZfEvent(
             type=CLOSEOUT_REQUIRED,
             actor="zf-self-repair",
@@ -240,6 +288,8 @@ def emit_self_repair_closeouts(
                 "branch": str(payload.get("branch") or ""),
                 "worktree": str(worktree),
                 "source_commit": branch_head,
+                "repair_commit": branch_head,
+                "base_commit": base_commit,
                 "source_title": title,
                 "commits_ahead": ahead_count,
                 "changed_files": changed_files[:80],
@@ -249,17 +299,7 @@ def emit_self_repair_closeouts(
                 "safe_boundary": restart["safe_boundary"],
                 "state_snapshot_required": restart["state_snapshot_required"],
                 "replay_required": restart["replay_required"],
-                "continuation": {
-                    "schema_version": "self-repair.closeout-continuation.v1",
-                    "restart_required": restart["restart_required"],
-                    "restart_strategy": restart["restart_strategy"],
-                    "safe_boundary": restart["safe_boundary"],
-                    "state_snapshot_required": restart["state_snapshot_required"],
-                    "replay_required": restart["replay_required"],
-                    "resume_original_workflow": True,
-                    "resume_strategy": restart["resume_strategy"],
-                    "blocked_until": "verification_passed_and_apply_decision_recorded",
-                },
+                "continuation": continuation,
                 "action": "operator_merge_or_cherry_pick_then_restart_decision",
                 "restart_required": restart["restart_required"],
                 "auto_merge": False,

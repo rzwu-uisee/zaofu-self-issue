@@ -57,7 +57,12 @@ export function mergeAutopilotDescriptors(
   liveDescriptors: AutopilotProposalDescriptor[],
 ): AutopilotProposalDescriptor[] {
   const durable = pendingProposals.map(pendingProposalDescriptor);
-  const seen = new Set(durable.map((item) => item.proposalId));
+  const seen = new Set(
+    pendingProposals.flatMap((proposal) => [
+      proposal.proposal_event_id,
+      ...(proposal.proposal_event_ids || []),
+    ]),
+  );
   const live = liveDescriptors.filter((item) => !seen.has(item.proposalId));
   return [...durable, ...live];
 }

@@ -379,6 +379,22 @@ def validate_shared_action_payload(
         channel_id = _normal_channel_id(payload.get("channel_id") or payload.get("id") or name)
         if not channel_id:
             return "channel_id must include a letter or number"
+    if action == "channel-create-from-template":
+        if not _required_text(payload, "template_id"):
+            return "template_id is required"
+        if payload.get("overrides") is not None and not isinstance(
+            payload.get("overrides"), dict
+        ):
+            return "overrides must be a mapping"
+    if action == "channel-discussion-start":
+        if not _required_text(payload, "channel_id"):
+            return "channel_id is required"
+        if not (
+            _required_text(payload, "message")
+            or _required_text(payload, "objective")
+            or _required_text(payload, "text")
+        ):
+            return "message or objective is required"
     if action == "channel-invite-member":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
@@ -427,6 +443,28 @@ def validate_shared_action_payload(
         stage = _workflow_stage(config, pattern_id)
         if stage is None:
             return f"execution pattern {pattern_id!r} is not declared in zf.yaml"
+    if action == "research-start":
+        if not _required_text(payload, "task_id"):
+            return "task_id is required"
+        if not (
+            _required_text(payload, "topic")
+            or _required_text(payload, "objective")
+            or _required_text(payload, "message")
+        ):
+            return "topic, objective, or message is required"
+        template_id = _required_text(payload, "template_id")
+        if template_id and template_id != "research-fanout.fixed.v1":
+            return "template_id must be research-fanout.fixed.v1"
+    if action == "research-adopt":
+        for key in (
+            "request_id",
+            "request_revision",
+            "artifact_ref",
+            "artifact_digest",
+            "summary",
+        ):
+            if payload.get(key) in (None, ""):
+                return f"{key} is required"
     if action == "channel-drain-replies":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"

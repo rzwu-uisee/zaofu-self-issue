@@ -35,6 +35,7 @@ class LoadedWriterTaskMap:
     plan_artifact_package_id: str = ""
     plan_artifact_package_ref: str = ""
     plan_artifact_package_digest: str = ""
+    task_map_generation: str = ""
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,9 @@ def load_writer_task_map(
         ).strip(),
         plan_artifact_package_digest=str(
             payload.get("plan_artifact_package_digest") or ""
+        ).strip(),
+        task_map_generation=str(
+            payload.get("task_map_generation") or ""
         ).strip(),
     )
 

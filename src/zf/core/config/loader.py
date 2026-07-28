@@ -549,6 +549,17 @@ def _build_workflow_kind_routes(
             )
         except ValueError as exc:
             raise ConfigError(f"Invalid workflow.kind_routes.{kind}: {exc}") from exc
+        if not route.alias:
+            default_target = (
+                route.tier_routes.get(route.default_tier, "")
+                if route.default_tier
+                else ""
+            )
+            if not route.pattern_id and not default_target:
+                raise ConfigError(
+                    f"workflow.kind_routes.{kind} must declare pattern_id or "
+                    "a tier_routes entry for default_tier"
+                )
         for field_name, target in [
             ("pattern_id", route.pattern_id),
             *[(f"tier_routes.{tier}", target) for tier, target in route.tier_routes.items()],
@@ -2509,10 +2520,13 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
     source_repair_apply_policy = str(
         source_repair_raw.get("apply_policy", "proposal_only") or "proposal_only"
     ).strip()
-    if source_repair_apply_policy not in {"proposal_only"}:
+    if source_repair_apply_policy not in {
+        "proposal_only",
+        "verified_checkpoint_apply",
+    }:
         raise ConfigError(
-            "runtime.run_manager.source_repair.apply_policy currently only "
-            "supports 'proposal_only'"
+            "runtime.run_manager.source_repair.apply_policy must be one of "
+            "'proposal_only' or 'verified_checkpoint_apply'"
         )
     source_repair_restart_policy = str(
         source_repair_raw.get("restart_policy", "never_during_active_run")
@@ -2973,6 +2987,15 @@ _FEISHU_ROUTE_TARGETS = {
     "worker",
     "agent",
 }
+_FEISHU_PERMISSION_PROFILES = {
+    "read_only",
+    "operator",
+    "artifact_writer",
+    "project_writer",
+    "workspace_writer",
+    "isolated_writer",
+    "dangerous_full",
+}
 
 
 def _build_feishu_routing(data: object) -> dict[str, FeishuRouteConfig]:
@@ -3004,6 +3027,36 @@ def _build_feishu_routing(data: object) -> dict[str, FeishuRouteConfig]:
                 f"integrations.feishu_routing[{chat_id}] target=agent requires "
                 "backend (claude-code | codex | ...)"
             )
+        permission_profile = (
+            str(entry.get("permission_profile") or "read_only")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        if permission_profile not in _FEISHU_PERMISSION_PROFILES:
+            raise ConfigError(
+                f"integrations.feishu_routing[{chat_id}].permission_profile "
+                f"must be one of {sorted(_FEISHU_PERMISSION_PROFILES)}"
+            )
+        dangerous_ack = _bool_value(entry.get("dangerous_ack"), False)
+        allowed_senders_raw = entry.get("allowed_senders") or []
+        if not isinstance(allowed_senders_raw, list):
+            raise ConfigError(
+                f"integrations.feishu_routing[{chat_id}].allowed_senders must be a list"
+            )
+        allowed_senders = [
+            str(sender).strip()
+            for sender in allowed_senders_raw
+            if str(sender).strip()
+        ]
+        if permission_profile == "dangerous_full" and (
+            not dangerous_ack or not allowed_senders
+        ):
+            raise ConfigError(
+                f"integrations.feishu_routing[{chat_id}] dangerous_full requires "
+                "dangerous_ack=true and a non-empty allowed_senders list"
+            )
         routes[str(chat_id)] = FeishuRouteConfig(
             target=target,
             channel_id=str(entry.get("channel_id") or ""),
@@ -3011,6 +3064,9 @@ def _build_feishu_routing(data: object) -> dict[str, FeishuRouteConfig]:
             worker_session_id=worker_session_id,
             backend=backend,
             cwd=str(entry.get("cwd") or ""),
+            permission_profile=permission_profile,
+            dangerous_ack=dangerous_ack,
+            allowed_senders=allowed_senders,
         )
     return routes
 

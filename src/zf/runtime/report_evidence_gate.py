@@ -20,6 +20,12 @@ _EVIDENCE_KEYS = (
     "artifact_refs",
     "probes",
 )
+_NESTED_EVIDENCE_COLLECTIONS = (
+    "findings",
+    "requirement_results",
+    "requirement_coverage_matrix",
+    "probe_receipts",
+)
 
 
 def is_verification_stage(*, stage_id: str, event_type: str) -> bool:
@@ -35,27 +41,37 @@ def report_evidence_gap(report: Any) -> str:
     """返回缺口描述("" = 报告带证据或无报告可核)。"""
     if not isinstance(report, dict):
         return ""
-    has_verdict = bool(report.get("status") or report.get("recommendation"))
+    has_verdict = bool(
+        report.get("status")
+        or report.get("recommendation")
+        or report.get("verdict")
+    )
     if not has_verdict:
         return ""
-    for key in _EVIDENCE_KEYS:
-        value = report.get(key)
-        if isinstance(value, list) and any(str(item or "").strip() for item in value):
-            return ""
-        if isinstance(value, str) and value.strip():
-            return ""
-    findings = report.get("findings")
-    if isinstance(findings, list):
-        for item in findings:
-            if isinstance(item, dict):
-                for key in _EVIDENCE_KEYS:
-                    value = item.get(key)
-                    if value and str(value).strip():
+    if _has_evidence(report):
+        return ""
+    for collection in _NESTED_EVIDENCE_COLLECTIONS:
+        items = report.get(collection)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    if _has_evidence(item):
                         return ""
     return (
         "verification report carries a verdict but no evidence refs "
         f"(checked keys: {', '.join(_EVIDENCE_KEYS)})"
     )
+
+
+def _has_evidence(value: dict[str, Any]) -> bool:
+    for key in _EVIDENCE_KEYS:
+        evidence = value.get(key)
+        if isinstance(evidence, list):
+            if any(str(item or "").strip() for item in evidence):
+                return True
+        elif isinstance(evidence, str) and evidence.strip():
+            return True
+    return False
 
 
 __all__ = [

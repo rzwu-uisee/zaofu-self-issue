@@ -1210,6 +1210,17 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
             "required": ["task_id", "pattern_id", "source_event_id", "reason"],
             "optional": ["channel_id", "thread_id"],
         },
+        "workflow.research.adopted": {
+            "required": [
+                "request_id",
+                "request_revision",
+                "artifact_ref",
+                "artifact_digest",
+                "summary",
+                "source_event_id",
+            ],
+            "optional": ["channel_id", "thread_id"],
+        },
     }
 
 

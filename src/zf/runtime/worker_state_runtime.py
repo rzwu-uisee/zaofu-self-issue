@@ -129,10 +129,14 @@ class WorkerStateRuntimeMixin:
             generation_override=force,
         )
         try:
-            payload = {"from": old, "to": new_state, "reason": reason}
+            payload = {
+                "instance_id": instance_id,
+                "from": old,
+                "to": new_state,
+                "reason": reason,
+            }
             if task_id:
                 payload["task_id"] = task_id
-                payload["instance_id"] = instance_id
             if force:
                 payload["generation_override"] = True
             emitted = self.event_writer.append(ZfEvent(

@@ -12,6 +12,7 @@ from zf.core.events.segments import (
     current_event_cursor,
     cursor_is_stale,
     iter_event_records,
+    iter_event_records_from_cursor,
     write_event_manifest,
 )
 from zf.runtime.sidecar_refs import write_sidecar_text
@@ -57,6 +58,29 @@ def test_segment_cursor_detects_manifest_drift(tmp_path: Path) -> None:
 
     _write_line(state_dir / "events.jsonl", ZfEvent(type="b", id="evt-b"))
     assert cursor_is_stale(state_dir, cursor)
+
+
+def test_segment_cursor_reader_only_yields_new_complete_records(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="a", id="evt-a"))
+    baseline = list(iter_event_records(state_dir))
+    last = baseline[-1]
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="b", id="evt-b"))
+    with (state_dir / "events.jsonl").open("ab") as handle:
+        handle.write(b'{"id":"partial"')
+
+    records = list(iter_event_records_from_cursor(
+        state_dir,
+        segment=last.raw_segment,
+        byte_offset=last.raw_offset + last.raw_length,
+        start_seq=last.seq,
+    ))
+
+    assert [(record.seq, record.event.id) for record in records] == [
+        (2, "evt-b"),
+    ]
 
 
 def test_read_model_rebuild_indexes_timeline_and_raw_event(tmp_path: Path) -> None:
@@ -638,3 +662,18 @@ def test_payload_slim_keeps_message_event_id() -> None:
         "message_event_id": "evt-user-msg",
     })
     assert slim["message_event_id"] == "evt-user-msg"
+
+
+def test_payload_slim_keeps_worker_state_identity_and_transition() -> None:
+    from zf.web.projections.read_model import _payload_slim
+
+    slim = _payload_slim({
+        "instance_id": "delivery_worker",
+        "from": "idle",
+        "to": "busy",
+        "reason": "dispatched fanout child",
+    })
+
+    assert slim["instance_id"] == "delivery_worker"
+    assert slim["from"] == "idle"
+    assert slim["to"] == "busy"

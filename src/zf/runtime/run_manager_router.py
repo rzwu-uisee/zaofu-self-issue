@@ -12,6 +12,14 @@ from zf.runtime.run_manager_rework_triage import (
     triage_action_preflight,
     triage_expected_downstream_events,
 )
+from zf.runtime.run_manager_repair_router import (
+    FANOUT_AGGREGATE_ACTIONS,
+    REPAIR_CLOSEOUT_ACTIONS,
+    REPAIR_CLOSEOUT_APPLY_ACTIONS,
+    special_action_policy,
+    special_action_preflight,
+    special_expected_downstream_events,
+)
 
 
 SAFE_BATCH_ACTIONS = frozenset({"repair_failed_children", "reemit_candidate_ready"})
@@ -27,7 +35,6 @@ SAFE_TASK_ACTIONS = frozenset({
 CANDIDATE_REWORK_ACTIONS = frozenset({"retrigger", "replan", "escalate"})
 DIAGNOSIS_ACTIONS = frozenset({"diagnose-attention"})
 WORKER_LIFECYCLE_ACTIONS = frozenset({"worker-lifecycle-recover"})
-REPAIR_CLOSEOUT_ACTIONS = frozenset({"repair-closeout-validate"})
 RESIDENT_AGENT_ACTIONS = frozenset({"resident-agent-reprompt"})
 OWNER_APPROVAL_ACTIONS = frozenset({"failure-closeout-activate"})
 INTERVENTION_CLASSES = frozenset({
@@ -248,22 +255,14 @@ def decide_action_policy(
             preflight=preflight,
             reason="worker lifecycle recovery emits a bounded respawn request",
         )
-    if action in REPAIR_CLOSEOUT_ACTIONS:
-        preflight = preflight_action(action=action, payload=payload)
-        if preflight["status"] == "blocked":
-            return _decision(
-                "needs_diagnosis",
-                executable=True,
-                payload=payload,
-                preflight=preflight,
-                reason="repair closeout validation is missing required evidence",
-            )
+    special_policy = special_action_policy(action, payload)
+    if special_policy is not None:
         return _decision(
-            "auto_decide",
-            executable=True,
+            special_policy["decision"],
+            executable=bool(special_policy["executable"]),
             payload=payload,
-            preflight=preflight,
-            reason="repair closeout validation is read-only and allowlisted",
+            preflight=special_policy["preflight"],
+            reason=str(special_policy["reason"]),
         )
     if action in RESIDENT_AGENT_ACTIONS:
         preflight = preflight_action(action=action, payload=payload)
@@ -451,6 +450,9 @@ def preflight_action(
     checkpoint_id = str(payload.get("checkpoint_id") or "")
     if action in ORCHESTRATOR_TRIAGE_ACTIONS:
         return triage_action_preflight(action, payload)
+    special_preflight = special_action_preflight(action, payload)
+    if special_preflight is not None:
+        return special_preflight
     if action in DIAGNOSIS_ACTIONS:
         if not checkpoint_id:
             failures.append("missing_checkpoint_id")
@@ -488,26 +490,6 @@ def preflight_action(
             "warnings": warnings,
             "checkpoint_id": checkpoint_id,
             "safe_resume_action": safe_action or "worker_lifecycle_recover",
-            "expected_downstream_events": expected,
-            "verify_condition": str(payload.get("verify_condition") or "")
-            or "expected_downstream_event:" + ",".join(expected),
-        }
-    if action in REPAIR_CLOSEOUT_ACTIONS:
-        if not checkpoint_id:
-            failures.append("missing_checkpoint_id")
-        if not str(payload.get("worktree_path") or payload.get("worktree") or ""):
-            failures.append("missing_worktree_path")
-        plan = payload.get("verification_plan")
-        if not isinstance(plan, list) or not plan:
-            failures.append("missing_verification_plan")
-        expected = ["run.manager.action.applied"]
-        return {
-            "schema_version": "run-manager.action-preflight.v1",
-            "status": "blocked" if failures else "passed",
-            "failures": failures,
-            "warnings": warnings,
-            "checkpoint_id": checkpoint_id,
-            "safe_resume_action": safe_action or "repair_closeout_validate",
             "expected_downstream_events": expected,
             "verify_condition": str(payload.get("verify_condition") or "")
             or "expected_downstream_event:" + ",".join(expected),
@@ -826,7 +808,7 @@ def _spec_needs_recovery_closeout(spec: Any) -> bool:
 def _safe_action_for_spec(spec: Any) -> str:
     suggested = str(getattr(spec, "suggested_action_kind", "") or "")
     if suggested in SAFE_BATCH_ACTIONS | SAFE_TASK_ACTIONS | {
-        "trigger_rework", "ship-retry",
+        "trigger_rework", "ship-retry", "fanout-aggregate-rebuild",
     }:
         return suggested
     if suggested in {
@@ -889,12 +871,13 @@ def expected_downstream_events(safe_action: str) -> set[str]:
     triage_events = triage_expected_downstream_events(safe_action)
     if triage_events:
         return triage_events
+    special_events = special_expected_downstream_events(safe_action)
+    if special_events is not None:
+        return special_events
     if safe_action == "diagnose_attention":
         return {"run.manager.autoresearch.requested", "run.manager.resident.prompted"}
     if safe_action == "worker_lifecycle_recover":
         return {"worker.respawn.requested"}
-    if safe_action == "repair_closeout_validate":
-        return {"run.manager.action.applied"}
     if safe_action == "resident_agent_reprompt":
         return {"run.manager.resident.prompted"}
     if safe_action == "failure_closeout_activate":
@@ -971,6 +954,7 @@ __all__ = [
     "INTERVENTION_CLASSES",
     "OWNER_APPROVAL_ACTIONS",
     "ORCHESTRATOR_TRIAGE_ACTIONS",
+    "REPAIR_CLOSEOUT_APPLY_ACTIONS",
     "REPAIR_CLOSEOUT_ACTIONS",
     "RESIDENT_AGENT_ACTIONS",
     "SAFE_BATCH_ACTIONS",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 
 from zf.core.config.loader import load_config
 from zf.core.config.schema import (
@@ -248,3 +249,17 @@ def test_research_fanout_template_runs_to_channel_update(tmp_path: Path) -> None
     )
     assert channel_update.payload["channel_id"] == "ch-research"
     assert channel_update.payload["refs"]["workflow_run_id"] == "wf-research-1"
+    artifact_ref = aggregate.payload["research_artifact_ref"]
+    artifact_path = _state_dir / artifact_ref
+    assert artifact_path.exists()
+    assert (
+        hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        == aggregate.payload["research_artifact_digest"]
+    )
+    assert aggregate.payload["research_summary"] == "Evidence-backed synthesis."
+    assert any(
+        isinstance(item, dict)
+        and item.get("ref") == artifact_ref
+        and item.get("sha256") == aggregate.payload["research_artifact_digest"]
+        for item in aggregate.payload["artifact_refs"]
+    )

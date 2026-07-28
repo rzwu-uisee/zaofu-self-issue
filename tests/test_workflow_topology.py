@@ -103,6 +103,16 @@ class TestOrphanDetection:
 
         assert topo.dead_end_roles() == []
 
+    def test_controlled_workflow_invoke_is_an_external_producer(self):
+        workflow_worker = RoleConfig(
+            name="workflow-worker",
+            triggers=["workflow.invoke.requested"],
+        )
+        topo = WorkflowTopology.from_config(_make_config(workflow_worker))
+
+        assert topo.dead_end_roles() == []
+        assert topo.orphan_events() == []
+
     def test_product_orchestrator_exception_bridge_is_external(self):
         orchestrator = RoleConfig(
             name="orchestrator",

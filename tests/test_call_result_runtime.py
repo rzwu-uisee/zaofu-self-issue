@@ -113,6 +113,16 @@ def test_selected_call_result_replays_settled_operation_without_redispatch(
     assert request["output_profile_id"] == "implementation"
     assert request["output_profile_revision"] == "1"
     assert request["attempt_domain"] == "task"
+    assert request["handoff_authority_contract"] == {
+        "schema_version": "handoff-authority-contract.v1",
+        "output_profile_id": "implementation",
+        "stage_id": "impl",
+        "operation_type": "fanout_writer_child",
+        "attempt_domain": "task",
+        "continuation_key": "",
+        "requires_prior_task_ref": False,
+        "requires_candidate_lineage": False,
+    }
     assert request["result_identity"]["plan_artifact_package_id"] == "planpkg-current"
     assert request["result_identity"]["run_contract_digest"] == "contract-sha"
     manifest = hydrate_sidecar_ref(

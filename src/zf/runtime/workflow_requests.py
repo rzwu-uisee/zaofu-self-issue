@@ -53,6 +53,90 @@ def load_workflow_request(state_dir: Path, request_id: str) -> dict[str, Any]:
     return _read_json(path)
 
 
+def adopt_workflow_research_result(
+    state_dir: Path,
+    request_id: str,
+    *,
+    expected_revision: int,
+    artifact_ref: str,
+    artifact_digest: str,
+    summary: str,
+    actor: str,
+    source_event_id: str,
+    channel_id: str = "",
+    thread_id: str = "",
+    writer: EventWriter | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Bind verified research to the current request revision.
+
+    Requirement revision is not changed: adoption enriches the request context
+    projection and fails if the caller observed an older requirement revision.
+    """
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    current_revision = int(projection.get("revision") or 0)
+    if expected_revision != current_revision:
+        raise WorkflowRequestError(
+            "stale workflow request revision: "
+            f"expected {expected_revision}, current {current_revision}"
+        )
+    digest = str(artifact_digest or "").removeprefix("sha256:").strip().lower()
+    if not artifact_ref or len(digest) != 64 or not summary:
+        raise WorkflowRequestError(
+            "research adoption requires artifact_ref, 64-char artifact_digest, and summary"
+        )
+    adoptions = [
+        dict(item)
+        for item in projection.get("research_artifacts") or []
+        if isinstance(item, dict)
+    ]
+    existing = next(
+        (
+            item
+            for item in adoptions
+            if str(item.get("sha256") or "").lower() == digest
+            and int(item.get("request_revision") or 0) == current_revision
+        ),
+        None,
+    )
+    if existing is not None:
+        return projection, False
+    adoption = {
+        "artifact_ref": artifact_ref,
+        "sha256": digest,
+        "summary": summary,
+        "request_revision": current_revision,
+        "source_event_id": source_event_id,
+        "channel_id": channel_id or str(projection.get("channel_id") or ""),
+        "thread_id": thread_id or str(projection.get("thread_id") or ""),
+        "adopted_by": actor,
+        "adopted_at": _now_iso(),
+    }
+    projection = dict(projection)
+    projection["research_artifacts"] = [*adoptions, adoption]
+    projection["updated_at"] = _now_iso()
+    _write_projection(state_dir, projection)
+    if writer is not None:
+        writer.emit(
+            "workflow.research.adopted",
+            actor=actor,
+            causation_id=source_event_id or None,
+            correlation_id=adoption["channel_id"] or None,
+            payload={
+                "request_id": request_id,
+                "request_revision": current_revision,
+                "artifact_ref": artifact_ref,
+                "artifact_digest": digest,
+                "summary": summary,
+                "channel_id": adoption["channel_id"],
+                "thread_id": adoption["thread_id"],
+                "source_event_id": source_event_id,
+            },
+        )
+    return projection, True
+
+
 def register_workflow_intake(
     state_dir: Path,
     manifest_path: Path,

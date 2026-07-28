@@ -117,3 +117,70 @@ def test_apply_batch_task_map_ready_injects_rework_feedback(tmp_path: Path) -> N
     assert ready[0].payload["rework_feedback"] == [
         "AVBS-FLOW-001: fix resource release",
     ]
+
+
+def test_apply_batch_task_map_ready_preserves_current_package_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task_map = tmp_path / "task_map.json"
+    task_map.write_text(json.dumps({"tasks": []}), encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    writer.append(ZfEvent(
+        id="evt-task-map",
+        type="task_map.ready",
+        payload={
+            "workflow_run_id": "Run-UPPER",
+            "prd_ref": "docs/prd/current.md",
+            "task_map_ref": str(task_map),
+        },
+    ))
+    writer.append(ZfEvent(
+        type="fanout.started",
+        payload={
+            "fanout_id": "fanout-1",
+            "trigger_event_id": "evt-task-map",
+            "expected_children": [{
+                "child_id": "child-1",
+                "workflow_run_id": "Run-UPPER",
+                "task_map_generation": "generation-1",
+                "plan_artifact_package_id": "planpkg-1",
+                "plan_artifact_package_ref": "plan-packages/current.json",
+                "plan_artifact_package_digest": "package-digest-1",
+            }],
+        },
+    ))
+    checkpoint = WorkflowBatchResumeCheckpoint(
+        checkpoint_id="cp-package",
+        source_event_id="evt-failed",
+        source_event_type="integration.failed",
+        blocking_event_id="evt-failed",
+        safe_resume_action="repair_failed_children",
+        pdd_id="PDD-1",
+        fanout_id="fanout-1",
+        task_map_ref=str(task_map),
+        source_commit="abc123",
+        candidate_base_commit="abc123",
+        failed_children=["child-1"],
+    )
+
+    result = _apply_batch_task_map_ready(
+        writer,
+        checkpoint,
+        [],
+        reason="retry current package",
+        task_ids=["TASK-1"],
+        resume_scope="failed_children_only",
+        state_dir=state_dir,
+    )
+
+    assert result.applied
+    ready = [event for event in log.read_all() if event.type == "task_map.ready"]
+    resumed = ready[-1].payload
+    assert resumed["workflow_run_id"] == "Run-UPPER"
+    assert resumed["prd_ref"] == "docs/prd/current.md"
+    assert resumed["task_map_generation"] == "generation-1"
+    assert resumed["plan_artifact_package_id"] == "planpkg-1"
+    assert resumed["plan_artifact_package_digest"] == "package-digest-1"

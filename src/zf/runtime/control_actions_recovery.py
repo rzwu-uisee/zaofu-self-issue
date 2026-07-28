@@ -16,12 +16,15 @@
 
 from __future__ import annotations
 
+import json
+
 from zf.core.events.model import ZfEvent
 
 RECOVERY_ACTIONS = (
     "task-requeue",
     "child-rebuild",
     "stage-retrigger",
+    "fanout-aggregate-rebuild",
     "rescan-grant",
 )
 
@@ -227,6 +230,156 @@ class RecoveryActionsMixin:
             "retriggered_event_id": emitted.id,
             "source_event_id": source_event_id,
             "event_type": source.type,
+        })
+
+    def _fanout_aggregate_rebuild_action(
+        self, *, requested: ZfEvent, action: str, requested_action: str, payload: dict,
+    ) -> dict:
+        source_event_id = str(payload.get("source_event_id") or "").strip()
+        if not source_event_id:
+            return self._recovery_failed(
+                requested, action, requested_action, "source_event_id is required",
+            )
+        events = self.writer.event_log.read_all()
+        source = next(
+            (event for event in events if event.id == source_event_id),
+            None,
+        )
+        if source is None:
+            return self._recovery_failed(
+                requested, action, requested_action,
+                f"source event {source_event_id} not found", 404,
+            )
+        invalid_event = None
+        aggregate_event = source
+        if source.type == "goal.closure.identity.invalid":
+            invalid_event = source
+            invalid_payload = (
+                source.payload if isinstance(source.payload, dict) else {}
+            )
+            aggregate_event_id = str(
+                invalid_payload.get("source_event_id") or ""
+            ).strip()
+            aggregate_event = next(
+                (event for event in events if event.id == aggregate_event_id),
+                None,
+            )
+        if aggregate_event is None or aggregate_event.type != "flow.discovery.completed":
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "aggregate rebuild only accepts flow.discovery.completed "
+                "or its goal.closure.identity.invalid event",
+                409,
+            )
+        aggregate_payload = (
+            aggregate_event.payload
+            if isinstance(aggregate_event.payload, dict)
+            else {}
+        )
+        fanout_id = str(aggregate_payload.get("fanout_id") or "").strip()
+        if not fanout_id:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "source aggregate has no fanout_id",
+                409,
+            )
+        try:
+            manifest = json.loads(
+                (
+                    self.state_dir
+                    / "fanouts"
+                    / fanout_id
+                    / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            manifest = {}
+        if not isinstance(manifest, dict) or not manifest:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                f"fanout manifest {fanout_id!r} is missing",
+                404,
+            )
+        try:
+            from zf.runtime.fanout_identity import fanout_current_status
+
+            current = fanout_current_status(events, fanout_id)
+        except Exception:
+            current = None
+        if current is not None and not current.current:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                (
+                    f"fanout {fanout_id!r} is stale"
+                    + (
+                        f": {current.stale_reason}"
+                        if current.stale_reason
+                        else ""
+                    )
+                ),
+                409,
+            )
+        children = [
+            child
+            for child in manifest.get("children", []) or []
+            if isinstance(child, dict)
+        ]
+        if not children or not all(
+            str(child.get("status") or "") in {"completed", "failed"}
+            for child in children
+        ):
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "fanout children are not terminal",
+                409,
+            )
+        for event in events:
+            event_payload = event.payload if isinstance(event.payload, dict) else {}
+            if (
+                event.type == "fanout.aggregate.rebuild.requested"
+                and str(event_payload.get("source_event_id") or "")
+                == aggregate_event.id
+            ):
+                return self._recovery_failed(
+                    requested,
+                    action,
+                    requested_action,
+                    f"aggregate already has rebuild request {event.id}",
+                    409,
+                )
+        emitted = self.writer.append(ZfEvent(
+            type="fanout.aggregate.rebuild.requested",
+            actor=self.actor,
+            payload={
+                "schema_version": "fanout.aggregate-rebuild.v1",
+                "fanout_id": fanout_id,
+                "source_event_id": aggregate_event.id,
+                "identity_invalid_event_id": (
+                    invalid_event.id if invalid_event is not None else ""
+                ),
+                "expected_success_event": aggregate_event.type,
+                "reason": str(
+                    payload.get("reason")
+                    or "rebuild aggregate from durable manifest with current reducer"
+                ),
+            },
+            causation_id=requested.id,
+            correlation_id=aggregate_event.correlation_id,
+        ))
+        return self._recovery_ok(requested, emitted, action, requested_action, {
+            "fanout_id": fanout_id,
+            "source_event_id": aggregate_event.id,
+            "rebuild_request_event_id": emitted.id,
         })
 
     def _rescan_grant_action(

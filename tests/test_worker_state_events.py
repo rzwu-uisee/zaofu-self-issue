@@ -87,6 +87,7 @@ class TestSetWorkerStateIdempotent:
             if e.type == "worker.state.changed" and e.actor == "dev"
         ]
         assert len(events) == 2
+        assert events[0].payload.get("instance_id") == "dev"
         assert events[0].payload.get("to") == "busy"
         assert events[1].payload.get("from") == "busy"
         assert events[1].payload.get("to") == "idle"

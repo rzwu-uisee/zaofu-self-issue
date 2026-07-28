@@ -9,6 +9,7 @@ from zf.cli.main import main
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.runtime.sidecar_refs import write_sidecar_json
+from zf.runtime.artifact_query.store import projection_db_path
 from zf.web.server import create_app
 
 
@@ -116,3 +117,59 @@ def test_cli_and_web_share_catalog_task_attempt_and_lineage_queries(
         "evt-consumer-parent"
     )
     assert cli_lineage["items"][0]["result_event_id"] == "evt-consumer"
+
+
+def test_projection_doctor_repair_quarantines_and_rebuilds_catalog(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    state_dir.mkdir(parents=True)
+    monkeypatch.setenv("ZF_PROJECT_ROOT", str(project_root))
+    monkeypatch.setenv("ZF_STATE_DIR", str(state_dir))
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/result.json",
+        {"status": "passed"},
+        kind="verification_result",
+        schema_version="verification-result.v1",
+        created_by="verify",
+    )
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        id="evt-doctor",
+        type="verify.passed",
+        task_id="T-doctor",
+        payload={"artifact_ref": descriptor},
+    ))
+    assert main([
+        "artifact",
+        "catalog",
+        "list",
+        "--state-dir",
+        str(state_dir),
+    ]) == 0
+    capsys.readouterr()
+    db_path = projection_db_path(state_dir)
+    db_path.write_bytes(b"corrupt")
+    Path(str(db_path) + "-wal").write_bytes(b"corrupt wal")
+    Path(str(db_path) + "-shm").write_bytes(b"corrupt shm")
+
+    assert main([
+        "projection",
+        "--state-dir",
+        str(state_dir),
+        "doctor",
+        "--projection",
+        "artifact-catalog",
+        "--repair",
+        "--json",
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok"
+    assert result["projection"]["overall_state"] == "ready"
+    assert result["repairs"][0]["affected_components"] == [
+        "artifact-catalog",
+        "event-index",
+    ]

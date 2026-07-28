@@ -703,6 +703,7 @@ def _apply_batch_task_map_ready(
         override_task_map_ref=override_task_map_ref,
     )
     payload: dict[str, Any] = {
+        **_resume_plan_identity(state_dir, checkpoint),
         "pdd_id": checkpoint.pdd_id,
         "feature_id": checkpoint.feature_id or checkpoint.pdd_id,
         "trace_id": checkpoint.trace_id or checkpoint.fanout_id,
@@ -761,6 +762,85 @@ def _apply_batch_task_map_ready(
     applied = writer.append(_batch_applied_event(checkpoint, reason, event.id))
     emitted.append(applied.id)
     return WorkflowResumeApplyResult(checkpoint, True, reason, emitted)
+
+
+_RESUME_PLAN_IDENTITY_KEYS = (
+    "workflow_run_id",
+    "requirement_spec_ref",
+    "requirement_spec_digest",
+    "objective_ref",
+    "prd_ref",
+    "issue_ref",
+    "task_map_generation",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+    "run_contract_ref",
+    "run_contract_digest",
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+)
+
+
+def _resume_plan_identity(
+    state_dir: Path,
+    checkpoint: WorkflowBatchResumeCheckpoint,
+) -> dict[str, Any]:
+    """Recover the current Package identity from the fanout being resumed."""
+
+    try:
+        events = EventLog(Path(state_dir) / "events.jsonl").read_all()
+    except OSError:
+        return {}
+    fanout_ids = {
+        value
+        for value in (
+            checkpoint.upstream_fanout_id,
+            checkpoint.fanout_id,
+        )
+        if value
+    }
+    fanout: ZfEvent | None = None
+    for event in reversed(events):
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            event.type == "fanout.started"
+            and str(payload.get("fanout_id") or "") in fanout_ids
+        ):
+            fanout = event
+            break
+    if fanout is None or not isinstance(fanout.payload, dict):
+        return {}
+
+    source: dict[str, Any] = {}
+    children = fanout.payload.get("expected_children")
+    for child in children if isinstance(children, list) else []:
+        if not isinstance(child, dict):
+            continue
+        child_payload = (
+            child.get("payload")
+            if isinstance(child.get("payload"), dict)
+            else {}
+        )
+        source = {**child_payload, **child}
+        if not checkpoint.failed_children or str(child.get("child_id") or "") in set(
+            checkpoint.failed_children
+        ):
+            break
+
+    trigger_event_id = str(fanout.payload.get("trigger_event_id") or "")
+    if trigger_event_id:
+        trigger = next(
+            (event for event in events if event.id == trigger_event_id),
+            None,
+        )
+        if trigger is not None and isinstance(trigger.payload, dict):
+            source = {**trigger.payload, **source}
+    return {
+        key: source[key]
+        for key in _RESUME_PLAN_IDENTITY_KEYS
+        if source.get(key) not in (None, "")
+    }
 
 
 def _apply_batch_candidate_ready(

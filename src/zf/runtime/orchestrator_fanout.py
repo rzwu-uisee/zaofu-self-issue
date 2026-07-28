@@ -24,6 +24,12 @@ from zf.runtime.failure_kind import (
 from zf.runtime.fanout_briefing_runtime import FanoutBriefingMixin
 from zf.runtime.briefing_metrics import write_briefing_with_metrics
 from zf.runtime.fanout_dispatch_liveness import FanoutDispatchLivenessMixin
+from zf.runtime.fanout_failure_findings import (
+    candidate_failure_findings,
+    fanout_failure_findings,
+    findings_from_payload,
+)
+from zf.runtime.fanout_result_identity import bind_blocking_writer_result_identity
 from zf.runtime.fanout_recovery_runtime import FanoutRecoveryRuntimeMixin
 from zf.runtime.durable_call_fanout import DurableCallFanoutMixin
 from zf.runtime.fanout_stage_criteria import evaluate_fanout_stage_success_criteria_for_orchestrator
@@ -2600,6 +2606,12 @@ class FanoutCoordinationMixin(
         return ready_event
 
     def _maybe_start_reader_fanout(self, event: ZfEvent) -> bool:
+        trigger_payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            event.type == "workflow.invoke.requested"
+            and not str(trigger_payload.get("workflow_invoke_pattern_id") or "")
+        ):
+            return False
         stages = [
             stage for stage in getattr(self.config.workflow, "stages", [])
             if stage.topology == "fanout_reader" and stage.trigger == event.type
@@ -2617,7 +2629,6 @@ class FanoutCoordinationMixin(
             trace_id = event.correlation_id or (
                 event.payload.get("trace_id", "") if isinstance(event.payload, dict) else ""
             ) or event.id
-            trigger_payload = event.payload if isinstance(event.payload, dict) else {}
             target_ref = self._render_fanout_target(stage.target_ref, event)
             workflow_target_ref = str(trigger_payload.get("target_ref") or "").strip()
             if (
@@ -4733,7 +4744,6 @@ class FanoutCoordinationMixin(
                 report_payload[key] = value
         from zf.runtime.call_result_admission import result_protocol_mode
         from zf.runtime.call_result_runtime import admit_runtime_call_result
-
         call_mode = result_protocol_mode(
             self.config,
             {**child_payload, **base_payload, **payload},
@@ -4767,9 +4777,8 @@ class FanoutCoordinationMixin(
             if call_mode in {"warning", "blocking"}:
                 from zf.runtime.call_result_runtime import hydrate_admitted_control_result
 
-                control_result = hydrate_admitted_control_result(
-                    self.state_dir,
-                    call_outcome.envelope_ref or {},
+                control_result = report_payload["report"] = hydrate_admitted_control_result(
+                    self.state_dir, call_outcome.envelope_ref or {},
                 )
                 control_verdict = str(control_result.get("verdict") or "").lower()
                 base_payload["semantic_verdict"] = control_verdict
@@ -4799,7 +4808,7 @@ class FanoutCoordinationMixin(
                 event_type=event.type,
             )
         ):
-            evidence_gap = report_evidence_gap(report_result.report)
+            evidence_gap = report_evidence_gap(report_payload["report"])
         if evidence_gap:
             self.event_writer.append(ZfEvent(
                 type=REPORT_EVIDENCE_MISSING_EVENT,
@@ -5198,6 +5207,7 @@ class FanoutCoordinationMixin(
                 fanout_id = str(manifest.get("fanout_id") or fanout_id)
                 child_id = str(child.get("child_id") or child_id)
                 recovery = True
+        payload = bind_blocking_writer_result_identity(payload, child or {})
         run_id = str(payload.get("run_id") or (child or {}).get("run_id") or "")
         expected_run_id = str((child or {}).get("run_id") or "")
         actual_run_id = str(payload.get("run_id") or "")
@@ -5621,122 +5631,15 @@ class FanoutCoordinationMixin(
         *,
         extra_payloads: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """Collect structured findings from failed fanout children.
-
-        Rework/candidate recovery should not have to infer reviewer feedback
-        from terse ``reason`` strings. Children may report findings either at
-        top level or under ``report.findings``; failed children without
-        findings still contribute a compact reason finding.
-        """
-        child_payloads = {
-            str(payload.get("child_id") or ""): payload
-            for payload in self._fanout_child_payloads(manifest)
-            if isinstance(payload, dict)
-        }
-        payloads: list[dict] = []
-        for child in manifest.get("children", []) or []:
-            if not isinstance(child, dict):
-                continue
-            if str(child.get("status") or "") != "failed":
-                continue
-            child_id = str(child.get("child_id") or "")
-            enriched = dict(child)
-            enriched.update(child_payloads.get(child_id, {}))
-            payloads.append(enriched)
-        payloads.extend(
-            payload for payload in (extra_payloads or []) if isinstance(payload, dict)
+        return fanout_failure_findings(
+            self,
+            manifest,
+            extra_payloads=extra_payloads,
         )
-        try:
-            events = self.event_log.read_all()
-        except Exception:
-            events = []
-        fanout_id = str(manifest.get("fanout_id") or "")
-        for event in events:
-            if event.type != "fanout.child.failed":
-                continue
-            payload = event.payload if isinstance(event.payload, dict) else {}
-            if str(payload.get("fanout_id") or "") != fanout_id:
-                continue
-            payloads.append(payload)
-
-        findings: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, str]] = set()
-        for payload in payloads:
-            for finding in self._findings_from_payload(payload):
-                key = (
-                    str(finding.get("child_id") or ""),
-                    str(finding.get("task_id") or ""),
-                    str(finding.get("message") or ""),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                findings.append(finding)
-        return findings
 
     @staticmethod
     def _findings_from_payload(payload: dict) -> list[dict[str, Any]]:
-        raw_findings = payload.get("findings")
-        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
-        if not isinstance(raw_findings, list):
-            raw_findings = report.get("findings")
-        if not isinstance(raw_findings, list):
-            raw_findings = payload.get("blocked_rework_findings")
-        if not isinstance(raw_findings, list):
-            raw_findings = []
-
-        out: list[dict[str, Any]] = []
-        child_id = str(payload.get("child_id") or "")
-        task_id = str(payload.get("task_id") or "")
-        for index, raw in enumerate(raw_findings):
-            if isinstance(raw, dict):
-                message = str(
-                    raw.get("message")
-                    or raw.get("summary")
-                    or raw.get("title")
-                    or raw.get("reason")
-                    or ""
-                ).strip()
-                if not message:
-                    continue
-                item = dict(raw)
-                item.setdefault("finding_id", f"{child_id or task_id or 'child'}-{index + 1}")
-                item.setdefault("severity", "high")
-                item.setdefault("category", "verification")
-                item.setdefault("child_id", child_id)
-                item.setdefault("task_id", task_id)
-                item["message"] = message
-                out.append(item)
-            else:
-                message = str(raw).strip()
-                if message:
-                    out.append({
-                        "finding_id": f"{child_id or task_id or 'child'}-{index + 1}",
-                        "severity": "high",
-                        "category": "verification",
-                        "child_id": child_id,
-                        "task_id": task_id,
-                        "message": message,
-                    })
-        if out:
-            return out
-        reason = str(
-            payload.get("reason")
-            or payload.get("failure_reason")
-            or payload.get("summary")
-            or report.get("summary")
-            or ""
-        ).strip()
-        if not reason:
-            return []
-        return [{
-            "finding_id": f"{child_id or task_id or 'child'}-reason",
-            "severity": "high",
-            "category": "runtime_failure",
-            "child_id": child_id,
-            "task_id": task_id,
-            "message": reason,
-        }]
+        return findings_from_payload(payload)
 
     @staticmethod
     def _candidate_failure_findings(
@@ -5745,59 +5648,80 @@ class FanoutCoordinationMixin(
         status: str,
         failed_children: list[str],
     ) -> list[dict[str, Any]]:
-        if status not in {"conflict", "quality_failed", "stale"} and not failed_children:
-            return []
-        findings: list[dict[str, Any]] = []
-        for item in candidate_payload.get("stale_tasks") or []:
-            if not isinstance(item, dict):
-                continue
-            findings.append({
-                "finding_id": f"{item.get('task_id') or 'task'}-stale-task-ref",
-                "severity": "high",
-                "category": "stale_task_ref",
-                "task_id": str(item.get("task_id") or ""),
-                "message": (
-                    "candidate task ref is stale: "
-                    + str(item.get("reason") or "task_index_mismatch")
-                ),
-            })
-        if status == "conflict":
-            findings.append({
-                "finding_id": "candidate-conflict",
-                "severity": "high",
-                "category": "candidate_integration",
-                "message": str(candidate_payload.get("error") or "candidate conflict"),
-                "files_or_scope": list(candidate_payload.get("conflict_files") or []),
-            })
-        if status == "quality_failed":
-            from zf.runtime.candidate_rework import candidate_quality_failure_message
-            quality = (
-                candidate_payload.get("quality")
-                if isinstance(candidate_payload.get("quality"), dict)
-                else {}
-            )
-            findings.append({
-                "finding_id": "candidate-quality-failed",
-                "severity": "high",
-                "category": "candidate_quality",
-                "message": candidate_quality_failure_message(quality),
-                "verification_command": "; ".join(
-                    str(command)
-                    for commands in (quality.get("failure_details") or {}).values()
-                    for command in (commands if isinstance(commands, list) else [])
-                ),
-                "evidence_refs": list(quality.get("gates_failed") or []),
-            })
-        for child in failed_children:
-            if child.startswith("candidate:"):
-                findings.append({
-                    "finding_id": "candidate-exception",
-                    "severity": "high",
-                    "category": "candidate_integration",
-                    "message": child,
-                })
-        return findings
-    def _evaluate_reader_fanout(self, fanout_id: str) -> None:
+        return candidate_failure_findings(
+            candidate_payload,
+            status=status,
+            failed_children=failed_children,
+        )
+
+    def _handle_fanout_aggregate_rebuild(self, event: ZfEvent) -> bool:
+        if event.type != "fanout.aggregate.rebuild.requested":
+            return False
+        self._rebuild_reader_fanout_aggregate(event)
+        self._processed_event_ids.add(event.id)
+        return True
+
+    def _rebuild_reader_fanout_aggregate(self, event: ZfEvent) -> None:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        fanout_id = str(payload.get("fanout_id") or "").strip()
+        source_event_id = str(payload.get("source_event_id") or "").strip()
+        if not fanout_id or not source_event_id:
+            return
+        events = self.event_log.read_all()
+        source = next(
+            (item for item in events if item.id == source_event_id),
+            None,
+        )
+        source_payload = (
+            source.payload
+            if source is not None and isinstance(source.payload, dict)
+            else {}
+        )
+        manifest = self._fanout_manifest(fanout_id)
+        config = (
+            manifest.get("aggregate_config")
+            if isinstance(manifest.get("aggregate_config"), dict)
+            else {}
+        )
+        if (
+            source is None
+            or not manifest
+            or source.type != str(config.get("success_event") or "")
+            or str(source_payload.get("fanout_id") or "") != fanout_id
+        ):
+            return
+        if any(
+            item.type == "fanout.aggregate.completed"
+            and isinstance(item.payload, dict)
+            and str(item.payload.get("fanout_id") or "") == fanout_id
+            and str(item.payload.get("rebuild_of") or "") == source_event_id
+            for item in events
+        ):
+            return
+        stale_reason, _superseded_by = self._fanout_identity_stale_reason(fanout_id)
+        if stale_reason:
+            return
+        children = [
+            child
+            for child in manifest.get("children", []) or []
+            if isinstance(child, dict)
+        ]
+        if not children or not all(
+            str(child.get("status") or "") in {"completed", "failed"}
+            for child in children
+        ):
+            return
+        self._evaluate_reader_fanout(
+            fanout_id,
+            rebuild_request=event,
+        )
+
+    def _evaluate_reader_fanout(
+        self,
+        fanout_id: str,
+        *,
+        rebuild_request: ZfEvent | None = None,
+    ) -> None:
         manifest = self._fanout_manifest(fanout_id)
         if not manifest:
             return
@@ -5807,7 +5731,10 @@ class FanoutCoordinationMixin(
         if stale_reason:
             return
         aggregate = manifest.get("aggregate") if isinstance(manifest.get("aggregate"), dict) else {}
-        if aggregate.get("status") in {"completed", "failed", "timed_out", "cancelled"}:
+        if (
+            aggregate.get("status") in {"completed", "failed", "timed_out", "cancelled"}
+            and rebuild_request is None
+        ):
             return
         children = [
             child for child in manifest.get("children", [])
@@ -5892,10 +5819,38 @@ class FanoutCoordinationMixin(
             if criteria_failure:
                 final_status = "failed"
                 artifact_payload = criteria_failure.artifact_payload
+        rebuild_payload = (
+            rebuild_request.payload
+            if rebuild_request is not None
+            and isinstance(rebuild_request.payload, dict)
+            else {}
+        )
+        rebuild_of = str(rebuild_payload.get("source_event_id") or "")
+        recovery_generation = 0
+        if rebuild_request is not None:
+            recovery_generation = 1 + sum(
+                1
+                for item in self.event_log.read_all()
+                if item.type == "fanout.aggregate.completed"
+                and isinstance(item.payload, dict)
+                and str(item.payload.get("fanout_id") or "") == fanout_id
+                and str(item.payload.get("rebuild_of") or "")
+            )
         self.event_writer.append(ZfEvent(
             type="fanout.aggregate.started",
             actor="zf-cli",
-            payload={"fanout_id": fanout_id, "trace_id": trace_id, "stage_id": stage_id, "mode": mode},
+            payload={
+                "fanout_id": fanout_id,
+                "trace_id": trace_id,
+                "stage_id": stage_id,
+                "mode": mode,
+                **({
+                    "rebuild_of": rebuild_of,
+                    "rebuild_request_event_id": rebuild_request.id,
+                    "recovery_generation": recovery_generation,
+                } if rebuild_request is not None else {}),
+            },
+            causation_id=rebuild_request.id if rebuild_request is not None else None,
             correlation_id=trace_id,
         ))
         publish_event = failure_event if final_status == "failed" else success_event
@@ -5920,6 +5875,12 @@ class FanoutCoordinationMixin(
             "failure_event": failure_event if final_status == "failed" else "",
             **artifact_payload,
         }
+        if rebuild_request is not None:
+            aggregate_payload.update({
+                "rebuild_of": rebuild_of,
+                "rebuild_request_event_id": rebuild_request.id,
+                "recovery_generation": recovery_generation,
+            })
         if final_status == "failed":
             aggregate_payload.setdefault("findings", failure_findings)
             aggregate_payload.setdefault(
@@ -5940,6 +5901,7 @@ class FanoutCoordinationMixin(
             type="fanout.aggregate.completed",
             actor="zf-cli",
             payload=aggregate_payload,
+            causation_id=rebuild_request.id if rebuild_request is not None else None,
             correlation_id=trace_id,
         ))
         self._consume_durable_fanout_aggregate_result(aggregate_event)
@@ -6008,6 +5970,12 @@ class FanoutCoordinationMixin(
                 "child_count": len(children),
                 **artifact_payload,
             }
+            if rebuild_request is not None:
+                publish_payload.update({
+                    "rebuild_of": rebuild_of,
+                    "rebuild_request_event_id": rebuild_request.id,
+                    "recovery_generation": recovery_generation,
+                })
             if final_status == "failed":
                 publish_payload.setdefault("findings", failure_findings)
                 publish_payload.setdefault(
@@ -6048,6 +6016,7 @@ class FanoutCoordinationMixin(
                 type=publish_event,
                 actor="zf-cli",
                 payload=publish_payload,
+                causation_id=aggregate_event.id,
                 correlation_id=trace_id,
             ))
             if final_status == "completed" and publish_event == "verify.passed":
@@ -7089,6 +7058,18 @@ class FanoutCoordinationMixin(
                     success_event=success_event,
                     extra_payloads=[payload],
                 )
+            from zf.runtime.research_fanout_artifact import (
+                materialize_research_fanout_artifact,
+                merge_research_artifact_payload,
+            )
+            artifact_payload = merge_research_artifact_payload(
+                artifact_payload,
+                materialize_research_fanout_artifact(
+                    self.state_dir,
+                    manifest=manifest,
+                    synth_event=event,
+                ),
+            )
         elif (
             success_event == "flow.discovery.completed"
             and failure_event == "flow.discovery.failed"

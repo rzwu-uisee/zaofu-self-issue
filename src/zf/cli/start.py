@@ -82,6 +82,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Auto-stop an isolated /tmp/zf-* run after its run terminal",
     )
+    parser.add_argument(
+        "--control-plane-only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.set_defaults(func=run)
 
 
@@ -491,12 +496,81 @@ def _write_run_contract_snapshot(
 def _run_orchestrator_idle_tick(orchestrator) -> None:
     """Run a periodic orchestrator tick and catch up persisted events.
 
-    Passing ``events=[]`` would force pushed-event mode and advance
-    ``session.latest_event_offset`` to the end of ``events.jsonl`` without
-    processing events written before the watcher started. The idle tick must
-    instead let the orchestrator read from its durable offset.
+    Passing ``events=[]`` would force pushed-event mode and skip durable
+    catch-up. The idle tick must instead let the orchestrator read from its
+    acknowledged offset.
     """
     orchestrator.run_once()
+
+
+def _process_watched_event(
+    event: ZfEvent,
+    *,
+    wake_patterns: set[str],
+    wake_worthy_fn,
+    rate_limiter,
+    orchestrator,
+    simulation: bool,
+    event_log,
+    stop_watcher,
+) -> bool:
+    """Process one watcher event before applying simulation auto-stop."""
+    terminal_settlement = simulation and event.type in {
+        "run.goal.completed",
+        "run.goal.blocked",
+    }
+    should_wake = terminal_settlement or (
+        event.type in wake_patterns
+        and wake_worthy_fn(event)
+        and rate_limiter.allow(event.type)
+    )
+    if should_wake:
+        orchestrator.run_once(events=[event])
+
+    if not simulation:
+        return should_wake
+
+    from zf.core.events.writer import EventWriter
+    from zf.runtime.simulation_lifecycle import emit_simulation_done
+
+    done = emit_simulation_done(
+        event,
+        events=event_log.read_all(),
+        writer=EventWriter(event_log, default_origin="kernel"),
+    )
+    if done is None:
+        return should_wake
+    stop_watcher()
+    return should_wake
+
+
+def _process_watched_batch(
+    events: list[ZfEvent],
+    *,
+    consumed_offset: int,
+    pushed_event_ids: set[str],
+    orchestrator,
+) -> None:
+    """Process non-wake batch members, then acknowledge the exact boundary."""
+    batch_event_ids = {event.id for event in events}
+    if not batch_event_ids.intersection(pushed_event_ids):
+        # Pure observation batches remain level-triggered and are consumed by
+        # the periodic durable catch-up instead of waking the full runtime on
+        # every watcher poll.
+        return
+    pending = [
+        event
+        for event in events
+        if event.id not in pushed_event_ids
+    ]
+    if pending:
+        orchestrator.run_once(
+            events=pending,
+            consumed_offset=consumed_offset,
+        )
+    else:
+        orchestrator.acknowledge_consumed_offset(consumed_offset)
+    pushed_event_ids.difference_update(batch_event_ids)
 
 
 def _run_startup_orchestrator_catchup(orchestrator, event_log) -> None:
@@ -558,6 +632,44 @@ def _release_lock(fh: object, lock_path: Path) -> None:
         pass
 
 
+def _initialize_start_transport(
+    transport,
+    *,
+    control_plane_only: bool,
+    exclude_roles: set[str],
+) -> bool:
+    if control_plane_only:
+        return bool(transport.is_session_running())
+    transport.init(exclude_roles=exclude_roles)
+    return True
+
+
+def _requeue_inflight_for_start(
+    *,
+    state_dir: Path,
+    config,
+    control_plane_only: bool,
+) -> bool:
+    if control_plane_only:
+        return False
+    from zf.runtime.shutdown import requeue_stale_inflight_tasks
+
+    try:
+        requeue_stale_inflight_tasks(
+            state_dir,
+            event_log_from_project(state_dir, config=config),
+            source="zf_start_boot_reconcile",
+            reason=(
+                "zf start boot reconcile — worker sessions do not "
+                "survive restart; release in-flight WIP "
+                "(ZF-E2E-RACING-P1 2026-07-11)"
+            ),
+        )
+    except Exception:
+        return False
+    return True
+
+
 def run(args: argparse.Namespace) -> int:
     project_root = Path.cwd()
     # doc 78 O-7 fix: load the project .env so the watcher (and the O-7
@@ -574,6 +686,7 @@ def run(args: argparse.Namespace) -> int:
     no_watch = getattr(args, "no_watch", False)
     skip_workflow_inspect = getattr(args, "skip_workflow_inspect", False)
     simulation = getattr(args, "simulation", False)
+    control_plane_only = getattr(args, "control_plane_only", False)
     legacy_foreground = getattr(args, "foreground", False)
     if legacy_foreground:
         print(
@@ -820,7 +933,17 @@ def run(args: argparse.Namespace) -> int:
 
         # 6. Initialize transport (creates tmux session today)
         transport = make_transport(config, dry_run=dry_run)
-        transport.init(exclude_roles=preserved_run_manager_roles)
+        if not _initialize_start_transport(
+            transport,
+            control_plane_only=control_plane_only,
+            exclude_roles=preserved_run_manager_roles,
+        ):
+            print(
+                "Error: control-plane-only restart requires the existing "
+                "worker transport session",
+                file=sys.stderr,
+            )
+            return 1
 
         # 7. Spawn workers via SpawnCoordinator: allocate pane/process,
         #    launch agent CLI with --session-id / exec resume as needed,
@@ -862,7 +985,11 @@ def run(args: argparse.Namespace) -> int:
         for role in config.roles:
             skip_spawn = role.name == "orchestrator" and role.transport == "stream-json"
             spawn_cwd: Path | None = None
-            if workdir_manager is not None and not skip_spawn:
+            if (
+                workdir_manager is not None
+                and not skip_spawn
+                and not control_plane_only
+            ):
                 plan = workdir_manager.prepare(role)
                 event_log.append(ZfEvent(
                     type="workdir.prepared",
@@ -879,7 +1006,7 @@ def run(args: argparse.Namespace) -> int:
                     spawn_cwd = project_path
 
             skill_entries = []
-            if role.skills:
+            if role.skills and not control_plane_only:
                 from zf.core.skills import (
                     build_skill_lock_entries,
                     materialize_role_skills,
@@ -916,9 +1043,10 @@ def run(args: argparse.Namespace) -> int:
             # the workers so send-keys has somewhere to land.
             if skip_spawn:
                 continue
-            coordinator.spawn(role, cwd=spawn_cwd)
+            if not control_plane_only:
+                coordinator.spawn(role, cwd=spawn_cwd)
 
-            if not dry_run:
+            if not dry_run and not control_plane_only:
                 adapter = get_adapter(role.backend)
                 ready = (
                     transport.wait_ready(
@@ -943,17 +1071,20 @@ def run(args: argparse.Namespace) -> int:
                     print(f"    {role.instance_id}: ready")
                 else:
                     print(f"    {role.instance_id}: timeout waiting for ready (continuing)")
+            elif control_plane_only:
+                print(f"    {role.instance_id}: preserved")
 
             # Write role instructions to .zf/instructions/ for reference
-            instructions = generate_role_instructions(
-                config,
-                role,
-                skill_entries=skill_entries,
-                state_dir_ref=state_dir,
-                project_root=project_root,
-            )
-            instructions_dir.mkdir(parents=True, exist_ok=True)
-            (instructions_dir / f"{role.instance_id}.md").write_text(instructions)
+            if not control_plane_only:
+                instructions = generate_role_instructions(
+                    config,
+                    role,
+                    skill_entries=skill_entries,
+                    state_dir_ref=state_dir,
+                    project_root=project_root,
+                )
+                instructions_dir.mkdir(parents=True, exist_ok=True)
+                (instructions_dir / f"{role.instance_id}.md").write_text(instructions)
 
             # Phase 2: start tailing claude session jsonl.
             # Phase 3: same for codex rollout jsonl.
@@ -980,8 +1111,12 @@ def run(args: argparse.Namespace) -> int:
             spawn_resident_run_manager,
         )
 
-        resident_role = None
-        if preserved_run_manager_marker:
+        resident_role = (
+            dedicated_resident_run_manager_role(config)
+            if control_plane_only
+            else None
+        )
+        if not control_plane_only and preserved_run_manager_marker:
             resident_role = rebind_preserved_resident_run_manager(
                 config=config,
                 state_dir=state_dir,
@@ -1003,7 +1138,7 @@ def run(args: argparse.Namespace) -> int:
                         pass
                 clear_resident_preserve_marker(state_dir)
 
-        if resident_role is None:
+        if not control_plane_only and resident_role is None:
             resident_role = spawn_resident_run_manager(
                 config=config,
                 state_dir=state_dir,
@@ -1069,12 +1204,19 @@ def run(args: argparse.Namespace) -> int:
         # Semantics: session.started = "tmux session / transport up";
         # loop.started = "reactor reading events". Splitting the two so
         # `--no-watch` does not falsely claim the reactor is running.
-        event_log.append(ZfEvent(type="session.started", actor="zf-cli"))
+        event_log.append(ZfEvent(
+            type="session.started",
+            actor="zf-cli",
+            payload={
+                "control_plane_only": control_plane_only,
+                "workers_preserved": control_plane_only,
+            },
+        ))
 
         # 9. Update session state
         session_store.update(runtime_state="active")
 
-        if foreground or dry_run:
+        if (foreground or dry_run) and not control_plane_only:
             from zf.runtime.autoresearch_resident_sidecar import (
                 start_autoresearch_resident_sidecar,
             )
@@ -1110,6 +1252,7 @@ def run(args: argparse.Namespace) -> int:
         # Wake patterns = base set + YAML-enabled extensions (P3).
         # `workflow.wake_extensions.{hooks,agent}.enabled` opt-in.
         wake_patterns = sorted(compute_effective_wake_patterns(config))
+        wake_pattern_set = set(wake_patterns)
         rate_limiter = WakeRateLimiter(rate_limits_for_config(config))
         # ZF-E2E-RACING-P1: boot-side twin of the graceful-stop in-flight
         # cleanup. Start (re)spawns worker panes, so a dispatch that was in
@@ -1117,24 +1260,15 @@ def run(args: argparse.Namespace) -> int:
         # its current dispatch already has stage progress (pending-handoff
         # reconciliation owns those). Must run BEFORE the Orchestrator
         # constructor revives active_dispatch_ids from kanban.json.
-        from zf.runtime.shutdown import requeue_stale_inflight_tasks
-
-        try:
-            requeue_stale_inflight_tasks(
-                state_dir,
-                event_log_from_project(state_dir, config=config),
-                source="zf_start_boot_reconcile",
-                reason=(
-                    "zf start boot reconcile — worker sessions do not "
-                    "survive restart; release in-flight WIP "
-                    "(ZF-E2E-RACING-P1 2026-07-11)"
-                ),
-            )
-        except Exception:
-            pass
+        _requeue_inflight_for_start(
+            state_dir=state_dir,
+            config=config,
+            control_plane_only=control_plane_only,
+        )
         orchestrator = Orchestrator(
             state_dir, config, transport, project_root=project_root,
         )
+        pushed_event_ids: set[str] = set()
 
         def _on_event(line: str) -> None:
             # Parse the line and push the event object into run_once so the
@@ -1144,29 +1278,28 @@ def run(args: argparse.Namespace) -> int:
                 event = ZfEvent.from_json(line)
             except Exception:
                 return
-            if simulation:
-                from zf.core.events.writer import EventWriter
-                from zf.runtime.simulation_lifecycle import emit_simulation_done
+            if _process_watched_event(
+                event,
+                wake_patterns=wake_pattern_set,
+                wake_worthy_fn=wake_worthy,
+                rate_limiter=rate_limiter,
+                orchestrator=orchestrator,
+                simulation=simulation,
+                event_log=event_log,
+                stop_watcher=watcher.stop,
+            ):
+                pushed_event_ids.add(event.id)
 
-                done = emit_simulation_done(
-                    event,
-                    events=event_log.read_all(),
-                    writer=EventWriter(event_log, default_origin="kernel"),
-                )
-                if done is not None:
-                    watcher.stop()
-                    return
-            if not any(p == event.type for p in wake_patterns):
-                return
-            # avbs-r4 F3: 高频观察型 hook 不逐条唤醒(no-op handler /
-            # 仅 deny 有意义)。事件照常在 events.jsonl,唤醒是纯成本。
-            if not wake_worthy(event):
-                return
-            # P3: rate-limited extension events may be dropped (event
-            # still persisted in events.jsonl — only wake is suppressed).
-            if not rate_limiter.allow(event.type):
-                return
-            orchestrator.run_once(events=[event])
+        def _on_batch_consumed(
+            events: list[ZfEvent],
+            consumed_offset: int,
+        ) -> None:
+            _process_watched_batch(
+                events,
+                consumed_offset=consumed_offset,
+                pushed_event_ids=pushed_event_ids,
+                orchestrator=orchestrator,
+            )
 
         # α-3 + β-1 periodic-sweep throttles: the EventWatcher tick fires
         # every ~5s but heartbeat/supervisor/autoresearch services have
@@ -1224,6 +1357,7 @@ def run(args: argparse.Namespace) -> int:
             state_dir / "events.jsonl",
             on_event=_on_event,
             on_tick=_on_tick,
+            on_batch_consumed=_on_batch_consumed,
             wake_patterns=wake_patterns,
             event_log=event_log,
             shutdown_marker=state_dir / "shutdown-requested",

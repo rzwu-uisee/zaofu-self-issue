@@ -35,6 +35,7 @@ from zf.core.task.store import TaskStore
 from zf.runtime.event_problem_registry import (
     RUN_MANAGER_PENDING_EVENT_TYPES,
     RUN_MANAGER_POST_TERMINAL_EVENT_TYPES,
+    event_is_recovery_actionable,
     looks_actionable_event,
     spec_for_event,
 )
@@ -87,6 +88,12 @@ from zf.runtime.run_manager_wait_hint import (
 from zf.runtime.run_continuation import (
     build_run_continuation_projection,
     enrich_continuation_actions,
+)
+from zf.runtime.read_only_dynamic_continuation import (
+    DYNAMIC_CONTINUATION_ACTION,
+    execute_read_only_continuation,
+    pending_read_only_continuation_actions,
+    reconcile_reserved_read_only_continuations,
 )
 from zf.runtime.sidecar_refs import write_sidecar_json
 from zf.runtime.task_attempt_recovery import pending_task_attempt_recovery_actions
@@ -309,6 +316,12 @@ def _run_manager_tick_unlocked(
     ):
         events = _read_events(state_dir, event_log=event_log)
     if _settle_pending_action_effects(events, writer):
+        events = _read_events(state_dir, event_log=event_log)
+    if reconcile_reserved_read_only_continuations(
+        state_dir,
+        event_log=event_log,
+        writer=writer,
+    ):
         events = _read_events(state_dir, event_log=event_log)
 
     deterministic_actions_applied = 0
@@ -879,6 +892,11 @@ def build_run_manager_projection(
     )
     resident_actions = _pending_resident_agent_actions(resident_agent, events)
     repair_validation_actions = _pending_repair_validation_actions(merge_queue, events)
+    repair_apply_actions = _pending_repair_apply_actions(
+        merge_queue,
+        events,
+        config=config,
+    )
     failure_closeout_actions = _pending_failure_closeout_activation_actions(events)
     channel_reply_actions = []
     for action in pending_channel_reply_exhausted_actions(events):
@@ -963,6 +981,7 @@ def build_run_manager_projection(
         *worker_actions,
         *resident_actions,
         *repair_validation_actions,
+        *repair_apply_actions,
         *failure_closeout_actions,
         *channel_reply_actions,
         *post_repair_continuation_actions,
@@ -971,11 +990,25 @@ def build_run_manager_projection(
         *semantic_event_actions,
         *attention_actions,
     ]
+    dynamic_continuation_actions = []
+    if (
+        not base_pending_actions
+        and completion_profile.get("status") != "complete"
+    ):
+        dynamic_continuation_actions = pending_read_only_continuation_actions(
+            state_dir,
+            config=config,
+            events=events,
+        )
+    selectable_actions = [
+        *base_pending_actions,
+        *dynamic_continuation_actions,
+    ]
     unknown_gap_actions = []
     if (
         completion_profile.get("status") != "complete"
         and (
-            not base_pending_actions
+            not selectable_actions
             or str(no_progress.get("status") or "") == "tripped"
         )
     ):
@@ -987,7 +1020,7 @@ def build_run_manager_projection(
             resident_agent=resident_agent,
         )
     pending_actions = [
-        *base_pending_actions,
+        *selectable_actions,
         *unknown_gap_actions,
     ]
     pending_actions = [
@@ -1208,6 +1241,7 @@ def _pending_action_priority(action: dict[str, Any]) -> tuple[int, str, str]:
             return (20, action_name, str(action.get("checkpoint_id") or ""))
         if action_name in {
             "repair-closeout-validate",
+            "repair-closeout-apply",
             "candidate-rework-apply",
             "failure-closeout-activate",
         }:
@@ -2928,7 +2962,8 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type in {RUN_MANAGER_ACTION_APPLIED, RUN_MANAGER_ACTION_FAILED} and (
-            str(payload.get("action") or "") != "repair-closeout-validate"
+            str(payload.get("action") or "")
+            not in {"repair-closeout-validate", "repair-closeout-apply"}
         ):
             continue
         key = _repair_merge_key(payload, fallback=event.id)
@@ -2940,7 +2975,12 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
             "branch": str(payload.get("branch") or payload.get("candidate_branch") or ""),
             "worktree_path": str(payload.get("worktree_path") or payload.get("worktree") or ""),
             "source_commit": str(payload.get("source_commit") or ""),
+            "base_commit": str(payload.get("base_commit") or ""),
+            "repair_commit": str(
+                payload.get("repair_commit") or payload.get("source_commit") or ""
+            ),
             "source_title": str(payload.get("source_title") or ""),
+            "changed_files": _string_list(payload.get("changed_files")),
             "risk_classification": payload.get("risk_classification")
             if isinstance(payload.get("risk_classification"), dict) else {},
             "verification_plan": payload.get("verification_plan")
@@ -2951,6 +2991,12 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
             "safe_boundary": str(payload.get("safe_boundary") or ""),
             "state_snapshot_required": bool(payload.get("state_snapshot_required", False)),
             "replay_required": bool(payload.get("replay_required", False)),
+            "control_plane_restart_required": bool(
+                payload.get("control_plane_restart_required", False)
+            ),
+            "restart_request_event_id": str(
+                payload.get("restart_request_event_id") or ""
+            ),
             "apply_candidate": _repair_closeout_apply_candidate(payload),
             "validation": {},
             "status": "closeout_required",
@@ -2971,6 +3017,13 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
         elif event.type == RUN_MANAGER_REPAIR_MERGE_MERGED:
             row["status"] = "merged"
             row["next_allowed_action"] = "none"
+            row["control_plane_restart_required"] = bool(
+                payload.get("control_plane_restart_required", False)
+            )
+            row["restart_request_event_id"] = str(
+                payload.get("restart_request_event_id") or ""
+            )
+            row["applied_commit"] = str(payload.get("applied_commit") or "")
         elif event.type == RUN_MANAGER_REPAIR_MERGE_NEEDS_REVIEW:
             row["status"] = "needs_review"
             row["next_allowed_action"] = "operator_review"
@@ -2990,6 +3043,12 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
                 if event.type == RUN_MANAGER_ACTION_FAILED:
                     row["status"] = "needs_review"
                     row["next_allowed_action"] = "repair_validation_failed"
+            elif (
+                action_name == "repair-closeout-apply"
+                and event.type == RUN_MANAGER_ACTION_FAILED
+            ):
+                row["status"] = "needs_review"
+                row["next_allowed_action"] = "repair_apply_failed"
     rows = sorted(entries.values(), key=lambda item: str(item.get("last_event_id") or ""))
     return redact_obj({
         "schema_version": REPAIR_MERGE_QUEUE_SCHEMA_VERSION,
@@ -3523,6 +3582,27 @@ def emit_human_escalation_package(
         "task_map_ref": str(action.get("task_map_ref") or ""),
         "source_index_ref": str(action.get("source_index_ref") or ""),
         "source_commit": str(action.get("source_commit") or ""),
+        "base_commit": str(action.get("base_commit") or ""),
+        "repair_commit": str(action.get("repair_commit") or ""),
+        "applied_commit": str(action.get("applied_commit") or ""),
+        "worktree_path": str(action.get("worktree_path") or ""),
+        "validation_event_id": str(action.get("validation_event_id") or ""),
+        "continuation_checkpoint_id": str(
+            action.get("continuation_checkpoint_id") or ""
+        ),
+        "continuation_safe_resume_action": str(
+            action.get("continuation_safe_resume_action") or ""
+        ),
+        "continuation_stale_reason": str(
+            action.get("continuation_stale_reason") or ""
+        ),
+        "restart_strategy": str(action.get("restart_strategy") or ""),
+        "restart_boundary": str(action.get("restart_boundary") or ""),
+        "continuation": (
+            action.get("continuation")
+            if isinstance(action.get("continuation"), dict)
+            else {}
+        ),
         "target_ref": str(action.get("target_ref") or ""),
         "candidate_ref": str(action.get("candidate_ref") or ""),
         "candidate_base_commit": str(action.get("candidate_base_commit") or ""),
@@ -3531,6 +3611,9 @@ def emit_human_escalation_package(
         "candidate_retry_mode": str(action.get("candidate_retry_mode") or ""),
         "diff_ref": str(action.get("diff_ref") or ""),
         "source_event_id": str(action.get("source_event_id") or ""),
+        "aggregate_source_event_id": str(
+            action.get("aggregate_source_event_id") or ""
+        ),
         "source_event_type": str(action.get("source_event_type") or ""),
         "mutating_resume_supported": bool(action.get("mutating_resume_supported")),
         "source_event_ids": [
@@ -3903,6 +3986,7 @@ def _controlled_action_name_from_recommendation(payload: dict[str, Any]) -> str:
         "workflow-batch-resume",
         "worker-lifecycle-recover",
         "repair-closeout-validate",
+        "fanout-aggregate-rebuild",
         "resident-agent-reprompt",
         "candidate-rework-apply",
         "failure-closeout-activate",
@@ -3923,6 +4007,7 @@ def _controlled_action_name_from_recommendation(payload: dict[str, Any]) -> str:
     safe_to_action = {
         "worker_lifecycle_recover": "worker-lifecycle-recover",
         "repair_closeout_validate": "repair-closeout-validate",
+        "fanout_aggregate_rebuild": "fanout-aggregate-rebuild",
         "resident_agent_reprompt": "resident-agent-reprompt",
         "failure_closeout_activate": "failure-closeout-activate",
         "diagnose_attention": "diagnose-attention",
@@ -4035,6 +4120,12 @@ def _emit_repair_acceptance_from_agent(
     repair_task_payload = payload.get("repair_task_payload")
     if not isinstance(repair_task_payload, dict):
         repair_task_payload = _repair_task_payload_from_agent_action(action, payload)
+    else:
+        repair_task_payload = dict(repair_task_payload)
+        repair_task_payload.setdefault(
+            "continuation",
+            _repair_continuation_from_action(action),
+        )
     writer.emit(
         RUN_MANAGER_REPAIR_ACCEPTED,
         actor="run-manager",
@@ -4088,6 +4179,7 @@ def _repair_task_payload_from_agent_action(
     )
     return {
         "title": title,
+        "continuation": _repair_continuation_from_action(action),
         "contract": {
             "schema_version": "task-contract.v1",
             "phase": "zaofu_self_repair",
@@ -4105,6 +4197,22 @@ def _repair_task_payload_from_agent_action(
                 "fingerprint": _fingerprint(action, fallback="resident-repair"),
             },
         },
+    }
+
+
+def _repair_continuation_from_action(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "self-repair.request-continuation.v1",
+        "resume_original_workflow": True,
+        "checkpoint_id": str(action.get("checkpoint_id") or ""),
+        "safe_resume_action": str(action.get("safe_resume_action") or ""),
+        "workflow_run_id": str(action.get("workflow_run_id") or ""),
+        "run_id": str(action.get("run_id") or ""),
+        "pdd_id": str(action.get("pdd_id") or ""),
+        "feature_id": str(action.get("feature_id") or ""),
+        "fanout_id": str(action.get("fanout_id") or ""),
+        "task_id": str(action.get("task_id") or ""),
+        "source_event_ids": _string_list(action.get("source_event_ids")),
     }
 
 
@@ -4656,6 +4764,23 @@ def _execute_controlled_run_action(
             action=action,
             causation_id=causation_id,
         )
+    if action_name == "repair-closeout-apply":
+        return _execute_repair_closeout_apply(
+            state_dir=state_dir,
+            writer=writer,
+            project_root=project_root,
+            action=action,
+            causation_id=causation_id,
+        )
+    if action_name == "fanout-aggregate-rebuild":
+        return _execute_operator_controlled_action(
+            state_dir=state_dir,
+            writer=writer,
+            config=config,
+            project_root=project_root,
+            action=action,
+            causation_id=causation_id,
+        )
     if action_name == "resident-agent-reprompt":
         return _execute_resident_agent_reprompt(
             state_dir=state_dir,
@@ -4683,12 +4808,85 @@ def _execute_controlled_run_action(
             action=action,
             causation_id=causation_id,
         )
+    if action_name == DYNAMIC_CONTINUATION_ACTION:
+        return _execute_read_only_dynamic_continuation(
+            state_dir=state_dir,
+            writer=writer,
+            config=config,
+            action=action,
+            causation_id=causation_id,
+        )
     _emit_blocked_action(
         writer,
         action,
         causation_id=causation_id,
         reason=f"unsupported run manager action {action_name!r}",
         human=False,
+    )
+    return "blocked"
+
+
+def _execute_read_only_dynamic_continuation(
+    *,
+    state_dir: Path,
+    writer: EventWriter,
+    config: ZfConfig,
+    action: dict[str, Any],
+    causation_id: str,
+) -> str:
+    planned = writer.emit(
+        RUN_MANAGER_ACTION_PLANNED,
+        actor="run-manager",
+        task_id=str(action.get("task_id") or "") or None,
+        causation_id=causation_id,
+        correlation_id=str(action.get("workflow_run_id") or "") or None,
+        payload={
+            "schema_version": "run-manager.action.v1",
+            **_action_payload(action),
+        },
+    )
+    result = execute_read_only_continuation(
+        state_dir,
+        config=config,
+        event_log=writer.event_log,
+        writer=writer,
+        action=action,
+        causation_id=planned.id,
+    )
+    result_payload = {
+        **_action_payload(action),
+        "status": result.status,
+        "reason": result.reason,
+        "workflow_operation_id": result.operation_id,
+        "workflow_operation_request_hash": result.request_hash,
+        "reservation_id": result.reservation_id,
+        "provider_idempotency_key": result.idempotency_key,
+        "dispatch_event_id": result.dispatch_event_id,
+        "semantic_attempt_consumed": False,
+    }
+    if result.status in {"dispatched", "already_dispatched"}:
+        writer.emit(
+            RUN_MANAGER_ACTION_APPLIED,
+            actor="run-manager",
+            task_id=str(action.get("task_id") or "") or None,
+            causation_id=planned.id,
+            correlation_id=str(action.get("workflow_run_id") or "") or None,
+            payload={
+                "schema_version": "run-manager.action.v1",
+                **result_payload,
+            },
+        )
+        return "applied"
+    writer.emit(
+        RUN_MANAGER_ACTION_BLOCKED,
+        actor="run-manager",
+        task_id=str(action.get("task_id") or "") or None,
+        causation_id=planned.id,
+        correlation_id=str(action.get("workflow_run_id") or "") or None,
+        payload={
+            "schema_version": "run-manager.action.v1",
+            **result_payload,
+        },
     )
     return "blocked"
 
@@ -5350,6 +5548,229 @@ def _execute_repair_closeout_validate(
     return "applied" if ok else "failed"
 
 
+def _execute_repair_closeout_apply(
+    *,
+    state_dir: Path,
+    writer: EventWriter,
+    project_root: Path | None,
+    action: dict[str, Any],
+    causation_id: str,
+) -> str:
+    from zf.runtime.self_repair_runner import harness_root
+    from zf.runtime.source_repair_apply import apply_verified_checkpoint_repair
+
+    planned = writer.emit(
+        RUN_MANAGER_ACTION_PLANNED,
+        actor="run-manager",
+        causation_id=causation_id,
+        payload={
+            "schema_version": "run-manager.action.v1",
+            **_action_payload(action),
+        },
+    )
+    queue_payload = {
+        "schema_version": "run-manager.repair-merge.v1",
+        **_action_payload(action),
+        "candidate_id": str(action.get("candidate_id") or ""),
+        "branch": str(action.get("branch") or ""),
+        "worktree_path": str(action.get("worktree_path") or ""),
+        "risk_classification": action.get("risk_classification")
+        if isinstance(action.get("risk_classification"), dict) else {},
+    }
+    queued = writer.emit(
+        RUN_MANAGER_REPAIR_MERGE_QUEUED,
+        actor="run-manager",
+        causation_id=planned.id,
+        payload={**queue_payload, "status": "queued"},
+    )
+    merging = writer.emit(
+        RUN_MANAGER_REPAIR_MERGE_MERGING,
+        actor="run-manager",
+        causation_id=queued.id,
+        payload={**queue_payload, "status": "merging"},
+    )
+    result = apply_verified_checkpoint_repair(
+        root=harness_root(),
+        worktree=Path(str(action.get("worktree_path") or "")),
+        base_commit=str(action.get("base_commit") or ""),
+        repair_commit=str(
+            action.get("repair_commit") or action.get("source_commit") or ""
+        ),
+        checkpoint_id=str(action.get("continuation_checkpoint_id") or ""),
+        safe_resume_action=str(
+            action.get("continuation_safe_resume_action") or ""
+        ),
+        validation_event_id=str(action.get("validation_event_id") or ""),
+        allow_paths=_string_list(action.get("allow_paths")),
+        deny_paths=_string_list(action.get("deny_paths")),
+    )
+    if not bool(result.get("ok")):
+        review = writer.emit(
+            RUN_MANAGER_REPAIR_MERGE_NEEDS_REVIEW,
+            actor="run-manager",
+            causation_id=merging.id,
+            payload={
+                **queue_payload,
+                "status": "needs_review",
+                "reason": str(result.get("reason") or "repair_apply_failed"),
+                "apply_receipt": result,
+            },
+        )
+        writer.emit(
+            RUN_MANAGER_ACTION_FAILED,
+            actor="run-manager",
+            causation_id=review.id,
+            payload={
+                "schema_version": "run-manager.action.v1",
+                **_action_payload(action),
+                "status": "failed",
+                "reason": str(result.get("reason") or "repair_apply_failed"),
+                "apply_receipt": result,
+            },
+        )
+        return "failed"
+    if project_root is None:
+        reason = "project_root_missing_for_control_plane_restart"
+        review = writer.emit(
+            RUN_MANAGER_REPAIR_MERGE_NEEDS_REVIEW,
+            actor="run-manager",
+            causation_id=merging.id,
+            payload={
+                **queue_payload,
+                "status": "needs_review",
+                "reason": reason,
+                "apply_receipt": result,
+            },
+        )
+        writer.emit(
+            RUN_MANAGER_ACTION_FAILED,
+            actor="run-manager",
+            causation_id=review.id,
+            payload={
+                "schema_version": "run-manager.action.v1",
+                **_action_payload(action),
+                "status": "failed",
+                "reason": reason,
+                "apply_receipt": result,
+            },
+        )
+        return "failed"
+    try:
+        actuator_pid = _spawn_source_repair_restart_actuator(
+            state_dir=state_dir,
+            project_root=project_root,
+        )
+    except Exception as exc:
+        reason = f"control_plane_restart_actuator_failed: {exc}"
+        review = writer.emit(
+            RUN_MANAGER_REPAIR_MERGE_NEEDS_REVIEW,
+            actor="run-manager",
+            causation_id=merging.id,
+            payload={
+                **queue_payload,
+                "status": "needs_review",
+                "reason": reason,
+                "apply_receipt": result,
+            },
+        )
+        writer.emit(
+            RUN_MANAGER_ACTION_FAILED,
+            actor="run-manager",
+            causation_id=review.id,
+            payload={
+                "schema_version": "run-manager.action.v1",
+                **_action_payload(action),
+                "status": "failed",
+                "reason": reason,
+                "apply_receipt": result,
+            },
+        )
+        return "failed"
+    restart = writer.emit(
+        "runtime.restart.requested",
+        actor="run-manager",
+        causation_id=merging.id,
+        payload={
+            "schema_version": "runtime.control-plane-restart.v1",
+            "restart_strategy": "control_plane_restart_preserve_workers",
+            "workers_preserved": True,
+            "state_dir_preserved": True,
+            "resident_run_manager_preserved": True,
+            "actuator_pid": actuator_pid,
+            "checkpoint_id": str(action.get("continuation_checkpoint_id") or ""),
+            "safe_resume_action": str(
+                action.get("continuation_safe_resume_action") or ""
+            ),
+            "base_commit": str(result.get("base_commit") or ""),
+            "repair_commit": str(result.get("repair_commit") or ""),
+            "applied_commit": str(result.get("applied_commit") or ""),
+        },
+    )
+    merged = writer.emit(
+        RUN_MANAGER_REPAIR_MERGE_MERGED,
+        actor="run-manager",
+        causation_id=restart.id,
+        payload={
+            **queue_payload,
+            "status": "merged",
+            "control_plane_restart_required": True,
+            "restart_request_event_id": restart.id,
+            "applied_commit": str(result.get("applied_commit") or ""),
+            "apply_receipt": result,
+        },
+    )
+    writer.emit(
+        RUN_MANAGER_ACTION_APPLIED,
+        actor="run-manager",
+        causation_id=merged.id,
+        payload={
+            "schema_version": "run-manager.action.v1",
+            **_action_payload({
+                **action,
+                "applied_commit": str(result.get("applied_commit") or ""),
+            }),
+            "status": "applied",
+            "apply_receipt": result,
+            "restart_request_event_id": restart.id,
+        },
+    )
+    return "applied"
+
+
+def _spawn_source_repair_restart_actuator(
+    *,
+    state_dir: Path,
+    project_root: Path,
+) -> int:
+    import sys
+    from zf.runtime import source_repair_restart_actuator
+
+    log_dir = Path(state_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "source-repair-restart-actuator.log"
+    log_handle = log_path.open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                source_repair_restart_actuator.__name__,
+                "--project-root",
+                str(Path(project_root).resolve()),
+                "--state-dir",
+                str(Path(state_dir).resolve()),
+            ],
+            cwd=str(Path(project_root).resolve()),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+    return int(process.pid)
+
+
 def _execute_resident_agent_reprompt(
     *,
     state_dir: Path,
@@ -5762,7 +6183,9 @@ def _post_verify_action(
     )
     effect_expected = _string_list(action.get("effect_expected_events"))
     effect_failures = _string_list(action.get("effect_failure_events"))
-    if passed and effect_expected:
+    effect_sequence = action.get("effect_required_sequence")
+    effect_sequence = effect_sequence if isinstance(effect_sequence, list) else []
+    if passed and (effect_expected or effect_sequence):
         writer.emit(
             RUN_MANAGER_ACTION_EFFECT_PENDING,
             actor="run-manager",
@@ -5779,6 +6202,7 @@ def _post_verify_action(
                 "receipt_verification_event_id": verification.id,
                 "expected_event_types": effect_expected,
                 "failure_event_types": effect_failures,
+                "required_sequence": effect_sequence,
                 "status": "pending",
             },
         )
@@ -5817,16 +6241,27 @@ def _settle_pending_action_effects(
             continue
         expected = set(_string_list(payload.get("expected_event_types")))
         failures = set(_string_list(payload.get("failure_event_types")))
-        fanout_id = str(payload.get("fanout_id") or "")
-        observed = None
-        for candidate in events[index + 1:]:
-            if candidate.type not in expected | failures:
-                continue
-            body = candidate.payload if isinstance(candidate.payload, dict) else {}
-            if fanout_id and str(body.get("fanout_id") or "") != fanout_id:
-                continue
-            observed = candidate
-            break
+        required_sequence = payload.get("required_sequence")
+        required_sequence = (
+            required_sequence if isinstance(required_sequence, list) else []
+        )
+        observed = (
+            _observe_required_effect_sequence(
+                events[index + 1:],
+                payload=payload,
+                required_sequence=required_sequence,
+            )
+            if required_sequence
+            else next(
+                (
+                    candidate
+                    for candidate in events[index + 1:]
+                    if candidate.type in expected | failures
+                    and _effect_event_matches_scope(candidate, payload)
+                ),
+                None,
+            )
+        )
         if observed is None:
             continue
         passed = observed.type in expected
@@ -5852,6 +6287,56 @@ def _settle_pending_action_effects(
         terminal_by_id.add(effect_id)
         settled += 1
     return settled
+
+
+def _observe_required_effect_sequence(
+    events: list[ZfEvent],
+    *,
+    payload: dict[str, Any],
+    required_sequence: list[Any],
+) -> ZfEvent | None:
+    cursor = 0
+    observed: ZfEvent | None = None
+    for raw_stage in required_sequence:
+        accepted = set(_string_list(raw_stage))
+        if not accepted:
+            return None
+        matched = None
+        while cursor < len(events):
+            candidate = events[cursor]
+            cursor += 1
+            if (
+                candidate.type in accepted
+                and _effect_event_matches_scope(candidate, payload)
+            ):
+                matched = candidate
+                break
+        if matched is None:
+            return None
+        observed = matched
+    return observed
+
+
+def _effect_event_matches_scope(
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> bool:
+    body = event.payload if isinstance(event.payload, dict) else {}
+    for key in ("workflow_run_id", "run_id", "fanout_id"):
+        expected = str(payload.get(key) or "")
+        actual = str(body.get(key) or "")
+        if expected and actual and expected != actual:
+            return False
+    expected_run = str(
+        payload.get("workflow_run_id") or payload.get("run_id") or ""
+    )
+    actual_run = str(
+        body.get("workflow_run_id")
+        or body.get("run_id")
+        or event.correlation_id
+        or ""
+    )
+    return not expected_run or actual_run == expected_run
 
 
 def _workflow_resume_applied_closeout_observed(
@@ -6180,6 +6665,11 @@ def _consume_autoresearch_candidate_result(
         updated,
         candidate_path=candidate_path,
     )
+    if repair_task_payload is not None:
+        repair_task_payload = {
+            **repair_task_payload,
+            "continuation": _repair_continuation_from_action(request_payload),
+        }
     writer.emit(
         f"autoresearch.bug_candidate.{candidate_status}",
         actor="run-manager",
@@ -6716,6 +7206,184 @@ def _pending_repair_validation_actions(
     return out
 
 
+def _pending_repair_apply_actions(
+    repair_merge_queue: dict[str, Any],
+    events: list[ZfEvent],
+    *,
+    config: ZfConfig,
+) -> list[dict[str, Any]]:
+    source_repair = getattr(
+        getattr(getattr(config, "runtime", None), "run_manager", None),
+        "source_repair",
+        None,
+    )
+    if (
+        source_repair is None
+        or not bool(getattr(source_repair, "enabled", False))
+        or str(getattr(source_repair, "apply_policy", "") or "")
+        != "verified_checkpoint_apply"
+    ):
+        return []
+    items = repair_merge_queue.get("items") if isinstance(repair_merge_queue, dict) else []
+    out: list[dict[str, Any]] = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or str(item.get("status") or "") != "closeout_required":
+            continue
+        validation = item.get("validation")
+        validation = validation if isinstance(validation, dict) else {}
+        if str(validation.get("status") or "") != "passed":
+            continue
+        continuation = item.get("continuation")
+        continuation = continuation if isinstance(continuation, dict) else {}
+        continuation_checkpoint_id = str(
+            continuation.get("checkpoint_id")
+            or continuation.get("resume_checkpoint_ref")
+            or ""
+        ).strip()
+        continuation_safe_action = str(
+            continuation.get("safe_resume_action") or ""
+        ).strip()
+        continuation_stale_reason = _repair_continuation_stale_reason(
+            events,
+            item=item,
+            continuation=continuation,
+        )
+        action = {
+            "schema_version": "run-manager.pending-action.v1",
+            "action": "repair-closeout-apply",
+            "checkpoint_id": _repair_apply_checkpoint_id(item),
+            "safe_resume_action": "repair_closeout_apply",
+            "queue_id": str(item.get("queue_id") or ""),
+            "fingerprint": str(item.get("fingerprint") or ""),
+            "candidate_id": str(item.get("candidate_id") or ""),
+            "branch": str(item.get("branch") or ""),
+            "worktree_path": str(item.get("worktree_path") or ""),
+            "base_commit": str(item.get("base_commit") or ""),
+            "repair_commit": str(
+                item.get("repair_commit") or item.get("source_commit") or ""
+            ),
+            "source_commit": str(item.get("source_commit") or ""),
+            "source_title": str(item.get("source_title") or ""),
+            "changed_files": _string_list(item.get("changed_files")),
+            "risk_classification": item.get("risk_classification")
+            if isinstance(item.get("risk_classification"), dict) else {},
+            "validation_status": "passed",
+            "validation_event_id": str(validation.get("event_id") or ""),
+            "validation_result": validation.get("result")
+            if isinstance(validation.get("result"), dict) else {},
+            "continuation": continuation,
+            "continuation_checkpoint_id": continuation_checkpoint_id,
+            "continuation_safe_resume_action": continuation_safe_action,
+            "continuation_stale_reason": continuation_stale_reason,
+            "apply_policy": "verified_checkpoint_apply",
+            "restart_strategy": "control_plane_restart_preserve_workers",
+            "restart_boundary": str(
+                getattr(source_repair, "restart_boundary", "") or ""
+            ),
+            "replay_before_restart": bool(
+                getattr(source_repair, "replay_before_restart", True)
+            ),
+            "allow_paths": list(getattr(source_repair, "allow_paths", []) or []),
+            "deny_paths": list(getattr(source_repair, "deny_paths", []) or []),
+            "failure_class": "verified_self_repair_apply",
+            "owner_route": "controlled_action",
+            "action_policy": "auto_decide",
+            "intervention_class": "repair_harness",
+            "expected_downstream_events": [
+                RUN_MANAGER_REPAIR_MERGE_MERGED,
+            ],
+            "verify_condition": (
+                "expected_downstream_event:"
+                + RUN_MANAGER_REPAIR_MERGE_MERGED
+            ),
+            "route_registry": "run-manager-router.v1",
+        }
+        if _action_seen(events, action):
+            continue
+        action["preflight"] = preflight_action(
+            action="repair-closeout-apply",
+            payload=action,
+        )
+        action["policy_decision"] = router_decide_action_policy(
+            action="repair-closeout-apply",
+            payload=action,
+        )
+        out.append(action)
+    return out
+
+
+def _repair_continuation_stale_reason(
+    events: list[ZfEvent],
+    *,
+    item: dict[str, Any],
+    continuation: dict[str, Any],
+) -> str:
+    checkpoint_id = str(
+        continuation.get("checkpoint_id")
+        or continuation.get("resume_checkpoint_ref")
+        or continuation.get("idempotency_key")
+        or ""
+    ).strip()
+    queue_id = str(item.get("queue_id") or "")
+    boundary = -1
+    source_event_ids = set(_string_list(continuation.get("source_event_ids")))
+    for index, event in enumerate(events):
+        if event.id in source_event_ids:
+            boundary = max(boundary, index)
+        if event.type != "autoresearch.repair.closeout.required":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if _repair_merge_key(payload, fallback=event.id) == queue_id:
+            boundary = max(boundary, index)
+    for event in events[boundary + 1:]:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if checkpoint_id and event.type == "workflow.resume.applied":
+            observed_checkpoint = str(
+                payload.get("checkpoint_id")
+                or payload.get("resume_checkpoint_ref")
+                or payload.get("idempotency_key")
+                or ""
+            ).strip()
+            if observed_checkpoint == checkpoint_id:
+                return "already_applied"
+        if (
+            checkpoint_id
+            and event.type == RUN_MANAGER_ACTION_APPLIED
+            and str(payload.get("action") or "")
+            not in {"repair-closeout-validate", "repair-closeout-apply"}
+            and str(payload.get("checkpoint_id") or "") == checkpoint_id
+        ):
+            return "already_settled"
+        if event.type in {"run.goal.completed", RUN_COMPLETED} and (
+            _event_matches_continuation_scope(event, continuation)
+        ):
+            return "run_already_completed"
+    return ""
+
+
+def _event_matches_continuation_scope(
+    event: ZfEvent,
+    continuation: dict[str, Any],
+) -> bool:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    expected = {
+        str(continuation.get("workflow_run_id") or ""),
+        str(continuation.get("run_id") or ""),
+        str(continuation.get("pdd_id") or ""),
+    }
+    expected.discard("")
+    if not expected:
+        return False
+    actual = {
+        str(payload.get("workflow_run_id") or ""),
+        str(payload.get("run_id") or ""),
+        str(payload.get("pdd_id") or ""),
+        str(event.correlation_id or ""),
+    }
+    actual.discard("")
+    return bool(expected.intersection(actual))
+
+
 _INFRA_ACTORS = frozenset({
     "zf-cli", "run-manager", "zf-supervisor", "zf-runtime",
     "zf-autoresearch", "operator", "",
@@ -6846,6 +7514,10 @@ def _pending_post_repair_continuation_actions(
             continue
         if str(item.get("status") or "") != "merged":
             continue
+        if bool(item.get("control_plane_restart_required")) and not (
+            _control_plane_restart_observed(events, item)
+        ):
+            continue
         continuation = item.get("continuation")
         continuation = continuation if isinstance(continuation, dict) else {}
         if not continuation.get("resume_original_workflow"):
@@ -6952,6 +7624,29 @@ def _pending_post_repair_continuation_actions(
     return out
 
 
+def _control_plane_restart_observed(
+    events: list[ZfEvent],
+    item: dict[str, Any],
+) -> bool:
+    queue_id = str(item.get("queue_id") or "")
+    merged_index = -1
+    for index, event in enumerate(events):
+        if event.type != RUN_MANAGER_REPAIR_MERGE_MERGED:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if _repair_merge_key(payload, fallback=event.id) == queue_id:
+            merged_index = index
+    if merged_index < 0:
+        return False
+    return any(
+        event.type == "session.started"
+        and isinstance(event.payload, dict)
+        and bool(event.payload.get("control_plane_only"))
+        and bool(event.payload.get("workers_preserved"))
+        for event in events[merged_index + 1:]
+    )
+
+
 def _repair_queue_event_ids(item: dict[str, Any]) -> list[str]:
     ids: list[str] = []
     for event in item.get("events") or []:
@@ -6974,6 +7669,12 @@ def _post_repair_continuation_seen(
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type in {RUN_MANAGER_AUTORESEARCH_REQUESTED, RUN_MANAGER_ACTION_APPLIED}:
+            if (
+                event.type == RUN_MANAGER_ACTION_APPLIED
+                and str(payload.get("action") or "")
+                in {"repair-closeout-validate", "repair-closeout-apply"}
+            ):
+                continue
             if checkpoint_id and str(payload.get("checkpoint_id") or "") == checkpoint_id:
                 return True
             if fingerprint and str(payload.get("fingerprint") or "") == fingerprint:
@@ -6999,6 +7700,16 @@ def _repair_validation_checkpoint_id(item: dict[str, Any]) -> str:
         str(item.get("worktree_path") or ""),
     ])
     return "repair-validate-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _repair_apply_checkpoint_id(item: dict[str, Any]) -> str:
+    raw = "|".join([
+        "repair-closeout-apply",
+        str(item.get("queue_id") or ""),
+        str(item.get("base_commit") or ""),
+        str(item.get("repair_commit") or item.get("source_commit") or ""),
+    ])
+    return "repair-apply-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _worker_lifecycle_reason(row: dict[str, Any]) -> str:
@@ -7197,12 +7908,7 @@ def _pending_semantic_event_actions(
             == "autoresearch.invocation.accepted"
         ):
             continue
-        if (
-            event.type == "plan.artifact_package.rejected"
-            and str(event_payload.get("mode") or "").strip().lower() == "shadow"
-        ):
-            # Shadow rollout records compatibility diagnostics without
-            # becoming a recovery owner or changing the legacy control path.
+        if not event_is_recovery_actionable(event.type, event_payload):
             continue
         if (
             event.type in {"task.rework.capped", "candidate.rework.capped"}
@@ -7376,10 +8082,12 @@ def _semantic_event_diagnostic_action(
     )
     direct_controlled_action = (
         suggested_action_kind
-        if suggested_action_kind in {"ship-retry"}
+        if suggested_action_kind in {"ship-retry", "fanout-aggregate-rebuild"}
         else ""
     )
-    safe_resume_action = direct_controlled_action or "diagnose_attention"
+    safe_resume_action = {
+        "fanout-aggregate-rebuild": "fanout_aggregate_rebuild",
+    }.get(direct_controlled_action, direct_controlled_action) or "diagnose_attention"
     expected_downstream = list(blocker_recovery.get("expected_downstream_events") or [])
     if not expected_downstream:
         expected_downstream = sorted(
@@ -7446,11 +8154,25 @@ def _semantic_event_diagnostic_action(
         for key in (
             "workflow_run_id", "run_id", "goal_id", "claim_id",
             "delivery_operation_id", "candidate_ref", "target_ref",
-            "target_commit",
+            "target_commit", "source_event_id", "fanout_id",
         ):
             value = payload.get(key)
             if value not in (None, "", [], {}):
                 action[key] = value
+    if direct_controlled_action == "fanout-aggregate-rebuild":
+        action.update({
+            "source_event_id": event.id,
+            "aggregate_source_event_id": str(
+                payload.get("source_event_id") or ""
+            ),
+            "effect_expected_events": ["run.goal.completed"],
+            "effect_failure_events": ["run.goal.blocked"],
+            "effect_required_sequence": [
+                ["flow.goal.closed"],
+                ["judge.requested"],
+                ["run.goal.completed", "run.goal.blocked"],
+            ],
+        })
     return action
 
 
@@ -8489,6 +9211,21 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
         "task_map_ref": str(action.get("task_map_ref") or ""),
         "source_index_ref": str(action.get("source_index_ref") or ""),
         "source_commit": str(action.get("source_commit") or ""),
+        "base_commit": str(action.get("base_commit") or ""),
+        "repair_commit": str(action.get("repair_commit") or ""),
+        "applied_commit": str(action.get("applied_commit") or ""),
+        "validation_event_id": str(action.get("validation_event_id") or ""),
+        "continuation_checkpoint_id": str(
+            action.get("continuation_checkpoint_id") or ""
+        ),
+        "continuation_safe_resume_action": str(
+            action.get("continuation_safe_resume_action") or ""
+        ),
+        "restart_strategy": str(action.get("restart_strategy") or ""),
+        "restart_boundary": str(action.get("restart_boundary") or ""),
+        "continuation_stale_reason": str(
+            action.get("continuation_stale_reason") or ""
+        ),
         "target_ref": str(action.get("target_ref") or ""),
         "candidate_ref": str(action.get("candidate_ref") or ""),
         "candidate_base_commit": str(action.get("candidate_base_commit") or ""),
@@ -8499,6 +9236,17 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
             str(value) for value in action.get("expected_downstream_events") or []
             if str(value).strip()
         ],
+        "effect_expected_events": _string_list(
+            action.get("effect_expected_events")
+        ),
+        "effect_failure_events": _string_list(
+            action.get("effect_failure_events")
+        ),
+        "effect_required_sequence": (
+            action.get("effect_required_sequence")
+            if isinstance(action.get("effect_required_sequence"), list)
+            else []
+        ),
         "fanout_id": str(action.get("fanout_id") or ""),
         "pdd_id": str(action.get("pdd_id") or ""),
         "feature_id": str(action.get("feature_id") or ""),
@@ -8551,10 +9299,39 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
         if isinstance(action.get("risk_classification"), dict) else {},
         "continuation": action.get("continuation")
         if isinstance(action.get("continuation"), dict) else {},
+        "fragment_id": str(action.get("fragment_id") or ""),
+        "fragment_digest": str(action.get("fragment_digest") or ""),
+        "continuation_key": str(action.get("continuation_key") or ""),
+        "parent_operation_id": str(action.get("parent_operation_id") or ""),
+        "pattern_id": str(action.get("pattern_id") or ""),
+        "plan_artifact_package_id": str(
+            action.get("plan_artifact_package_id") or ""
+        ),
+        "plan_artifact_package_ref": str(
+            action.get("plan_artifact_package_ref") or ""
+        ),
+        "plan_artifact_package_digest": str(
+            action.get("plan_artifact_package_digest") or ""
+        ),
+        "task_map_generation": str(
+            action.get("task_map_generation") or ""
+        ),
     }
 
 
 def _operator_controlled_action_payload(action: dict[str, Any]) -> dict[str, Any]:
+    if str(action.get("action") or "") == "fanout-aggregate-rebuild":
+        return {
+            "source": "run-manager",
+            "source_event_id": str(action.get("source_event_id") or ""),
+            "aggregate_source_event_id": str(
+                action.get("aggregate_source_event_id") or ""
+            ),
+            "reason": str(
+                action.get("summary")
+                or "rebuild aggregate from durable manifest"
+            ),
+        }
     payload = {
         "source": "run-manager",
         "approval_ref": str(action.get("approval_ref") or ""),

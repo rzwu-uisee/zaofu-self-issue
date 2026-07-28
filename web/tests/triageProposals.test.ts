@@ -12,6 +12,10 @@ function assert(condition: unknown, message: string): void {
 function pending(overrides: Partial<PendingKanbanProposal>): PendingKanbanProposal {
   return {
     proposal_event_id: "evt-1",
+    proposal_event_ids: ["evt-1"],
+    proposal_id: "proposal-1",
+    proposal_digest: "a".repeat(64),
+    revision: 1,
     ts: "2026-07-09T00:00:00Z",
     action: "create-task",
     requested_action: "create-task",
@@ -55,6 +59,26 @@ function testDurableAndLiveDedup(): void {
   assert(merged[0].proposalId === "evt-A", "dedup keeps the shared proposal id");
 }
 
+function testCrossSurfaceEventIdsDedupToCanonicalProposal(): void {
+  const durable = pending({
+    proposal_event_id: "evt-feishu",
+    proposal_event_ids: ["evt-web", "evt-feishu"],
+  });
+  const live: AutopilotProposalDescriptor[] = [{
+    proposalId: "evt-web",
+    action: "create-task",
+    valid: true,
+    actionPayload: { title: "Backend CRUD" },
+    title: "Backend CRUD",
+    metaKind: "proposal",
+    metaSeverity: "medium",
+    taskId: "",
+  }];
+  const merged = mergeAutopilotDescriptors([durable], live);
+  assert(merged.length === 1, "cross-surface copies must render once");
+  assert(merged[0].proposalId === "evt-feishu", "latest exact event remains the approval target");
+}
+
 // Live-only proposals (e.g. autopilot.proposal.created with no durable kanban
 // entry) still contribute so nothing regresses for the Feishu-surface path.
 function testLiveOnlyProposalContributes(): void {
@@ -81,6 +105,7 @@ function testDescriptorReadsTaskId(): void {
 
 testDurableProposalSurvivesEmptyLive();
 testDurableAndLiveDedup();
+testCrossSurfaceEventIdsDedupToCanonicalProposal();
 testLiveOnlyProposalContributes();
 testDescriptorReadsTaskId();
 

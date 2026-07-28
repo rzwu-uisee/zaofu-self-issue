@@ -12,7 +12,9 @@ from zf.autoresearch.campaign import (
 from zf.autoresearch.orchestrator import (
     AutoresearchRunConfig,
     build_inner_runner_command,
+    cleanup_prepared_worktree,
     ensure_web_dependencies,
+    prepare_worktree,
     summarize_events,
     sync_tracked_checkout_changes,
     tmux_supervisor_command,
@@ -44,6 +46,84 @@ def test_resolve_builtin_scenario_allows_overrides(tmp_path: Path) -> None:
     assert scenario.seed_text == "Custom seed"
     assert scenario.expected_done == 2
     assert scenario.timeout_seconds == 30
+
+
+def test_prepared_worktree_restores_only_unchanged_framework_files(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    original = "version: '1.0'\nproject: {name: original}\n"
+    (worktree / "zf.yaml").write_text(original, encoding="utf-8")
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+    scenario = resolve_scenario(
+        "self-eval-backlog",
+        expected_done=1,
+        timeout_seconds=30,
+    )
+    cfg = AutoresearchRunConfig(
+        worktree=worktree,
+        config_template=template,
+        reuse_worktree=True,
+        sync_dirty=False,
+    )
+
+    seed = prepare_worktree(
+        cfg,
+        scenario=scenario,
+        run_id="restore-framework-files",
+        run_dir=run_dir,
+    )
+    assert (worktree / "zf.yaml").read_text(encoding="utf-8") != original
+    assert seed.exists()
+    assert not (worktree / "zf.yaml.pre-autoresearch").exists()
+
+    outcome = cleanup_prepared_worktree(worktree=worktree, run_dir=run_dir)
+
+    assert outcome["status"] == "cleaned"
+    assert (worktree / "zf.yaml").read_text(encoding="utf-8") == original
+    assert not seed.exists()
+
+
+def test_prepared_worktree_retains_user_modified_framework_file(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "zf.yaml").write_text(
+        "version: '1.0'\nproject: {name: original}\n",
+        encoding="utf-8",
+    )
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "run"
+    scenario = resolve_scenario("self-eval-backlog")
+    prepare_worktree(
+        AutoresearchRunConfig(
+            worktree=worktree,
+            config_template=template,
+            reuse_worktree=True,
+            sync_dirty=False,
+        ),
+        scenario=scenario,
+        run_id="retain-modified-framework-file",
+        run_dir=run_dir,
+    )
+    changed = "version: '1.0'\nproject: {name: candidate-change}\n"
+    (worktree / "zf.yaml").write_text(changed, encoding="utf-8")
+
+    outcome = cleanup_prepared_worktree(worktree=worktree, run_dir=run_dir)
+
+    assert outcome["status"] == "retained"
+    assert (worktree / "zf.yaml").read_text(encoding="utf-8") == changed
 
 
 def test_resolve_campaign_contains_metric_scenarios() -> None:

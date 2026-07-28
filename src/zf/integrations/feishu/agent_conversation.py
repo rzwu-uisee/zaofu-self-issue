@@ -14,6 +14,11 @@ from typing import Any
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_turn import run_channel_reply_turn
 from zf.runtime.channel_sidecar import channel_message_event_payload
+from zf.runtime.channel_contracts import (
+    normalize_permission_profile,
+    permission_profile_write_policy,
+)
+from zf.integrations.feishu.thread_scope import feishu_thread_id
 
 
 def run_specialist_conversation(
@@ -48,6 +53,11 @@ def run_specialist_conversation(
     )
     backend = _conversation_backend(config, route)
     project_root = _project_root(route)
+    thread_id = feishu_thread_id(payload)
+    permission_profile = normalize_permission_profile(
+        getattr(route, "permission_profile", "read_only")
+    )
+    dangerous_ack = bool(getattr(route, "dangerous_ack", False))
 
     _ensure_channel(
         state,
@@ -59,6 +69,8 @@ def run_specialist_conversation(
         source=source,
         agent_kind=agent_kind,
         chat_id=chat_id,
+        permission_profile=permission_profile,
+        dangerous_ack=dangerous_ack,
     )
     msg = writer.emit(
         "channel.message.posted",
@@ -68,7 +80,7 @@ def run_specialist_conversation(
             state,
             {
                 "channel_id": channel_id,
-                "thread_id": "main",
+                "thread_id": thread_id,
                 "message_id": message_id,
                 "member_id": user_id or "feishu",
                 "role": "user",
@@ -80,6 +92,7 @@ def run_specialist_conversation(
                         "chat_id": chat_id,
                         "message_id": message_id,
                         "agent_kind": agent_kind,
+                        "thread_id": thread_id,
                     },
                 },
             },
@@ -103,6 +116,8 @@ def run_specialist_conversation(
         "channel_id": channel_id,
         "member_id": member_id,
         "backend": backend,
+        "thread_id": thread_id,
+        "permission_profile": permission_profile,
         "reply_requests": list(turn["route"].reply_requests),
         "dispatched": len(turn["dispatched"]),
     }
@@ -116,6 +131,7 @@ def run_specialist_conversation(
             trigger_event=msg,
             chat_id=chat_id,
             feishu_message_id=message_id,
+            thread_id=thread_id,
             source=source,
         )
         if proposal is not None:
@@ -133,6 +149,7 @@ def _emit_kanban_action_proposal(
     trigger_event,
     chat_id: str,
     feishu_message_id: str,
+    thread_id: str,
     source: str,
 ) -> dict[str, Any] | None:
     """Extract an action proposal from the kanban agent's channel reply.
@@ -151,6 +168,7 @@ def _emit_kanban_action_proposal(
         state_dir,
         channel_id=channel_id,
         member_id=member_id,
+        thread_id=thread_id,
         after_ts=str(getattr(trigger_event, "ts", "") or ""),
     )
     if not reply_text:
@@ -158,14 +176,14 @@ def _emit_kanban_action_proposal(
     proposal = extract_action_proposal(reply_text, user_message=user_text)
     if proposal is None:
         return None
-    writer.emit(
+    proposal_event = writer.emit(
         "kanban.agent.action.proposed",
         actor=source,
         causation_id=trigger_event.id,
         correlation_id=channel_id,
         payload={
             "turn_id": trigger_event.id,
-            "thread_key": f"channel:{channel_id}:main:{member_id}",
+            "thread_key": f"channel:{channel_id}:{thread_id}:{member_id}",
             "project_id": "",
             "conversation_id": channel_id,
             "reply_event_id": "",
@@ -175,10 +193,12 @@ def _emit_kanban_action_proposal(
                 "feishu": {
                     "chat_id": chat_id,
                     "message_id": feishu_message_id,
+                    "thread_id": thread_id,
                 },
             },
         },
     )
+    proposal["proposal_event_id"] = proposal_event.id
     return proposal
 
 
@@ -187,6 +207,7 @@ def _latest_assistant_reply_text(
     *,
     channel_id: str,
     member_id: str,
+    thread_id: str,
     after_ts: str,
 ) -> str:
     channel = project_channel(state_dir, channel_id) or {}
@@ -198,6 +219,7 @@ def _latest_assistant_reply_text(
         if isinstance(m, dict)
         and str(m.get("member_id") or "") == member_id
         and str(m.get("role") or "") == "assistant"
+        and str(m.get("thread_id") or "main") == thread_id
         and str(m.get("ts") or "") >= after_ts
     ]
     if not replies:
@@ -217,6 +239,8 @@ def _ensure_channel(
     source: str,
     agent_kind: str,
     chat_id: str = "",
+    permission_profile: str = "read_only",
+    dangerous_ack: bool = False,
 ) -> None:
     existing = project_channel(state_dir, channel_id) or {}
     if not existing or not existing.get("created_by_event"):
@@ -249,9 +273,9 @@ def _ensure_channel(
             "provider": backend,
             "backend": backend,
             "channel_role": "owner_delegate",
-            "permission_profile": "dangerous_full",
-            "permission_profile_ack": True,
-            "dangerous_ack": True,
+            "permission_profile": permission_profile,
+            "permission_profile_ack": dangerous_ack,
+            "dangerous_ack": dangerous_ack,
             "permissions": ["read", "message"],
             "source": source,
         }
@@ -271,6 +295,47 @@ def _ensure_channel(
             correlation_id=channel_id,
             payload=member_payload,
         )
+    else:
+        member = next(
+            (
+                item for item in (members or [])
+                if isinstance(item, dict)
+                and str(item.get("member_id") or "") == member_id
+            ),
+            {},
+        )
+        if str(member.get("permission_profile") or "read_only") != permission_profile:
+            update = {
+                "channel_id": channel_id,
+                "thread_id": "main",
+                "member_id": member_id,
+                "member_type": str(member.get("member_type") or "provider_agent"),
+                "provider": str(member.get("provider") or backend),
+                "backend": str(member.get("backend") or backend),
+                "channel_role": str(member.get("channel_role") or "owner_delegate"),
+                "visibility_profile": str(member.get("visibility_profile") or ""),
+                "permission_profile": permission_profile,
+                "write_policy": permission_profile_write_policy(permission_profile),
+                "permissions": list(member.get("permissions") or ["read", "message"]),
+                "reason": "synchronized from Feishu route",
+                "source": source,
+            }
+            changed = writer.emit(
+                "channel.member.permissions.updated",
+                actor=source,
+                correlation_id=channel_id,
+                payload=update,
+            )
+            writer.emit(
+                "channel.member.permission_profile.audit",
+                actor=source,
+                causation_id=changed.id,
+                correlation_id=channel_id,
+                payload={
+                    **update,
+                    "dangerous_ack": dangerous_ack,
+                },
+            )
     discussion = existing.get("discussion") if isinstance(existing, dict) else {}
     if str((discussion or {}).get("default_responder_id") or "") != member_id:
         writer.emit(

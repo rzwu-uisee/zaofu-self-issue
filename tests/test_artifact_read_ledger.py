@@ -2,8 +2,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from zf.core.events.model import ZfEvent
 from zf.runtime.artifact_read_ledger import (
+    ArtifactReadError,
     active_ledger_attempt_id,
     build_attempt_source_manifest,
     build_input_consumption_policy,
@@ -183,6 +186,82 @@ def test_required_read_records_and_seals_attempt_ledger(tmp_path: Path) -> None:
         policy=policy,
         ledger_descriptor=descriptor,
     ) == []
+
+
+def test_attempt_read_authorizes_exact_manifest_occurrence_before_io(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "artifacts" / "inputs" / "restricted.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps({"secret": "value"}), encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    manifest = build_attempt_source_manifest(
+        workflow_run_id="run-auth",
+        task_id="T-auth",
+        attempt_id="attempt-auth",
+        dispatch_id="dispatch-auth",
+        metadata={
+            "source_event_id": "evt-auth",
+            "read_purpose": "implementation",
+        },
+        sources=[{
+            "source_id": "contract",
+            "artifact_id": "restricted.json",
+            "ref": "artifacts/inputs/restricted.json",
+            "sha256": digest,
+            "schema_version": "restricted.v1",
+            "access_scope": {
+                "visibility": "project",
+                "actor": "dev-1",
+                "purpose": "implementation",
+            },
+            "retention": {"class": "run"},
+        }],
+    )
+    source = manifest["sources"][0]
+    assert source["occurrence_id"].startswith("attempt-occurrence:")
+    assert source["source_event_id"] == "evt-auth"
+    assert source["schema_version"] == "restricted.v1"
+    assert source["retention"] == {"class": "run"}
+
+    with pytest.raises(ArtifactReadError, match="not authorized"):
+        read_attempt_artifact(
+            tmp_path,
+            manifest=manifest,
+            source_id="contract",
+            artifact_id="restricted.json",
+            actor="dev-2",
+            role="dev",
+        )
+    ledger_path = (
+        tmp_path
+        / "artifacts"
+        / "attempts"
+        / "attempt-auth"
+        / "read-ledger.active.jsonl"
+    )
+    denied = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(denied) == 1
+    assert denied[0]["status"] == "denied"
+    assert denied[0]["denial_code"] == "artifact_access_denied"
+    assert denied[0]["returned_bytes"] == 0
+    assert "artifact_ref" not in denied[0]
+    assert "artifact_sha256" not in denied[0]
+
+    result = read_attempt_artifact(
+        tmp_path,
+        manifest=manifest,
+        source_id="contract",
+        artifact_id="restricted.json",
+        actor="dev-1",
+        role="dev",
+    )
+    assert result["read"]["occurrence_id"] == source["occurrence_id"]
+    assert result["read"]["consumer_purpose"] == "implementation"
+    assert result["read"]["status"] == "read"
 
 
 def test_required_read_identity_is_exact_and_optional_sources_are_optional(

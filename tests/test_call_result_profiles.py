@@ -27,6 +27,11 @@ def test_profile_identity_distinguishes_verify_surfaces() -> None:
     ) == ("candidate-verify", "1")
     assert call_result_profile_identity(
         operation_type="fanout_reader_child",
+        stage_id="prd-lanes-verify",
+        payload={"candidate_head_commit": "candidate-head"},
+    ) == ("candidate-verify", "1")
+    assert call_result_profile_identity(
+        operation_type="fanout_reader_child",
         stage_id="global-rescan",
         payload={},
     ) == ("global-rescan", "1")

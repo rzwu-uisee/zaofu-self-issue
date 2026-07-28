@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from zf.core.events.log import EventLog
+from zf.core.events.model import ZfEvent
 
 
 # doc 80 rev1 § 7 P4 — quiesce defaults.
@@ -34,6 +35,7 @@ class EventWatcher:
         on_event: Callable[[str], None],
         *,
         on_tick: Callable[[], None] | None = None,
+        on_batch_consumed: Callable[[list[ZfEvent], int], None] | None = None,
         wake_patterns: list[str] | None = None,
         event_log: EventLog | None = None,
         quiesce_patterns: list[str] | None = None,
@@ -44,6 +46,7 @@ class EventWatcher:
         self.events_path = events_path
         self.on_event = on_event
         self.on_tick = on_tick
+        self.on_batch_consumed = on_batch_consumed
         self.wake_patterns = wake_patterns or []
         self.event_log = event_log or EventLog(events_path)
         self.shutdown_marker = shutdown_marker
@@ -72,6 +75,7 @@ class EventWatcher:
     def poll_once(self) -> list[str]:
         """Read any new lines since last poll. Returns new lines."""
         new_lines: list[str] = []
+        previous_offset = self._file_pos
         events, new_offset = self.event_log.read_from_offset(self._file_pos)
         self._file_pos = new_offset
         for event in events:
@@ -86,6 +90,15 @@ class EventWatcher:
                 self._quiesced = True
             if etype in self.resume_patterns:
                 self._quiesced = False
+        if (
+            self.on_batch_consumed is not None
+            and new_offset != previous_offset
+        ):
+            # Acknowledge only the immutable snapshot boundary returned by
+            # read_from_offset(), and only after every callback in the batch
+            # completed. Events appended by a callback remain beyond this
+            # cursor and are consumed by the next poll or restart catch-up.
+            self.on_batch_consumed(list(events), new_offset)
         return new_lines
 
     # P4 quiesce introspection ------------------------------------------------

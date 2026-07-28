@@ -221,6 +221,18 @@ def test_runtime_evidence_refs_are_accepted() -> None:
     }) == ""
 
 
+def test_verification_result_requirement_evidence_is_accepted() -> None:
+    assert report_evidence_gap({
+        "schema_version": "verification-result.v1",
+        "verdict": "passed",
+        "requirement_results": [{
+            "acceptance_id": "AC-1",
+            "status": "passed",
+            "evidence_refs": ["receipt:verify-ac-1"],
+        }],
+    }) == ""
+
+
 def test_flat_project_setup_key_is_rejected(tmp_path) -> None:
     config_path = tmp_path / "zf.yaml"
     config_path.write_text(

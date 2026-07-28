@@ -235,6 +235,85 @@ def iter_event_records(
             offset += raw_length
 
 
+def iter_event_records_from_cursor(
+    state_dir: Path,
+    *,
+    segment: str = "",
+    byte_offset: int = 0,
+    start_seq: int = 0,
+    config: ZfConfig | None = None,
+) -> Iterable[EventRecord]:
+    """Yield complete records after an exact segment/byte cursor.
+
+    The caller must validate that the stored segment layout still represents
+    the same append-only history. This helper never guesses across rotation or
+    truncation and never consumes an unterminated tail.
+    """
+
+    if not segment:
+        yield from iter_event_records(
+            state_dir,
+            config=config,
+            start_seq=start_seq,
+        )
+        return
+
+    segments = list_event_segments(state_dir)
+    start_index = next(
+        (
+            index
+            for index, item in enumerate(segments)
+            if item.rel_path == segment
+        ),
+        -1,
+    )
+    if start_index < 0:
+        raise ValueError(f"event cursor segment is missing: {segment}")
+
+    event_log = event_log_from_project(state_dir, config=config)
+    seq = max(0, int(start_seq))
+    for index, current in enumerate(segments[start_index:], start=start_index):
+        offset = max(0, int(byte_offset)) if index == start_index else 0
+        if offset > current.size:
+            raise ValueError(
+                f"event cursor exceeds segment size: {current.rel_path}"
+            )
+        try:
+            with current.path.open("rb") as fh:
+                fh.seek(offset)
+                data = fh.read(current.size - offset)
+        except OSError:
+            continue
+        last_newline = data.rfind(b"\n")
+        if last_newline < 0:
+            continue
+        local_offset = 0
+        for raw in data[: last_newline + 1].splitlines(keepends=True):
+            raw_length = len(raw)
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                seq += 1
+                event = event_log.decode_line(line)
+                if event is None:
+                    event = ZfEvent(
+                        type="event.malformed",
+                        actor="segments",
+                        payload={
+                            "line": line[:200],
+                            "error": "unable to decode event line",
+                        },
+                    )
+                yield EventRecord(
+                    seq=seq,
+                    event=event,
+                    raw_segment=current.rel_path,
+                    raw_offset=offset + local_offset,
+                    raw_length=raw_length,
+                    raw_line=line,
+                )
+            local_offset += raw_length
+
+
 def count_event_records(state_dir: Path) -> int:
     count = 0
     for segment in list_event_segments(state_dir):

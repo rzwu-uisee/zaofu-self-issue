@@ -19,10 +19,14 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "workflow-request",
     "workflow-submit",
     "workflow-invoke",
+    "research-start",
+    "research-adopt",
     "workflow-batch-resume",
     "candidate-rework-apply",
     "idea-to-product",
     "start-collaboration",
+    "channel-create-from-template",
+    "channel-discussion-start",
     "start-operator-session",
     "dispatch-task",
     "request-verify",
@@ -54,6 +58,8 @@ KANBAN_AGENT_CAPABILITIES = (
     "read_runtime_projections",
     "read_project_operator_summary",
     "read_skills_catalog",
+    "develop_in_selected_workspace",
+    "run_project_verification",
     "explain_projection",
     "explain_status_evidence_split",
     "read_star_dag",
@@ -62,11 +68,15 @@ KANBAN_AGENT_CAPABILITIES = (
     "propose_idea_to_product",
     "request_fanout",
     "request_workflow_invoke",
+    "start_research_fanout",
+    "adopt_research_result",
     "request_workflow_requirement",
     "request_workflow_submit",
     "request_workflow_batch_resume",
     "request_candidate_rework",
     "request_collaboration",
+    "create_channel_from_template",
+    "start_channel_discussion",
     "request_supervisor_diagnosis",
     "request_autoresearch_diagnosis",
     "request_automation_run",
@@ -81,10 +91,10 @@ KANBAN_AGENT_CAPABILITIES = (
 
 KANBAN_AGENT_FORBIDDEN_CAPABILITIES = (
     "direct_zf_truth_write",
-    "direct_git_mutation",
     "role_terminal_control",
     "orchestrator_terminal_control",
     "direct_role_dispatch",
+    "direct_git_mutation",
     "direct_task_status_mutation",
     "direct_runtime_stop_restart",
     "direct_workflow_config_write",
@@ -163,8 +173,9 @@ def kanban_agent_shared_context(
 
 def kanban_agent_boundary() -> dict[str, Any]:
     return {
-        "role": "operator_action_requester",
+        "role": "resident_project_agent",
         "scheduler": False,
+        "direct_project_code_write": "permission_profile_gated",
         "direct_truth_write": False,
         "direct_role_dispatch": False,
         "direct_role_terminal_control": False,
@@ -173,9 +184,6 @@ def kanban_agent_boundary() -> dict[str, Any]:
         "high_risk_actions_require_owner_approval": True,
         "proposal_only_actions": [
             "idea-to-product",
-            "provider-dev-chat-start",
-            "provider-dev-chat-send",
-            "provider-dev-chat-stop",
             "workflow-config-propose",
             "workflow-config-validate",
         ],
@@ -219,6 +227,9 @@ CANONICAL_ACTIONS = {
     "drain-worker": "worker-drain",
     "channel.create": "channel-create",
     "channel-new": "channel-create",
+    "channel.create_from_template": "channel-create-from-template",
+    "channel.template.create": "channel-create-from-template",
+    "channel.discussion.start": "channel-discussion-start",
     "channel.add_member": "channel-invite-member",
     "channel-add-member": "channel-invite-member",
     "channel.member.permission": "channel-update-member-permission",
@@ -256,6 +267,10 @@ CANONICAL_ACTIONS = {
     "plan.approve": "plan-approve",
     "plan.reject": "plan-reject",
     "workflow.invoke": "workflow-invoke",
+    "workflow.start": "workflow-invoke",
+    "research.start": "research-start",
+    "research.fanout.start": "research-start",
+    "research.adopt": "research-adopt",
     "workflow.request": "workflow-request",
     "workflow.submit": "workflow-submit",
     "workflow.batch.resume": "workflow-batch-resume",
@@ -305,5 +320,14 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "present, must contain only repo-relative path globs like src/** — put any "
     "non-path scope prose in the behavior text instead. For product ideas "
     "prefer action=idea-to-product with payload.objective. The operator must "
-    "approve every proposal before it runs; never claim the task was created."
+    "approve every proposal before it runs; never claim the task was created. "
+    "When the operator explicitly asks to create a collaboration channel, use "
+    "action=channel-create-from-template with payload.template_id and optional "
+    "payload.name/overrides. When asked to start a channel discussion, use "
+    "action=channel-discussion-start with payload.channel_id and "
+    "payload.objective. When asked to run the fixed research fanout, use "
+    "action=research-start with payload.task_id and payload.topic. When asked "
+    "to run a configured workflow, use action=workflow-invoke with "
+    "payload.task_id and payload.pattern_id. These are proposals, not completed "
+    "effects, until owner approval succeeds."
 )

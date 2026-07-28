@@ -17,6 +17,7 @@ spec:
   verifyRescan: module_parity
   completionThreshold: close_p0_p1
   deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig
@@ -75,6 +76,7 @@ spec:
     # 会被 schema fail-closed 拒绝。
     kind_routes:
       refactor:
+        pattern_id: flow-scan
         default_tier: standard
     dag:
       external_triggers: [refactor.scan.requested]

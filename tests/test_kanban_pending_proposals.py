@@ -2,7 +2,12 @@
 session — pending list is a ledger fold, approval/dismissal are events."""
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
+import json
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -13,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from zf.core.events import EventLog, EventWriter, ZfEvent
 from zf.runtime.control_actions import ControlledActionService
-from zf.runtime.kanban_proposals import pending_kanban_proposals
+from zf.runtime.kanban_proposals import (
+    pending_kanban_proposals,
+    proposal_execution_gate,
+)
+from zf.web.proposal_extraction import extract_action_proposal
 from zf.web.server import create_app
 
 
@@ -87,6 +96,52 @@ def test_unrelated_task_created_keeps_pending():
     assert len(pending_kanban_proposals(events)) == 1
 
 
+def test_same_semantic_proposal_has_one_cross_surface_identity():
+    answer = (
+        '```json\n{"action_proposal":{"action":"update-task",'
+        '"payload":{"task_id":"TASK-1","priority":1},"reason":"raise"}}\n```'
+    )
+    web = extract_action_proposal(
+        answer,
+        user_message="update the task",
+        proposal_context={
+            "project_id": "web-project",
+            "conversation_id": "web-conversation",
+            "thread_id": "web-thread",
+            "run_id": "web-run",
+        },
+    )
+    feishu = extract_action_proposal(
+        answer,
+        user_message="update the task",
+        proposal_context={
+            "conversation_id": "feishu-chat",
+            "thread_id": "feishu-thread",
+        },
+    )
+
+    assert web is not None and feishu is not None
+    assert web["proposal_id"] == feishu["proposal_id"]
+    assert web["proposal_digest"] == feishu["proposal_digest"]
+    events = [
+        ZfEvent(
+            id="evt-web",
+            type="kanban.agent.action.proposed",
+            actor="web",
+            payload={"proposal": web, "source": "web"},
+        ),
+        ZfEvent(
+            id="evt-feishu",
+            type="kanban.agent.action.proposed",
+            actor="feishu",
+            payload={"proposal": feishu, "source": "feishu"},
+        ),
+    ]
+    items = pending_kanban_proposals(events)
+    assert len(items) == 1
+    assert set(items[0]["proposal_event_ids"]) == {"evt-web", "evt-feishu"}
+
+
 def _state(tmp_path: Path) -> Path:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -145,6 +200,86 @@ def test_dismiss_through_web_action_route(tmp_path: Path, monkeypatch: pytest.Mo
     assert page.json()["items"] == []
 
 
+def test_research_adoption_proposal_preserves_semantic_request_id_through_web_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    state_dir = _state(tmp_path)
+    artifact = state_dir / "research" / "report.md"
+    artifact.parent.mkdir()
+    artifact.write_text("verified research\n", encoding="utf-8")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    request_dir = state_dir / "workflow-requests"
+    request_dir.mkdir()
+    (request_dir / "REQ-ADOPT.json").write_text(
+        json.dumps({
+            "request_id": "REQ-ADOPT",
+            "revision": 1,
+            "research_artifacts": [],
+            "channel_id": "ch-research",
+            "thread_id": "main",
+        }),
+        encoding="utf-8",
+    )
+    action_payload = {
+        "task_id": "TASK-RESEARCH",
+        "request_id": "REQ-ADOPT",
+        "request_revision": 1,
+        "artifact_ref": "research/report.md",
+        "artifact_digest": digest,
+        "summary": "Adopt the verified research.",
+        "channel_id": "ch-research",
+        "thread_id": "main",
+    }
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        id="evt-research-adopt",
+        type="kanban.agent.action.proposed",
+        actor="web",
+        payload={
+            "source": "web",
+            "proposal": {
+                "proposal_id": "proposal-research-adopt",
+                "proposal_digest": "a" * 64,
+                "revision": 1,
+                "action": "research-adopt",
+                "requested_action": "research-adopt",
+                "payload": action_payload,
+                "valid": True,
+            },
+        },
+    ))
+    client = TestClient(create_app(state_dir, project_root=tmp_path))
+    project_id = client.get("/api/snapshot").json()["project"]["project_id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/actions/research-adopt",
+        headers={
+            "x-zf-web-token": "test-token",
+            "x-idempotency-key": "approve-research-adopt",
+        },
+        json={
+            "project_id": project_id,
+            "idempotency_key": "approve-research-adopt",
+            "actor": "web",
+            "payload": {
+                **action_payload,
+                "proposal_event_id": "evt-research-adopt",
+            },
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "adopted"
+    adopted = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "workflow.research.adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0].payload["request_id"] == "REQ-ADOPT"
+
+
 def test_pending_proposals_endpoint(tmp_path: Path):
     state_dir = _state(tmp_path)
     EventLog(state_dir / "events.jsonl").append(_proposed("evt-p1", "任务甲"))
@@ -182,7 +317,16 @@ def test_executed_non_create_proposal_clears_its_card(tmp_path: Path):
     task_id = created["task_id"]
 
     # a proposed update-task lands as a pending card
-    log.append(_proposed("evt-upd", "改优先级", action="update-task"))
+    proposed_update = _proposed(
+        "evt-upd",
+        "改优先级",
+        action="update-task",
+    )
+    proposed_update.payload["proposal"]["payload"] = {
+        "task_id": task_id,
+        "priority": 1,
+    }
+    log.append(proposed_update)
     assert any(i["proposal_event_id"] == "evt-upd"
                for i in pending_kanban_proposals(log.read_all())), "update-task card should be pending"
 
@@ -202,3 +346,206 @@ def test_executed_non_create_proposal_clears_its_card(tmp_path: Path):
     # the Triage card is now cleared
     assert not any(i["proposal_event_id"] == "evt-upd"
                    for i in pending_kanban_proposals(log.read_all())), "card must clear after execute"
+
+    replay = service.execute(
+        action="update-task", requested_action="update-task",
+        payload={"task_id": task_id, "priority": 1, "proposal_event_id": "evt-upd"},
+        requested=requested,
+    )
+    assert replay["status"] == "already_resolved"
+    resolved = [
+        event
+        for event in log.read_all()
+        if event.type == "kanban.agent.proposal.resolved"
+        and event.payload.get("proposal_event_id") == "evt-upd"
+    ]
+    assert len(resolved) == 1
+
+
+def test_approved_proposal_rejects_changed_semantic_payload(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    proposal = _proposed(
+        "evt-payload-bound",
+        "raise priority",
+        action="update-task",
+    )
+    proposal.payload["proposal"]["payload"] = {
+        "task_id": "TASK-X",
+        "priority": 1,
+    }
+    log.append(proposal)
+    writer = EventWriter(log)
+    service = ControlledActionService(
+        state_dir,
+        writer,
+        actor="operator",
+        source="web",
+        surface="web",
+    )
+    requested = writer.emit(
+        "web.action.requested",
+        actor="operator",
+        payload={},
+    )
+
+    result = service.execute(
+        action="update-task",
+        requested_action="update-task",
+        payload={
+            "task_id": "TASK-X",
+            "priority": 2,
+            "proposal_event_id": "evt-payload-bound",
+        },
+        requested=requested,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "proposal_payload_mismatch"
+    assert not any(
+        event.type in {
+            "task.updated",
+            "kanban.agent.proposal.resolved",
+        }
+        for event in log.read_all()
+    )
+
+
+def test_expired_and_superseded_proposals_fail_closed(tmp_path: Path):
+    state_dir = _state(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    expired = _proposed("evt-expired", "expired", action="update-task")
+    expired.payload["proposal"].update({
+        "proposal_id": "proposal-expired",
+        "proposal_digest": "a" * 64,
+        "expires_at": "2000-01-01T00:00:00Z",
+    })
+    old = _proposed("evt-old", "old", action="update-task")
+    old.payload["proposal"].update({
+        "proposal_id": "proposal-revisioned",
+        "proposal_digest": "b" * 64,
+        "revision": 1,
+    })
+    new = _proposed("evt-new", "new", action="update-task")
+    new.payload["proposal"].update({
+        "proposal_id": "proposal-revisioned",
+        "proposal_digest": "c" * 64,
+        "revision": 2,
+    })
+    for event in (expired, old, new):
+        log.append(event)
+    writer = EventWriter(log)
+    service = ControlledActionService(
+        state_dir, writer, actor="operator", source="web", surface="web",
+    )
+    requested = writer.emit("web.action.requested", actor="operator", payload={})
+
+    expired_result = service.execute(
+        action="update-task", requested_action="update-task",
+        payload={"task_id": "TASK-X", "proposal_event_id": "evt-expired"},
+        requested=requested,
+    )
+    superseded_result = service.execute(
+        action="update-task", requested_action="update-task",
+        payload={"task_id": "TASK-X", "proposal_event_id": "evt-old"},
+        requested=requested,
+    )
+
+    assert expired_result["status"] == "proposal_expired"
+    assert superseded_result["status"] == "proposal_superseded"
+
+
+def test_explicit_supersedes_hides_and_blocks_prior_proposal() -> None:
+    prior = _proposed("evt-prior", "Prior")
+    prior.payload["proposal"]["proposal_id"] = "proposal-prior"
+    replacement = _proposed("evt-replacement", "Replacement")
+    replacement.payload["proposal"].update({
+        "proposal_id": "proposal-replacement",
+        "supersedes": "proposal-prior",
+    })
+    events = [prior, replacement]
+
+    pending = pending_kanban_proposals(events)
+    assert [item["proposal_id"] for item in pending] == [
+        "proposal-replacement"
+    ]
+    gated = proposal_execution_gate(
+        events,
+        proposal_event_id="evt-prior",
+        action="create-task",
+    )
+    assert gated["status"] == "proposal_superseded"
+    assert gated["superseded_by"] == "proposal-replacement"
+
+
+def test_cross_surface_concurrent_approval_executes_proposal_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir = _state(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    proposal = _proposed("evt-concurrent", "Concurrent task")
+    proposal.payload["proposal"].update({
+        "proposal_id": "proposal-concurrent",
+        "proposal_digest": "d" * 64,
+    })
+    log.append(proposal)
+    setup_writer = EventWriter(log)
+    requested = [
+        setup_writer.emit(
+            "web.action.requested",
+            actor=surface,
+            payload={"surface": surface},
+        )
+        for surface in ("web", "feishu")
+    ]
+    original_create = ControlledActionService._create_task
+
+    def slow_create(self, **kwargs):
+        time.sleep(0.1)
+        return original_create(self, **kwargs)
+
+    monkeypatch.setattr(
+        ControlledActionService,
+        "_create_task",
+        slow_create,
+    )
+    start = threading.Barrier(2)
+
+    def approve(index: int) -> dict:
+        writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+        service = ControlledActionService(
+            state_dir,
+            writer,
+            actor=("web" if index == 0 else "feishu"),
+            source=("web" if index == 0 else "feishu"),
+            surface=("web" if index == 0 else "feishu"),
+        )
+        start.wait(timeout=2)
+        return service.execute(
+            action="create-task",
+            requested_action="create-task",
+            payload={
+                "title": "Concurrent task",
+                "proposal_event_id": "evt-concurrent",
+            },
+            requested=requested[index],
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(approve, range(2)))
+
+    assert sorted(result["status"] for result in results) == [
+        "already_resolved",
+        "completed",
+    ]
+    created = [
+        event
+        for event in log.read_all()
+        if event.type == "task.created"
+        and event.payload.get("request", {}).get("proposal_event_id")
+        == "evt-concurrent"
+    ]
+    assert len(created) == 1

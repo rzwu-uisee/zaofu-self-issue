@@ -28,6 +28,7 @@ RUN_MANAGER_HUMAN_DECISION_APPLIED = "run.manager.human_decision.applied"
 RUN_MANAGER_HUMAN_DECISION_REJECTED = "run.manager.human_decision.rejected"
 INBOX_ITEM_READ = "inbox.item.read"
 INBOX_ALL_READ = "inbox.all.read"
+OWNER_VISIBLE_MESSAGE_REQUESTED = "owner.visible_message.requested"
 
 OPERATOR_INBOX_SCHEMA_VERSION = "operator-inbox.v2"
 _HIDDEN_VISIBLE_STATUSES = {"acknowledged"}
@@ -64,6 +65,23 @@ def build_operator_inbox(
             continue
         if etype == INBOX_ALL_READ:
             read_all_at = ts or read_all_at
+            continue
+
+        if etype == OWNER_VISIBLE_MESSAGE_REQUESTED and (
+            payload.get("message_kind") == "run_terminal_delivery"
+            or payload.get("delivery_class") == "run_terminal"
+        ):
+            message_id = str(payload.get("message_id") or event_id).strip()
+            if not message_id:
+                continue
+            key = f"run-delivery:{message_id}"
+            if key in items:
+                _merge_duplicate_item(
+                    items[key],
+                    _run_delivery_item(event=event, payload=payload),
+                )
+            else:
+                items[key] = _run_delivery_item(event=event, payload=payload)
             continue
 
         if etype == PLAN_APPROVAL_REQUESTED:
@@ -210,7 +228,11 @@ def build_operator_inbox(
     )
     noise_pending = sum(
         1 for item in ordered
-        if item.get("status") == "pending" and item.get("actionability") != "human_required"
+        if item.get("status") == "pending" and item.get("actionability") == "automation_owned"
+    )
+    notification_pending = sum(
+        1 for item in ordered
+        if item.get("status") == "pending" and item.get("actionability") == "informational"
     )
     return {
         "schema_version": OPERATOR_INBOX_SCHEMA_VERSION,
@@ -220,9 +242,11 @@ def build_operator_inbox(
             "pending": len(pending),
             "action_required_pending": action_required_pending,
             "noise_pending": noise_pending,
+            "notification_pending": notification_pending,
             "plan_approvals": sum(1 for item in ordered if item.get("kind") == "plan_approval"),
             "attention": sum(1 for item in ordered if item.get("kind") == "runtime_attention"),
             "human_decisions": sum(1 for item in ordered if item.get("kind") == "human_decision"),
+            "run_deliveries": sum(1 for item in ordered if item.get("kind") == "run_delivery"),
             "suppressed_acknowledged": suppressed_acknowledged + len(hidden),
             "unread": sum(1 for item in ordered if item.get("unread")),
         },
@@ -502,6 +526,47 @@ def _generic_approval_item(
             {"action": str(payload.get("approve_action") or ""), "label": "Approve", "requires_token": True},
             {"action": str(payload.get("reject_action") or ""), "label": "Reject", "requires_token": True},
         ],
+    }
+
+
+def _run_delivery_item(
+    *,
+    event: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    run_id = str(payload.get("run_id") or "")
+    message_id = str(payload.get("message_id") or _event_id(event))
+    return {
+        "id": f"run-delivery:{message_id}",
+        "kind": "run_delivery",
+        "status": "pending",
+        "title": str(payload.get("title") or "Run delivery"),
+        "summary": str(payload.get("summary") or run_id),
+        "created_event_id": _event_id(event),
+        "created_ts": _event_ts(event),
+        "resolved_event_id": "",
+        "resolved_ts": "",
+        "source_role": _source_role(event, payload),
+        "source_actor": _actor(event),
+        "message_id": message_id,
+        "run_id": run_id,
+        "goal_id": str(payload.get("goal_id") or ""),
+        "terminal_status": str(payload.get("terminal_status") or ""),
+        "task_counts": dict(payload.get("task_counts") or {}),
+        "claim_counts": dict(payload.get("claim_counts") or {}),
+        "gap_count": _int_or_none(payload.get("gap_count")) or 0,
+        "next_action": str(payload.get("next_action") or ""),
+        "refs": {
+            "dossier_ref": str(payload.get("dossier_ref") or ""),
+            "dossier_markdown_ref": str(
+                payload.get("dossier_markdown_ref") or ""
+            ),
+            "completion_receipt_ref": str(
+                payload.get("completion_receipt_ref") or ""
+            ),
+        },
+        "deep_link": str(payload.get("web_deep_link") or ""),
+        "actions": [],
     }
 
 

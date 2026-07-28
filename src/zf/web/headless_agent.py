@@ -824,11 +824,21 @@ class KanbanHeadlessAgent:
         permission_profile: str = "read_only",
     ) -> HeadlessTurnResult:
         backend = canonical_headless_backend(backend)
+        permission_profile = normalize_permission_profile(permission_profile)
         if not backend or backend not in self.backends:
             return _backend_failure(backend or "unknown", "", "unsupported headless backend")
         adapter = self.backends[backend]
         if not adapter.available():
             return _backend_failure(backend, "", f"{backend} command is unavailable")
+        if (
+            permission_profile == "isolated_writer"
+            and not (self.project_root / ".git").is_file()
+        ):
+            return _backend_failure(
+                backend,
+                "",
+                "isolated_writer requires the selected project root to be a Git linked worktree",
+            )
 
         thread = self.store.load(scope=scope, task_id=task_id, thread_key=thread_key)
         thread_id = str(thread["thread_id"])
@@ -894,7 +904,7 @@ class KanbanHeadlessAgent:
             result = adapter.run_turn(
                 prompt=prompt,
                 cwd=self.project_root,
-                system_prompt=self._system_prompt(),
+                system_prompt=self._system_prompt(permission_profile),
                 thread_id=thread_id,
                 provider_session_id=provider_session_id,
                 on_session_id=pin,
@@ -912,7 +922,7 @@ class KanbanHeadlessAgent:
                 retry = adapter.run_turn(
                     prompt=prompt,
                     cwd=self.project_root,
-                    system_prompt=self._system_prompt(),
+                    system_prompt=self._system_prompt(permission_profile),
                     thread_id=thread_id,
                     provider_session_id="",
                     on_session_id=pin,
@@ -940,10 +950,51 @@ class KanbanHeadlessAgent:
             self.store.record_turn(thread, result=result, workdir=str(self.project_root))
             return result
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, permission_profile: str = "read_only") -> str:
+        profile = normalize_permission_profile(permission_profile)
+        execution_contract = {
+            "read_only": (
+                "This turn is read-only. Inspect and explain, but do not edit files "
+                "or run commands that mutate the workspace."
+            ),
+            "operator": (
+                "This turn is an operator turn. You may inspect the project and "
+                "propose controlled collaboration/runtime actions, but do not edit "
+                "project source files."
+            ),
+            "artifact_writer": (
+                "You may write only the artifact paths permitted by the supplied "
+                "write policy."
+            ),
+            "project_writer": (
+                "You may write only the project documentation, skill, task, and "
+                "backlog paths permitted by the supplied write policy."
+            ),
+            "workspace_writer": (
+                "You are authorized to implement code and run verification in the "
+                "current project workspace. Do not commit, push, merge, or rewrite "
+                "Git history unless the user explicitly asks through an authorized "
+                "higher-permission turn."
+            ),
+            "isolated_writer": (
+                "You are authorized to implement code and run verification only in "
+                "the current isolated worktree. Do not modify another checkout, "
+                "push, merge, or rewrite Git history."
+            ),
+            "dangerous_full": (
+                "The operator explicitly authorized full project shell and Git "
+                "access for this turn. Follow the request directly while preserving "
+                "ZaoFu state ownership and repository safety rules."
+            ),
+        }[profile]
         return (
             "You are the ZaoFu Kanban Agent. You explain runtime projections and "
-            "propose controlled actions, but you never mutate .zf truth directly. "
+            "can perform normal project development when the active permission "
+            f"profile allows it. Active permission profile: {profile}. "
+            f"{execution_contract} "
+            "Never mutate .zf truth, events.jsonl, kanban.json, feature_list.json, "
+            "session state, or other Kernel-owned canonical state directly; request "
+            "a sanctioned CLI or controlled action for those effects. "
             "Read-only requests such as introduce yourself, explain, analyze, debug, "
             "diagnose, inspect, review a task, or ask why something happened must be "
             "answered without action_proposal JSON. Do not include example "
@@ -954,12 +1005,19 @@ class KanbanHeadlessAgent:
             "an action, include a compact JSON "
             "object with action_proposal: {action, payload, reason}. For product "
             "ideas, prefer action=idea-to-product with payload.objective. For "
-            "workflow yaml changes, provider dev chat, or runtime restart/stop, "
-            "propose workflow-config-*, provider-dev-chat-*, or runtime-* only as "
-            "owner-approved/proposal-only actions. For creating work, prefer "
+            "workflow yaml changes or runtime restart/stop, propose "
+            "workflow-config-* or runtime-* only as owner-approved/proposal-only "
+            "actions. For creating work, prefer "
             "action=create-task with payload.title and optional "
             "payload.contract={behavior,verification,acceptance}; the operator must "
-            "confirm before the action runs. Contract discipline "
+            "confirm before the action runs. For an explicit collaboration-channel "
+            "request, propose channel-create-from-template with payload.template_id; "
+            "for a channel discussion, propose channel-discussion-start with "
+            "payload.channel_id and payload.objective; for the fixed research "
+            "fanout, propose research-start with payload.task_id and payload.topic; "
+            "for a configured workflow, propose workflow-invoke with payload.task_id "
+            "and payload.pattern_id. Never report these effects as completed before "
+            "the controlled action is approved. Contract discipline "
             "(ZF-E2E-RACING-P2 2026-07-11: a structured verification of bare "
             "'npm test' failed from the repo root and burned four rework "
             "rounds): contract.verification is machine-executed from the "
@@ -1626,7 +1684,7 @@ class _CodexRpcClient:
         return _codex_decision_for_method(method, allow=allow)
 
     def _approval_allowed(self, method: str, params: object) -> bool:
-        if self.permission_profile == "read_only":
+        if self.permission_profile in {"read_only", "operator"}:
             return False
         if self.permission_profile == "dangerous_full":
             return True
@@ -1643,6 +1701,10 @@ class _CodexRpcClient:
                 cwd=self.cwd,
                 write_policy=self.write_policy,
                 allow_empty=False,
+            )
+        if self.permission_profile in {"workspace_writer", "isolated_writer"}:
+            return method == "execCommandApproval" or method.endswith(
+                "item/commandExecution/requestApproval"
             )
         return False
 

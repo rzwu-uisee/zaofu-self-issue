@@ -76,6 +76,36 @@ def test_plan_admission_failure_does_not_become_semantic_source_repair_signal(
     assert detect_semantic_flow_failures([event], state_dir=tmp_path / ".zf") == []
 
 
+def test_shadow_plan_package_rejection_is_observation_only(tmp_path: Path) -> None:
+    shadow = ZfEvent(
+        type="plan.artifact_package.rejected",
+        id="evt-shadow-package",
+        payload={
+            "workflow_run_id": "run-shadow",
+            "mode": "shadow",
+            "reason": "draft matrix is not ready",
+        },
+    )
+    blocking = ZfEvent(
+        type="plan.artifact_package.rejected",
+        id="evt-blocking-package",
+        payload={
+            "workflow_run_id": "run-blocking",
+            "mode": "blocking",
+            "reason": "current package is invalid",
+        },
+    )
+
+    assert detect_semantic_flow_failures(
+        [shadow],
+        state_dir=tmp_path / ".zf",
+    ) == []
+    assert len(detect_semantic_flow_failures(
+        [blocking],
+        state_dir=tmp_path / ".zf",
+    )) == 1
+
+
 def test_fanout_pending_without_lifecycle_becomes_signal(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     log = EventLog(state_dir / "events.jsonl")

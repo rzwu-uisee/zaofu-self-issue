@@ -114,6 +114,7 @@ def build_plan_artifact_package(
     required_ports: Iterable[str] = (),
     request_id: str = "",
     package_slot: str = PLAN_ARTIFACT_PACKAGE_SLOT,
+    package_mode: str = "",
     supersedes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_produced = normalize_plan_ports(produced)
@@ -159,6 +160,13 @@ def build_plan_artifact_package(
         "produced": normalized_produced,
         "inherited": normalized_inherited,
     }
+    normalized_mode = str(package_mode or "").strip().lower()
+    if normalized_mode:
+        if normalized_mode not in PLAN_ARTIFACT_PACKAGE_MODES:
+            raise PlanArtifactPackageError(
+                f"unsupported artifact package mode: {normalized_mode}"
+            )
+        body["artifact_package_mode"] = normalized_mode
     if request_id:
         body["request_id"] = request_id
     prior = supersedes or {}
@@ -187,6 +195,11 @@ def validate_plan_artifact_package_shape(package: Mapping[str, Any]) -> None:
     if present:
         raise PlanArtifactPackageError(
             "mutable or self-derived package fields are forbidden: " + ", ".join(present)
+        )
+    package_mode = str(package.get("artifact_package_mode") or "").strip()
+    if package_mode and package_mode not in PLAN_ARTIFACT_PACKAGE_MODES:
+        raise PlanArtifactPackageError(
+            f"unsupported artifact package mode: {package_mode}"
         )
     for key in (
         "workflow_run_id",
@@ -474,6 +487,7 @@ def prepare_plan_artifact_package(
         produced=explicit_ports.values(),
         inherited=inherited,
         required_ports=required_ports,
+        package_mode=mode,
         supersedes=previous,
     )
     descriptor = write_plan_artifact_package(
@@ -510,6 +524,9 @@ def package_event_payload(
         "package_digest": str(descriptor.get("package_digest") or descriptor.get("sha256") or ""),
         "run_contract_ref": str(package.get("run_contract_ref") or ""),
         "run_contract_digest": str(package.get("run_contract_digest") or ""),
+        "artifact_package_mode": str(
+            package.get("artifact_package_mode") or ""
+        ),
         "supersedes_package_ref": str(package.get("supersedes_package_ref") or ""),
         "supersedes_package_digest": str(package.get("supersedes_package_digest") or ""),
     }
@@ -569,13 +586,16 @@ def admit_plan_artifact_package_for_payload(
                 "sha256": current_before["package_digest"],
             },
         )
+        current_mode = str(
+            current_body.get("artifact_package_mode") or "shadow"
+        )
         current_ports = {
             str(port.get("logical_name") or ""): port
             for port in [*current_body["produced"], *current_body["inherited"]]
         }
         claim_port = current_ports.get("goal_claim_set") or {}
         return {
-            "artifact_package_mode": mode,
+            "artifact_package_mode": current_mode,
             "artifact_package_status": "admitted",
             "plan_artifact_package_id": str(current_before.get("package_id") or ""),
             "plan_artifact_package_ref": str(current_before.get("package_ref") or ""),

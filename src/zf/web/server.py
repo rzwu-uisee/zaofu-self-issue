@@ -92,6 +92,7 @@ from zf.autoresearch.projection import project_autoresearch_state
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.channel_contracts import (
     CHANNEL_DISCUSSION_MODES,
+    normalize_permission_profile,
     validate_channel_member_contract,
 )
 from zf.runtime.agent_live import project_agent_live
@@ -119,7 +120,7 @@ from zf.runtime.project_spine_review import project_spine_review_insight
 from zf.runtime.workflow_spine_projection import read_spine_explain
 from zf.runtime.agent_session_stream import AgentSessionIdentity, AgentSessionStreamEmitter
 from zf.runtime.live_delta_bus import live_delta_bus_for_writer
-from zf.runtime.provider_permissions import emit_provider_permission_snapshot
+from zf.runtime.provider_permissions import KANBAN_AGENT_PERMISSION_PROFILES, emit_provider_permission_snapshot
 from zf.core.workspace import (
     ProjectInitializer,
     ProjectResolver,
@@ -140,17 +141,16 @@ from zf.web.operator_contract import (
     kanban_agent_shared_context,
     kanban_agent_status_model,
 )
-from zf.web.headless_agent import HeadlessMessage, KanbanHeadlessAgent, canonical_headless_backend
+from zf.web.headless_agent import HeadlessMessage, HeadlessThreadStore, KanbanHeadlessAgent, canonical_headless_backend
 from zf.web.proposal_extraction import (
     extract_action_proposal,
     json_candidates as proposal_json_candidates,
     normalize_action_proposal,
 )
-from zf.web.agent_session_runtime import (
-    begin_agent_session_run,
-    cancel_agent_session_run,
-    run_key,
-)
+from zf.web.agent_session_runtime import begin_agent_session_run, run_key
+from zf.web.provider_dev_chat import handle_agent_session_cancel, handle_provider_dev_chat
+from zf.web.headless_recovery import reconcile_kanban_startup
+from zf.web.collaboration_action_validation import validate_collaboration_action_payload
 from zf.web.operator_session import OperatorSessionManager
 from zf.web.perf import (
     record_timing,
@@ -192,6 +192,7 @@ from zf.web.projections.common import (  # noqa: F401
     _display_path,
     _canonical_operator_backend,
     _action_payload,
+    _action_request_identity,
     _payload_hash,
     _message_allows_create_task_proposal,
     _message_allows_idea_to_product_proposal,
@@ -488,6 +489,11 @@ _ACTION_ALIASES = {
     "channel-create",
     "channel.create",
     "channel-new",
+    "channel-create-from-template",
+    "channel.create_from_template",
+    "channel.template.create",
+    "channel-discussion-start",
+    "channel.discussion.start",
     "channel-post-message",
     "channel-invite-member",
     "channel.add_member",
@@ -517,6 +523,12 @@ _ACTION_ALIASES = {
     "channel-owner-report-request",
     "workflow-invoke",
     "workflow.invoke",
+    "workflow.start",
+    "research-start",
+    "research.start",
+    "research.fanout.start",
+    "research-adopt",
+    "research.adopt",
     "workflow-request",
     "workflow.request",
     "workflow-submit",
@@ -619,8 +631,6 @@ _WEB_SESSIONS: dict[str, float] = {}
 _WEB_UNLOCK_FAILURES: dict[str, list[float]] = {}
 
 
-
-
 def create_app(
     state_dir: Path,
     config: ZfConfig | None = None,
@@ -636,6 +646,7 @@ def create_app(
     app = FastAPI(title="zaofu dashboard", version="0.1.0")
     state_dir = Path(state_dir).resolve()
     project_root = _resolve_project_root_for_state(state_dir, project_root)
+    app.state.kanban_agent_recovery = reconcile_kanban_startup(state_dir, config=config)
     default_project_id = (
         _default_project_id(config=config, project_root=project_root)
         if default_project_enabled else ""
@@ -656,6 +667,13 @@ def create_app(
         state_dir=state_dir,
         project_root=project_root,
         config=config,
+    ))
+    from zf.web.run_dossier_routes import build_run_dossier_router
+
+    app.include_router(build_run_dossier_router(
+        default_project_id=default_project_id, default_state_dir=state_dir,
+        default_config=config, default_project_root=project_root,
+        resolve_project=_resolve_api_project,
     ))
 
     react_dist = _react_dist_dir()
@@ -5343,6 +5361,8 @@ def _operator_agent_surface(
         "configured_backend": configured_backend or "",
         "default_backend": default_backend,
         "backends": backends,
+        "permission_profile": "read_only",
+        "permission_profiles": list(KANBAN_AGENT_PERMISSION_PROFILES),
         "descriptor": descriptor,
         "profile": "operator",
         "terminal_backed": bool(session.get("terminal_backed")) or backend in {
@@ -5629,12 +5649,9 @@ def _web_action(
         }
 
     canonical_action = _canonical_action(action_name)
-    request_payload = _action_payload(payload)
-    idempotency_key = str(
-        x_idempotency_key
-        or payload.get("idempotency_key")
-        or payload.get("request_id")
-        or ""
+    request_payload, idempotency_key = _action_request_identity(
+        payload,
+        idempotency_key=x_idempotency_key,
     )
     payload_hash = _payload_hash(request_payload)
     if idempotency_key:
@@ -5930,8 +5947,35 @@ def _web_action(
         )
         return response
 
+    if canonical_action in {
+        "provider-dev-chat-start",
+        "provider-dev-chat-send",
+        "provider-dev-chat-stop",
+    }:
+        response = handle_provider_dev_chat(
+            state_dir,
+            writer,
+            requested=requested,
+            action=canonical_action,
+            requested_action=action_name,
+            payload=request_payload,
+            project_root=project_root,
+            project_id=project_id or "",
+            config=config,
+            chat_handler=_handle_chat_orchestrator,
+            backend_available=_operator_backend_command_available,
+        )
+        _complete_idempotency_key(
+            state_dir,
+            key=idempotency_key,
+            action=canonical_action,
+            payload_hash=payload_hash,
+            response=response,
+        )
+        return response
+
     if canonical_action == "agent-session-cancel":
-        response = _handle_agent_session_cancel(
+        response = handle_agent_session_cancel(
             writer,
             requested=requested,
             action=canonical_action,
@@ -6009,6 +6053,8 @@ def _web_action(
 
     if canonical_action in {
         "channel-create",
+        "channel-create-from-template",
+        "channel-discussion-start",
         "channel-post-message",
         "channel-invite-member",
         "channel-update-member-permission",
@@ -6023,6 +6069,8 @@ def _web_action(
         "channel-discussion-mode",
         "channel-owner-report",
         "workflow-invoke",
+        "research-start",
+        "research-adopt",
     }:
         response = ControlledActionService(
             state_dir,
@@ -6390,6 +6438,12 @@ def _validate_action_payload(
     *,
     config: ZfConfig | None = None,
 ) -> str:
+    collaboration_error = validate_collaboration_action_payload(
+        action,
+        payload,
+    )
+    if collaboration_error:
+        return collaboration_error
     if action in {
         "dispatch-task",
         "request-verify",
@@ -6937,6 +6991,7 @@ def _handle_chat_orchestrator(
     message = str(payload.get("message") or "").strip()
     task_id = _task_id_from_payload(payload)
     headless_backend = canonical_headless_backend(str(payload.get("backend") or ""))
+    permission_profile = normalize_permission_profile(payload.get("permission_profile"))
     user_message = writer.emit(
         "user.message",
         actor="web",
@@ -6948,6 +7003,7 @@ def _handle_chat_orchestrator(
             "message": message,
             "runtime_delivery": "headless" if headless_backend else "queued_no_runtime",
             "backend": headless_backend or str(payload.get("backend") or ""),
+            "permission_profile": permission_profile,
             "project_id": str(payload.get("project_id") or ""),
             "conversation_id": str(payload.get("conversation_id") or ""),
             "thread_key": str(payload.get("thread_key") or ""),
@@ -7041,93 +7097,6 @@ def _handle_chat_orchestrator(
     return response
 
 
-def _handle_agent_session_cancel(
-    writer: EventWriter,
-    *,
-    requested: ZfEvent,
-    action: str,
-    requested_action: str,
-    payload: dict,
-    project_id: str,
-) -> dict:
-    task_id = _task_id_from_payload(payload)
-    run_id = str(payload.get("run_id") or payload.get("turn_id") or "").strip()
-    thread_id = str(payload.get("thread_id") or payload.get("thread_key") or "").strip()
-    cancel_result = cancel_agent_session_run(run_key(
-        run_id=run_id,
-        thread_id=thread_id,
-        project_id=project_id,
-        conversation_id=str(payload.get("conversation_id") or ""),
-    ))
-    event = writer.emit(
-        "agent.session.run.cancelled",
-        actor="web",
-        task_id=task_id,
-        causation_id=requested.id,
-        correlation_id=str(payload.get("conversation_id") or project_id or requested.correlation_id),
-        payload={
-            "project_id": project_id,
-            "conversation_id": str(payload.get("conversation_id") or ""),
-            "thread_id": thread_id,
-            "run_id": run_id,
-            "provider": str(payload.get("backend") or payload.get("provider") or ""),
-            "reason": str(payload.get("reason") or "operator cancelled agent session run"),
-            "status": cancel_result.status,
-            "interrupt_supported": cancel_result.interrupt_supported,
-            "process_found": cancel_result.process_found,
-            "process_terminated": cancel_result.process_terminated,
-            "pid": cancel_result.pid or "",
-            "source": "web",
-        },
-    )
-    writer.emit(
-        "runtime.action.completed",
-        actor="web",
-        task_id=task_id,
-        causation_id=event.id,
-        correlation_id=event.correlation_id,
-        payload={
-            "action": action,
-            "requested_action": requested_action,
-            "status": "cancel_requested",
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "interrupt_status": cancel_result.status,
-            "process_terminated": cancel_result.process_terminated,
-        },
-    )
-    writer.emit(
-        "web.action.completed",
-        actor="web",
-        task_id=task_id,
-        causation_id=event.id,
-        correlation_id=event.correlation_id,
-        payload={
-            "action": action,
-            "requested_action": requested_action,
-            "status": "cancel_requested",
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "interrupt_status": cancel_result.status,
-            "process_terminated": cancel_result.process_terminated,
-        },
-    )
-    return {
-        "ok": True,
-        "status": cancel_result.status,
-        "action": action,
-        "requested_action": requested_action,
-        "reason": cancel_result.reason or "agent session cancel request recorded; provider interrupt is best-effort",
-        "event_id": event.id,
-        "run_id": run_id,
-        "thread_id": thread_id,
-        "interrupt_supported": cancel_result.interrupt_supported,
-        "process_found": cancel_result.process_found,
-        "process_terminated": cancel_result.process_terminated,
-        "pid": cancel_result.pid,
-    }
-
-
 def _handle_headless_kanban_agent_chat(
     state_dir: Path,
     writer: EventWriter,
@@ -7144,6 +7113,7 @@ def _handle_headless_kanban_agent_chat(
 ) -> dict:
     task_id = _task_id_from_payload(payload)
     thread_key = str(payload.get("thread_key") or "").strip()
+    permission_profile = normalize_permission_profile(payload.get("permission_profile"))
     turn_id = str(payload.get("turn_id") or uuid.uuid4())
     project_id = str(payload.get("project_id") or "")
     conversation_id = str(payload.get("conversation_id") or "")
@@ -7169,6 +7139,7 @@ def _handle_headless_kanban_agent_chat(
             "project_id": project_id,
             "conversation_id": conversation_id,
             "backend": backend,
+            "permission_profile": permission_profile,
             "scope": str(payload.get("scope") or "project"),
             "message_event_id": user_message.id,
             "requested_action": requested_action,
@@ -7186,6 +7157,7 @@ def _handle_headless_kanban_agent_chat(
             "project_id": project_id,
             "conversation_id": conversation_id,
             "backend": backend,
+            "permission_profile": permission_profile,
             "message_event_id": user_message.id,
         },
     )
@@ -7208,6 +7180,8 @@ def _handle_headless_kanban_agent_chat(
         "project_id": project_id,
         "conversation_id": conversation_id,
         "thinking_level": thinking_level,
+        "permission_profile": permission_profile,
+        "config": config,
     }
     if _headless_chat_sync(payload):
         return _run_headless_kanban_agent_turn(**runner_kwargs)
@@ -7239,6 +7213,7 @@ def _handle_headless_kanban_agent_chat(
         "thread_key": thread_key,
         "trace_id": user_message.correlation_id,
         "backend": backend,
+        "permission_profile": permission_profile,
     }
 
 
@@ -7405,6 +7380,8 @@ def _run_headless_kanban_agent_turn(
     project_id: str,
     conversation_id: str,
     thinking_level: str = "",
+    permission_profile: str = "read_only",
+    config: ZfConfig | None = None,
 ) -> dict:
     runtime_snapshot_ref = ""
     try:
@@ -7426,6 +7403,15 @@ def _run_headless_kanban_agent_turn(
             backend=backend,
             publishes=[],
         )
+        thread_store = HeadlessThreadStore(
+            state_dir=state_dir,
+            project_root=project_root,
+        )
+        stored_thread_id = thread_store.thread_id(
+            scope=str(payload.get("scope") or "project"),
+            task_id=task_id or "",
+            thread_key=thread_key,
+        )
         snapshot = build_runtime_snapshot(RuntimeSnapshotInput(
             state_dir=state_dir,
             project_root=project_root,
@@ -7438,10 +7424,7 @@ def _run_headless_kanban_agent_turn(
             trace_id=user_message.correlation_id or "",
             refs={
                 "headless_thread_ref": (
-                    state_dir
-                    / "operator"
-                    / "threads"
-                    / f"{run_thread_id or thread_key or 'main'}.json"
+                    thread_store.path_for(stored_thread_id)
                 ),
             },
             output_contract={
@@ -7544,6 +7527,7 @@ def _run_headless_kanban_agent_turn(
             },
             on_message=delta_emitter.emit,
             thinking_level=thinking_level,
+            permission_profile=permission_profile,
         )
         delta_emitter.flush()
     except Exception as exc:
@@ -7617,6 +7601,7 @@ def _run_headless_kanban_agent_turn(
             "run_id": turn_id,
             "causation_id": user_message.id,
         },
+        config=config,
     )
     reply = {
         "source": "kanban-agent.headless",
@@ -7634,6 +7619,7 @@ def _run_headless_kanban_agent_turn(
         "usage": result.usage,
         "status": result.status,
         "error": result.error,
+        "permission_profile": permission_profile,
     }
     try:
         from zf.runtime.agent_session_output import apply_agent_output_contract
@@ -7658,7 +7644,15 @@ def _run_headless_kanban_agent_turn(
         )
     except Exception:
         pass
+    proposal_event: ZfEvent | None = None
     if action_proposal is not None:
+        proposal_event = ZfEvent(
+            type="kanban.agent.action.proposed",
+            actor="web",
+            task_id=task_id,
+            correlation_id=user_message.correlation_id,
+        )
+        action_proposal["proposal_event_id"] = proposal_event.id
         reply["action_proposal"] = action_proposal
     reply_event = writer.emit(
         "kanban.agent.reply",
@@ -7668,22 +7662,17 @@ def _run_headless_kanban_agent_turn(
         correlation_id=user_message.correlation_id,
         payload=redact_obj(reply),
     )
-    if action_proposal is not None:
-        writer.emit(
-            "kanban.agent.action.proposed",
-            actor="web",
-            task_id=task_id,
-            causation_id=reply_event.id,
-            correlation_id=user_message.correlation_id,
-            payload={
-                "turn_id": turn_id,
-                "thread_key": thread_key,
-                "project_id": project_id,
-                "conversation_id": conversation_id,
-                "reply_event_id": reply_event.id,
-                "proposal": redact_obj(action_proposal),
-            },
-        )
+    if proposal_event is not None and action_proposal is not None:
+        proposal_event.causation_id = reply_event.id
+        proposal_event.payload = {
+            "turn_id": turn_id,
+            "thread_key": thread_key,
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "reply_event_id": reply_event.id,
+            "proposal": redact_obj(action_proposal),
+        }
+        writer.append(proposal_event)
     if not result.ok:
         agent_stream.fail(
             reason=result.error or result.status,
@@ -7715,6 +7704,7 @@ def _run_headless_kanban_agent_turn(
                 "project_id": project_id,
                 "conversation_id": conversation_id,
                 "backend": backend,
+                "permission_profile": permission_profile,
                 "thread_id": result.thread_id,
                 "provider_session_id": result.provider_session_id,
                 "status": result.status,
@@ -7797,6 +7787,7 @@ def _run_headless_kanban_agent_turn(
             "project_id": project_id,
             "conversation_id": conversation_id,
             "backend": backend,
+            "permission_profile": permission_profile,
             "thread_id": result.thread_id,
             "provider_session_id": result.provider_session_id,
             "status": result.status,
@@ -7822,6 +7813,7 @@ def _run_headless_kanban_agent_turn(
             "project_id": project_id,
             "conversation_id": conversation_id,
             "backend": backend,
+            "permission_profile": permission_profile,
             "thread_id": result.thread_id,
             "provider_session_id": result.provider_session_id,
             "status": result.status,
@@ -7840,6 +7832,7 @@ def _run_headless_kanban_agent_turn(
             "requested_action": requested_action,
             "status": "completed",
             "backend": backend,
+            "permission_profile": permission_profile,
             "message_event_id": user_message.id,
             "reply_event_id": reply_event.id,
         },
@@ -7870,6 +7863,7 @@ def _run_headless_kanban_agent_turn(
         "turn_id": turn_id,
         "thread_key": thread_key,
         "trace_id": user_message.correlation_id,
+        "permission_profile": permission_profile,
         "reply": redact_obj(reply),
     }
 
@@ -7897,12 +7891,17 @@ def _headless_action_proposal(
     *,
     user_message: str = "",
     proposal_context: dict[str, Any] | None = None,
+    config: ZfConfig | None = None,
 ) -> dict[str, Any] | None:
     return extract_action_proposal(
         answer,
         user_message=user_message,
         proposal_context=proposal_context,
-        validate_payload=_validate_action_payload,
+        validate_payload=lambda action, payload: _validate_action_payload(
+            action,
+            payload,
+            config=config,
+        ),
     )
 
 
@@ -7915,12 +7914,17 @@ def _normalize_headless_action_proposal(
     *,
     user_message: str = "",
     proposal_context: dict[str, Any] | None = None,
+    config: ZfConfig | None = None,
 ) -> dict[str, Any] | None:
     return normalize_action_proposal(
         decoded,
         user_message=user_message,
         proposal_context=proposal_context,
-        validate_payload=_validate_action_payload,
+        validate_payload=lambda action, payload: _validate_action_payload(
+            action,
+            payload,
+            config=config,
+        ),
     )
 
 

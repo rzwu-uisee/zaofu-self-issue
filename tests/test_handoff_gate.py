@@ -58,6 +58,27 @@ def test_external_trigger_without_producer_lint(tmp_path):
     assert diags[0]["kind"] == "external_trigger_without_producer"
 
 
+def test_controlled_workflow_invoke_external_trigger_has_producer():
+    from types import SimpleNamespace
+
+    from zf.core.workflow.inspection import _external_trigger_producer_diagnostics
+
+    config = SimpleNamespace(workflow=SimpleNamespace(
+        dag=SimpleNamespace(external_triggers=["workflow.invoke.requested"]),
+        stages=[SimpleNamespace(
+            trigger="workflow.invoke.requested",
+            topology="fanout_writer_scoped",
+            aggregate=SimpleNamespace(
+                success_event="candidate.ready",
+                failure_event="integration.failed",
+            ),
+        )],
+        pipelines=[],
+    ))
+
+    assert _external_trigger_producer_diagnostics(config) == []
+
+
 @pytest.mark.parametrize("path", sorted(glob.glob("examples/prod/*-claude.yaml")))
 def test_prod_yaml_external_triggers_have_producers(path, monkeypatch):
     # task_map.ready in refactor is kernel-produced (the bridge) → allowlisted;

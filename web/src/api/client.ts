@@ -31,6 +31,7 @@ import type {
   RecentEvent,
   RepairActionProjection,
   RoleSummary,
+  GoalDossier,
   RunDetail,
   RuntimeResourceProjection,
   RuntimeSummary,
@@ -558,6 +559,12 @@ export function getEventsPage(params: URLSearchParams, projectId?: string): Prom
 
 export interface PendingKanbanProposal {
   proposal_event_id: string;
+  proposal_event_ids?: string[];
+  proposal_id: string;
+  proposal_digest: string;
+  revision: number;
+  expires_at?: string;
+  source?: string;
   ts: string;
   action: string;
   requested_action: string;
@@ -632,6 +639,12 @@ export function getFanoutDetail(fanoutId: string, projectId?: string): Promise<F
 
 export function getRunDetail(runId: string, projectId?: string): Promise<RunDetail> {
   return requestJson<RunDetail>(`${projectPrefix(projectId)}/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getRunDossier(runId: string, projectId?: string): Promise<GoalDossier> {
+  return requestJson<GoalDossier>(
+    `${projectPrefix(projectId)}/runs/${encodeURIComponent(runId)}/dossier`,
+  );
 }
 
 export function getWorkdirs(projectId?: string): Promise<WorkdirSummary[]> {

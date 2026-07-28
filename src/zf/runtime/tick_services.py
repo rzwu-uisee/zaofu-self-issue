@@ -48,10 +48,18 @@ _RUN_MANAGER_NOOP_INPUT_EVENTS = frozenset({
     "runtime.snapshot.recorded",
     "failure.candidates.materialized",
     "failure.closeout.materialized",
+    "autoresearch.worktree.cleaned",
+    "autoresearch.worktree.retained",
     "owner.visible_message.delivery_attempted",
     "owner.visible_message.delivered",
     "owner.visible_message.suppressed",
     "owner.visible_message.failed",
+    "workflow.operation.reserved",
+    "workflow.operation.superseded",
+    "workflow.fragment.admitted",
+    "workflow.fragment.rejected",
+    "workflow.fragment.superseded",
+    "workflow.fragment.cancelled",
 })
 _RUN_MANAGER_REACTIVE_SELF_EVENTS = frozenset({
     "run.manager.agent.recommendation",
@@ -118,6 +126,7 @@ class TickServiceResult:
     run_manager_resident_restart: bool = False
     run_manager_card_delivery: bool = False
     owner_visible_delivery: bool = False
+    goal_dossier_delivery: bool = False
     stale_supervisor_projection: bool = False
     failure_candidates_materialized: int = 0
     failure_closeout_materialized: int = 0
@@ -185,6 +194,34 @@ def run_standard_tick_services(
     if (state_dir / "shutdown-requested").exists():
         return TickServiceResult()
 
+    goal_dossier_delivery = False
+    early_owner_visible_delivery = False
+    try:
+        from zf.runtime.goal_dossier_delivery import (
+            materialize_terminal_goal_deliveries,
+        )
+        from zf.core.workspace.registry import stable_project_id
+
+        dossier_result = materialize_terminal_goal_deliveries(
+            state_dir=state_dir,
+            event_log=event_log,
+            writer=event_writer,
+            project_id=stable_project_id(
+                name=str(
+                    getattr(getattr(config, "project", None), "name", "") or ""
+                ),
+                root=project_root,
+            ),
+        )
+        goal_dossier_delivery = dossier_result.changed
+        if dossier_result.considered:
+            early_owner_visible_delivery = _deliver_owner_visible(
+                state_dir, config,
+            )
+    except Exception:
+        # A read-side closeout must never change an admitted run terminal.
+        goal_dossier_delivery = False
+
     # U3/G3(灰度,goal.enabled 默认关):终局 escalate 未获处置时全体
     # tick 服务静默——escalate = 干净地等人,不是每 5s 空烧(r6.1 4h
     # 6.4M 实弹)。唤醒(操作员动作/新进展)后自动恢复。
@@ -199,7 +236,10 @@ def run_standard_tick_services(
         )
         mark_quiescent_transition(event_writer, _q_events, status=_q_status)
         if _q_status.quiescent:
-            return TickServiceResult()
+            return TickServiceResult(
+                goal_dossier_delivery=goal_dossier_delivery,
+                owner_visible_delivery=early_owner_visible_delivery,
+            )
     except Exception:
         pass
 
@@ -214,7 +254,7 @@ def run_standard_tick_services(
     run_manager_watchdog = False
     run_manager_resident_restart = False
     run_manager_card_delivery = False
-    owner_visible_delivery = False
+    owner_visible_delivery = early_owner_visible_delivery
     stale_supervisor_projection = False
     failure_candidates_materialized = 0
     failure_closeout_materialized = 0
@@ -242,7 +282,10 @@ def run_standard_tick_services(
         except Exception:
             pass
         heartbeat_sweep = True
-        owner_visible_delivery = _deliver_owner_visible(state_dir, config)
+        owner_visible_delivery = (
+            _deliver_owner_visible(state_dir, config)
+            or owner_visible_delivery
+        )
 
     if now - state.last_bug_scan_at >= intervals.bug_scan_s:
         state.last_bug_scan_at = now
@@ -471,6 +514,7 @@ def run_standard_tick_services(
         run_manager_resident_restart=run_manager_resident_restart,
         run_manager_card_delivery=run_manager_card_delivery,
         owner_visible_delivery=owner_visible_delivery,
+        goal_dossier_delivery=goal_dossier_delivery,
         stale_supervisor_projection=stale_supervisor_projection,
         failure_candidates_materialized=failure_candidates_materialized,
         failure_closeout_materialized=failure_closeout_materialized,

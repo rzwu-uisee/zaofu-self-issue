@@ -40,6 +40,9 @@ from zf.integrations.feishu.gateway import (
     FeishuCommandEnvelope,
 )
 from zf.integrations.feishu.plan_approval_card import push_plan_approval_cards_once
+from zf.integrations.feishu.kanban_proposal_card import (
+    push_kanban_proposal_cards_once,
+)
 from zf.integrations.feishu.replan_approval_card import push_replan_cards_once
 from zf.integrations.feishu.run_manager_card import push_run_manager_cards_once
 from zf.integrations.feishu.stream_card import push_stream_card_once
@@ -91,6 +94,10 @@ CHANNEL_QUESTION_COMMANDS = {
     "channel-question-adopt",
     "channel-question-oos",
 }
+KANBAN_PROPOSAL_COMMANDS = {
+    "kanban-proposal-approve",
+    "kanban-proposal-dismiss",
+}
 # 2026-07-17 card-quality L3: owner-visible alert cards gain a real
 # acknowledge button (attention-ack:<attention_id>) instead of the dead
 # "回复「重试」" text prompt nothing consumed.
@@ -102,6 +109,7 @@ SIGNED_ACTION_COMMANDS = (
     | AGENT_CANCEL_COMMANDS
     | HUMAN_DECISION_COMMANDS
     | CHANNEL_QUESTION_COMMANDS
+    | KANBAN_PROPOSAL_COMMANDS
     | ATTENTION_ACK_COMMANDS
 )
 ATTENTION_COMMANDS = {"attention"}
@@ -703,6 +711,26 @@ def run_push(args: argparse.Namespace) -> int:
                     f"question-card push failed (discussion unaffected): {exc}",
                     file=sys.stderr,
                 )
+        proposal_sent = proposal_updated = 0
+        if plan_target:
+            try:
+                proposal_result = push_kanban_proposal_cards_once(
+                    context.state_dir,
+                    transport,
+                    receive_id=plan_target,
+                    receive_id_type=str(
+                        getattr(args, "receive_id_type", "chat_id") or "chat_id"
+                    ),
+                    action_secret=_action_secret,
+                    action_ttl_seconds=_action_ttl,
+                )
+                proposal_sent = len(proposal_result.get("sent", []))
+                proposal_updated = len(proposal_result.get("updated", []))
+            except Exception as exc:
+                print(
+                    f"kanban proposal card push failed (proposal unaffected): {exc}",
+                    file=sys.stderr,
+                )
         offset_store.write(new_offset)
         print(
             f"Pushed {pushed} Feishu message(s); "
@@ -716,6 +744,8 @@ def run_push(args: argparse.Namespace) -> int:
             f"run_manager_status_updated={run_manager_status_updated}; "
             f"run_manager_escalation_sent={run_manager_escalation_sent} "
             f"run_manager_escalation_updated={run_manager_escalation_updated}; "
+            f"kanban_proposal_cards_sent={proposal_sent} "
+            f"kanban_proposal_cards_updated={proposal_updated}; "
             f"offset={new_offset}"
         )
         return pushed
@@ -1259,6 +1289,13 @@ def _handle_event_data(
             envelope,
             context.state_dir,
             config=context.config,
+        )
+    if envelope.command in KANBAN_PROPOSAL_COMMANDS:
+        return _handle_kanban_proposal_result(
+            envelope,
+            context.state_dir,
+            config=context.config,
+            project_root=context.project_root,
         )
 
     if envelope.command in APPROVAL_COMMANDS:
@@ -2142,6 +2179,95 @@ def _handle_channel_question_result(
         writer=writer,
         user_id=envelope.user_id,
     )
+
+
+def _handle_kanban_proposal_result(
+    envelope: FeishuCommandEnvelope,
+    state_dir: Path,
+    *,
+    config: object | None,
+    project_root: Path,
+) -> dict:
+    """Signed proposal card callback -> the shared ControlledActionService."""
+    proposal_event_id = envelope.args[0] if envelope.args else ""
+    if not proposal_event_id:
+        return {
+            "ok": False,
+            "status": "invalid_payload",
+            "message": "missing proposal_event_id",
+        }
+    event_log = event_log_from_project(state_dir, config=config)
+    proposal_event = next(
+        (
+            event
+            for event in event_log.read_all()
+            if event.id == proposal_event_id
+            and event.type == "kanban.agent.action.proposed"
+        ),
+        None,
+    )
+    if proposal_event is None:
+        return {
+            "ok": False,
+            "status": "proposal_not_found",
+            "message": f"proposal {proposal_event_id} not found",
+        }
+    proposal_payload = (
+        proposal_event.payload
+        if isinstance(proposal_event.payload, dict)
+        else {}
+    )
+    proposal = (
+        proposal_payload.get("proposal")
+        if isinstance(proposal_payload.get("proposal"), dict)
+        else {}
+    )
+    action = str(proposal.get("action") or "")
+    payload = (
+        dict(proposal.get("payload"))
+        if isinstance(proposal.get("payload"), dict)
+        else {}
+    )
+    if envelope.command == "kanban-proposal-dismiss":
+        action = "kanban-proposal-dismiss"
+        payload = {
+            "proposal_event_id": proposal_event_id,
+            "reason": "dismissed from Feishu proposal card",
+        }
+    else:
+        payload["proposal_event_id"] = proposal_event_id
+        payload.setdefault("source", "feishu-kanban-proposal")
+    actor = f"feishu:{envelope.user_id or 'unknown'}"
+    writer = EventWriter(event_log)
+    requested = writer.emit(
+        "feishu.command.enveloped",
+        actor=actor,
+        correlation_id=proposal_event.correlation_id,
+        payload={
+            "command": envelope.command,
+            "action": action,
+            "chat_id": envelope.chat_id,
+            "user_id": envelope.user_id,
+            "message_id": envelope.message_id,
+            "idempotency_key": envelope.idempotency_key,
+            "request": payload,
+        },
+    )
+    response = ControlledActionService(
+        state_dir,
+        writer,
+        config=config,
+        project_root=project_root,
+        actor=actor,
+        source="feishu",
+        surface="feishu",
+    ).execute(
+        action=action,
+        requested_action=envelope.command,
+        payload=payload,
+        requested=requested,
+    )
+    return {**response, "message": _format_action_response(response)}
 
 
 def _handle_human_decision_result(

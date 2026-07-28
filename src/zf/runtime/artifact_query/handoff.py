@@ -9,17 +9,21 @@ from typing import Any, Mapping
 
 from zf.core.config.schema import ZfConfig
 from zf.core.task.store import TaskStore
+from zf.core.workflow.flow_metadata import flow_metadata_for
 from zf.runtime.artifact_query.service import ArtifactQueryService
 from zf.runtime.artifact_read_ledger import (
     ArtifactReadError,
     source_manifest_from_payload,
 )
+from zf.runtime.candidate_result_binding import candidate_task_source_commits
 from zf.runtime.plan_artifact_package import (
     PlanArtifactPackageError,
     hydrate_plan_artifact_package,
     reduce_plan_artifact_packages,
 )
+from zf.runtime.artifact_package_policy import effective_artifact_package_mode
 from zf.runtime.plan_artifact_ports import canonical_plan_port_name
+from zf.runtime.run_scope import events_for_run
 from zf.runtime.sidecar_refs import SidecarRefError
 from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
@@ -27,6 +31,43 @@ from zf.runtime.task_contract_snapshot import (
     hydrate_target_snapshot,
     hydrate_task_contract_snapshot,
 )
+
+HANDOFF_AUTHORITY_SCHEMA = "handoff-authority-contract.v1"
+
+
+def build_handoff_authority_contract(
+    payload: Mapping[str, Any],
+    *,
+    output_profile_id: str,
+    stage_id: str,
+    operation_type: str,
+) -> dict[str, Any]:
+    trigger = (
+        payload.get("trigger_payload")
+        if isinstance(payload.get("trigger_payload"), Mapping)
+        else {}
+    )
+    continuation_key = str(
+        payload.get("rework_of")
+        or payload.get("rework_of_attempt_id")
+        or trigger.get("rework_of")
+        or trigger.get("rework_of_attempt_id")
+        or ""
+    ).strip()
+    attempt_domain = str(payload.get("attempt_domain") or "").strip()
+    profile = str(output_profile_id or "").strip()
+    return {
+        "schema_version": HANDOFF_AUTHORITY_SCHEMA,
+        "output_profile_id": profile,
+        "stage_id": str(stage_id or ""),
+        "operation_type": str(operation_type or ""),
+        "attempt_domain": attempt_domain,
+        "continuation_key": continuation_key,
+        "requires_prior_task_ref": bool(
+            profile == "implementation" and continuation_key
+        ),
+        "requires_candidate_lineage": profile == "candidate-verify",
+    }
 
 
 class CanonicalHandoffResolver:
@@ -63,6 +104,19 @@ class CanonicalHandoffResolver:
             task_id=task_id,
         )
         profile = str(mutable.get("output_profile_id") or "")
+        authority_contract = self._authority_contract(
+            mutable,
+            profile=profile,
+        )
+        candidate_snapshot = (
+            self._validate_candidate_authority(
+                payload=mutable,
+                workflow_run_id=workflow_run_id,
+                currentness=currentness,
+            )
+            if profile == "candidate-verify"
+            else {}
+        )
         plan_port_sources = (
             self._current_plan_port_sources(
                 workflow_run_id=workflow_run_id,
@@ -79,18 +133,6 @@ class CanonicalHandoffResolver:
                 else []
             )
             mutable["artifact_refs"] = [*artifact_refs, *plan_port_sources]
-        context = self.query.context(
-            actor="zf-kernel",
-            role="kernel",
-            purpose="handoff",
-            mode="canonical",
-            limit=1,
-        )
-        self.query.catalog_list(
-            context=context,
-            task_id=task_id,
-            run_id=workflow_run_id,
-        )
         metadata = {
             **currentness,
             "source_snapshot": self._stable_source_snapshot(
@@ -99,8 +141,12 @@ class CanonicalHandoffResolver:
             ),
             "resolver": {
                 "schema_version": "canonical-handoff-resolver.v1",
-                "selection": "projection-candidate-canonical-verify",
+                "selection": "canonical-authority-matrix",
             },
+            "source_event_id": source_event_id,
+            "read_purpose": profile,
+            "handoff_authority_contract": authority_contract,
+            "candidate_snapshot": candidate_snapshot,
         }
         manifest, descriptor = source_manifest_from_payload(
             state_dir=self.state_dir,
@@ -137,7 +183,7 @@ class CanonicalHandoffResolver:
         payload: Mapping[str, Any],
         workflow_run_id: str,
         task_id: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         result = {
             "contract_revision": str(payload.get("contract_revision") or ""),
             "task_map_generation": str(payload.get("task_map_generation") or ""),
@@ -162,7 +208,27 @@ class CanonicalHandoffResolver:
             "task-verify",
             "candidate-verify",
         }
+        authority_profile = self._authority_profile(payload, profile=profile)
+        result["handoff_authority_profile"] = authority_profile
+        blocking = self._blocking_handoff(payload)
+        authority_contract = self._authority_contract(payload, profile=profile)
+        if blocking and task_bound_profile and not authority_contract:
+            raise ArtifactReadError(
+                f"{authority_profile} handoff requires an authority contract"
+            )
+        if (
+            blocking
+            and authority_profile == "implementation-initial"
+            and not result["base_commit"]
+        ):
+            raise ArtifactReadError(
+                "implementation-initial handoff requires a pinned base_commit"
+            )
         task = TaskStore(self.state_dir / "kanban.json").get(task_id) if task_id else None
+        if blocking and task_bound_profile and task is None:
+            raise ArtifactReadError(
+                f"{authority_profile} handoff requires a current canonical task"
+            )
         if task is not None:
             try:
                 current = current_task_contract_identity(task)
@@ -191,8 +257,41 @@ class CanonicalHandoffResolver:
 
         task_ref = self._task_ref_entry(task_id)
         expected_ref = str(task_ref.get("task_ref") or "")
-        self._require_match("task_ref", result["task_ref"], expected_ref)
-        result["task_ref"] = expected_ref or result["task_ref"]
+        accepted_commit = str(task_ref.get("source_commit") or "")
+        requires_prior_task_ref = bool(
+            authority_contract.get("requires_prior_task_ref")
+        )
+        if (
+            authority_profile == "implementation-rework"
+            and requires_prior_task_ref
+            and not str(authority_contract.get("continuation_key") or "")
+        ):
+            raise ArtifactReadError(
+                "implementation-rework continuation requires continuation_key"
+            )
+        if task is not None and (
+            authority_profile == "task-verify"
+            or (
+                authority_profile == "implementation-rework"
+                and requires_prior_task_ref
+            )
+        ):
+            if not expected_ref or not accepted_commit:
+                raise ArtifactReadError(
+                    f"{authority_profile} handoff requires an accepted "
+                    "TaskRef with source_commit"
+                )
+            self._require_match("task_ref", result["task_ref"], expected_ref)
+            result["task_ref"] = expected_ref
+        elif expected_ref and result["task_ref"] == expected_ref:
+            result["task_ref"] = expected_ref
+        if task is not None and authority_profile == "task-verify":
+            self._require_match(
+                "target_commit",
+                result["target_commit"],
+                accepted_commit,
+            )
+            result["target_commit"] = accepted_commit
 
         package_id = result["plan_artifact_package_id"]
         if workflow_run_id and (package_id or (task is not None and task_bound_profile)):
@@ -212,6 +311,13 @@ class CanonicalHandoffResolver:
             )
             expected_ref = str(current_package.get("package_ref") or "")
             expected_digest = str(current_package.get("package_digest") or "")
+            if blocking and task_bound_profile and not all(
+                (expected_package, expected_ref, expected_digest)
+            ):
+                raise ArtifactReadError(
+                    f"{authority_profile} handoff requires a current "
+                    "Plan Artifact Package"
+                )
             for field, incoming, current in (
                 ("plan_artifact_package_id", package_id, expected_package),
                 (
@@ -248,12 +354,181 @@ class CanonicalHandoffResolver:
             )
         return result
 
+    def _authority_contract(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        profile: str,
+    ) -> dict[str, Any]:
+        value = payload.get("handoff_authority_contract")
+        if not isinstance(value, Mapping):
+            return {}
+        contract = dict(value)
+        if str(contract.get("schema_version") or "") != HANDOFF_AUTHORITY_SCHEMA:
+            raise ArtifactReadError("unsupported handoff authority contract")
+        if str(contract.get("output_profile_id") or "") != profile:
+            raise ArtifactReadError(
+                "handoff authority output_profile_id mismatch"
+            )
+        if not isinstance(contract.get("requires_prior_task_ref"), bool):
+            raise ArtifactReadError(
+                "handoff authority requires_prior_task_ref must be boolean"
+            )
+        if not isinstance(contract.get("requires_candidate_lineage"), bool):
+            raise ArtifactReadError(
+                "handoff authority requires_candidate_lineage must be boolean"
+            )
+        return contract
+
+    def _blocking_handoff(self, payload: Mapping[str, Any]) -> bool:
+        metadata = flow_metadata_for(self.config, payload=payload)
+        return effective_artifact_package_mode(
+            state_dir=self.state_dir,
+            payload=payload,
+            metadata=metadata,
+        ) == "blocking"
+
+    @staticmethod
+    def _authority_profile(
+        payload: Mapping[str, Any],
+        *,
+        profile: str,
+    ) -> str:
+        if profile == "task-verify":
+            return "task-verify"
+        if profile == "candidate-verify":
+            return "candidate-verify"
+        if profile != "implementation":
+            return profile or "non-task"
+        attempt_domain = str(payload.get("attempt_domain") or "").lower()
+        is_rework = any(
+            (
+                str(payload.get("rework_feedback_ref") or "").strip(),
+                str(payload.get("rework_of_attempt_id") or "").strip(),
+                str(payload.get("parent_attempt_id") or "").strip(),
+            )
+        ) or "rework" in attempt_domain
+        return "implementation-rework" if is_rework else "implementation-initial"
+
+    def _validate_candidate_authority(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        workflow_run_id: str,
+        currentness: dict[str, Any],
+    ) -> dict[str, Any]:
+        contract = self._authority_contract(
+            payload,
+            profile="candidate-verify",
+        )
+        if self._blocking_handoff(payload) and not contract.get(
+            "requires_candidate_lineage"
+        ):
+            raise ArtifactReadError(
+                "candidate-verify authority contract requires candidate lineage"
+            )
+        all_events = self.query._events()
+        scoped = events_for_run(all_events, run_id=workflow_run_id)
+        candidates = [
+            event
+            for event in scoped
+            if event.type == "candidate.ready"
+            and isinstance(event.payload, Mapping)
+        ]
+        if not candidates:
+            if self._blocking_handoff(payload):
+                raise ArtifactReadError(
+                    "candidate-verify handoff requires current candidate.ready"
+                )
+            return {}
+        event = candidates[-1]
+        body = dict(event.payload)
+        candidate_head = str(body.get("candidate_head_commit") or "").strip()
+        completed = [
+            str(item).strip()
+            for item in body.get("completed_task_ids") or []
+            if str(item).strip()
+        ]
+        if not candidate_head or not completed:
+            raise ArtifactReadError(
+                "candidate-verify current candidate lacks head/tasks"
+            )
+        incoming_event_id = str(
+            payload.get("candidate_snapshot_event_id")
+            or payload.get("candidate_event_id")
+            or ""
+        ).strip()
+        if incoming_event_id and incoming_event_id != event.id:
+            raise ArtifactReadError(
+                "candidate-verify candidate event is stale"
+            )
+        incoming_target = str(currentness.get("target_commit") or "")
+        if incoming_target != candidate_head:
+            raise ArtifactReadError(
+                "candidate-verify target_commit does not match current candidate"
+            )
+        candidate_generation = str(
+            body.get("task_map_generation") or ""
+        ).strip()
+        current_generation = str(
+            currentness.get("task_map_generation") or ""
+        ).strip()
+        if (
+            candidate_generation
+            and current_generation
+            and candidate_generation != current_generation
+        ):
+            raise ArtifactReadError(
+                "candidate-verify task_map_generation is stale"
+            )
+        integrated = candidate_task_source_commits(
+            all_events,
+            workflow_run_id=workflow_run_id,
+            candidate_head_commit=candidate_head,
+        )
+        missing = sorted(set(completed) - set(integrated))
+        if missing:
+            raise ArtifactReadError(
+                "candidate-verify missing integrated TaskRefs: "
+                + ", ".join(missing)
+            )
+        snapshot = {
+            "schema_version": "candidate-authority-snapshot.v1",
+            "candidate_event_id": event.id,
+            "candidate_head_commit": candidate_head,
+            "candidate_base_commit": str(
+                body.get("candidate_base_commit") or ""
+            ),
+            "completed_task_ids": completed,
+            "integrated_task_refs": [
+                {
+                    "task_id": task,
+                    "source_commit": integrated[task],
+                }
+                for task in sorted(integrated)
+                if task in set(completed)
+            ],
+        }
+        encoded = json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        snapshot["identity_digest"] = hashlib.sha256(encoded).hexdigest()
+        currentness.update({
+            "candidate_event_id": event.id,
+            "candidate_head_commit": candidate_head,
+            "candidate_snapshot_digest": snapshot["identity_digest"],
+        })
+        return snapshot
+
     def _current_plan_port_sources(
         self,
         *,
         workflow_run_id: str,
         task_id: str,
-        currentness: Mapping[str, str],
+        currentness: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         task = TaskStore(self.state_dir / "kanban.json").get(task_id) if task_id else None
         if task is None:
@@ -357,7 +632,7 @@ class CanonicalHandoffResolver:
         workflow_run_id: str,
         task_id: str,
         profile: str,
-        currentness: Mapping[str, str],
+        currentness: Mapping[str, Any],
     ) -> None:
         contract_ref = str(payload.get("contract_snapshot_ref") or "")
         contract_digest = str(payload.get("contract_snapshot_digest") or "")
@@ -371,7 +646,16 @@ class CanonicalHandoffResolver:
             **{
                 key: value
                 for key, value in currentness.items()
-                if key != "target_commit" and value
+                if key in {
+                    "contract_revision",
+                    "task_map_generation",
+                    "base_commit",
+                    "task_ref",
+                    "plan_artifact_package_id",
+                    "plan_artifact_package_ref",
+                    "plan_artifact_package_digest",
+                }
+                and value
             },
         }
         try:
@@ -495,4 +779,8 @@ class CanonicalHandoffResolver:
             )
 
 
-__all__ = ["CanonicalHandoffResolver"]
+__all__ = [
+    "HANDOFF_AUTHORITY_SCHEMA",
+    "CanonicalHandoffResolver",
+    "build_handoff_authority_contract",
+]

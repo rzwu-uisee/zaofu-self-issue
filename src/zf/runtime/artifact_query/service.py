@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -12,6 +13,7 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
 from zf.core.events.segments import build_event_manifest
+from zf.runtime.artifact_access import artifact_access_allowed
 from zf.runtime.artifact_query.models import (
     QueryContext,
     QueryResult,
@@ -19,13 +21,14 @@ from zf.runtime.artifact_query.models import (
 )
 from zf.runtime.artifact_query.store import (
     EXTRACTOR_VERSION,
+    catch_up_catalog,
     catalog_rows,
     catalog_show,
     catalog_status,
     descriptor_record,
     get_reducer_projection,
     lineage_rows,
-    rebuild_catalog,
+    projection_db_path,
     set_reducer_projection,
 )
 from zf.runtime.attempt_handoff_reducer import (
@@ -46,7 +49,11 @@ from zf.runtime.sidecar_refs import (
 QUERY_SCHEMA_VERSION = "artifact-query-result.v1"
 ATTEMPT_INSPECT_SCHEMA = "attempt-artifact-view.v1"
 PACKAGE_PROJECTION_VERSION = f"{PLAN_PACKAGE_SCHEMA}:reducer.v1"
-GOAL_DOSSIER_CACHE_VERSION = "goal-dossier-cache.v1"
+GOAL_DOSSIER_CACHE_VERSION = "goal-dossier-cache.v2"
+CATALOG_CATCH_UP_WAIT_SECONDS = 2.5
+
+_CATALOG_CATCH_UPS: dict[str, threading.Event] = {}
+_CATALOG_CATCH_UPS_LOCK = threading.Lock()
 
 
 class ArtifactQueryError(ValueError):
@@ -242,7 +249,7 @@ class ArtifactQueryService:
             )
         return QueryResult(
             schema_version="artifact-lineage.v1",
-            items=items,
+            items=[self._lineage_visibility(item, context) for item in items],
             source_snapshot=self.source_snapshot(
                 projected_seq=int(status.get("projected_seq") or 0)
             ),
@@ -398,7 +405,10 @@ class ArtifactQueryService:
         builder: Callable[[], dict[str, Any]],
     ) -> dict[str, Any]:
         snapshot = self.source_snapshot()
-        snapshot_key = self.source_snapshot_key(snapshot)
+        snapshot_key = (
+            f"{GOAL_DOSSIER_CACHE_VERSION}:"
+            f"{self.source_snapshot_key(snapshot)}"
+        )
         cached = get_reducer_projection(
             self.state_dir,
             projection_kind="goal-dossier",
@@ -505,14 +515,10 @@ class ArtifactQueryService:
     ) -> tuple[dict[str, Any], bool]:
         try:
             status = catalog_status(self.state_dir)
-            if status.get("projection_state") != "ready":
-                rebuild_catalog(
-                    self.state_dir,
-                    project_root=self.project_root,
-                    config=self.config,
-                )
+            if status.get("projection_state") in {"missing", "stale"}:
+                self._catch_up_catalog_single_flight()
                 status = catalog_status(self.state_dir)
-            return status, False
+            return status, status.get("projection_state") != "ready"
         except (OSError, sqlite3.Error, SidecarRefError, ValueError) as exc:
             status = {
                 "projection_state": "degraded",
@@ -522,6 +528,29 @@ class ArtifactQueryService:
             if context.mode == "canonical":
                 return status, True
             return status, True
+
+    def _catch_up_catalog_single_flight(self) -> None:
+        key = str(projection_db_path(self.state_dir).resolve())
+        with _CATALOG_CATCH_UPS_LOCK:
+            event = _CATALOG_CATCH_UPS.get(key)
+            owner = event is None
+            if owner:
+                event = threading.Event()
+                _CATALOG_CATCH_UPS[key] = event
+        if owner:
+            try:
+                catch_up_catalog(
+                    self.state_dir,
+                    project_root=self.project_root,
+                    config=self.config,
+                )
+            finally:
+                with _CATALOG_CATCH_UPS_LOCK:
+                    _CATALOG_CATCH_UPS.pop(key, None)
+                event.set()
+            return
+        if not event.wait(CATALOG_CATCH_UP_WAIT_SECONDS):
+            raise TimeoutError("artifact catalog catch-up wait timed out")
 
     def _canonical_catalog_rows(self, **filters: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -558,32 +587,30 @@ class ArtifactQueryService:
         context: QueryContext,
     ) -> dict[str, Any]:
         item = dict(row)
-        authorized = self._authorized(
+        authorized = artifact_access_allowed(
             item.get("access_scope"),
-            context=context,
+            actor=context.actor,
+            role=context.role,
+            purpose=context.purpose,
         )
-        item["authorized"] = authorized
-        if not authorized:
-            item["preview"] = ""
-        return item
+        if authorized:
+            item["authorized"] = True
+            return item
+        return {"authorized": False, "redacted": True}
 
     @staticmethod
-    def _authorized(
-        scope_value: object,
-        *,
+    def _lineage_visibility(
+        row: Mapping[str, Any],
         context: QueryContext,
-    ) -> bool:
-        scope = scope_value if isinstance(scope_value, Mapping) else {}
-        visibility = str(scope.get("visibility") or "project")
-        if visibility not in {"project", "public"}:
-            return False
-        expected_actor = str(scope.get("actor") or "").strip()
-        if expected_actor and expected_actor not in {context.actor, context.role}:
-            return False
-        expected_purpose = str(scope.get("purpose") or "").strip()
-        if expected_purpose and context.purpose != expected_purpose:
-            return False
-        return True
+    ) -> dict[str, Any]:
+        if artifact_access_allowed(
+            row.get("access_scope"),
+            actor=context.actor,
+            role=context.role,
+            purpose=context.purpose,
+        ):
+            return {**dict(row), "authorized": True}
+        return {"authorized": False, "redacted": True}
 
     def _events(self) -> list[ZfEvent]:
         return event_log_from_project(

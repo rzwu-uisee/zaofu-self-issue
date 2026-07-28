@@ -301,6 +301,13 @@ _DURABLE_CALL_RESULT_EVENTS: dict[str, dict[str, Any]] = {
         "schema_version", "canonicalization_version", "workflow_run_id",
         "operation_id", "operation_type", "request_hash", "request_ref",
     ),
+    "workflow.operation.reserved": _req(
+        "schema_version", "workflow_run_id", "operation_id", "request_hash",
+        "reservation_id", "reservation_expires_at", "continuation_key",
+        "expected_generation", "expected_package_ref",
+        "expected_package_digest", "pending_action_digest", "budget_snapshot",
+        "idempotency_key", "semantic_attempt_consumed",
+    ),
     "workflow.operation.started": _req(
         "schema_version", "workflow_run_id", "operation_id", "request_hash",
     ),
@@ -315,6 +322,35 @@ _DURABLE_CALL_RESULT_EVENTS: dict[str, dict[str, Any]] = {
     "workflow.operation.blocked": _req(
         "schema_version", "workflow_run_id", "operation_id", "request_hash",
         "reason",
+    ),
+    "workflow.operation.superseded": _req(
+        "schema_version", "workflow_run_id", "operation_id", "request_hash",
+        "reason", "reservation_id", "semantic_attempt_consumed",
+    ),
+    "workflow.fragment.proposed": _req(
+        "schema_version", "workflow_run_id", "fragment_id", "fragment_digest",
+        "mode", "parent_operation_id", "task_map_generation",
+        "current_plan_artifact_package", "trigger_checkpoint", "nodes",
+    ),
+    "workflow.fragment.admitted": _req(
+        "schema_version", "workflow_run_id", "fragment_id", "fragment_digest",
+        "mode", "task_map_generation", "continuation_key",
+        "parent_operation_id", "reason", "semantic_attempt_consumed",
+    ),
+    "workflow.fragment.rejected": _req(
+        "schema_version", "workflow_run_id", "fragment_id", "fragment_digest",
+        "mode", "task_map_generation", "continuation_key",
+        "parent_operation_id", "reason", "semantic_attempt_consumed",
+    ),
+    "workflow.fragment.superseded": _req(
+        "schema_version", "workflow_run_id", "fragment_id", "fragment_digest",
+        "mode", "task_map_generation", "continuation_key",
+        "parent_operation_id", "reason", "semantic_attempt_consumed",
+    ),
+    "workflow.fragment.cancelled": _req(
+        "schema_version", "workflow_run_id", "fragment_id", "fragment_digest",
+        "mode", "task_map_generation", "continuation_key",
+        "parent_operation_id", "reason", "semantic_attempt_consumed",
     ),
 }
 

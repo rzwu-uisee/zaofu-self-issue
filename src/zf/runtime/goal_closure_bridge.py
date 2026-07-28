@@ -141,10 +141,16 @@ class GoalClosureBridgeMixin:
             ))
             return None
         from zf.core.workflow.flow_metadata import flow_metadata_for
-        from zf.runtime.plan_artifact_package import artifact_package_mode
+        from zf.runtime.artifact_package_policy import (
+            effective_artifact_package_mode,
+        )
 
         metadata = flow_metadata_for(self.config, payload=payload)
-        if artifact_package_mode(metadata) == "blocking" and not all((
+        if effective_artifact_package_mode(
+            state_dir=self.state_dir,
+            payload={**source_payload, **payload},
+            metadata=metadata,
+        ) == "blocking" and not all((
             identity.get("plan_artifact_package_id"),
             identity.get("plan_artifact_package_ref"),
             identity.get("plan_artifact_package_digest"),

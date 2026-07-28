@@ -215,6 +215,143 @@ class TestJudgePassed:
         assert store.get("TASK-OTHER").status == "backlog"
 
 
+class TestGoalTerminalCursor:
+    def test_restart_consumes_terminal_not_acknowledged_by_prior_push(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="T-GOAL",
+            title="goal task",
+            status="in_progress",
+            assigned_to="dev",
+            contract=TaskContract(feature_id="RUN-GOAL"),
+        ))
+        log = EventLog(state_dir / "events.jsonl")
+        earlier = ZfEvent(
+            type="worker.state.changed",
+            actor="zf-cli",
+            payload={"state": "idle"},
+        )
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-GOAL",
+                "workflow_run_id": "RUN-GOAL",
+                "pdd_id": "RUN-GOAL",
+                "feature_id": "RUN-GOAL",
+                "completed_task_ids": ["T-GOAL"],
+            },
+        )
+        log.append(earlier)
+        earlier_offset = log.current_offset()
+        log.append(terminal)
+
+        first = Orchestrator(state_dir, legacy_config, transport)
+        first.run_once(events=[earlier])
+
+        assert SessionStore(state_dir / "session.yaml").load().latest_event_offset == 0
+        assert store.get("T-GOAL").status == "in_progress"
+
+        first.run_once(events=[], consumed_offset=earlier_offset)
+        restarted = Orchestrator(state_dir, legacy_config, transport)
+        restarted.run_once()
+
+        assert store.get("T-GOAL").status == "done"
+
+
+class TestGoalTerminalSettlement:
+    def test_run_goal_closes_exact_tasks_and_bootstrap_only(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="RUN-EXACT",
+            title="workflow root",
+            status="backlog",
+            contract=TaskContract(
+                feature_id="RUN-EXACT",
+                evidence_contract={
+                    "source": "workflow_invoke_bootstrap",
+                    "workflow_fanout_anchor": True,
+                },
+            ),
+        ))
+        store.add(Task(
+            id="T-COMPLETED",
+            title="completed",
+            status="backlog",
+            contract=TaskContract(feature_id="RUN-EXACT"),
+        ))
+        store.add(Task(
+            id="T-SIBLING",
+            title="not completed",
+            status="in_progress",
+            assigned_to="dev",
+            contract=TaskContract(feature_id="RUN-EXACT"),
+        ))
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-EXACT",
+                "workflow_run_id": "RUN-EXACT",
+                "pdd_id": "RUN-EXACT",
+                "feature_id": "RUN-EXACT",
+                "completed_task_ids": ["T-COMPLETED"],
+            },
+        )
+        _emit(state_dir, terminal)
+
+        orchestrator = Orchestrator(state_dir, legacy_config, transport)
+        orchestrator.run_once(events=[terminal])
+        orchestrator.run_once(events=[terminal])
+
+        assert store.get("RUN-EXACT").status == "done"
+        assert store.get("T-COMPLETED").status == "done"
+        assert store.get("T-SIBLING").status == "in_progress"
+
+    def test_late_goal_terminal_does_not_close_replanned_task(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="T-REUSED",
+            title="current generation",
+            status="in_progress",
+            assigned_to="dev",
+            contract=TaskContract(
+                feature_id="RUN-REPLAN",
+                evidence_contract={
+                    "source": "refactor_task_map",
+                    "source_refs": {
+                        "task_map_ref": "artifacts/task-map-g2.json",
+                        "task_map_generation": "G2",
+                    },
+                },
+            ),
+        ))
+        stale_terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-REPLAN",
+                "workflow_run_id": "RUN-REPLAN",
+                "pdd_id": "RUN-REPLAN",
+                "feature_id": "RUN-REPLAN",
+                "completed_task_ids": ["T-REUSED"],
+                "task_map_ref": "artifacts/task-map-g1.json",
+                "task_map_generation": "G1",
+            },
+        )
+
+        orchestrator = Orchestrator(state_dir, legacy_config, transport)
+        orchestrator.run_once(events=[stale_terminal])
+
+        assert store.get("T-REUSED").status == "in_progress"
+
+
 class TestJudgeFailed:
     def test_judge_failed_returns_task_to_in_progress(
         self, state_dir: Path, legacy_config, transport

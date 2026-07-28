@@ -26,6 +26,30 @@ def test_kanban_agent_route():
     assert r.target == "kanban_agent" and not r.channel_id
 
 
+def test_dangerous_route_requires_ack_and_sender_allowlist():
+    with pytest.raises(ConfigError, match="dangerous_full requires"):
+        _cfg({
+            "oc_dm": {
+                "target": "kanban_agent",
+                "permission_profile": "dangerous_full",
+            },
+        })
+
+    cfg = _cfg({
+        "oc_dm": {
+            "target": "kanban_agent",
+            "permission_profile": "dangerous_full",
+            "dangerous_ack": True,
+            "allowed_senders": ["ou_owner"],
+        },
+    })
+
+    route = resolve_feishu_route(cfg, "oc_dm")
+    assert route.permission_profile == "dangerous_full"
+    assert route.dangerous_ack is True
+    assert route.allowed_senders == ["ou_owner"]
+
+
 def test_run_manager_route():
     cfg = _cfg({"oc_rm": {"target": "run_manager"}})
     r = resolve_feishu_route(cfg, "oc_rm")

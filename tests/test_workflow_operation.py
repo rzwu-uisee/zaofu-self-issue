@@ -5,6 +5,7 @@ from zf.core.events.writer import EventWriter
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     reduce_workflow_operations,
+    stable_continuation_idempotency_key,
     stable_operation_id,
 )
 
@@ -87,3 +88,74 @@ def test_operation_settles_even_when_product_verdict_is_rejected(tmp_path: Path)
     view = reduce_workflow_operations(service.event_log.read_all())[operation_id]
     assert view["status"] == "settled"
     assert view["admitted_call_result_ref"]["ref"].endswith("rejected.json")
+
+
+def test_continuation_reservation_is_replay_safe_and_supersedable(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="dynamic-op-1",
+        operation_type="dynamic_read_only_workflow",
+        request={
+            "attempt_domain": "read_only_dynamic",
+            "continuation_key": "fragment-1",
+        },
+        parent_operation_id="parent-op",
+        task_id="T1",
+    )
+
+    first = service.reserve_continuation(
+        operation_id="dynamic-op-1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        continuation_key="fragment-1",
+        expected_generation="GEN-1",
+        expected_package_ref="artifacts/packages/p1.json",
+        expected_package_digest="a" * 64,
+        pending_action_digest="b" * 64,
+        budget_snapshot={"available": True},
+        reservation_expires_at="2026-07-24T12:00:30+00:00",
+        parent_operation_id="parent-op",
+        task_id="T1",
+    )
+    replay = service.reserve_continuation(
+        operation_id="dynamic-op-1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        continuation_key="fragment-1",
+        expected_generation="GEN-1",
+        expected_package_ref="artifacts/packages/p1.json",
+        expected_package_digest="a" * 64,
+        pending_action_digest="b" * 64,
+        budget_snapshot={"available": True},
+        reservation_expires_at="2026-07-24T12:01:00+00:00",
+        parent_operation_id="parent-op",
+        task_id="T1",
+    )
+
+    assert first.created is True
+    assert replay.replay_hit is True
+    assert replay.reservation_id == first.reservation_id
+    assert replay.idempotency_key == stable_continuation_idempotency_key(
+        workflow_run_id="run-1",
+        continuation_key="fragment-1",
+        expected_generation="GEN-1",
+    )
+    service.supersede(
+        operation_id="dynamic-op-1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        reason="package_generation_changed",
+        reservation_id=first.reservation_id,
+        task_id="T1",
+    )
+    view = reduce_workflow_operations(service.event_log.read_all())["dynamic-op-1"]
+    assert view["status"] == "superseded"
+    assert view["reservation_id"] == first.reservation_id
+    assert view["reason"] == "package_generation_changed"
+    assert sum(
+        event.type == "workflow.operation.reserved"
+        for event in service.event_log.read_all()
+    ) == 1

@@ -68,6 +68,43 @@ class TestEventWatcher:
         watcher.poll_once()
         assert len(detected) == 3
 
+    def test_acknowledges_exact_snapshot_after_all_callbacks(self, tmp_path: Path):
+        events_file = tmp_path / "events.jsonl"
+        events_file.write_text("")
+        log = EventLog(events_file)
+        order: list[str] = []
+        acknowledged: list[int] = []
+
+        def on_event(line: str) -> None:
+            event_type = json.loads(line)["type"]
+            order.append(event_type)
+            if event_type == "batch.first":
+                log.append(ZfEvent(type="next.batch"))
+
+        def on_batch_consumed(_events: list[ZfEvent], offset: int) -> None:
+            order.append("ack")
+            acknowledged.append(offset)
+
+        watcher = EventWatcher(
+            events_file,
+            on_event=on_event,
+            on_batch_consumed=on_batch_consumed,
+            event_log=log,
+        )
+        log.append(ZfEvent(type="batch.first"))
+        log.append(ZfEvent(type="batch.second"))
+        first_batch_end = log.current_offset()
+
+        watcher.poll_once()
+
+        assert order == ["batch.first", "batch.second", "ack"]
+        assert acknowledged == [first_batch_end]
+        assert first_batch_end < log.current_offset()
+
+        watcher.poll_once()
+        assert order[-2:] == ["next.batch", "ack"]
+        assert acknowledged[-1] == log.current_offset()
+
     def test_handles_missing_file_gracefully(self, tmp_path: Path):
         events_file = tmp_path / "events.jsonl"
         # File does not exist

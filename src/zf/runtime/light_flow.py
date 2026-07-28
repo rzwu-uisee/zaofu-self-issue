@@ -39,6 +39,7 @@ def synthesize_light_task_map(
     verification_commands: list[str] | None = None,
     flow_kind: str = "prd",
     objective_ref: str = "",
+    ready_plan_ports: list[str] | None = None,
 ) -> dict[str, Any]:
     root = (target_root or ".").strip().rstrip("/") or "."
     task_id = f"{pdd_id.upper()}-{LIGHT_TASK_SUFFIX}" if pdd_id else LIGHT_TASK_SUFFIX
@@ -100,7 +101,7 @@ def synthesize_light_task_map(
         **matrix_refs,
         "required_plan_ports": _light_required_plan_ports(
             flow_kind=flow_kind,
-            matrix_refs=matrix_refs,
+            ready_plan_ports=ready_plan_ports or [],
         ),
         "shared_conventions": {
             "test_path_prefix": f"{path_prefix}tests",
@@ -124,20 +125,38 @@ def maybe_synthesize_light_task_map(
     entry = str(metadata.get("light_entry_trigger") or "prd.requested")
     if event.type != entry:
         return None
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    flow_kind = str(payload.get("kind") or metadata.get("flow_kind") or "prd")
+    pdd_id = str(
+        payload.get("pdd_id")
+        or payload.get("request_id")
+        or f"{flow_kind}-default"
+    )
+    workflow_run_id = str(
+        payload.get("workflow_run_id")
+        or event.correlation_id
+        or f"run-light-{pdd_id}-{event.id}"
+    )
     for prior in events:
         if prior.type != "task_map.ready":
             continue
-        payload = prior.payload if isinstance(prior.payload, dict) else {}
+        prior_payload = prior.payload if isinstance(prior.payload, dict) else {}
         if (
             prior.causation_id == event.id
-            or str(payload.get("source") or "") == "light_flow_kernel"
+            or (
+                str(prior_payload.get("source") or "") == "light_flow_kernel"
+                and str(prior_payload.get("workflow_run_id") or "")
+                == workflow_run_id
+            )
         ):
             return None  # 已合成过(幂等;重入靠 rework_of 通道)
-    payload = event.payload if isinstance(event.payload, dict) else {}
-    flow_kind = str(payload.get("kind") or metadata.get("flow_kind") or "prd")
-    pdd_id = str(payload.get("pdd_id") or payload.get("request_id") or f"{flow_kind}-default")
     objective = str(payload.get("objective") or payload.get("reason") or "")
     workflow_refs = _workflow_refs_from_payload(payload, state_dir=state_dir)
+    workflow_refs.setdefault("workflow_run_id", workflow_run_id)
+    ready_plan_ports = _ready_matrix_plan_ports(
+        workflow_refs,
+        state_dir=state_dir,
+    )
     objective_ref = str(
         payload.get("objective_ref")
         or payload.get("prd_ref")
@@ -164,6 +183,7 @@ def maybe_synthesize_light_task_map(
             state_dir=state_dir,
         ),
         flow_kind=flow_kind,
+        ready_plan_ports=ready_plan_ports,
     )
     # light goal 终态闭环(2026-07-08):最简配置只开 goal.enabled、无人发
     # run.goal.started → goal 投影永远是 loop.started 兜底(run_id 空),
@@ -172,20 +192,27 @@ def maybe_synthesize_light_task_map(
     # _maybe_complete_run_goal 自动闭环 run.goal.completed。
     goal_enabled = bool(getattr(getattr(config, "goal", None), "enabled", False))
     if goal_enabled and not any(
-        prior.type == "run.goal.started" for prior in events
+        prior.type == "run.goal.started"
+        and isinstance(prior.payload, dict)
+        and (
+            str(prior.payload.get("run_id") or "") == workflow_run_id
+            or prior.causation_id == event.id
+        )
+        for prior in events
     ):
         event_writer.append(ZfEvent(
             type="run.goal.started",
             actor="zf-cli",
             payload={
-                "run_id": f"run-light-{pdd_id}-{event.id}",
+                "run_id": workflow_run_id,
+                "workflow_run_id": workflow_run_id,
                 "objective": objective,
                 "pdd_id": pdd_id,
                 "source": "light_flow_kernel",
                 "reason": "light topology: goal minted at entry synthesis",
             },
             causation_id=event.id,
-            correlation_id=event.correlation_id or event.id,
+            correlation_id=workflow_run_id,
         ))
     target = Path(state_dir) / "artifacts" / pdd_id / "task_map.json"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +231,7 @@ def maybe_synthesize_light_task_map(
             "reason": "light topology: kernel-synthesized single-task map",
         },
         causation_id=event.id,
-        correlation_id=event.correlation_id or event.id,
+        correlation_id=workflow_run_id,
     ))
 
 
@@ -231,10 +258,19 @@ def _matrix_refs(payload: dict[str, Any]) -> dict[str, str]:
 def _light_required_plan_ports(
     *,
     flow_kind: str,
-    matrix_refs: dict[str, str],
+    ready_plan_ports: list[str],
 ) -> list[str]:
     requirement_port = "issue_spec" if flow_kind == "issue" else "requirement_spec"
     ports = [requirement_port, "goal_claim_set", "task_map", "planning_result"]
+    ports.extend(str(item).strip() for item in ready_plan_ports if str(item).strip())
+    return list(dict.fromkeys(ports))
+
+
+def _ready_matrix_plan_ports(
+    workflow_refs: dict[str, Any],
+    *,
+    state_dir: Path,
+) -> list[str]:
     ref_to_port = {
         "source_inventory_ref": "source_inventory",
         "capability_matrix_ref": "capability_matrix",
@@ -242,12 +278,24 @@ def _light_required_plan_ports(
         "test_matrix_ref": "test_matrix",
         "real_e2e_matrix_ref": "real_e2e_matrix",
     }
-    ports.extend(
-        logical_name
-        for ref_key, logical_name in ref_to_port.items()
-        if matrix_refs.get(ref_key)
-    )
-    return list(dict.fromkeys(ports))
+    ready: list[str] = []
+    for ref_key, logical_name in ref_to_port.items():
+        body = _load_manifest_ref(
+            str(workflow_refs.get(ref_key) or ""),
+            state_dir=state_dir,
+        )
+        if str(body.get("status") or "").strip().lower() != "ready":
+            continue
+        metadata = body.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        contract = metadata.get("enrichment_contract")
+        if (
+            isinstance(contract, dict)
+            and str(contract.get("status") or "").strip().lower() != "fulfilled"
+        ):
+            continue
+        ready.append(logical_name)
+    return ready
 
 
 def _light_verification_commands(
@@ -318,11 +366,7 @@ def _workflow_refs_from_payload(payload: dict[str, Any], *, state_dir: Path) -> 
         if isinstance(manifest_artifacts, list):
             merged = [*refs.get("artifact_refs", []), *manifest_artifacts]
             refs["artifact_refs"] = _dedupe_artifact_refs(merged)
-    if (
-        refs.get("source_refs")
-        or refs.get("artifact_refs")
-        or refs.get("workflow_input_manifest_ref")
-    ):
+    if any(bool(value) for value in refs.values()):
         return refs
     return {}
 

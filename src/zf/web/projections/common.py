@@ -396,11 +396,31 @@ def _canonical_operator_backend(value: Any) -> str:
     return ""
 
 
-def _action_payload(payload: dict) -> dict:
+def _action_payload(
+    payload: dict,
+    *,
+    preserve_request_id: bool = False,
+) -> dict:
     out = dict(payload)
     out.pop("idempotency_key", None)
-    out.pop("request_id", None)
+    if not preserve_request_id:
+        out.pop("request_id", None)
     return out
+
+
+def _action_request_identity(
+    payload: dict,
+    *,
+    idempotency_key: str | None,
+) -> tuple[dict, str]:
+    explicit_key = str(
+        idempotency_key or payload.get("idempotency_key") or ""
+    )
+    request_payload = _action_payload(
+        payload,
+        preserve_request_id=bool(explicit_key),
+    )
+    return request_payload, explicit_key or str(payload.get("request_id") or "")
 
 
 def _payload_hash(payload: dict) -> str:

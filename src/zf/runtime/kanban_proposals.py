@@ -10,25 +10,76 @@ fallback for out-of-band executions — a ``task.created`` with the same title.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
+import json
 from typing import Any, Iterable
 
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
 
 PROPOSAL_RESOLVED_EVENT = "kanban.agent.proposal.resolved"
+_PROPOSAL_TRANSPORT_KEYS = frozenset({
+    "actor",
+    "causation_id",
+    "conversation_id",
+    "idempotency_key",
+    "project_id",
+    "proposal_event_id",
+    "run_id",
+    "source",
+    "thread_id",
+})
+
+
+def proposal_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Strip request-envelope fields that do not change proposed semantics."""
+    return {
+        str(key): value
+        for key, value in payload.items()
+        if str(key) not in _PROPOSAL_TRANSPORT_KEYS
+    }
+
+
+def proposal_payload_digest(action: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {
+            "action": action,
+            "payload": proposal_semantic_payload(payload),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
+    event_list = list(events)
     pending: dict[str, dict[str, Any]] = {}
+    event_to_proposal: dict[str, str] = {}
     resolved: set[str] = set()
+    resolved_proposals: set[str] = set()
+    superseded_proposals: set[str] = set()
     created_titles: set[str] = set()
-    for event in events:
+    for event in event_list:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type == "kanban.agent.action.proposed":
             proposal = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
             action_payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
-            pending[event.id] = {
+            proposal_id = str(proposal.get("proposal_id") or event.id)
+            event_to_proposal[event.id] = proposal_id
+            supersedes = str(proposal.get("supersedes") or "")
+            if supersedes and supersedes != proposal_id:
+                superseded_proposals.add(supersedes)
+            record = {
                 "proposal_event_id": event.id,
+                "proposal_id": proposal_id,
+                "proposal_digest": str(proposal.get("proposal_digest") or ""),
+                "revision": _revision(proposal.get("revision")),
+                "expires_at": str(proposal.get("expires_at") or ""),
+                "source": str(payload.get("source") or event.actor or ""),
                 "ts": event.ts,
                 "action": str(proposal.get("action") or ""),
                 "requested_action": str(proposal.get("requested_action") or ""),
@@ -41,20 +92,57 @@ def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
                 "conversation_id": str(payload.get("conversation_id") or ""),
                 "thread_key": str(payload.get("thread_key") or ""),
             }
+            prior = pending.get(proposal_id)
+            if prior is None or (
+                record["revision"],
+                record["ts"],
+            ) >= (
+                _revision(prior.get("revision")),
+                str(prior.get("ts") or ""),
+            ):
+                prior_ids = (
+                    list(prior.get("proposal_event_ids") or [])
+                    if prior is not None
+                    else []
+                )
+                record["proposal_event_ids"] = [
+                    *prior_ids,
+                    event.id,
+                ]
+                pending[proposal_id] = record
+            elif prior is not None:
+                prior.setdefault("proposal_event_ids", []).append(event.id)
         elif event.type == PROPOSAL_RESOLVED_EVENT:
-            resolved.add(str(payload.get("proposal_event_id") or ""))
+            event_id = str(payload.get("proposal_event_id") or "")
+            resolved.add(event_id)
+            proposal_id = str(payload.get("proposal_id") or event_to_proposal.get(event_id) or "")
+            if proposal_id:
+                resolved_proposals.add(proposal_id)
         elif event.type == "task.created":
             request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
             threaded = str(request.get("proposal_event_id") or "")
             if threaded:
                 resolved.add(threaded)
+                proposal_id = event_to_proposal.get(threaded)
+                if proposal_id:
+                    resolved_proposals.add(proposal_id)
             task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
             title = str(request.get("title") or task.get("title") or "").strip()
             if title:
                 created_titles.add(title)
     out = []
-    for event_id, record in pending.items():
-        if event_id in resolved:
+    for proposal_id, record in pending.items():
+        if (
+            proposal_id in resolved_proposals
+            or proposal_id in superseded_proposals
+        ):
+            continue
+        if any(
+            event_id in resolved
+            for event_id in record.get("proposal_event_ids") or []
+        ):
+            continue
+        if _expired(str(record.get("expires_at") or "")):
             continue
         if (
             record["action"] in {"create-task", "idea-to-product"}
@@ -63,5 +151,147 @@ def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
         ):
             continue
         out.append(redact_obj(record))
-    out.reverse()  # newest first
-    return out
+    return sorted(
+        out,
+        key=lambda item: str(item.get("ts") or ""),
+        reverse=True,
+    )
+
+
+def proposal_execution_gate(
+    events: Iterable[ZfEvent],
+    *,
+    proposal_event_id: str,
+    action: str,
+    execution_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate exact proposal identity and dedupe execution across surfaces."""
+    event_list = list(events)
+    source = next(
+        (
+            event
+            for event in event_list
+            if event.id == proposal_event_id
+            and event.type == "kanban.agent.action.proposed"
+        ),
+        None,
+    )
+    if source is None:
+        return {"ok": False, "status": "proposal_not_found"}
+    source_payload = source.payload if isinstance(source.payload, dict) else {}
+    proposal = (
+        source_payload.get("proposal")
+        if isinstance(source_payload.get("proposal"), dict)
+        else {}
+    )
+    proposal_action = str(proposal.get("action") or "")
+    if action != "kanban-proposal-dismiss" and proposal_action != action:
+        return {"ok": False, "status": "proposal_action_mismatch"}
+    if not bool(proposal.get("valid")) and action != "kanban-proposal-dismiss":
+        return {"ok": False, "status": "proposal_invalid"}
+    if _expired(str(proposal.get("expires_at") or "")):
+        return {"ok": False, "status": "proposal_expired"}
+    proposal_id = str(proposal.get("proposal_id") or source.id)
+    revision = _revision(proposal.get("revision"))
+    latest_revision = revision
+    for event in event_list:
+        if event.type != "kanban.agent.action.proposed":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        candidate = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
+        if (
+            str(candidate.get("supersedes") or "") == proposal_id
+            and event.id != source.id
+        ):
+            return {
+                "ok": False,
+                "status": "proposal_superseded",
+                "proposal_id": proposal_id,
+                "revision": revision,
+                "superseded_by": str(candidate.get("proposal_id") or event.id),
+            }
+        if str(candidate.get("proposal_id") or event.id) == proposal_id:
+            latest_revision = max(
+                latest_revision,
+                _revision(candidate.get("revision")),
+            )
+    if revision < latest_revision:
+        return {
+            "ok": False,
+            "status": "proposal_superseded",
+            "proposal_id": proposal_id,
+            "revision": revision,
+            "latest_revision": latest_revision,
+        }
+
+    proposed_payload = (
+        proposal.get("payload")
+        if isinstance(proposal.get("payload"), dict)
+        else {}
+    )
+    if (
+        action != "kanban-proposal-dismiss"
+        and execution_payload is not None
+        and proposal_payload_digest(action, proposed_payload)
+        != proposal_payload_digest(action, execution_payload)
+    ):
+        return {
+            "ok": False,
+            "status": "proposal_payload_mismatch",
+            "proposal_id": proposal_id,
+            "revision": revision,
+        }
+
+    for event in event_list:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type == PROPOSAL_RESOLVED_EVENT and (
+            str(payload.get("proposal_event_id") or "") == proposal_event_id
+            or str(payload.get("proposal_id") or "") == proposal_id
+        ):
+            return {
+                "ok": True,
+                "status": "already_resolved",
+                "proposal_id": proposal_id,
+                "proposal_digest": str(proposal.get("proposal_digest") or ""),
+                "revision": revision,
+                "resolution_event_id": event.id,
+            }
+        if event.type == "task.created":
+            request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+            if str(request.get("proposal_event_id") or "") == proposal_event_id:
+                task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+                return {
+                    "ok": True,
+                    "status": "already_resolved",
+                    "proposal_id": proposal_id,
+                    "proposal_digest": str(proposal.get("proposal_digest") or ""),
+                    "revision": revision,
+                    "resolution_event_id": event.id,
+                    "task_id": str(task.get("id") or event.task_id or ""),
+                }
+    return {
+        "ok": True,
+        "status": "ready",
+        "proposal_id": proposal_id,
+        "proposal_digest": str(proposal.get("proposal_digest") or ""),
+        "revision": revision,
+    }
+
+
+def _expired(value: str) -> bool:
+    if not value:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)
+
+
+def _revision(value: object) -> int:
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1

@@ -20,6 +20,7 @@ from zf.runtime.result_submit import (
     SemanticResultSubmitService,
     provision_role_submit_credential,
 )
+from zf.runtime.run_contract import stable_json_sha256, write_run_contract
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import (
     build_target_snapshot,
@@ -30,6 +31,12 @@ from zf.runtime.task_contract_snapshot import (
 
 TASK_ID = "STALE-CONTRACT-001"
 SENTINEL_AC = "AC-R2-UNIQUE-SENTINEL"
+PLAN_REQUIRED_SOURCE_IDS = {
+    "plan-port-requirement_spec",
+    "plan-port-goal_claim_set",
+    "plan-port-task_map",
+    "plan-port-planning_result",
+}
 
 
 class _Transport:
@@ -78,6 +85,24 @@ def _stage_manifest(state_dir: Path, log: EventLog, stage_id: str) -> dict:
         and event.payload.get("stage_id") == stage_id
     )
     return _manifest(state_dir, str(started.payload["fanout_id"]))
+
+
+def _dispatched_stage_manifest(
+    orchestrator: Orchestrator,
+    state_dir: Path,
+    log: EventLog,
+    stage_id: str,
+) -> dict:
+    for _ in range(8):
+        manifest = _stage_manifest(state_dir, log, stage_id)
+        if any(
+            child.get("status") == "dispatched"
+            and child.get("contract_snapshot_ref")
+            for child in manifest["children"]
+        ):
+            return manifest
+        orchestrator.run_once()
+    raise AssertionError(f"{stage_id} did not dispatch a contract-bound child")
 
 
 def _record_required_reads(state_dir: Path, payload: dict) -> None:
@@ -292,6 +317,26 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
 
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    requirement_ref = "requirements/stale-contract.json"
+    requirement_path = tmp_path / requirement_ref
+    requirement_path.parent.mkdir(parents=True, exist_ok=True)
+    requirement_path.write_text(
+        json.dumps({
+            "schema_version": "requirement-spec.v1",
+            "acceptance": [{
+                "id": "STALE-CONTRACT",
+                "text": "Only the current contract generation may advance",
+            }],
+        }),
+        encoding="utf-8",
+    )
+    run_contract = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "prd"},
+        "project": {"root": str(tmp_path), "state_dir": str(state_dir)},
+    }
+    run_contract["contract_digest"] = stable_json_sha256(run_contract)
+    write_run_contract(state_dir, run_contract)
     judge_credential = provision_role_submit_credential(state_dir, "judge-prd")
     log = EventLog(state_dir / "events.jsonl")
     orchestrator = Orchestrator(state_dir, config, _Transport())  # type: ignore[arg-type]
@@ -328,12 +373,18 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
             "pdd_id": "STALE-CONTRACT",
             "feature_id": "STALE-CONTRACT",
             "task_map_ref": refs["R1"],
+            "prd_ref": requirement_ref,
             "flow_kind": "prd",
         },
     )
     log.append(r1_trigger)
     orchestrator.run_once(events=[r1_trigger])
-    r1_manifest = _stage_manifest(state_dir, log, "prd-lanes-impl")
+    r1_manifest = _dispatched_stage_manifest(
+        orchestrator,
+        state_dir,
+        log,
+        "prd-lanes-impl",
+    )
     r1_child = next(child for child in r1_manifest["children"] if child["task_id"] == TASK_ID)
     r1_child["fanout_id"] = r1_manifest["fanout_id"]
     r1_contract = json.loads(
@@ -343,51 +394,9 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     store = TaskStore(state_dir / "kanban.json")
     current_task = store.get(TASK_ID)
     assert current_task is not None
-    r2_contract_authority = deepcopy(current_task.contract)
-    r2_contract_authority.contract_revision = ""
-    r2_contract_authority.behavior = "implement the R2 sentinel only"
-    r2_contract_authority.acceptance_criteria = _task_map(
-        revision="R2", lane_id="lane1", sentinel=True,
-    )["tasks"][0]["acceptance_criteria"]
-    r2_contract_authority.verification = "grep -qx r2-sentinel result.txt"
-    r2_contract_authority.validation = _task_map(
-        revision="R2", lane_id="lane1", sentinel=True,
-    )["tasks"][0]["validation"]
-    r2_contract_authority.evidence_contract = deepcopy(
-        r2_contract_authority.evidence_contract,
-    )
-    source_refs = dict(r2_contract_authority.evidence_contract.get("source_refs") or {})
-    source_refs.update({
-        "task_map_ref": refs["R2"],
-        "plan_ref": refs["R2"],
-        "task_map_generation": "G2",
-    })
-    r2_contract_authority.evidence_contract["source_refs"] = source_refs
-    r2_contract_authority.plan_ref = refs["R2"]
-    updated_r2 = store.update(
-        TASK_ID,
-        status="backlog",
-        assigned_to="dev-lane-1",
-        active_dispatch_id="",
-        contract=r2_contract_authority,
-    )
-    assert updated_r2 is not None
-    r2_revision = effective_contract_revision(updated_r2)
-    contract_update = EventWriter(log).append(ZfEvent(
-        type="task.contract.update",
-        actor="orchestrator",
-        task_id=TASK_ID,
-        correlation_id="run-stale-contract",
-        payload={
-            "contract_revision": r2_revision,
-            "task_map_generation": "G2",
-            "task_map_ref": refs["R2"],
-            "reason": "stale-contract E2E replan",
-        },
-    ))
     # Replan supersedes the old dispatch lease while the provider may still
     # return later. The late result remains useful audit input, not current work.
-    EventWriter(log).append(ZfEvent(
+    dispatch_lost = EventWriter(log).append(ZfEvent(
         type="fanout.child.dispatch_lost",
         actor="orchestrator",
         task_id=TASK_ID,
@@ -402,6 +411,13 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
             "reason": "contract revision superseded by R2/G2",
         },
     ))
+    released = store.update(
+        TASK_ID,
+        status="backlog",
+        assigned_to="dev-lane-1",
+        active_dispatch_id="",
+    )
+    assert released is not None
     orchestrator._set_worker_state(  # type: ignore[attr-defined]
         r1_child["role_instance"],
         "idle",
@@ -417,14 +433,20 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
             "pdd_id": "STALE-CONTRACT",
             "feature_id": "STALE-CONTRACT",
             "task_map_ref": refs["R2"],
+            "prd_ref": requirement_ref,
             "flow_kind": "prd",
-            "rework_of": contract_update.id,
+            "rework_of": dispatch_lost.id,
             "task_map_generation": "G2",
         },
     )
     log.append(r2_trigger)
     orchestrator.run_once(events=[r2_trigger])
-    r2_manifest = _stage_manifest(state_dir, log, "prd-lanes-impl")
+    r2_manifest = _dispatched_stage_manifest(
+        orchestrator,
+        state_dir,
+        log,
+        "prd-lanes-impl",
+    )
     assert r2_manifest["fanout_id"] != r1_manifest["fanout_id"]
     r2_child = next(child for child in r2_manifest["children"] if child["task_id"] == TASK_ID)
     r2_child["fanout_id"] = r2_manifest["fanout_id"]
@@ -432,6 +454,9 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     r2_contract = json.loads(
         (state_dir / r2_child["contract_snapshot_ref"]).read_text(encoding="utf-8")
     )
+    materialized_r2 = store.get(TASK_ID)
+    assert materialized_r2 is not None
+    r2_revision = effective_contract_revision(materialized_r2)
     assert r2_contract["contract_revision"] == r2_revision
     assert r2_contract["task_map_generation"] == "G2"
     assert [item["acceptance_id"] for item in r2_contract["acceptance_criteria"]] == [
@@ -439,6 +464,7 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     ]
     assert {item["source_id"] for item in r2_payload["required_reads"]} == {
         "contract",
+        *PLAN_REQUIRED_SOURCE_IDS,
     }
 
     r1_workdir = Path(r1_child["workdir"])
@@ -490,7 +516,12 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     candidate = _latest(log, "candidate.ready")
     assert candidate.payload["candidate_head_commit"] != r1_commit
     orchestrator.run_once(events=[candidate])
-    verify_manifest = _stage_manifest(state_dir, log, "prd-lanes-verify")
+    verify_manifest = _dispatched_stage_manifest(
+        orchestrator,
+        state_dir,
+        log,
+        "prd-lanes-verify",
+    )
     verify_child = next(
         child for child in verify_manifest["children"] if child["task_id"] == TASK_ID
     )
@@ -499,6 +530,7 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
         "contract",
         "target",
         "impl-self-check",
+        *PLAN_REQUIRED_SOURCE_IDS,
     }
     assert verify_payload["target_commit"] == candidate.payload["candidate_head_commit"]
 
@@ -716,7 +748,12 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     orchestrator.run_once(events=[test_passed])
     goal_closed = _latest(log, "flow.goal.closed")
     orchestrator.run_once(events=[goal_closed])
-    judge_manifest = _stage_manifest(state_dir, log, "prd-lanes-final")
+    judge_manifest = _dispatched_stage_manifest(
+        orchestrator,
+        state_dir,
+        log,
+        "prd-lanes-final",
+    )
     judge_child = next(
         child for child in judge_manifest["children"] if child["status"] == "dispatched"
     )

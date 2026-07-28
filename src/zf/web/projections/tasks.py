@@ -20,6 +20,9 @@ from zf.core.task.store import TaskStore
 from zf.integrations.feishu.views import TaskView
 from zf.runtime.execution_route import project_execution_route
 from zf.runtime.execution_route import project_route_summary
+from zf.runtime.goal_terminal_settlement import (
+    goal_terminal_matches_current_task,
+)
 from zf.runtime.run_archive import read_task_runs
 from zf.web.operator_contract import kanban_agent_evidence_model
 from zf.web.operator_contract import kanban_agent_status_model
@@ -127,6 +130,8 @@ _GLOBAL_FAILURE_REF_KEYS = {
 _TERMINAL_TASK_STATUSES = {"done", "cancelled", "superseded", "archived"}
 _RUN_COMPLETED_PROJECTION_RESET_EVENTS = {
     "run.goal.started",
+    "task.created",
+    "task.contract.update",
     "task_map.ready",
     "task_map.amended",
     "gap_plan.ready",
@@ -1245,7 +1250,12 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
         except Exception:
             events = []
     all_events = _events_with_seq(state_dir, config=config)
-    completed_closeout = _current_completed_run_closeout_for_projection(all_events)
+    legacy_completed_closeout = _current_completed_run_closeout_for_projection(
+        all_events
+    )
+    goal_task_closeouts = _completed_goal_task_closeouts_for_projection(
+        all_events
+    )
     out = []
     _deep_index = None  # lazily built once for the deep-kanban per-task projections
     # One lowered dump per event (exact _payload_mentions parity), memoized by
@@ -1355,6 +1365,22 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             workflow=workflow,
         )
         projection_reconciled = False
+        projection_reconcile_reason = ""
+        completed_closeout = goal_task_closeouts.get(t.id)
+        if (
+            completed_closeout is not None
+            and goal_terminal_matches_current_task(
+                t,
+                completed_closeout.payload
+                if isinstance(completed_closeout.payload, dict) else {},
+            )
+        ):
+            projection_reconcile_reason = "run_goal_completed"
+        elif completed_closeout is not None:
+            completed_closeout = None
+        elif legacy_completed_closeout is not None:
+            completed_closeout = legacy_completed_closeout
+            projection_reconcile_reason = "run_completed"
         display_status = t.status
         if (
             completed_closeout is not None
@@ -1365,10 +1391,12 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             kanban_display = {
                 "column": "done",
                 "label": kanban_column_label("done"),
-                "reason": "run_completed_projection_reconciliation",
+                "reason": (
+                    f"{projection_reconcile_reason}_projection_reconciliation"
+                ),
                 "badges": list(dict.fromkeys([
                     *kanban_display.get("badges", []),
-                    "run_completed",
+                    projection_reconcile_reason,
                 ])),
             }
         out.append({
@@ -1378,7 +1406,7 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             "display_status": display_status,
             "projection_reconciled": projection_reconciled,
             "projection_reconcile_reason": (
-                "run_completed"
+                projection_reconcile_reason
                 if projection_reconciled else ""
             ),
             "projection_reconcile_event_id": (
@@ -1443,6 +1471,52 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             "retry_metadata": retry_metadata,
         })
     return out
+
+
+def _completed_goal_task_closeouts_for_projection(
+    events: list[tuple[int, ZfEvent]],
+) -> dict[str, ZfEvent]:
+    """Select scoped Goal terminals for active task display reconciliation."""
+    closeouts: dict[str, ZfEvent] = {}
+    for _, event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type == "run.goal.completed":
+            completed = payload.get("completed_task_ids")
+            if not isinstance(completed, list):
+                continue
+            for task_id in completed:
+                normalized = str(task_id or "").strip()
+                if normalized:
+                    closeouts[normalized] = event
+            continue
+        if event.type not in _RUN_COMPLETED_PROJECTION_RESET_EVENTS:
+            continue
+
+        affected = _payload_task_ids(payload)
+        event_task_id = str(getattr(event, "task_id", "") or "").strip()
+        if event_task_id:
+            affected.add(event_task_id)
+        for task_id in affected:
+            closeouts.pop(task_id, None)
+
+        reset_run_id = _projection_run_id(event)
+        if not reset_run_id:
+            continue
+        for task_id, terminal in list(closeouts.items()):
+            if _projection_run_id(terminal) == reset_run_id:
+                closeouts.pop(task_id, None)
+    return closeouts
+
+
+def _projection_run_id(event: ZfEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    return str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or payload.get("goal_id")
+        or event.correlation_id
+        or ""
+    ).strip()
 
 
 def _current_completed_run_closeout_for_projection(

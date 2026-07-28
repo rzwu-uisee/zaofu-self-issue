@@ -536,6 +536,10 @@ def run_resident_once(
                 ),
             )
         event_type = LOOP_COMPLETED if proc.returncode == 0 else LOOP_FAILED
+        worktree_outcome = _finalize_resident_worktree(
+            worktree=Path(worktree_root) / action.loop_request_id,
+            loop_request_id=action.loop_request_id,
+        )
         writer.append(ZfEvent(
             type=event_type,
             actor="zf-autoresearch-resident",
@@ -546,9 +550,118 @@ def run_resident_once(
                 "returncode": proc.returncode,
                 "stdout_tail": (proc.stdout or "")[-2000:],
                 "stderr_tail": (proc.stderr or "")[-2000:],
+                "worktree_lifecycle": worktree_outcome,
             },
         ))
+        lifecycle_event = str(worktree_outcome.get("event_type") or "")
+        if lifecycle_event:
+            writer.append(ZfEvent(
+                type=lifecycle_event,
+                actor="zf-autoresearch-resident",
+                payload={
+                    key: value
+                    for key, value in worktree_outcome.items()
+                    if key != "event_type"
+                },
+            ))
     return actions
+
+
+def _finalize_resident_worktree(
+    *,
+    worktree: Path,
+    loop_request_id: str,
+) -> dict[str, Any]:
+    """Remove only clean terminal worktrees; retain every candidate diff."""
+
+    path = Path(worktree).resolve()
+    base = {
+        "loop_request_id": loop_request_id,
+        "worktree": str(path),
+    }
+    if not path.exists():
+        return {**base, "status": "missing"}
+
+    status = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        return {
+            **base,
+            "status": "retained",
+            "reason": "git_status_failed",
+            "stderr_tail": (status.stderr or "")[-1000:],
+            "event_type": "autoresearch.worktree.retained",
+        }
+    branch_proc = subprocess.run(
+        ["git", "-C", str(path), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    branch = (branch_proc.stdout or "").strip()
+    dirty = [line for line in status.stdout.splitlines() if line.strip()]
+    if dirty:
+        return {
+            **base,
+            "status": "retained",
+            "reason": "candidate_diff_present",
+            "branch": branch,
+            "dirty_paths": dirty[:100],
+            "event_type": "autoresearch.worktree.retained",
+        }
+
+    common_proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    common_dir = (common_proc.stdout or "").strip()
+    if common_proc.returncode != 0 or not common_dir:
+        return {
+            **base,
+            "status": "retained",
+            "reason": "git_common_dir_unresolved",
+            "branch": branch,
+            "event_type": "autoresearch.worktree.retained",
+        }
+    removed = subprocess.run(
+        ["git", "--git-dir", common_dir, "worktree", "remove", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if removed.returncode != 0:
+        return {
+            **base,
+            "status": "retained",
+            "reason": "clean_worktree_remove_failed",
+            "branch": branch,
+            "stderr_tail": (removed.stderr or "")[-1000:],
+            "event_type": "autoresearch.worktree.retained",
+        }
+
+    branch_deleted = False
+    if branch:
+        deleted = subprocess.run(
+            ["git", "--git-dir", common_dir, "branch", "-d", branch],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        branch_deleted = deleted.returncode == 0
+    return {
+        **base,
+        "status": "cleaned",
+        "reason": "terminal_worktree_clean",
+        "branch": branch,
+        "branch_deleted": branch_deleted,
+        "event_type": "autoresearch.worktree.cleaned",
+    }
 
 
 def _action_event_payload(action: ResidentAction) -> dict[str, Any]:

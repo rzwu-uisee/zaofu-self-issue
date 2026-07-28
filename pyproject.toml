@@ -33,6 +33,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["tests/e2e/fixtures"]
 addopts = "--cov=zf --cov-report=term-missing -m 'not perf'"
 asyncio_mode = "auto"
 markers = [

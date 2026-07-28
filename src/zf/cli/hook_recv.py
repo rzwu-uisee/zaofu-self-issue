@@ -12,8 +12,9 @@ LH-3 hardening:
     in .zf/hooks/write_failed_queue.jsonl and flushed into events.jsonl
     by the next successful append so the orchestrator sees the outage.
   * **T3 — causation_id**: the new event inherits the id of the actor's
-    most recent `task.dispatched` event so trace commands can follow
-    the chain. Failure to resolve → emit `hook.orphan_event`.
+    most recent active dispatch so trace commands can follow the chain.
+    Bound idle/post-terminal roles remain taskless telemetry; only an
+    unresolved provider session emits a deduplicated `hook.orphan_event`.
 
 Design notes:
   - Short-lived subprocess per hook invocation; keep deps small.
@@ -315,6 +316,38 @@ def _resolve_causation(
     except Exception:
         return None
     return None
+
+
+def _hook_context_state(
+    *,
+    actor: str,
+    causation_id: str | None,
+    completed_tail_quiesced: bool,
+) -> str:
+    if causation_id:
+        return "active_task"
+    if completed_tail_quiesced:
+        return "post_terminal"
+    if actor.startswith("unresolved:"):
+        return "unresolved"
+    if actor in _ORCHESTRATOR_ACTORS:
+        return "control_plane"
+    return "bound_idle"
+
+
+def _orphan_already_recorded(event_log: EventLog, *, session_id: str) -> bool:
+    if not session_id:
+        return False
+    try:
+        for event in reversed(event_log.read_all()):
+            if event.type != "hook.orphan_event":
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if str(payload.get("session_id") or "") == session_id:
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _latest_active_dispatch_for_actor(
@@ -824,11 +857,16 @@ def run(args: argparse.Namespace) -> int:
     if completed_tail_quiesced and args.event == "provider.stop.check":
         return 0
 
-    # T3: causation_id from the latest task.dispatched for this actor.
-    # Orphan flag only applies to actors that *should* have a dispatch
-    # context — orchestrator / zf-cli hook events legitimately have none.
+    # T3: causation_id from the latest active dispatch for this actor. A known
+    # role without one is idle/post-terminal, not an unresolved provider hook.
     causation_id = _resolve_causation(state_dir, actor, event_log)
-    orphan = _should_check_causation(actor) and causation_id is None
+    context_state = _hook_context_state(
+        actor=actor,
+        causation_id=causation_id,
+        completed_tail_quiesced=completed_tail_quiesced,
+    )
+    event_payload["context_state"] = context_state
+    orphan = context_state == "unresolved"
 
     # 3. Emit the main hook event. On failure → dead_letter + queue
     # write_failed marker; do NOT raise (hook must never fail Claude turn).
@@ -859,15 +897,18 @@ def run(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
-    # 5. If causation lookup failed, emit hook.orphan_event so the
-    # reactor + metrics layer knows this hook had no dispatched context.
-    if orphan and not completed_tail_quiesced:
+    # 5. Emit one orphan marker per genuinely unresolved provider session.
+    if (
+        orphan
+        and not _orphan_already_recorded(event_log, session_id=session_id)
+    ):
         try:
             event_writer.append(ZfEvent(
                 type="hook.orphan_event",
                 actor=actor,
                 payload={"session_id": session_id,
-                         "origin_event": args.event},
+                         "origin_event": args.event,
+                         "context_state": context_state},
             ))
         except Exception:
             pass

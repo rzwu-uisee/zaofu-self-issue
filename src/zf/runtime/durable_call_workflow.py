@@ -19,6 +19,15 @@ _WORKFLOW_IDENTITY_KEYS = (
     "requirement_spec_ref",
     "requirement_spec_digest",
     "request_revision",
+    "continuation_key",
+    "expected_generation",
+    "fragment_id",
+    "fragment_digest",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+    "provider_idempotency_key",
+    "reservation_id",
 )
 
 
@@ -185,7 +194,12 @@ class DurableCallWorkflowMixin:
             roles=roles,
         )
         if invoke_operation is not None:
-            if invoke_operation.status in {"divergent", "failed", "blocked"}:
+            if invoke_operation.status in {
+                "divergent",
+                "failed",
+                "blocked",
+                "superseded",
+            }:
                 reason = invoke_operation.reason or invoke_operation.status
                 self._emit_workflow_invoke_rejected(
                     event,
@@ -209,8 +223,14 @@ class DurableCallWorkflowMixin:
                 invoke_operation.status in {"running", "settled"}
                 or existing_accept is not None
             ):
-                if invoke_operation.status == "requested" and existing_accept is not None:
+                if invoke_operation.status in {"requested", "reserved"} and existing_accept is not None:
                     from zf.runtime.call_result_runtime import workflow_operation_service
+                    from zf.runtime.workflow_operation import load_workflow_operation
+
+                    existing_operation = load_workflow_operation(
+                        self.event_log,
+                        invoke_operation.operation_id,
+                    ) or {}
 
                     workflow_operation_service(self).mark_started(
                         operation_id=invoke_operation.operation_id,
@@ -220,6 +240,12 @@ class DurableCallWorkflowMixin:
                         dispatch_id=str(
                             (existing_accept.payload or {}).get("fanout_request_event_id")
                             or existing_accept.id
+                        ),
+                        reservation_id=str(
+                            existing_operation.get("reservation_id") or ""
+                        ),
+                        idempotency_key=str(
+                            existing_operation.get("idempotency_key") or ""
                         ),
                         causation_id=existing_accept.id,
                         correlation_id=event.correlation_id or "",
@@ -323,9 +349,16 @@ class DurableCallWorkflowMixin:
             value = payload.get(key)
             if value not in (None, ""):
                 fanout_request.payload[key] = value
+        fanout_request.payload["workflow_invoke_admitted"] = True
         accepted_event.payload["fanout_request_event_id"] = fanout_request.id
         self.event_writer.append(accepted_event)
         self.event_writer.append(fanout_request)
+        if str(getattr(stage, "trigger", "") or "") == event.type:
+            self._try_start_declared_workflow_fanout(
+                fanout_request,
+                fanout_request.payload,
+                task_id=task_id,
+            )
         if invoke_operation is not None:
             from zf.runtime.call_result_runtime import workflow_operation_service
 
@@ -335,6 +368,10 @@ class DurableCallWorkflowMixin:
                 workflow_run_id=str(payload.get("workflow_run_id") or ""),
                 task_id=task_id,
                 dispatch_id=fanout_request.id,
+                reservation_id=str(payload.get("reservation_id") or ""),
+                idempotency_key=str(
+                    payload.get("provider_idempotency_key") or ""
+                ),
                 causation_id=accepted_event.id,
                 correlation_id=event.correlation_id or "",
             )
@@ -361,7 +398,11 @@ class DurableCallWorkflowMixin:
         if mode == "shadow" and not bool(payload.get("durable_operation")):
             return None
         from zf.runtime.call_result_runtime import workflow_operation_service
-        from zf.runtime.workflow_operation import stable_operation_id
+        from zf.runtime.workflow_operation import (
+            EnsureOperationResult,
+            load_workflow_operation,
+            stable_operation_id,
+        )
 
         workflow_run_id = str(
             payload.get("workflow_run_id")
@@ -375,35 +416,88 @@ class DurableCallWorkflowMixin:
             operation_key=task_id or pattern_id,
             operation_type="workflow",
         )
-        ensured = workflow_operation_service(self).ensure_operation(
-            workflow_run_id=workflow_run_id,
-            operation_id=operation_id,
-            operation_type="workflow",
-            request={
-                "task_id": task_id,
-                "pattern_id": pattern_id,
-                "topology": topology,
-                "target_ref": target_ref,
-                "roles": list(roles),
-                "scope": _strings(payload.get("scope")),
-                "requested_specialists": _strings(
-                    payload.get("requested_specialists")
-                ),
-                "expected_output": str(payload.get("expected_output") or ""),
-                "workflow_input_manifest_ref": str(
-                    payload.get("workflow_input_manifest_ref") or ""
-                ),
-                "artifact_refs": payload.get("artifact_refs")
-                if isinstance(payload.get("artifact_refs"), list)
-                else [],
-            },
-            parent_operation_id=str(payload.get("parent_operation_id") or ""),
-            parent_stage_id=pattern_id,
-            task_id=task_id,
-            child_task_ids=[task_id] if task_id else [],
-            causation_id=event.id,
-            correlation_id=event.correlation_id or workflow_run_id,
+        supplied_request_hash = str(
+            payload.get("workflow_operation_request_hash") or ""
         )
+        existing_operation = (
+            load_workflow_operation(self.event_log, operation_id)
+            if supplied_request_hash
+            else None
+        )
+        if supplied_request_hash:
+            if existing_operation is None:
+                return EnsureOperationResult(
+                    status="divergent",
+                    operation_id=operation_id,
+                    request_hash=supplied_request_hash,
+                    reason="prepared_workflow_operation_missing",
+                )
+            existing_hash = str(existing_operation.get("request_hash") or "")
+            if existing_hash != supplied_request_hash:
+                return EnsureOperationResult(
+                    status="divergent",
+                    operation_id=operation_id,
+                    request_hash=supplied_request_hash,
+                    reason="prepared_workflow_operation_hash_mismatch",
+                )
+            ensured = EnsureOperationResult(
+                status=str(existing_operation.get("status") or "requested"),
+                operation_id=operation_id,
+                request_hash=existing_hash,
+                replay_hit=True,
+                admitted_call_result_ref=str(
+                    (
+                        existing_operation.get("admitted_call_result_ref")
+                        if isinstance(
+                            existing_operation.get("admitted_call_result_ref"),
+                            dict,
+                        )
+                        else {}
+                    ).get("ref")
+                    or ""
+                ),
+                admitted_call_result_digest=str(
+                    (
+                        existing_operation.get("admitted_call_result_ref")
+                        if isinstance(
+                            existing_operation.get("admitted_call_result_ref"),
+                            dict,
+                        )
+                        else {}
+                    ).get("sha256")
+                    or ""
+                ),
+            )
+        else:
+            ensured = workflow_operation_service(self).ensure_operation(
+                workflow_run_id=workflow_run_id,
+                operation_id=operation_id,
+                operation_type="workflow",
+                request={
+                    "task_id": task_id,
+                    "pattern_id": pattern_id,
+                    "topology": topology,
+                    "target_ref": target_ref,
+                    "roles": list(roles),
+                    "scope": _strings(payload.get("scope")),
+                    "requested_specialists": _strings(
+                        payload.get("requested_specialists")
+                    ),
+                    "expected_output": str(payload.get("expected_output") or ""),
+                    "workflow_input_manifest_ref": str(
+                        payload.get("workflow_input_manifest_ref") or ""
+                    ),
+                    "artifact_refs": payload.get("artifact_refs")
+                    if isinstance(payload.get("artifact_refs"), list)
+                    else [],
+                },
+                parent_operation_id=str(payload.get("parent_operation_id") or ""),
+                parent_stage_id=pattern_id,
+                task_id=task_id,
+                child_task_ids=[task_id] if task_id else [],
+                causation_id=event.id,
+                correlation_id=event.correlation_id or workflow_run_id,
+            )
         payload.update({
             "workflow_run_id": workflow_run_id,
             "workflow_operation_id": operation_id,

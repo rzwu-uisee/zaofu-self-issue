@@ -20,8 +20,8 @@ import { getOperatorInbox, getPlanPreview, postAction } from "../../api/client";
 import type { OperatorInboxItem, OperatorInboxProjection, PlanPreview } from "../../api/types";
 import { MarkdownText } from "../agent-session/MarkdownText";
 
-type InboxView = "action_required" | "runtime_attention" | "automation" | "all" | "resolved";
-type InboxKindFilter = "all" | "plan_approval" | "human_decision" | "runtime_attention" | "approval";
+type InboxView = "action_required" | "runtime_attention" | "automation" | "notification" | "all" | "resolved";
+type InboxKindFilter = "all" | "plan_approval" | "human_decision" | "runtime_attention" | "approval" | "run_delivery";
 
 const KIND_OPTIONS: Array<{ value: InboxKindFilter; label: string }> = [
   { value: "all", label: "All types" },
@@ -29,12 +29,14 @@ const KIND_OPTIONS: Array<{ value: InboxKindFilter; label: string }> = [
   { value: "human_decision", label: "Human Decision" },
   { value: "runtime_attention", label: "Runtime Attention" },
   { value: "approval", label: "Approval" },
+  { value: "run_delivery", label: "Run Delivery" },
 ];
 
 const VIEW_OPTIONS: Array<{ value: InboxView; label: string }> = [
   { value: "action_required", label: "Action" },
   { value: "runtime_attention", label: "Runtime" },
   { value: "automation", label: "Automation" },
+  { value: "notification", label: "Delivery" },
   { value: "all", label: "All" },
   { value: "resolved", label: "Resolved" },
 ];
@@ -221,7 +223,8 @@ export function PlanApprovalPanel(
 
   const initialLoading = !hasLoadedInbox && !inbox;
   const pendingCount = inbox?.summary.action_required_pending ?? inbox?.pending.filter((item) => item.actionability === "human_required").length ?? 0;
-  const diagnosticCount = inbox?.summary.noise_pending ?? inbox?.pending.filter((item) => item.actionability !== "human_required").length ?? 0;
+  const diagnosticCount = inbox?.summary.noise_pending ?? inbox?.pending.filter((item) => item.actionability === "automation_owned").length ?? 0;
+  const deliveryCount = inbox?.summary.notification_pending ?? inbox?.pending.filter((item) => item.actionability === "informational").length ?? 0;
   const totalCount = inbox?.items.length ?? 0;
 
   return (
@@ -237,6 +240,7 @@ export function PlanApprovalPanel(
           <span className="muted">
             {initialLoading ? "loading" : pendingCount ? `${pendingCount} action required` : "clear"}
             {diagnosticCount ? ` / ${diagnosticCount} diagnostics` : ""}
+            {deliveryCount ? ` / ${deliveryCount} deliveries` : ""}
             {view === "all" && totalCount ? ` / ${totalCount} total` : ""}
           </span>
         </div>
@@ -454,6 +458,7 @@ function InboxRow({
             {typeof item.task_count === "number" ? <span>{item.task_count} tasks</span> : null}
             {item.trace_id ? <span>trace {item.trace_id}</span> : null}
             {item.checkpoint_id ? <span>checkpoint {item.checkpoint_id}</span> : null}
+            {item.run_id ? <span>run {item.run_id}</span> : null}
             {item.category ? <span>{categoryLabel(item.category)}</span> : null}
             {item.source_role ? <span>{sourceLabel(item.source_role)}</span> : null}
             {Number(item.dedupe_count || 0) > 1 ? <span>{item.dedupe_count} grouped</span> : null}
@@ -461,17 +466,24 @@ function InboxRow({
         </div>
       </div>
       {selected ? (
-        <InboxRowActions
-          item={item}
-          disabled={disabled}
-          rejectReason={rejectReason}
-          onRejectReason={onRejectReason}
-          onPreview={onPreview}
-          onApprove={onApprove}
-          onReject={onReject}
-          onRepair={onRepair}
-          onAction={onAction}
-        />
+        <>
+          {item.deep_link ? (
+            <div className="operator-inbox-inline-actions">
+              <a className="delivery-action-button" href={item.deep_link}>View run delivery</a>
+            </div>
+          ) : null}
+          <InboxRowActions
+            item={item}
+            disabled={disabled}
+            rejectReason={rejectReason}
+            onRejectReason={onRejectReason}
+            onPreview={onPreview}
+            onApprove={onApprove}
+            onReject={onReject}
+            onRepair={onRepair}
+            onAction={onAction}
+          />
+        </>
       ) : null}
     </article>
   );
@@ -663,6 +675,9 @@ function inboxItemsForView(inbox: OperatorInboxProjection | null, view: InboxVie
   if (view === "runtime_attention") {
     return items.filter((item) => item.status === "pending" && item.category === "runtime_attention");
   }
+  if (view === "notification") {
+    return items.filter((item) => item.status === "pending" && item.category === "notification");
+  }
   return items.filter((item) => item.status === "pending" && item.category === "automation_diagnostic");
 }
 
@@ -684,6 +699,7 @@ function kindLabel(kind: string): string {
   if (kind === "human_decision") return "Human Decision";
   if (kind === "runtime_attention") return "Runtime Attention";
   if (kind === "approval") return "Approval";
+  if (kind === "run_delivery") return "Run Delivery";
   return kind.replace(/_/g, " ");
 }
 

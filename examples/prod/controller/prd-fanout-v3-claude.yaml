@@ -10,6 +10,7 @@ spec:
   qualityFloor: product-demo
   evidencePolicy: strict_refs
   deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig

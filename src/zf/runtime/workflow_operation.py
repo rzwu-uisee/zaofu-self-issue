@@ -28,12 +28,19 @@ WORKFLOW_OPERATION_SCHEMA = "workflow-operation.v1"
 WORKFLOW_OPERATION_CANONICALIZATION = "workflow-operation-request.v1"
 OPERATION_EVENT_TYPES = frozenset({
     "workflow.operation.requested",
+    "workflow.operation.reserved",
     "workflow.operation.started",
     "workflow.operation.settled",
     "workflow.operation.failed",
     "workflow.operation.blocked",
+    "workflow.operation.superseded",
 })
-TERMINAL_OPERATION_STATUSES = frozenset({"settled", "failed", "blocked"})
+TERMINAL_OPERATION_STATUSES = frozenset({
+    "settled",
+    "failed",
+    "blocked",
+    "superseded",
+})
 
 _VOLATILE_REQUEST_KEYS = frozenset({
     "attempt_id",
@@ -67,6 +74,18 @@ class EnsureOperationResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class ReserveOperationResult:
+    status: str
+    operation_id: str
+    request_hash: str
+    reservation_id: str = ""
+    idempotency_key: str = ""
+    created: bool = False
+    replay_hit: bool = False
+    reason: str = ""
+
+
 def stable_operation_id(
     *,
     workflow_run_id: str,
@@ -82,6 +101,35 @@ def stable_operation_id(
         if str(item).strip()
     )[:72]
     return f"wop-{prefix or operation_type}-{digest}"
+
+
+def stable_continuation_reservation_id(
+    *,
+    workflow_run_id: str,
+    continuation_key: str,
+    expected_generation: str,
+) -> str:
+    semantic = ":".join((
+        workflow_run_id,
+        continuation_key,
+        expected_generation,
+    ))
+    return "wres-" + hashlib.sha256(semantic.encode("utf-8")).hexdigest()[:24]
+
+
+def stable_continuation_idempotency_key(
+    *,
+    workflow_run_id: str,
+    continuation_key: str,
+    expected_generation: str,
+) -> str:
+    semantic = ":".join((
+        "continuation-dispatch.v1",
+        workflow_run_id,
+        continuation_key,
+        expected_generation,
+    ))
+    return "widem-" + hashlib.sha256(semantic.encode("utf-8")).hexdigest()
 
 
 def canonicalize_operation_request(value: Any) -> Any:
@@ -157,8 +205,20 @@ def reduce_workflow_operations(
             "dispatch_id": str(payload.get("dispatch_id") or ""),
             "lease_id": str(payload.get("lease_id") or ""),
             "provider_session_id": str(payload.get("provider_session_id") or ""),
+            "context_delivery_envelope_ref": {},
+            "context_delivery_receipt_ref": {},
+            "context_delivery_receipt_error": "",
             "child_task_ids": [],
             "admitted_call_result_ref": {},
+            "reservation_id": "",
+            "reservation_expires_at": "",
+            "continuation_key": "",
+            "expected_generation": "",
+            "expected_package_ref": "",
+            "expected_package_digest": "",
+            "pending_action_digest": "",
+            "budget_snapshot": {},
+            "idempotency_key": "",
             "source_event_ids": [],
             "request_count": 0,
             "replay_count": 0,
@@ -182,6 +242,27 @@ def reduce_workflow_operations(
             row["replay_count"] = max(0, row["request_count"] - 1)
             if not row.get("request_ref") and isinstance(payload.get("request_ref"), dict):
                 row["request_ref"] = dict(payload["request_ref"])
+        elif (
+            event.type == "workflow.operation.reserved"
+            and row["status"] not in TERMINAL_OPERATION_STATUSES
+        ):
+            row["status"] = "reserved"
+            for key in (
+                "reservation_id",
+                "reservation_expires_at",
+                "continuation_key",
+                "expected_generation",
+                "expected_package_ref",
+                "expected_package_digest",
+                "pending_action_digest",
+                "idempotency_key",
+            ):
+                value = str(payload.get(key) or "")
+                if value:
+                    row[key] = value
+            budget_snapshot = payload.get("budget_snapshot")
+            if isinstance(budget_snapshot, Mapping):
+                row["budget_snapshot"] = dict(budget_snapshot)
         elif event.type == "workflow.operation.started" and row["status"] not in TERMINAL_OPERATION_STATUSES:
             row["status"] = "running"
             for key in (
@@ -191,6 +272,20 @@ def reduce_workflow_operations(
                 "lease_id",
                 "provider_session_id",
             ):
+                value = str(payload.get(key) or "")
+                if value:
+                    row[key] = value
+            for key in (
+                "context_delivery_envelope_ref",
+                "context_delivery_receipt_ref",
+            ):
+                value = payload.get(key)
+                if isinstance(value, Mapping):
+                    row[key] = dict(value)
+            row["context_delivery_receipt_error"] = str(
+                payload.get("context_delivery_receipt_error") or ""
+            )
+            for key in ("reservation_id", "idempotency_key"):
                 value = str(payload.get(key) or "")
                 if value:
                     row[key] = value
@@ -204,6 +299,9 @@ def reduce_workflow_operations(
             row["reason"] = str(payload.get("reason") or "")
         elif event.type == "workflow.operation.blocked":
             row["status"] = "blocked"
+            row["reason"] = str(payload.get("reason") or "")
+        elif event.type == "workflow.operation.superseded":
+            row["status"] = "superseded"
             row["reason"] = str(payload.get("reason") or "")
         row["last_event_id"] = event.id
         row["last_event_type"] = event.type
@@ -345,6 +443,109 @@ class WorkflowOperationService:
                 created=True,
             )
 
+    def reserve_continuation(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        continuation_key: str,
+        expected_generation: str,
+        expected_package_ref: str,
+        expected_package_digest: str,
+        pending_action_digest: str,
+        budget_snapshot: Mapping[str, Any],
+        reservation_expires_at: str,
+        parent_operation_id: str = "",
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+    ) -> ReserveOperationResult:
+        reservation_id = stable_continuation_reservation_id(
+            workflow_run_id=workflow_run_id,
+            continuation_key=continuation_key,
+            expected_generation=expected_generation,
+        )
+        idempotency_key = stable_continuation_idempotency_key(
+            workflow_run_id=workflow_run_id,
+            continuation_key=continuation_key,
+            expected_generation=expected_generation,
+        )
+        lock_path = (
+            self.state_dir
+            / "projections"
+            / "workflow-operations"
+            / f"{_safe_component(operation_id)}.guard"
+        )
+        with locked_path(lock_path):
+            existing = load_workflow_operation(self.event_log, operation_id)
+            if existing is None:
+                return ReserveOperationResult(
+                    status="missing",
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    reason="workflow_operation_missing",
+                )
+            if str(existing.get("request_hash") or "") != request_hash:
+                return ReserveOperationResult(
+                    status="divergent",
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    reason="request_hash_divergence",
+                )
+            status = str(existing.get("status") or "requested")
+            if status in {"reserved", "running"} | TERMINAL_OPERATION_STATUSES:
+                existing_reservation = str(existing.get("reservation_id") or "")
+                if existing_reservation and existing_reservation != reservation_id:
+                    return ReserveOperationResult(
+                        status="divergent",
+                        operation_id=operation_id,
+                        request_hash=request_hash,
+                        reason="reservation_identity_divergence",
+                    )
+                return ReserveOperationResult(
+                    status=status,
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    reservation_id=existing_reservation or reservation_id,
+                    idempotency_key=(
+                        str(existing.get("idempotency_key") or "")
+                        or idempotency_key
+                    ),
+                    replay_hit=True,
+                    reason=str(existing.get("reason") or ""),
+                )
+            self._emit_once(
+                "workflow.operation.reserved",
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=workflow_run_id,
+                task_id=task_id,
+                payload={
+                    "reservation_id": reservation_id,
+                    "reservation_expires_at": reservation_expires_at,
+                    "continuation_key": continuation_key,
+                    "expected_generation": expected_generation,
+                    "expected_package_ref": expected_package_ref,
+                    "expected_package_digest": expected_package_digest,
+                    "parent_operation_id": parent_operation_id,
+                    "pending_action_digest": pending_action_digest,
+                    "budget_snapshot": dict(budget_snapshot),
+                    "idempotency_key": idempotency_key,
+                    "semantic_attempt_consumed": False,
+                },
+                causation_id=causation_id,
+                correlation_id=correlation_id,
+            )
+            return ReserveOperationResult(
+                status="reserved",
+                operation_id=operation_id,
+                request_hash=request_hash,
+                reservation_id=reservation_id,
+                idempotency_key=idempotency_key,
+                created=True,
+            )
+
     def mark_started(
         self,
         *,
@@ -357,6 +558,11 @@ class WorkflowOperationService:
         active_attempt_id: str = "",
         lease_id: str = "",
         provider_session_id: str = "",
+        context_delivery_envelope_ref: Mapping[str, Any] | None = None,
+        context_delivery_receipt_ref: Mapping[str, Any] | None = None,
+        context_delivery_receipt_error: str = "",
+        reservation_id: str = "",
+        idempotency_key: str = "",
         causation_id: str = "",
         correlation_id: str = "",
     ) -> ZfEvent | None:
@@ -372,6 +578,44 @@ class WorkflowOperationService:
                 "active_attempt_id": active_attempt_id,
                 "lease_id": lease_id,
                 "provider_session_id": provider_session_id,
+                "context_delivery_envelope_ref": dict(
+                    context_delivery_envelope_ref or {}
+                ),
+                "context_delivery_receipt_ref": dict(
+                    context_delivery_receipt_ref or {}
+                ),
+                "context_delivery_receipt_error": str(
+                    context_delivery_receipt_error or ""
+                )[:512],
+                "reservation_id": reservation_id,
+                "idempotency_key": idempotency_key,
+            },
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def supersede(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        reason: str,
+        reservation_id: str = "",
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+    ) -> ZfEvent | None:
+        return self._emit_once(
+            "workflow.operation.superseded",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            payload={
+                "reason": reason,
+                "reservation_id": reservation_id,
+                "semantic_attempt_consumed": False,
             },
             causation_id=causation_id,
             correlation_id=correlation_id,
@@ -476,11 +720,14 @@ __all__ = [
     "WORKFLOW_OPERATION_CANONICALIZATION",
     "WORKFLOW_OPERATION_SCHEMA",
     "EnsureOperationResult",
+    "ReserveOperationResult",
     "WorkflowOperationError",
     "WorkflowOperationService",
     "canonicalize_operation_request",
     "load_workflow_operation",
     "operation_request_hash",
     "reduce_workflow_operations",
+    "stable_continuation_idempotency_key",
+    "stable_continuation_reservation_id",
     "stable_operation_id",
 ]

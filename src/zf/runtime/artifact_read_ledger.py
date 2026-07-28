@@ -13,6 +13,7 @@ from typing import Any, Iterable, Mapping
 from zf.core.events.model import ZfEvent
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
+from zf.runtime.artifact_access import ArtifactAccessError, require_artifact_access
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.sidecar_refs import (
     SidecarRefError,
@@ -46,6 +47,7 @@ def build_attempt_source_manifest(
     sources: Iterable[Mapping[str, Any]],
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    metadata = dict(metadata or {})
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for index, raw in enumerate(sources):
@@ -59,14 +61,57 @@ def build_attempt_source_manifest(
         if key in seen:
             continue
         seen.add(key)
-        normalized.append({
+        access_scope = (
+            dict(raw.get("access_scope") or {})
+            if isinstance(raw.get("access_scope"), Mapping)
+            else {}
+        )
+        retention = (
+            dict(raw.get("retention") or {})
+            if isinstance(raw.get("retention"), Mapping)
+            else {}
+        )
+        occurrence_id = str(raw.get("occurrence_id") or "").strip()
+        if not occurrence_id:
+            occurrence_body = {
+                "dispatch_id": dispatch_id,
+                "source_event_id": str(
+                    raw.get("source_event_id")
+                    or metadata.get("source_event_id")
+                    or ""
+                ),
+                "source_id": source_id,
+                "artifact_id": artifact_id,
+                "ref": ref,
+                "sha256": digest,
+                "access_scope": access_scope,
+                "retention": retention,
+            }
+            occurrence_id = "attempt-occurrence:" + hashlib.sha256(
+                json.dumps(
+                    occurrence_body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        row = {
             "source_id": source_id,
             "artifact_id": artifact_id,
             "kind": str(raw.get("kind") or "artifact"),
             "ref": ref,
             "sha256": digest,
             "allowed_paths": _strings(raw.get("allowed_paths")) or ["$"],
-        })
+            "occurrence_id": occurrence_id,
+            "source_event_id": str(
+                raw.get("source_event_id")
+                or metadata.get("source_event_id")
+                or ""
+            ),
+            "schema_version": str(raw.get("schema_version") or ""),
+            "access_scope": access_scope,
+            "retention": retention,
+        }
+        normalized.append(row)
     manifest = {
         "schema_version": SOURCE_MANIFEST_SCHEMA,
         "workflow_run_id": workflow_run_id,
@@ -88,6 +133,16 @@ def build_attempt_source_manifest(
             "plan_revision",
             "source_snapshot",
             "resolver",
+            "source_event_id",
+            "read_purpose",
+            "handoff_authority_profile",
+            "handoff_authority_contract",
+            "candidate_snapshot",
+            "candidate_event_id",
+            "candidate_head_commit",
+            "candidate_snapshot_digest",
+            "context_policy",
+            "context_sections",
         ):
             value = metadata.get(key)
             if value not in (None, "", {}, []):
@@ -179,6 +234,24 @@ def source_manifest_from_payload(
         sources=sources,
         metadata=manifest_metadata,
     )
+    if payload.get("_context_delivery_enabled", True):
+        from zf.runtime.context_delivery import attach_context_sections
+
+        required_reads = canonical_required_reads(
+            manifest,
+            output_profile_id=str(payload.get("output_profile_id") or ""),
+            explicit=(
+                payload.get("required_reads")
+                if isinstance(payload.get("required_reads"), list)
+                else ()
+            ),
+        )
+        manifest = attach_context_sections(
+            manifest,
+            output_profile_id=str(payload.get("output_profile_id") or ""),
+            explicit_required_reads=required_reads,
+            context_inheritance=payload.get("context_inheritance"),
+        )
     descriptor = write_attempt_source_manifest(
         state_dir,
         manifest,
@@ -348,8 +421,48 @@ def read_attempt_artifact(
     actor: str = "",
     role: str = "",
     provider: str = "",
+    purpose: str = "",
 ) -> dict[str, Any]:
     source = _find_source(manifest, source_id=source_id, artifact_id=artifact_id)
+    read_purpose = str(purpose or manifest.get("read_purpose") or "").strip()
+    try:
+        require_artifact_access(
+            source.get("access_scope"),
+            actor=actor,
+            role=role,
+            purpose=read_purpose,
+        )
+    except ArtifactAccessError as exc:
+        append_artifact_read(
+            state_dir,
+            {
+                "schema_version": ARTIFACT_READ_SCHEMA,
+                "status": "denied",
+                "workflow_run_id": str(
+                    manifest.get("workflow_run_id") or ""
+                )[:160],
+                "task_id": str(manifest.get("task_id") or "")[:160],
+                "attempt_id": str(manifest.get("attempt_id") or "")[:160],
+                "dispatch_id": str(manifest.get("dispatch_id") or "")[:160],
+                "source_id": str(source_id or "")[:160],
+                "artifact_id": str(artifact_id or "")[:160],
+                "json_path": str(json_path or "$")[:256],
+                "returned_bytes": 0,
+                "truncated": False,
+                "consumer_actor": str(actor or "")[:160],
+                "consumer_role": str(role or "")[:160],
+                "consumer_provider": str(provider or "")[:160],
+                "consumer_purpose": read_purpose[:160],
+                "occurrence_id": str(
+                    source.get("occurrence_id") or ""
+                )[:256],
+                "denial_code": "artifact_access_denied",
+                "read_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        raise ArtifactReadError(
+            "artifact read is not authorized"
+        ) from exc
     allowed_paths = _strings(source.get("allowed_paths")) or ["$"]
     if "$" not in allowed_paths and json_path not in allowed_paths:
         raise ArtifactReadError(
@@ -386,6 +499,7 @@ def read_attempt_artifact(
         truncated = True
     row = {
         "schema_version": ARTIFACT_READ_SCHEMA,
+        "status": "read",
         "workflow_run_id": str(manifest.get("workflow_run_id") or ""),
         "task_id": str(manifest.get("task_id") or ""),
         "attempt_id": str(manifest.get("attempt_id") or ""),
@@ -403,6 +517,8 @@ def read_attempt_artifact(
         "consumer_actor": str(actor or ""),
         "consumer_role": str(role or ""),
         "consumer_provider": str(provider or ""),
+        "consumer_purpose": read_purpose,
+        "occurrence_id": str(source.get("occurrence_id") or ""),
         "read_at": datetime.now(timezone.utc).isoformat(),
     }
     append_artifact_read(state_dir, row)
@@ -634,6 +750,19 @@ def _source_from_item(
             "artifact_id": str(item.get("artifact_id") or item.get("name") or Path(ref).name),
             "kind": kind,
             "allowed_paths": _strings(item.get("allowed_paths")) or ["$"],
+            "occurrence_id": str(item.get("occurrence_id") or ""),
+            "source_event_id": str(item.get("source_event_id") or ""),
+            "schema_version": str(item.get("schema_version") or ""),
+            "access_scope": (
+                dict(item.get("access_scope") or {})
+                if isinstance(item.get("access_scope"), Mapping)
+                else {}
+            ),
+            "retention": (
+                dict(item.get("retention") or {})
+                if isinstance(item.get("retention"), Mapping)
+                else {}
+            ),
         })
         return source
     return _source_from_ref(
@@ -811,6 +940,8 @@ def _parse_ledger(raw: bytes, *, expected_attempt_id: str) -> list[dict[str, Any
 
 
 def _read_matches(row: Mapping[str, Any], requirement: Mapping[str, Any]) -> bool:
+    if str(row.get("status") or "read") != "read":
+        return False
     for field in ("source_id", "artifact_id"):
         if str(requirement.get(field) or "") != str(row.get(field) or ""):
             return False

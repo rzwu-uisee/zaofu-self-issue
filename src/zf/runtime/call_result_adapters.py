@@ -262,6 +262,14 @@ def call_result_profile_identity(
         return PLAN_SYNTH_PROFILE_ID, PLAN_SYNTH_PROFILE_REVISION
     if "global" in identity or "rescan" in identity:
         return "global-rescan", "1"
+    if (
+        operation_type == "fanout_reader_child"
+        and (
+            str(payload.get("candidate_head_commit") or "").strip()
+            or str(payload.get("candidate_snapshot_ref") or "").strip()
+        )
+    ):
+        return "candidate-verify", "1"
     if "candidate" in identity:
         return "candidate-verify", "1"
     return "task-verify", "1"

@@ -25,6 +25,7 @@ from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     load_workflow_operation,
+    reduce_workflow_operations,
 )
 
 
@@ -121,6 +122,74 @@ def bind_operation_submit_capability(
         path.chmod(0o600)
     except OSError:
         pass
+
+
+def is_authorized_result_scratch_write(
+    state_dir: Path,
+    event_log: EventLog,
+    *,
+    role_instance: str,
+    target: Path,
+) -> bool:
+    """Allow one provider write only to its current signed result scratch."""
+
+    state_root = Path(state_dir).resolve()
+    actual = Path(os.path.abspath(Path(target).expanduser()))
+    try:
+        actual.relative_to(state_root)
+        mode = actual.lstat().st_mode
+    except (OSError, ValueError):
+        return False
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return False
+
+    operations = reduce_workflow_operations(event_log.read_all())
+    candidates = [
+        operation
+        for operation in operations.values()
+        if operation.get("status") == "running"
+        and str(operation.get("role_instance") or "") == role_instance
+    ]
+    if not candidates:
+        return False
+    current = max(
+        candidates,
+        key=lambda operation: (
+            str(operation.get("last_event_at") or ""),
+            str(operation.get("last_event_id") or ""),
+        ),
+    )
+    descriptor = current.get("request_ref")
+    if not isinstance(descriptor, Mapping):
+        return False
+    try:
+        request_body = hydrate_sidecar_ref(state_root, dict(descriptor)).payload
+    except Exception:
+        return False
+    if not isinstance(request_body, Mapping):
+        return False
+    request = request_body.get("request")
+    if not isinstance(request, Mapping):
+        return False
+    expected = Path(os.path.abspath(
+        state_root / str(request.get("result_scratch_ref") or "")
+    ))
+    if actual != expected:
+        return False
+
+    binding = _read_json(
+        _binding_path(state_root, str(current.get("operation_id") or ""))
+    )
+    expected_binding = {
+        "role_instance": role_instance,
+        "attempt_id": str(current.get("active_attempt_id") or ""),
+        "lease_id": str(current.get("lease_id") or ""),
+    }
+    return (
+        bool(binding)
+        and not bool(binding.get("used"))
+        and all(binding.get(key) == value for key, value in expected_binding.items())
+    )
 
 
 class SemanticResultSubmitService:
@@ -417,6 +486,7 @@ def _compatibility_projection(field: str, payload: Mapping[str, Any]) -> dict[st
             "status": status,
             "summary": str(result.get("summary") or ""),
             "findings": list(result.get("findings") or []),
+            "evidence_refs": list(result.get("evidence_refs") or []),
             "recommendation": "approve" if verdict == "passed" else "reject",
         },
         **(

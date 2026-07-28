@@ -1,0 +1,17 @@
+version: "1.0"
+preset: kanban-real-coding-e2e
+
+project:
+  name: kanban-real-coding-e2e
+  state_dir: ${ZF_STATE_DIR:-.zf}
+
+session:
+  tmux_session: ${ZF_TMUX_SESSION:-zf-kanban-real-coding}
+  tmux_layout: pane_grid
+
+orchestrator:
+  backend: codex
+
+runtime:
+  workdirs:
+    enabled: false

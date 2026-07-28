@@ -8,6 +8,7 @@ Autoresearch do not each maintain divergent event-name tables.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -28,6 +29,32 @@ RECOVERY_POLICIES: frozenset[str] = frozenset({
     "run_manager_then_autoresearch",
     "human",
 })
+
+_NON_ACTIONABLE_PAYLOAD_MODES = frozenset({
+    "observe",
+    "observation",
+    "shadow",
+    "shadow_only",
+})
+
+
+def event_is_recovery_actionable(
+    event_type: str,
+    payload: Mapping[str, object] | None = None,
+) -> bool:
+    """Return whether an observed event may enter an automated recovery path."""
+
+    body = payload or {}
+    actionability = str(body.get("actionability") or "").strip().lower()
+    if actionability in _NON_ACTIONABLE_PAYLOAD_MODES:
+        return False
+    mode = str(body.get("mode") or "").strip().lower()
+    if (
+        event_type == "plan.artifact_package.rejected"
+        and mode == "shadow"
+    ):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -726,6 +753,30 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             severity="high",
             title="Goal closure identity is incomplete or stale",
             owner_route="run_manager",
+            action_policy="auto_decide",
+            intervention_class="auto_recover",
+            suggested_route="run_manager_recovery",
+            suggested_action_kind="fanout-aggregate-rebuild",
+            supervisor_attention="on_repeated",
+            run_manager_semantics=("pending_action",),
+            autoresearch_eligible=False,
+            producer_kind="kernel",
+            required_scope_any=("run_id", "goal_id", "source_event_id"),
+            notification_policy="owner_on_repair_failed",
+            recovery_policy="run_manager_then_autoresearch",
+            dedupe_key_fields=(
+                "workflow_run_id", "goal_id", "source_event_id", "reason",
+            ),
+        ),
+        EventProblemSpec(
+            event_type="goal.dossier.inconsistent",
+            event_class="expected_negative",
+            problem_class="projection_consistency",
+            failure_class="goal_dossier_inconsistent",
+            source="goal_dossier_delivery",
+            severity="high",
+            title="Goal Dossier disagrees with terminal truth",
+            owner_route="run_manager",
             action_policy="needs_diagnosis",
             intervention_class="repair_harness",
             suggested_route="run_manager_recovery",
@@ -733,12 +784,15 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             supervisor_attention="on_repeated",
             run_manager_semantics=("pending_action",),
             autoresearch_eligible=True,
-            producer_kind="kernel",
-            required_scope_any=("run_id", "goal_id", "source_event_id"),
+            producer_kind="projection",
+            required_scope_any=("run_id", "goal_id", "terminal_event_id"),
             notification_policy="owner_on_repair_failed",
             recovery_policy="run_manager_then_autoresearch",
             dedupe_key_fields=(
-                "workflow_run_id", "goal_id", "source_event_id", "reason",
+                "workflow_run_id",
+                "goal_id",
+                "terminal_event_id",
+                "dossier_source_fingerprint",
             ),
         ),
         _product_gap_expected(
@@ -2049,8 +2103,15 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
                 "workflow.call.result.reported",
                 "workflow.call.result.admitted",
                 "workflow.operation.requested",
+                "workflow.operation.reserved",
                 "workflow.operation.started",
                 "workflow.operation.settled",
+                "workflow.operation.superseded",
+                "workflow.fragment.proposed",
+                "workflow.fragment.admitted",
+                "workflow.fragment.rejected",
+                "workflow.fragment.superseded",
+                "workflow.fragment.cancelled",
             )
         ),
         EventProblemSpec(

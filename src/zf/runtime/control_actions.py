@@ -8,8 +8,6 @@ import re
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
 import yaml
 
 from zf.core.config.schema import ZfConfig
@@ -17,7 +15,6 @@ from zf.core.events import EventWriter, ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task, TaskContract, TaskEvidence
 from zf.core.task.store import TaskStore
-from zf.runtime.action_orchestrator import ControlledActionOrchestrator
 from zf.runtime.channel_adapter import dispatch_pending_replies
 from zf.runtime.channel_contracts import (
     CHANNEL_DISCUSSION_MODES,
@@ -60,7 +57,9 @@ from zf.runtime.workflow_inputs import (
 
 from zf.runtime.control_actions_channel_msg import ChannelMessageActionsMixin
 from zf.runtime.control_actions_channel_admin import ChannelAdminActionsMixin
+from zf.runtime.control_actions_channel_templates import ChannelTemplateActionsMixin
 from zf.runtime.control_actions_plan import PlanApprovalActionsMixin
+from zf.runtime.control_actions_proposals import ProposalExecutionActionsMixin
 from zf.runtime.control_actions_product import ProductActionsMixin
 from zf.runtime.control_actions_ops import OpsActionsMixin
 from zf.runtime.control_actions_recovery import RECOVERY_ACTIONS, RecoveryActionsMixin
@@ -68,6 +67,7 @@ from zf.runtime.control_actions_surgery import SurgeryActionsMixin
 from zf.runtime.control_actions_emit import ActionEmitMixin
 from zf.runtime.control_actions_workflow_resume import WorkflowResumeActionsMixin
 from zf.runtime.control_actions_candidate_rework import CandidateReworkActionsMixin
+from zf.runtime.control_actions_research import ResearchActionsMixin
 from zf.runtime.control_actions_workflow_request import WorkflowRequestActionsMixin
 from zf.runtime.control_actions_helpers import (  # noqa: F401 — re-export moved helpers
     _approval_ref,
@@ -99,13 +99,16 @@ from zf.runtime.control_actions_helpers import (  # noqa: F401 — re-export mov
 
 
 class ControlledActionService(
+    ProposalExecutionActionsMixin,
     ChannelMessageActionsMixin,
+    ChannelTemplateActionsMixin,
     ChannelAdminActionsMixin,
     ProductActionsMixin,
     PlanApprovalActionsMixin,
     OpsActionsMixin,
     WorkflowResumeActionsMixin,
     CandidateReworkActionsMixin,
+    ResearchActionsMixin,
     WorkflowRequestActionsMixin,
     SurgeryActionsMixin,
     RecoveryActionsMixin,
@@ -133,57 +136,6 @@ class ControlledActionService(
         self.source = source
         self.surface = surface
         self.openclaw_client = openclaw_client
-
-    def execute(
-        self,
-        *,
-        action: str,
-        requested_action: str,
-        payload: dict,
-        requested: ZfEvent,
-    ) -> dict:
-        result = ControlledActionOrchestrator(
-            writer=self.writer,
-            actor=self.actor,
-            surface=self.surface,
-        ).run(
-            action=action,
-            requested_action=requested_action,
-            payload=payload,
-            requested=requested,
-            task_id=_task_id_from_payload(payload),
-            handler=lambda: self._execute_action(
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-                requested=requested,
-            ),
-        )
-        # frontend-stress (2026-07-15): ANY accepted proposal must clear its
-        # Triage card, not just create-task. The Web Accept threads
-        # proposal_event_id on every proposal action; when the action succeeds,
-        # emit the resolved event so pending_kanban_proposals collapses the card.
-        # create-task already clears via task.created, and the dismiss action
-        # emits its own resolved event — skip those to avoid a redundant event.
-        proposal_event_id = str(payload.get("proposal_event_id") or "").strip()
-        if (
-            proposal_event_id
-            and bool(result.get("ok"))
-            and action not in {"create-task", "kanban-proposal-dismiss"}
-        ):
-            self.writer.emit(
-                "kanban.agent.proposal.resolved",
-                actor=self.actor,
-                causation_id=requested.id,
-                correlation_id=requested.correlation_id,
-                payload={
-                    "proposal_event_id": proposal_event_id,
-                    "resolution": "executed",
-                    "action": action,
-                    "source": self.source,
-                },
-            )
-        return result
 
     def _execute_action(
         self,
@@ -251,6 +203,20 @@ class ControlledActionService(
             )
         if action == "channel-create":
             return self._channel_create(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "channel-create-from-template":
+            return self._channel_create_from_template(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "channel-discussion-start":
+            return self._channel_discussion_start(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
@@ -328,6 +294,20 @@ class ControlledActionService(
             )
         if action == "workflow-invoke":
             return self._workflow_invoke(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "research-start":
+            return self._research_start(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "research-adopt":
+            return self._research_adopt(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
@@ -473,6 +453,11 @@ class ControlledActionService(
             )
         if action == "stage-retrigger":
             return self._stage_retrigger_action(
+                requested=requested, action=action,
+                requested_action=requested_action, payload=payload,
+            )
+        if action == "fanout-aggregate-rebuild":
+            return self._fanout_aggregate_rebuild_action(
                 requested=requested, action=action,
                 requested_action=requested_action, payload=payload,
             )

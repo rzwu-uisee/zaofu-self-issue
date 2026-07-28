@@ -712,11 +712,18 @@ def _owner_visible_card(payload: dict[str, Any], body: str) -> dict[str, Any]:
         })
     web_base_url = os.environ.get("ZF_WEB_BASE_URL", "").strip()
     if web_base_url:
+        deep_link = _text(payload, "web_deep_link") or "/?page=inbox"
+        if deep_link.startswith(("http://", "https://")):
+            detail_url = deep_link
+        else:
+            if not deep_link.startswith("/"):
+                deep_link = "/" + deep_link
+            detail_url = f"{web_base_url.rstrip('/')}{deep_link}"
         actions.append({
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "🔍 详情(Web 收件箱)"},
+            "text": {"tag": "plain_text", "content": "🔍 查看交付详情"},
             "type": "default",
-            "url": f"{web_base_url.rstrip('/')}/?page=inbox",
+            "url": detail_url,
         })
     if actions:
         elements.append({"tag": "action", "actions": actions})
@@ -741,6 +748,8 @@ def _owner_visible_card(payload: dict[str, Any], body: str) -> dict[str, Any]:
 def _owner_message_header(payload: dict[str, Any]) -> str:
     source = _text(payload, "source").lower()
     handled_by = _text(payload, "handled_by").lower()
+    if source == "goal-dossier" or handled_by == "goal-dossier":
+        return "[ZaoFu Delivery]"
     # 找人出口收敛一期:supervisor only signs when the Run Manager is
     # demonstrably unavailable — the 「兜底」 marker IS the anomaly signal.
     if source == "supervisor_fallback":
@@ -758,7 +767,11 @@ def _owner_message_header(payload: dict[str, Any]) -> str:
 # pushed (operator convergence decision 2026-07-11; R12's 286x escalate storm
 # and this week's attention noise are the evidence). Everything else stays in
 # the Web inbox with a suppressed receipt — downgrade, never drop.
-_FEISHU_PUSH_POLICIES = frozenset({"owner_immediate", "owner_on_human_required"})
+_FEISHU_PUSH_POLICIES = frozenset({
+    "owner_immediate",
+    "owner_on_human_required",
+    "owner_terminal_delivery",
+})
 _FEISHU_PUSH_POLICIES_ENV = "ZF_OWNER_VISIBLE_FEISHU_POLICIES"
 
 
@@ -798,6 +811,11 @@ def _runtime_state_from_event_log(event_log: EventLog) -> str:
 
 def _stopped_runtime_delivery_allowed(payload: dict[str, Any]) -> bool:
     if bool(payload.get("human_action_required")):
+        return True
+    if (
+        _text(payload, "message_kind") == "run_terminal_delivery"
+        or _text(payload, "delivery_class") == "run_terminal"
+    ):
         return True
     source = _text(payload, "source").lower()
     handled_by = _text(payload, "handled_by").lower()

@@ -16,6 +16,7 @@ from zf.core.events.writer import EventWriter
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.goal_completion_receipt import build_goal_completion_receipt
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.run_contract import stable_json_sha256, write_run_contract
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.simulation_lifecycle import emit_simulation_done
 from zf.runtime.result_submit import (
@@ -151,9 +152,18 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
     assert config.workflow.flow_metadata["topology"] == "light"
     assert config.workflow.flow_metadata["result_protocol"]["semantic_submit_profiles"] == {
         "thin-judge-goal-closure": "blocking",
+        "task-verify": "blocking",
+        "candidate-verify": "blocking",
     }
 
     state_dir.mkdir()
+    run_contract = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "prd"},
+        "project": {"root": str(tmp_path), "state_dir": str(state_dir)},
+    }
+    run_contract["contract_digest"] = stable_json_sha256(run_contract)
+    write_run_contract(state_dir, run_contract)
     judge_token_path = provision_role_submit_credential(state_dir, "judge-prd")
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
     task_map_ref = f"{state_dir.name}/artifacts/LIGHT-148/task_map.json"
@@ -213,6 +223,9 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
         payload={
             "pdd_id": "LIGHT-148",
             "feature_id": "LIGHT-148",
+            "workflow_run_id": workflow_run_id,
+            "prd_ref": "README.md",
+            "source_refs": ["README.md"],
             "task_map_ref": task_map_ref,
             "flow_kind": "prd",
         },

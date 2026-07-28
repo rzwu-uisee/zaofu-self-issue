@@ -19,6 +19,14 @@ from zf.runtime.channel_contracts import (
     permission_profile_write_policy,
 )
 
+KANBAN_AGENT_PERMISSION_PROFILES = (
+    "read_only",
+    "operator",
+    "workspace_writer",
+    "isolated_writer",
+    "dangerous_full",
+)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -33,8 +41,11 @@ def codex_security_config_for_profile(
     values = env if env is not None else os.environ
     defaults = {
         "read_only": {"approvalPolicy": "never", "sandbox": "read-only"},
+        "operator": {"approvalPolicy": "never", "sandbox": "read-only"},
         "artifact_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
         "project_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
+        "workspace_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
+        "isolated_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
         "dangerous_full": {"approvalPolicy": "never", "sandbox": "danger-full-access"},
     }[profile]
     return {
@@ -59,7 +70,12 @@ def claude_permission_mode_for_profile(
     default = "default"
     if profile == "dangerous_full":
         default = "bypassPermissions"
-    elif profile in {"artifact_writer", "project_writer"}:
+    elif profile in {
+        "artifact_writer",
+        "project_writer",
+        "workspace_writer",
+        "isolated_writer",
+    }:
         default = "acceptEdits"
     return values.get("ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE", default)
 

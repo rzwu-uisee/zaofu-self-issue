@@ -254,6 +254,49 @@ def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(tmp_pa
     assert fanout.payload["artifact_refs"] == [{"path": "channels/ch-zaofu/spec.md"}]
 
 
+def test_workflow_invoke_starts_declared_fanout_only_after_admission(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    config.workflow.stages[0].trigger = "workflow.invoke.requested"
+    _state_dir, log, _transport, orch = _state(tmp_path, config=config)
+    orch.task_store.update(
+        "TASK-1",
+        status="in_progress",
+        assigned_to="review-a",
+    )
+    invoke = orch.event_writer.append(ZfEvent(
+        type="workflow.invoke.requested",
+        actor="web",
+        task_id="TASK-1",
+        correlation_id="ch-zaofu",
+        payload={
+            "task_id": "TASK-1",
+            "pattern_id": "review-wave",
+            "dispatch_id": "disp-1",
+            "requested_by": "qa",
+            "reason": "risk review",
+            "source_refs": {},
+            "expected_output": "review report",
+        },
+    ))
+
+    orch.run_once(events=[invoke])
+    fanout_request = next(
+        event for event in log.read_all()
+        if event.type == "task.fanout.requested"
+    )
+    orch.run_once(events=[fanout_request])
+
+    started = [
+        event for event in log.read_all()
+        if event.type == "fanout.started"
+        and event.payload.get("stage_id") == "review-wave"
+    ]
+    assert len(started) == 1
+    assert started[0].payload["trigger_event_id"] == fanout_request.id
+
+
 def test_scoped_workflow_invoke_preserves_identity_into_declared_fanout(
     tmp_path: Path,
 ) -> None:

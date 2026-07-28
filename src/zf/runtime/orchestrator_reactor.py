@@ -34,9 +34,13 @@ from zf.core.verification.evidence import (
 )
 from zf.runtime.channel_adapter import dispatch_reply_request
 from zf.runtime.channel_router import route_channel_message
+from zf.runtime.channel_synthesis_reactor import (
+    react_channel_synthesis_requested,
+)
 from zf.runtime.cli_command import zf_cli_cmd
 from zf.runtime.durable_call_workflow import DurableCallWorkflowMixin
 from zf.runtime.feature_completion import close_feature_if_all_tasks_done
+from zf.runtime.goal_terminal_settlement import select_candidate_terminal_tasks
 from zf.runtime.artifact_manifest import (
     is_taskless_workflow_manifest_payload,
     load_manifest_from_payload,
@@ -143,6 +147,7 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("task.fanout.requested", "_on_task_fanout_requested"),
     ("channel.message.posted", "_on_channel_message_posted"),
     ("channel.agent.reply.requested", "_on_channel_agent_reply_requested"),
+    ("channel.synthesis.requested", "_on_channel_synthesis_requested"),
     ("channel.agent.reply.completed", "_on_channel_discussion_event"),
     ("channel.question.opened", "_on_channel_discussion_event"),
     ("channel.question.resolved", "_on_channel_discussion_event"),
@@ -4392,30 +4397,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if not pdd_id or not feature_id:
             return None
         moved: list[str] = []
-        for task in self.task_store.list_all():
-            if task.status not in {
-                "backlog",
-                "in_progress",
-                "review",
-                "verify",
-                "testing",
-                "test",
-                "judge",
-            }:
-                continue
-            task_feature = str(
-                getattr(getattr(task, "contract", None), "feature_id", "") or ""
-            ).strip()
-            is_container = task.id in {pdd_id, feature_id}
-            if task.status == "backlog" and not (
-                is_container and self._is_workflow_bootstrap_task(task)
-            ):
-                continue
-            if not (
-                task_feature == feature_id
-                or is_container
-            ):
-                continue
+        tasks = select_candidate_terminal_tasks(
+            self.task_store.list_all(),
+            event,
+            pdd_id=pdd_id,
+            feature_id=feature_id,
+            is_bootstrap_task=self._is_workflow_bootstrap_task,
+        )
+        for task in tasks:
             if self._move_task(task.id, "done", trigger_event=event.type):
                 moved.append(task.id)
                 self._emit_spec_promote_decision(event, task)
@@ -5467,6 +5456,17 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 task_id=task_id,
                 reason="fanout request rejected: expected_output missing",
             )
+        pattern_id = str(payload.get("pattern_id") or "").strip()
+        if (
+            payload.get("workflow_invoke_admitted")
+            and pattern_id
+            and self._fanout_started(pattern_id, event.id)
+        ):
+            return OrchestratorDecision(
+                action="observe",
+                task_id=task_id,
+                reason="admitted workflow fanout already started",
+            )
         active_fanout_id = self._active_fanout_for_task(task_id)
         if active_fanout_id:
             self._emit_task_fanout_rejected(
@@ -5900,7 +5900,16 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             channel_id=channel_id,
             thread_id=str(payload.get("thread_id") or "main"),
             source="runtime",
+            config=getattr(self, "config", None),
+            project_root=getattr(self, "project_root", None),
         )
+        return None
+
+    def _on_channel_synthesis_requested(
+        self,
+        event: ZfEvent,
+    ) -> OrchestratorDecision | None:
+        react_channel_synthesis_requested(self, event)
         return None
 
     def _on_channel_agent_reply_requested(self, event: ZfEvent) -> OrchestratorDecision | None:

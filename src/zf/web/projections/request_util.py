@@ -84,6 +84,44 @@ def _complete_idempotency_key(
         })
 
 
+def reconcile_pending_idempotency_keys(state_dir: Path) -> int:
+    """Turn pre-restart pending reservations into explicit replayable failures."""
+    path = _idempotency_path(state_dir)
+    if not path.exists():
+        return 0
+    with locked_path(path):
+        records = _read_jsonl_dicts(path)
+        latest: dict[str, dict] = {}
+        for record in records:
+            key = str(record.get("key") or "")
+            if key:
+                latest[key] = record
+        pending = [
+            record
+            for record in latest.values()
+            if record.get("state") == "pending"
+        ]
+        for record in pending:
+            action = str(record.get("action") or "")
+            _append_jsonl(path, {
+                "key": str(record.get("key") or ""),
+                "action": action,
+                "payload_hash": str(record.get("payload_hash") or ""),
+                "state": "completed",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "response": {
+                    "ok": False,
+                    "status": "interrupted_by_server_restart",
+                    "action": action,
+                    "reason": (
+                        "the prior server stopped before this controlled action "
+                        "recorded a terminal response"
+                    ),
+                },
+            })
+    return len(pending)
+
+
 def _web_passcode_configured() -> bool:
     return bool(os.environ.get("ZF_WEB_PASSCODE", ""))
 

@@ -29,7 +29,9 @@ from zf.core.events import EventWriter
 from zf.core.events.factory import event_log_from_project
 from zf.integrations.feishu.routing import resolve_feishu_route
 from zf.integrations.feishu.storage import IdempotencyStore
+from zf.integrations.feishu.thread_scope import feishu_thread_id
 from zf.integrations.feishu.transport import MockFeishuTransport
+from zf.runtime.channel_contracts import normalize_permission_profile
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_sidecar import channel_message_event_payload
 from zf.runtime.control_actions import ControlledActionService
@@ -88,6 +90,38 @@ def _sender_blocked(event, *, context) -> bool:
     return True
 
 
+def _route_sender_blocked(event, route, *, context) -> bool:
+    permission_profile = normalize_permission_profile(
+        getattr(route, "permission_profile", "read_only")
+    )
+    dangerous_ack = bool(getattr(route, "dangerous_ack", False))
+    allowed = [
+        str(sender)
+        for sender in (getattr(route, "allowed_senders", None) or [])
+        if str(sender)
+    ]
+    blocked = (
+        (permission_profile == "dangerous_full" and (not dangerous_ack or not allowed))
+        or (bool(allowed) and str(event.user_id or "") not in allowed)
+    )
+    if not blocked:
+        return False
+    writer = EventWriter(
+        event_log_from_project(context.state_dir, config=context.config)
+    )
+    writer.emit(
+        "feishu.inbound.sender_blocked",
+        actor=f"feishu:{event.user_id or 'unknown'}",
+        payload={
+            "chat_id": event.chat_id,
+            "user_id": str(event.user_id or ""),
+            "permission_profile": permission_profile,
+            "reason": "sender_not_allowed_for_route",
+        },
+    )
+    return True
+
+
 def _route_inbound_message(event, *, context) -> dict:
     route = resolve_feishu_route(
         context.config,
@@ -100,6 +134,9 @@ def _route_inbound_message(event, *, context) -> dict:
                 "chat_id": event.chat_id}
     if _sender_blocked(event, context=context):
         return {"status": "dropped", "reason": "sender_not_allowed",
+                "chat_id": event.chat_id}
+    if _route_sender_blocked(event, route, context=context):
+        return {"status": "dropped", "reason": "sender_not_allowed_for_route",
                 "chat_id": event.chat_id}
 
     message_id = str(event.payload.get("message_id") or "")
@@ -157,6 +194,7 @@ def _post_to_channel(event, route, *, context) -> dict:
     message_id = str(event.payload.get("message_id") or "")
     payload = {
         "channel_id": route.channel_id,
+        "thread_id": feishu_thread_id(event.payload),
         "member_id": event.user_id or "feishu",
         "text": str(event.payload.get("text") or ""),
         "message_id": message_id,
@@ -202,6 +240,9 @@ def bridge_inbound_message(event, *, context) -> dict:
     setattr(event, "route", route)
     if _sender_blocked(event, context=context):
         return {"status": "dropped", "reason": "sender_not_allowed",
+                "chat_id": event.chat_id}
+    if _route_sender_blocked(event, route, context=context):
+        return {"status": "dropped", "reason": "sender_not_allowed_for_route",
                 "chat_id": event.chat_id}
 
     # W5 dedup: gate live + catchup-replay on the Feishu message_id so a restart
@@ -257,11 +298,17 @@ def bridge_inbound_message(event, *, context) -> dict:
                                  "member_type": "provider_agent",
                                  "provider": route.backend, "backend": route.backend,
                                  "channel_role": "dev",
+                                 "permission_profile": normalize_permission_profile(
+                                     getattr(route, "permission_profile", "read_only")
+                                 ),
+                                 "dangerous_ack": bool(
+                                     getattr(route, "dangerous_ack", False)
+                                 ),
                                  "permissions": ["read", "message"],
                                  "source": "feishu"})
 
     msg_payload = channel_message_event_payload(context.state_dir, {
-        "channel_id": channel_id, "thread_id": "main",
+        "channel_id": channel_id, "thread_id": feishu_thread_id(event.payload),
         "message_id": message_id or f"feishu-{event.user_id}",
         "member_id": event.user_id or "feishu", "role": "user",
         "source": "feishu", "text": str(event.payload.get("text") or ""),

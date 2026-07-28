@@ -151,6 +151,42 @@ def test_debounced_messages_dispatch_once_with_merged_text():
     assert calls[0].payload.get("text") == "hello\nworld"
 
 
+def test_parallel_feishu_threads_use_independent_debounce_scopes():
+    calls: list = []
+    done = threading.Event()
+
+    def fake_dispatch(event, *, context, transport=None):
+        calls.append(event)
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        fut.set_result({"status": "replied"})
+        if len(calls) == 2:
+            done.set()
+        return fut
+
+    bridge = BridgeWatch(
+        context=None,
+        transport=None,
+        debounce_ms=40,
+        dispatch=fake_dispatch,
+    )
+    bridge.on_message({
+        **_msg("alpha", "m-a"),
+        "root_message_id": "root-a",
+    })
+    bridge.on_message({
+        **_msg("beta", "m-b"),
+        "root_message_id": "root-b",
+    })
+
+    assert done.wait(2.0)
+    bridge.shutdown()
+    assert sorted(event.payload["text"] for event in calls) == ["alpha", "beta"]
+    assert sorted(event.payload["root_message_id"] for event in calls) == [
+        "root-a",
+        "root-b",
+    ]
+
+
 def test_run_serialized_per_chat_via_block_unblock():
     calls: list = []
     gate = threading.Event()  # controls when the first run "completes"
@@ -272,7 +308,7 @@ def test_run_manager_route_enters_agent_conversation(tmp_path: Path, monkeypatch
         if member.get("member_id") == "run-manager"
     )
     assert member["channel_role"] == "owner_delegate"
-    assert member["permission_profile"] == "dangerous_full"
+    assert member["permission_profile"] == "read_only"
     events = EventLog(ctx.state_dir / "events.jsonl").read_all()
     assert [event for event in events if event.type == "channel.message.posted"
             and event.payload.get("member_id") == "run-manager"]
@@ -315,7 +351,7 @@ def test_kanban_agent_route_enters_agent_conversation(tmp_path: Path, monkeypatc
         if member.get("member_id") == "zf-product-manager"
     )
     assert member["channel_role"] == "owner_delegate"
-    assert member["permission_profile"] == "dangerous_full"
+    assert member["permission_profile"] == "read_only"
     events = EventLog(ctx.state_dir / "events.jsonl").read_all()
     assert [event for event in events if event.type == "channel.message.posted"
             and event.payload.get("member_id") == "zf-product-manager"]

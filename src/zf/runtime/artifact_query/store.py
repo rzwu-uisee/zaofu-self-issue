@@ -11,16 +11,15 @@ from typing import Any, Iterable, Mapping
 
 from zf.core.config.schema import ZfConfig
 from zf.core.events.model import ZfEvent
-from zf.core.events.segments import build_event_manifest, iter_event_records
-from zf.core.state.locks import locked_path
-from zf.runtime.sidecar_refs import iter_sidecar_ref_descriptors
 
 
 CATALOG_SCHEMA_VERSION = "artifact-catalog.v1"
 EXTRACTOR_VERSION = "sidecar-descriptor-extractor.v2"
+CATALOG_PROJECTOR_VERSION = "artifact-catalog-projector.v2"
 MAX_REDUCER_PROJECTIONS = 256
 MAX_REDUCER_PAYLOAD_BYTES = 2_000_000
 MAX_WAL_BYTES = 8 * 1024 * 1024
+CATALOG_CATCH_UP_WAIT_SECONDS = 2.0
 
 
 def projection_db_path(state_dir: Path) -> Path:
@@ -153,9 +152,25 @@ def ensure_catalog_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE artifact_occurrence ADD COLUMN source_event_id TEXT"
         )
-    _set_meta(conn, "catalog_schema_version", CATALOG_SCHEMA_VERSION)
-    _set_meta(conn, "descriptor_extractor_version", EXTRACTOR_VERSION)
+    _set_meta_if_missing(conn, "catalog_schema_version", CATALOG_SCHEMA_VERSION)
     conn.commit()
+
+
+def catch_up_catalog(
+    state_dir: Path,
+    *,
+    project_root: Path,
+    config: ZfConfig | None = None,
+    wait_timeout_seconds: float = CATALOG_CATCH_UP_WAIT_SECONDS,
+) -> dict[str, Any]:
+    from .maintenance import catch_up_catalog as _catch_up_catalog
+
+    return _catch_up_catalog(
+        state_dir,
+        project_root=project_root,
+        config=config,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
 
 
 def rebuild_catalog(
@@ -165,121 +180,46 @@ def rebuild_catalog(
     config: ZfConfig | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    state_dir = Path(state_dir)
-    manifest = build_event_manifest(state_dir)
-    path = projection_db_path(state_dir)
-    with locked_path(path):
-        with connect_projection_db(state_dir) as conn:
-            ensure_catalog_schema(conn)
-            meta = _meta(conn)
-            if (
-                not force
-                and meta.get("source_manifest_digest") == manifest.digest
-                and meta.get("descriptor_extractor_version") == EXTRACTOR_VERSION
-            ):
-                return catalog_status(state_dir, conn=conn)
-            conn.executescript(
-                """
-                DELETE FROM artifact_edge;
-                DELETE FROM artifact_occurrence;
-                DELETE FROM artifact_locator;
-                DELETE FROM artifact_object;
-                DELETE FROM artifact_reducer_projection;
-                """
-            )
-            object_count = 0
-            locator_count = 0
-            occurrence_count = 0
-            edge_count = 0
-            skipped = 0
-            last_seq = 0
-            for record in iter_event_records(state_dir, config=config):
-                last_seq = record.seq
-                payload = (
-                    record.event.payload
-                    if isinstance(record.event.payload, dict)
-                    else {}
-                )
-                for descriptor in iter_sidecar_ref_descriptors(payload):
-                    inserted = _insert_descriptor(
-                        conn,
-                        project_root=project_root,
-                        state_dir=state_dir,
-                        event=record.event,
-                        payload=payload,
-                        descriptor=descriptor,
-                        source_seq=record.seq,
-                    )
-                    if not inserted:
-                        skipped += 1
-                        continue
-                    object_count += inserted["object"]
-                    locator_count += inserted["locator"]
-                    occurrence_count += inserted["occurrence"]
-                    edge_count += inserted["edges"]
-            _set_meta(conn, "source_manifest_digest", manifest.digest)
-            _set_meta(conn, "source_seq", last_seq)
-            _set_meta(conn, "updated_at", _now())
-            _set_meta(conn, "descriptor_extractor_version", EXTRACTOR_VERSION)
-            conn.commit()
-    return {
-        "schema_version": CATALOG_SCHEMA_VERSION,
-        "projection_state": "ready",
-        "source_seq": last_seq,
-        "source_manifest_digest": manifest.digest,
-        "objects_inserted": object_count,
-        "locators_inserted": locator_count,
-        "occurrences_inserted": occurrence_count,
-        "edges_inserted": edge_count,
-        "descriptors_skipped": skipped,
-    }
+    from .maintenance import rebuild_catalog as _rebuild_catalog
+
+    return _rebuild_catalog(
+        state_dir,
+        project_root=project_root,
+        config=config,
+        force=force,
+    )
+
+
+def recover_catalog_projection(
+    state_dir: Path,
+    *,
+    project_root: Path,
+    config: ZfConfig | None = None,
+) -> dict[str, Any]:
+    from .maintenance import (
+        recover_catalog_projection as _recover_catalog_projection,
+    )
+
+    return _recover_catalog_projection(
+        state_dir,
+        project_root=project_root,
+        config=config,
+    )
 
 
 def catalog_status(
     state_dir: Path,
     *,
     conn: sqlite3.Connection | None = None,
+    count_source: bool = False,
 ) -> dict[str, Any]:
-    manifest = build_event_manifest(state_dir)
-    owns_conn = conn is None
-    current = conn or connect_projection_db(state_dir)
-    try:
-        ensure_catalog_schema(current)
-        meta = _meta(current)
-        row = current.execute(
-            "SELECT COUNT(*) AS count FROM artifact_occurrence"
-        ).fetchone()
-        count = int(row["count"] or 0) if row else 0
-    except sqlite3.Error as exc:
-        return {
-            "schema_version": CATALOG_SCHEMA_VERSION,
-            "projection_state": "corrupt",
-            "source_manifest_digest": manifest.digest,
-            "projected_manifest_digest": "",
-            "projected_seq": 0,
-            "occurrence_count": 0,
-            "diagnostic": str(exc),
-        }
-    finally:
-        if owns_conn:
-            current.close()
-    projected_digest = str(meta.get("source_manifest_digest") or "")
-    return {
-        "schema_version": CATALOG_SCHEMA_VERSION,
-        "projection_state": (
-            "ready"
-            if projected_digest == manifest.digest
-            else ("stale" if projected_digest else "missing")
-        ),
-        "source_manifest_digest": manifest.digest,
-        "projected_manifest_digest": projected_digest,
-        "projected_seq": int(meta.get("source_seq") or 0),
-        "occurrence_count": count,
-        "updated_at": meta.get("updated_at", ""),
-        "descriptor_extractor_version": meta.get(
-            "descriptor_extractor_version", ""
-        ),
-    }
+    from .maintenance import catalog_status as _catalog_status
+
+    return _catalog_status(
+        state_dir,
+        conn=conn,
+        count_source=count_source,
+    )
 
 
 def catalog_rows(
@@ -388,17 +328,25 @@ def lineage_rows(
               e.edge_id, e.subject_kind, e.subject_id, e.relation,
               e.occurrence_id, e.locator_id, e.source_event_id,
               e.causation_event_id, e.result_event_id, e.source_seq,
-              e.attempt_domain, l.ref, l.kind, b.object_id, b.sha256
+              e.attempt_domain, l.ref, l.kind, b.object_id, b.sha256,
+              o.access_scope_json
             FROM artifact_edge AS e
             JOIN artifact_locator AS l ON l.locator_id = e.locator_id
             JOIN artifact_object AS b ON b.object_id = l.object_id
+            JOIN artifact_occurrence AS o ON o.occurrence_id = e.occurrence_id
             WHERE e.subject_kind = ? AND e.subject_id = ?
             ORDER BY e.source_seq DESC, e.edge_id
             LIMIT ?
             """,
             (subject_kind, subject_id, bounded),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {
+            **dict(row),
+            "access_scope": _json_object(row["access_scope_json"]),
+        }
+        for row in rows
+    ]
 
 
 def get_reducer_projection(
@@ -565,7 +513,10 @@ def descriptor_record(
             event.id if _is_result_event(event.type) else
             str(payload.get("result_event_id") or "")
         ),
-        "relation": _relation(kind),
+        "relation": _relation(
+            event=event,
+            descriptor=descriptor,
+        ),
     }
 
 
@@ -754,17 +705,72 @@ def _subjects(row: Mapping[str, Any]) -> Iterable[tuple[str, str]]:
             yield kind, value
 
 
-def _relation(kind: str) -> str:
-    lowered = kind.lower()
-    if "target" in lowered:
-        return "target"
-    if "read_ledger" in lowered:
-        return "read"
-    if any(token in lowered for token in ("result", "report", "evidence", "matrix")):
-        return "evidence"
-    if any(token in lowered for token in ("contract", "manifest", "briefing", "input")):
-        return "input"
-    return "output"
+_RELATIONS = {
+    "causation",
+    "evidence",
+    "inherits",
+    "input",
+    "output",
+    "read",
+    "supersedes",
+    "target",
+}
+
+_KIND_RELATIONS = {
+    "acceptance_matrix": "evidence",
+    "artifact_read_ledger": "read",
+    "attempt_source_manifest": "input",
+    "call_result_envelope": "evidence",
+    "contract_snapshot": "input",
+    "goal_claim_set": "input",
+    "impl_self_check": "evidence",
+    "input_consumption_policy": "input",
+    "issue_spec": "input",
+    "planning_result": "input",
+    "requirement_spec": "input",
+    "run_contract": "input",
+    "target_snapshot": "target",
+    "task_contract_snapshot": "input",
+    "task_map": "input",
+    "test_matrix": "evidence",
+    "verification_result": "evidence",
+    "workflow_input_manifest": "input",
+}
+
+_SCHEMA_RELATIONS = {
+    "artifact-read-ledger.v1": "read",
+    "attempt-source-manifest.v1": "input",
+    "input-consumption-policy.v1": "input",
+    "target-snapshot.v1": "target",
+    "task-contract-snapshot.v1": "input",
+    "verification-result.v1": "evidence",
+}
+
+_EVENT_RELATIONS = {
+    "artifact.read.recorded": "read",
+    "plan.artifact_package.superseded": "supersedes",
+}
+
+
+def _relation(
+    *,
+    event: ZfEvent,
+    descriptor: Mapping[str, Any],
+) -> str:
+    explicit = str(
+        descriptor.get("relation")
+        or descriptor.get("lineage_relation")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit if explicit in _RELATIONS else "output"
+    schema_version = str(descriptor.get("schema_version") or "").strip()
+    if schema_version in _SCHEMA_RELATIONS:
+        return _SCHEMA_RELATIONS[schema_version]
+    kind = str(descriptor.get("kind") or "").strip()
+    if kind in _KIND_RELATIONS:
+        return _KIND_RELATIONS[kind]
+    return _EVENT_RELATIONS.get(event.type, "output")
 
 
 def _is_result_event(event_type: str) -> bool:
@@ -788,6 +794,17 @@ def _meta(conn: sqlite3.Connection) -> dict[str, str]:
 def _set_meta(conn: sqlite3.Connection, key: str, value: object) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO artifact_query_meta(key, value) VALUES (?, ?)",
+        (key, str(value)),
+    )
+
+
+def _set_meta_if_missing(
+    conn: sqlite3.Connection,
+    key: str,
+    value: object,
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO artifact_query_meta(key, value) VALUES (?, ?)",
         (key, str(value)),
     )
 
@@ -825,10 +842,12 @@ def _now() -> str:
 
 __all__ = [
     "CATALOG_SCHEMA_VERSION",
+    "CATALOG_PROJECTOR_VERSION",
     "EXTRACTOR_VERSION",
     "MAX_REDUCER_PAYLOAD_BYTES",
     "MAX_REDUCER_PROJECTIONS",
     "MAX_WAL_BYTES",
+    "catch_up_catalog",
     "catalog_rows",
     "catalog_show",
     "catalog_status",
@@ -838,6 +857,7 @@ __all__ = [
     "get_reducer_projection",
     "lineage_rows",
     "projection_db_path",
+    "recover_catalog_projection",
     "rebuild_catalog",
     "set_reducer_projection",
 ]

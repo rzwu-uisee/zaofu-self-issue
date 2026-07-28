@@ -11,13 +11,20 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from zf.cli.hook_recv import run as hook_recv_run
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
+from zf.runtime.call_result_runtime import (
+    mark_call_operation_started,
+    prepare_call_operation,
+)
+from zf.runtime.result_submit import provision_role_submit_credential
 
 
 def _invoke(state_dir: Path, event: str, backend: str, payload: dict,
@@ -291,6 +298,60 @@ def test_codex_hook_transcript_path_repairs_stale_registry_binding(
     assert reloaded.get("review") is None
 
 
+def test_bound_idle_role_hook_is_not_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    session_id = "12121212-1212-1212-1212-121212121212"
+    registry = RoleSessionRegistry(
+        state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    registry.bind_codex_session("run-manager", session_id)
+
+    _invoke(
+        state_dir,
+        event="codex.hook.stop",
+        backend="codex",
+        payload={"session_id": session_id, "hook_event_name": "Stop"},
+        monkeypatch=monkeypatch,
+    )
+
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    hook = next(event for event in events if event.type == "codex.hook.stop")
+    assert hook.actor == "run-manager"
+    assert hook.payload["context_state"] == "bound_idle"
+    assert not any(event.type == "hook.orphan_event" for event in events)
+
+
+def test_unresolved_session_emits_one_deduplicated_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    session_id = "34343434-3434-3434-3434-343434343434"
+
+    for event_type in ("codex.hook.pre_tool_use", "codex.hook.post_tool_use"):
+        _invoke(
+            state_dir,
+            event=event_type,
+            backend="codex",
+            payload={"session_id": session_id, "hook_event_name": "ToolUse"},
+            monkeypatch=monkeypatch,
+        )
+
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    hooks = [event for event in events if event.type.startswith("codex.hook.")]
+    orphans = [event for event in events if event.type == "hook.orphan_event"]
+    assert len(hooks) == 2
+    assert all(event.payload["context_state"] == "unresolved" for event in hooks)
+    assert len(orphans) == 1
+    assert orphans[0].payload["session_id"] == session_id
+
+
 def test_claude_hook_still_works_after_codex_routing_added(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -531,6 +592,89 @@ def test_claude_workdir_write_is_allowed(tmp_path: Path, monkeypatch) -> None:
     )
 
     assert code == 0
+
+
+def test_claude_workdir_guard_allows_only_current_result_scratch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    workdir = _seed_claude_fanout_workdir(state_dir)
+    event_log = EventLog(state_dir / "events.jsonl")
+    runtime = SimpleNamespace(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        event_log=event_log,
+        event_writer=EventWriter(event_log),
+        config=SimpleNamespace(
+            workflow=SimpleNamespace(
+                flow_metadata={"result_protocol": {"mode": "blocking"}}
+            )
+        ),
+    )
+    provision_role_submit_credential(state_dir, "dev-1")
+    prepared = prepare_call_operation(
+        runtime,
+        payload={
+            "workflow_run_id": "run-scratch",
+            "role_instance": "dev-1",
+            "fanout_id": "fanout-1",
+            "stage_id": "impl",
+            "child_id": "child-1",
+            "run_id": "attempt-scratch",
+            "task_id": "T-RESULT",
+            "canonical_success_event": "dev.build.done",
+            "canonical_failure_event": "dev.blocked",
+        },
+        operation_type="fanout_writer_child",
+        operation_key="child-1",
+        stage_id="impl",
+        task_id="T-RESULT",
+        dispatch_id="attempt-scratch",
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="T-RESULT",
+        dispatch_id="attempt-scratch",
+    )
+    scratch = state_dir / prepared.result_scratch_ref
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("{}\n", encoding="utf-8")
+
+    allowed = _invoke(
+        state_dir,
+        event="claude.hook.pre_tool_use",
+        backend="claude-code",
+        payload={
+            "session_id": "",
+            "cwd": str(workdir),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(scratch), "content": "{}"},
+        },
+        monkeypatch=monkeypatch,
+    )
+    denied = _invoke(
+        state_dir,
+        event="claude.hook.pre_tool_use",
+        backend="claude-code",
+        payload={
+            "session_id": "",
+            "cwd": str(workdir),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": str(scratch.with_name("other.json")),
+                "content": "{}",
+            },
+        },
+        monkeypatch=monkeypatch,
+    )
+
+    assert allowed == 0
+    assert denied == 2
 
 
 def test_claude_workdir_guard_allows_read_only_root_command_redirection(

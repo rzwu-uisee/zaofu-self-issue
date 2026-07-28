@@ -15,6 +15,7 @@ pytest.importorskip("httpx")
 import zf.web.headless_agent as headless_agent
 from fastapi.testclient import TestClient
 
+from zf.core.config.schema import WorkflowConfig, WorkflowStageConfig, ZfConfig
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
@@ -992,7 +993,7 @@ def test_chat_orchestrator_can_use_claude_headless_backend(
     assert "kanban.agent.turn.delta" not in event_types, (
         "deltas are ephemeral bus transport, never ledger truth (doc 106)"
     )
-    assert _bus_rows(state_dir, "kanban.agent.turn.delta") == []
+    assert not _bus_rows(state_dir, "kanban.agent.turn.delta")
     replies = [event for event in events if event.type == "kanban.agent.reply"]
     assert replies[-1].payload["answer"] == "final headless answer"
     assert replies[-1].payload["backend"] == "claude-headless"
@@ -1170,7 +1171,7 @@ def test_chat_orchestrator_batches_fast_text_and_thinking_deltas(
 
     assert response.status_code == 200
     events = EventLog(state_dir / "events.jsonl").read_all()
-    assert _bus_rows(state_dir, "kanban.agent.turn.delta") == []
+    assert not _bus_rows(state_dir, "kanban.agent.turn.delta")
     assert not [event for event in events if event.type == "kanban.agent.turn.delta"]
     replies = [event for event in events if event.type == "kanban.agent.reply"]
     assert replies[-1].payload["answer"] == "alpha beta"
@@ -1215,16 +1216,124 @@ def test_chat_orchestrator_spills_large_delta_and_reply_to_sidecar(
     events = EventLog(state_dir / "events.jsonl").read_all()
     reply = [event for event in events if event.type == "kanban.agent.reply"][-1]
 
-    # The committed reply still spills to the sidecar; the delta is ephemeral
-    # bus transport and carries its content inline (never written to the
-    # ledger, so no spill needed — doc 106).
+    # The committed reply spills to the sidecar; terminal completion discards
+    # the ephemeral delta scratch.
     assert reply.payload["answer"] != "A" * 15000
     reply_ref = reply.payload["refs"]["raw_output"]
     assert hydrate_sidecar_ref(state_dir, reply_ref).payload == "A" * 15000
     assert "A" * 15000 not in (state_dir / "events.jsonl").read_text(encoding="utf-8")
-    assert _bus_rows(state_dir, "kanban.agent.turn.delta") == []
+    assert not _bus_rows(state_dir, "kanban.agent.turn.delta")
     turns_completed = [event for event in events if event.type == "kanban.agent.turn.completed"]
     assert turns_completed[-1].payload["delta_count"] >= 1
+
+
+def test_workspace_writer_runs_real_headless_executor_and_records_profile(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    script = tmp_path / "fake_claude_writer.py"
+    output = state_dir.parent / "workspace-change.txt"
+    script.write_text(
+        "\n".join([
+            "import json",
+            "from pathlib import Path",
+            "Path('workspace-change.txt').write_text('implemented', encoding='utf-8')",
+            "print(json.dumps({'type':'system','session_id':'writer-session'}), flush=True)",
+            "print(json.dumps({'type':'result','session_id':'writer-session','result':'implemented and tested'}), flush=True)",
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "permission_profile": "workspace_writer",
+            "sync": True,
+            "thread_key": "coding-thread",
+            "message": "implement the requested change",
+        },
+    )
+
+    assert response.status_code == 200
+    assert output.read_text(encoding="utf-8") == "implemented"
+    assert response.json()["permission_profile"] == "workspace_writer"
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    snapshots = [
+        event for event in events
+        if event.type == "provider.permission.snapshot.recorded"
+    ]
+    assert snapshots[-1].payload["permission_profile"] == "workspace_writer"
+    assert snapshots[-1].payload["snapshot"]["permission_mode"] == "acceptEdits"
+    completed = [
+        event for event in events if event.type == "kanban.agent.turn.completed"
+    ]
+    assert completed[-1].payload["permission_profile"] == "workspace_writer"
+
+
+def test_provider_dev_chat_start_uses_headless_executor(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    script = _fake_claude_script(tmp_path)
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    response = client.post(
+        "/api/actions/provider-dev-chat-start",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "permission_profile": "workspace_writer",
+            "thread_id": "dev-thread",
+            "sync": True,
+            "message": "inspect and update the project",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    assert "provider.dev_chat.start.requested" in [event.type for event in events]
+    assert [
+        event for event in events
+        if event.type == "kanban.agent.reply"
+        and event.payload.get("permission_profile") == "workspace_writer"
+    ]
+
+
+def test_dangerous_full_requires_explicit_ack(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "permission_profile": "dangerous_full",
+            "message": "run a full project operation",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "dangerous_ack=true" in json.dumps(response.json())
 
 
 def test_headless_thread_key_isolates_provider_sessions(
@@ -1299,6 +1408,86 @@ def test_chat_orchestrator_extracts_headless_action_proposal(
     assert proposal_data["payload"]["causation_id"] == response.json()["event_id"]
     assert proposal_data["mutates_task_state"] is True
     assert proposal_data["valid"] is True
+    assert proposal_data["proposal_event_id"].startswith("evt-")
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    reply_event = [
+        event for event in events if event.type == "kanban.agent.reply"
+    ][-1]
+    proposed_event = [
+        event
+        for event in events
+        if event.id == proposal_data["proposal_event_id"]
+    ][0]
+    assert reply_event.payload["action_proposal"]["proposal_event_id"] == (
+        proposed_event.id
+    )
+    assert proposed_event.causation_id == reply_event.id
+
+
+def test_chat_orchestrator_validates_workflow_proposal_against_project_config(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "fake_claude_workflow_proposal.py"
+    proposal = {
+        "action_proposal": {
+            "action": "workflow-invoke",
+            "payload": {
+                "task_id": "TASK-WORKFLOW",
+                "pattern_id": "delivery-smoke",
+            },
+            "reason": "start the declared workflow",
+        }
+    }
+    script.write_text(
+        "\n".join([
+            "import json",
+            f"proposal = {proposal!r}",
+            "print(json.dumps({'type':'system','session_id':'claude-session-workflow'}), flush=True)",
+            "print(json.dumps({'type':'result','session_id':'claude-session-workflow','result':json.dumps(proposal)}), flush=True)",
+        ]),
+        encoding="utf-8",
+    )
+    config = ZfConfig(
+        workflow=WorkflowConfig(stages=[
+            WorkflowStageConfig(
+                id="delivery-smoke",
+                trigger="workflow.invoke.requested",
+                topology="fanout_reader",
+                roles=["delivery_worker"],
+            ),
+        ]),
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    client = TestClient(
+        create_app(
+            state_dir,
+            config=config,
+            project_root=state_dir.parent,
+        )
+    )
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "task_id": "TASK-WORKFLOW",
+            "sync": True,
+            "message": "start delivery-smoke",
+        },
+    )
+
+    assert response.status_code == 200
+    action_proposal = response.json()["reply"]["action_proposal"]
+    assert action_proposal["action"] == "workflow-invoke"
+    assert action_proposal["valid"] is True
+    assert action_proposal["validation_error"] == ""
 
 
 def test_chat_orchestrator_extracts_create_task_proposal(

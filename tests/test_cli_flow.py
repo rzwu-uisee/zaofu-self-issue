@@ -433,6 +433,57 @@ Build a dependency-free Node.js CLI under app/.
     assert "node src/index.js list" in e2e["rows"][0]["command"]
 
 
+def test_flow_intake_does_not_execute_cli_usage_placeholders(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "release-status.md"
+    source.write_text(
+        """# Release Status
+
+## Requirements
+
+- Provide `python -m app.release_status SERVICE CHECK=BOOL...`.
+
+## Usage
+
+- `python -m app.release_status SERVICE CHECK=BOOL...`
+
+## Acceptance
+
+- `python -m unittest discover -s tests -v` passes.
+""",
+        encoding="utf-8",
+    )
+
+    rc = main([
+        "flow", "intake",
+        "--kind", "prd",
+        "--from", str(source),
+        "--request-id", "wfint-cli-placeholder",
+        "--output", str(tmp_path / "docs" / "intake.md"),
+        "--target-root", "app",
+        "--json",
+    ])
+
+    assert rc == 0
+    result = json.loads(capsys.readouterr().out)
+    manifest = json.loads(
+        Path(result["workflow_input_manifest_ref"]).read_text(encoding="utf-8")
+    )
+    tests = json.loads(
+        Path(manifest["test_matrix_ref"]).read_text(encoding="utf-8")
+    )
+    commands = [
+        command
+        for row in tests["tests"]
+        for command in row.get("commands", [])
+    ]
+    assert commands == ["python -m unittest discover -s tests -v"]
+
+
 def test_flow_intake_delivery_matrix_draft_passes_contract_gate(tmp_path, capsys):
     intake = tmp_path / "docs" / "intake" / "refactor.md"
 

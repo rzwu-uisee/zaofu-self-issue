@@ -25,6 +25,7 @@ from zf.core.config.schema import (
 )
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.task.store import TaskStore
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.call_result_envelope import (
     normalize_call_result_envelope,
@@ -886,6 +887,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     maybe_complete_run_goal(restarted, settled)
 
     events = log.read_all()
+    terminal = next(
+        event for event in reversed(events)
+        if event.type == "run.goal.completed"
+    )
+    restarted.run_once(events=[terminal])
+    events = log.read_all()
+    task_store = TaskStore(state_dir / "kanban.json")
+    terminal_task_ids = [
+        str(task_id)
+        for task_id in terminal.payload.get("completed_task_ids", [])
+        if str(task_id).strip()
+    ]
+    unsettled = []
+    for task_id in terminal_task_ids:
+        task = task_store.get(task_id)
+        if task is None or task.status != "done":
+            unsettled.append(task_id)
+    if unsettled:
+        raise AssertionError(
+            f"Goal terminal left active Kanban tasks: {unsettled}"
+        )
     counts = Counter(event.type for event in events)
     expected_counts = {
         "workflow.call.result.admitted": 2,
@@ -908,10 +930,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _run(["git", "merge-base", "--is-ancestor", target_commit, "main"], cwd=project_root)
     from zf.runtime.simulation_lifecycle import emit_simulation_done
 
-    terminal = next(
-        event for event in reversed(events)
-        if event.type == "run.goal.completed"
-    )
     if emit_simulation_done(terminal, events=events, writer=writer) is None:
         raise AssertionError("simulation.done was not emitted from the run terminal")
     return {

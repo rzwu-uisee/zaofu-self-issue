@@ -22,6 +22,9 @@ from zf.runtime.artifact_manifest import (
     load_manifest_from_payload,
     normalize_artifact_kind,
 )
+from zf.runtime.fanout_result_identity import (
+    bind_blocking_writer_result_identity,
+)
 from zf.runtime.recovery_sufficiency import verify_artifact_ref
 from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
@@ -97,6 +100,7 @@ class TaskRefManager:
         if event.type not in {"dev.build.done", "impl.child.completed"} or not event.task_id:
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
+        payload = self._canonical_writer_result_payload(payload)
         stale_reason = self._stale_contract_result_reason(event, payload)
         if stale_reason:
             return self._reject(
@@ -259,26 +263,7 @@ class TaskRefManager:
     ) -> str:
         """Reject a late typed Impl result before it can move the task ref."""
 
-        binding: dict[str, Any] = {}
-        fanout_id = str(payload.get("fanout_id") or "").strip()
-        child_id = str(payload.get("child_id") or payload.get("child_run") or "").strip()
-        if fanout_id and child_id:
-            path = self.state_dir / "fanouts" / fanout_id / "manifest.json"
-            try:
-                manifest = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                manifest = {}
-            for child in manifest.get("children", []) if isinstance(manifest, dict) else []:
-                if not isinstance(child, dict):
-                    continue
-                if str(child.get("child_id") or "") != child_id:
-                    continue
-                child_payload = child.get("payload")
-                if isinstance(child_payload, dict):
-                    binding.update(child_payload)
-                binding.update(child)
-                break
-        binding.update(payload)
+        binding = dict(payload)
         ref = str(binding.get("contract_snapshot_ref") or "").strip()
         digest = str(binding.get("contract_snapshot_digest") or "").strip()
         if not ref or not digest:
@@ -299,6 +284,32 @@ class TaskRefManager:
         except TaskContractSnapshotError as exc:
             return f"stale task contract: {exc}"
         return ""
+
+    def _canonical_writer_result_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        child: dict[str, Any] = {}
+        fanout_id = str(payload.get("fanout_id") or "").strip()
+        child_id = str(payload.get("child_id") or payload.get("child_run") or "").strip()
+        if fanout_id and child_id:
+            path = self.state_dir / "fanouts" / fanout_id / "manifest.json"
+            try:
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest = {}
+            for child in manifest.get("children", []) if isinstance(manifest, dict) else []:
+                if not isinstance(child, dict):
+                    continue
+                if str(child.get("child_id") or "") != child_id:
+                    continue
+                child_payload = child.get("payload")
+                child = {
+                    **(child_payload if isinstance(child_payload, dict) else {}),
+                    **child,
+                }
+                break
+        return bind_blocking_writer_result_identity(payload, child)
 
     def _snapshot_dev_artifacts_if_available(
         self,

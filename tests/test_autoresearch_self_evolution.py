@@ -38,6 +38,7 @@ from zf.autoresearch.resident import (
     REVIEW_GATE_COMPLETED,
     REVIEW_GATE_REQUESTED,
     REVIEW_GATE_STARTED,
+    _finalize_resident_worktree,
     run_resident_once,
 )
 from zf.core.events.log import EventLog
@@ -842,3 +843,72 @@ def test_resident_queue_acks_all_pending_and_executes_capped(tmp_path):
     assert len(completed) == 2
     started_ids = {e.payload["loop_request_id"] for e in started}
     assert len(started_ids) == 2
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _git_repo_with_worktree(
+    tmp_path: Path,
+    *,
+    branch: str,
+) -> tuple[Path, Path]:
+    repo = tmp_path / f"repo-{branch.replace('/', '-')}"
+    repo.mkdir()
+    _git(repo, "init", "-b", "dev")
+    _git(repo, "config", "user.email", "autoresearch-test@example.invalid")
+    _git(repo, "config", "user.name", "Autoresearch Test")
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "test: seed repository")
+    worktree = tmp_path / f"worktree-{branch.replace('/', '-')}"
+    _git(repo, "worktree", "add", "-b", branch, str(worktree), "HEAD")
+    return repo, worktree
+
+
+def test_resident_removes_clean_terminal_worktree_and_branch(
+    tmp_path: Path,
+) -> None:
+    repo, worktree = _git_repo_with_worktree(
+        tmp_path,
+        branch="experiment/clean",
+    )
+
+    outcome = _finalize_resident_worktree(
+        worktree=worktree,
+        loop_request_id="loop-clean",
+    )
+
+    assert outcome["status"] == "cleaned"
+    assert outcome["event_type"] == "autoresearch.worktree.cleaned"
+    assert outcome["branch_deleted"] is True
+    assert not worktree.exists()
+    branches = _git(repo, "branch", "--format=%(refname:short)").stdout.splitlines()
+    assert "experiment/clean" not in branches
+
+
+def test_resident_retains_terminal_worktree_with_candidate_diff(
+    tmp_path: Path,
+) -> None:
+    _, worktree = _git_repo_with_worktree(
+        tmp_path,
+        branch="experiment/dirty",
+    )
+    (worktree / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+
+    outcome = _finalize_resident_worktree(
+        worktree=worktree,
+        loop_request_id="loop-dirty",
+    )
+
+    assert outcome["status"] == "retained"
+    assert outcome["event_type"] == "autoresearch.worktree.retained"
+    assert outcome["reason"] == "candidate_diff_present"
+    assert any("candidate.txt" in path for path in outcome["dirty_paths"])
+    assert worktree.exists()

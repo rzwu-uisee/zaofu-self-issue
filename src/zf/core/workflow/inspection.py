@@ -365,6 +365,10 @@ _KERNEL_PRODUCED_EXTERNAL_TRIGGERS = frozenset({
     "verify.parity_scan.requested",
     "flow.goal.closed",
     "module.parity.closed",
+    # Token-gated ControlledActionService / `zf flow submit` ingress. It is
+    # deterministic but intentionally lives outside role.publishes/stage
+    # success_event declarations.
+    "workflow.invoke.requested",
 })
 
 

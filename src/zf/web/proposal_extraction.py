@@ -18,6 +18,7 @@ import json
 from typing import Any, Callable
 
 from zf.core.security.redaction import redact_obj
+from zf.runtime.kanban_proposals import proposal_payload_digest
 from zf.web.operator_contract import KANBAN_AGENT_ALLOWED_ACTIONS, canonical_action
 from zf.web.projections.common import (
     _message_allows_create_task_proposal,
@@ -28,10 +29,53 @@ from zf.web.projections.common import (
 
 def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
     """Minimal portable validation: mirrors the controlled-action hard gate."""
-    if action in {"create-task", "idea-to-product"} and not str(
-        payload.get("title") or ""
-    ).strip():
+    if action == "create-task" and not str(payload.get("title") or "").strip():
         return "title is required"
+    if action == "idea-to-product" and not any(
+        str(payload.get(key) or "").strip()
+        for key in ("objective", "message", "title")
+    ):
+        return "objective or message is required"
+    if action == "channel-create-from-template" and not str(
+        payload.get("template_id") or ""
+    ).strip():
+        return "template_id is required"
+    if action == "channel-discussion-start":
+        if not str(payload.get("channel_id") or "").strip():
+            return "channel_id is required"
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("objective", "message", "text")
+        ):
+            return "objective, message, or text is required"
+    if action == "workflow-invoke":
+        if not str(payload.get("task_id") or "").strip():
+            return "task_id is required"
+        if not str(payload.get("pattern_id") or "").strip():
+            return "pattern_id is required"
+    if action == "research-start":
+        if not str(payload.get("task_id") or "").strip():
+            return "task_id is required"
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("topic", "objective", "message")
+        ):
+            return "topic, objective, or message is required"
+    if action == "research-adopt":
+        for key in (
+            "request_id",
+            "artifact_ref",
+            "artifact_digest",
+            "summary",
+        ):
+            if not str(payload.get(key) or "").strip():
+                return f"{key} is required"
+        try:
+            request_revision = int(payload.get("request_revision"))
+        except (TypeError, ValueError):
+            request_revision = 0
+        if request_revision < 1:
+            return "request_revision must be a positive integer"
     return ""
 
 
@@ -140,7 +184,17 @@ def normalize_action_proposal(
             and not str(contract.get("verification") or "").strip()
         ):
             validation_error = "contract has no behavior/verification after normalization"
+    proposal_digest = proposal_payload_digest(action, payload)
+    try:
+        revision = max(1, int(proposal.get("revision") or 1))
+    except (TypeError, ValueError):
+        revision = 1
     return {
+        "proposal_id": f"proposal-{proposal_digest[:24]}",
+        "proposal_digest": proposal_digest,
+        "revision": revision,
+        "expires_at": str(proposal.get("expires_at") or ""),
+        "supersedes": str(proposal.get("supersedes") or ""),
         "action": action,
         "requested_action": requested_action,
         "payload": redact_obj(payload),

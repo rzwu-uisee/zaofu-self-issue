@@ -7,7 +7,7 @@ terminal provider result without changing semantic lane routing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -17,7 +17,10 @@ from zf.runtime.artifact_read_ledger import (
     canonical_required_reads,
     write_input_consumption_policy,
 )
-from zf.runtime.artifact_query.handoff import CanonicalHandoffResolver
+from zf.runtime.artifact_query.handoff import (
+    CanonicalHandoffResolver,
+    build_handoff_authority_contract,
+)
 from zf.runtime.call_result_admission import (
     CallResultAdmissionOutcome,
     CallResultAdmissionService,
@@ -50,6 +53,9 @@ class PreparedCallOperation:
     replay_hit: bool = False
     admitted_call_result_ref: str = ""
     admitted_call_result_digest: str = ""
+    provider_session_id: str = ""
+    context_delivery_envelope: dict[str, Any] = field(default_factory=dict)
+    context_delivery_envelope_ref: dict[str, Any] = field(default_factory=dict)
 
 
 def prepare_call_operation(
@@ -99,12 +105,22 @@ def prepare_call_operation(
         operation_key=scoped_operation_key,
         operation_type=operation_type,
     )
+    context_delivery_enabled, context_inheritance = (
+        _context_protocol_for_operation(
+            runtime,
+            operation_id=operation_id,
+            requested=payload.get("context_inheritance"),
+        )
+    )
     payload.update({
         "workflow_run_id": workflow_run_id,
         "operation_id": operation_id,
         "attempt_id": attempt_id,
         "result_protocol_mode": mode,
+        "_context_delivery_enabled": context_delivery_enabled,
     })
+    if context_delivery_enabled:
+        payload["context_inheritance"] = context_inheritance
     from zf.runtime.attempt_domain import infer_attempt_domain
 
     payload["attempt_domain"] = infer_attempt_domain(
@@ -128,6 +144,12 @@ def prepare_call_operation(
         "output_profile_revision": output_profile_revision,
         "result_scratch_ref": result_scratch_ref,
     })
+    payload["handoff_authority_contract"] = build_handoff_authority_contract(
+        payload,
+        output_profile_id=output_profile_id,
+        stage_id=stage_id,
+        operation_type=operation_type,
+    )
     semantic_submit_mode = _semantic_submit_mode(
         runtime.config,
         profile_id=output_profile_id,
@@ -147,6 +169,7 @@ def prepare_call_operation(
         dispatch_id=dispatch_id,
         source_event_id=causation_id,
     )
+    payload.pop("_context_delivery_enabled", None)
     payload.update({
         "attempt_source_manifest_ref": str(source_descriptor.get("ref") or ""),
         "attempt_source_manifest_digest": str(source_descriptor.get("sha256") or ""),
@@ -180,12 +203,19 @@ def prepare_call_operation(
             "input_consumption_policy_digest": str(policy_descriptor.get("sha256") or ""),
         })
 
+    context_envelope: dict[str, Any] = {}
+    context_envelope_descriptor: dict[str, Any] = {}
+    provider_session_id = ""
+
     request = {
         "workflow_run_id": workflow_run_id,
         "operation_type": operation_type,
         "stage_id": stage_id,
         "operation_key": operation_key,
         "attempt_domain": str(payload.get("attempt_domain") or ""),
+        "handoff_authority_contract": dict(
+            payload["handoff_authority_contract"]
+        ),
         "task_id": task_id,
         "fanout_id": str(payload.get("fanout_id") or ""),
         "child_id": str(payload.get("child_id") or ""),
@@ -261,6 +291,13 @@ def prepare_call_operation(
             if payload.get(key) not in (None, "")
         },
     }
+    if context_delivery_enabled:
+        from zf.runtime.context_delivery import CONTEXT_RENDERER_VERSION
+
+        request.update({
+            "context_inheritance": dict(context_inheritance),
+            "context_renderer_version": CONTEXT_RENDERER_VERSION,
+        })
     service = workflow_operation_service(runtime)
     ensured = service.ensure_operation(
         workflow_run_id=workflow_run_id,
@@ -302,6 +339,25 @@ def prepare_call_operation(
     # prompt. A requested operation may have crashed before send and is safe to
     # dispatch once more with the same request hash.
     should_dispatch = ensured.status == "requested"
+    if context_delivery_enabled and should_dispatch:
+        from zf.runtime.context_delivery import prepare_runtime_context_delivery
+
+        (
+            provider_session_id,
+            context_envelope,
+            context_envelope_descriptor,
+        ) = prepare_runtime_context_delivery(
+            runtime,
+            payload=payload,
+            source_manifest=source_manifest,
+            source_descriptor=source_descriptor,
+            workflow_run_id=workflow_run_id,
+            operation_id=operation_id,
+            attempt_id=attempt_id,
+            dispatch_id=dispatch_id,
+            role_instance=role_instance,
+            causation_id=causation_id,
+        )
     return PreparedCallOperation(
         mode=mode,
         workflow_run_id=workflow_run_id,
@@ -317,6 +373,9 @@ def prepare_call_operation(
         replay_hit=ensured.replay_hit,
         admitted_call_result_ref=ensured.admitted_call_result_ref,
         admitted_call_result_digest=ensured.admitted_call_result_digest,
+        provider_session_id=provider_session_id,
+        context_delivery_envelope=context_envelope,
+        context_delivery_envelope_ref=context_envelope_descriptor,
     )
 
 
@@ -329,6 +388,25 @@ def mark_call_operation_started(
     causation_id: str = "",
     correlation_id: str = "",
 ) -> None:
+    receipt_descriptor: dict[str, Any] = {}
+    receipt_error = ""
+    if (
+        prepared.context_delivery_envelope
+        and prepared.context_delivery_envelope_ref
+    ):
+        from zf.runtime.context_delivery import write_context_delivery_receipt
+
+        try:
+            receipt_descriptor = write_context_delivery_receipt(
+                runtime.state_dir,
+                envelope=prepared.context_delivery_envelope,
+                envelope_descriptor=prepared.context_delivery_envelope_ref,
+                source_event_id=causation_id,
+            )
+        except Exception as exc:
+            # H1 remains shadow-only. Missing delivery evidence must not turn a
+            # successfully sent provider call into a duplicate dispatch.
+            receipt_error = f"{type(exc).__name__}: {exc}"[:512]
     workflow_operation_service(runtime).mark_started(
         operation_id=prepared.operation_id,
         request_hash=prepared.request_hash,
@@ -338,6 +416,10 @@ def mark_call_operation_started(
         role_instance=prepared.role_instance,
         active_attempt_id=prepared.attempt_id,
         lease_id=dispatch_id or prepared.attempt_id,
+        provider_session_id=prepared.provider_session_id,
+        context_delivery_envelope_ref=prepared.context_delivery_envelope_ref,
+        context_delivery_receipt_ref=receipt_descriptor,
+        context_delivery_receipt_error=receipt_error,
         causation_id=causation_id,
         correlation_id=correlation_id or prepared.workflow_run_id,
     )
@@ -491,6 +573,40 @@ def hydrate_runtime_call_result_event(runtime: Any, event: ZfEvent) -> ZfEvent |
             correlation_id=event.correlation_id,
         ))
         return None
+
+
+def _context_protocol_for_operation(
+    runtime: Any,
+    *,
+    operation_id: str,
+    requested: Any,
+) -> tuple[bool, dict[str, Any]]:
+    from zf.runtime.context_delivery import normalize_context_inheritance
+
+    operation = load_workflow_operation(runtime.event_log, operation_id)
+    if operation is None:
+        return True, normalize_context_inheritance(requested)
+    descriptor = operation.get("request_ref")
+    if not isinstance(descriptor, Mapping):
+        raise WorkflowOperationError(
+            f"workflow operation {operation_id} has no immutable request"
+        )
+    try:
+        stored = hydrate_sidecar_ref(runtime.state_dir, dict(descriptor)).payload
+    except Exception as exc:
+        raise WorkflowOperationError(
+            f"workflow operation {operation_id} request is unreadable"
+        ) from exc
+    request = stored.get("request") if isinstance(stored, Mapping) else None
+    if not isinstance(request, Mapping):
+        raise WorkflowOperationError(
+            f"workflow operation {operation_id} request is invalid"
+        )
+    pinned = request.get("context_inheritance")
+    if not isinstance(pinned, Mapping):
+        # Pre-H0 operations retain their original manifest and request hash.
+        return False, {}
+    return True, normalize_context_inheritance(pinned)
 
 
 def _semantic_submit_mode(

@@ -45,6 +45,7 @@ FATAL_EVENT_TYPES = frozenset({
     "worker.recycle.failed",
     "worker.stuck.recovery_failed",
 })
+_PREPARATION_MANIFEST = "worktree-preparation.json"
 
 
 @dataclass(frozen=True)
@@ -373,20 +374,12 @@ def prepare_worktree(
         raise FileNotFoundError(f"config template not found: {config_src}")
 
     zf_yaml = worktree / "zf.yaml"
-    # r-next backlog B-5: autoresearch overwrote the user's zf.yaml in
-    # --reuse-worktree mode and left the long zf-autoresearch-<run-id>
-    # session name behind, breaking the next plain `zf start`. Back up
-    # the original so operators have an explicit restore path. (Full
-    # automatic restore needs an exit hook around the supervisor; the
-    # backup is a low-risk first step.)
-    if cfg.reuse_worktree and zf_yaml.exists():
-        backup_path = worktree / "zf.yaml.pre-autoresearch"
-        try:
-            backup_path.write_text(
-                zf_yaml.read_text(encoding="utf-8"), encoding="utf-8",
-            )
-        except OSError:
-            pass
+    preparation_dir = run_dir / "worktree-preparation"
+    preparation_dir.mkdir(parents=True, exist_ok=True)
+    original_zf = preparation_dir / "zf.yaml.original"
+    zf_existed = zf_yaml.is_file()
+    if zf_existed:
+        shutil.copy2(zf_yaml, original_zf)
     data = _load_yaml(config_src)
     data.setdefault("project", {})["name"] = "zaofu-autoresearch"
     data["project"]["state_dir"] = ".zf"
@@ -400,6 +393,21 @@ def prepare_worktree(
 
     seed_path = worktree / "autoresearch-seed.txt"
     seed_path.write_text(scenario.seed_text.strip() + "\n", encoding="utf-8")
+    preparation = {
+        "schema_version": "autoresearch-worktree-preparation.v1",
+        "worktree": str(worktree),
+        "zf_yaml": str(zf_yaml),
+        "zf_existed": zf_existed,
+        "original_zf": str(original_zf) if zf_existed else "",
+        "generated_zf_sha256": _path_sha256(zf_yaml),
+        "seed_file": str(seed_path),
+        "generated_seed_sha256": _path_sha256(seed_path),
+    }
+    (preparation_dir / _PREPARATION_MANIFEST).write_text(
+        json.dumps(preparation, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
 
     manifest = {
         "run_id": run_id,
@@ -428,6 +436,71 @@ def prepare_worktree(
         encoding="utf-8",
     )
     return seed_path
+
+
+def cleanup_prepared_worktree(
+    *,
+    worktree: Path,
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Restore only unchanged framework-owned files after one experiment."""
+
+    manifest_path = run_dir / "worktree-preparation" / _PREPARATION_MANIFEST
+    outcome: dict[str, Any] = {
+        "status": "not_prepared",
+        "restored": [],
+        "removed": [],
+        "retained": [],
+    }
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return outcome
+    if not isinstance(manifest, dict):
+        return outcome
+
+    root = Path(worktree).resolve()
+    preparation_dir = Path(run_dir).resolve() / "worktree-preparation"
+    zf_yaml = root / "zf.yaml"
+    if _path_sha256(zf_yaml) == str(manifest.get("generated_zf_sha256") or ""):
+        original = preparation_dir / "zf.yaml.original"
+        if bool(manifest.get("zf_existed")) and original.is_file():
+            shutil.copy2(original, zf_yaml)
+            outcome["restored"].append(str(zf_yaml))
+        else:
+            zf_yaml.unlink(missing_ok=True)
+            outcome["removed"].append(str(zf_yaml))
+    elif zf_yaml.exists():
+        outcome["retained"].append(str(zf_yaml))
+
+    seed = root / "autoresearch-seed.txt"
+    if _path_sha256(seed) == str(manifest.get("generated_seed_sha256") or ""):
+        seed.unlink(missing_ok=True)
+        outcome["removed"].append(str(seed))
+    elif seed.exists():
+        outcome["retained"].append(str(seed))
+    outcome["status"] = "retained" if outcome["retained"] else "cleaned"
+    return outcome
+
+
+def cleanup_autoresearch_run(
+    cfg: AutoresearchRunConfig,
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    run_dir = (
+        cfg.output_dir
+        if cfg.output_dir is not None
+        else cfg.worktree.resolve() / ".zf" / "autoresearch" / "runs" / run_id
+    )
+    return cleanup_prepared_worktree(worktree=cfg.worktree, run_dir=run_dir)
+
+
+def _path_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def build_inner_runner_command(

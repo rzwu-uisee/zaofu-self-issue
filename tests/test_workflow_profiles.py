@@ -174,6 +174,29 @@ workflow:
         with pytest.raises(ConfigError, match="unknown workflow stage"):
             load_config(path)
 
+    def test_kind_routes_require_a_default_target(self, tmp_path):
+        path = tmp_path / "zf.yaml"
+        path.write_text("""\
+version: "1.0"
+project: {name: demo}
+roles:
+  - name: reader
+    backend: mock
+    role_kind: reader
+workflow:
+  kind_routes:
+    prd:
+      default_tier: light
+  stages:
+    - id: prd-lanes-impl
+      trigger: task_map.ready
+      topology: fanout_reader
+      roles: [reader]
+""", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="must declare pattern_id"):
+            load_config(path)
+
     def test_kind_routes_validate_alias_targets(self, tmp_path):
         path = tmp_path / "zf.yaml"
         path.write_text("""\

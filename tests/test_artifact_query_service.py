@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,8 +12,12 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
-from zf.runtime.artifact_query.handoff import CanonicalHandoffResolver
+from zf.runtime.artifact_query.handoff import (
+    CanonicalHandoffResolver,
+    build_handoff_authority_contract,
+)
 from zf.runtime.artifact_query import store as artifact_query_store
+from zf.runtime.artifact_query import service as artifact_query_service
 from zf.runtime.artifact_query.service import (
     ArtifactQueryError,
     ArtifactQueryService,
@@ -32,7 +38,9 @@ from zf.runtime.run_contract import stable_json_sha256, write_run_contract_snaps
 from zf.runtime.sidecar_refs import write_sidecar_json
 from zf.runtime.task_contract_snapshot import current_task_contract_identity
 from zf.runtime.task_contract_snapshot import (
+    build_target_snapshot,
     build_task_contract_snapshot,
+    write_target_snapshot,
     write_task_contract_snapshot,
 )
 
@@ -72,6 +80,35 @@ def _append(
             "artifact_ref": descriptor,
         },
     ))
+
+
+def _write_test_plan_package(
+    state_dir: Path,
+    *,
+    workflow_run_id: str,
+    task_map_generation: str,
+) -> tuple[dict, dict]:
+    run_contract_body = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "prd"},
+    }
+    run_contract = write_run_contract_snapshot(
+        state_dir,
+        {
+            **run_contract_body,
+            "contract_digest": stable_json_sha256(run_contract_body),
+        },
+    )
+    package = build_plan_artifact_package(
+        workflow_run_id=workflow_run_id,
+        flow_kind="prd",
+        producer_stage_id="prd-plan",
+        run_contract=run_contract,
+        plan_revision="R1",
+        task_map_generation=task_map_generation,
+        produced=[],
+    )
+    return package, write_plan_artifact_package(state_dir, package)
 
 
 def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
@@ -131,24 +168,36 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
     first = service.catalog_list(context=context, task_id="T1")
     assert first["projection_state"] == "ready"
     assert len(first["items"]) == 3
-    assert len({row["object_id"] for row in first["items"]}) == 1
-    assert len({row["locator_id"] for row in first["items"]}) == 2
-    assert len({row["occurrence_id"] for row in first["items"]}) == 3
+    visible = [row for row in first["items"] if row["authorized"]]
+    assert len(visible) == 2
+    assert [row for row in first["items"] if not row["authorized"]] == [
+        {"authorized": False, "redacted": True}
+    ]
+    assert len({row["object_id"] for row in visible}) == 1
+    assert len({row["locator_id"] for row in visible}) == 2
     assert {
         row["event_id"]: row["authorized"]
-        for row in first["items"]
+        for row in visible
     } == {
         "evt-a": True,
-        "evt-b": False,
         "evt-copy": True,
     }
+    restricted_view = service.catalog_list(
+        context=service.context(
+            actor="worker-b",
+            role="dev",
+            purpose="implementation",
+        ),
+        task_id="T1",
+    )
+    restricted_occurrence = next(
+        row["occurrence_id"]
+        for row in restricted_view["items"]
+        if row.get("event_id") == "evt-b"
+    )
     with pytest.raises(ArtifactQueryError):
         service.hydrate(
-            next(
-                row["occurrence_id"]
-                for row in first["items"]
-                if row["event_id"] == "evt-b"
-            ),
+            restricted_occurrence,
             context=context,
         )
     with pytest.raises(ArtifactQueryError, match="exact occurrence"):
@@ -160,18 +209,28 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
             row["locator_id"],
             row["occurrence_id"],
         )
-        for row in first["items"]
+        for row in [*visible, *restricted_view["items"]]
+        if row.get("authorized")
     }
     for path in projection_db_path(state_dir).parent.glob("read_model.sqlite*"):
         path.unlink()
     rebuilt = service.catalog_list(context=context, task_id="T1")
+    rebuilt_restricted = service.catalog_list(
+        context=service.context(
+            actor="worker-b",
+            role="dev",
+            purpose="implementation",
+        ),
+        task_id="T1",
+    )
     assert {
         (
             row["object_id"],
             row["locator_id"],
             row["occurrence_id"],
         )
-        for row in rebuilt["items"]
+        for row in [*rebuilt["items"], *rebuilt_restricted["items"]]
+        if row.get("authorized")
     } == identities
     assert rebuilt["source_snapshot"]["event_cursor"]["projected_seq"] == 3
     assert "session_store_digest" in rebuilt["source_snapshot"]
@@ -182,6 +241,408 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
     )
     assert len(bounded["items"]) == 1
     assert bounded["has_more"] is True
+
+
+def test_catalog_active_append_catches_up_without_deleting_existing_rows(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    first_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/first.json",
+        {"value": "first"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-first", descriptor=first_descriptor)
+    initial = service.catalog_list(context=service.context())
+    first_occurrence = initial["items"][0]["occurrence_id"]
+    artifact_query_store.set_reducer_projection(
+        state_dir,
+        projection_kind="sentinel",
+        subject_id="keep-me",
+        source_snapshot_key="snapshot-1",
+        source_seq=1,
+        reducer_version="test.v1",
+        payload={"kept": True},
+    )
+
+    second_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/second.json",
+        {"value": "second"},
+        kind="verification_result",
+        schema_version="test.result.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-second", descriptor=second_descriptor)
+    result = artifact_query_store.catch_up_catalog(
+        state_dir,
+        project_root=project_root,
+    )
+
+    assert result["records_projected"] == 1
+    assert result["occurrences_inserted"] == 1
+    rows = service.catalog_list(context=service.context())["items"]
+    assert {row["event_id"] for row in rows} == {"evt-first", "evt-second"}
+    assert first_occurrence in {row["occurrence_id"] for row in rows}
+    assert artifact_query_store.get_reducer_projection(
+        state_dir,
+        projection_kind="sentinel",
+        subject_id="keep-me",
+        source_snapshot_key="snapshot-1",
+    ) == {"kept": True}
+
+
+def test_catalog_catch_up_rolls_back_rows_and_cursor_on_write_fault(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    first_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/first.json",
+        {"value": "first"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-first", descriptor=first_descriptor)
+    service.catalog_list(context=service.context())
+    second_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/second.json",
+        {"value": "second"},
+        kind="verification_result",
+        schema_version="test.result.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-second", descriptor=second_descriptor)
+
+    real_insert = artifact_query_store._insert_descriptor
+
+    def fail_after_insert(*args, **kwargs):
+        real_insert(*args, **kwargs)
+        raise RuntimeError("injected catalog write fault")
+
+    monkeypatch.setattr(
+        artifact_query_store,
+        "_insert_descriptor",
+        fail_after_insert,
+    )
+    with pytest.raises(RuntimeError, match="injected catalog write fault"):
+        artifact_query_store.catch_up_catalog(
+            state_dir,
+            project_root=project_root,
+        )
+
+    with artifact_query_store.connect_projection_db(state_dir) as conn:
+        meta = artifact_query_store._meta(conn)
+        occurrence_count = conn.execute(
+            "SELECT COUNT(*) FROM artifact_occurrence"
+        ).fetchone()[0]
+    assert int(meta["source_seq"]) == 1
+    assert occurrence_count == 1
+
+    monkeypatch.setattr(
+        artifact_query_store,
+        "_insert_descriptor",
+        real_insert,
+    )
+    repaired = artifact_query_store.catch_up_catalog(
+        state_dir,
+        project_root=project_root,
+    )
+    assert repaired["source_seq"] == 2
+    assert repaired["occurrences_inserted"] == 1
+
+
+def test_catalog_concurrent_queries_share_one_incremental_catch_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    first_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/first.json",
+        {"value": "first"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-first", descriptor=first_descriptor)
+    service.catalog_list(context=service.context())
+    second_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/second.json",
+        {"value": "second"},
+        kind="verification_result",
+        schema_version="test.result.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-second", descriptor=second_descriptor)
+
+    calls: list[str] = []
+    real_catch_up = artifact_query_service.catch_up_catalog
+
+    def counted_catch_up(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        time.sleep(0.05)
+        return real_catch_up(*args, **kwargs)
+
+    monkeypatch.setattr(
+        artifact_query_service,
+        "catch_up_catalog",
+        counted_catch_up,
+    )
+    barrier = threading.Barrier(6)
+    results: list[dict] = []
+
+    def query() -> None:
+        barrier.wait()
+        results.append(service.catalog_list(context=service.context()))
+
+    threads = [
+        threading.Thread(target=query, name=f"catalog-query-{index}")
+        for index in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(calls) == 1
+    assert len(results) == 6
+    assert all(
+        {row["event_id"] for row in result["items"]}
+        == {"evt-first", "evt-second"}
+        for result in results
+    )
+
+
+def test_catalog_truncation_requires_explicit_rebuild_and_uses_fallback(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/current.json",
+        {"value": "current"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-current", descriptor=descriptor)
+    service.catalog_list(context=service.context())
+
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    status = artifact_query_store.catalog_status(state_dir)
+    assert status["projection_state"] == "rebuild_required"
+    assert status["rebuild_reason"] == "event_segment_truncated"
+    fallback = service.catalog_list(context=service.context(mode="canonical"))
+    assert fallback["fallback"]["used"] is True
+    assert fallback["items"] == []
+    with artifact_query_store.connect_projection_db(state_dir) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM artifact_occurrence"
+        ).fetchone()[0] == 1
+
+    artifact_query_store.rebuild_catalog(
+        state_dir,
+        project_root=project_root,
+        force=True,
+    )
+    assert artifact_query_store.catalog_status(state_dir)[
+        "projection_state"
+    ] == "ready"
+
+
+def test_catalog_version_watermarks_are_not_overwritten_by_schema_init(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/current.json",
+        {"value": "current"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-current", descriptor=descriptor)
+    service.catalog_list(context=service.context())
+    with artifact_query_store.connect_projection_db(state_dir) as conn:
+        artifact_query_store._set_meta(
+            conn,
+            "descriptor_extractor_version",
+            "sidecar-descriptor-extractor.v1",
+        )
+        conn.commit()
+        artifact_query_store.ensure_catalog_schema(conn)
+        meta = artifact_query_store._meta(conn)
+    assert meta["descriptor_extractor_version"] == (
+        "sidecar-descriptor-extractor.v1"
+    )
+
+    status = artifact_query_store.catalog_status(state_dir)
+    assert status["projection_state"] == "rebuild_required"
+    assert status["rebuild_reason"] == "extractor_version_changed"
+    artifact_query_store.rebuild_catalog(
+        state_dir,
+        project_root=project_root,
+        force=True,
+    )
+    rebuilt = artifact_query_store.catalog_status(
+        state_dir,
+        count_source=True,
+    )
+    assert rebuilt["projection_state"] == "ready"
+    assert rebuilt["descriptor_extractor_version"] == (
+        artifact_query_store.EXTRACTOR_VERSION
+    )
+    assert rebuilt["catalog_projector_version"] == (
+        artifact_query_store.CATALOG_PROJECTOR_VERSION
+    )
+    assert rebuilt["catalog_build_watermark"]
+    assert rebuilt["last_full_rebuild_at"]
+    assert rebuilt["projection_lag"] == 0
+    assert rebuilt["db_bytes"] > 0
+
+
+def test_catalog_lineage_relation_is_schema_aware_not_kind_heuristic(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    target_like = write_sidecar_json(
+        state_dir,
+        "artifacts/target-like.json",
+        {"value": "not a target"},
+        kind="target-looking-custom",
+        schema_version="custom.v1",
+        created_by="test",
+    )
+    explicit = {
+        **write_sidecar_json(
+            state_dir,
+            "artifacts/superseding.json",
+            {"value": "replacement"},
+            kind="custom",
+            schema_version="custom.v1",
+            created_by="test",
+        ),
+        "relation": "supersedes",
+    }
+    target = write_sidecar_json(
+        state_dir,
+        "artifacts/target.json",
+        {"target_commit": "abc"},
+        kind="target_snapshot",
+        schema_version="target-snapshot.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-custom", descriptor=target_like)
+    _append(state_dir, event_id="evt-explicit", descriptor=explicit)
+    _append(state_dir, event_id="evt-target", descriptor=target)
+
+    lineage = service.lineage(
+        subject_kind="task",
+        subject_id="T1",
+        context=service.context(),
+    )
+    relations = {
+        item["source_event_id"]: item["relation"]
+        for item in lineage["items"]
+    }
+    assert relations == {
+        "evt-custom": "output",
+        "evt-explicit": "supersedes",
+        "evt-target": "target",
+    }
+
+
+def test_catalog_rotation_and_partial_tail_require_bounded_handling(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    first = write_sidecar_json(
+        state_dir,
+        "artifacts/first.json",
+        {"value": "first"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-first", descriptor=first)
+    service.catalog_list(context=service.context())
+
+    with (state_dir / "events.jsonl").open("ab") as handle:
+        handle.write(b'{"id":"partial"')
+    partial = artifact_query_store.catch_up_catalog(
+        state_dir,
+        project_root=project_root,
+    )
+    assert partial["records_projected"] == 0
+    assert artifact_query_store.catalog_status(state_dir)[
+        "occurrence_count"
+    ] == 1
+
+    active = state_dir / "events.jsonl"
+    archive = state_dir / "events" / "2026-07-24.jsonl"
+    archive.parent.mkdir(parents=True)
+    active.replace(archive)
+    second = write_sidecar_json(
+        state_dir,
+        "artifacts/second.json",
+        {"value": "second"},
+        kind="verification_result",
+        schema_version="verification-result.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-second", descriptor=second)
+    rotated = artifact_query_store.catalog_status(state_dir)
+    assert rotated["projection_state"] == "rebuild_required"
+    assert rotated["rebuild_reason"] == "event_segment_layout_changed"
+
+
+def test_catalog_recovery_quarantines_db_wal_and_shm_before_rebuild(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, service = _service(tmp_path)
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/current.json",
+        {"value": "current"},
+        kind="contract_snapshot",
+        schema_version="test.contract.v1",
+        created_by="test",
+    )
+    _append(state_dir, event_id="evt-current", descriptor=descriptor)
+    service.catalog_list(context=service.context())
+    db_path = projection_db_path(state_dir)
+    db_path.write_bytes(b"not sqlite")
+    Path(str(db_path) + "-wal").write_bytes(b"bad wal")
+    Path(str(db_path) + "-shm").write_bytes(b"bad shm")
+
+    recovered = artifact_query_store.recover_catalog_projection(
+        state_dir,
+        project_root=project_root,
+    )
+
+    assert recovered["projection_state"] == "ready"
+    assert recovered["affected_components"] == [
+        "artifact-catalog",
+        "event-index",
+    ]
+    assert {Path(path).name for path in recovered["quarantined"]} == {
+        "read_model.sqlite",
+        "read_model.sqlite-wal",
+        "read_model.sqlite-shm",
+    }
+    assert all(Path(path).is_file() for path in recovered["quarantined"])
+    assert artifact_query_store.catalog_status(state_dir)[
+        "occurrence_count"
+    ] == 1
 
 
 def test_catalog_corruption_uses_canonical_fallback_without_semantic_state(
@@ -212,7 +673,7 @@ def test_catalog_corruption_uses_canonical_fallback_without_semantic_state(
         "used": True,
         "source": "event-log-descriptor-scan",
     }
-    assert result["projection_state"] == "degraded"
+    assert result["projection_state"] == "corrupt"
     assert result["items"][0]["event_id"] == "evt-result"
     assert not (state_dir / "kanban.json").exists()
 
@@ -285,6 +746,7 @@ def test_attempt_missing_reads_is_protocol_repair_then_closes(
 
 def test_goal_dossier_cache_invalidates_on_source_snapshot_change(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _, state_dir, service = _service(tmp_path)
     calls: list[int] = []
@@ -307,6 +769,14 @@ def test_goal_dossier_cache_invalidates_on_source_snapshot_change(
     third = service.cached_goal_dossier("run-cache", builder=build)
     assert third["cache"]["hit"] is False
     assert calls == [1, 2]
+
+    monkeypatch.setattr(
+        "zf.runtime.artifact_query.service.GOAL_DOSSIER_CACHE_VERSION",
+        "goal-dossier-cache.next",
+    )
+    fourth = service.cached_goal_dossier("run-cache", builder=build)
+    assert fourth["cache"]["hit"] is False
+    assert calls == [1, 2, 3]
 
 
 def test_reducer_projection_cache_enforces_entry_and_payload_bounds(
@@ -421,6 +891,7 @@ def test_handoff_resolver_rejects_stale_or_missing_task_authority(
         "canonical-handoff-resolver.v1"
     )
     assert descriptor["kind"] == "attempt_source_manifest"
+    assert manifest["handoff_authority_profile"] == "implementation-initial"
 
     with pytest.raises(ArtifactReadError, match="contract_revision"):
         resolver.resolve_payload(
@@ -452,6 +923,256 @@ def test_handoff_resolver_rejects_stale_or_missing_task_authority(
             task_id="T-current",
             attempt_id="attempt-hash-mismatch",
             dispatch_id="dispatch-hash-mismatch",
+        )
+
+
+def test_blocking_handoff_distinguishes_initial_impl_from_rework(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, _ = _service(tmp_path)
+    package, package_descriptor = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-authority",
+        task_map_generation="G1",
+    )
+    task = Task(
+        id="T-authority",
+        title="Authority matrix",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            behavior="respect stage authority",
+            acceptance_criteria=["AC-1"],
+            verification="pytest -q",
+            evidence_contract={
+                "source_refs": {
+                    "task_map_generation": "G1",
+                    "task_map_ref": "artifacts/task-maps/g1.json",
+                    "plan_artifact_package_id": package_descriptor["package_id"],
+                    "plan_artifact_package_ref": package_descriptor["ref"],
+                    "plan_artifact_package_digest": package_descriptor["sha256"],
+                },
+            },
+        ),
+    )
+    TaskStore(state_dir / "kanban.json").add(task)
+    current = current_task_contract_identity(task)
+    snapshot = build_task_contract_snapshot(
+        task,
+        workflow_run_id="run-authority",
+        task_map_generation_id=current["task_map_generation"],
+        base_commit="base-1",
+        task_ref="refs/zf/tasks/T-authority",
+    )
+    snapshot_ref = write_task_contract_snapshot(state_dir, snapshot)
+    resolver = CanonicalHandoffResolver(
+        state_dir=state_dir,
+        project_root=project_root,
+        config=None,
+    )
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        id="evt-package-authority",
+        type="plan.artifact_package.admitted",
+        correlation_id="run-authority",
+        payload=package_event_payload(
+            package,
+            package_descriptor,
+            status="admitted",
+        ),
+    ))
+    initial = {
+        **current,
+        "artifact_package_mode": "blocking",
+        "task_ref": "refs/zf/tasks/T-authority",
+        "base_commit": "base-1",
+        "output_profile_id": "implementation",
+        "contract_snapshot_ref": snapshot_ref["ref"],
+        "contract_snapshot_digest": snapshot_ref["sha256"],
+        "plan_artifact_package_id": package_descriptor["package_id"],
+        "plan_artifact_package_ref": package_descriptor["ref"],
+        "plan_artifact_package_digest": package_descriptor["sha256"],
+    }
+    initial["handoff_authority_contract"] = (
+        build_handoff_authority_contract(
+            initial,
+            output_profile_id="implementation",
+            stage_id="impl",
+            operation_type="writer",
+        )
+    )
+
+    manifest, _ = resolver.resolve_payload(
+        payload=initial,
+        workflow_run_id="run-authority",
+        task_id="T-authority",
+        attempt_id="attempt-initial",
+        dispatch_id="dispatch-initial",
+    )
+    assert manifest["handoff_authority_profile"] == "implementation-initial"
+
+    with pytest.raises(ArtifactReadError, match="accepted TaskRef"):
+        resolver.resolve_payload(
+            payload={
+                **initial,
+                "attempt_domain": "task_rework",
+                "rework_of_attempt_id": "attempt-initial",
+                "rework_feedback_ref": "artifacts/rework.json",
+                "handoff_authority_contract": build_handoff_authority_contract(
+                    {
+                        **initial,
+                        "attempt_domain": "task_rework",
+                        "rework_of_attempt_id": "attempt-initial",
+                    },
+                    output_profile_id="implementation",
+                    stage_id="impl",
+                    operation_type="writer",
+                ),
+            },
+            workflow_run_id="run-authority",
+            task_id="T-authority",
+            attempt_id="attempt-rework",
+            dispatch_id="dispatch-rework",
+        )
+
+    with pytest.raises(ArtifactReadError, match="current canonical task"):
+        resolver.resolve_payload(
+            payload=initial,
+            workflow_run_id="run-authority",
+            task_id="T-missing",
+            attempt_id="attempt-missing-task",
+            dispatch_id="dispatch-missing-task",
+        )
+
+
+def test_candidate_verify_binds_current_candidate_and_integrated_task_refs(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, _ = _service(tmp_path)
+    package, package_descriptor = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-candidate",
+        task_map_generation="G2",
+    )
+    source_refs = {
+        "task_map_generation": "G2",
+        "task_map_ref": "artifacts/task-maps/g2.json",
+        "plan_artifact_package_id": package_descriptor["package_id"],
+        "plan_artifact_package_ref": package_descriptor["ref"],
+        "plan_artifact_package_digest": package_descriptor["sha256"],
+    }
+    task = Task(
+        id="T-candidate",
+        title="Candidate authority",
+        status="done",
+        assigned_to="dev",
+        contract=TaskContract(
+            behavior="bind candidate lineage",
+            acceptance_criteria=["AC-C"],
+            verification="pytest -q",
+            evidence_contract={"source_refs": source_refs},
+        ),
+    )
+    TaskStore(state_dir / "kanban.json").add(task)
+    current = current_task_contract_identity(task)
+    contract = build_task_contract_snapshot(
+        task,
+        workflow_run_id="run-candidate",
+        task_map_generation_id=current["task_map_generation"],
+        base_commit="base-candidate",
+        task_ref="refs/zf/tasks/T-candidate",
+    )
+    contract_ref = write_task_contract_snapshot(state_dir, contract)
+    candidate_commit = "c" * 40
+    target = build_target_snapshot(
+        contract_ref,
+        target_commit=candidate_commit,
+        contract_snapshot=contract,
+    )
+    target_ref = write_target_snapshot(state_dir, target)
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        id="evt-package-candidate",
+        type="plan.artifact_package.admitted",
+        correlation_id="run-candidate",
+        payload=package_event_payload(
+            package,
+            package_descriptor,
+            status="admitted",
+        ),
+    ))
+    task_commit = "d" * 40
+    log.append(ZfEvent(
+        id="evt-task-ref-candidate",
+        type="task.ref.updated",
+        task_id="T-candidate",
+        correlation_id="run-candidate",
+        payload={
+            "workflow_run_id": "run-candidate",
+            "task_id": "T-candidate",
+            "source_commit": task_commit,
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-candidate-current",
+        type="candidate.ready",
+        correlation_id="run-candidate",
+        payload={
+            "workflow_run_id": "run-candidate",
+            "candidate_base_commit": "base-candidate",
+            "candidate_head_commit": candidate_commit,
+            "completed_task_ids": ["T-candidate"],
+            "task_map_generation": "G2",
+        },
+    ))
+    payload = {
+        **current,
+        **source_refs,
+        "artifact_package_mode": "blocking",
+        "output_profile_id": "candidate-verify",
+        "base_commit": "base-candidate",
+        "target_commit": candidate_commit,
+        "task_ref": "refs/zf/tasks/T-candidate",
+        "contract_snapshot_ref": contract_ref["ref"],
+        "contract_snapshot_digest": contract_ref["sha256"],
+        "target_snapshot_ref": target_ref["ref"],
+        "target_snapshot_digest": target_ref["sha256"],
+    }
+    payload["handoff_authority_contract"] = (
+        build_handoff_authority_contract(
+            payload,
+            output_profile_id="candidate-verify",
+            stage_id="candidate-verify",
+            operation_type="verifier",
+        )
+    )
+    resolver = CanonicalHandoffResolver(
+        state_dir=state_dir,
+        project_root=project_root,
+        config=None,
+    )
+
+    manifest, _ = resolver.resolve_payload(
+        payload=payload,
+        workflow_run_id="run-candidate",
+        task_id="T-candidate",
+        attempt_id="attempt-candidate",
+        dispatch_id="dispatch-candidate",
+    )
+    assert manifest["candidate_snapshot"]["candidate_event_id"] == (
+        "evt-candidate-current"
+    )
+    assert manifest["candidate_snapshot"]["integrated_task_refs"] == [{
+        "task_id": "T-candidate",
+        "source_commit": task_commit,
+    }]
+
+    with pytest.raises(ArtifactReadError, match="target_commit"):
+        resolver.resolve_payload(
+            payload={**payload, "target_commit": "e" * 40},
+            workflow_run_id="run-candidate",
+            task_id="T-candidate",
+            attempt_id="attempt-stale-candidate",
+            dispatch_id="dispatch-stale-candidate",
         )
 
 

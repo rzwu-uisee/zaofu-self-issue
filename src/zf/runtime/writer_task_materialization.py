@@ -14,12 +14,15 @@ def bind_plan_package_source_refs(
     package_digest = str(
         getattr(loaded, "plan_artifact_package_digest", "") or ""
     )
+    generation = str(getattr(loaded, "task_map_generation", "") or "")
     if package_id:
         source_refs["plan_artifact_package_id"] = package_id
     if package_ref:
         source_refs["plan_artifact_package_ref"] = package_ref
     if package_digest:
         source_refs["plan_artifact_package_digest"] = package_digest
+    if generation:
+        source_refs["task_map_generation"] = generation
 
 
 def materialize_writer_tasks(
