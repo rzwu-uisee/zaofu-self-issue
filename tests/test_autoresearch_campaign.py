@@ -76,7 +76,7 @@ def test_full_validation_plan_writes_common_and_specific_assertions(
         campaign=resolve_campaign("full-validation"),
         output_dir=tmp_path / "plan",
         worktree_root=tmp_path / "worktrees",
-        config_template=Path("examples/dev-codex-backends.yaml"),
+        config_template=Path("examples/tmp/dev-codex-backends.yaml"),
         use_tmux=False,
     )
 

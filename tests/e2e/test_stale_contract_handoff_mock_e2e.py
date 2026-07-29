@@ -8,6 +8,8 @@ import subprocess
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.loader import load_config
 from zf.core.config.schema import WorkflowAffinityLaneConfig
 from zf.core.events.log import EventLog
@@ -37,6 +39,8 @@ PLAN_REQUIRED_SOURCE_IDS = {
     "plan-port-task_map",
     "plan-port-planning_result",
 }
+
+pytestmark = pytest.mark.mock_e2e
 
 
 class _Transport:

@@ -18,7 +18,7 @@ from zf.core.config.loader import load_config
 from zf.core.workflow.inspection import build_workflow_inspection_report
 
 EXAMPLES = sorted(
-    (Path(__file__).resolve().parent.parent / "examples").glob("*.yaml")
+    (Path(__file__).resolve().parent.parent / "examples" / "tmp").glob("*.yaml")
 )
 
 # dev-route 类 STOP:B10 已清零,永不回归。

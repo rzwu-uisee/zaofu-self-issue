@@ -488,9 +488,12 @@ def test_materialize_claude_code_targets_worktree_project_dot_claude(tmp_path: P
 def test_dev_codex_example_materializes_each_role_skills_and_dependencies(
     tmp_path: Path,
 ):
-    example = Path(__file__).parent.parent / "examples" / "dev-codex-backends.yaml"
-    if not example.exists():
-        pytest.skip("examples/dev-codex-backends.yaml not present")
+    example = (
+        Path(__file__).parent.parent
+        / "examples"
+        / "tmp"
+        / "dev-codex-backends.yaml"
+    )
 
     config = load_config(example)
     missing_sources = [

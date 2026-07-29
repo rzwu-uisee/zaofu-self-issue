@@ -216,6 +216,7 @@ def _load_jsonl(path: Path) -> list[dict]:
     return out
 
 
+@pytest.mark.host
 @pytest.mark.skipif(
     not (_HERMES_YAML.exists() and _R23_ARCHIVE.exists()),
     reason="R23 归档/hermes 配置不在本机",
@@ -254,6 +255,7 @@ def test_r23_archive_replay_flags_synth_terminal_missing():
     )
 
 
+@pytest.mark.host
 @pytest.mark.skipif(
     not (_HERMES_YAML.exists() and _R24_ARCHIVE.exists()),
     reason="R24 归档未落盘(backlog 2026-06-11-0321 blocked:待运行节点回传)",

@@ -22,6 +22,8 @@ import pytest
 
 from zf.core.memory.store import MemoryStore
 
+pytestmark = pytest.mark.serial
+
 _BLOCK_RE = re.compile(r"<!-- type: (\w+); max_days: \d+; last_updated: [^>]+ -->")
 _SEED = "seed-content-MUST-SURVIVE"
 

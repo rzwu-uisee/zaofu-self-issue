@@ -1,4 +1,4 @@
-"""Tests for examples/mixed-team.yaml — 1202-T4.
+"""Tests for the archived mixed-team preset — 1202-T4.
 
 Locks in the mixed-backend preset shape so later edits don't regress
 the topology. E2E smoke belongs to 1203; this file is config-only.
@@ -11,7 +11,9 @@ from pathlib import Path
 from zf.core.config.loader import load_config
 
 
-MIXED_YAML = Path(__file__).resolve().parents[1] / "examples" / "mixed-team.yaml"
+MIXED_YAML = (
+    Path(__file__).resolve().parents[1] / "examples" / "tmp" / "mixed-team.yaml"
+)
 
 
 def test_mixed_team_yaml_loads():

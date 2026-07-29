@@ -38,6 +38,7 @@ from zf.web.projections.workflow_graph import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_EXAMPLES = ROOT / "examples" / "tmp"
 
 
 def test_controller_profiles_project_thin_judge_and_goal_terminal() -> None:
@@ -53,7 +54,7 @@ def test_controller_profiles_project_thin_judge_and_goal_terminal() -> None:
 
 
 def test_all_examples_compile_to_workflow_graph() -> None:
-    for path in sorted((ROOT / "examples").glob("*.yaml")):
+    for path in sorted(LEGACY_EXAMPLES.glob("*.yaml")):
         cfg = load_config(path)
         graph = compile_workflow_graph(cfg)
 
@@ -67,11 +68,11 @@ def test_standard_codex_workflows_validate() -> None:
         "workflow-product-standard-codex.yaml",
         "workflow-refactor-standard-codex.yaml",
     ):
-        assert validate_config(ROOT / "examples" / name) == []
+        assert validate_config(LEGACY_EXAMPLES / name) == []
 
 
 def test_graph_compiles_fanout_static_gate_and_derived_events() -> None:
-    cfg = load_config(ROOT / "examples" / "hermes-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "hermes-codex.yaml")
     graph = compile_workflow_graph(cfg)
 
     assert graph.nodes_by_type("fanout_stage")
@@ -79,7 +80,7 @@ def test_graph_compiles_fanout_static_gate_and_derived_events() -> None:
     assert "zaofu.refactor.plan.ready" in graph.event_sets.handoff_success_events
     assert "integration.failed" in graph.event_sets.rework_trigger_events
 
-    cfg2 = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg2 = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph2 = compile_workflow_graph(cfg2)
     assert graph2.node("gate:impl_exit_gate") is not None
     assert "static_gate.passed" in graph2.event_sets.handoff_success_events
@@ -112,7 +113,7 @@ def test_graph_compiles_fanout_static_gate_and_derived_events() -> None:
 
 
 def test_graph_diagnostics_cover_invalid_routes_and_fanout_aggregate_gaps() -> None:
-    cfg = load_config(ROOT / "examples" / "hermes-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "hermes-codex.yaml")
     cfg.workflow.rework_routing["integration.failed"] = "missing-role"
     cfg.workflow.stages[0].aggregate.success_event = ""
     cfg.workflow.stages[0].aggregate.failure_event = ""
@@ -127,7 +128,7 @@ def test_graph_diagnostics_cover_invalid_routes_and_fanout_aggregate_gaps() -> N
 
 
 def test_condition_evaluator_blocks_stale_dispatch() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     node = graph.node("gate:impl_exit_gate")
     assert node is not None
@@ -163,7 +164,7 @@ def test_condition_evaluator_blocks_stale_dispatch() -> None:
 
 
 def test_condition_evaluator_explains_missing_gate_and_terminal_evidence_without_writes(tmp_path: Path) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     review_node = graph.node("role:review")
     terminal_node = graph.node("terminal:done")
@@ -203,7 +204,7 @@ def test_condition_evaluator_explains_missing_gate_and_terminal_evidence_without
 
 
 def test_condition_evaluator_shadow_match_reports_legacy_comparison() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     node = graph.node("gate:impl_exit_gate")
     assert node is not None
@@ -225,7 +226,7 @@ def test_condition_evaluator_shadow_match_reports_legacy_comparison() -> None:
 
 
 def test_workflow_node_projection_distinguishes_static_gate_skipped() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     task = Task(id="TASK-1", title="demo", status="in_progress")
     events = [
@@ -248,7 +249,7 @@ def test_workflow_node_projection_distinguishes_static_gate_skipped() -> None:
 
 
 def test_workflow_node_projection_contains_blocking_reasons_source_ids_and_action_decisions() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     task = Task(id="TASK-1", title="demo", status="review")
     early_review = ZfEvent(type="review.approved", task_id="TASK-1")
@@ -277,7 +278,7 @@ def test_workflow_node_projection_contains_blocking_reasons_source_ids_and_actio
 
 
 def test_stage_action_runner_plan_is_pure_and_commit_uses_kernel_helpers(tmp_path: Path) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     node = graph.node("terminal:done")
     assert node is not None
@@ -310,7 +311,7 @@ def test_stage_action_runner_plan_is_pure_and_commit_uses_kernel_helpers(tmp_pat
 
 
 def test_stage_action_runner_static_gate_and_rework_are_replay_idempotent(tmp_path: Path) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     gate = graph.node("gate:impl_exit_gate")
     rework = graph.node("rework:static_gate.failed")
@@ -368,7 +369,7 @@ def test_stage_action_runner_static_gate_and_rework_are_replay_idempotent(tmp_pa
 
 
 def test_stage_action_runner_unknown_action_fails_closed() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     node = compile_workflow_graph(cfg).node("terminal:done")
     assert node is not None
 
@@ -379,7 +380,7 @@ def test_stage_action_runner_unknown_action_fails_closed() -> None:
 
 
 def test_workflow_reconciler_resync_reports_ready_nodes() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     task = Task(id="TASK-1", title="demo", status="in_progress")
     events = [ZfEvent(type="dev.build.done", task_id="TASK-1")]
@@ -436,7 +437,7 @@ def test_workflow_reconciler_does_not_replan_gate_from_gate_terminal_event() -> 
 
 
 def test_workflow_reconciler_plans_review_dispatch_terminal_and_rework_routes() -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     graph = compile_workflow_graph(cfg)
     task = Task(id="TASK-1", title="demo", status="testing")
     approved = ZfEvent(type="review.approved", task_id="TASK-1")
@@ -708,7 +709,7 @@ def _graph_review_test_judge_config() -> ZfConfig:
 
 
 def test_reactor_registers_workflow_graph_shadow_handler(tmp_path: Path) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     reactor = _ShadowReactor(cfg=cfg, state_dir=tmp_path)
     reactor.task_store.add(Task(id="TASK-1", title="demo", status="in_progress"))
     registry = reactor._build_event_registry()
@@ -1027,7 +1028,7 @@ def test_workflow_graph_resync_recovers_missing_dispatch(tmp_path: Path) -> None
 
 
 def test_workflow_graph_web_projection_adds_compiled_graph(tmp_path: Path) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     event_log = EventLog(tmp_path / "events.jsonl")
     task_store = TaskStore(tmp_path / "kanban.json")
     task_store.add(Task(id="TASK-1", title="demo", status="in_progress"))
@@ -1045,7 +1046,7 @@ def test_workflow_graph_web_projection_uses_read_model_cache(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    cfg = load_config(ROOT / "examples" / "zf-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
     event_log = EventLog(tmp_path / "events.jsonl")
     TaskStore(tmp_path / "kanban.json").add(
         Task(id="TASK-1", title="demo", status="in_progress")
@@ -1055,8 +1056,9 @@ def test_workflow_graph_web_projection_uses_read_model_cache(
     def fail_read_all(self):  # noqa: ANN001
         raise AssertionError("workflow graph must not scan EventLog.read_all")
 
+    app = create_app(state_dir=tmp_path, config=cfg)
     monkeypatch.setattr("zf.core.events.log.EventLog.read_all", fail_read_all)
-    client = TestClient(create_app(state_dir=tmp_path, config=cfg))
+    client = TestClient(app)
 
     first = client.get("/api/workflow/graph").json()
     event_log.append(ZfEvent(

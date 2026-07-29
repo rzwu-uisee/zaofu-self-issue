@@ -132,6 +132,11 @@ code and tests.
 - For config/runtime/schema/Web/API changes, add focused tests near the changed
   behavior.
 - Install full test dependencies with `uv sync --extra dev --extra web`.
+- Use `python scripts/dev-verify.py plan --base dev` to explain the current
+  worktree's verification closure and `python scripts/dev-verify.py run
+  --base dev` to execute its automatic tiers. The planner is conservative:
+  an unmapped `src/` change must add a direct test, pass explicit `--tests`,
+  or extend a shared boundary rule; it must never silently mean "no tests".
 - Test by change domain and impact closure, not by changed-file count alone.
   A focused run must cover the changed module, its direct callers, and any
   shared Event/Schema/Store contract it crosses. Web UI and backend are
@@ -155,6 +160,10 @@ code and tests.
   explicit time and memory budgets. A long-running or resource-exhausting
   monolithic pytest process is a test-infrastructure failure to report, not a
   reason to block ordinary development.
+- Coverage is an explicit release tier
+  (`uv run pytest --cov=zf --cov-report=term-missing ...`), not an implicit
+  cost on ordinary focused tests. Host and real-provider markers remain
+  explicit even when deterministic tests run in parallel.
 - Focused verification is not full verification: report the exact tier that
   ran. A broad docs-only reconciliation instead runs docs/instruction checks
   plus focused generator tests.
@@ -249,6 +258,8 @@ Multiple agent sessions may work this repo concurrently. Four hard rules:
   and `.codex/skills/` are distribution copies synced from it (see
   `skills/zf-tool-skill-parity/`), not independently evolving forks.
 - Useful commands: `uv sync --extra dev --extra web`,
+  `python scripts/dev-verify.py plan --base dev`,
+  `python scripts/dev-verify.py run --base dev`,
   `uv run pytest <focused-paths> -q --no-cov`,
   `uv run pytest -q --no-cov`,
   `uv run zf validate --cold-start`, `uv run zf start`, `uv run zf stop`,

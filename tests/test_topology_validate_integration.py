@@ -27,8 +27,13 @@ from zf.core.workflow.topology import (
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 
+def _example(name: str) -> Path:
+    current = EXAMPLES / name
+    return current if current.exists() else EXAMPLES / "tmp" / name
+
+
 def _load(name: str):
-    return load_config(EXAMPLES / name)
+    return load_config(_example(name))
 
 
 def test_external_events_whitelist_has_core_kernel_events():
@@ -150,7 +155,7 @@ def test_validate_cold_start_prints_topology_section(tmp_path, monkeypatch):
 
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    shutil.copy(EXAMPLES / "safe-team.yaml", workspace / "zf.yaml")
+    shutil.copy(_example("safe-team.yaml"), workspace / "zf.yaml")
     (workspace / "README.md").write_text("x")
     (workspace / "CLAUDE.md").write_text("x")
     (workspace / "src").mkdir()

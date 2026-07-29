@@ -16,6 +16,8 @@ from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 
+pytestmark = pytest.mark.serial
+
 
 def _add_task(path: str, title: str) -> None:
     TaskStore(Path(path)).add(Task(title=title))

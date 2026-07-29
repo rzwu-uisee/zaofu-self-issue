@@ -111,17 +111,6 @@ async function primeBrowser(page: Page, withToken = true): Promise<void> {
 }
 
 async function openKanbanAgent(page: Page, id: string, withToken = true): Promise<void> {
-  page.on("dialog", async (dialog) => {
-    if (
-      dialog.type() === "confirm"
-      && dialog.message()
-        === "Grant this Kanban Agent turn full shell and Git access?"
-    ) {
-      await dialog.accept();
-      return;
-    }
-    await dialog.dismiss();
-  });
   await primeBrowser(page, withToken);
   await page.goto(`/?project=${encodeURIComponent(id)}`);
   await expect(page.locator(".status-pill.status-live")).toBeVisible({ timeout: 90_000 });

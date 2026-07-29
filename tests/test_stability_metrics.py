@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from zf.core.events.model import ZfEvent
 from zf.runtime.stability_metrics import evaluate_stability
 
@@ -61,6 +63,7 @@ def test_stall_recovery_p95() -> None:
     assert 55 <= report.s4_recovery_p95_s <= 65
 
 
+@pytest.mark.host
 def test_r4_archive_is_not_stable() -> None:
     # 实弹 fixture:r4 归档(21 escalate/风暴期)必须判 NOT STABLE
     from zf.core.events.log import EventLog

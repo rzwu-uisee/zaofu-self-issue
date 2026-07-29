@@ -43,6 +43,7 @@ from tests.e2e.star_smoke_support import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+LEGACY_EXAMPLES = REPO_ROOT / "examples" / "tmp"
 DEFAULT_CANDIDATE_REF = "candidate/zf-star-smoke"
 DEFAULT_BACKEND = "codex"
 DEFAULT_PERMISSION_MODE = "bypass"
@@ -88,7 +89,7 @@ class StarSummary:
 SCENARIOS: dict[str, StarScenario] = {
     "verifier": StarScenario(
         name="verifier",
-        config=REPO_ROOT / "examples" / "star-verifier-reader.yaml",
+        config=LEGACY_EXAMPLES / "star-verifier-reader.yaml",
         stage_id="verify-candidate",
         trigger_event="candidate.ready",
         pdd_id="PDD-STAR-VERIFY",
@@ -98,7 +99,7 @@ SCENARIOS: dict[str, StarScenario] = {
     ),
     "review": StarScenario(
         name="review",
-        config=REPO_ROOT / "examples" / "star-critic-review-reader.yaml",
+        config=LEGACY_EXAMPLES / "star-critic-review-reader.yaml",
         stage_id="review-wave",
         trigger_event="candidate.ready",
         pdd_id="PDD-STAR-REVIEW",
@@ -108,7 +109,7 @@ SCENARIOS: dict[str, StarScenario] = {
     ),
     "writer": StarScenario(
         name="writer",
-        config=REPO_ROOT / "examples" / "star-supervisor-worker-writer.yaml",
+        config=LEGACY_EXAMPLES / "star-supervisor-worker-writer.yaml",
         stage_id="supervisor-worker-dev-fanout",
         trigger_event="task_map.ready",
         pdd_id="PDD-STAR-WRITER",
@@ -118,7 +119,7 @@ SCENARIOS: dict[str, StarScenario] = {
     ),
     "writer-conflict": StarScenario(
         name="writer-conflict",
-        config=REPO_ROOT / "examples" / "star-supervisor-worker-writer.yaml",
+        config=LEGACY_EXAMPLES / "star-supervisor-worker-writer.yaml",
         stage_id="supervisor-worker-dev-fanout",
         trigger_event="task_map.ready",
         pdd_id="PDD-STAR-WRITER-CONFLICT",

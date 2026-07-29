@@ -795,14 +795,6 @@ export function OrchestratorPanel({
       return;
     }
     const directAction = slashAction(message);
-    if (
-      !directAction
-      && turnPermissionProfile === "dangerous_full"
-      && !options.dangerousAck
-      && !window.confirm("Grant this Kanban Agent turn full shell and Git access?")
-    ) {
-      return;
-    }
     setHeadlessSubmitting(true);
     setHeadlessMessage("");
     let pendingTurnId = "";
@@ -845,6 +837,9 @@ export function OrchestratorPanel({
         ...contextPayload(),
         backend: targetBackend,
         permission_profile: turnPermissionProfile,
+        // The token/passcode-gated Web session is the operator acknowledgement
+        // for its configured default profile. Explicit escalation remains a
+        // separate "Run once with full access" action.
         dangerous_ack: turnPermissionProfile === "dangerous_full" || undefined,
         scope: desiredOperatorScope,
         message,

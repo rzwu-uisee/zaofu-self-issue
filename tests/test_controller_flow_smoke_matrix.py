@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.loader import load_config
 from zf.core.config.render import build_config_inspection_report
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_DIR = ROOT / "examples" / "prod" / "controller"
+
+pytestmark = pytest.mark.mock_e2e
 
 
 def _inspect(name: str) -> dict:

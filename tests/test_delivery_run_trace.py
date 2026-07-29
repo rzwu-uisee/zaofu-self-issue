@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _dynamic_config():
-    return load_config(ROOT / "examples" / "workflow-task-flow-dynamic-codex.yaml")
+    return load_config(
+        ROOT / "examples" / "tmp" / "workflow-task-flow-dynamic-codex.yaml"
+    )
 
 
 def test_delivery_task_flow_uses_dynamic_yaml_stage_order() -> None:

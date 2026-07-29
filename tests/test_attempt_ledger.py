@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from zf.core.events.model import ZfEvent
 from zf.runtime.attempt_ledger import (
     counted_failure_events,
@@ -89,6 +91,7 @@ def test_non_retryable_classification() -> None:
     assert non_retryable_reason(normal) is None
 
 
+@pytest.mark.host
 def test_r4_archive_scene_counted_far_below_nominal() -> None:
     # 实弹:r4 SCENE-001 名义 24 次 attempt,大半是 supersede 风暴重绑;
     # 账本的真实计数失败必须远低于名义值(F16 语义验收)。

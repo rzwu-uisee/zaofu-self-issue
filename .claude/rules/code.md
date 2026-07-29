@@ -29,6 +29,12 @@ discipline only when relevant.
 
 ## Test Scope Discipline
 
+Start with `python scripts/dev-verify.py plan --base dev`; use the matching
+`run` command when the plan is correct. If an unmapped source change fails
+closed, add a direct test or pass an exact `--tests` path with a stated
+reason. Do not weaken the selector or classify an unknown source file as
+docs-only merely to obtain a green plan.
+
 Do not select pytest scope from changed-file count alone. Use the impact
 closure: changed module, direct callers, and shared Event/Schema/Store
 contracts. Web/UI and backend are separate default test domains; cross-domain

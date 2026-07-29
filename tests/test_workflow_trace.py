@@ -9,10 +9,11 @@ from zf.core.task.schema import Task, TaskContract
 from zf.runtime.workflow_trace import build_workflow_trace
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_EXAMPLES = ROOT / "examples" / "tmp"
 
 
 def test_workflow_trace_contains_pending_yaml_stages_without_events() -> None:
-    cfg = load_config(ROOT / "examples" / "hermes-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "hermes-codex.yaml")
 
     trace = build_workflow_trace(config=cfg, events=[], feature_id="F-1")
 
@@ -27,7 +28,7 @@ def test_workflow_trace_contains_pending_yaml_stages_without_events() -> None:
 
 
 def test_workflow_trace_projects_fanout_children_and_aggregate_status() -> None:
-    cfg = load_config(ROOT / "examples" / "hermes-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "hermes-codex.yaml")
     events = [
         ZfEvent(
             id="evt-start",
@@ -102,7 +103,7 @@ def test_workflow_trace_projects_fanout_children_and_aggregate_status() -> None:
 
 
 def test_workflow_trace_projects_queue_aggregate_and_critical_metrics() -> None:
-    cfg = load_config(ROOT / "examples" / "hermes-codex.yaml")
+    cfg = load_config(LEGACY_EXAMPLES / "hermes-codex.yaml")
     events = [
         ZfEvent(
             id="evt-request",

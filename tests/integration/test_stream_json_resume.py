@@ -167,6 +167,7 @@ class TestBackendAdapterResumeFlags:
 REAL_CLAUDE = os.environ.get("RUN_REAL_CLAUDE", "").lower() in ("1", "true", "yes")
 
 
+@pytest.mark.real_provider
 @pytest.mark.skipif(not REAL_CLAUDE, reason="Set RUN_REAL_CLAUDE=1 to run")
 class TestRealClaudeMultiTurnResume:
     """Spawns a real Claude subprocess via stream-json, sends two turns,

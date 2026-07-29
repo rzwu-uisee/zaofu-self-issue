@@ -74,7 +74,7 @@ else
 fi
 
 # ---- 7. Preset yaml exists ----
-PRESET="examples/safe-team.yaml"
+PRESET="examples/tmp/safe-team.yaml"
 if [[ "$CONFIG_MODE" == "full" ]]; then
   bad "config_mode_full" "'full' mode requires W5E2E-T1 ship (critic + test_spec roles); not yet available. Run with CONFIG_MODE=mvp."
 elif [[ -f "$PRESET" ]]; then

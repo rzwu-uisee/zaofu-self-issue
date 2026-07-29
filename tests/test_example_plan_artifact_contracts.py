@@ -6,36 +6,36 @@ from zf.core.config.loader import load_config
 
 
 PLAN_STAGE_REQUIRED_KEYS = {
-    "examples/workflow-product-fanout-standard-codex.yaml": {
+    "examples/tmp/workflow-product-fanout-standard-codex.yaml": {
         "product-plan-authoring": {"plan_artifact_ref", "artifact_refs"},
         "product-task-map": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
-    "examples/workflow-refactor-standard-codex.yaml": {
+    "examples/tmp/workflow-refactor-standard-codex.yaml": {
         "refactor-plan": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
-    "examples/hermes-codex.yaml": {
+    "examples/tmp/hermes-codex.yaml": {
         "cj-min-refactor-plan": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
-    "examples/hermes-mixed.yaml": {
+    "examples/tmp/hermes-mixed.yaml": {
         "cj-min-refactor-scan": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
-    "examples/star-refactor-planning-reader.yaml": {
+    "examples/tmp/star-refactor-planning-reader.yaml": {
         "refactor-planning-scan": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
-    "examples/star-zaofu-refactor-review.yaml": {
+    "examples/tmp/star-zaofu-refactor-review.yaml": {
         "zaofu-refactor-plan-synthesis": {"plan_artifact_ref", "task_map_ref", "artifact_refs"},
     },
 }
 
 
 DAG_PLAN_REF_EXAMPLES = [
-    "examples/workflow-product-standard-codex.yaml",
-    "examples/zf-codex.yaml",
-    "examples/zf-full-claude.yaml",
-    "examples/zf-full-codex.yaml",
-    "examples/zf-mixed.yaml",
-    "examples/zf-standard-codex.yaml",
-    "examples/zf-strict-codex.yaml",
+    "examples/tmp/workflow-product-standard-codex.yaml",
+    "examples/tmp/zf-codex.yaml",
+    "examples/tmp/zf-full-claude.yaml",
+    "examples/tmp/zf-full-codex.yaml",
+    "examples/tmp/zf-mixed.yaml",
+    "examples/tmp/zf-standard-codex.yaml",
+    "examples/tmp/zf-strict-codex.yaml",
 ]
 
 

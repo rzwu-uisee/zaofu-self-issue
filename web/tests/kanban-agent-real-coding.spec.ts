@@ -1,6 +1,12 @@
 import { mkdirSync, readFileSync } from "node:fs";
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Dialog,
+  type Page,
+} from "@playwright/test";
 
 const token = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
 const projectRoot = process.env.ZF_REAL_CODING_PROJECT_ROOT ?? "";
@@ -202,15 +208,16 @@ async function sendCodingTurn(
 ): Promise<void> {
   const input = page.getByPlaceholder("Tell me what to do...");
   await input.fill(message);
-  let dangerousAccessConfirmed = false;
-  page.once("dialog", async (dialog) => {
-    expect(dialog.type()).toBe("confirm");
-    expect(dialog.message()).toContain("full shell and Git access");
-    dangerousAccessConfirmed = true;
-    await dialog.accept();
-  });
+  const dialogs: string[] = [];
+  const recordUnexpectedDialog = async (dialog: Dialog) => {
+    dialogs.push(dialog.message());
+    await dialog.dismiss();
+  };
+  page.on("dialog", recordUnexpectedDialog);
   await page.getByRole("button", { name: "Send message" }).click();
-  expect(dangerousAccessConfirmed).toBe(true);
+  await page.waitForTimeout(100);
+  page.off("dialog", recordUnexpectedDialog);
+  expect(dialogs).toEqual([]);
   const reply = page.locator(".agent-text-part").filter({
     hasText: replyMarker,
   }).last();

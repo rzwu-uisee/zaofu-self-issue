@@ -87,7 +87,7 @@ class TestReachabilityCore:
 
 class TestExamplesStayGreen:
     def test_all_examples_have_producible_stage_orders(self):
-        examples = sorted(Path("examples").glob("*.yaml"))
+        examples = sorted(Path("examples/tmp").glob("*.yaml"))
         assert examples, "examples/ missing"
         offenders = {}
         for path in examples:

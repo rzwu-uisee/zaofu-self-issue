@@ -23,7 +23,12 @@ from zf.runtime.backend import (
 )
 
 
-MIXED_YAML = Path(__file__).resolve().parents[2] / "examples" / "mixed-team.yaml"
+MIXED_YAML = (
+    Path(__file__).resolve().parents[2]
+    / "examples"
+    / "tmp"
+    / "mixed-team.yaml"
+)
 
 
 def test_mixed_yaml_instantiates_both_adapters():

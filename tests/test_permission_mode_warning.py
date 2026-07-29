@@ -120,7 +120,7 @@ class TestLoadingShippedExamplesIsClean:
         self, example: str, capsys
     ):
         repo_root = Path(__file__).parent.parent
-        p = repo_root / "examples" / example
+        p = repo_root / "examples" / "tmp" / example
         load_config(p)
         err = capsys.readouterr().err
         assert "implicit permission_mode" not in err, (

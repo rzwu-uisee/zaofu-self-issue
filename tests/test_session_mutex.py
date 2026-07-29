@@ -10,6 +10,8 @@ import pytest
 
 from zf.runtime.session_mutex import SessionLock, SessionLockBusy
 
+pytestmark = pytest.mark.serial
+
 
 def test_acquire_and_release_via_context_manager(tmp_path: Path):
     lock_dir = tmp_path / "locks"

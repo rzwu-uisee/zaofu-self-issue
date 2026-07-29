@@ -68,7 +68,13 @@ this skill.
      tokens, and secrets;
    - treat `docs/` examples carefully, but defang real-looking credentials.
 4. Verify:
-   - run focused tests or validation appropriate to the changed files;
+   - run `python scripts/dev-verify.py plan --base dev` from the source
+     worktree and inspect its changed-file/domain/reason output; if the exact
+     current diff has no recorded passing receipt, run the matching
+     `python scripts/dev-verify.py run --base dev`;
+   - an unmapped source path must add a direct test or use exact
+     `--tests <path>` values with a stated impact-closure reason; never weaken
+     the selector to make a commit pass;
    - for skill-only changes, validate each changed `SKILL.md` frontmatter with
      the kernel's `read_skill_metadata(path, expected_name=<dir name>)`
      (`src/zf/core/skills/provenance.py`) so `name` matches the directory, and

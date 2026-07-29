@@ -27,6 +27,8 @@ def test_claude_commands_match_declared_fresh_environment() -> None:
     text = _read("CLAUDE.md")
 
     assert "uv sync --extra dev --extra web" in text
+    assert "scripts/dev-verify.py plan --base dev" in text
+    assert "scripts/dev-verify.py run --base dev" in text
     assert "uv run pytest -q --no-cov" in text
     assert "pytest -n" not in text
     assert "runtime state: `.zf/`" not in text
@@ -38,6 +40,7 @@ def test_path_rules_do_not_restore_retired_operations() -> None:
     docs = _read(".claude/rules/docs.md")
 
     assert "caller-level test" in code
+    assert "scripts/dev-verify.py plan --base dev" in code
     assert "git mv backlogs/" not in backlogs
     assert "mv backlogs/" in backlogs
     assert "一旦立项,整个文件 `git mv`" not in backlogs
@@ -57,3 +60,17 @@ def test_zf_cr_canonical_and_provider_copies_match() -> None:
     assert "142-layered-runtime-authority-and-orchestration-modes.md" in text
     assert "doc 44 is only a historical scoring snapshot" in text
     assert "skills, workdirs, lockfiles" not in text
+
+
+def test_closeout_skill_provider_copies_match_canonical() -> None:
+    for skill in (
+        "zf-backlog-batch-closeout",
+        "zf-harness-commit-push",
+    ):
+        canonical = (ROOT / "skills" / skill / "SKILL.md").read_bytes()
+        claude = (
+            ROOT / ".claude" / "skills" / skill / "SKILL.md"
+        ).read_bytes()
+        codex = (ROOT / ".codex" / "skills" / skill / "SKILL.md").read_bytes()
+
+        assert canonical == claude == codex, skill

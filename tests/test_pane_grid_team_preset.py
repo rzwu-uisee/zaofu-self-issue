@@ -1,4 +1,4 @@
-"""1206 Phase C-T3 — lock `examples/pane-grid-team.yaml` shape."""
+"""1206 Phase C-T3 — lock the archived pane-grid-team preset shape."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ from zf.core.config.loader import load_config
 
 
 PANE_GRID_YAML = (
-    Path(__file__).resolve().parents[1] / "examples" / "pane-grid-team.yaml"
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "tmp"
+    / "pane-grid-team.yaml"
 )
 
 

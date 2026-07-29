@@ -193,6 +193,7 @@ def test_codex_hook_trust_states_dedups_identical_roots(tmp_path: Path):
 # they cannot catch codex changing its algorithm in a newer build. This sensor
 # fails (does not silently pass) when a codex on PATH drifts from the verified
 # baseline, prompting re-verification. Skipped when codex is absent / unparsable.
+@pytest.mark.host
 def test_codex_version_matches_hash_baseline():
     import shutil
     import subprocess

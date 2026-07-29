@@ -42,6 +42,10 @@ Use `docs/design/00-index.md` for the full index and verify behavior against
 - `zf validate --cold-start` -- 冷启动 5-point readiness check
 - `zf web --port 8001` -- 主端口 8001 留给真 dev session,模拟一律 8002+
   (见 AGENTS.md §Temporary Simulation Hygiene)
+- `python scripts/dev-verify.py plan --base dev` -- 从当前 worktree diff
+  生成可解释的 impact-closure 计划
+- `python scripts/dev-verify.py run --base dev` -- 执行 deterministic/Web/
+  mock/premerge 自动层；host/真实 Provider 仍需显式验证
 - `uv run pytest <focused-paths> -q --no-cov` -- 修改后的确定性聚焦测试
 - `uv run pytest <impact-closure-paths> -q --no-cov` -- 修改模块、直接调用者
   和共享 Event/Schema/Store 契约的最小正确回归集

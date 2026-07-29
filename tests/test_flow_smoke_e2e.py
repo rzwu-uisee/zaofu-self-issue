@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from zf.core.task.store import TaskStore
 
 from tests.test_lane_stage_streaming_runtime import (
@@ -25,6 +27,8 @@ from tests.test_lane_stage_streaming_runtime import (
     _start,
     _state,
 )
+
+pytestmark = pytest.mark.mock_e2e
 
 
 def test_refactor_lane_full_cycle_smoke(tmp_path: Path) -> None:

@@ -174,6 +174,7 @@ def test_broken_arc_semantics_for_approval_and_replan(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.host
 @pytest.mark.skipif(not R6_ARCHIVE.exists(), reason="r6 archive not on this machine")
 def test_r6_archive_integration() -> None:
     view = build_loop_view(R6_ARCHIVE)

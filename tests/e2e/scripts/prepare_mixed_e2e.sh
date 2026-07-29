@@ -13,7 +13,7 @@ set -u  # don't set -e — we want to print partial preflight results
 
 WORKTREE_PATH="${WORKTREE_PATH:-/tmp/zaofu-mixed}"
 BRANCH_NAME="${BRANCH_NAME:-experiment/mixed-backend-e2e}"
-PRESET="examples/mixed-team.yaml"
+PRESET="examples/tmp/mixed-team.yaml"
 
 cd "$(git rev-parse --show-toplevel)" || {
   echo "ERROR: must run inside a git worktree of zaofu" >&2
