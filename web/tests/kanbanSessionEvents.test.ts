@@ -4,6 +4,10 @@ import {
   mergeBoundedKanbanSessionEvents,
   mergeEventsByIdentity,
 } from "../src/components/orchestrator/kanbanSessionEvents.js";
+import {
+  parsePlanRequest,
+  parsePlanResponse,
+} from "../src/components/agent-session/agentUiEvent.js";
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -118,6 +122,96 @@ const codexDeltaUnderClaudeSelector = kanbanAgentSessionEventsFromLive([
 assert(
   codexDeltaUnderClaudeSelector.length === 1,
   `codex live delta must fold under a claude selector (backend advisory), got ${codexDeltaUnderClaudeSelector.length}`,
+);
+
+const livePlanEvents = kanbanAgentSessionEventsFromLive([
+  event(30, "kanban.agent.plan.requested", {
+    project_id: "proj-a",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    plan_request: { request_id: "plan-route" },
+  }),
+  event(31, "kanban.agent.plan.answered", {
+    project_id: "proj-a",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    request_id: "plan-route",
+  }),
+], scope);
+assert(livePlanEvents.length === 2, "Plan request and answer events stay in the live session buffer");
+
+const multiQuestionPlan = parsePlanRequest({
+  plan_request: {
+    request_event_id: "evt-plan-multi",
+    request_id: "plan-multi",
+    revision: 2,
+    header: "Delivery inputs",
+    questions: [
+      {
+        id: "route",
+        question: "Which route?",
+        options: [
+          { id: "direct", label: "Direct", recommended: true },
+          { id: "research", label: "Research" },
+        ],
+      },
+      {
+        id: "evidence",
+        question: "Which evidence depth?",
+        options: [
+          { id: "focused", label: "Focused", recommended: true },
+          { id: "broad", label: "Broad" },
+        ],
+      },
+    ],
+  },
+});
+assert(multiQuestionPlan?.questions.length === 2, "Plan projection should retain both questions");
+assert(
+  multiQuestionPlan?.questions.every((question) => question.options[0]?.recommended),
+  "Plan projection should retain each recommended option",
+);
+const multiQuestionResponse = parsePlanResponse({
+  request_event_id: "evt-plan-multi",
+  request_id: "plan-multi",
+  revision: 2,
+  answers: [
+    { question_id: "route", option_id: "direct", answer: "Direct" },
+    { question_id: "evidence", option_id: "focused", answer: "Focused" },
+  ],
+});
+assert(
+  multiQuestionResponse?.answers.length === 2,
+  "Plan response projection should retain the atomic answer set",
+);
+
+const proposalReceipts = kanbanAgentSessionEventsFromLive([
+  event(39, "operator.action.proposed", {
+    project_id: "proj-a",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    proposal: { proposal_event_id: "evt-proposal" },
+  }),
+  event(40, "operator.action.resolved", {
+    project_id: "proj-a",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    proposal_event_id: "evt-proposal",
+    resolution: "dismissed",
+  }),
+  event(41, "task.created", {
+    proposal_event_id: "evt-proposal-2",
+    request: { proposal_event_id: "evt-proposal-2" },
+  }),
+  event(42, "operator.action.proposed", {
+    project_id: "proj-a",
+    source: "cli",
+    proposal: { proposal_event_id: "evt-unscoped" },
+  }),
+], scope);
+assert(
+  proposalReceipts.length === 3,
+  "scoped proposal requests and receipts stay in the live session buffer without leaking CLI proposals",
 );
 
 console.log("kanbanSessionEvents.test.ts OK");

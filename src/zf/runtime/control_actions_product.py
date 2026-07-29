@@ -1,6 +1,7 @@
 """ProductActionsMixin — controlled-action handlers (moved verbatim from control_actions.py)."""
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
@@ -27,6 +28,21 @@ from zf.runtime.workflow_inputs import workflow_input_manifest_ref
 from zf.runtime.workflow_inputs import workflow_run_id_for
 from zf.runtime.workflow_inputs import write_workflow_input_manifest
 from zf.runtime.workflow_inputs import write_workflow_prompt_package
+from zf.runtime.kanban_plan_requests import (
+    PLAN_REQUESTED_EVENT,
+    PLAN_REQUEST_SCHEMA_VERSION,
+    normalize_plan_request_revision,
+)
+from zf.runtime.kanban_proposals import (
+    LEGACY_PROPOSAL_EVENT,
+    LEGACY_PROPOSAL_RESOLVED_EVENT,
+    PROPOSAL_EVENT_TYPES,
+    PROPOSAL_RESOLVED_EVENT,
+)
+from zf.runtime.task_workflow_plans import (
+    build_task_workflow_plan_request,
+)
+from zf.runtime.workflow_anchor import mark_workflow_managed_task
 
 
 class ProductActionsMixin:
@@ -73,6 +89,19 @@ class ProductActionsMixin:
             blocked_by=_string_list(payload.get("blocked_by")),
             contract=_task_contract_from_payload(payload.get("contract")),
         )
+        raw_workflow_plan = payload.get("workflow_plan")
+        workflow_plan_warning = ""
+        if raw_workflow_plan is not None:
+            workflow_candidate = mark_workflow_managed_task(deepcopy(task))
+            task = workflow_candidate
+            _workflow_preview, workflow_plan_warning = (
+                build_task_workflow_plan_request(
+                    raw_workflow_plan,
+                    task=workflow_candidate,
+                    task_event_id="",
+                    config=self.config,
+                )
+            )
         try:
             created = store.add(task)
         except Exception as exc:
@@ -95,8 +124,63 @@ class ProductActionsMixin:
                 "source": self.source,
                 "task": redact_obj(asdict(created)),
                 "request": redact_obj(payload),
+                "proposal_event_id": str(
+                    payload.get("proposal_event_id") or ""
+                ),
             },
         )
+        workflow_plan_event_id = ""
+        if raw_workflow_plan is not None:
+            workflow_plan, workflow_plan_warning = (
+                build_task_workflow_plan_request(
+                    raw_workflow_plan,
+                    task=created,
+                    task_event_id=event.id,
+                    config=self.config,
+                    context={
+                        "project_id": str(payload.get("project_id") or ""),
+                        "conversation_id": str(
+                            payload.get("conversation_id") or ""
+                        ),
+                        "thread_id": str(payload.get("thread_id") or ""),
+                        "turn_id": str(payload.get("run_id") or ""),
+                        "backend": str(payload.get("backend") or ""),
+                        "originating_message_event_id": str(
+                            payload.get("causation_id")
+                            or payload.get(
+                                "originating_message_event_id"
+                            )
+                            or event.id
+                        ),
+                    },
+                )
+            )
+            if workflow_plan is not None:
+                workflow_plan = normalize_plan_request_revision(
+                    self.writer.event_log.read_all(),
+                    workflow_plan,
+                )
+                plan_event = ZfEvent(
+                    type=PLAN_REQUESTED_EVENT,
+                    actor=self.actor,
+                    task_id=created.id,
+                    causation_id=event.id,
+                    correlation_id=requested.correlation_id,
+                )
+                workflow_plan["request_event_id"] = plan_event.id
+                plan_event.payload = {
+                    "schema_version": PLAN_REQUEST_SCHEMA_VERSION,
+                    "source": self.source,
+                    "project_id": str(payload.get("project_id") or ""),
+                    "conversation_id": str(
+                        payload.get("conversation_id") or ""
+                    ),
+                    "thread_key": str(payload.get("thread_id") or ""),
+                    "plan_request": redact_obj(workflow_plan),
+                    "request": redact_obj(workflow_plan),
+                }
+                self.writer.append(plan_event)
+                workflow_plan_event_id = plan_event.id
         self._completed(
             requested=requested,
             event=event,
@@ -104,7 +188,11 @@ class ProductActionsMixin:
             requested_action=requested_action,
             status="completed",
             task_id=created.id,
-            extra={"task_id": created.id},
+            extra={
+                "task_id": created.id,
+                "workflow_plan_event_id": workflow_plan_event_id,
+                "workflow_plan_warning": workflow_plan_warning,
+            },
         )
         return {
             "_status_code": 201,
@@ -115,6 +203,8 @@ class ProductActionsMixin:
             "reason": f"task {created.id} created through controlled action",
             "event_id": event.id,
             "task_id": created.id,
+            "workflow_plan_event_id": workflow_plan_event_id,
+            "workflow_plan_warning": workflow_plan_warning,
             "result": {"task": redact_obj(asdict(created))},
         }
     def _kanban_proposal_dismiss(
@@ -138,13 +228,65 @@ class ProductActionsMixin:
                 status_code=422,
                 status="invalid_payload",
             )
+        source_event = next(
+            (
+                event
+                for event in self.writer.event_log.read_all()
+                if event.id == proposal_event_id
+                and event.type in PROPOSAL_EVENT_TYPES
+            ),
+            None,
+        )
+        source_payload = (
+            source_event.payload
+            if source_event is not None
+            and isinstance(source_event.payload, dict)
+            else {}
+        )
+        proposal = (
+            source_payload.get("proposal")
+            if isinstance(source_payload.get("proposal"), dict)
+            else {}
+        )
+        resolution_type = (
+            LEGACY_PROPOSAL_RESOLVED_EVENT
+            if source_event is not None
+            and source_event.type == LEGACY_PROPOSAL_EVENT
+            else PROPOSAL_RESOLVED_EVENT
+        )
+        proposal_payload = (
+            proposal.get("payload")
+            if isinstance(proposal.get("payload"), dict)
+            else {}
+        )
+        proposal_task_id = str(
+            (source_event.task_id if source_event is not None else "")
+            or proposal_payload.get("task_id")
+            or ""
+        ).strip()
         event = self.writer.emit(
-            "kanban.agent.proposal.resolved",
+            resolution_type,
             actor=self.actor,
+            task_id=proposal_task_id or None,
             causation_id=requested.id,
             correlation_id=requested.correlation_id,
             payload={
+                **{
+                    key: source_payload[key]
+                    for key in (
+                        "conversation_id",
+                        "project_id",
+                        "thread_key",
+                        "turn_id",
+                    )
+                    if source_payload.get(key) not in (None, "")
+                },
                 "proposal_event_id": proposal_event_id,
+                "proposal_id": str(proposal.get("proposal_id") or ""),
+                "proposal_digest": str(
+                    proposal.get("proposal_digest") or ""
+                ),
+                "revision": int(proposal.get("revision") or 1),
                 "resolution": "dismissed",
                 "reason": str(payload.get("reason") or ""),
                 "source": self.source,
@@ -156,7 +298,7 @@ class ProductActionsMixin:
             action=action,
             requested_action=requested_action,
             status="completed",
-            task_id=None,
+            task_id=proposal_task_id or None,
             extra={"proposal_event_id": proposal_event_id},
         )
         return {
@@ -168,6 +310,7 @@ class ProductActionsMixin:
             "reason": f"proposal {proposal_event_id} dismissed",
             "event_id": event.id,
             "proposal_event_id": proposal_event_id,
+            "task_id": proposal_task_id,
         }
 
     def _capture_regression_case(

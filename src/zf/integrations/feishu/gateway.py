@@ -69,6 +69,7 @@ _COMMAND_AUTH: dict[str, AuthLevel] = {
     # clarification questions, so require an operator-level owner identity.
     "channel-question-adopt": AuthLevel.OPERATOR,
     "channel-question-oos": AuthLevel.OPERATOR,
+    "kanban-plan-answer": AuthLevel.OPERATOR,
     "kanban-proposal-approve": AuthLevel.APPROVER,
     "kanban-proposal-dismiss": AuthLevel.OPERATOR,
 }

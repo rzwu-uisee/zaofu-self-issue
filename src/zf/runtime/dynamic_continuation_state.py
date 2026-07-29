@@ -38,6 +38,8 @@ _OPERATOR_TERMINALS = frozenset({
     "operator.action.completed",
     "operator.action.failed",
     "operator.action.executed",
+    "operator.action.resolved",
+    "kanban.agent.proposal.resolved",
     "approval.resolved",
     "approval.expired",
     "plan.approved",
@@ -234,16 +236,33 @@ def _pending_operator_actions(
         if event.type not in _OPERATOR_TERMINALS:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
+        proposal = (
+            payload.get("proposal")
+            if isinstance(payload.get("proposal"), dict)
+            else {}
+        )
         terminal_tokens.update(
-            str(payload.get(key) or "")
-            for key in ("proposal_id", "approval_id", "request_id", "intent_id")
+            str(payload.get(key) or proposal.get(key) or "")
+            for key in (
+                "proposal_event_id",
+                "proposal_id",
+                "approval_id",
+                "request_id",
+                "intent_id",
+            )
             if str(payload.get(key) or "")
+            or str(proposal.get(key) or "")
         )
     pending: list[str] = []
     for event in events:
         if event.type not in _OPERATOR_PROPOSALS:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
+        proposal = (
+            payload.get("proposal")
+            if isinstance(payload.get("proposal"), dict)
+            else {}
+        )
         event_run_id = str(
             payload.get("workflow_run_id")
             or payload.get("run_id")
@@ -253,10 +272,18 @@ def _pending_operator_actions(
         if event_run_id != workflow_run_id:
             continue
         tokens = {
-            str(payload.get(key) or "")
-            for key in ("proposal_id", "approval_id", "request_id", "intent_id")
+            str(payload.get(key) or proposal.get(key) or "")
+            for key in (
+                "proposal_event_id",
+                "proposal_id",
+                "approval_id",
+                "request_id",
+                "intent_id",
+            )
             if str(payload.get(key) or "")
+            or str(proposal.get(key) or "")
         }
+        tokens.add(event.id)
         if event.id in terminals_by_causation or tokens & terminal_tokens:
             continue
         pending.append(event.id)

@@ -43,6 +43,11 @@ from zf.integrations.feishu.plan_approval_card import push_plan_approval_cards_o
 from zf.integrations.feishu.kanban_proposal_card import (
     push_kanban_proposal_cards_once,
 )
+from zf.integrations.feishu.kanban_plan_card import (
+    KANBAN_PLAN_COMMANDS,
+    parse_plan_answer_target,
+    push_kanban_plan_cards_once,
+)
 from zf.integrations.feishu.replan_approval_card import push_replan_cards_once
 from zf.integrations.feishu.run_manager_card import push_run_manager_cards_once
 from zf.integrations.feishu.stream_card import push_stream_card_once
@@ -74,6 +79,7 @@ from zf.integrations.feishu.transport import (
     MockFeishuTransport,
 )
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.kanban_proposals import PROPOSAL_EVENT_TYPES
 from zf.runtime.owner_visible_delivery import deliver_owner_visible_messages_once
 
 
@@ -109,6 +115,7 @@ SIGNED_ACTION_COMMANDS = (
     | AGENT_CANCEL_COMMANDS
     | HUMAN_DECISION_COMMANDS
     | CHANNEL_QUESTION_COMMANDS
+    | KANBAN_PLAN_COMMANDS
     | KANBAN_PROPOSAL_COMMANDS
     | ATTENTION_ACK_COMMANDS
 )
@@ -224,6 +231,39 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     send_test.add_argument("--receive-id-type", default="chat_id")
     send_test.add_argument("--message", default="ZaoFu Feishu bridge test")
     send_test.set_defaults(func=run_send_test)
+
+    live_smoke = feishu_subparsers.add_parser(
+        "live-smoke",
+        help="Run a cleanup-safe smoke against the real Feishu API",
+    )
+    live_smoke.add_argument("--state-dir", default=None)
+    live_smoke.add_argument("--to", required=True, help="Target chat_id")
+    live_smoke.add_argument(
+        "--purpose",
+        choices=["kanban_agent", "run_manager", "default"],
+        default="kanban_agent",
+    )
+    live_smoke.add_argument(
+        "--receive-id-type",
+        choices=["chat_id"],
+        default="chat_id",
+    )
+    live_smoke.add_argument(
+        "--message",
+        default="ZaoFu real transport verification",
+    )
+    live_smoke.add_argument(
+        "--confirm-real-api",
+        action="store_true",
+        help="Confirm that this command may call Feishu and create a temporary card",
+    )
+    live_smoke.add_argument(
+        "--keep-message",
+        action="store_true",
+        help="Keep the temporary card instead of recalling it",
+    )
+    live_smoke.add_argument("--format", choices=["json", "text"], default="json")
+    live_smoke.set_defaults(func=_run_live_smoke)
 
     operate = feishu_subparsers.add_parser(
         "operate",
@@ -439,7 +479,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def _run_root(args: argparse.Namespace) -> int:
     print(
         "Usage: zf feishu "
-        "{handle,push,serve,send-test,sync-automations,"
+        "{handle,push,serve,send-test,live-smoke,sync-automations,"
         "sync-automation-insights-table,sync-kanban-table,init-targets,cron-template} ...",
         file=sys.stderr,
     )
@@ -458,6 +498,12 @@ def _run_bridge(args: argparse.Namespace) -> int:
     from zf.cli.feishu_consume import run_bridge
 
     return run_bridge(args)
+
+
+def _run_live_smoke(args: argparse.Namespace) -> int:
+    from zf.cli.feishu_live_smoke import run_live_smoke
+
+    return run_live_smoke(args)
 
 
 def run_handle(args: argparse.Namespace) -> int:
@@ -712,7 +758,26 @@ def run_push(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         proposal_sent = proposal_updated = 0
+        kanban_plan_sent = kanban_plan_updated = 0
         if plan_target:
+            try:
+                kanban_plan_result = push_kanban_plan_cards_once(
+                    context.state_dir,
+                    transport,
+                    receive_id=plan_target,
+                    receive_id_type=str(
+                        getattr(args, "receive_id_type", "chat_id") or "chat_id"
+                    ),
+                    action_secret=_action_secret,
+                    action_ttl_seconds=_action_ttl,
+                )
+                kanban_plan_sent = len(kanban_plan_result.get("sent", []))
+                kanban_plan_updated = len(kanban_plan_result.get("updated", []))
+            except Exception as exc:
+                print(
+                    f"kanban Plan card push failed (conversation unaffected): {exc}",
+                    file=sys.stderr,
+                )
             try:
                 proposal_result = push_kanban_proposal_cards_once(
                     context.state_dir,
@@ -744,6 +809,8 @@ def run_push(args: argparse.Namespace) -> int:
             f"run_manager_status_updated={run_manager_status_updated}; "
             f"run_manager_escalation_sent={run_manager_escalation_sent} "
             f"run_manager_escalation_updated={run_manager_escalation_updated}; "
+            f"kanban_plan_cards_sent={kanban_plan_sent} "
+            f"kanban_plan_cards_updated={kanban_plan_updated}; "
             f"kanban_proposal_cards_sent={proposal_sent} "
             f"kanban_proposal_cards_updated={proposal_updated}; "
             f"offset={new_offset}"
@@ -1289,6 +1356,13 @@ def _handle_event_data(
             envelope,
             context.state_dir,
             config=context.config,
+        )
+    if envelope.command in KANBAN_PLAN_COMMANDS:
+        return _handle_kanban_plan_result(
+            envelope,
+            context.state_dir,
+            config=context.config,
+            project_root=context.project_root,
         )
     if envelope.command in KANBAN_PROPOSAL_COMMANDS:
         return _handle_kanban_proposal_result(
@@ -2202,7 +2276,7 @@ def _handle_kanban_proposal_result(
             event
             for event in event_log.read_all()
             if event.id == proposal_event_id
-            and event.type == "kanban.agent.action.proposed"
+            and event.type in PROPOSAL_EVENT_TYPES
         ),
         None,
     )
@@ -2268,6 +2342,49 @@ def _handle_kanban_proposal_result(
         requested=requested,
     )
     return {**response, "message": _format_action_response(response)}
+
+
+def _handle_kanban_plan_result(
+    envelope: FeishuCommandEnvelope,
+    state_dir: Path,
+    *,
+    config: object | None,
+    project_root: Path,
+) -> dict:
+    """Signed Plan option -> durable answer + same channel/provider continuation."""
+    from zf.integrations.feishu.agent_conversation import (
+        continue_kanban_plan_response,
+    )
+
+    target = envelope.args[0] if envelope.args else ""
+    request_event_id, option_id = parse_plan_answer_target(target)
+    if not request_event_id or not option_id:
+        return {
+            "ok": False,
+            "status": "invalid_payload",
+            "message": "missing Plan request or option",
+        }
+    event_log = event_log_from_project(state_dir, config=config)
+    result = continue_kanban_plan_response(
+        state_dir=state_dir,
+        config=config,
+        writer=EventWriter(event_log),
+        request_event_id=request_event_id,
+        option_id=option_id,
+        answer="Customize this plan" if option_id == "other" else "",
+        user_id=envelope.user_id,
+        chat_id=envelope.chat_id,
+        message_id=envelope.message_id,
+        project_root=project_root,
+    )
+    return {
+        **result,
+        "message": (
+            f"Plan answer continued in thread {result.get('thread_id')}"
+            if result.get("ok")
+            else f"Plan answer rejected: {result.get('status')}"
+        ),
+    }
 
 
 def _handle_human_decision_result(

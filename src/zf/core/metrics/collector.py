@@ -41,12 +41,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zf.core.cost.tracker import CostTracker
 from zf.core.events.log import EventLog
 from zf.core.metrics.vcr import calculate_vcr
 from zf.core.task.store import TaskStore
+
+if TYPE_CHECKING:
+    from zf.core.events.model import ZfEvent
 
 
 @dataclass

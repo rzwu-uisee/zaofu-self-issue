@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 RUN_ROOT=""
 WEB_PORT=""
+EVIDENCE_DIR="${ZF_PLAYWRIGHT_EVIDENCE_DIR:-}"
 KEEP=0
 DOCKER_IMAGE="${ZF_PLAYWRIGHT_IMAGE:-mcp/playwright:latest}"
 
@@ -15,6 +16,8 @@ Usage: tests/e2e/scripts/run_doc156_kanban_collaboration_e2e.sh [options]
 Options:
   --run-root PATH  Isolated run root. Default: /tmp/zf-doc156-kanban-<utc>
   --port PORT      Web port. Default: first free port at 8002+
+  --evidence-dir PATH
+                   Retain browser screenshots outside the run root
   --keep           Retain the run root after completion for diagnosis
   -h, --help       Show this help
 
@@ -28,6 +31,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-root) RUN_ROOT="$2"; shift 2 ;;
     --port) WEB_PORT="$2"; shift 2 ;;
+    --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -81,6 +85,7 @@ STAMP="$(date -u +%Y%m%d-%H%M%S)"
 RUN_ROOT="${RUN_ROOT:-/tmp/zf-doc156-kanban-${STAMP}}"
 PROJECT_ROOT="$RUN_ROOT/project"
 WORKSPACE_HOME="$RUN_ROOT/workspace-home"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$RUN_ROOT/evidence}"
 STATE_DIR="$PROJECT_ROOT/.zf"
 TMUX_SESSION="zf-doc156-kanban-${STAMP}-$$"
 CHANNEL_ID="ch-doc156-live-${STAMP}"
@@ -97,7 +102,8 @@ WEB_PGID=""
 RESEARCH_PID=""
 INITIALIZED=0
 
-mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME"
+mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME" "$EVIDENCE_DIR"
+EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"
 cp "$ROOT/tests/e2e/fixtures/doc156-kanban-collaboration-live.yaml" "$PROJECT_ROOT/zf.yaml"
 git -C "$PROJECT_ROOT" init -q
 git -C "$PROJECT_ROOT" config user.name "ZaoFu Doc156 E2E"
@@ -286,6 +292,7 @@ docker run --rm --network host \
   --entrypoint bash \
   -v "$ROOT:/work" \
   -v "$RUN_ROOT:/zf-run" \
+  -v "$EVIDENCE_DIR:/zf-evidence" \
   -w /work/web \
   -e HOME=/tmp/zf-playwright-home \
   -e PLAYWRIGHT_BROWSERS_PATH=0 \
@@ -294,6 +301,7 @@ docker run --rm --network host \
   -e ZF_DOC156_TASK_ID="$TASK_ID" \
   -e ZF_DOC156_CHANNEL_ID="$CHANNEL_ID" \
   -e ZF_DOC156_REQUEST_ID="$REQUEST_ID" \
+  -e ZF_PLAYWRIGHT_EVIDENCE_DIR=/zf-evidence \
   "$DOCKER_IMAGE" \
   -lc 'set -euo pipefail; mkdir -p "$HOME"; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test tests/kanban-agent-collaboration.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
 

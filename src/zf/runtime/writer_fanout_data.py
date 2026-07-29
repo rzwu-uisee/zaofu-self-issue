@@ -5,6 +5,7 @@ verbatim;路径越权为纯评估(返回 violation 描述),裁决留宿主。"""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from zf.runtime.fanout_parent_identity import parent_flow_identity
 from zf.runtime.task_contract_snapshot import criterion_text

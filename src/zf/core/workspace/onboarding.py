@@ -3,7 +3,7 @@
 The Web welcome wizard must show on first `zf web` open and never again once
 completed or explicitly skipped. The gate lives here as a global flag file
 (`~/.zaofu/onboarding.json`), NOT in per-workspace registry (welcome covers
-host-global environment setup: backend / preflight / notifications, which do
+host-global environment setup: provider / preflight / access, which does
 not vary by workspace) and NOT in browser localStorage (a server-backed tool
 must behave the same across browsers hitting the same instance).
 
@@ -18,9 +18,11 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from zf.core.config.backend_identity import canonical_backend_id
 from zf.core.state.atomic_io import atomic_write_text
 
-SCHEMA_VERSION = "onboarding.v1"
+SCHEMA_VERSION = "onboarding.v2"
+PRIMARY_BACKENDS = ("claude-code", "codex")
 
 
 def onboarding_path(*, home: Path | None = None) -> Path:
@@ -36,6 +38,7 @@ class OnboardingState:
     skipped: bool = False
     step: int = 1
     backend: str = ""
+    mixed_enabled: bool = False
     notifications: str = ""
     completed_at: str = ""
 
@@ -48,12 +51,20 @@ class OnboardingState:
     def from_dict(cls, raw: dict) -> "OnboardingState":
         if not isinstance(raw, dict):
             return cls()
+        raw_backend = canonical_backend_id(
+            raw.get("primary_backend") or raw.get("backend") or ""
+        )
+        legacy_mixed = raw_backend == "mixed"
+        backend = "codex" if legacy_mixed else raw_backend
+        if backend not in PRIMARY_BACKENDS:
+            backend = ""
         return cls(
-            schema_version=str(raw.get("schema_version") or SCHEMA_VERSION),
+            schema_version=SCHEMA_VERSION,
             completed=bool(raw.get("completed", False)),
             skipped=bool(raw.get("skipped", False)),
             step=int(raw.get("step") or 1),
-            backend=str(raw.get("backend") or ""),
+            backend=backend,
+            mixed_enabled=bool(raw.get("mixed_enabled", legacy_mixed)),
             notifications=str(raw.get("notifications") or ""),
             completed_at=str(raw.get("completed_at") or ""),
         )
@@ -79,6 +90,7 @@ def apply_action(
     *,
     step: int | None = None,
     backend: str = "",
+    mixed_enabled: bool | None = None,
     notifications: str = "",
     now: str = "",
     home: Path | None = None,
@@ -94,7 +106,9 @@ def apply_action(
         state.completed = True
         state.completed_at = now
         if backend:
-            state.backend = backend
+            state.backend = normalize_primary_backend(backend)
+        if mixed_enabled is not None:
+            state.mixed_enabled = bool(mixed_enabled)
         if notifications:
             state.notifications = notifications
     elif action == "skip":
@@ -103,7 +117,9 @@ def apply_action(
         if step is not None:
             state.step = max(1, int(step))
         if backend:
-            state.backend = backend
+            state.backend = normalize_primary_backend(backend)
+        if mixed_enabled is not None:
+            state.mixed_enabled = bool(mixed_enabled)
         if notifications:
             state.notifications = notifications
     else:
@@ -125,10 +141,27 @@ def detect_backends() -> list[dict]:
         path = shutil.which(binary)
         out.append({"id": backend_id, "detected": bool(path), "path": path or "",
                     "note": note, "always_available": False})
-    # 混合团队:claude+codex 都在 PATH 时才提供;真正的 per-role 分配在 New Project 里做。
-    detected = {b["id"] for b in out if b["detected"]}
-    if {"claude-code", "codex"} <= detected:
-        out.append({"id": "mixed", "detected": True, "path": "",
-                    "note": "codex + claude 混合团队(New Project 里按角色分配)",
-                    "always_available": False})
     return out
+
+
+def normalize_primary_backend(value: object, *, default: str = "") -> str:
+    backend = canonical_backend_id(value or default)
+    if backend not in PRIMARY_BACKENDS:
+        raise ValueError(
+            "primary backend must be one of: " + ", ".join(PRIMARY_BACKENDS)
+        )
+    return backend
+
+
+def secondary_backend_for(primary_backend: object) -> str:
+    primary = normalize_primary_backend(primary_backend)
+    return "codex" if primary == "claude-code" else "claude-code"
+
+
+def mixed_backends_available(backends: list[dict] | None = None) -> bool:
+    detected = {
+        str(item.get("id") or "")
+        for item in (backends if backends is not None else detect_backends())
+        if item.get("detected")
+    }
+    return set(PRIMARY_BACKENDS) <= detected

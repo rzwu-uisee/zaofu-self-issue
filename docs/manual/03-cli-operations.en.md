@@ -18,7 +18,7 @@ uv run zf <command> --help
 | `zf presets show <name>` | Render a preset |
 | `zf init` | Initialize configured runtime state |
 | `zf init --preset safe-team` | Initialize from a preset |
-| `zf project init --name NAME --root PATH` | Create the default multi-kind Project and runtime state without ignition |
+| `zf project init --name NAME --root PATH [--description TEXT] [--stack STACK] [--verify-backend ID]` | Create the default multi-kind Project, context, and runtime state without ignition |
 | `zf project init --kind issue|prd|refactor ...` | Compatibility entry point for a single-kind Controller |
 | `zf profile detect` | Detect project stack |
 | `zf profile recommend` | Recommend a profile |
@@ -71,6 +71,9 @@ worktrees have been independently verified clean and disposable.
 | `zf flow preflight` | Check request and environment readiness |
 | `zf flow submit --dry-run` | Preview admission without mutation |
 | `zf flow submit --apply` | Explicitly approve and submit a ready Request |
+| `zf workflow routes --task TASK --format json` | Query routes exposed by the current `zf.yaml` for this Task |
+| `zf workflow start --task TASK --route ROUTE --propose` | Create a Task-bound Workflow proposal without ignition |
+| `zf workflow start --proposal-event-id EVENT --apply ...` | Apply the exact proposal with operator authorization |
 
 Example:
 
@@ -83,8 +86,10 @@ uv run zf task trace "$TASK_ID"
 Strict terminal transitions require configured evidence. A rejected move to
 `done` should be diagnosed, not bypassed by editing state files.
 
-Project initialization, `zf start`, and workflow ignition are separate actions.
-Default initialization does not emit `workflow.invoke.requested`. See
+Project initialization, `zf start`, and Workflow ignition are separate actions.
+Research and delivery Workflows require an existing Task. Neither default
+initialization nor `workflow start --propose` emits
+`workflow.invoke.requested`. See
 [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
 for the complete path.
 

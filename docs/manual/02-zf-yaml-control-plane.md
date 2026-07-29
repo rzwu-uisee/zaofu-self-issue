@@ -8,6 +8,23 @@
 
 不要引入第二套任务 schema 或外部控制面。外部系统只能通过事件、CLI 或明确的 kernel API 写入意图,不能直接改业务真相。
 
+### 1.1 创建 Project 时为什么不再选择 YAML
+
+Web `Add/Open Project` 不再让用户选择 YAML、Controller、kind、lane 或 role。这是
+**入口简化**，不是移除 `zf.yaml`：
+
+- 目录已有合法 `zf.yaml` 时，Inspect 只决定 open、register 或 initialize state，
+  不会改写现有配置；
+- 目录没有配置时，Initialize 生成一份默认 multi-kind `zf.yaml`；
+- Project Brief、Stack 和 Provider 只补充项目上下文、命令 Profile 与 provider
+  policy，不直接选择 Workflow；
+- Kanban Agent 为已有 Task 推荐 Workflow 时，只能使用该 Project 当前
+  `zf.yaml` 展开的 route catalog。
+
+因此一个 Project 始终只有一份 canonical `zf.yaml`。需要显式采用单一 Controller
+或迁移现有控制面时，使用 `zf profile bootstrap` / 配置迁移流程，并在写入前人工审核，
+不要把 YAML 选择重新放回日常 Project 创建表单。
+
 最小形态:
 
 ```yaml

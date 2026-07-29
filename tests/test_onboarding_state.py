@@ -9,6 +9,8 @@ import pytest
 from zf.core.workspace.onboarding import (
     apply_action,
     detect_backends,
+    mixed_backends_available,
+    onboarding_path,
     read_onboarding,
 )
 
@@ -26,11 +28,17 @@ def test_fresh_install_shows_welcome() -> None:
 
 
 def test_complete_suppresses_permanently() -> None:
-    apply_action("complete", backend="claude-code", now="2026-07-07T00:00:00+00:00")
+    apply_action(
+        "complete",
+        backend="claude-code",
+        mixed_enabled=True,
+        now="2026-07-07T00:00:00+00:00",
+    )
     state = read_onboarding()
     assert state.completed is True
     assert state.show_welcome is False
     assert state.backend == "claude-code"
+    assert state.mixed_enabled is True
     assert state.completed_at == "2026-07-07T00:00:00+00:00"
 
 
@@ -66,6 +74,21 @@ def test_detect_backends_no_mock_and_mixed_gated() -> None:
     # mock 已从欢迎向导后端目录移除(不再作为 onboarding 选项)。
     assert "mock" not in backends
     assert "claude-code" in backends and "codex" in backends
-    # mixed(codex+claude)仅在两者都探测到时出现。
+    assert "mixed" not in backends
     both = backends["claude-code"]["detected"] and backends["codex"]["detected"]
-    assert ("mixed" in backends) == both
+    assert mixed_backends_available(list(backends.values())) is both
+
+
+def test_legacy_mixed_state_migrates_to_primary_plus_policy() -> None:
+    path = onboarding_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"schema_version":"onboarding.v1","backend":"mixed","step":2}',
+        encoding="utf-8",
+    )
+
+    state = read_onboarding()
+
+    assert state.schema_version == "onboarding.v2"
+    assert state.backend == "codex"
+    assert state.mixed_enabled is True

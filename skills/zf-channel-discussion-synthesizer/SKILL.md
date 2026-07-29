@@ -19,7 +19,8 @@ zf emit channel.question.merged --actor <你的member_id> --payload '{"channel_i
 
 台账已清零。产出**澄清需求 artifact**:
 
-1. 写文件到 `.zf/channel-artifacts/clarified-<slug>.md`,结构固定:
+1. 在结构化回复中提供完整 PRD 字段。Runtime 会原子写入
+   `.zf/channel-artifacts/<channel>/<synthesis-request>.md` 并绑定 sha256:
 
 ```markdown
 # 澄清需求:<标题>
@@ -31,14 +32,15 @@ zf emit channel.question.merged --actor <你的member_id> --payload '{"channel_i
 
 只写台账里有据的内容——**每条 Decision 必须能对应一个 resolved question**,不发明 owner 没说过的决定。
 
-2. 在 channel 回复里贴出稿件要点,然后提案:
+2. 在 channel 回复末尾输出 `channel_synthesis` JSON，包含 `title`、
+   `decision`、`summary`、`decisions`、`assumptions`、`out_of_scope`、
+   `acceptance_criteria`、`open_questions`、`risks`、
+   `recommended_workflow`、`source_refs` 和 `confidence`。Runtime 负责
+   `channel.synthesis.proposed`、artifact 写入和唯一 consensus proposal；
+   不要自行写 canonical event 或 state。
 
-```bash
-zf emit channel.consensus.proposed --actor <你的member_id> --payload '{"channel_id":"<CH>","thread_id":"main","artifact_ref":".zf/channel-artifacts/clarified-<slug>.md","proposed_by":"<你的member_id>"}'
-```
+3. 出现 `blocked` → 讨论自动重开，blocker 进台账 → owner 答完后重新综合。
 
-3. 等其余角色 `signed`;出现 `blocked` → 讨论自动重开,blocker 进台账 → owner 答完后**修订稿件、重新 proposed**(新提案会重置签名)。
-
-## 你签自己的稿
-
-提案后同样 emit 你自己的 `channel.consensus.signed`。全角色签 + owner 确认后,kernel 会自动收敛(closed + idea-to-product 提案),**不需要你做任何 workflow 动作**。
+Runtime 会把你的结构化综合绑定为 proposer 签名。Owner 确认后 kernel 只关闭
+讨论并发布 canonical PRD；Task 创建和 Workflow 点火必须由 owner 在 Channel 或
+Kanban Agent 上另行发起，不自动执行。

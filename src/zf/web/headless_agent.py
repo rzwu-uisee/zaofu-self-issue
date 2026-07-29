@@ -50,6 +50,17 @@ DEFAULT_KANBAN_AGENT_HEADLESS_IDLE_TIMEOUT_S = 30 * 60.0
 DEFAULT_CODEX_HEADLESS_TOOL_TIMEOUT_S = 2 * 60 * 60.0
 
 
+def _headless_subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in tuple(env):
+        if key.startswith("ZF_") and any(
+            marker in key
+            for marker in ("TOKEN", "PASSCODE", "SECRET", "ENCRYPT_KEY")
+        ):
+            env.pop(key, None)
+    return env
+
+
 @dataclass(frozen=True)
 class HeadlessMessage:
     type: str
@@ -411,7 +422,7 @@ class ClaudeHeadlessBackend:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=dict(os.environ),
+                env=_headless_subprocess_env(),
             )
             session_key = run_key(
                 run_id=run_id,
@@ -997,26 +1008,93 @@ class KanbanHeadlessAgent:
             "a sanctioned CLI or controlled action for those effects. "
             "Read-only requests such as introduce yourself, explain, analyze, debug, "
             "diagnose, inspect, review a task, or ask why something happened must be "
-            "answered without action_proposal JSON. Do not include example "
+            "answered without action_proposal or plan_request JSON. Do not include example "
             "action_proposal JSON in ordinary explanations; plain text is safer. "
+            "When one to three unresolved owner choices materially change the route "
+            "or parameters, end the turn with exactly one compact fenced JSON object "
+            "containing plan_request. A single question may use {header, id, question, "
+            "options, allow_other, reason}; multiple pure clarification questions use "
+            "questions with one to three entries in that same shape. Each question "
+            "has two or three mutually exclusive options, exactly one recommended "
+            "option first, and an optional free-form answer. Multi-question Plans "
+            "cannot bind an action. Do not request secrets. A plan_request ends the turn and "
+            "must never appear with action_proposal. Do not use a synchronous "
+            "request_user_input call in this headless bridge: the durable answer "
+            "will arrive as the next turn in the same provider session. Plan is "
+            "clarification, not permission or approval, except for the bounded "
+            "Channel setup contract below. "
+            "When turn context contains plan_discussion, answer the user's visible "
+            "message naturally against that exact pending Plan. Keep the Plan pending "
+            "and do not repeat its JSON unless the discussion requires a revised "
+            "question or options. "
             "If a state change is needed, describe the exact controlled action for "
             "the Web action gate. Only when the operator explicitly asks to create, "
-            "track, or schedule work should you propose create-task. When proposing "
+            "track, or schedule work should you propose create-task. The turn "
+            "context contains workflow_route_catalog from the active expanded "
+            "zf.yaml. Use the zf-workflow-start-planner method when available for "
+            "semantic classification, clarification, and route recommendation, and "
+            "use only route_id values present in that catalog. Never inspect, "
+            "request, or fabricate a workflow action token, and never call "
+            "`zf workflow start --apply`; provider turns may only preview/propose. "
+            "Add "
+            "payload.workflow_plan with a task-"
+            "specific question and two or three options. Executable options contain "
+            "route_id, label, description, recommended, and optional parameters; "
+            "a no-run choice uses mode=defer. Do not put Channel creation in "
+            "workflow_plan. The runtime creates the Task first, injects its real "
+            "task_id, and publishes the Workflow Plan; Task approval does not start "
+            "a Workflow. Omit workflow_plan only when the operator explicitly asks "
+            "for tracking without execution. When proposing "
             "an action, include a compact JSON "
             "object with action_proposal: {action, payload, reason}. For product "
             "ideas, prefer action=idea-to-product with payload.objective. For "
             "workflow yaml changes or runtime restart/stop, propose "
             "workflow-config-* or runtime-* only as owner-approved/proposal-only "
             "actions. For creating work, prefer "
-            "action=create-task with payload.title and optional "
-            "payload.contract={behavior,verification,acceptance}; the operator must "
-            "confirm before the action runs. For an explicit collaboration-channel "
-            "request, propose channel-create-from-template with payload.template_id; "
-            "for a channel discussion, propose channel-discussion-start with "
-            "payload.channel_id and payload.objective; for the fixed research "
-            "fanout, propose research-start with payload.task_id and payload.topic; "
-            "for a configured workflow, propose workflow-invoke with payload.task_id "
-            "and payload.pattern_id. Never report these effects as completed before "
+            "action=create-task with payload.title and payload.contract; the operator "
+            "must confirm before the action runs. For a Task created from a Channel "
+            "or Research artifact, copy the supplied lineage exactly into "
+            "contract.spec_ref, contract.source_ref, contract.handoff_artifacts, and "
+            "contract.evidence_contract.channel_prd_digest. These values must be "
+            "non-empty, must not be fabricated, and must preserve the artifact ref "
+            "and sha256 digest from turn context. The turn context contains a bounded "
+            "canonical_channel_prds projection. Use it only after an explicit owner "
+            "request to create a Task from that artifact. Set spec_ref and "
+            "handoff_artifacts from item.artifact_ref, source_ref from item.source_ref, "
+            "and channel_prd_digest from item.artifact_digest. When no item or "
+            "multiple plausible items match, ask one Plan question instead of "
+            "guessing. For a "
+            "direct Task without an artifact, contract still "
+            "needs behavior, verification, and acceptance. When a requirement would benefit from "
+            "a new multi-role collaboration Channel, do not directly propose a "
+            "low-level create action. Return one action-bound Channel setup Plan "
+            "with submit_action=channel-create-and-start, submit_label='Create & "
+            "start', allow_other=false, and two or three options. Every option must "
+            "have an exact submit_payload containing template_id plus optional "
+            "name/overrides; use overrides.budget.max_rounds for the requested "
+            "discussion turns. Use each option description for its tradeoff; the "
+            "runtime materializes and displays exact member roles, member count, "
+            "and max_rounds from submit_payload. The selected option is the "
+            "exact confirmation: the runtime creates the Channel and members, posts "
+            "the original user requirement, and starts discussion without another "
+            "proposal or a manual first message. Built-in template ids are "
+            "prd-clarification, research-review, architecture-review, quick-change, "
+            "and incident-triage. For a direct non-chat API request with an already "
+            "fixed configuration, use channel-create-and-start. For a discussion "
+            "in an existing Channel, propose channel-discussion-start with "
+            "payload.channel_id and payload.objective. Channel is an independent "
+            "collaboration surface, not a Workflow preparation stage. For an "
+            "existing Task, use subject_type=task_workflow and option effects with "
+            "mode=propose, action=workflow-start, and exact payload "
+            "{task_id,route_id,objective,config_digest,parameters}; the runtime "
+            "binds the current task_contract_digest before display. The runtime turns "
+            "the selected route into a separate Approve proposal. If source/input "
+            "refs, expected output, or another required route parameter is unresolved, "
+            "ask one bounded clarification Plan with up to three questions before "
+            "emitting the task_workflow choice. A new topology must use the "
+            "workflow-config proposal path. Do not emit workflow-invoke(pattern_id) "
+            "as the normal Kanban product action; it is a compatibility adapter "
+            "behind workflow-start. Never report these effects as completed before "
             "the controlled action is approved. Contract discipline "
             "(ZF-E2E-RACING-P2 2026-07-11: a structured verification of bare "
             "'npm test' failed from the repo root and burned four rework "
@@ -1455,7 +1533,7 @@ class _CodexRpcClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=dict(os.environ),
+            env=_headless_subprocess_env(),
         )
         thread = threading.Thread(target=self._reader, daemon=True)
         thread.start()

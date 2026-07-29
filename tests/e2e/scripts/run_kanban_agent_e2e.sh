@@ -5,15 +5,18 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 RUN_ROOT="${ZF_KANBAN_AGENT_E2E_RUN_ROOT:-}"
 WEB_PORT="${ZF_KANBAN_AGENT_E2E_PORT:-}"
+EVIDENCE_DIR="${ZF_PLAYWRIGHT_EVIDENCE_DIR:-}"
 DOCKER_IMAGE="${ZF_PLAYWRIGHT_IMAGE:-mcp/playwright:latest}"
+PLAYWRIGHT_INSTALL_TIMEOUT_S="${ZF_PLAYWRIGHT_INSTALL_TIMEOUT_S:-600}"
 KEEP=0
 
 usage() {
   cat <<'USAGE'
-Usage: tests/e2e/scripts/run_kanban_agent_e2e.sh [--run-root PATH] [--port PORT] [--keep]
+Usage: tests/e2e/scripts/run_kanban_agent_e2e.sh [--run-root PATH] [--port PORT] [--evidence-dir PATH] [--keep]
 
 Runs the deterministic Kanban Agent fake-provider suite in Docker Playwright.
 Successful runs clean their temporary state by default; failed runs are retained.
+Screenshots are retained when --evidence-dir points outside the run root.
 USAGE
 }
 
@@ -21,6 +24,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-root) RUN_ROOT="$2"; shift 2 ;;
     --port) WEB_PORT="$2"; shift 2 ;;
+    --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -66,6 +70,7 @@ STAMP="$(date -u +%Y%m%d-%H%M%S)"
 RUN_ROOT="${RUN_ROOT:-/tmp/zf-kanban-agent-e2e-${STAMP}}"
 PROJECT_ROOT="$RUN_ROOT/project"
 WORKSPACE_HOME="$RUN_ROOT/workspace-home"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$RUN_ROOT/evidence}"
 STATE_DIR="$PROJECT_ROOT/.zf"
 FAKE_CLAUDE="$RUN_ROOT/fake_claude.py"
 WEB_LOG="$RUN_ROOT/web.log"
@@ -75,7 +80,8 @@ WEB_PID=""
 WEB_PGID=""
 SIM_INITIALIZED=0
 
-mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME"
+mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME" "$EVIDENCE_DIR"
+EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"
 
 cat >"$FAKE_CLAUDE" <<'PY'
 #!/usr/bin/env python3
@@ -122,7 +128,189 @@ if marker.startswith("KBA_HOLD_"):
     raise SystemExit(9)
 
 time.sleep(1.5)
-if marker.startswith("KBA_CREATE_"):
+if marker.startswith("KBA_CHANNEL_"):
+    result = {
+        "plan_request": {
+            "subject_type": "channel_setup",
+            "header": "Channel setup",
+            "id": "channel-setup",
+            "question": f"Which collaboration setup should handle {marker}?",
+            "submit_action": "channel-create-and-start",
+            "submit_label": "Create & start",
+            "options": [
+                {
+                    "id": "quick",
+                    "label": "Quick change (Recommended)",
+                    "description": "Three focused roles and four rounds.",
+                    "recommended": True,
+                    "submit_payload": {
+                        "template_id": "quick-change",
+                        "name": f"Channel {marker}",
+                        "overrides": {
+                            "backend": "fake",
+                            "budget": {"max_rounds": 4},
+                        },
+                    },
+                },
+                {
+                    "id": "architecture",
+                    "label": "Architecture review",
+                    "description": "Broader architecture and security review.",
+                    "submit_payload": {
+                        "template_id": "architecture-review",
+                        "name": f"Architecture {marker}",
+                        "overrides": {
+                            "backend": "fake",
+                            "budget": {"max_rounds": 6},
+                        },
+                    },
+                },
+            ],
+            "allow_other": False,
+            "reason": "The role set and turn budget change collaboration cost.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_TASK_WORKFLOW_"):
+    result = {
+        "action_proposal": {
+            "action": "create-task",
+            "payload": {
+                "title": f"Task workflow {marker}",
+                "priority": 2,
+                "contract": {
+                    "behavior": f"Run the selected workflow for {marker}.",
+                    "verification": "Verify the bound workflow invoke event.",
+                    "acceptance": "The workflow starts only after Plan and Approve.",
+                },
+                "workflow_plan": {
+                    "header": "Workflow route",
+                    "question_id": "workflow-route",
+                    "question": f"How should Task workflow {marker} run?",
+                    "options": [
+                        {
+                            "id": "research",
+                            "label": "Research first (Recommended)",
+                            "description": "Use the fixed reader fanout and synthesis.",
+                            "recommended": True,
+                            "route_id": "research:fixed",
+                            "parameters": {
+                                "expected_output": "Evidence-backed recommendation.",
+                            },
+                        },
+                        {
+                            "id": "general",
+                            "label": "Delivery smoke review",
+                            "description": "Use the registered general reader route.",
+                            "route_id": "general:delivery-smoke",
+                        },
+                        {
+                            "id": "defer",
+                            "label": "No workflow yet",
+                            "description": "Keep the Task tracked without execution.",
+                            "mode": "defer",
+                        },
+                    ],
+                    "allow_other": True,
+                    "reason": "The selected route changes topology and output.",
+                },
+            },
+            "reason": "Create the Task before choosing its execution route.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_PLAN_") and "Answer:" not in text:
+    result = {
+        "plan_request": {
+            "header": "Delivery route",
+            "id": "route",
+            "question": f"Which route should create the task for {marker}?",
+            "options": [
+                {
+                    "id": "direct",
+                    "label": "Direct (Recommended)",
+                    "description": "Create one tracked task now.",
+                },
+                {
+                    "id": "research",
+                    "label": "Research",
+                    "description": "Collect evidence before creating work.",
+                },
+            ],
+            "allow_other": True,
+            "reason": "The route changes the next controlled action.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_PLAN_"):
+    result = {
+        "action_proposal": {
+            "action": "create-task",
+            "payload": {
+                "title": f"Kanban Plan delivery {marker}",
+                "priority": 2,
+                "contract": {
+                    "behavior": f"Implement the route selected for {marker}.",
+                    "verification": "uv run pytest -q --no-cov tests/test_web_headless_agent.py",
+                    "acceptance": "The task is created only after Approve.",
+                },
+            },
+            "reason": "The owner answered the durable Plan request.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_MULTI_PLAN_") and "Answer:" not in text:
+    result = {
+        "plan_request": {
+            "subject_type": "clarification",
+            "header": "Delivery inputs",
+            "questions": [
+                {
+                    "id": "route",
+                    "header": "Route",
+                    "question": f"Which route should handle {marker}?",
+                    "options": [
+                        {
+                            "id": "direct",
+                            "label": "Direct",
+                            "description": "Proceed from the current contract.",
+                            "recommended": True,
+                        },
+                        {
+                            "id": "research",
+                            "label": "Research",
+                            "description": "Collect broader evidence first.",
+                        },
+                    ],
+                    "allow_other": True,
+                },
+                {
+                    "id": "evidence",
+                    "header": "Evidence",
+                    "question": "Which evidence depth is required?",
+                    "options": [
+                        {
+                            "id": "focused",
+                            "label": "Focused",
+                            "description": "Cover the changed contract and callers.",
+                            "recommended": True,
+                        },
+                        {
+                            "id": "broad",
+                            "label": "Broad",
+                            "description": "Run a wider project audit.",
+                        },
+                    ],
+                    "allow_other": True,
+                },
+            ],
+            "reason": "Both owner choices materially change the delivery plan.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_MULTI_PLAN_"):
+    reply = f"{marker} accepted both Plan answers without proposing an action"
+elif marker.startswith("KBA_CREATE_"):
     result = {
         "action_proposal": {
             "action": "create-task",
@@ -191,6 +379,8 @@ echo "[setup] run_root=$RUN_ROOT port=${WEB_PORT:-auto} token_sha256=$TOKEN_SHA2
     "$ROOT/.venv/bin/zf" init --preset minimal --force
 )
 SIM_INITIALIZED=1
+cp "$ROOT/tests/e2e/fixtures/doc156-kanban-collaboration-live.yaml" \
+  "$PROJECT_ROOT/zf.yaml"
 WEB_PORT="${WEB_PORT:-$(pick_port 8002)}"
 
 echo "[serve] http://0.0.0.0:$WEB_PORT"
@@ -233,12 +423,15 @@ docker run --rm --network host \
   --entrypoint bash \
   -v "$ROOT:/work" \
   -v "$RUN_ROOT:/zf-run" \
+  -v "$EVIDENCE_DIR:/zf-evidence" \
   -w /work/web \
   -e HOME=/tmp/zf-playwright-home \
   -e PLAYWRIGHT_BROWSERS_PATH=0 \
+  -e ZF_PLAYWRIGHT_INSTALL_TIMEOUT_S="$PLAYWRIGHT_INSTALL_TIMEOUT_S" \
   -e ZF_WEB_BASE_URL="http://127.0.0.1:$WEB_PORT" \
   -e ZF_WEB_ACTION_TOKEN_FOR_TEST="$TOKEN" \
+  -e ZF_PLAYWRIGHT_EVIDENCE_DIR=/zf-evidence \
   "$DOCKER_IMAGE" \
-  -lc 'set -euo pipefail; mkdir -p "$HOME"; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test tests/kanban-agent-conversation.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
+  -lc 'set -euo pipefail; mkdir -p "$HOME"; timeout "${ZF_PLAYWRIGHT_INSTALL_TIMEOUT_S}s" ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test tests/kanban-agent-conversation.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
 
 echo "[pass] Kanban Agent deterministic browser E2E"

@@ -1,12 +1,8 @@
-"""Durable pending-proposal projection (chat-e2e F2).
+"""Durable pending-proposal projection and exact execution gate.
 
-``kanban.agent.action.proposed`` is ledger truth, but the approval card used
-to exist only in the originating browser session's DOM — closing the browser
-orphaned the proposal. This fold gives every surface (panel, inbox, API) the
-same session-independent pending list. Resolution comes from an explicit
-``kanban.agent.proposal.resolved`` event (execute / dismiss), a
-``task.created`` whose request threads ``proposal_event_id``, or — as a
-fallback for out-of-band executions — a ``task.created`` with the same title.
+New proposals use the surface-neutral ``operator.action.*`` events. Historical
+``kanban.agent.*`` events remain readable so pending approvals survive an
+upgrade without migration.
 """
 from __future__ import annotations
 
@@ -18,18 +14,36 @@ from typing import Any, Iterable
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
 
-PROPOSAL_RESOLVED_EVENT = "kanban.agent.proposal.resolved"
+PROPOSAL_EVENT = "operator.action.proposed"
+PROPOSAL_RESOLVED_EVENT = "operator.action.resolved"
+LEGACY_PROPOSAL_EVENT = "kanban.agent.action.proposed"
+LEGACY_PROPOSAL_RESOLVED_EVENT = "kanban.agent.proposal.resolved"
+PROPOSAL_EVENT_TYPES = frozenset({PROPOSAL_EVENT, LEGACY_PROPOSAL_EVENT})
+PROPOSAL_RESOLVED_EVENT_TYPES = frozenset({
+    PROPOSAL_RESOLVED_EVENT,
+    LEGACY_PROPOSAL_RESOLVED_EVENT,
+})
 _PROPOSAL_TRANSPORT_KEYS = frozenset({
     "actor",
+    "authorization_ref",
     "causation_id",
     "conversation_id",
     "idempotency_key",
+    "origin",
     "project_id",
     "proposal_event_id",
     "run_id",
     "source",
+    "surface",
     "thread_id",
 })
+
+
+def canonical_proposal_action(action: str) -> str:
+    value = str(action or "").strip()
+    if value == "task-workflow-start":
+        return "workflow-start"
+    return value
 
 
 def proposal_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -44,7 +58,7 @@ def proposal_semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def proposal_payload_digest(action: str, payload: dict[str, Any]) -> str:
     encoded = json.dumps(
         {
-            "action": action,
+            "action": canonical_proposal_action(action),
             "payload": proposal_semantic_payload(payload),
         },
         ensure_ascii=False,
@@ -65,8 +79,14 @@ def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
     created_titles: set[str] = set()
     for event in event_list:
         payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type == "kanban.agent.action.proposed":
-            proposal = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
+        if event.type in PROPOSAL_EVENT_TYPES:
+            proposal = (
+                payload.get("proposal")
+                if isinstance(payload.get("proposal"), dict)
+                else {}
+            )
+            if not proposal:
+                continue
             action_payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
             proposal_id = str(proposal.get("proposal_id") or event.id)
             event_to_proposal[event.id] = proposal_id
@@ -112,7 +132,7 @@ def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
                 pending[proposal_id] = record
             elif prior is not None:
                 prior.setdefault("proposal_event_ids", []).append(event.id)
-        elif event.type == PROPOSAL_RESOLVED_EVENT:
+        elif event.type in PROPOSAL_RESOLVED_EVENT_TYPES:
             event_id = str(payload.get("proposal_event_id") or "")
             resolved.add(event_id)
             proposal_id = str(payload.get("proposal_id") or event_to_proposal.get(event_id) or "")
@@ -172,7 +192,7 @@ def proposal_execution_gate(
             event
             for event in event_list
             if event.id == proposal_event_id
-            and event.type == "kanban.agent.action.proposed"
+            and event.type in PROPOSAL_EVENT_TYPES
         ),
         None,
     )
@@ -185,7 +205,11 @@ def proposal_execution_gate(
         else {}
     )
     proposal_action = str(proposal.get("action") or "")
-    if action != "kanban-proposal-dismiss" and proposal_action != action:
+    if (
+        action != "kanban-proposal-dismiss"
+        and canonical_proposal_action(proposal_action)
+        != canonical_proposal_action(action)
+    ):
         return {"ok": False, "status": "proposal_action_mismatch"}
     if not bool(proposal.get("valid")) and action != "kanban-proposal-dismiss":
         return {"ok": False, "status": "proposal_invalid"}
@@ -195,7 +219,7 @@ def proposal_execution_gate(
     revision = _revision(proposal.get("revision"))
     latest_revision = revision
     for event in event_list:
-        if event.type != "kanban.agent.action.proposed":
+        if event.type not in PROPOSAL_EVENT_TYPES:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         candidate = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
@@ -229,6 +253,9 @@ def proposal_execution_gate(
         if isinstance(proposal.get("payload"), dict)
         else {}
     )
+    proposal_task_id = str(
+        source.task_id or proposed_payload.get("task_id") or ""
+    ).strip()
     if (
         action != "kanban-proposal-dismiss"
         and execution_payload is not None
@@ -244,7 +271,7 @@ def proposal_execution_gate(
 
     for event in event_list:
         payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type == PROPOSAL_RESOLVED_EVENT and (
+        if event.type in PROPOSAL_RESOLVED_EVENT_TYPES and (
             str(payload.get("proposal_event_id") or "") == proposal_event_id
             or str(payload.get("proposal_id") or "") == proposal_id
         ):
@@ -255,6 +282,7 @@ def proposal_execution_gate(
                 "proposal_digest": str(proposal.get("proposal_digest") or ""),
                 "revision": revision,
                 "resolution_event_id": event.id,
+                "task_id": str(event.task_id or proposal_task_id),
             }
         if event.type == "task.created":
             request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
@@ -275,6 +303,18 @@ def proposal_execution_gate(
         "proposal_id": proposal_id,
         "proposal_digest": str(proposal.get("proposal_digest") or ""),
         "revision": revision,
+        "task_id": proposal_task_id,
+        "proposal_event_type": source.type,
+        "proposal_context": {
+            key: source_payload[key]
+            for key in (
+                "conversation_id",
+                "project_id",
+                "thread_key",
+                "turn_id",
+            )
+            if source_payload.get(key) not in (None, "")
+        },
     }
 
 

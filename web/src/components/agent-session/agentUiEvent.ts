@@ -1,5 +1,12 @@
 import type { EventRecord } from "../../api/types";
-import type { AgentPartKind, AgentSessionActionProposal, AgentSessionStatus } from "./types";
+import type {
+  AgentPartKind,
+  AgentSessionActionProposal,
+  AgentSessionPlanOption,
+  AgentSessionPlanRequest,
+  AgentSessionPlanResponse,
+  AgentSessionStatus,
+} from "./types";
 
 export const AGENT_UI_EVENT_SCHEMA_VERSION = "agent-ui-event.v1";
 
@@ -138,7 +145,7 @@ export function agentDeltaContent(payload: Record<string, unknown>): string {
 }
 
 export function parseActionProposal(payload: Record<string, unknown>): AgentSessionActionProposal | undefined {
-  const proposal = recordValue(payload.action_proposal);
+  const proposal = recordValue(payload.action_proposal ?? payload.proposal);
   if (!proposal) return undefined;
   const action = textValue(proposal.action).trim();
   const nestedPayload = recordValue(proposal.payload);
@@ -155,6 +162,173 @@ export function parseActionProposal(payload: Record<string, unknown>): AgentSess
     confidence: textValue(proposal.confidence).trim(),
     valid: proposal.valid !== false,
     validationError: textValue(proposal.validation_error).trim(),
+  };
+}
+
+function parsePlanOptions(value: unknown): AgentSessionPlanOption[] {
+  const rawOptions = Array.isArray(value) ? value : [];
+  return rawOptions.flatMap((item): AgentSessionPlanOption[] => {
+    const option = recordValue(item);
+    if (!option) return [];
+    const id = textValue(option.id).trim();
+    const label = textValue(option.label).trim();
+    if (!id || !label) return [];
+    const submitDetails = recordValue(option.submit_details);
+    const submitPayload = recordValue(option.submit_payload);
+    const members = Array.isArray(submitDetails?.members)
+      ? submitDetails.members.flatMap((item): string[] => {
+        const member = recordValue(item);
+        const role = textValue(member?.role || member?.member_id).trim();
+        return role ? [role] : [];
+      })
+      : [];
+    return [{
+      id,
+      label,
+      description: textValue(option.description).trim(),
+      recommended: option.recommended === true,
+      submitAction: textValue(option.submit_action).trim(),
+      submitMode: (
+        ["apply", "continue", "propose"].includes(textValue(option.submit_mode))
+          ? textValue(option.submit_mode) as "apply" | "continue" | "propose"
+          : undefined
+      ),
+      submitDetails: submitDetails ? {
+        templateId: textValue(submitDetails.template_id).trim(),
+        templateName: textValue(submitDetails.template_name).trim(),
+        taskId: textValue(submitPayload?.task_id).trim(),
+        objective: textValue(submitPayload?.objective).trim(),
+        memberCount: Number(submitDetails.member_count || members.length || 0),
+        roles: members,
+        maxRounds: Number(submitDetails.max_rounds || 0),
+        routeId: textValue(submitDetails.route_id).trim(),
+        family: textValue(submitDetails.family).trim(),
+        kind: textValue(submitDetails.kind).trim(),
+        tier: textValue(submitDetails.tier).trim(),
+        topology: textValue(submitDetails.topology).trim(),
+        writerRoles: Array.isArray(submitDetails.writer_roles)
+          ? submitDetails.writer_roles.map(textValue).filter(Boolean)
+          : [],
+        verifyRoles: Array.isArray(submitDetails.verify_roles)
+          ? submitDetails.verify_roles.map(textValue).filter(Boolean)
+          : [],
+        laneCount: Number(submitDetails.lane_count || 0),
+        outputProfile: textValue(submitDetails.output_profile).trim(),
+      } : undefined,
+    }];
+  });
+}
+
+export function parsePlanRequest(payload: Record<string, unknown>): AgentSessionPlanRequest | undefined {
+  const request = recordValue(payload.plan_request);
+  if (!request) return undefined;
+  const requestEventId = textValue(request.request_event_id).trim();
+  const requestId = textValue(request.request_id).trim();
+  const rawQuestions = Array.isArray(request.questions)
+    ? request.questions
+    : [request];
+  const questions = rawQuestions.flatMap((item, index) => {
+    const rawQuestion = recordValue(item);
+    if (!rawQuestion) return [];
+    const id = textValue(
+      rawQuestion.id
+      || rawQuestion.question_id
+      || (index === 0 ? request.question_id || request.id : ""),
+    ).trim();
+    const question = textValue(
+      rawQuestion.question
+      || rawQuestion.text
+      || (index === 0 ? request.question : ""),
+    ).trim();
+    const header = textValue(
+      rawQuestion.header
+      || (index === 0 ? request.header : ""),
+    ).trim() || `Question ${index + 1}`;
+    const options = parsePlanOptions(
+      rawQuestion.options
+      || (index === 0 ? request.options : []),
+    );
+    if (!id || !question) return [];
+    return [{
+      id,
+      header,
+      question,
+      options,
+      allowOther: rawQuestion.allow_other !== false,
+    }];
+  });
+  const primaryQuestion = questions[0];
+  if (!requestEventId || !requestId || !primaryQuestion) return undefined;
+  return {
+    requestEventId,
+    requestId,
+    requestDigest: textValue(request.request_digest).trim(),
+    revision: Math.max(1, Number(request.revision || 1)),
+    header: textValue(request.header).trim() || "Plan",
+    subjectType: (
+      ["channel_setup", "clarification", "task_workflow"].includes(textValue(request.subject_type))
+        ? textValue(request.subject_type) as "channel_setup" | "clarification" | "task_workflow"
+        : undefined
+    ),
+    questionId: primaryQuestion.id,
+    question: primaryQuestion.question,
+    options: primaryQuestion.options,
+    allowOther: primaryQuestion.allowOther,
+    questions,
+    reason: textValue(request.reason).trim(),
+    valid: (
+      request.valid !== false
+      && questions.length >= 1
+      && questions.length <= 3
+      && questions.every((item) => (
+        item.options.length >= 2 && item.options.length <= 3
+      ))
+    ),
+    validationError: textValue(request.validation_error).trim(),
+    backend: textValue(request.backend).trim(),
+    providerSessionId: textValue(request.provider_session_id).trim(),
+    submitAction: textValue(request.submit_action).trim(),
+    submitMode: (
+      ["apply", "continue", "propose"].includes(textValue(request.submit_mode))
+        ? textValue(request.submit_mode) as "apply" | "continue" | "propose"
+        : undefined
+    ),
+    submitLabel: textValue(request.submit_label).trim(),
+    configDigest: textValue(request.config_digest).trim(),
+  };
+}
+
+export function parsePlanResponse(
+  payload: Record<string, unknown>,
+  eventId = "",
+): AgentSessionPlanResponse | undefined {
+  const response = recordValue(payload.plan_response) ?? payload;
+  const requestEventId = textValue(response.request_event_id).trim();
+  const requestId = textValue(response.request_id).trim();
+  const rawAnswers = Array.isArray(response.answers)
+    ? response.answers
+    : [response];
+  const answers = rawAnswers.flatMap((item) => {
+    const row = recordValue(item);
+    if (!row) return [];
+    const questionId = textValue(row.question_id).trim();
+    const optionId = textValue(row.option_id).trim();
+    const answer = textValue(row.answer).trim();
+    return questionId && optionId && answer
+      ? [{ questionId, optionId, answer }]
+      : [];
+  });
+  const primaryAnswer = answers[0];
+  if (!requestEventId || !requestId || !primaryAnswer) return undefined;
+  return {
+    requestEventId,
+    requestId,
+    revision: Math.max(1, Number(response.revision || 1)),
+    questionId: primaryAnswer.questionId,
+    optionId: primaryAnswer.optionId,
+    answer: primaryAnswer.answer,
+    answers,
+    answerEventId: eventId,
   };
 }
 

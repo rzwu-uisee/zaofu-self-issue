@@ -1307,6 +1307,7 @@ def _apply_context_pack(
         "role_definition": payload.get("role_definition") if isinstance(payload.get("role_definition"), dict) else {},
         "summary": _payload_str(payload, "summary"),
         "message_refs": payload.get("message_refs") if isinstance(payload.get("message_refs"), list) else [],
+        "question_ledger": payload.get("question_ledger") if isinstance(payload.get("question_ledger"), list) else [],
         "artifact_refs": payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else [],
         "report_refs": payload.get("report_refs") if isinstance(payload.get("report_refs"), list) else [],
         "limits": payload.get("limits") if isinstance(payload.get("limits"), dict) else {},
@@ -1541,6 +1542,11 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
     if event.type == "channel.consensus.proposed":
         item.update({
             "artifact_ref": _payload_str(payload, "artifact_ref"),
+            "artifact_digest": _payload_str(payload, "artifact_digest"),
+            "required_signers": _string_list(
+                payload.get("required_signers")
+            ),
+            "source_refs": _string_list(payload.get("source_refs")),
             "proposed_by": _payload_str(payload, "proposed_by") or event.actor,
             "proposed_event_id": event.id,
             "signed": {},
@@ -1603,6 +1609,7 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             if isinstance(payload.get("recommended_workflow"), dict) else {}
         ),
         "artifact_ref": _payload_str(payload, "artifact_ref"),
+        "artifact_digest": _payload_str(payload, "artifact_digest"),
         "spec_path": _payload_str(payload, "spec_path"),
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),

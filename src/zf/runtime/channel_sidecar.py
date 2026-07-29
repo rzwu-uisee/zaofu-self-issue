@@ -159,6 +159,7 @@ def channel_context_pack_event_payload(
         "source": str(payload.get("source") or ""),
         "limits": payload.get("limits") if isinstance(payload.get("limits"), dict) else {},
         "message_ref_count": len(payload.get("message_refs") if isinstance(payload.get("message_refs"), list) else []),
+        "question_ref_count": len(payload.get("question_ledger") if isinstance(payload.get("question_ledger"), list) else []),
         "artifact_ref_count": len(payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else []),
         "report_ref_count": len(payload.get("report_refs") if isinstance(payload.get("report_refs"), list) else []),
         "context_pack_ref": descriptor["ref"],

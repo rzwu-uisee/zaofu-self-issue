@@ -17,6 +17,7 @@ from zf.core.task.store import TaskStore
 from zf.runtime.autoresearch_invocation import autoresearch_invocation_projection
 from zf.runtime.pane_probe import build_runtime_pane_probe
 from zf.runtime.supervisor_inspection import read_supervisor_snapshot, supervisor_snapshot_ref
+from zf.runtime.workflow_route_catalog import workflow_route_catalog
 
 
 KANBAN_AGENT_SUMMARY_SCHEMA_VERSION = "kanban-agent.project-summary.v0"
@@ -95,6 +96,7 @@ def project_kanban_agent_summary(
         "workflow": {
             "recent_event_count": len(workflow_events[-100:]),
             "latest": [_event_summary(event) for event in workflow_events[-10:]],
+            "route_catalog": workflow_route_catalog(config),
         },
         "replan_loop": replan_loop,
         "runtime": {

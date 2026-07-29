@@ -10,6 +10,7 @@ from zf.core.task.schema import Task
 
 
 WORKFLOW_INVOKE_BOOTSTRAP_SOURCE = "workflow_invoke_bootstrap"
+WORKFLOW_MANAGED_EXECUTION_OWNER = "workflow"
 
 
 def mark_workflow_fanout_anchor(
@@ -39,4 +40,29 @@ def is_workflow_fanout_anchor_task(task: Task) -> bool:
     return bool(
         evidence.get("workflow_fanout_anchor") is True
         or str(evidence.get("source") or "") == WORKFLOW_INVOKE_BOOTSTRAP_SOURCE
+    )
+
+
+def mark_workflow_managed_task(task: Task) -> Task:
+    """Reserve an ordinary parent Task for its selected Workflow."""
+    evidence = dict(getattr(task.contract, "evidence_contract", {}) or {})
+    evidence["execution_owner"] = WORKFLOW_MANAGED_EXECUTION_OWNER
+    task.contract.evidence_contract = evidence
+    return task
+
+
+def is_workflow_managed_task(task: Task) -> bool:
+    contract = getattr(task, "contract", None)
+    evidence = getattr(contract, "evidence_contract", {}) if contract else {}
+    return (
+        isinstance(evidence, dict)
+        and str(evidence.get("execution_owner") or "")
+        == WORKFLOW_MANAGED_EXECUTION_OWNER
+    )
+
+
+def is_workflow_dispatch_managed_task(task: Task) -> bool:
+    return (
+        is_workflow_fanout_anchor_task(task)
+        or is_workflow_managed_task(task)
     )

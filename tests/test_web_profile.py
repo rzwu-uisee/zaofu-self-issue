@@ -70,7 +70,7 @@ def test_web_validate_path_reports_state_dir_outside_root(client, tmp_path, monk
     assert any(item["kind"] == "state_dir_outside_root" for item in body["diagnostics"])
 
 
-def test_web_validate_path_reports_non_empty_state_dir(client, tmp_path, monkeypatch):
+def test_web_validate_path_blocks_partial_state_dir(client, tmp_path, monkeypatch):
     monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
     root = tmp_path / "project"
     state = root / ".zf"
@@ -85,9 +85,10 @@ def test_web_validate_path_reports_non_empty_state_dir(client, tmp_path, monkeyp
 
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
+    assert body["ok"] is False
     assert body["state_dir_non_empty"] is True
-    assert any(item["kind"] == "state_dir_non_empty" for item in body["diagnostics"])
+    assert body["admission"]["action"] == "blocked"
+    assert body["admission"]["reason"] == "state_dir_partial"
 
 
 def test_web_recommend(client, py_repo):
@@ -235,14 +236,14 @@ def test_web_recommend_backend_codex_flow(client, py_repo):
 
 
 def test_web_init_writes_operator_notes(client, tmp_path, monkeypatch):
-    """Operator free-text comments land in CLAUDE.md (= npm init description)."""
+    """Explicit operator notes land in CLAUDE.md."""
     monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "secret-token")
     target = tmp_path / "noted"
     r = client.post(
         "/api/workspace/projects/init",
         headers={"X-Zf-Web-Token": "secret-token"},
         json={"root": str(target), "preset": "minimal",
-              "description": "支付网关,合规优先,勿动 legacy/billing"},
+              "notes": "支付网关,合规优先,勿动 legacy/billing"},
     )
     assert r.status_code == 201, r.text
     claude = (target / "CLAUDE.md").read_text(encoding="utf-8")

@@ -458,8 +458,6 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # the 1000-line soft limit via doc-118..125 workflow-intake + web-wizard
     # merges without a debt entry, so the guard fired red-by-staleness on clean
     # dev. Registered here with split triggers; real splits tracked in the task.
-    # Split trigger: next flow-intake/submit command change.
-    "src/zf/cli/flow.py",
     # Split trigger: next supervisor inspection signal or attention rule.
     "src/zf/runtime/supervisor_inspection.py",
     # Split trigger: next read-model projection/endpoint or freshness-gate change.

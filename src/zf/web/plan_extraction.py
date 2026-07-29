@@ -1,0 +1,871 @@
+"""Extract a resumable Plan question from a Kanban Agent reply."""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+from zf.core.security.redaction import redact_obj
+from zf.runtime.channel_templates import materialize_channel_template
+from zf.runtime.kanban_plan_requests import (
+    PLAN_APPLY_ALLOWED_ACTIONS,
+    PLAN_DIRECT_APPLY_ACTIONS,
+    PLAN_PROPOSAL_ACTIONS,
+    PLAN_REQUEST_SCHEMA_VERSION,
+    plan_request_digest,
+    plan_request_id,
+)
+from zf.runtime.workflow_route_catalog import (
+    resolve_workflow_route,
+    workflow_route_catalog,
+)
+from zf.runtime.workflow_start import is_workflow_start_action
+from zf.web.proposal_extraction import json_candidates
+
+
+_TASK_WORKFLOW_PARAMETER_KEYS = frozenset({
+    "acceptance",
+    "artifact_refs",
+    "backend",
+    "channel_id",
+    "constraints",
+    "expected_output",
+    "open_questions",
+    "risk",
+    "scope",
+    "source_ref",
+    "source_refs",
+    "source_root",
+    "strictness",
+    "synthesis_event_id",
+    "target_ref",
+    "target_root",
+    "thread_id",
+    "topic",
+})
+
+
+def extract_plan_request(
+    answer: str,
+    *,
+    plan_context: dict[str, Any] | None = None,
+    config: Any | None = None,
+) -> dict[str, Any] | None:
+    for candidate in json_candidates(answer):
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                decoded, _ = json.JSONDecoder().raw_decode(candidate)
+            except json.JSONDecodeError:
+                continue
+        request = normalize_plan_request(
+            decoded,
+            plan_context=plan_context or {},
+            config=config,
+        )
+        if request is not None:
+            return request
+    return None
+
+
+def normalize_plan_request(
+    decoded: Any,
+    *,
+    plan_context: dict[str, Any] | None = None,
+    config: Any | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(decoded, dict):
+        return None
+    raw = decoded.get("plan_request") or decoded.get("input_request")
+    if not isinstance(raw, dict):
+        return None
+
+    questions = raw.get("questions")
+    if isinstance(questions, list):
+        question_rows = [item for item in questions if isinstance(item, dict)]
+    else:
+        question_rows = [raw]
+    question = question_rows[0] if question_rows else {}
+    validation_errors: list[str] = []
+    if not 1 <= len(question_rows) <= 3:
+        validation_errors.append("one to three questions are required")
+    question_rows = question_rows[:3]
+
+    request_header = str(
+        raw.get("header") or question.get("header") or ""
+    ).strip()
+    question_header = str(
+        question.get("header") or request_header
+    ).strip()
+    question_id = _slug(
+        str(question.get("id") or question.get("question_id") or "decision")
+    )
+    question_text = str(
+        question.get("question")
+        or question.get("text")
+        or raw.get("question")
+        or ""
+    ).strip()
+    if not request_header:
+        validation_errors.append("header is required")
+    if not question_text:
+        validation_errors.append("question is required")
+    if bool(question.get("isSecret") or question.get("is_secret")):
+        validation_errors.append("secret input is not supported")
+
+    context = plan_context or {}
+    task_binding_digests = {
+        str(key): str(value)
+        for key, value in (
+            context.get("task_binding_digests", {}).items()
+            if isinstance(context.get("task_binding_digests"), dict)
+            else []
+        )
+        if str(key).strip() and str(value).strip()
+    }
+    context_task_id = str(context.get("task_id") or "").strip()
+    context_task_digest = str(
+        context.get("task_contract_digest") or ""
+    ).strip()
+    if context_task_id and context_task_digest:
+        task_binding_digests.setdefault(
+            context_task_id,
+            context_task_digest,
+        )
+    workflow_context = context.get("workflow_parameters")
+    if workflow_context is None:
+        workflow_context = {}
+    if not isinstance(workflow_context, dict):
+        validation_errors.append("workflow_parameters must be a mapping")
+        workflow_context = {}
+    unknown_context_parameters = sorted(
+        set(workflow_context) - _TASK_WORKFLOW_PARAMETER_KEYS
+    )
+    if unknown_context_parameters:
+        validation_errors.append(
+            "unsupported workflow context field(s): "
+            + ", ".join(unknown_context_parameters)
+        )
+        workflow_context = {}
+    normalized_workflow_context = {
+        str(key): value
+        for key, value in workflow_context.items()
+        if value not in (None, "", [], {})
+    }
+    submit_action = str(
+        raw.get("submit_action")
+        or raw.get("commit_action")
+        or ""
+    ).strip()
+    if is_workflow_start_action(submit_action):
+        submit_action = "workflow-start"
+    submit_mode = "apply" if submit_action else ""
+    submit_label = str(
+        raw.get("submit_label")
+        or raw.get("commit_label")
+        or ""
+    ).strip()
+    allow_other = bool(
+        question.get("allow_other", raw.get("allow_other", True))
+    )
+    if submit_action and submit_action not in PLAN_APPLY_ALLOWED_ACTIONS:
+        validation_errors.append(
+            f"unsupported Plan submit action: {submit_action}"
+        )
+    if submit_action and not submit_label:
+        validation_errors.append("submit_label is required for an action-bound Plan")
+    if submit_action and allow_other:
+        validation_errors.append(
+            "action-bound Plan requests must set allow_other to false"
+        )
+    subject_type = _plan_subject_type(
+        raw,
+        question,
+        submit_action=submit_action,
+    )
+    if subject_type not in {
+        "channel_setup",
+        "clarification",
+        "task_workflow",
+    }:
+        validation_errors.append(
+            "subject_type must be channel_setup, clarification, or task_workflow"
+        )
+
+    raw_options = question.get("options")
+    options: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    if isinstance(raw_options, list):
+        for index, item in enumerate(raw_options[:3], start=1):
+            if isinstance(item, str):
+                label = item.strip()
+                description = ""
+                explicit_id = ""
+                recommended = "(Recommended)" in label or "(推荐)" in label
+            elif isinstance(item, dict):
+                label = str(item.get("label") or "").strip()
+                description = str(item.get("description") or "").strip()
+                explicit_id = str(item.get("id") or "").strip()
+                recommended = bool(item.get("recommended")) or (
+                    "(Recommended)" in label or "(推荐)" in label
+                )
+            else:
+                continue
+            if not label:
+                validation_errors.append(f"option {index} label is required")
+                continue
+            option_id = _unique_id(
+                _slug(explicit_id or label) or f"option-{index}",
+                used_ids,
+            )
+            if option_id == "other":
+                validation_errors.append("'other' is reserved for free-form input")
+            option: dict[str, Any] = {
+                "id": option_id,
+                "label": label,
+                "description": description,
+                "recommended": recommended,
+            }
+            option_submit_action = submit_action
+            option_submit_mode = submit_mode or "continue"
+            raw_submit_payload: object = None
+            if isinstance(item, dict):
+                effect = (
+                    item.get("effect")
+                    if isinstance(item.get("effect"), dict)
+                    else {}
+                )
+                option_submit_action = str(
+                    effect.get("action")
+                    or item.get("submit_action")
+                    or submit_action
+                    or ""
+                ).strip()
+                if is_workflow_start_action(option_submit_action):
+                    option_submit_action = "workflow-start"
+                option_submit_mode = str(
+                    effect.get("mode")
+                    or item.get("submit_mode")
+                    or ("apply" if option_submit_action == submit_action and submit_action else "continue")
+                ).strip().lower()
+                raw_submit_payload = (
+                    effect.get("payload")
+                    if isinstance(effect.get("payload"), dict)
+                    else item.get("submit_payload")
+                )
+            if option_submit_mode not in {"apply", "continue", "propose"}:
+                validation_errors.append(
+                    f"option {index}: submit mode must be apply, continue, or propose"
+                )
+            if (
+                option_submit_action
+                and option_submit_action not in PLAN_APPLY_ALLOWED_ACTIONS
+            ):
+                validation_errors.append(
+                    f"option {index}: unsupported Plan submit action: "
+                    f"{option_submit_action}"
+                )
+            if (
+                option_submit_mode == "apply"
+                and option_submit_action not in PLAN_DIRECT_APPLY_ACTIONS
+            ):
+                validation_errors.append(
+                    f"option {index}: action is not allowed for direct Plan apply"
+                )
+            if (
+                option_submit_mode == "propose"
+                and option_submit_action not in PLAN_PROPOSAL_ACTIONS
+            ):
+                validation_errors.append(
+                    f"option {index}: action is not allowed for Plan proposal"
+                )
+            if option_submit_mode == "continue" and option_submit_action:
+                validation_errors.append(
+                    f"option {index}: continue mode cannot carry an action"
+                )
+            boundary_error = _subject_action_error(
+                subject_type,
+                option_submit_mode,
+                option_submit_action,
+            )
+            if boundary_error:
+                validation_errors.append(
+                    f"option {index}: {boundary_error}"
+                )
+            if option_submit_action:
+                if (
+                    is_workflow_start_action(option_submit_action)
+                    and isinstance(raw_submit_payload, dict)
+                ):
+                    if (
+                        not raw_submit_payload.get("task_id")
+                        and context.get("task_id")
+                    ):
+                        raw_submit_payload = {
+                            **raw_submit_payload,
+                            "task_id": str(context.get("task_id") or ""),
+                        }
+                    raw_parameters = raw_submit_payload.get("parameters")
+                    if (
+                        normalized_workflow_context
+                        and raw_parameters in (None, {})
+                    ):
+                        raw_parameters = {}
+                    if (
+                        normalized_workflow_context
+                        and isinstance(raw_parameters, dict)
+                    ):
+                        raw_submit_payload = {
+                            **raw_submit_payload,
+                            "parameters": {
+                                **raw_parameters,
+                                **normalized_workflow_context,
+                            },
+                        }
+                submit_payload, submit_details, submit_error = (
+                    _normalize_plan_submit_payload(
+                        option_submit_action,
+                        raw_submit_payload,
+                        config=config,
+                        task_binding_digests=task_binding_digests,
+                    )
+                )
+                if submit_error:
+                    validation_errors.append(
+                        f"option {index}: {submit_error}"
+                    )
+                option["submit_payload"] = submit_payload
+                option["submit_details"] = submit_details
+                option["submit_action"] = option_submit_action
+                option["submit_mode"] = option_submit_mode
+            else:
+                option["submit_mode"] = "continue"
+            options.append(option)
+    if not 2 <= len(options) <= 3:
+        validation_errors.append("two or three options are required")
+    if isinstance(raw_options, list) and len(raw_options) > 3:
+        validation_errors.append("at most three options are allowed")
+    _normalize_recommended_options(
+        options,
+        validation_errors,
+        question_id=question_id,
+    )
+    normalized_questions = [{
+        "id": question_id,
+        "header": question_header,
+        "question": question_text,
+        "options": options,
+        "allow_other": allow_other,
+    }]
+    question_ids = {question_id}
+    for index, extra_question in enumerate(question_rows[1:], start=2):
+        normalized_question = _normalize_clarification_question(
+            extra_question,
+            index=index,
+            fallback_header=str(raw.get("header") or ""),
+            fallback_allow_other=bool(raw.get("allow_other", True)),
+            validation_errors=validation_errors,
+        )
+        if normalized_question["id"] in question_ids:
+            validation_errors.append(
+                f"question {index}: question id must be unique"
+            )
+        question_ids.add(normalized_question["id"])
+        normalized_questions.append(normalized_question)
+    if len(normalized_questions) > 1:
+        if subject_type != "clarification":
+            validation_errors.append(
+                "multi-question Plan requests must be clarification"
+            )
+        if submit_action or any(
+            str(option.get("submit_action") or "")
+            for option in options
+        ):
+            validation_errors.append(
+                "multi-question Plan requests cannot bind an action"
+            )
+    workflow_task_ids = {
+        str(option.get("submit_payload", {}).get("task_id") or "")
+        for option in options
+        if is_workflow_start_action(str(option.get("submit_action") or ""))
+        and isinstance(option.get("submit_payload"), dict)
+    }
+    workflow_task_ids.discard("")
+    if subject_type == "task_workflow":
+        if not any(
+            is_workflow_start_action(str(option.get("submit_action") or ""))
+            for option in options
+        ):
+            validation_errors.append(
+                "task_workflow requires at least one workflow proposal"
+            )
+        if len(workflow_task_ids) != 1:
+            validation_errors.append(
+                "task_workflow options must bind exactly one Task"
+            )
+        if (
+            context_task_id
+            and workflow_task_ids
+            and context_task_id not in workflow_task_ids
+        ):
+            validation_errors.append(
+                "task_workflow options do not match the active Task"
+            )
+    request_task_id = (
+        next(iter(workflow_task_ids))
+        if len(workflow_task_ids) == 1
+        else context_task_id
+    )
+
+    route_catalog = workflow_route_catalog(config)
+    request: dict[str, Any] = {
+        "schema_version": PLAN_REQUEST_SCHEMA_VERSION,
+        "interaction_mode": "plan",
+        "subject_type": subject_type,
+        "revision": _revision(raw.get("revision")),
+        "expires_at": str(raw.get("expires_at") or ""),
+        "header": request_header,
+        "question_id": question_id,
+        "question": question_text,
+        "options": options,
+        "allow_other": allow_other,
+        "questions": normalized_questions,
+        "reason": str(raw.get("reason") or raw.get("summary") or ""),
+        "submit_action": submit_action,
+        "submit_mode": submit_mode,
+        "submit_label": submit_label,
+        "project_id": str(context.get("project_id") or ""),
+        "task_id": request_task_id,
+        "task_contract_digest": str(
+            task_binding_digests.get(request_task_id) or ""
+        ),
+        "config_digest": (
+            str(route_catalog.get("config_digest") or "")
+            if subject_type == "task_workflow"
+            else ""
+        ),
+        "conversation_id": str(context.get("conversation_id") or ""),
+        "thread_key": str(
+            context.get("thread_key")
+            or context.get("thread_id")
+            or ""
+        ),
+        "turn_id": str(context.get("turn_id") or ""),
+        "backend": str(context.get("backend") or ""),
+        "provider_session_id": str(context.get("provider_session_id") or ""),
+        "originating_message_event_id": str(
+            context.get("originating_message_event_id") or ""
+        ),
+        "originating_message_event_ids": [
+            str(item)
+            for item in context.get(
+                "originating_message_event_ids", []
+            )
+            if str(item)
+        ],
+        "requirement_digest": str(
+            context.get("requirement_digest") or ""
+        ),
+        "valid": not validation_errors,
+        "validation_error": "; ".join(dict.fromkeys(validation_errors)),
+    }
+    digest = plan_request_digest(request)
+    request["request_digest"] = digest
+    request["request_id"] = plan_request_id(request)
+    return redact_obj(request)
+
+
+def _normalize_clarification_question(
+    raw: dict[str, Any],
+    *,
+    index: int,
+    fallback_header: str,
+    fallback_allow_other: bool,
+    validation_errors: list[str],
+) -> dict[str, Any]:
+    question_id = _slug(
+        str(raw.get("id") or raw.get("question_id") or f"decision-{index}")
+    )
+    header = str(raw.get("header") or fallback_header or "").strip()
+    question = str(raw.get("question") or raw.get("text") or "").strip()
+    if not header:
+        validation_errors.append(f"question {index}: header is required")
+    if not question:
+        validation_errors.append(f"question {index}: question is required")
+    if bool(raw.get("isSecret") or raw.get("is_secret")):
+        validation_errors.append(
+            f"question {index}: secret input is not supported"
+        )
+    raw_options = raw.get("options")
+    options: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    if isinstance(raw_options, list):
+        for option_index, item in enumerate(raw_options[:3], start=1):
+            if isinstance(item, str):
+                label = item.strip()
+                description = ""
+                explicit_id = ""
+                recommended = _label_is_recommended(label)
+                has_effect = False
+            elif isinstance(item, dict):
+                label = str(item.get("label") or "").strip()
+                description = str(item.get("description") or "").strip()
+                explicit_id = str(item.get("id") or "").strip()
+                recommended = bool(item.get("recommended")) or (
+                    _label_is_recommended(label)
+                )
+                has_effect = any(
+                    key in item
+                    for key in (
+                        "effect",
+                        "submit_action",
+                        "submit_mode",
+                        "submit_payload",
+                    )
+                )
+            else:
+                continue
+            if not label:
+                validation_errors.append(
+                    f"question {index} option {option_index}: label is required"
+                )
+                continue
+            if has_effect:
+                validation_errors.append(
+                    f"question {index} option {option_index}: "
+                    "clarification options cannot bind an action"
+                )
+            option_id = _unique_id(
+                _slug(explicit_id or label) or f"option-{option_index}",
+                used_ids,
+            )
+            if option_id == "other":
+                validation_errors.append(
+                    f"question {index}: 'other' is reserved for free-form input"
+                )
+            options.append({
+                "id": option_id,
+                "label": label,
+                "description": description,
+                "recommended": recommended,
+                "submit_mode": "continue",
+            })
+    if not 2 <= len(options) <= 3:
+        validation_errors.append(
+            f"question {index}: two or three options are required"
+        )
+    if isinstance(raw_options, list) and len(raw_options) > 3:
+        validation_errors.append(
+            f"question {index}: at most three options are allowed"
+        )
+    _normalize_recommended_options(
+        options,
+        validation_errors,
+        question_id=question_id,
+    )
+    return {
+        "id": question_id,
+        "header": header,
+        "question": question,
+        "options": options,
+        "allow_other": bool(
+            raw.get("allow_other", fallback_allow_other)
+        ),
+    }
+
+
+def _normalize_recommended_options(
+    options: list[dict[str, Any]],
+    validation_errors: list[str],
+    *,
+    question_id: str,
+) -> None:
+    if not options:
+        return
+    recommended = [
+        index for index, option in enumerate(options)
+        if bool(option.get("recommended"))
+    ]
+    if not recommended:
+        options[0]["recommended"] = True
+        return
+    if len(recommended) > 1:
+        validation_errors.append(
+            f"question {question_id}: exactly one recommended option is allowed"
+        )
+        return
+    if recommended[0] != 0:
+        options.insert(0, options.pop(recommended[0]))
+
+
+def _label_is_recommended(label: str) -> bool:
+    return "(Recommended)" in label or "(推荐)" in label
+
+
+def _normalize_plan_submit_payload(
+    action: str,
+    raw_payload: object,
+    *,
+    config: Any | None = None,
+    task_binding_digests: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    if not isinstance(raw_payload, dict):
+        return {}, {}, "submit_payload must be a mapping"
+    if is_workflow_start_action(action):
+        return _normalize_task_workflow_submit_payload(
+            raw_payload,
+            config=config,
+            task_binding_digests=task_binding_digests or {},
+        )
+    if action != "channel-create-and-start":
+        return {}, {}, f"unsupported Plan submit action: {action}"
+
+    allowed_keys = {
+        "channel_id",
+        "name",
+        "overrides",
+        "task_id",
+        "template_id",
+        "thread_id",
+    }
+    unknown = sorted(set(raw_payload) - allowed_keys)
+    if unknown:
+        return (
+            {},
+            {},
+            "unsupported submit_payload field(s): " + ", ".join(unknown),
+        )
+    template_id = str(raw_payload.get("template_id") or "").strip()
+    if not template_id:
+        return {}, {}, "submit_payload.template_id is required"
+    overrides = raw_payload.get("overrides")
+    if overrides is not None and not isinstance(overrides, dict):
+        return {}, {}, "submit_payload.overrides must be a mapping"
+    materialized, error = materialize_channel_template(
+        template_id,
+        overrides=overrides,
+    )
+    if error or materialized is None:
+        return {}, {}, error or "channel template preflight failed"
+
+    payload: dict[str, Any] = {"template_id": template_id}
+    name = str(raw_payload.get("name") or "").strip()
+    if name:
+        payload["name"] = name
+    for key in ("channel_id", "task_id", "thread_id"):
+        value = str(raw_payload.get(key) or "").strip()
+        if value:
+            payload[key] = value
+    if isinstance(overrides, dict) and overrides:
+        payload["overrides"] = overrides
+    members = [
+        {
+            "member_id": str(member.get("member_id") or ""),
+            "role": str(member.get("channel_role") or ""),
+            "permission_profile": str(
+                member.get("permission_profile") or "read_only"
+            ),
+        }
+        for member in materialized["members"]
+        if isinstance(member, dict)
+    ]
+    discussion = (
+        materialized.get("discussion")
+        if isinstance(materialized.get("discussion"), dict)
+        else {}
+    )
+    details = {
+        "template_id": template_id,
+        "template_name": str(materialized.get("name") or template_id),
+        "template_version": str(
+            materialized.get("template_version") or ""
+        ),
+        "template_digest": str(
+            materialized.get("template_digest") or ""
+        ),
+        "materialization_digest": str(
+            materialized.get("materialization_digest") or ""
+        ),
+        "member_count": len(members),
+        "members": members,
+        "max_rounds": int(discussion.get("max_rounds") or 0),
+    }
+    return payload, details, ""
+
+
+def _normalize_task_workflow_submit_payload(
+    raw_payload: dict[str, Any],
+    *,
+    config: Any | None,
+    task_binding_digests: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    allowed_keys = {
+        "config_digest",
+        "objective",
+        "parameters",
+        "route_id",
+        "task_contract_digest",
+        "task_id",
+    }
+    unknown = sorted(set(raw_payload) - allowed_keys)
+    if unknown:
+        return (
+            {},
+            {},
+            "unsupported submit_payload field(s): " + ", ".join(unknown),
+        )
+    task_id = str(raw_payload.get("task_id") or "").strip()
+    route_id = str(raw_payload.get("route_id") or "").strip()
+    objective = str(raw_payload.get("objective") or "").strip()
+    if not task_id:
+        return {}, {}, "submit_payload.task_id is required"
+    if not route_id:
+        return {}, {}, "submit_payload.route_id is required"
+    if not objective:
+        return {}, {}, "submit_payload.objective is required"
+    current_task_digest = str(
+        task_binding_digests.get(task_id) or ""
+    ).strip()
+    proposed_task_digest = str(
+        raw_payload.get("task_contract_digest") or ""
+    ).strip()
+    if not current_task_digest:
+        return {}, {}, "workflow Task binding is unavailable"
+    if (
+        proposed_task_digest
+        and proposed_task_digest != current_task_digest
+    ):
+        return {}, {}, "workflow Task binding is stale"
+    parameters = raw_payload.get("parameters")
+    if parameters is None:
+        parameters = {}
+    if not isinstance(parameters, dict):
+        return {}, {}, "submit_payload.parameters must be a mapping"
+    unknown_parameters = sorted(
+        set(parameters) - _TASK_WORKFLOW_PARAMETER_KEYS
+    )
+    if unknown_parameters:
+        return (
+            {},
+            {},
+            "unsupported workflow parameter field(s): "
+            + ", ".join(unknown_parameters),
+        )
+    catalog = workflow_route_catalog(config)
+    config_digest = str(
+        raw_payload.get("config_digest")
+        or catalog.get("config_digest")
+        or ""
+    )
+    route = resolve_workflow_route(
+        config,
+        route_id,
+        expected_config_digest=config_digest,
+    )
+    if route is None:
+        return {}, {}, f"workflow route {route_id!r} is stale or unavailable"
+    payload = {
+        "task_id": task_id,
+        "route_id": route_id,
+        "objective": objective,
+        "config_digest": config_digest,
+        "task_contract_digest": current_task_digest,
+        "parameters": {
+            str(key): value
+            for key, value in parameters.items()
+            if value not in (None, "", [], {})
+        },
+    }
+    details = {
+        "route_id": route_id,
+        "family": str(route.get("family") or ""),
+        "kind": str(route.get("kind") or ""),
+        "tier": str(route.get("tier") or ""),
+        "topology": str(route.get("topology") or ""),
+        "roles": list(route.get("roles") or []),
+        "writer_roles": list(route.get("writer_roles") or []),
+        "verify_roles": list(route.get("verify_roles") or []),
+        "lane_count": int(route.get("lane_count") or 0),
+        "output_profile": str(route.get("output_profile") or ""),
+    }
+    return payload, details, ""
+
+
+def _plan_subject_type(
+    raw: dict[str, Any],
+    question: dict[str, Any],
+    *,
+    submit_action: str,
+) -> str:
+    explicit = str(
+        raw.get("subject_type")
+        or question.get("subject_type")
+        or ""
+    ).strip().lower()
+    if explicit:
+        return explicit
+    raw_options = question.get("options")
+    if isinstance(raw_options, list):
+        for item in raw_options:
+            if not isinstance(item, dict):
+                continue
+            effect = (
+                item.get("effect")
+                if isinstance(item.get("effect"), dict)
+                else {}
+            )
+            action = str(
+                effect.get("action")
+                or item.get("submit_action")
+                or ""
+            )
+            if is_workflow_start_action(action):
+                return "task_workflow"
+    if submit_action == "channel-create-and-start":
+        return "channel_setup"
+    return "clarification"
+
+
+def _subject_action_error(
+    subject_type: str,
+    mode: str,
+    action: str,
+) -> str:
+    if subject_type == "channel_setup":
+        if mode != "apply" or action != "channel-create-and-start":
+            return "channel_setup only allows direct channel-create-and-start"
+    elif subject_type == "task_workflow":
+        if mode == "continue" and not action:
+            return ""
+        if mode != "propose" or not is_workflow_start_action(action):
+            return "task_workflow only allows workflow-start proposals"
+    elif action:
+        return "clarification options cannot carry actions"
+    return ""
+
+
+def _slug(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", value.strip().lower())
+    return normalized.strip("-")[:64]
+
+
+def _unique_id(candidate: str, used: set[str]) -> str:
+    value = candidate
+    suffix = 2
+    while value in used:
+        value = f"{candidate}-{suffix}"
+        suffix += 1
+    used.add(value)
+    return value
+
+
+def _revision(value: object) -> int:
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+__all__ = ["extract_plan_request", "normalize_plan_request"]

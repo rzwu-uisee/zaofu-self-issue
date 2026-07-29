@@ -195,3 +195,38 @@ def test_stages_from_config_keeps_flow_kind_for_shared_triggers():
             "issue",
         ),
     ]
+
+
+def test_workflow_invoke_only_targets_selected_pattern():
+    stages = [
+        (
+            "research-fanout",
+            "workflow.invoke.requested",
+            "research.fanout.completed",
+        ),
+        (
+            "delivery-smoke",
+            "workflow.invoke.requested",
+            "workflow.stage.completed",
+        ),
+    ]
+    events = [
+        _ev(
+            "workflow.invoke.requested",
+            {
+                "task_id": "TASK-1",
+                "pattern_id": "delivery-smoke",
+                "workflow_run_id": "wf-delivery-1",
+            },
+        ),
+        _ev(
+            "fanout.started",
+            {
+                "stage_id": "delivery-smoke",
+                "workflow_run_id": "wf-delivery-1",
+            },
+        ),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=stages) == []

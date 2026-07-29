@@ -13,6 +13,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
@@ -22,6 +23,10 @@ from zf.runtime.owner_channel_liveness import (
     channel_liveness,
 )
 from zf.runtime.remediation_cascade import SAFE_HALTED_EVENT
+
+if TYPE_CHECKING:
+    from zf.core.config.schema import RoleConfig
+    from zf.runtime.backend_session_reader import UsageReport
 
 
 # B-COST-02: consecutive disk-read misses before a claude-code worker's

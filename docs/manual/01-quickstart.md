@@ -1,236 +1,265 @@
 # ZaoFu 快速开始
 
-> 适用对象：首次为已有项目物化 production Controller，并按最短安全路径跑通
-> 端到端流程的操作者。
+> 适用对象：第一次安装 ZaoFu，并希望通过 Web 创建/打开 Project，再使用
+> Kanban Agent、Channel、Research 或交付 Workflow 的操作者。
+>
+> 当前路径按 CLI、Web 和真实浏览器 E2E 核实于 2026-07-29。
 
-本手册只使用 `examples/prod/controller/` 下的产品 Controller catalog。
-通用 preset 不是这里描述的产品工作流入口。一个项目保持一份 project-local
-`zf.yaml` 和一个配置的 `project.state_dir`；后续 PRD、issue、feature 或 refactor
-通过新的 workflow request 进入同一个项目控制面。
-
-ZaoFu 源码仓库根 `zf.yaml` 默认是 PRD 工作流；`zf project init` 则默认创建
-multi-kind Project 且不点火。完整的创建、Bootstrap、澄清与批准步骤见
-[20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
-
-## 0. 开始之前
+## 0. 安装并启动 Dashboard
 
 必需环境：
 
-- Python 3.11+
-- `uv`
-- Git
-- `tmux`
-- 至少一个已登录的 provider CLI：`codex` 或 `claude`
-
-在 ZaoFu 源码 checkout 中安装依赖：
+- Python 3.11+、`uv`、Git、`tmux`；
+- 至少一个已安装并登录的 provider CLI：Codex 或 Claude Code；
+- 使用 Claude Code stream-json transport 时安装 `stream-json` extra。
 
 ```bash
 cd /path/to/zaofu
 uv sync --extra dev --extra web --extra stream-json
 uv run zf --version
-```
-
-Claude Code stream-json transport 需要 `stream-json`；只有使用本地 Dashboard
-时才需要 `web`。
-
-启动真实 worker 前检查 provider：
-
-```bash
-command -v tmux
-command -v codex      # 使用 --backend codex 时
-command -v claude     # 使用 --backend claude-code 时
-
 uv run zf doctor provider --backend codex
 ```
 
-Provider 登录状态由外部 CLI 管理。二进制缺失或登录失败时，先完成安装和认证。
-
-## 1. 检查 Controller 推荐结果
-
-设置稳定的源码和目标项目路径：
+启动 Workspace Dashboard：
 
 ```bash
 export ZAOFU_ROOT=/path/to/zaofu
-export TARGET_PROJECT=/path/to/my-project
+export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
+
+uv run --project "$ZAOFU_ROOT" zf web \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --workspace-only
 ```
 
-先只检查推荐，不写入文件：
+浏览器访问 `http://127.0.0.1:8001/`。只有在可信网络中才绑定 `0.0.0.0`。
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf profile bootstrap \
-  "$TARGET_PROJECT" \
-  --intent build \
-  --backend codex \
-  --scale launch
-```
+## 1. 完成安装 Onboarding
 
-Intent 对应产品工作流家族：
+首次进入按四步完成安装级设置：
 
-| Intent | 典型 Controller 家族 |
+1. **Provider**：选择 Codex 或 Claude Code 作为 primary provider；两者都可用时可启用
+   Mixed team，由另一个 provider 承担独立 verify lane。
+2. **Environment**：检查宿主依赖和 provider 可用性。
+3. **Access**：为当前浏览器建立受控 action session。
+4. **Ready**：进入 Workspace。
+
+Onboarding 不创建 Project。零 Project 的空 Workspace 是正常状态。
+
+## 2. Add/Open Project
+
+点击左侧 Project 选择器旁的 `+`：
+
+1. 输入**服务端本机**上的 Project path。
+2. 点击 `Inspect`。
+3. 审核服务端返回的唯一 admission action 与 diagnostics。
+4. 仅在 `initialize_project` 时填写 Project Name、Project Brief、Project Stack、
+   Primary Provider 和可选 Mixed team。
+5. 执行界面给出的 `Open Project`、`Add & Open`、`Initialize & Open` 或
+   `Create Project`。
+
+Inspect 会按磁盘真相选择动作：
+
+| 目录状态 | 行为 |
 |---|---|
-| `build` | PRD 交付（`prd-fanout-v3` 或 light 变体） |
-| `refactor` | lane-based refactor（`refactor-lane-v3`） |
-| `maintain` / `review` | issue 与 regression flow（`issue-fanout-v3`） |
+| 已注册且健康 | 直接打开 |
+| 有合法 `zf.yaml`、未注册 | 注册并打开 |
+| 有合法配置、缺运行态 | 初始化 state 后打开 |
+| 没有 `zf.yaml` | 创建默认 multi-kind Project |
+| 配置无效或存在残缺非空 state | `blocked`，先修复，不猜测覆盖 |
 
-推荐结果是人工审批点。沿用本产品路径时，只有 `archetype` 是
-`examples/prod/controller/` 中的 `[flow]` entry 才继续。标记为 `[preset]`
-的推荐是通用 fallback，不是 production Controller catalog。
+![Add/Open Project 创建表单](assets/project-add-open-current.png)
 
-Greenfield 项目代码信号不足时，使用 Web New Project wizard 显式选择 Controller，
-并补充目标项目真实的 quality checks。
+目标路径不存在或为空时，`Create Project` 会生成最小 README/src/tests、独立 Git
+repository 和 initial HEAD，使默认 worktree runtime 可以启动。已有非空代码目录不会
+被 Web 自动 `git init` 或提交；需要先由 operator 建立可信 Git baseline。
 
-## 2. 物化并审核 Controller
+Project Brief 应写长期背景、目标和关键约束，不要写单次 Task Prompt。初始化后：
 
-确认推荐结果后执行：
+- `project.description` 保存到 `zf.yaml`；
+- Project Context 托管段写入 `AGENTS.md`；
+- Stack 及探测到的 build/test 命令写入独立 Profile 托管段；
+- `CLAUDE.md` 保持 Claude 专属规则，并引用 `AGENTS.md`；
+- Project 注册到 Workspace，但不会自动创建 Task 或启动 Workflow。
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf profile bootstrap \
-  "$TARGET_PROJECT" \
-  --intent build \
-  --backend codex \
-  --scale launch \
-  --apply
+已有注册 Project 不需要重新导入；刷新 Workspace 后直接打开即可。
+
+## 3. `zf.yaml` 仍是唯一控制面
+
+Add/Open Project 不再让用户选择 YAML、preset、Controller、kind、scale、lane 或 role。
+这只是把配置选择移出日常创建表单：
+
+- 已有合法 `zf.yaml` 原样保留；
+- 新目录生成一份默认 multi-kind `zf.yaml`；
+- Stack 只决定项目指令和命令 Profile，不决定 Workflow；
+- Provider 选择编译 provider policy；Mixed team 仍保留一个 primary backend，
+  另一个 provider 用于独立验证，不存在 `backend: mixed`；
+- Kanban Agent 只能从当前 `zf.yaml` 展开的 active route catalog 推荐 Workflow。
+
+显式选择单一 Controller、迁移控制面或物化 Bootstrap 推荐时，才使用
+`zf profile bootstrap`。不要为每条 PRD、Issue 或 Refactor 创建第二份 `zf.yaml`。
+
+## 4. 打开 Project 后如何输入需求
+
+Kanban Agent 是 Project 内的通用 Coding Agent，不只是看板监工。根据需求和你的明确
+意图，它可以走不同路径：
+
+| 目标 | 是否先要 Task | 交互与结果 |
+|---|---:|---|
+| 普通分析、修改代码、运行测试 | 否 | 在当前 provider session 内直接工作，受权限和 Git 规则约束 |
+| 只建立可追踪工作项 | 否 | 生成 `Create Task` proposal，确认后创建 Task |
+| 多角色澄清、评审或讨论 | 否 | 给出 Channel setup Plan，选择后自动建 Channel 并开始讨论 |
+| 固定角色深度研究 | 是 | 对已有 Task 给出 Research route Plan，随后独立 Approve |
+| PRD/Issue/Refactor/Planning 交付 | 是 | 对已有 Task 推荐 active Workflow route，随后独立 Approve |
+
+不要在创建 Project 时提前决定 lane 数或角色。Kanban Agent 应基于具体 Task 的业务类型、
+复杂度和验收目标，从 active catalog 中推荐单 lane、多 lane、Research 或其他已注册
+route。
+
+## 5. 创建 Channel Group
+
+产品里常说的 Channel Group，canonical 模型是运行时的 **Channel + Members**，不是
+`zf.yaml` 中的静态配置块。向 Kanban Agent 描述需求并明确希望多角色讨论，例如：
+
+```text
+为这个需求创建一个 PRD 澄清 Channel，重点讨论安全边界、技术可行性和验收标准。
 ```
 
-物化会把选定 Controller 写成项目本地 `zf.yaml`，并复制所需 profile 和 skill
-assets。`zf.yaml` 始终是唯一有效控制面配置。
+Kanban Agent 返回一个 Plan，选项会显示模板、成员角色、成员数和讨论轮次：
 
-如果项目已经存在 `zf.yaml`，bootstrap 会保留它，只补充可探测且未配置的检查，
-不会静默把既有项目切换到另一个 Controller。继续前应显式审核或迁移当前控制面。
+![Channel setup Plan](assets/kanban-channel-plan.png)
 
-启动前审核：
+选择方案并点击 `Create & start` 后，系统一次完成：
 
-- `prdRef`、`issueRef`、`sourceRoot`、`targetRoot` 等 Controller inputs；
-- `project.state_dir` 与 worktree policy；
-- provider backend 与 permission policy；
-- `quality_gates` 是否是目标项目真实可执行的命令；
-- validation 报告的 placeholder 或缺失环境要求。
+```text
+创建 Channel
+-> 物化模板成员、角色上下文、技能与写权限
+-> 把原始需求发到 Channel
+-> 启动 fanout_then_synthesis 讨论
+-> 默认 responder/synthesizer 收敛结论
+```
 
-Bootstrap 可以填入可探测的检查，但不能虚构产品语义和验收标准。多 lane
-Controller 缺少项目 quality gate 时会 fail closed。
+不需要再手工建成员或复制第一条消息。`Chat about` 会保留 Plan，允许先补充轮次、
+角色或范围。讨论结束后，人可以继续在同一 Channel 输入新问题或延续原需求。
 
-## 3. 初始化、验证与 Dry Run
+Channel 独立于 Workflow：讨论结论不会自动创建 Task，也不会自动点火 Research/交付
+Workflow。需要进入交付时，让 Kanban Agent 基于结论生成 `Create Task` proposal，
+确认 Task 后再选择 Workflow。
 
-从目标项目执行命令，确保相对路径基于它的 `zf.yaml` 解析：
+完整模板与飞书用法见
+[15 Channel 协作使用手册](15-channel-collaboration.md)。
+
+## 6. 启动 Research 或 Task Workflow
+
+Research 和交付 Workflow 共用一套 Task-bound start service：
+
+```text
+已有 Task
+-> Kanban Agent 读取 zf workflow routes
+-> Plan 推荐 active route / 参数 / topology / roles
+-> 选择方案
+-> 生成独立 Approve 卡
+-> Owner 确认
+-> workflow.invoke.requested
+```
+
+Plan 负责澄清和选择，不等于授权：
+
+![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
+
+选择后仍需确认 exact Task、route、objective 和参数：
+
+![Workflow Approve](assets/kanban-task-workflow-approve.png)
+
+Research 的默认固定 route 是 `research:fixed`，角色为
+`source_researcher`、`product_analyst`、`technical_analyst`、`risk_critic` 和
+`synthesizer`。它产出研究摘要、证据引用、开放问题和 PRD/Refactor prompt inputs；
+不会自动创建交付 Task 或直接执行 PRD 拆分。
+
+`research-review` Channel 模板只是多角色讨论/评审，不等于启动
+`research:fixed`。只有用户明确要求 Research fanout、已有 Task 且当前 Project
+route catalog 提供该 route 时，才进入 Research Workflow。
+
+CLI 可以检查同一套 surface-neutral route：
 
 ```bash
-cd "$TARGET_PROJECT"
+cd /path/to/project
+uv run --project "$ZAOFU_ROOT" zf workflow routes \
+  --task TASK-ID \
+  --format json
+```
 
-uv run --project "$ZAOFU_ROOT" zf init \
-  --workspace-register \
-  --with-bootstrap
+提案与授权命令见
+[20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
 
+## 7. 启动 Runtime 与观测
+
+创建 Project 不会凭空运行 Workflow。需要真实 worker 时，从 Project 根启动：
+
+```bash
+cd /path/to/project
 uv run --project "$ZAOFU_ROOT" zf validate --cold-start
-uv run --project "$ZAOFU_ROOT" zf skills doctor
-uv run --project "$ZAOFU_ROOT" zf workflow inspect
-uv run --project "$ZAOFU_ROOT" zf start --dry-run --no-watch
-```
-
-Validation 仍有 `STOP` 时不要启动真实 provider。先修复缺失 route、skill、gate、
-input 或工具，再重复上述检查。Dry run 只验证确定性启动 wiring，不代表 provider
-已经登录，也不代表产品交付质量已经通过。
-
-## 4. 启动与观测
-
-启动 watcher 和 workers：
-
-```bash
 uv run --project "$ZAOFU_ROOT" zf start
 ```
 
-Watcher 默认在前台运行，需要保持进程存活。另开一个终端：
+另一个终端观测：
 
 ```bash
-cd "$TARGET_PROJECT"
 uv run --project "$ZAOFU_ROOT" zf status --workers
 uv run --project "$ZAOFU_ROOT" zf kanban --board
 uv run --project "$ZAOFU_ROOT" zf events --last 30
-uv run --project "$ZAOFU_ROOT" zf attach
 ```
 
-## 5. 投递工作
+`zf start` 只启动 worker、sidecar 和 watcher。没有已批准的
+`workflow.invoke.requested` 时，worker idle 是正确状态。
 
-首次可以提交自然语言目标：
+## 8. CLI 创建 Project
+
+Web greenfield、`zf project init` 和 `tools/init-project.sh` 共同复用
+`init_flow_project` 的 Project 初始化语义。Web 不执行 Shell。
+CLI 示例：
 
 ```bash
-uv run --project "$ZAOFU_ROOT" zf chat \
-  "实现一个小功能，并提供测试、review 和交付证据。"
+uv run --project "$ZAOFU_ROOT" zf project init \
+  --name account-service \
+  --description "账号与认证服务；目标是逐步统一登录和安全策略。" \
+  --root /path/to/account-service \
+  --create \
+  --git-init \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
+  --workspace-register
 ```
 
-类型化产品 request 需要先生成 intake artifact。以下是 stock PRD route 示例：
+需要同时完成 Git readiness、`zf init`、validate 和 startup dry-run 时：
 
 ```bash
-uv run --project "$ZAOFU_ROOT" zf flow intake \
-  --kind prd \
-  --from docs/prd/account-security.md \
-  --target-root app \
-  --acceptance "账号安全验收测试通过" \
-  --request-id prd-account-security \
-  --output docs/intake/prd-account-security.md
+tools/init-project.sh \
+  --project-dir /path/to/account-service \
+  --name account-service \
+  --description "账号与认证服务" \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
+  --yes
 ```
 
-输入仍有 open question 时先澄清并确认 requirement snapshot：
+两条命令默认都只创建 Project，不创建 Task，不点火 Workflow。
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow clarify \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --confirm \
-  --json
-```
-
-先预览 admission，不修改 runtime state：
-
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow submit \
-  --dry-run \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --kind prd \
-  --allow-missing-env \
-  --json
-```
-
-审核 preview 并解决环境要求后再 apply：
-
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow submit \
-  --apply \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --kind prd \
-  --json
-```
-
-只有 `workflow.kind_routes` 声明的 request kind 才能进入项目。项目已在 route
-中配置 pattern 时可以省略 `--pattern-id`。后续工作使用新的 `request_id`，
-不要为同一个项目创建第二控制面。
-
-## 6. 可选 Dashboard
-
-从 ZaoFu checkout 启动：
-
-```bash
-tools/start-webkanban.sh --host 127.0.0.1 --port 8001
-```
-
-访问 `http://127.0.0.1:8001/`。Web mutation 需要生成或显式提供的 action token。
-只有在可信网络中才绑定 `0.0.0.0`。
-
-## 7. 停止
+## 9. 停止
 
 ```bash
 uv run --project "$ZAOFU_ROOT" zf stop
 ```
 
-只有优雅停止失败时才使用 `zf stop --force`。共享主机上不要运行
-`tmux kill-server`，只停止当前项目声明的 session。
+只有优雅停止失败时才使用 `zf stop --force`。共享主机不要执行
+`tmux kill-server`。
 
 ## 下一步
 
-- [架构总览](architecture.md)
-- [CLI 操作手册](03-cli-operations.md)
+- [Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
+- [`zf.yaml` 控制面与运行态](02-zf-yaml-control-plane.md)
+- [Channel 协作](15-channel-collaboration.md)
 - [Web、观测与 E2E](06-web-observability-e2e.md)
 - [故障排查](07-troubleshooting.md)
-- [Autoresearch](10-autoresearch-usage.md)
-- [Feishu AI-Native 直连 Bridge](19-feishu-ai-native-direct-bridge.md)

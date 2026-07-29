@@ -1,153 +1,232 @@
 # Channel 协作使用手册
 
-> 适用对象: 想让一个或多个 agent 在一个共享对话空间里协作、并把对话投影到飞书 / Web 的操作者。
+> 适用对象：希望让多个 agent 围绕一个需求协作，并在 Web 或飞书中继续对话的操作者。
 >
-> 状态: **当前可用范围版**。Channel 的核心(发消息、@mention 触发 agent 回复、事件投影)
-> 已落地;多成员编排(speaker policy、discussion mode、channel→workflow 直接点火)仍是
-> 规划中,provider adapter 部分 WIP。本手册只覆盖**已实现**部分,规划项在文末"当前边界"列明。
+> 状态：Kanban Plan 自动建 Channel、模板成员、原始需求投递、
+> `fanout_then_synthesis` 与继续对话已实现；本手册按 2026-07-28 真实 E2E 更新。
 
-## 1. Channel 是什么
+## 1. Channel Group 的当前模型
 
-Channel 是一个事件驱动的共享对话空间:用户和一个/多个 agent 成员在里面发消息,
-agent 被 @mention 时回复,全过程以 `channel.*` 事件落到 `events.jsonl`,可重建为投影。
+产品交互可以称为 Channel Group，kernel canonical 模型是：
 
-两点需要先澄清:
+```text
+Channel
+├── Members (provider agent / runtime role / human / observer)
+├── Messages and threads
+├── Discussion policy
+├── Writer role and writer scope
+└── Synthesis artifacts and event refs
+```
 
-- **没有 "channel group" 静态配置块**。Channel 是**运行时动态创建**的(`channel.created`
-  事件),不在 `zf.yaml` 里预声明。代码里的概念是 **channel + member**,不是 "channel group"。
-- **入站来源** 可以是飞书(`feishu_routing` 的 `target: agent` 会自动建一个临时 channel,
-  `target: channel` 投递到已有 channel,见 [19](19-feishu-ai-native-direct-bridge.md) §3.1)
-  或 Web Dashboard。
+Channel 是运行时动态对象，由 `channel.created` 及后续 `channel.*` 事件建立，不在
+`zf.yaml` 中预声明一个 `channel group` 配置块。`zf.yaml` 仍提供 provider、runtime
+role、权限和集成等控制面约束。
 
-### 1.1 Channel 到 Workflow Request
+Channel 与 Workflow 相互独立：
 
-已初始化 Project 中，Channel 可以通过受控 `workflow-request` action 创建或更新
-Request proposal。系统会生成 intake、分类 kind、执行 submit preview，并返回
-`clarification_required` 或 `proposal_ready`。该动作不会直接产生
-`workflow.invoke.requested`；proposal 仍需通过 Project workflow-submit 的显式批准。
-完整 Project/Request/Run 流程见
-[20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
+- 创建或讨论 Channel 不要求先有 Task；
+- Channel 用于澄清、评审、辩论和形成共识；
+- Channel 结论不会自动创建 Task；
+- Channel 不直接启动 Research 或交付 Workflow；
+- 需要进入执行时，先人工确认 `Create Task` proposal，再为该 Task 选择 Workflow。
 
-## 2. 发消息:`zf channel say`
+## 2. 推荐入口：让 Kanban Agent 自动建 Channel
 
-当前唯一的 channel CLI 是 `say` —— 以某个成员身份往 channel 发一条消息。它**不直接持有
-飞书凭证、不直接调 transport**,而是走 `channel-post-message` ControlledAction(与 Web/飞书
-入站同一套白名单 + 审计门,`src/zf/cli/channel.py`):
+不需要先点 `New Channel`、逐个邀请成员或复制第一条需求。在 Kanban Agent 中描述需求
+并明确希望协作，例如：
+
+```text
+请为登录安全改造创建一个 PRD 澄清 Channel。
+需要产品、架构、质疑和安全视角，讨论 12 轮以内并输出可追溯结论。
+```
+
+Kanban Agent 应返回一个 action-bound Channel setup Plan。每个选项必须绑定具体：
+
+- `template_id`；
+- Channel name（可选）；
+- 精确成员角色与成员数；
+- provider/model override（可选）；
+- `max_rounds` 等预算；
+- writer role 与受限 writer scope。
+
+![Channel setup Plan 显示模板、成员与轮次](assets/kanban-channel-plan.png)
+
+选择方案后点击 `Create & start`。这一个动作原子化执行：
+
+```text
+channel-create-and-start
+-> 创建 Channel
+-> 按模板物化 Members、role context、skills 和权限
+-> 投递触发本次 Plan 的原始用户需求
+-> 启动 discussion
+-> fanout blind replies
+-> relay / critique
+-> synthesis
+```
+
+不再生成第二张 Approve 卡。Channel setup 是 Plan 直接应用的受控例外；浏览器 action
+session/token 仍必须有效。其他高风险动作继续走独立 Approve。
+
+### `Chat about`
+
+`Chat about` 不执行选项，也不丢弃 Plan。它把补充内容发回同一 Kanban Agent session，
+适合调整：
+
+- 讨论轮次；
+- 是否启用可选角色；
+- 关注范围和预期输出；
+- primary provider、模型或预算；
+- writer scope。
+
+Agent 应基于补充信息更新 Plan，而不是让用户改 JSON。
+
+## 3. 内置 Channel 模板
+
+当前内置模板如下，均使用 `fanout_then_synthesis`：
+
+| Template | 默认成员 | Writer |
+|---|---|---|
+| `prd-clarification` | `product_pm`、`arch`、`critic`、`synthesizer`，可选 `security_reviewer` | `product_pm`，默认限 `docs/design/**`、`docs/impl/**` |
+| `research-review` | `researcher`、`arch`、`critic`、`synthesizer` | `researcher`，默认限 research artifacts |
+| `architecture-review` | `arch`、`security_reviewer`、`dev_reviewer`、`critic` | `arch` |
+| `quick-change` | `tech_leader`、`dev_reviewer`、`qa_analyst` | `tech_leader` |
+| `incident-triage` | `tech_leader`、`qa_analyst`，可选 `security_reviewer` | `tech_leader` |
+
+模板不是随意角色字符串集合。required role 不能被关闭；可选角色、backend、model、
+writer、writer scope 和预算只能通过模板允许的 override 修改。非 writer 默认降为
+read-only，避免所有成员同时改 Project。
+
+## 4. 讨论、收敛与继续输入
+
+`fanout_then_synthesis` 分为三段：
+
+1. `phase1_blind`：成员独立回答，避免先入为主；
+2. `phase2_relay`：互相转发、质疑和补证据；
+3. `phase3_synthesis`：模板 synthesizer/default responder 收敛。
+
+完整事件包括 Channel/Member 创建、消息投递、reply request/start/delta/complete、
+discussion phase 和 synthesis refs。可通过 Web、`zf events` 或飞书投影观察。
+
+真实讨论完成后，Channel 保持可交互。人可以在输入框继续追问、补充新需求或要求重开
+讨论，不需要重建 Channel：
+
+![Channel 讨论收敛后的可继续输入状态](assets/kanban-channel-synthesis.png)
+
+PRD Clarification 可以形成 canonical PRD/需求快照，但这仍是协作产物，不是执行 Task。
+需要交付时，在 Kanban Agent 或 Channel 中明确：
+
+```text
+基于当前结论生成一个 Create Task proposal，不要自动启动 Workflow。
+```
+
+确认创建 Task 后，再进入 Task-bound Workflow Plan。PRD 拆分、planning artifact 和
+`task_map` 属于所选 Workflow 的 planning 阶段，不由 Channel 或 Kanban Agent 提前伪造。
+
+## 5. Channel 与 Research Workflow 的区别
+
+`research-review` 是 Channel 模板，用于已有材料的多角色评审或轻量研究讨论。
+它不会隐式点火固定 Research fanout。
+
+真正的 Research Workflow 需要：
+
+1. 一个真实 Task；
+2. 用户明确要求 Research fanout；
+3. 当前 Project 的 `zf workflow routes` 中存在且可用 `research:fixed`；
+4. Kanban Plan 选择 route；
+5. 独立 Approve exact proposal。
+
+固定 Research 角色是
+`source_researcher`、`product_analyst`、`technical_analyst`、`risk_critic` 和
+`synthesizer`：
+
+![Research Workflow 的固定角色与 request surface](assets/research-workflow-surface.png)
+
+Research 输出为 summary、evidence refs、open questions、PRD/Refactor prompt inputs。
+用户随后决定是否创建交付 Task；系统不自动把研究结果变成 PRD Workflow。
+
+## 6. 低层 CLI：向已有 Channel 发消息
+
+稳定 CLI 命令是 `zf channel say`：
 
 ```bash
 zf channel say <channel_id> \
-  --text "评审已通过,请 @dev 合并" \
+  --text "请补充失败场景，并由 @critic 复核。" \
   --member-id reviewer \
-  --mention dev          # 可重复:--mention dev --mention test
+  --mention critic
 ```
 
 | 参数 | 含义 | 默认 |
 |---|---|---|
-| `channel_id` | 目标频道 | (必填) |
-| `--text` | 消息正文 | (必填) |
-| `--member-id` | 以哪个成员身份发(agent 身份) | `agent` |
-| `--mention` | @mention 一个成员,可重复 | 空 |
-| `--state-dir` | 指定运行态目录 | 按 project context 解析 |
+| `channel_id` | 目标 Channel | 必填 |
+| `--text` | 消息正文 | 必填 |
+| `--member-id` | 发言成员身份 | `agent` |
+| `--mention` | @mention 成员，可重复 | 空 |
+| `--state-dir` | 显式运行态目录 | 按 Project context 解析 |
 
-发出后产生一条 `channel.message.posted`;若 `--mention` 命中 agent 成员,会触发其回复流程。
+该命令通过 `channel-post-message` ControlledAction 追加
+`channel.message.posted`，不会直接写 `events.jsonl` 或持有飞书凭证。
 
-## 3. 一次对话的事件链
+`list`、`show`、`invite`、`synth` 尚不是稳定 Channel CLI 子命令。建群、邀请、权限、
+讨论和 synthesis 由 Kanban Plan、Web API 或其他 ControlledAction 入口执行。
 
-用户发言 → @mention 解析 → agent 回复 → 流式增量 → 完成,核心事件
-(全量定义见 `src/zf/runtime/channel_projection.py` `CHANNEL_EVENT_TYPES`):
+## 7. 飞书关联
 
-```mermaid
-sequenceDiagram
-  participant U as 用户(飞书/Web)
-  participant K as Kernel
-  participant A as Agent 成员
-  U->>K: channel.message.posted (role=user, mentions=[dev])
-  K->>K: channel.mention.detected
-  K->>A: channel.agent.reply.requested
-  A-->>K: channel.agent.reply.started
-  A-->>K: channel.message.stream.delta (流式增量)
-  A->>K: channel.agent.reply.completed
-  K->>U: channel.message.posted (role=assistant)
-```
-
-常用观测:
-
-```bash
-zf events --last 50 | grep channel.
-zf channel say ch-zaofu --text "..." --member-id agent   # 也可用于人工补一条
-```
-
-成员生命周期相关事件:`channel.member.invited` / `channel.member.added` /
-`channel.member.connected` / `channel.member.suspended` / `channel.member.removed`。
-
-## 4. 从飞书进 channel
-
-最常见的入口是飞书。在 `zf.yaml` 把一个群绑到 agent,消息就会自动进入一个 channel:
+飞书群可以投递到已有 Channel，也可以路由到 agent 直连会话：
 
 ```yaml
 integrations:
   feishu_routing:
-    oc_<群的_chat_id>:
-      target: agent        # 自动建临时 channel(channel_id = agent-<chat_id>)+ agent 成员
-      backend: codex
-      cwd: /path/to/repo
-      default_member: zf-coder
+    oc_<chat_id>:
+      target: channel
+      channel_id: ch-login-security
 ```
 
-要让一个群投递到**已有**的、可多成员协作的 channel,用 `target: channel` + `channel_id`
-(见 [19](19-feishu-ai-native-direct-bridge.md) §3.1 的 target 对照表)。
+使用 `target: agent` 时，Bridge 会为该 chat 建立对应 agent Channel 会话；使用
+`target: channel` 时，消息进入指定多成员 Channel。入站 intent、按钮批准和出站投影
+仍通过事件/ControlledAction 闭环，不能直接改 Task 或 Workflow canonical state。
 
-## 5. 当前边界(诚实说明)
+完整配置见
+[19 Feishu AI-Native 直连 Bridge](19-feishu-ai-native-direct-bridge.md)。
 
-下列功能**已规划但尚未作为可用功能交付**,本手册不教其用法:
+## 8. 成员与权限值域
 
-- **CLI 只有 `zf channel say`**。`list` / `show` / `invite` / `synth` 等未实现。成员邀请、
-  归档等目前经 ControlledAction / Web API,不是稳定 CLI 面。
-- **多成员编排** —— speaker policy(round-robin / leader-delegation)未实现;
-  **discussion mode 策略层已落地**(2026-07-06 bizsim r4 核实更新):经受控动作
-  `channel-discussion-mode` 可设 `mention_relay`(agent 帖内 @mention 定向转发,
-  relay 深度上限默认 4)或 `fanout_then_synthesis`(三阶段:phase1_blind 盲答 →
-  phase2_relay 互相转发 → phase3_synthesis 收敛)。**默认 `manual_mention` 下
-  agent 回帖不自动扇出**(doc 64 §5 防风暴守卫),事件流表现为
-  `channel.route.blocked: auto_route_not_allowed`——这是设计内行为,不是故障;
-  要 agent 间真实互达必须先设 relay 模式。
-- **channel → workflow 直接点火** —— proposal bridge 已落地，但
-  `channel.synthesis.proposed` 不应无批准直接变成 `workflow.invoke.requested`。
-  readiness 和 Project workflow-submit approval 是刻意保留的安全边界。
-- **provider adapter** —— Codex / Claude-Code 在 channel 内的连接器部分 WIP;
-  `target: agent` 直连回复路径已可用,复杂多 provider 协作未稳定。
+ControlledAction 邀请成员时，常用 `member_type` 包括：
 
-需要这些能力时,先 `grep` 现网符号确认是否已落地,不要照设计文档当成已交付。
+`provider_agent`、`runtime-role`、`human`、`observer`、
+`readonly-reviewer`、`owner_delegate`。
 
-## 成员管理值域(bizsim r4 教育配对)
+常用 `channel_role` 包括：
 
-经受控动作 `channel-invite-member`(POST `/api/projects/<id>/actions/channel-invite-member`)
-邀请成员时,两个枚举字段值域如下——传错会被 422 拒绝,错误信息会回显合法值:
+`product_pm`、`arch`、`critic`、`synthesizer`、`researcher`、
+`security_reviewer`、`dev_reviewer`、`qa_analyst`、`tech_leader`。
 
-- `member_type`:`automation_reporter` / `claude-code` / `codex` / `hermes` /
-  `human` / `observer` / `openclaw` / `owner_delegate` / `persona` /
-  `persona_agent` / `provider_agent` / `readonly-reviewer` / `runtime-role` /
-  `runtime_role_binding`。绑定 zf.yaml 已声明角色用 `runtime-role` +
-  `workflow_role_binding: {"role": "<instance_id>"}`。
-- `channel_role`:`arch` / `automation_reporter` / `critic` / `dev_reviewer` /
-  `facilitator` / `observer` / `owner_delegate` / `product_pm` / `qa_analyst` /
-  `researcher` / `security_reviewer` / `spine_reviewer` / `synthesizer` /
-  `tech_leader`。
+绑定 `zf.yaml` 已声明角色时使用 `runtime-role` 和
+`workflow_role_binding: {"role": "<instance_id>"}`。`skill_refs` 按 Channel
+成员的字面 skill path 物化，不复用 Workflow role 的 skill-pool 冲突消解。
 
-示例(绑定 prd-author 角色为产品视角参与者):
+权限、writer role 与 scope 必须由模板或 token-gated action 校验。即使宿主以
+danger-full-access 启动，也不代表每个 Channel 成员自动获得 Project 写权限。
 
-```json
-{"channel_id": "ch-demo", "member_id": "prd-author",
- "backend": "codex", "member_type": "runtime-role",
- "channel_role": "product_pm",
- "skill_refs": ["zf-channel-discussion-participant"],
- "workflow_role_binding": {"role": "prd-author"}}
+## 9. 观测与故障定位
+
+```bash
+zf events --last 100 | grep channel.
+zf status --workers
 ```
 
-`skill_refs` 会按字面路径物化 `skills/<name>/SKILL.md` 给成员会话
-(与 roles 的 skills 解析不同,不走 skill pool 冲突消解)。
+重点检查：
+
+- `channel.created` 与预期 template digest；
+- required Members 是否全部 added/connected；
+- 原始需求是否只有一次 `channel.message.posted`；
+- discussion 是否进入预期 phase；
+- synthesis artifact/ref 是否落地；
+- 重试是否因 idempotency key 复用同一 Channel，而不是重复建群；
+- provider 登录、预算和 writer scope 是否阻断成员回复。
 
 ## 相关
 
-- [19 Feishu AI-Native 直连 Bridge](19-feishu-ai-native-direct-bridge.md) — 入站绑定与 target 类型
-- [架构总览](architecture.md) — 事件溯源与三层架构的整体模型
+- [01 快速开始](01-quickstart.md)
+- [20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
+- [19 Feishu AI-Native 直连 Bridge](19-feishu-ai-native-direct-bridge.md)
+- [`zf.yaml` 控制面与运行态](02-zf-yaml-control-plane.md)

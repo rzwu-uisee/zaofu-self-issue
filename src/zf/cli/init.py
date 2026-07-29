@@ -57,8 +57,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--notes",
         default="",
-        help="Operator notes / conventions to append into project CLAUDE.md "
-             "(same path as Web New Project 'description').",
+        help="Claude-specific operator notes / conventions appended to CLAUDE.md",
+    )
+    parser.add_argument(
+        "--stack",
+        default="",
+        choices=["python", "node", "go", "rust"],
+        help="Declare the project stack when it cannot be detected from repository files",
+    )
+    parser.add_argument(
+        "--surface",
+        default="",
+        choices=["", "backend", "frontend", "fullstack", "library"],
+        help="Optional surface override for a declared stack",
     )
     parser.add_argument(
         "--no-git-hooks",
@@ -97,6 +108,8 @@ def run(args: argparse.Namespace) -> int:
             create_root=bool(getattr(args, "create", False)),
             workspace_register=workspace_register,
             notes=str(getattr(args, "notes", "") or ""),
+            instruction_stack=str(getattr(args, "stack", "") or ""),
+            instruction_surface=str(getattr(args, "surface", "") or ""),
         )
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)

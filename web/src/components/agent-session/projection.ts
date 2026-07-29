@@ -1,6 +1,6 @@
 import type { EventRecord } from "../../api/types.js";
 import type {
-  AgentConversation, AgentSessionActionProposal, AgentSessionCard, AgentSessionPart, AgentSessionRun,
+  AgentConversation, AgentSessionActionProposal, AgentSessionCard, AgentSessionPart, AgentSessionPlanRequest, AgentSessionRun,
   AgentSessionThread, AgentSessionThreadRef, AgentSessionTurn,
 } from "./types.js";
 import {
@@ -9,7 +9,10 @@ import {
   agentToolTitle,
   eventSourceRefs,
   parseActionProposal,
+  parsePlanRequest,
+  parsePlanResponse,
 } from "./agentUiEvent.js";
+import { actionPresentation } from "./actionPresentation.js";
 
 function textValue(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -56,6 +59,59 @@ function proposalDisplayAnswer(answer: string, proposal: AgentSessionActionPropo
   const start = visible.indexOf("{");
   const end = visible.lastIndexOf("}");
   if (start >= 0 && end > start && matchesProposalEnvelope(visible.slice(start, end + 1))) {
+    visible = `${visible.slice(0, start)}${visible.slice(end + 1)}`.trim();
+  }
+  return visible.replace(/\n{3,}/g, "\n\n");
+}
+
+function planDisplayAnswer(answer: string, request: AgentSessionPlanRequest): string {
+  const matchesPlanEnvelope = (candidate: string): boolean => {
+    try {
+      const decoded = recordValue(JSON.parse(candidate));
+      const envelope = recordValue(decoded?.plan_request ?? decoded?.input_request);
+      if (!envelope) return false;
+      const requestId = textValue(envelope.request_id).trim();
+      const question = textValue(envelope.question).trim();
+      const rawQuestions = Array.isArray(envelope.questions)
+        ? envelope.questions.flatMap((item) => {
+          const row = recordValue(item);
+          if (!row) return [];
+          return [{
+            id: textValue(row.id || row.question_id).trim(),
+            question: textValue(row.question || row.text).trim(),
+          }];
+        })
+        : [];
+      const requestQuestions = request.questions?.length
+        ? request.questions
+        : [{
+          id: request.questionId,
+          question: request.question,
+        }];
+      return Boolean(
+        (requestId && requestId === request.requestId)
+        || (question && question === request.question)
+        || rawQuestions.some((candidate) => requestQuestions.some(
+          (expected) => (
+            (candidate.id && candidate.id === expected.id)
+            || (
+              candidate.question
+              && candidate.question === expected.question
+            )
+          ),
+        )),
+      );
+    } catch {
+      return false;
+    }
+  };
+  let visible = answer.replace(/```(?:json)?\s*([\s\S]*?)```/gi, (block, body: string) => (
+    matchesPlanEnvelope(body.trim()) ? "" : block
+  )).trim();
+  if (!visible || matchesPlanEnvelope(visible)) return "";
+  const start = visible.indexOf("{");
+  const end = visible.lastIndexOf("}");
+  if (start >= 0 && end > start && matchesPlanEnvelope(visible.slice(start, end + 1))) {
     visible = `${visible.slice(0, start)}${visible.slice(end + 1)}`.trim();
   }
   return visible.replace(/\n{3,}/g, "\n\n");
@@ -274,10 +330,13 @@ function finalizeThreads(threads: Map<string, AgentSessionThread>, activeThreadI
   const out = [...threads.values()];
   for (const thread of out) {
     const runs = thread.turns.flatMap((turn) => turn.runs);
+    const hasPendingPlan = thread.turns.some((turn) => (
+      turn.cards.some((card) => card.kind === "plan" && card.status === "waiting_input")
+    ));
     const activeRun = [...runs].reverse().find((run) => run.status === "streaming" || run.status === "submitted");
     const failedRun = [...runs].reverse().find((run) => run.status === "failed");
     thread.activeRunId = activeRun?.id;
-    thread.status = activeRun ? "streaming" : failedRun ? "failed" : runs.some((run) => run.status === "completed") ? "completed" : "idle";
+    thread.status = activeRun ? "streaming" : hasPendingPlan ? "waiting_input" : failedRun ? "failed" : runs.some((run) => run.status === "completed") ? "completed" : "idle";
     thread.unseenCount = thread.id !== activeThreadId && ["streaming", "waiting_input", "queued", "failed"].includes(thread.status) ? 1 : 0;
     thread.updatedAt = [...thread.turns].reverse().find((turn) => turn.ts)?.ts || thread.updatedAt;
     for (const run of runs) {
@@ -328,6 +387,54 @@ export function buildKanbanConversation(args: {
     if (leftSeq !== rightSeq) return leftSeq - rightSeq;
     return String(left.ts || "").localeCompare(String(right.ts || ""));
   });
+  const planResponsesByEvent = new Map<string, ReturnType<typeof parsePlanResponse>>();
+  const planResponsesByRevision = new Map<string, ReturnType<typeof parsePlanResponse>>();
+  const planAnswerEventIds = new Set<string>();
+  const latestPlanRevisions = new Map<string, number>();
+  const proposalResolutions = new Map<string, string>();
+  for (const event of accepted) {
+    if (event.type === "kanban.agent.plan.answered") {
+      const response = parsePlanResponse(event.payload ?? {}, textValue(event.id));
+      if (!response) continue;
+      if (event.id) planAnswerEventIds.add(event.id);
+      planResponsesByEvent.set(response.requestEventId, response);
+      planResponsesByRevision.set(
+        `${response.requestId}:${response.revision}`,
+        response,
+      );
+    } else if (
+      event.type === "kanban.agent.reply"
+      || event.type === "kanban.agent.plan.requested"
+    ) {
+      const request = parsePlanRequest(event.payload ?? {});
+      if (request) {
+        latestPlanRevisions.set(
+          request.requestId,
+          Math.max(
+            request.revision,
+            latestPlanRevisions.get(request.requestId) ?? 0,
+          ),
+        );
+      }
+    } else if (
+      event.type === "kanban.agent.proposal.resolved"
+      || event.type === "operator.action.resolved"
+    ) {
+      const proposalEventId = textValue(event.payload?.proposal_event_id).trim();
+      if (proposalEventId) {
+        proposalResolutions.set(
+          proposalEventId,
+          textValue(event.payload?.resolution || "resolved"),
+        );
+      }
+    } else if (event.type === "task.created") {
+      const request = recordValue(event.payload?.request);
+      const proposalEventId = textValue(
+        event.payload?.proposal_event_id || request?.proposal_event_id,
+      ).trim();
+      if (proposalEventId) proposalResolutions.set(proposalEventId, "executed");
+    }
+  }
   for (const event of accepted) {
     const payload = event.payload ?? {};
     const payloadBackend = canonicalBackend(payload.backend);
@@ -347,14 +454,129 @@ export function buildKanbanConversation(args: {
       if (payload.target !== "kanban-agent" || payload.runtime_delivery !== "headless") continue;
       const thread = ensureThread(threads, threadId);
       const turn = ensureTurn(thread, textValue(event.id || event.seq), event.ts);
-      turn.user = {
-        id: textValue(event.id || event.seq),
-        role: "user",
-        label: "You",
-        content: textValue(payload.message),
-        ts: event.ts,
-        sourceEvent: event,
-      };
+      const actionRequest = recordValue(payload.request);
+      const internalPlanResponse = (
+        recordValue(actionRequest?.plan_response)
+        || planAnswerEventIds.has(textValue(event.causation_id))
+      );
+      const internalPermissionRetry = Boolean(payload.permission_escalation_retry_for);
+      if (!internalPlanResponse && !internalPermissionRetry) {
+        turn.user = {
+          id: textValue(event.id || event.seq),
+          role: "user",
+          label: "You",
+          content: textValue(payload.message),
+          ts: event.ts,
+          sourceEvent: event,
+        };
+      }
+      thread.updatedAt = event.ts;
+      continue;
+    }
+    if (event.type === "kanban.agent.plan.requested") {
+      const planRequest = parsePlanRequest(payload);
+      if (!planRequest) continue;
+      const rawRequest = (
+        recordValue(payload.plan_request)
+        || recordValue(payload.request)
+        || {}
+      );
+      const planTurnId = textValue(rawRequest.turn_id).trim();
+      const originatingMessageEventId = textValue(
+        rawRequest.originating_message_event_id,
+      ).trim();
+      const thread = ensureThread(threads, threadId);
+      const turn = ensureTurn(
+        thread,
+        originatingMessageEventId
+          || turnToMessage.get(planTurnId)
+          || `plan-${planRequest.requestEventId}`,
+        event.ts,
+      );
+      const run = ensureRun(
+        turn,
+        planTurnId || `plan-${planRequest.requestEventId}`,
+        {
+          provider: canonicalBackend(planRequest.backend) || backendFilter,
+          providerSessionId: planRequest.providerSessionId,
+          status: "completed",
+          updatedAt: event.ts,
+        },
+      );
+      const response = (
+        planResponsesByEvent.get(planRequest.requestEventId)
+        ?? planResponsesByRevision.get(
+          `${planRequest.requestId}:${planRequest.revision}`,
+        )
+        ?? undefined
+      );
+      addCard(turn, {
+        id: `plan-${planRequest.requestEventId}`,
+        kind: "plan",
+        title: planRequest.header,
+        body: planRequest.reason,
+        status: response
+          ? "completed"
+          : planRequest.revision < (
+            latestPlanRevisions.get(planRequest.requestId) ?? 0
+          )
+            ? "stale"
+            : planRequest.valid
+              ? "waiting_input"
+              : "failed",
+        runId: run.id,
+        threadId: thread.id,
+        actionLabel: planRequest.submitLabel || "Continue",
+        planRequest: {
+          ...planRequest,
+          response,
+        },
+        refs: eventSourceRefs(event, recordValue(payload.refs)),
+      });
+      thread.updatedAt = event.ts;
+      continue;
+    }
+    if (
+      event.type === "kanban.agent.action.proposed"
+      || event.type === "operator.action.proposed"
+    ) {
+      const proposal = parseActionProposal(payload);
+      if (!proposal) continue;
+      const proposalTurnId = textValue(payload.turn_id).trim();
+      const thread = ensureThread(threads, threadId);
+      const turn = ensureTurn(
+        thread,
+        turnToMessage.get(proposalTurnId)
+          || `proposal-${proposal.proposalEventId || event.id}`,
+        event.ts,
+      );
+      const run = ensureRun(
+        turn,
+        proposalTurnId || `proposal-${proposal.proposalEventId || event.id}`,
+        {
+          provider: payloadBackend || backendFilter,
+          status: "completed",
+          updatedAt: event.ts,
+        },
+      );
+      const resolution = proposalResolutions.get(
+        proposal.proposalEventId || "",
+      );
+      const presentation = actionPresentation(proposal.action);
+      run.proposal = proposal;
+      addCard(turn, {
+        id: `proposal-${proposal.proposalEventId || run.id}`,
+        kind: "approve",
+        title: presentation.title,
+        body: proposal.reason,
+        status: resolution ? "completed" : "waiting_input",
+        runId: run.id,
+        threadId: thread.id,
+        actionLabel: "Approve",
+        proposal,
+        payload: resolution ? { resolution } : undefined,
+        refs: eventSourceRefs(event, recordValue(payload.refs)),
+      });
       thread.updatedAt = event.ts;
       continue;
     }
@@ -416,8 +638,8 @@ export function buildKanbanConversation(args: {
         if (uiDeltaKind(payload) === "question") {
           addCard(turn, {
             id: `question-${run.id}-${event.seq ?? turn.cards.length + 1}`,
-            kind: "question",
-            title: "Agent needs input",
+            kind: "plan",
+            title: "Plan",
             body: uiDeltaContent(payload),
             status: "waiting_input",
             runId: run.id,
@@ -435,10 +657,29 @@ export function buildKanbanConversation(args: {
       run.providerSessionId = textValue(payload.provider_session_id) || run.providerSessionId;
       run.usage = recordValue(payload.usage) ?? undefined;
       const proposal = parseActionProposal(payload);
+      const parsedPlanRequest = parsePlanRequest(payload);
+      const planSuperseded = Boolean(
+        parsedPlanRequest
+        && parsedPlanRequest.revision < (
+          latestPlanRevisions.get(parsedPlanRequest.requestId) ?? 0
+        ),
+      );
+      const planRequest = parsedPlanRequest ? {
+        ...parsedPlanRequest,
+        response: (
+          planResponsesByEvent.get(parsedPlanRequest.requestEventId)
+          ?? planResponsesByRevision.get(
+            `${parsedPlanRequest.requestId}:${parsedPlanRequest.revision}`,
+          )
+          ?? undefined
+        ),
+      } : undefined;
       const rawAnswer = textValue(payload.answer || payload.error).trim();
-      const answer = proposal && !payload.error
+      const answer = !payload.error && proposal
         ? proposalDisplayAnswer(rawAnswer, proposal)
-        : rawAnswer;
+        : !payload.error && planRequest
+          ? planDisplayAnswer(rawAnswer, planRequest)
+          : rawAnswer;
       if (answer) {
         upsertPart(run, {
           id: payload.error ? "text-error" : "text",
@@ -454,17 +695,41 @@ export function buildKanbanConversation(args: {
           refs: eventSourceRefs(event, recordValue(payload.refs)),
         });
       }
-      if (proposal) {
-        run.proposal = proposal;
+      if (planRequest) {
         addCard(turn, {
-          id: `proposal-${run.id}`,
-          kind: "proposal",
-          title: proposal.action === "create-task" ? "Create task proposal" : "Action proposal",
-          body: proposal.reason,
+          id: `plan-${planRequest.requestEventId}`,
+          kind: "plan",
+          title: planRequest.header,
+          body: planRequest.reason,
+          status: planRequest.response
+            ? "completed"
+            : planSuperseded
+              ? "stale"
+            : planRequest.valid
+              ? "waiting_input"
+              : "failed",
           runId: run.id,
           threadId: thread.id,
-          actionLabel: proposal.action === "create-task" ? "Create Task" : "Run action",
+          actionLabel: planRequest.submitLabel || "Continue",
+          planRequest,
+          refs: eventSourceRefs(event, recordValue(payload.refs)),
+        });
+      }
+      if (proposal) {
+        const resolution = proposalResolutions.get(proposal.proposalEventId || "");
+        const presentation = actionPresentation(proposal.action);
+        run.proposal = proposal;
+        addCard(turn, {
+          id: `proposal-${proposal.proposalEventId || run.id}`,
+          kind: "approve",
+          title: presentation.title,
+          body: proposal.reason,
+          status: resolution ? "completed" : "waiting_input",
+          runId: run.id,
+          threadId: thread.id,
+          actionLabel: "Approve",
           proposal,
+          payload: resolution ? { resolution } : undefined,
           refs: eventSourceRefs(event, recordValue(payload.refs)),
         });
       }

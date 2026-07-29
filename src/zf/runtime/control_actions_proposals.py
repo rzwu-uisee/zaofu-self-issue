@@ -8,7 +8,12 @@ from zf.core.events import ZfEvent
 from zf.core.state.locks import locked_path
 from zf.runtime.action_orchestrator import ControlledActionOrchestrator
 from zf.runtime.control_actions_helpers import _task_id_from_payload
-from zf.runtime.kanban_proposals import proposal_execution_gate
+from zf.runtime.kanban_proposals import (
+    LEGACY_PROPOSAL_EVENT,
+    LEGACY_PROPOSAL_RESOLVED_EVENT,
+    PROPOSAL_RESOLVED_EVENT,
+    proposal_execution_gate,
+)
 
 
 class ProposalExecutionActionsMixin:
@@ -122,26 +127,39 @@ class ProposalExecutionActionsMixin:
             and bool(result.get("ok"))
             and action not in {"create-task", "kanban-proposal-dismiss"}
         ):
+            resolution_event_type = (
+                LEGACY_PROPOSAL_RESOLVED_EVENT
+                if str(proposal_gate.get("proposal_event_type") or "")
+                == LEGACY_PROPOSAL_EVENT
+                else PROPOSAL_RESOLVED_EVENT
+            )
+            resolution_payload = {
+                **dict(proposal_gate.get("proposal_context") or {}),
+                "proposal_event_id": proposal_event_id,
+                "resolution": "executed",
+                "action": action,
+                "proposal_id": str(
+                    proposal_gate.get("proposal_id") or ""
+                ),
+                "proposal_digest": str(
+                    proposal_gate.get("proposal_digest") or ""
+                ),
+                "revision": int(
+                    proposal_gate.get("revision") or 1
+                ),
+                "source": self.source,
+            }
             self.writer.emit(
-                "kanban.agent.proposal.resolved",
+                resolution_event_type,
                 actor=self.actor,
+                task_id=(
+                    str(proposal_gate.get("task_id") or "").strip()
+                    or _task_id_from_payload(payload)
+                    or None
+                ),
                 causation_id=requested.id,
                 correlation_id=requested.correlation_id,
-                payload={
-                    "proposal_event_id": proposal_event_id,
-                    "resolution": "executed",
-                    "action": action,
-                    "proposal_id": str(
-                        proposal_gate.get("proposal_id") or ""
-                    ),
-                    "proposal_digest": str(
-                        proposal_gate.get("proposal_digest") or ""
-                    ),
-                    "revision": int(
-                        proposal_gate.get("revision") or 1
-                    ),
-                    "source": self.source,
-                },
+                payload=resolution_payload,
             )
         return result
 

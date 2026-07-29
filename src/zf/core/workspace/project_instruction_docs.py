@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from zf.core.agents_md import render_canonical_block, replace_managed_block
 from zf.core.config.schema import ZfConfig
+from zf.core.profile.apply import (
+    PROFILE_BLOCK_END,
+    PROFILE_BLOCK_START,
+    render_stack_section,
+)
+from zf.core.profile.detector import declared_profile, detect
+from zf.core.profile.schema import ProjectProfile
+
+
+PROJECT_CONTEXT_BLOCK_START = "<!-- ZF:PROJECT-CONTEXT:START -->"
+PROJECT_CONTEXT_BLOCK_END = "<!-- ZF:PROJECT-CONTEXT:END -->"
+_KERNEL_BLOCK_START = "<!-- ZF:START -->"
 
 
 @dataclass(frozen=True)
@@ -14,6 +27,7 @@ class ProjectInstructionDocsResult:
     created: tuple[str, ...] = ()
     updated: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    profile: dict[str, Any] = field(default_factory=dict)
 
 
 def ensure_project_instruction_docs(
@@ -21,11 +35,21 @@ def ensure_project_instruction_docs(
     *,
     config: ZfConfig | None,
     state_dir: Path,
+    stack: str = "",
+    surface: str = "",
 ) -> ProjectInstructionDocsResult:
     """Create or refresh root AGENTS.md / CLAUDE.md for a ZaoFu project."""
     root = Path(project_root).resolve()
     project_name = config.project.name if config is not None else root.name
+    project_description = (
+        config.project.description if config is not None else ""
+    )
     state_ref = _display_state_dir(root, state_dir)
+    profile = (
+        declared_profile(stack, surface)
+        if stack
+        else detect(root)
+    )
 
     created: list[str] = []
     updated: list[str] = []
@@ -35,8 +59,10 @@ def ensure_project_instruction_docs(
     agents_created, agents_updated = _ensure_agents_md(
         agents_path,
         project_name=project_name,
+        project_description=project_description,
         state_ref=state_ref,
         config=config,
+        profile=profile,
     )
     if agents_created:
         created.append("AGENTS.md")
@@ -59,6 +85,7 @@ def ensure_project_instruction_docs(
         created=tuple(created),
         updated=tuple(updated),
         skipped=tuple(skipped),
+        profile=profile.to_dict(),
     )
 
 
@@ -116,12 +143,38 @@ def render_project_claude_md(*, project_name: str, state_ref: str) -> str:
 """
 
 
+def render_project_context_section(
+    *,
+    project_name: str,
+    project_description: str,
+) -> str:
+    """Render durable, provider-neutral Project context for coding agents."""
+
+    lines = [
+        PROJECT_CONTEXT_BLOCK_START,
+        "## Project Context (managed by ZaoFu)",
+        "",
+        f"- 项目名: `{project_name}`",
+    ]
+    description = _escape_instruction_markers(project_description.strip())
+    if description:
+        lines.extend(["", "### 背景与目标", ""])
+        lines.extend(
+            ">" if not line else f"> {line}"
+            for line in description.splitlines()
+        )
+    lines.append(PROJECT_CONTEXT_BLOCK_END)
+    return "\n".join(lines)
+
+
 def _ensure_agents_md(
     path: Path,
     *,
     project_name: str,
+    project_description: str,
     state_ref: str,
     config: ZfConfig | None,
+    profile: ProjectProfile,
 ) -> tuple[bool, bool]:
     existed = path.exists()
     current = path.read_text(encoding="utf-8") if existed else ""
@@ -129,14 +182,63 @@ def _ensure_agents_md(
         project_name=project_name,
         state_ref=state_ref,
     )
-    updated = replace_managed_block(
+    updated = _replace_instruction_section(
         base,
+        start=PROJECT_CONTEXT_BLOCK_START,
+        end=PROJECT_CONTEXT_BLOCK_END,
+        section=render_project_context_section(
+            project_name=project_name,
+            project_description=project_description,
+        ),
+    )
+    if profile.languages or profile.confidence == "declared":
+        updated = _replace_instruction_section(
+            updated,
+            start=PROFILE_BLOCK_START,
+            end=PROFILE_BLOCK_END,
+            section=render_stack_section(profile),
+        )
+    updated = replace_managed_block(
+        updated,
         render_canonical_block(config=config).rstrip("\n"),
     )
     if updated == current:
         return False, False
     path.write_text(updated, encoding="utf-8")
     return (not existed), existed
+
+
+def _replace_instruction_section(
+    text: str,
+    *,
+    start: str,
+    end: str,
+    section: str,
+) -> str:
+    start_count = text.count(start)
+    end_count = text.count(end)
+    if start_count != end_count or start_count > 1:
+        raise ValueError(f"malformed managed instruction section: {start}")
+    if start_count == 1:
+        before, remainder = text.split(start, 1)
+        _, after = remainder.split(end, 1)
+        return f"{before.rstrip()}\n\n{section}\n\n{after.lstrip()}".rstrip() + "\n"
+    if _KERNEL_BLOCK_START in text:
+        before, after = text.split(_KERNEL_BLOCK_START, 1)
+        return (
+            f"{before.rstrip()}\n\n{section}\n\n"
+            f"{_KERNEL_BLOCK_START}{after}"
+        )
+    separator = "\n\n" if text.strip() else ""
+    return f"{text.rstrip()}{separator}{section}\n"
+
+
+def _escape_instruction_markers(value: str) -> str:
+    return (
+        value
+        .replace(PROJECT_CONTEXT_BLOCK_START, "&lt;!-- ZF:PROJECT-CONTEXT:START --&gt;")
+        .replace(PROJECT_CONTEXT_BLOCK_END, "&lt;!-- ZF:PROJECT-CONTEXT:END --&gt;")
+    )
 
 
 def _display_state_dir(project_root: Path, state_dir: Path) -> str:

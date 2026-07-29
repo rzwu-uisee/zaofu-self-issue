@@ -8,6 +8,7 @@ allowlist + respawn 熔断登记读取。verbatim,零裁决 —— 裁决(respaw
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from zf.core.events.model import ZfEvent
 from zf.runtime.owner_channel_liveness import (
@@ -16,6 +17,9 @@ from zf.runtime.owner_channel_liveness import (
     channel_liveness,
 )
 from zf.runtime.remediation_cascade import SAFE_HALTED_EVENT
+
+if TYPE_CHECKING:
+    from zf.core.config.schema import RoleConfig
 
 
 class LifecycleLivenessEvidenceMixin:

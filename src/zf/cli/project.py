@@ -16,11 +16,10 @@ from zf.core.config.loader import ConfigError
 from zf.core.config.backend_identity import canonical_backend_id
 from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.core.workspace.project_initializer import ProjectInitializer
+from zf.core.workspace.project_admission import normalize_new_project_metadata
 from zf.core.workflow.request_policy import default_lanes_for_kind
 from zf.cli.flow import (
     _git_is_work_tree,
-    apply_flow_submit,
-    build_flow_intake,
     draft_flow_spec,
     draft_multi_kind_project_spec,
 )
@@ -32,6 +31,8 @@ from zf.runtime.project_spine_review import (
     resolve_spine_review_context,
     write_spine_review_artifact,
 )
+from zf.runtime.workflow_delivery import apply_flow_submit
+from zf.runtime.workflow_intake import build_flow_intake
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -55,6 +56,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     init.add_argument("--name", required=True)
+    init.add_argument(
+        "--description",
+        default="",
+        help="Project background and goal persisted into zf.yaml and AGENTS.md",
+    )
     init.add_argument("--root", type=Path, default=Path("."))
     init.add_argument("--from", dest="source_ref", default="")
     init.add_argument("--objective", default="")
@@ -66,6 +72,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     init.add_argument("--source-root", default="")
     init.add_argument("--target", "--target-root", dest="target_root", default="")
     init.add_argument("--backend", default="codex")
+    init.add_argument(
+        "--verify-backend",
+        default="",
+        help="Optional secondary provider used by independent verify lanes",
+    )
+    init.add_argument(
+        "--stack",
+        default="",
+        choices=["python", "node", "go", "rust"],
+        help="Declare the project stack when repository detection has no signal",
+    )
+    init.add_argument(
+        "--surface",
+        default="",
+        choices=["", "backend", "frontend", "fullstack", "library"],
+        help="Optional surface override for a declared stack",
+    )
     init.add_argument("--lanes", type=int, default=0)
     init.add_argument("--state-dir", default="")
     init.add_argument("--strictness", default="standard")
@@ -89,8 +112,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     init.add_argument("--skip-instruction-docs", action="store_true")
     init.add_argument(
         "--notes", default="",
-        help="Operator notes / conventions appended into project CLAUDE.md "
-             "(same shared path as Web New Project 'description').",
+        help="Claude-specific operator notes / conventions appended to CLAUDE.md",
     )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_run_project_init)
@@ -148,12 +170,16 @@ def init_flow_project(
     kind: str,
     name: str,
     project_root: Path,
+    description: str = "",
     source_ref: str = "",
     objective: str = "",
     request_kind: str = "auto",
     source_root: str = "",
     target_root: str = "",
     backend: str = "codex",
+    verify_backend: str = "",
+    stack: str = "",
+    surface: str = "",
     lanes: int = 0,
     state_dir: str = "",
     strictness: str = "standard",
@@ -184,6 +210,9 @@ def init_flow_project(
     if kind not in {"multi", "issue", "prd", "refactor"}:
         raise ValueError("kind must be one of multi, issue, prd, refactor")
     backend = canonical_backend_id(backend)
+    verify_backend = canonical_backend_id(verify_backend)
+    if verify_backend == backend:
+        verify_backend = ""
     has_request_input = bool(
         str(objective or "").strip()
         or str(source_ref or "").strip()
@@ -192,6 +221,11 @@ def init_flow_project(
     if apply_request and not has_request_input:
         raise ValueError("--apply requires --objective, --from, or --open-question")
     project_root = project_root.expanduser().resolve()
+    name, description = normalize_new_project_metadata(
+        root=project_root,
+        name=name,
+        description=description,
+    )
     if create_root:
         project_root.mkdir(parents=True, exist_ok=True)
     elif not project_root.exists():
@@ -254,8 +288,10 @@ def init_flow_project(
     if kind == "multi":
         docs = draft_multi_kind_project_spec(
             backend=backend,
+            verify_backend=verify_backend,
             lanes=lanes,
             project_name=name,
+            project_description=description,
             state_dir=state_dir,
             project_root=project_root,
             strictness=strictness,
@@ -268,8 +304,10 @@ def init_flow_project(
             source_root=source_root,
             target_root=config_target_root,
             backend=backend,
+            verify_backend=verify_backend,
             lanes=lanes or _default_project_lanes(kind),
             project_name=name,
+            project_description=description,
             state_dir=state_dir,
             project_root=project_root,
             strictness=strictness,
@@ -288,6 +326,8 @@ def init_flow_project(
         with_instruction_docs=with_instruction_docs,
         workspace_register=workspace_register,
         notes=notes,
+        instruction_stack=stack,
+        instruction_surface=surface,
     )
     request_result: dict[str, Any] = {}
     submit_result: dict[str, Any] = {}
@@ -323,6 +363,7 @@ def init_flow_project(
         )
     if created_git_repo:
         _create_initial_project_commit(project_root, state_dir=result.state_dir)
+    git_head = _project_git_head(project_root)
     if apply_request:
         submit_result = apply_flow_submit(
             config_path=yaml_path,
@@ -350,6 +391,15 @@ def init_flow_project(
         "ok": True,
         "kind": kind,
         "project_name": name,
+        "project_metadata": {
+            "name": name,
+            "description": description,
+        },
+        "provider_policy": {
+            "primary_backend": backend,
+            "mixed_enabled": bool(verify_backend),
+            "verify_backend": verify_backend,
+        },
         "project_root": str(project_root),
         "config_ref": str(yaml_path),
         "state_dir": str(result.state_dir),
@@ -360,6 +410,20 @@ def init_flow_project(
         "request": request_result,
         "submit": submit_result,
         "materialized_assets": materialized_assets,
+        "instruction_docs": {
+            "created": list(result.instruction_docs.created),
+            "updated": list(result.instruction_docs.updated),
+            "skipped": list(result.instruction_docs.skipped),
+            "profile": result.instruction_docs.profile,
+        },
+        "git_hook": result.git_hook_status,
+        "setup_suggestion": result.setup_suggestion or None,
+        "notes": result.notes_applied or None,
+        "git_readiness": {
+            "created": created_git_repo,
+            "head": git_head,
+            "ready": bool(git_head),
+        },
         "readiness": {
             "launch_ready": launch_ready,
             "missing_required_fields": missing_fields,
@@ -396,6 +460,18 @@ def _git_work_tree_is_root(root: Path) -> bool:
     if proc.returncode != 0:
         return False
     return Path(proc.stdout.strip()).resolve() == root.resolve()
+
+
+def _project_git_head(root: Path) -> str:
+    if not _git_work_tree_is_root(root):
+        return ""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
 def _localize_request_source(
@@ -489,12 +565,16 @@ def _run_project_init(args: argparse.Namespace) -> int:
             kind=args.kind,
             name=args.name,
             project_root=args.root,
+            description=args.description,
             source_ref=args.source_ref,
             objective=args.objective,
             request_kind=args.request_kind,
             source_root=args.source_root,
             target_root=args.target_root,
             backend=args.backend,
+            verify_backend=args.verify_backend,
+            stack=args.stack,
+            surface=args.surface,
             lanes=args.lanes,
             state_dir=args.state_dir,
             strictness=args.strictness,

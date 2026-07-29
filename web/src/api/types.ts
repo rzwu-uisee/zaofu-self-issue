@@ -1472,7 +1472,8 @@ export interface ChannelSummary {
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
   discussions?: Record<string, Record<string, unknown>>;
-  open_questions?: Record<string, Record<string, unknown>>;
+  open_questions?: Array<Record<string, unknown>> | Record<string, Record<string, unknown>>;
+  consensus?: Record<string, Record<string, unknown>>;
   reply_requests?: Array<Record<string, unknown>>;
   provider_runs?: Array<Record<string, unknown>>;
   agent_session_runs?: Array<Record<string, unknown>>;
@@ -2050,7 +2051,7 @@ export interface ChannelDetail extends ChannelSummary {
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
   discussions?: Record<string, Record<string, unknown>>;
-  open_questions?: Record<string, Record<string, unknown>>;
+  open_questions?: Array<Record<string, unknown>> | Record<string, Record<string, unknown>>;
   reply_requests?: Array<Record<string, unknown>>;
   provider_runs?: Array<Record<string, unknown>>;
   agent_session_runs?: Array<Record<string, unknown>>;
@@ -2143,6 +2144,7 @@ export interface Snapshot {
   project: {
     project_id?: string;
     name?: string;
+    description?: string;
     root: string;
     state_dir: string;
   };
@@ -2525,6 +2527,9 @@ export interface OnboardingStatus {
   skipped: boolean;
   step: number;
   backend: string;
+  primary_backend: string;
+  mixed_enabled: boolean;
+  mixed_available: boolean;
   notifications: string;
   backends: OnboardingBackend[];
   preflight: Array<{ name: string; ok: boolean; detail: string }>;

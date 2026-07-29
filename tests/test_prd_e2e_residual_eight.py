@@ -142,6 +142,7 @@ def test_e2_submit_payload_carries_manifest_objective(tmp_path: Path, monkeypatc
     import json
 
     from zf.cli import flow as flow_cli
+    from zf.runtime import workflow_delivery
 
     # 最小 manifest + intake
     manifest = {"request_id": "wfint-x", "kind": "prd",
@@ -165,9 +166,9 @@ def test_e2_submit_payload_carries_manifest_objective(tmp_path: Path, monkeypatc
     )
     mpath = tmp_path / "workflow-input-manifest.json"
     mpath.write_text(json.dumps(manifest), encoding="utf-8")
-    monkeypatch.setattr(flow_cli, "_load_manifest_for_intake",
+    monkeypatch.setattr(workflow_delivery, "_load_manifest_for_intake",
                         lambda p: (mpath, manifest))
-    monkeypatch.setattr(flow_cli, "build_flow_preflight_report",
+    monkeypatch.setattr(workflow_delivery, "build_flow_preflight_report",
                         lambda *a, **kw: {"status": "PASS", "blockers": [],
                                           "flow_kind": "prd"})
     preview = flow_cli.build_flow_submit_preview(

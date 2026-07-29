@@ -488,6 +488,10 @@ def render_stack_section(profile: ProjectProfile) -> str:
             f"- `{u.root}` — {u.language}{fw} · {u.surface}"
             f"{' · 有测试' if u.has_tests else ''}"
         )
+        if u.build_cmd:
+            lines.append(f"  - build: `{u.build_cmd}`")
+        if u.test_cmd:
+            lines.append(f"  - test: `{u.test_cmd}`")
     if profile.all_gate_cmds:
         lines.append("")
         lines.append(f"- 建议 gate: {', '.join(profile.all_gate_cmds)}")

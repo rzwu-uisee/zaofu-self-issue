@@ -62,12 +62,12 @@ def unclaimed_warnings(
     # A workflow invoke bootstrap task is a kernel-owned fanout anchor, not a
     # worker-owned unit of work.  Its children carry the actual dispatches;
     # warning on the anchor creates a false SLA escalation for healthy runs.
-    from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
+    from zf.runtime.workflow_anchor import is_workflow_dispatch_managed_task
 
     ordinary_task_ids = {
         str(getattr(task, "id", "") or "")
         for task in tasks
-        if not is_workflow_fanout_anchor_task(task)
+        if not is_workflow_dispatch_managed_task(task)
     }
     created_at: dict[str, float] = {}
     claimed: set[str] = set()

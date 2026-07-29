@@ -1,249 +1,286 @@
 # ZaoFu Quick Start
 
-> Audience: first-time operators materializing a production Controller for an
-> existing project and running the shortest safe end-to-end path.
+> Audience: first-time operators installing ZaoFu, creating or opening a
+> Project in Web, and then using Kanban Agent, Channel, Research, or a delivery
+> Workflow.
+>
+> This path was checked against the CLI, Web, and real browser E2E on
+> 2026-07-29.
 
-This guide uses the product Controller catalog under
-`examples/prod/controller/`. Generic presets are not the product workflow
-entry point described here. Keep one project-local `zf.yaml` and one configured
-`project.state_dir`; later PRD, issue, feature, or refactor work enters that
-same project as a new workflow request.
+## 0. Install and start the Dashboard
 
-The ZaoFu source repository's root `zf.yaml` defaults to PRD. In contrast,
-`zf project init` defaults to a multi-kind Project with no ignition. See
-[20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
-for the complete creation, clarification, and approval path.
+Prerequisites:
 
-## 0. Before You Start
-
-Required:
-
-- Python 3.11+
-- `uv`
-- Git
-- `tmux`
-- at least one authenticated provider CLI: `codex` or `claude`
-
-From the ZaoFu source checkout:
+- Python 3.11+, `uv`, Git, and `tmux`;
+- at least one installed and authenticated provider CLI: Codex or Claude Code;
+- the `stream-json` extra when using the Claude Code stream-json transport.
 
 ```bash
 cd /path/to/zaofu
 uv sync --extra dev --extra web --extra stream-json
 uv run zf --version
-```
-
-`stream-json` is required for Claude Code stream-json transports. `web` is
-needed only for the local dashboard.
-
-Check the provider before starting real workers:
-
-```bash
-command -v tmux
-command -v codex      # when using --backend codex
-command -v claude     # when using --backend claude-code
-
 uv run zf doctor provider --backend codex
 ```
 
-Provider authentication is external to ZaoFu. Resolve missing binaries or
-login failures before continuing.
-
-## 1. Inspect the Controller Recommendation
-
-Set stable source and target paths:
+Start the Workspace Dashboard:
 
 ```bash
 export ZAOFU_ROOT=/path/to/zaofu
-export TARGET_PROJECT=/path/to/my-project
+export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
+
+uv run --project "$ZAOFU_ROOT" zf web \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --workspace-only
 ```
 
-Inspect the recommendation without writing files:
+Open `http://127.0.0.1:8001/`. Bind to `0.0.0.0` only on a trusted network.
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf profile bootstrap \
-  "$TARGET_PROJECT" \
-  --intent build \
-  --backend codex \
-  --scale launch
-```
+## 1. Complete installation onboarding
 
-Intent selects the product workflow family:
+The first-run sequence has four installation-level steps:
 
-| Intent | Typical Controller family |
+1. **Provider**: choose Codex or Claude Code as primary. When both are
+   available, Mixed team can use the other provider for an independent verify
+   lane.
+2. **Environment**: check host dependencies and provider availability.
+3. **Access**: establish a controlled action session for this browser.
+4. **Ready**: enter the Workspace.
+
+Onboarding does not create a Project. An empty Workspace with zero Projects is
+valid.
+
+## 2. Add or open a Project
+
+Select the `+` beside the Project picker:
+
+1. Enter a Project path on the **server host**.
+2. Select `Inspect`.
+3. Review the one admission action and diagnostics returned by the server.
+4. Only for `initialize_project`, provide Project Name, Project Brief, Project
+   Stack, Primary Provider, and optional Mixed team.
+5. Run the displayed `Open Project`, `Add & Open`, `Initialize & Open`, or
+   `Create Project` action.
+
+Inspect chooses from disk truth:
+
+| Directory state | Behavior |
 |---|---|
-| `build` | PRD delivery (`prd-fanout-v3` or the light variant) |
-| `refactor` | lane-based refactor (`refactor-lane-v3`) |
-| `maintain` / `review` | issue and regression flow (`issue-fanout-v3`) |
+| Registered and healthy | Open |
+| Valid `zf.yaml`, not registered | Register and open |
+| Valid config, runtime state missing | Initialize state and open |
+| No `zf.yaml` | Create a default multi-kind Project |
+| Invalid config or partial non-empty state | Block until repaired |
 
-The output is an approval point. For this product path, continue only when
-`archetype` is a `[flow]` entry from `examples/prod/controller/`. A recommendation
-marked `[preset]` is a generic fallback, not the production Controller catalog.
+![Add/Open Project form](assets/project-add-open-current.png)
 
-For a greenfield project with too little code to classify, use the Web New
-Project wizard to select a Controller explicitly, then provide real
-project-specific quality checks.
+When the target path is missing or empty, `Create Project` creates the minimum
+README/src/tests seed, an independent Git repository, and an initial HEAD so
+the default worktree runtime can start. Web does not run `git init` or commit
+files in an existing non-empty code directory; establish a trusted Git
+baseline first.
 
-## 2. Materialize and Review the Controller
+Project Brief is durable background, goal, and constraints, not a one-off Task
+Prompt. Initialization:
 
-After approving the recommendation:
+- persists `project.description` in `zf.yaml`;
+- writes a managed Project Context section in `AGENTS.md`;
+- writes the Stack and detected build/test commands in a separate managed
+  Profile section;
+- preserves Claude-specific rules in `CLAUDE.md` and points it at `AGENTS.md`;
+- registers the Project without creating a Task or starting a Workflow.
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf profile bootstrap \
-  "$TARGET_PROJECT" \
-  --intent build \
-  --backend codex \
-  --scale launch \
-  --apply
+Projects already registered in the Workspace do not need re-import. Refresh and
+open them directly.
+
+## 3. `zf.yaml` remains the only control plane
+
+Add/Open Project no longer asks for YAML, preset, Controller, kind, scale, lane,
+or role. This moves configuration choice out of normal admission:
+
+- a valid existing `zf.yaml` is preserved;
+- a new directory receives one default multi-kind `zf.yaml`;
+- Stack controls instruction and command Profile generation, not Workflow
+  selection;
+- Provider controls provider policy. Mixed team retains one primary backend
+  and assigns the other provider to independent verification; there is no
+  `backend: mixed`;
+- Kanban Agent may recommend only routes expanded from the current `zf.yaml`.
+
+Use `zf profile bootstrap` only when explicitly adopting a single Controller,
+migrating the control plane, or materializing a reviewed Bootstrap
+recommendation. Do not create a second `zf.yaml` for each PRD, Issue, or
+Refactor request.
+
+## 4. Enter requirements after opening the Project
+
+Kanban Agent is a general Coding Agent inside the Project, not only a board
+supervisor:
+
+| Goal | Task required first | Interaction and result |
+|---|---:|---|
+| Analyze, edit code, or run tests normally | No | Work in the current provider session under permission and Git policy |
+| Create only a tracked work item | No | Produce a `Create Task` proposal and create it after confirmation |
+| Clarify or review with multiple roles | No | Show a Channel setup Plan, then create and start the Channel |
+| Run fixed-role deep research | Yes | Show a Research route Plan for an existing Task, then a separate Approve |
+| Deliver PRD, Issue, Refactor, or Planning work | Yes | Recommend an active Workflow route for an existing Task, then a separate Approve |
+
+Do not choose lane count or roles during Project creation. For each concrete
+Task, Kanban Agent classifies the work and recommends only active single-lane,
+multi-lane, Research, or other catalog routes.
+
+## 5. Create a Channel Group
+
+The product term Channel Group maps to the runtime canonical model
+**Channel + Members**. It is not a static block in `zf.yaml`. Ask Kanban Agent
+for multi-role discussion, for example:
+
+```text
+Create a PRD clarification Channel for this requirement. Focus on security
+boundaries, technical feasibility, and acceptance.
 ```
 
-Materialization writes the selected Controller as project-local `zf.yaml` and
-copies required profile and skill assets. `zf.yaml` remains the only active
-control-plane configuration.
+The Plan shows the exact template, roles, member count, and discussion rounds:
 
-If `zf.yaml` already exists, bootstrap preserves it and only fills detectable
-checks without clobbering existing values. It does not silently switch an
-existing project to another Controller. Review or migrate the current control
-plane deliberately before continuing.
+![Channel setup Plan](assets/kanban-channel-plan.png)
 
-Before startup, review:
+After selecting an option and `Create & start`, ZaoFu atomically:
 
-- Controller inputs such as `prdRef`, `issueRef`, `sourceRoot`, or `targetRoot`;
-- `project.state_dir` and worktree policy;
-- provider backend and permission policy;
-- `quality_gates` commands against the actual target project;
-- placeholders or missing environment requirements reported by validation.
+```text
+creates the Channel
+-> materializes members, role context, skills, and writer scope
+-> posts the original requirement
+-> starts fanout_then_synthesis
+-> converges through the default responder/synthesizer
+```
 
-Bootstrap can fill detectable checks, but it cannot invent product semantics
-or acceptance criteria. Multi-lane Controllers fail closed when required
-project quality gates are absent.
+No manual member creation or first-message copy is needed. `Chat about` keeps
+the Plan pending while the operator adjusts roles, rounds, or scope. After
+synthesis, humans can continue the same requirement or post another request in
+the Channel.
 
-## 3. Initialize, Validate, and Dry Run
+Channel is independent from Workflow. Its output does not automatically create
+a Task or start Research/delivery. To move into delivery, ask Kanban Agent to
+create a Task proposal from the result, confirm the Task, and then select a
+Workflow.
 
-Run project commands from the target project so relative paths resolve against
-its `zf.yaml`:
+See [15 Channel Collaboration](15-channel-collaboration.en.md) for templates
+and Feishu projection.
+
+## 6. Start Research or a Task Workflow
+
+Research and delivery share one Task-bound start service:
+
+```text
+existing Task
+-> Kanban Agent reads zf workflow routes
+-> Plan recommends active route, parameters, topology, and roles
+-> operator selects an option
+-> a separate Approve card is created
+-> owner confirms
+-> workflow.invoke.requested
+```
+
+Plan clarifies and selects; it does not authorize:
+
+![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
+
+The approval binds the exact Task, route, objective, and parameters:
+
+![Workflow approval](assets/kanban-task-workflow-approve.png)
+
+The default fixed Research route is `research:fixed`, with
+`source_researcher`, `product_analyst`, `technical_analyst`, `risk_critic`,
+and `synthesizer`. It produces a summary, evidence refs, open questions, and
+PRD/Refactor prompt inputs. It does not create a delivery Task or split PRD
+work automatically.
+
+The `research-review` Channel template is a discussion surface, not an implicit
+start of `research:fixed`. Research starts only for an explicit fanout request,
+an existing Task, and an available route in the current Project catalog.
+
+Inspect the same surface-neutral routes from CLI:
 
 ```bash
-cd "$TARGET_PROJECT"
+cd /path/to/project
+uv run --project "$ZAOFU_ROOT" zf workflow routes \
+  --task TASK-ID \
+  --format json
+```
 
-uv run --project "$ZAOFU_ROOT" zf init \
-  --workspace-register \
-  --with-bootstrap
+See [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
+for proposal and authorization commands.
 
+## 7. Start runtime and observe
+
+Project creation does not run a Workflow. Start real workers from the Project
+root:
+
+```bash
+cd /path/to/project
 uv run --project "$ZAOFU_ROOT" zf validate --cold-start
-uv run --project "$ZAOFU_ROOT" zf skills doctor
-uv run --project "$ZAOFU_ROOT" zf workflow inspect
-uv run --project "$ZAOFU_ROOT" zf start --dry-run --no-watch
-```
-
-Do not start real providers while validation reports a `STOP`. Fix missing
-routes, skills, gates, inputs, or tools, then rerun the same checks. A dry run
-validates deterministic startup wiring; it does not prove provider login or
-product delivery quality.
-
-## 4. Start and Observe
-
-Start the watcher and workers:
-
-```bash
 uv run --project "$ZAOFU_ROOT" zf start
 ```
 
-The watcher runs in the foreground by default. Keep it alive. In another
-terminal:
+Observe from another terminal:
 
 ```bash
-cd "$TARGET_PROJECT"
 uv run --project "$ZAOFU_ROOT" zf status --workers
 uv run --project "$ZAOFU_ROOT" zf kanban --board
 uv run --project "$ZAOFU_ROOT" zf events --last 30
-uv run --project "$ZAOFU_ROOT" zf attach
 ```
 
-## 5. Submit Work
+`zf start` only starts workers, sidecars, and the watcher. Workers remaining
+idle before an approved `workflow.invoke.requested` is correct.
 
-For an initial operator goal:
+## 8. Create a Project from CLI
+
+Web greenfield creation, `zf project init`, and `tools/init-project.sh` share
+the Python `init_flow_project` contract. Web does not execute the shell script:
 
 ```bash
-uv run --project "$ZAOFU_ROOT" zf chat \
-  "Implement a small feature with tests, review, and delivery evidence."
+uv run --project "$ZAOFU_ROOT" zf project init \
+  --name account-service \
+  --description "Account and authentication service; unify login policy." \
+  --root /path/to/account-service \
+  --create \
+  --git-init \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
+  --workspace-register
 ```
 
-For a typed product request, create an intake artifact first. This PRD example
-uses the stock PRD route:
+Use the script when Git readiness, `zf init`, validation, and startup dry-run
+are also required:
 
 ```bash
-uv run --project "$ZAOFU_ROOT" zf flow intake \
-  --kind prd \
-  --from docs/prd/account-security.md \
-  --target-root app \
-  --acceptance "Account security acceptance tests pass" \
-  --request-id prd-account-security \
-  --output docs/intake/prd-account-security.md
+tools/init-project.sh \
+  --project-dir /path/to/account-service \
+  --name account-service \
+  --description "Account and authentication service" \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
+  --yes
 ```
 
-If open questions remain, clarify and confirm the requirement snapshot first:
+Both paths create only the Project by default. They do not create a Task or
+ignite a Workflow.
 
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow clarify \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --confirm \
-  --json
-```
-
-Preview admission without mutating runtime state:
-
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow submit \
-  --dry-run \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --kind prd \
-  --allow-missing-env \
-  --json
-```
-
-After reviewing the preview and resolving environment requirements:
-
-```bash
-uv run --project "$ZAOFU_ROOT" zf flow submit \
-  --apply \
-  --config zf.yaml \
-  --intake docs/intake/prd-account-security.md \
-  --kind prd \
-  --json
-```
-
-Only request kinds declared in `workflow.kind_routes` are admitted. Projects
-that set the route pattern in `workflow.kind_routes` can omit `--pattern-id`.
-Use a new `request_id` for later work; do not create a second control plane for
-the same project.
-
-## 6. Optional Dashboard
-
-From the ZaoFu checkout:
-
-```bash
-tools/start-webkanban.sh --host 127.0.0.1 --port 8001
-```
-
-Open `http://127.0.0.1:8001/`. Web mutations require the generated or supplied
-action token. Bind `0.0.0.0` only on a trusted network.
-
-## 7. Stop
+## 9. Stop
 
 ```bash
 uv run --project "$ZAOFU_ROOT" zf stop
 ```
 
-Use `zf stop --force` only when graceful shutdown cannot complete. Never run
-`tmux kill-server` on a shared host; stop only the project session.
+Use `zf stop --force` only after graceful stop fails. Never run
+`tmux kill-server` on a shared host.
 
 ## Next
 
-- [Architecture Overview](architecture.en.md)
-- [CLI Operations](03-cli-operations.en.md)
+- [Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
+- [`zf.yaml` Control Plane and Runtime State](02-zf-yaml-control-plane.en.md)
+- [Channel Collaboration](15-channel-collaboration.en.md)
 - [Web, Observability, and E2E](06-web-observability-e2e.en.md)
 - [Troubleshooting](07-troubleshooting.en.md)
-- [Autoresearch](10-autoresearch-usage.en.md)
-- [Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md)

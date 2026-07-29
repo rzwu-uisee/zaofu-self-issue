@@ -10,6 +10,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 from zf.core.events import EventLog, ZfEvent
+from zf.core.config.loader import load_config
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.kanban_agent_summary import project_kanban_agent_summary
@@ -40,7 +41,7 @@ def test_operator_intent_classifier_marks_high_risk_actions() -> None:
 
     product = infer_operator_intent("把这个 idea 跑成产品", project_id="demo")
     assert product["intent_type"] == "idea_to_product"
-    assert product["proposed_actions"] == ["create-task", "workflow-invoke"]
+    assert product["proposed_actions"] == ["create-task", "workflow-start"]
 
 
 def test_project_kanban_agent_summary_is_read_only(tmp_path: Path) -> None:
@@ -71,8 +72,31 @@ def test_project_kanban_agent_summary_is_read_only(tmp_path: Path) -> None:
     assert summary["tasks"]["by_board_column"]["in_progress"] == 1
     assert summary["tasks"]["by_board_column"]["blocked"] == 1
     assert summary["workflow"]["latest"][-1]["type"] == "workflow.invoke.requested"
+    assert summary["workflow"]["route_catalog"]["routes"] == []
     assert any(item["kind"] == "inspect_blocked_tasks" for item in summary["next_actions"])
     assert (state_dir / "events.jsonl").read_text(encoding="utf-8") == before_events
+
+
+def test_project_kanban_agent_summary_includes_active_workflow_routes(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    config = load_config(Path(__file__).resolve().parents[1] / "zf.yaml")
+
+    summary = project_kanban_agent_summary(
+        state_dir,
+        config=config,
+        project_root=tmp_path,
+        project_id="demo",
+        include_pane_probe=False,
+    )
+
+    route_ids = {
+        item["route_id"]
+        for item in summary["workflow"]["route_catalog"]["routes"]
+    }
+    assert "delivery:prd:standard" in route_ids
+    assert "research:fixed" in route_ids
 
 
 def test_project_kanban_agent_summary_explains_replan_loop(tmp_path: Path) -> None:

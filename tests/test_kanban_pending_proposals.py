@@ -96,6 +96,23 @@ def test_unrelated_task_created_keeps_pending():
     assert len(pending_kanban_proposals(events)) == 1
 
 
+def test_agent_cannot_bypass_task_workflow_plan_with_direct_proposal():
+    proposal = extract_action_proposal(
+        (
+            '```json\n{"action_proposal":{"action":"task-workflow-start",'
+            '"payload":{"task_id":"TASK-1","route_id":"research:fixed",'
+            '"objective":"Research"},"reason":"start"}}\n```'
+        ),
+        user_message="start the Task workflow",
+    )
+
+    assert proposal is not None
+    assert proposal["valid"] is False
+    assert "must originate from a task_workflow Plan" in (
+        proposal["validation_error"]
+    )
+
+
 def test_same_semantic_proposal_has_one_cross_surface_identity():
     answer = (
         '```json\n{"action_proposal":{"action":"update-task",'
@@ -175,6 +192,56 @@ def test_dismiss_controlled_action_emits_resolved(tmp_path: Path):
     resolved = [e for e in log.read_all() if e.type == "kanban.agent.proposal.resolved"]
     assert len(resolved) == 1
     assert resolved[0].payload["proposal_event_id"] == "evt-p1"
+    assert pending_kanban_proposals(log.read_all()) == []
+
+
+def test_dismiss_generic_proposal_emits_generic_resolution(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    proposal = _proposed("evt-generic", "通用 workflow proposal")
+    proposal.type = "operator.action.proposed"
+    proposal.payload["proposal"].update({
+        "proposal_id": "proposal-generic",
+        "proposal_digest": "a" * 64,
+        "revision": 2,
+    })
+    proposal.task_id = "TASK-GENERIC"
+    proposal.payload["proposal"]["payload"]["task_id"] = "TASK-GENERIC"
+    log.append(proposal)
+    writer = EventWriter(log)
+    service = ControlledActionService(
+        state_dir,
+        writer,
+        actor="operator",
+        source="cli",
+        surface="cli",
+    )
+    requested = writer.emit(
+        "control.action.requested",
+        actor="operator",
+        payload={},
+    )
+
+    result = service.execute(
+        action="kanban-proposal-dismiss",
+        requested_action="kanban-proposal-dismiss",
+        payload={"proposal_event_id": "evt-generic"},
+        requested=requested,
+    )
+
+    assert result["ok"] is True
+    resolved = [
+        event
+        for event in log.read_all()
+        if event.type == "operator.action.resolved"
+    ]
+    assert len(resolved) == 1
+    assert resolved[0].payload["proposal_id"] == "proposal-generic"
+    assert resolved[0].payload["revision"] == 2
+    assert resolved[0].task_id == "TASK-GENERIC"
+    assert result["task_id"] == "TASK-GENERIC"
     assert pending_kanban_proposals(log.read_all()) == []
 
 
@@ -343,6 +410,7 @@ def test_executed_non_create_proposal_clears_its_card(tmp_path: Path):
                 and e.payload.get("proposal_event_id") == "evt-upd"]
     assert len(resolved) == 1
     assert resolved[0].payload["resolution"] == "executed"
+    assert resolved[0].task_id == task_id
     # the Triage card is now cleared
     assert not any(i["proposal_event_id"] == "evt-upd"
                    for i in pending_kanban_proposals(log.read_all())), "card must clear after execute"
@@ -353,6 +421,7 @@ def test_executed_non_create_proposal_clears_its_card(tmp_path: Path):
         requested=requested,
     )
     assert replay["status"] == "already_resolved"
+    assert replay["task_id"] == task_id
     resolved = [
         event
         for event in log.read_all()

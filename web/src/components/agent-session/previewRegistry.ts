@@ -74,6 +74,25 @@ export function actionImpactRows(action: string, payload: Record<string, unknown
     push("title", payload.title);
     push("assignee", payload.assigned_to || payload.assignee_id);
     push("verification", recordValue(payload.contract)?.verification);
+  } else if (
+    action === "channel-create-from-template"
+    || action === "channel-create-and-start"
+  ) {
+    push("name", payload.name || payload.channel_id);
+    push("template", payload.template_id);
+    if (action === "channel-create-and-start") {
+      push("requirement", payload.message || payload.objective || payload.text);
+    }
+  } else if (action === "channel-discussion-start") {
+    push("channel", payload.channel_id);
+    push("objective", payload.objective);
+  } else if (action === "research-start") {
+    push("topic", payload.topic);
+    push("task", payload.task_id);
+  } else if (action === "research-adopt") {
+    push("task", payload.task_id);
+    push("artifact", payload.artifact_ref || payload.artifact_digest);
+    push("digest", payload.artifact_digest);
   } else if (action === "update-task") {
     push("task", payload.task_id);
     for (const key of ["status", "assigned_to", "blocked_reason", "priority"]) push(key, payload[key]);
@@ -81,6 +100,15 @@ export function actionImpactRows(action: string, payload: Record<string, unknown
     push("workflow", payload.workflow_id || payload.pattern_id || payload.stage_id);
     push("task", payload.task_id);
     push("channel", payload.channel_id);
+  } else if (
+    action === "workflow-start"
+    || action === "task-workflow-start"
+  ) {
+    push("workflow", payload.route_id);
+    push("task", payload.task_id);
+    push("objective", payload.objective);
+  } else if (action === "idea-to-product") {
+    push("objective", payload.objective);
   } else if (action === "apply-patch-proposal") {
     push("patch", payload.patch_ref || payload.artifact_id || payload.path);
     push("mode", "gated preview only");

@@ -22,6 +22,7 @@ from zf.core.events.model import ZfEvent
 from zf.runtime.workflow_resume import build_workflow_resume_projection
 from zf.web.operator_contract import (
     KANBAN_AGENT_ALLOWED_ACTIONS,
+    KANBAN_AGENT_CAPABILITIES,
     KANBAN_AGENT_FORBIDDEN_CAPABILITIES,
     kanban_agent_boundary,
 )
@@ -232,7 +233,7 @@ def test_kanban_agent_recovery_actions_fail_closed_before_runtime(
     assert missing_source.json()["reason"] == "source_event_id is required"
 
 
-def test_kanban_agent_recovery_contract_stays_operator_only() -> None:
+def test_kanban_agent_recovery_contract_preserves_coding_and_kernel_boundaries() -> None:
     boundary = kanban_agent_boundary()
 
     assert "workflow-batch-resume" in KANBAN_AGENT_ALLOWED_ACTIONS
@@ -240,5 +241,9 @@ def test_kanban_agent_recovery_contract_stays_operator_only() -> None:
     assert boundary["direct_truth_write"] is False
     assert boundary["direct_role_dispatch"] is False
     assert boundary["direct_role_terminal_control"] is False
-    assert "direct_git_mutation" in KANBAN_AGENT_FORBIDDEN_CAPABILITIES
+    assert boundary["direct_project_code_write"] == (
+        "permission_profile_gated"
+    )
+    assert "develop_in_selected_workspace" in KANBAN_AGENT_CAPABILITIES
+    assert "direct_git_mutation" not in KANBAN_AGENT_FORBIDDEN_CAPABILITIES
     assert "role_terminal_control" in KANBAN_AGENT_FORBIDDEN_CAPABILITIES

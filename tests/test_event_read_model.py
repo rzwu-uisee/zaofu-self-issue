@@ -341,6 +341,141 @@ def test_events_page_keeps_kanban_agent_projection_fields(tmp_path: Path) -> Non
     assert payload["action_proposal"]["payload"]["contract"]["behavior"] == "cover the flow"
 
 
+def test_events_page_keeps_kanban_plan_request_and_response(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    request = {
+        "request_event_id": "evt-plan",
+        "request_id": "plan-route",
+        "request_digest": "digest-route",
+        "revision": 1,
+        "question_id": "route",
+        "question": "Which route?",
+        "options": [
+            {"id": "research", "label": "Research", "description": "Gather evidence."},
+            {"id": "channel", "label": "Channel", "description": "Discuss roles."},
+        ],
+        "valid": True,
+    }
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="kanban.agent.plan.requested",
+        id="evt-plan",
+        payload={
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "plan_request": request,
+        },
+    ))
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="kanban.agent.plan.answered",
+        id="evt-answer",
+        payload={
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "request_event_id": "evt-plan",
+            "request_id": "plan-route",
+            "request_digest": "digest-route",
+            "revision": 1,
+            "question_id": "route",
+            "option_id": "research",
+            "answer": "Research",
+            "answers": [
+                {
+                    "question_id": "route",
+                    "option_id": "research",
+                    "answer": "Research",
+                },
+                {
+                    "question_id": "evidence",
+                    "option_id": "focused",
+                    "answer": "Focused",
+                },
+            ],
+        },
+    ))
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="operator.action.proposed",
+        id="evt-workflow-proposal",
+        task_id="TASK-PLAN",
+        payload={
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "turn_id": "turn-plan",
+            "proposal": {
+                "proposal_event_id": "evt-workflow-proposal",
+                "proposal_id": "proposal-workflow",
+                "proposal_digest": "digest-workflow",
+                "action": "workflow-start",
+                "payload": {
+                    "task_id": "TASK-PLAN",
+                    "route_id": "research:fixed",
+                },
+                "valid": True,
+            },
+        },
+    ))
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="operator.action.proposed",
+        id="evt-cli-proposal",
+        task_id="TASK-PLAN",
+        payload={
+            "project_id": "project-a",
+            "source": "cli",
+            "proposal": {
+                "action": "workflow-start",
+                "payload": {"task_id": "TASK-PLAN"},
+                "valid": True,
+            },
+        },
+    ))
+    read_model.rebuild(state_dir)
+
+    page = read_model.events_page(state_dir, limit=10)
+
+    assert page is not None
+    rows = {row["type"]: row["payload"] for row in page["items"]}
+    assert rows["kanban.agent.plan.requested"]["plan_request"]["question"] == "Which route?"
+    assert rows["kanban.agent.plan.answered"]["request_event_id"] == "evt-plan"
+    assert rows["kanban.agent.plan.answered"]["request_id"] == "plan-route"
+    assert rows["kanban.agent.plan.answered"]["revision"] == 1
+    assert rows["kanban.agent.plan.answered"]["answer"] == "Research"
+    assert rows["kanban.agent.plan.answered"]["answers"] == [
+        {
+            "question_id": "route",
+            "option_id": "research",
+            "answer": "Research",
+        },
+        {
+            "question_id": "evidence",
+            "option_id": "focused",
+            "answer": "Focused",
+        },
+    ]
+    assert rows["operator.action.proposed"]["proposal"]["action"] == (
+        "workflow-start"
+    )
+    history = read_model.agent_session_history(
+        state_dir,
+        surface="kanban_agent",
+        thread_id="main",
+        project_id="project-a",
+        conversation_id="kanban:project-a",
+        task_id="",
+        limit=10,
+    )
+    assert history is not None
+    assert any(
+        item["type"] == "operator.action.proposed"
+        for item in history["items"]
+    )
+    assert not any(
+        item["id"] == "evt-cli-proposal"
+        for item in history["items"]
+    )
+
+
 def test_agent_session_history_pages_full_kanban_thread_past_recent_window(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     for index in range(305):
@@ -650,6 +785,44 @@ def test_payload_slim_keeps_proposal_object() -> None:
     assert slim["proposal"]["payload"]["title"] == "赛车 MVP"
 
 
+def test_payload_slim_keeps_plan_interaction_objects() -> None:
+    from zf.web.projections.read_model import _payload_slim
+
+    slim = _payload_slim({
+        "plan_request": {
+            "request_id": "plan-route",
+            "question": "Which route?",
+            "options": [{"id": "research", "label": "Research"}],
+        },
+        "plan_response": {
+            "request_event_id": "evt-plan",
+            "option_id": "research",
+            "answer": "Research",
+        },
+        "request_id": "plan-route",
+        "revision": 2,
+        "answers": [
+            {
+                "question_id": "route",
+                "option_id": "research",
+                "answer": "Research",
+            },
+            {
+                "question_id": "evidence",
+                "option_id": "focused",
+                "answer": "Focused",
+            },
+        ],
+    })
+
+    assert slim["plan_request"]["question"] == "Which route?"
+    assert slim["plan_response"]["request_event_id"] == "evt-plan"
+    assert slim["request_id"] == "plan-route"
+    assert slim["revision"] == 2
+    assert len(slim["answers"]) == 2
+    assert slim["answers"][1]["question_id"] == "evidence"
+
+
 def test_payload_slim_keeps_message_event_id() -> None:
     """kanban.agent.turn.* rows link to their user.message via
     message_event_id; slimming it away split the question and answer into
@@ -662,6 +835,20 @@ def test_payload_slim_keeps_message_event_id() -> None:
         "message_event_id": "evt-user-msg",
     })
     assert slim["message_event_id"] == "evt-user-msg"
+
+
+def test_payload_slim_keeps_permission_escalation_identity() -> None:
+    from zf.web.projections.read_model import _payload_slim
+
+    slim = _payload_slim({
+        "permission_profile": "dangerous_full",
+        "permission_escalation_retry_for": "evt-sandbox-failed",
+    })
+
+    assert slim == {
+        "permission_profile": "dangerous_full",
+        "permission_escalation_retry_for": "evt-sandbox-failed",
+    }
 
 
 def test_payload_slim_keeps_worker_state_identity_and_transition() -> None:

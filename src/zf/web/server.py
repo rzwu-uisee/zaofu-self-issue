@@ -72,14 +72,10 @@ from zf.core.task.kanban_projection import (
 from zf.core.task.schema import Task, TaskContract, TaskEvidence
 from zf.core.task.store import TaskStore
 from zf.core.trace.diagnostics import _safe_trace_id
-from zf.cli.flow import (
-    build_flow_intake,
-    build_flow_intent,
-    build_flow_submit_preview,
-    draft_flow_spec,
-    draft_multi_kind_project_spec,
-)
+from zf.cli.flow import build_flow_intent
 from zf.integrations.feishu.views import TaskView
+from zf.runtime.workflow_delivery import build_flow_submit_preview
+from zf.runtime.workflow_intake import build_flow_intake
 from zf.runtime.run_archive import (
     RunArchiveError,
     RunProjector,
@@ -88,6 +84,7 @@ from zf.runtime.run_archive import (
     read_task_runs,
     validate_run_id,
 )
+from zf.runtime.kanban_proposals import PROPOSAL_EVENT
 from zf.autoresearch.projection import project_autoresearch_state
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.channel_contracts import (
@@ -105,6 +102,10 @@ from zf.runtime.execution_route import (
 from zf.runtime.gate_projection import project_gate_projection
 from zf.runtime.hook_registry import project_hook_registry
 from zf.runtime.kanban_agent_summary import project_kanban_agent_summary
+from zf.runtime.channel_prd_context import canonical_channel_prd_context
+from zf.runtime.channel_prd_context import workflow_context_from_payload
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_route_catalog import workflow_route_catalog
 from zf.runtime.operator_reliability import (
     project_agent_cockpit,
     project_mutation_audit,
@@ -120,13 +121,18 @@ from zf.runtime.project_spine_review import project_spine_review_insight
 from zf.runtime.workflow_spine_projection import read_spine_explain
 from zf.runtime.agent_session_stream import AgentSessionIdentity, AgentSessionStreamEmitter
 from zf.runtime.live_delta_bus import live_delta_bus_for_writer
-from zf.runtime.provider_permissions import KANBAN_AGENT_PERMISSION_PROFILES, emit_provider_permission_snapshot
+from zf.runtime.provider_permissions import (
+    KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE,
+    KANBAN_AGENT_PERMISSION_PROFILES,
+    emit_provider_permission_snapshot,
+)
 from zf.core.workspace import (
     ProjectInitializer,
     ProjectResolver,
     RuntimeManager,
     WorkspaceProject,
     WorkspaceRegistry,
+    inspect_project_admission,
     project_lifecycle,
     stable_project_id,
 )
@@ -136,19 +142,35 @@ from zf.web.operator_contract import (
     KANBAN_AGENT_ALLOWED_ACTIONS,
     KANBAN_AGENT_CAPABILITIES,
     KANBAN_AGENT_FORBIDDEN_CAPABILITIES,
+    PROJECT_OPERATOR_CONTROLLED_ACTIONS,
     kanban_agent_boundary,
     kanban_agent_evidence_model,
     kanban_agent_shared_context,
     kanban_agent_status_model,
 )
-from zf.web.headless_agent import HeadlessMessage, HeadlessThreadStore, KanbanHeadlessAgent, canonical_headless_backend
+from zf.web.project_init_policy import draft_project_init_config
+from zf.web.project_init_service import (
+    apply_project_profile_overlay,
+    initialize_admitted_project,
+)
+from zf.web.headless_agent import (
+    HeadlessMessage,
+    HeadlessThreadStore,
+    KanbanHeadlessAgent,
+    canonical_headless_backend,
+)
 from zf.web.proposal_extraction import (
     extract_action_proposal,
-    json_candidates as proposal_json_candidates,
-    normalize_action_proposal,
 )
-from zf.web.agent_session_runtime import begin_agent_session_run, run_key
-from zf.web.provider_dev_chat import handle_agent_session_cancel, handle_provider_dev_chat
+from zf.web import plan_runtime
+from zf.web.agent_session_runtime import (
+    begin_agent_session_run,
+    run_key,
+)
+from zf.web.provider_dev_chat import (
+    handle_agent_session_cancel,
+    handle_provider_dev_chat,
+)
 from zf.web.headless_recovery import reconcile_kanban_startup
 from zf.web.collaboration_action_validation import validate_collaboration_action_payload
 from zf.web.operator_session import OperatorSessionManager
@@ -451,6 +473,7 @@ _ACTION_ALIASES = {
     "operator.intent.approve",
     "operator-intent-reject",
     "operator.intent.reject",
+    "kanban-plan-apply",
     "replan-approve",
     "replan.approve",
     "replan-defer",
@@ -492,6 +515,9 @@ _ACTION_ALIASES = {
     "channel-create-from-template",
     "channel.create_from_template",
     "channel.template.create",
+    "channel-create-and-start",
+    "channel.create_and_start",
+    "channel.setup.apply",
     "channel-discussion-start",
     "channel.discussion.start",
     "channel-post-message",
@@ -511,6 +537,9 @@ _ACTION_ALIASES = {
     "channel-synthesis",
     "channel-synthesis-request",
     "channel.synthesis.request",
+    "channel-question-resolve", "channel.question.resolve",
+    "channel-consensus-confirm", "channel.consensus.confirm",
+    "channel-consensus-block", "channel.consensus.block",
     "channel-drain-replies",
     "channel-mark-read",
     "channel.mark_read",
@@ -523,6 +552,7 @@ _ACTION_ALIASES = {
     "channel-owner-report-request",
     "workflow-invoke",
     "workflow.invoke",
+    "workflow-start",
     "workflow.start",
     "research-start",
     "research.start",
@@ -531,6 +561,9 @@ _ACTION_ALIASES = {
     "research.adopt",
     "workflow-request",
     "workflow.request",
+    "task-workflow-start",
+    "task.workflow.start",
+    "workflow.route.start",
     "workflow-submit",
     "workflow.submit",
     "workflow-batch-resume",
@@ -597,38 +630,12 @@ _ACTION_ALIASES = {
 _CANONICAL_ACTIONS = CANONICAL_ACTIONS
 _ALLOWED_WEB_ACTIONS = set(_ACTION_ALIASES)
 _CHANNEL_DISCUSSION_MODES = CHANNEL_DISCUSSION_MODES
-_PROJECT_OPERATOR_CONTROLLED_ACTIONS = {
-    "operator-intent-create",
-    "operator-intent-approve",
-    "operator-intent-reject",
-    "replan-approve",
-    "replan-defer",
-    "replan-reject",
-    "plan-approve",
-    "plan-reject",
-    "workflow-request",
-    "workflow-submit",
-    "workflow-batch-resume",
-    "candidate-rework-apply",
-    "idea-to-product",
-    "provider-dev-chat-start",
-    "provider-dev-chat-send",
-    "provider-dev-chat-stop",
-    "workflow-config-propose",
-    "workflow-config-validate",
-    "workflow-config-apply",
-    "runtime-stop",
-    "runtime-restart",
-    "runtime-resume",
-    "failure-closeout",
-    "failure-closeout-activate",
-    "real-e2e-run",
-    "run-contract-review",
-}
 _OPERATOR_MANAGERS: dict[str, OperatorSessionManager] = {}
 _WEB_SESSION_COOKIE = "zf_web_session"
 _WEB_SESSIONS: dict[str, float] = {}
 _WEB_UNLOCK_FAILURES: dict[str, list[float]] = {}
+
+
 
 
 def create_app(
@@ -966,10 +973,15 @@ def create_app(
 
     @app.get("/api/workspace/onboarding")
     def workspace_onboarding() -> JSONResponse:
-        from zf.core.workspace.onboarding import detect_backends, read_onboarding
+        from zf.core.workspace.onboarding import (
+            detect_backends,
+            mixed_backends_available,
+            read_onboarding,
+        )
         from zf.runtime.env_preflight import check_tmux
 
         state = read_onboarding()
+        backends = detect_backends()
         tmux = check_tmux()
         return JSONResponse({
             "schema_version": state.schema_version,
@@ -978,8 +990,11 @@ def create_app(
             "skipped": state.skipped,
             "step": state.step,
             "backend": state.backend,
+            "primary_backend": state.backend,
+            "mixed_enabled": state.mixed_enabled,
+            "mixed_available": mixed_backends_available(backends),
             "notifications": state.notifications,
-            "backends": detect_backends(),
+            "backends": backends,
             "preflight": [
                 {"name": tmux.name, "ok": tmux.ok, "detail": tmux.detail},
             ],
@@ -1027,20 +1042,41 @@ def create_app(
         action = str((payload or {}).get("action") or "")
         if action not in {"step", "complete", "skip", "reset"}:
             raise HTTPException(status_code=400, detail="invalid onboarding action")
+        if (
+            "mixed_enabled" in (payload or {})
+            and not isinstance((payload or {}).get("mixed_enabled"), bool)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="mixed_enabled must be a boolean",
+            )
         raw_step = (payload or {}).get("step")
-        state = apply_action(
-            action,
-            step=int(raw_step) if isinstance(raw_step, (int, float, str)) and str(raw_step).strip().lstrip("-").isdigit() else None,
-            backend=str((payload or {}).get("backend") or ""),
-            notifications=str((payload or {}).get("notifications") or ""),
-            now=datetime.now(timezone.utc).isoformat(),
-        )
+        try:
+            state = apply_action(
+                action,
+                step=int(raw_step) if isinstance(raw_step, (int, float, str)) and str(raw_step).strip().lstrip("-").isdigit() else None,
+                backend=str(
+                    (payload or {}).get("primary_backend")
+                    or (payload or {}).get("backend")
+                    or ""
+                ),
+                mixed_enabled=(
+                    bool((payload or {}).get("mixed_enabled"))
+                    if "mixed_enabled" in (payload or {}) else None
+                ),
+                notifications=str((payload or {}).get("notifications") or ""),
+                now=datetime.now(timezone.utc).isoformat(),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse({
             "ok": True,
             "show_welcome": state.show_welcome,
             "completed": state.completed,
             "skipped": state.skipped,
             "step": state.step,
+            "primary_backend": state.backend,
+            "mixed_enabled": state.mixed_enabled,
         })
 
     @app.post("/api/workspace/projects/validate-path")
@@ -1061,99 +1097,13 @@ def create_app(
         raw_root = str(payload.get("root") or "").strip()
         if not raw_root:
             return JSONResponse({"ok": False, "status": "invalid", "reason": "root is required"}, status_code=422)
-        root = Path(raw_root).expanduser()
-        resolved_root = root.resolve(strict=False)
-        exists = root.exists()
-        state_dir_raw = str(payload.get("state_dir") or ".zf").strip() or ".zf"
-        state_dir = Path(state_dir_raw).expanduser()
-        if not state_dir.is_absolute():
-            state_dir = root / state_dir
-        resolved_state_dir = state_dir.resolve(strict=False)
-        diagnostics: list[dict[str, Any]] = []
-        parent = root.parent
-        parent_exists = parent.exists()
-        parent_writable = parent_exists and os.access(parent, os.W_OK)
-        if not parent_exists:
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "parent_missing",
-                "message": f"parent does not exist: {parent}",
-            })
-        elif not parent_writable:
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "parent_not_writable",
-                "message": f"parent is not writable: {parent}",
-            })
-        if exists and not root.is_dir():
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "root_not_directory",
-                "message": f"root is not a directory: {root}",
-            })
-        try:
-            resolved_state_dir.relative_to(resolved_root)
-        except ValueError:
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "state_dir_outside_root",
-                "message": f"state_dir is outside root: {resolved_state_dir}",
-            })
-        registered_conflicts: list[dict[str, str]] = []
-        try:
-            workspace = str(payload.get("workspace") or "default")
-            for project in WorkspaceRegistry(workspace=workspace).list_projects():
-                try:
-                    project_root_path = Path(project.root).expanduser().resolve(strict=False)
-                except Exception:
-                    continue
-                if project_root_path == resolved_root:
-                    registered_conflicts.append({
-                        "project_id": project.project_id,
-                        "name": project.name,
-                        "root": str(project_root_path),
-                    })
-        except Exception:
-            registered_conflicts = []
-        if registered_conflicts:
-            diagnostics.append({
-                "severity": "WARN",
-                "kind": "root_already_registered",
-                "message": "root is already registered in workspace",
-                "project_ids": [item["project_id"] for item in registered_conflicts],
-            })
-        state_dir_non_empty = resolved_state_dir.is_dir() and any(resolved_state_dir.iterdir())
-        if resolved_state_dir.exists() and not resolved_state_dir.is_dir():
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "state_dir_not_directory",
-                "message": f"state_dir is not a directory: {resolved_state_dir}",
-            })
-        if state_dir_non_empty:
-            diagnostics.append({
-                "severity": "WARN",
-                "kind": "state_dir_non_empty",
-                "message": f"state_dir already exists and is non-empty: {resolved_state_dir}",
-            })
-        stop = any(str(item.get("severity") or "").upper() == "STOP" for item in diagnostics)
-        return JSONResponse({
-            "ok": exists and not stop,
-            "status": "invalid" if stop else "valid" if exists else "missing",
-            "root": str(root.resolve()) if exists else str(root),
-            "root_resolved": str(resolved_root),
-            "config_path": str((root / "zf.yaml").resolve()) if exists else str(root / "zf.yaml"),
-            "has_config": bool((root / "zf.yaml").exists()) if exists else False,
-            "state_dir": str(state_dir),
-            "state_dir_resolved": str(resolved_state_dir),
-            "state_dir_exists": resolved_state_dir.exists(),
-            "state_dir_non_empty": state_dir_non_empty,
-            "parent_exists": parent_exists,
-            "parent_writable": bool(parent_writable),
-            "can_create": (not exists) and parent_exists and bool(parent_writable) and not stop,
-            "can_register": exists and bool((root / "zf.yaml").exists()) and not stop,
-            "registered_conflicts": registered_conflicts,
-            "diagnostics": diagnostics,
-        })
+        return JSONResponse(
+            inspect_project_admission(
+                raw_root,
+                workspace=str(payload.get("workspace") or "default"),
+                requested_state_dir=str(payload.get("state_dir") or ""),
+            )
+        )
 
     @app.post("/api/workspace/projects/register")
     async def workspace_register_project(
@@ -1171,7 +1121,14 @@ def create_app(
             status_code = int(auth_error.pop("_status_code", 403))
             return JSONResponse(auth_error, status_code=status_code)
         payload = await _request_json(request)
-        root = Path(str(payload.get("root") or "")).expanduser()
+        raw_root = str(payload.get("root") or "").strip()
+        if not raw_root:
+            return JSONResponse({
+                "ok": False,
+                "status": "invalid_payload",
+                "reason": "root is required",
+            }, status_code=422)
+        root = Path(raw_root).expanduser()
         workspace = str(payload.get("workspace") or "default")
         display_name = str(
             payload.get("display_name")
@@ -1196,42 +1153,6 @@ def create_app(
             "project": _workspace_project_payload(project),
         })
 
-    def _apply_profile_overlay(
-        root: Path,
-        *,
-        stack: str = "",
-        surface: str = "",
-        scale: str = "",
-        scaffold: bool = False,
-        intent: str = "build",
-    ) -> dict:
-        """Post-init stack overlay (doc 102 §4.3): no-clobber required_checks +
-        AGENTS.md stack section, + optional from-0 scaffold. When a stack is
-        declared (greenfield survey) use declared_profile instead of detection.
-        Token gate already passed upstream."""
-        from zf.core.profile.apply import (
-            apply_agents_md_stack,
-            fill_required_checks,
-            scaffold_from_zero,
-        )
-        from zf.core.profile.detector import declared_profile, detect
-        from zf.core.profile.recommender import recommend
-
-        profile = declared_profile(stack, surface) if stack else detect(root)
-        rec = recommend(profile, intent, declared=bool(stack), scale=scale or None)
-        out: dict = {"archetype": rec.archetype, "harness_profile": rec.harness_profile,
-                     "languages": list(profile.languages)}
-        zf_yaml = root / "zf.yaml"
-        if zf_yaml.exists():
-            out["required_checks"] = fill_required_checks(
-                zf_yaml, rec.required_checks, write=True)
-        agents = root / "AGENTS.md"
-        if agents.exists():
-            out["agents_md"] = apply_agents_md_stack(agents, profile, write=True)["action"]
-        if scaffold:
-            out["scaffold"] = scaffold_from_zero(root, profile, write=True)["created"]
-        return out
-
     @app.post("/api/workspace/projects/init")
     async def workspace_init_project(
         request: Request,
@@ -1248,78 +1169,101 @@ def create_app(
             status_code = int(auth_error.pop("_status_code", 403))
             return JSONResponse(auth_error, status_code=status_code)
         payload = await _request_json(request)
-        root = Path(str(payload.get("root") or "")).expanduser()
+        raw_root = str(payload.get("root") or "").strip()
+        if not raw_root:
+            return JSONResponse({
+                "ok": False,
+                "status": "invalid_payload",
+                "reason": "root is required",
+            }, status_code=422)
+        root = Path(raw_root).expanduser()
         preset_arg = str(payload.get("preset") or "") or None
         flow_kind = str(payload.get("kind") or payload.get("request_kind") or "").strip().lower()
+        implicit_admission = not preset_arg and not flow_kind
+        admission_inspection: dict[str, Any] | None = None
+        admission_action = ""
+        if implicit_admission:
+            admission_inspection = inspect_project_admission(
+                root,
+                workspace=str(payload.get("workspace") or "default"),
+                requested_state_dir=str(payload.get("state_dir") or ""),
+            )
+            admission_action = str(
+                (admission_inspection.get("admission") or {}).get("action") or ""
+            )
+            if admission_action == "blocked":
+                return JSONResponse({
+                    "ok": False,
+                    "status": "admission_blocked",
+                    "reason": (
+                        (admission_inspection.get("admission") or {}).get("reason")
+                        or "project admission blocked"
+                    ),
+                    "inspection": admission_inspection,
+                }, status_code=422)
+            if admission_action in {"open", "register"}:
+                return JSONResponse({
+                    "ok": False,
+                    "status": "already_initialized",
+                    "reason": "project state is already initialized",
+                    "inspection": admission_inspection,
+                }, status_code=409)
+        if implicit_admission and not (root / "zf.yaml").exists():
+            flow_kind = "multi"
         if flow_kind and flow_kind not in {"multi", "issue", "prd", "refactor"}:
             return JSONResponse({
                 "ok": False,
                 "status": "invalid_payload",
                 "reason": "kind must be one of multi, issue, prd, refactor",
             }, status_code=422)
-        generated_flow_kind = ""
+        if "mixed_enabled" in payload and not isinstance(
+            payload.get("mixed_enabled"),
+            bool,
+        ):
+            return JSONResponse({
+                "ok": False,
+                "status": "invalid_payload",
+                "reason": "mixed_enabled must be a boolean",
+            }, status_code=422)
+        generated_config = None
         if flow_kind:
-            project_name = (
-                str(payload.get("name") or payload.get("project_name") or "").strip()
-                or root.expanduser().name
-                or f"{flow_kind}-project"
+            try:
+                generated_config = draft_project_init_config(
+                    payload=payload,
+                    root=root,
+                    flow_kind=flow_kind,
+                    inherit_onboarding=implicit_admission,
+                )
+            except ValueError as exc:
+                return JSONResponse({
+                    "ok": False,
+                    "status": "invalid_payload",
+                    "reason": str(exc),
+                }, status_code=422)
+            preset_arg = None
+        if (
+            implicit_admission
+            and admission_action == "initialize_project"
+            and generated_config is not None
+            and admission_inspection is not None
+        ):
+            body, status_code = initialize_admitted_project(
+                payload=payload,
+                root=root,
+                generated_config=generated_config,
+                admission_inspection=admission_inspection,
             )
-            lanes_raw = payload.get("lanes") or payload.get("requested_lanes")
-            lanes = int(lanes_raw) if lanes_raw else 0
-            if not lanes and flow_kind != "multi":
-                from zf.core.workflow.request_policy import default_lanes_for_kind
-
-                lanes = default_lanes_for_kind(flow_kind)
-            parity_scope_raw = payload.get("parity_scope") or payload.get("parityScope") or []
-            if isinstance(parity_scope_raw, str):
-                parity_scope = tuple(
-                    item.strip() for item in parity_scope_raw.split(",") if item.strip()
-                )
-            elif isinstance(parity_scope_raw, list):
-                parity_scope = tuple(str(item).strip() for item in parity_scope_raw if str(item).strip())
-            else:
-                parity_scope = ()
+            return JSONResponse(body, status_code=status_code)
+        if generated_config is not None:
             root.mkdir(parents=True, exist_ok=True)
-            if flow_kind == "multi":
-                docs = draft_multi_kind_project_spec(
-                    backend=str(payload.get("backend") or "codex"),
-                    lanes=lanes,
-                    project_name=project_name,
-                    state_dir=str(payload.get("state_dir") or ""),
-                    project_root=root,
-                    strictness=str(payload.get("strictness") or "standard"),
-                    parity_scope=parity_scope,
-                )
-            else:
-                docs = draft_flow_spec(
-                    kind=flow_kind,
-                    source_ref=str(
-                        payload.get("from")
-                        or payload.get("source_ref")
-                        or payload.get("objective_ref")
-                        or ""
-                    ),
-                    source_root=str(payload.get("source_root") or payload.get("sourceRoot") or ""),
-                    target_root=str(
-                        payload.get("target_root")
-                        or payload.get("targetRoot")
-                        or payload.get("target")
-                        or ""
-                    ),
-                    backend=str(payload.get("backend") or "codex"),
-                    lanes=lanes,
-                    project_name=project_name,
-                    state_dir=str(payload.get("state_dir") or ""),
-                    project_root=root,
-                    strictness=str(payload.get("strictness") or "standard"),
-                    parity_scope=parity_scope,
-                )
             (root / "zf.yaml").write_text(
-                yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True),
+                yaml.safe_dump_all(
+                    generated_config.documents,
+                    sort_keys=False,
+                    allow_unicode=True,
+                ),
                 encoding="utf-8",
             )
-            preset_arg = None
-            generated_flow_kind = flow_kind
         # A validated prod flow archetype → write its yaml directly, skip preset gen.
         if preset_arg:
             from zf.core.profile.flows import is_flow_id, read_flow_yaml
@@ -1335,8 +1279,22 @@ def create_app(
 
                     materialize_flow_assets(preset_arg, root, config_path=root / "zf.yaml")
                 preset_arg = None
+        if admission_inspection is not None:
+            inspected_state_dir = Path(
+                str(admission_inspection.get("state_dir_resolved") or "")
+            )
+            if (
+                inspected_state_dir.is_dir()
+                and not any(inspected_state_dir.iterdir())
+            ):
+                try:
+                    inspected_state_dir.rmdir()
+                except OSError:
+                    # A concurrent writer won the admission/init race. Leave
+                    # the directory in place so ProjectInitializer fails closed.
+                    pass
         try:
-            if generated_flow_kind:
+            if generated_config is not None:
                 from zf.core.profile.apply import materialize_config_skills
 
                 materialize_config_skills(root / "zf.yaml", root)
@@ -1350,7 +1308,9 @@ def create_app(
                 with_instruction_docs=not bool(payload.get("skip_instruction_docs")),
                 workspace_register=True,
                 create_root=True,
-                notes=str(payload.get("description") or ""),
+                notes=str(payload.get("notes") or ""),
+                instruction_stack=str(payload.get("stack") or ""),
+                instruction_surface=str(payload.get("surface") or ""),
             )
         except Exception as exc:
             return JSONResponse({
@@ -1360,7 +1320,7 @@ def create_app(
             }, status_code=422)
         profile_applied = None
         if bool(payload.get("apply_profile")):
-            profile_applied = _apply_profile_overlay(
+            profile_applied = apply_project_profile_overlay(
                 root,
                 stack=str(payload.get("stack") or ""),
                 surface=str(payload.get("surface") or ""),
@@ -1378,14 +1338,30 @@ def create_app(
                 "created": list(result.instruction_docs.created),
                 "updated": list(result.instruction_docs.updated),
                 "skipped": list(result.instruction_docs.skipped),
+                "profile": result.instruction_docs.profile,
             },
             # onboarding 与 CLI init 对齐(入口打通):
             "git_hook": result.git_hook_status,
             "setup_suggestion": result.setup_suggestion or None,
             "profile": profile_applied,
             "notes": notes_written,
-            "kind": generated_flow_kind,
-            "config_generated": "typed_flow_spec" if generated_flow_kind else (
+            "kind": generated_config.flow_kind if generated_config else "",
+            "project_metadata": (
+                {
+                    "name": generated_config.project_name,
+                    "description": generated_config.project_description,
+                }
+                if generated_config else None
+            ),
+            "provider_policy": (
+                {
+                    "primary_backend": generated_config.primary_backend,
+                    "mixed_enabled": generated_config.mixed_enabled,
+                    "verify_backend": generated_config.verify_backend,
+                }
+                if generated_config else None
+            ),
+            "config_generated": "typed_flow_spec" if generated_config else (
                 "preset" if preset_arg else "existing"
             ),
             "project": (
@@ -4078,6 +4054,10 @@ def _snapshot(
                 config.project.name
                 if config is not None and config.project.name else project_root.name
             ),
+            "description": (
+                config.project.description
+                if config is not None else ""
+            ),
             "root": str(project_root),
             "state_dir": str(state_dir),
         },
@@ -4357,6 +4337,10 @@ def _snapshot_base(
             "name": (
                 config.project.name
                 if config is not None and config.project.name else project_root.name
+            ),
+            "description": (
+                config.project.description
+                if config is not None else ""
             ),
             "root": str(project_root),
             "state_dir": str(state_dir),
@@ -5361,7 +5345,7 @@ def _operator_agent_surface(
         "configured_backend": configured_backend or "",
         "default_backend": default_backend,
         "backends": backends,
-        "permission_profile": "read_only",
+        "permission_profile": KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE,
         "permission_profiles": list(KANBAN_AGENT_PERMISSION_PROFILES),
         "descriptor": descriptor,
         "profile": "operator",
@@ -6054,6 +6038,7 @@ def _web_action(
     if canonical_action in {
         "channel-create",
         "channel-create-from-template",
+        "channel-create-and-start",
         "channel-discussion-start",
         "channel-post-message",
         "channel-invite-member",
@@ -6063,6 +6048,8 @@ def _web_action(
         "channel-clear-history",
         "channel-synthesis",
         "channel-synthesis-request",
+        "channel-question-resolve", "channel-consensus-confirm",
+        "channel-consensus-block",
         "channel-drain-replies",
         "channel-mark-read",
         "channel-handoff",
@@ -6071,6 +6058,7 @@ def _web_action(
         "workflow-invoke",
         "research-start",
         "research-adopt",
+        "kanban-plan-apply",
     }:
         response = ControlledActionService(
             state_dir,
@@ -6230,7 +6218,7 @@ def _web_action(
         )
         return response
 
-    if canonical_action in _PROJECT_OPERATOR_CONTROLLED_ACTIONS:
+    if canonical_action in PROJECT_OPERATOR_CONTROLLED_ACTIONS:
         response = ControlledActionService(
             state_dir,
             writer,
@@ -6426,12 +6414,6 @@ def _canonical_action(action_name: str) -> str:
     return _CANONICAL_ACTIONS.get(action_name, action_name)
 
 
-
-
-
-
-
-
 def _validate_action_payload(
     action: str,
     payload: dict,
@@ -6452,9 +6434,9 @@ def _validate_action_payload(
         "mark-blocked",
     } and not str(payload.get("task_id") or ""):
         return "task_id is required"
-    if action == "chat-orchestrator" and not str(payload.get("message") or "").strip():
-        return "message is required"
     if action == "chat-orchestrator":
+        if plan_error := plan_runtime.validate_chat_plan_payload(payload):
+            return plan_error
         backend = str(payload.get("backend") or "").strip()
         if backend:
             allowed = {
@@ -6988,15 +6970,21 @@ def _handle_chat_orchestrator(
     project_root: Path | None = None,
     config: ZfConfig | None = None,
 ) -> dict:
-    message = str(payload.get("message") or "").strip()
     task_id = _task_id_from_payload(payload)
+    payload, terminal = plan_runtime.prepare_web_plan_interaction(
+        writer, requested=requested, action=action,
+        requested_action=requested_action, task_id=task_id, payload=payload,
+    )
+    if terminal is not None:
+        return terminal
+    message = str(payload.get("message") or "").strip()
     headless_backend = canonical_headless_backend(str(payload.get("backend") or ""))
     permission_profile = normalize_permission_profile(payload.get("permission_profile"))
     user_message = writer.emit(
         "user.message",
         actor="web",
         task_id=task_id,
-        causation_id=requested.id,
+        causation_id=str(payload.get("plan_answer_event_id") or requested.id),
         payload={
             "source": "kanban",
             "target": "kanban-agent" if headless_backend else "orchestrator",
@@ -7007,6 +6995,7 @@ def _handle_chat_orchestrator(
             "project_id": str(payload.get("project_id") or ""),
             "conversation_id": str(payload.get("conversation_id") or ""),
             "thread_key": str(payload.get("thread_key") or ""),
+            "permission_escalation_retry_for": str(payload.get("permission_escalation_retry_for") or ""),
             "request": redact_obj(payload),
         },
     )
@@ -7384,6 +7373,7 @@ def _run_headless_kanban_agent_turn(
     config: ZfConfig | None = None,
 ) -> dict:
     runtime_snapshot_ref = ""
+    task = None
     try:
         from types import SimpleNamespace
 
@@ -7524,6 +7514,10 @@ def _run_headless_kanban_agent_turn(
                 "project_id": project_id,
                 "conversation_id": conversation_id,
                 "runtime_snapshot_ref": runtime_snapshot_ref,
+                "workflow_route_catalog": workflow_route_catalog(config),
+                "canonical_channel_prds": canonical_channel_prd_context(state_dir),
+                "workflow_context": workflow_context_from_payload(payload),
+                "plan_discussion": payload.get("plan_discussion") or {},
             },
             on_message=delta_emitter.emit,
             thinking_level=thinking_level,
@@ -7591,9 +7585,13 @@ def _run_headless_kanban_agent_turn(
             "turn_id": turn_id,
             "thread_key": thread_key,
         }
+    origin_message_event_id = str(payload.get("plan_origin_message_event_id") or "")
+    prior_events = writer.event_log.read_all()
     action_proposal = _headless_action_proposal(
         result.reply,
-        user_message=message,
+        user_message=plan_runtime.plan_proposal_user_message(
+            prior_events, payload=payload, message=message,
+        ),
         proposal_context={
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -7601,6 +7599,23 @@ def _run_headless_kanban_agent_turn(
             "run_id": turn_id,
             "causation_id": user_message.id,
         },
+        config=config,
+    )
+    plan_draft, action_proposal = plan_runtime.prepare_headless_plan_draft(
+        prior_events, answer=result.reply, action_proposal=action_proposal,
+        project_id=project_id, conversation_id=conversation_id,
+        thread_key=thread_key, fallback_thread_id=result.thread_id,
+        turn_id=turn_id, backend=backend,
+        provider_session_id=result.provider_session_id,
+        originating_message_event_id=origin_message_event_id or user_message.id,
+        task_id=task_id,
+        task_contract_digest=(
+            task_workflow_binding_digest(task)
+            if task is not None
+            else ""
+        ),
+        workflow_context=workflow_context_from_payload(payload),
+        correlation_id=user_message.correlation_id,
         config=config,
     )
     reply = {
@@ -7645,9 +7660,11 @@ def _run_headless_kanban_agent_turn(
     except Exception:
         pass
     proposal_event: ZfEvent | None = None
+    if plan_draft is not None:
+        reply["plan_request"] = plan_draft.request
     if action_proposal is not None:
         proposal_event = ZfEvent(
-            type="kanban.agent.action.proposed",
+            type=PROPOSAL_EVENT,
             actor="web",
             task_id=task_id,
             correlation_id=user_message.correlation_id,
@@ -7661,6 +7678,11 @@ def _run_headless_kanban_agent_turn(
         causation_id=user_message.id,
         correlation_id=user_message.correlation_id,
         payload=redact_obj(reply),
+    )
+    plan_runtime.append_headless_plan_draft(
+        writer,
+        plan_draft,
+        reply_event=reply_event,
     )
     if proposal_event is not None and action_proposal is not None:
         proposal_event.causation_id = reply_event.id
@@ -7903,33 +7925,6 @@ def _headless_action_proposal(
             config=config,
         ),
     )
-
-
-def _headless_json_candidates(text: str) -> list[str]:
-    return proposal_json_candidates(text)
-
-
-def _normalize_headless_action_proposal(
-    decoded: Any,
-    *,
-    user_message: str = "",
-    proposal_context: dict[str, Any] | None = None,
-    config: ZfConfig | None = None,
-) -> dict[str, Any] | None:
-    return normalize_action_proposal(
-        decoded,
-        user_message=user_message,
-        proposal_context=proposal_context,
-        validate_payload=lambda action, payload: _validate_action_payload(
-            action,
-            payload,
-            config=config,
-        ),
-    )
-
-
-
-
 
 
 def _handle_start_collaboration(

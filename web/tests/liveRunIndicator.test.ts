@@ -230,7 +230,7 @@ const proposalOnly = buildKanbanConversation({
 });
 const proposalOnlyTurn = proposalOnly.threads[0]!.turns[0]!;
 assert(!proposalOnlyTurn.runs[0]!.parts.some((p) => p.kind === "text"), "proposal-only JSON is hidden from reply text");
-assert(proposalOnlyTurn.cards.some((card) => card.kind === "proposal"), "proposal-only JSON still produces a proposal card");
+assert(proposalOnlyTurn.cards.some((card) => card.kind === "approve"), "proposal-only JSON still produces an Approve card");
 
 const proposalWithProse = buildKanbanConversation({
   activeThreadId: "main",
@@ -253,6 +253,40 @@ assert(
   "proposal fenced JSON is removed while explanatory prose remains",
 );
 
+const resolvedProposal = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-proposal-reply",
+      ts: "2026-07-16T00:00:00Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-proposal-resolved",
+        thread_key: "main",
+        answer: proposalEnvelope,
+        action_proposal: {
+          ...proposalPayload,
+          proposal_event_id: "evt-proposal-source",
+        },
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-task-created",
+      ts: "2026-07-16T00:01:00Z",
+      type: "task.created",
+      payload: {
+        proposal_event_id: "evt-proposal-source",
+        request: { proposal_event_id: "evt-proposal-source" },
+      },
+    },
+  ],
+});
+const resolvedProposalCard = resolvedProposal.threads[0]!.turns[0]!.cards.find((card) => card.kind === "approve");
+assert(resolvedProposalCard?.status === "completed", "task receipt resolves the historical Approve card");
+assert(resolvedProposalCard?.payload?.resolution === "executed", "Approve card carries executed receipt");
+
 const ordinaryJson = buildKanbanConversation({
   activeThreadId: "main",
   events: [{
@@ -267,5 +301,451 @@ assert(
   ordinaryJson.threads[0]!.turns[0]!.runs[0]!.parts.find((p) => p.kind === "text")?.content === '{"status":"healthy"}',
   "ordinary JSON without a parsed proposal remains visible",
 );
+
+const planRequest = {
+  request_event_id: "evt-plan-request",
+  request_id: "plan-route",
+  request_digest: "digest-route",
+  revision: 1,
+  header: "Route",
+  question_id: "route",
+  question: "Which route?",
+  options: [
+    { id: "research", label: "Research", description: "Collect evidence.", recommended: true },
+    { id: "channel", label: "Channel", description: "Discuss with roles." },
+  ],
+  allow_other: true,
+  valid: true,
+};
+const planEnvelope = JSON.stringify({ plan_request: {
+  header: "Route",
+  question: "Which route?",
+  options: planRequest.options,
+} });
+const planConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-plan-reply",
+      ts: "2026-07-16T00:00:00Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-plan",
+        thread_key: "main",
+        answer: planEnvelope,
+        plan_request: planRequest,
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-plan-answer",
+      ts: "2026-07-16T00:01:00Z",
+      type: "kanban.agent.plan.answered",
+      payload: {
+        request_event_id: "evt-plan-request",
+        request_id: "plan-route",
+        revision: 1,
+        question_id: "route",
+        option_id: "research",
+        answer: "Research",
+      },
+    },
+  ],
+});
+const planTurn = planConversation.threads[0]!.turns[0]!;
+const planCard = planTurn.cards.find((card) => card.kind === "plan");
+assert(Boolean(planCard?.planRequest), "structured Plan request produces a Plan card");
+assert(planCard?.status === "completed", "answered Plan request projects as completed");
+assert(planCard?.planRequest?.response?.answer === "Research", "Plan response binds to the exact request");
+assert(!planTurn.runs[0]!.parts.some((part) => part.kind === "text"), "Plan envelope is hidden from reply prose");
+
+const multiPlanRequest = {
+  ...planRequest,
+  request_event_id: "evt-plan-multi",
+  request_id: "plan-multi",
+  header: "Delivery inputs",
+  questions: [
+    {
+      id: "route",
+      header: "Route",
+      question: "Which route?",
+      options: planRequest.options,
+      allow_other: true,
+    },
+    {
+      id: "evidence",
+      header: "Evidence",
+      question: "Which evidence depth?",
+      options: [
+        { id: "focused", label: "Focused", recommended: true },
+        { id: "broad", label: "Broad" },
+      ],
+      allow_other: true,
+    },
+  ],
+};
+const multiPlanEnvelope = JSON.stringify({
+  plan_request: {
+    header: "Delivery inputs",
+    questions: multiPlanRequest.questions,
+  },
+});
+const multiPlanConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [{
+    seq: 1,
+    id: "evt-plan-multi-reply",
+    ts: "2026-07-16T00:00:00Z",
+    type: "kanban.agent.reply",
+    payload: {
+      turn_id: "turn-plan-multi",
+      thread_key: "main",
+      answer: multiPlanEnvelope,
+      plan_request: multiPlanRequest,
+    },
+  }],
+});
+assert(
+  !multiPlanConversation.threads[0]!.turns[0]!.runs[0]!.parts.some(
+    (part) => part.kind === "text",
+  ),
+  "multi-question Plan envelope is hidden from reply prose",
+);
+
+const workflowPlanRequest = {
+  ...planRequest,
+  request_event_id: "evt-workflow-plan",
+  request_id: "plan-workflow-route",
+  subject_type: "task_workflow",
+  config_digest: "sha256:config",
+  options: [
+    {
+      id: "delivery",
+      label: "PRD delivery",
+      recommended: true,
+      submit_action: "workflow-start",
+      submit_mode: "propose",
+      submit_details: {
+        route_id: "delivery:prd:standard",
+        family: "delivery",
+        topology: "multi_lane",
+        roles: ["planner", "dev-lane-0", "verify-lane-0"],
+        writer_roles: ["dev-lane-0"],
+        verify_roles: ["verify-lane-0"],
+        lane_count: 2,
+        output_profile: "candidate_and_evidence",
+      },
+    },
+    {
+      id: "defer",
+      label: "No workflow yet",
+      submit_mode: "continue",
+    },
+  ],
+};
+const workflowPlanConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [{
+    seq: 1,
+    id: "evt-workflow-plan-reply",
+    ts: "2026-07-16T00:00:00Z",
+    type: "kanban.agent.reply",
+    payload: {
+      turn_id: "turn-workflow-plan",
+      thread_key: "main",
+      answer: "Choose a workflow route.",
+      plan_request: workflowPlanRequest,
+    },
+  }],
+});
+const workflowPlan = workflowPlanConversation.threads[0]!.turns[0]!.cards[0]!.planRequest;
+assert(workflowPlan?.subjectType === "task_workflow", "workflow Plan subject is projected");
+assert(workflowPlan?.options[0]?.submitMode === "propose", "option-level proposal mode is projected");
+assert(workflowPlan?.options[0]?.submitDetails?.routeId === "delivery:prd:standard", "route details are projected");
+assert(workflowPlan?.options[0]?.submitDetails?.laneCount === 2, "lane count is projected");
+
+const standaloneWorkflowPlan = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-workflow-origin",
+      ts: "2026-07-16T00:00:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Create a Task and recommend its workflow.",
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-workflow-turn",
+      ts: "2026-07-16T00:00:01Z",
+      type: "kanban.agent.turn.created",
+      causation_id: "evt-workflow-origin",
+      payload: {
+        turn_id: "turn-workflow",
+        thread_key: "main",
+        message_event_id: "evt-workflow-origin",
+      },
+    },
+    {
+      seq: 3,
+      id: "evt-workflow-plan",
+      ts: "2026-07-16T00:00:02Z",
+      type: "kanban.agent.plan.requested",
+      task_id: "TASK-WORKFLOW",
+      payload: {
+        thread_key: "main",
+        plan_request: {
+          ...workflowPlanRequest,
+          turn_id: "turn-workflow",
+          originating_message_event_id: "evt-workflow-origin",
+        },
+      },
+    },
+    {
+      seq: 4,
+      id: "evt-workflow-proposal",
+      ts: "2026-07-16T00:00:03Z",
+      type: "operator.action.proposed",
+      task_id: "TASK-WORKFLOW",
+      payload: {
+        turn_id: "turn-workflow",
+        thread_key: "main",
+        proposal: {
+          proposal_event_id: "evt-workflow-proposal",
+          proposal_id: "proposal-workflow",
+          proposal_digest: "digest-workflow",
+          revision: 1,
+          action: "workflow-start",
+          requested_action: "workflow-start",
+          payload: {
+            task_id: "TASK-WORKFLOW",
+            route_id: "delivery:prd:standard",
+            objective: "Run the Task.",
+          },
+          reason: "The owner selected this route.",
+          valid: true,
+        },
+      },
+    },
+  ],
+});
+const standaloneTurn = standaloneWorkflowPlan.threads[0]!.turns.find(
+  (turn) => turn.id === "evt-workflow-origin",
+);
+assert(Boolean(standaloneTurn?.cards[0]?.planRequest), "standalone Plan event renders a durable Plan card");
+assert(standaloneTurn?.cards[0]?.planRequest?.subjectType === "task_workflow", "standalone Task workflow Plan keeps its subject");
+assert(standaloneTurn?.cards.some((card) => (
+  card.kind === "approve"
+  && card.proposal?.action === "workflow-start"
+)), "standalone Plan proposal renders an inline Approve card");
+
+const planContinuationConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-plan-reply",
+      ts: "2026-07-16T00:00:00Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-plan",
+        thread_key: "main",
+        answer: planEnvelope,
+        plan_request: planRequest,
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-plan-answer",
+      ts: "2026-07-16T00:01:00Z",
+      type: "kanban.agent.plan.answered",
+      payload: {
+        request_event_id: "evt-plan-request",
+        request_id: "plan-route",
+        revision: 1,
+        question_id: "route",
+        option_id: "research",
+        answer: "Research",
+      },
+    },
+    {
+      seq: 3,
+      id: "evt-plan-continuation-message",
+      causation_id: "evt-plan-answer",
+      ts: "2026-07-16T00:02:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Plan: Route\nQuestion: Which route?\nAnswer: Research",
+        request: {
+          plan_response: {
+            request_event_id: "evt-plan-request",
+            request_id: "plan-route",
+            revision: 1,
+            question_id: "route",
+            option_id: "research",
+            answer: "Research",
+          },
+        },
+      },
+    },
+    {
+      seq: 4,
+      id: "evt-plan-continuation-created",
+      causation_id: "evt-plan-continuation-message",
+      ts: "2026-07-16T00:02:01Z",
+      type: "kanban.agent.turn.created",
+      payload: {
+        turn_id: "turn-plan-continuation",
+        thread_key: "main",
+      },
+    },
+    {
+      seq: 5,
+      id: "evt-plan-continuation-reply",
+      ts: "2026-07-16T00:02:02Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-plan-continuation",
+        thread_key: "main",
+        answer: "I prepared the selected route.",
+      },
+    },
+  ],
+});
+const continuationTurn = planContinuationConversation.threads[0]!.turns.find((turn) => (
+  turn.id === "evt-plan-continuation-message"
+));
+assert(continuationTurn?.user === undefined, "internal Plan continuation does not render a protocol-shaped user bubble");
+assert(
+  continuationTurn?.runs[0]?.parts.some((part) => part.content === "I prepared the selected route."),
+  "internal Plan continuation still renders the resumed agent reply",
+);
+
+const permissionRetryConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-permission-retry-message",
+      ts: "2026-07-16T00:03:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Implement the requested change.",
+        permission_escalation_retry_for: "evt-sandbox-failed",
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-permission-retry-created",
+      causation_id: "evt-permission-retry-message",
+      ts: "2026-07-16T00:03:01Z",
+      type: "kanban.agent.turn.created",
+      payload: {
+        turn_id: "turn-permission-retry",
+        thread_key: "main",
+      },
+    },
+    {
+      seq: 3,
+      id: "evt-permission-retry-reply",
+      causation_id: "evt-permission-retry-message",
+      ts: "2026-07-16T00:03:02Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-permission-retry",
+        thread_key: "main",
+        answer: "The change is complete.",
+      },
+    },
+  ],
+});
+const permissionRetryTurn = permissionRetryConversation.threads[0]!.turns.find((turn) => (
+  turn.id === "evt-permission-retry-message"
+));
+assert(
+  permissionRetryTurn?.user === undefined,
+  "one-turn permission retry does not duplicate the original user message",
+);
+assert(
+  permissionRetryTurn?.runs[0]?.parts.some((part) => part.content === "The change is complete."),
+  "one-turn permission retry still renders the agent result",
+);
+
+const revisedPlanConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-plan-reply-r1",
+      ts: "2026-07-16T00:00:00Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-plan-r1",
+        thread_key: "main",
+        answer: planEnvelope,
+        plan_request: {
+          ...planRequest,
+          request_event_id: "evt-plan-request-r1",
+        },
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-plan-reply-r2",
+      ts: "2026-07-16T00:01:00Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-plan-r2",
+        thread_key: "main",
+        answer: planEnvelope,
+        plan_request: {
+          ...planRequest,
+          request_event_id: "evt-plan-request-r2",
+          request_digest: "digest-route-r2",
+          revision: 2,
+        },
+      },
+    },
+    {
+      seq: 3,
+      id: "evt-plan-answer-r2",
+      ts: "2026-07-16T00:02:00Z",
+      type: "kanban.agent.plan.answered",
+      payload: {
+        request_event_id: "evt-plan-request-r2",
+        request_id: "plan-route",
+        revision: 2,
+        question_id: "route",
+        option_id: "channel",
+        answer: "Channel",
+      },
+    },
+  ],
+});
+const revisedPlanCards = revisedPlanConversation.threads[0]!.turns
+  .flatMap((turn) => turn.cards)
+  .filter((card) => card.kind === "plan");
+const oldPlanCard = revisedPlanCards.find((card) => (
+  card.planRequest?.requestEventId === "evt-plan-request-r1"
+));
+const newPlanCard = revisedPlanCards.find((card) => (
+  card.planRequest?.requestEventId === "evt-plan-request-r2"
+));
+assert(oldPlanCard?.status === "stale", "older Plan revision projects as superseded");
+assert(!oldPlanCard?.planRequest?.response, "new answer does not bind to an older Plan revision");
+assert(newPlanCard?.status === "completed", "answered latest Plan revision is completed");
+assert(newPlanCard?.planRequest?.response?.answer === "Channel", "latest Plan revision gets its exact answer");
 
 console.log("liveRunIndicator.test.ts OK");

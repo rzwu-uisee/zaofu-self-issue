@@ -20,7 +20,9 @@ from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.runtime.agent_session_stream import AgentSessionIdentity, AgentSessionStreamEmitter
+from zf.runtime.kanban_plan_requests import PLAN_REQUESTED_EVENT
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.web.plan_extraction import extract_plan_request
 from zf.web.headless_agent import (
     ClaudeHeadlessBackend,
     CodexHeadlessBackend,
@@ -109,6 +111,98 @@ def _fake_codex_script(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return script
+
+
+def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
+    state_dir: Path,
+    tmp_path: Path,
+) -> None:
+    agent = KanbanHeadlessAgent(
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    prompt = agent._system_prompt("read_only")
+
+    assert "contract.spec_ref" in prompt
+    assert "contract.source_ref" in prompt
+    assert "contract.handoff_artifacts" in prompt
+    assert "contract.evidence_contract.channel_prd_digest" in prompt
+    assert "must be non-empty" in prompt
+    assert "must not be fabricated" in prompt
+    assert "canonical_channel_prds" in prompt
+    assert "multiple plausible items" in prompt
+
+
+def test_chat_plan_payload_rejects_discussion_and_response_together() -> None:
+    from zf.web.plan_runtime import validate_chat_plan_payload
+
+    error = validate_chat_plan_payload({
+        "message": "Explain and answer this Plan",
+        "plan_discussion": {
+            "request_event_id": "evt-plan",
+            "request_id": "plan-route",
+            "revision": 1,
+        },
+        "plan_response": {
+            "request_event_id": "evt-plan",
+            "request_id": "plan-route",
+            "revision": 1,
+            "question_id": "route",
+            "option_id": "direct",
+        },
+    })
+
+    assert error == "plan_discussion and plan_response are mutually exclusive"
+
+
+def test_chat_orchestrator_injects_canonical_channel_prd_context(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = tmp_path / "stdin.jsonl"
+    script = _fake_claude_script(tmp_path)
+    monkeypatch.setenv("FAKE_CLAUDE_CAPTURE", str(capture))
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    monkeypatch.setattr(
+        "zf.web.server.canonical_channel_prd_context",
+        lambda _state_dir: {
+            "schema_version": "channel-prd-context.v1",
+            "items": [{
+                "channel_id": "ch-prd",
+                "artifact_ref": "channel-artifacts/ch-prd/prd.md",
+                "artifact_digest": "sha256:canonical",
+            }],
+        },
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    client = TestClient(
+        create_app(state_dir, project_root=state_dir.parent)
+    )
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "project_id": "zaofu-test",
+            "conversation_id": "kanban:zaofu-test",
+            "thread_key": "main",
+            "sync": True,
+            "message": "基于刚才的 canonical PRD 创建 Task proposal",
+        },
+    )
+
+    assert response.status_code == 200
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    prompt = sent["message"]["content"][0]["text"]
+    assert '"canonical_channel_prds"' in prompt
+    assert '"artifact_ref": "channel-artifacts/ch-prd/prd.md"' in prompt
+    assert '"artifact_digest": "sha256:canonical"' in prompt
 
 
 def _fake_codex_patch_approval_script(tmp_path: Path) -> Path:
@@ -659,6 +753,26 @@ def test_headless_permission_profiles_map_to_provider_security(
         permission_profile="artifact_writer",
     )
     assert result.ok is True
+
+
+def test_headless_provider_env_strips_zf_control_plane_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "web-secret")
+    monkeypatch.setenv("ZF_WEB_PASSCODE", "passcode-secret")
+    monkeypatch.setenv("ZF_WORKFLOW_ACTION_TOKEN", "workflow-secret")
+    monkeypatch.setenv("ZF_FEISHU_ACTION_TOKEN_SECRET", "feishu-secret")
+    monkeypatch.setenv("ZF_DOC156_REQUEST_ID", "non-secret-context")
+    monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+
+    env = headless_agent._headless_subprocess_env()
+
+    assert "ZF_WEB_ACTION_TOKEN" not in env
+    assert "ZF_WEB_PASSCODE" not in env
+    assert "ZF_WORKFLOW_ACTION_TOKEN" not in env
+    assert "ZF_FEISHU_ACTION_TOKEN_SECRET" not in env
+    assert env["ZF_DOC156_REQUEST_ID"] == "non-secret-context"
+    assert env["OPENAI_API_KEY"] == "provider-secret"
 
 
 def test_codex_headless_resume_reapplies_provider_security(
@@ -1257,6 +1371,7 @@ def test_workspace_writer_runs_real_headless_executor_and_records_profile(
         json={
             "backend": "claude-headless",
             "permission_profile": "workspace_writer",
+            "permission_escalation_retry_for": "evt-sandbox-failed",
             "sync": True,
             "thread_key": "coding-thread",
             "message": "implement the requested change",
@@ -1277,6 +1392,13 @@ def test_workspace_writer_runs_real_headless_executor_and_records_profile(
         event for event in events if event.type == "kanban.agent.turn.completed"
     ]
     assert completed[-1].payload["permission_profile"] == "workspace_writer"
+    user_message = [
+        event for event in events if event.type == "user.message"
+    ][-1]
+    assert (
+        user_message.payload["permission_escalation_retry_for"]
+        == "evt-sandbox-failed"
+    )
 
 
 def test_provider_dev_chat_start_uses_headless_executor(
@@ -1422,6 +1544,352 @@ def test_chat_orchestrator_extracts_headless_action_proposal(
         proposed_event.id
     )
     assert proposed_event.causation_id == reply_event.id
+
+
+def test_chat_orchestrator_extracts_and_resumes_durable_plan_request(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "fake_claude_plan.py"
+    plan = {
+        "plan_request": {
+            "header": "Route",
+            "id": "route",
+            "question": "How should this requirement proceed?",
+            "options": [
+                {
+                    "id": "research",
+                    "label": "Research (Recommended)",
+                    "description": "Collect evidence first.",
+                },
+                {
+                    "id": "channel",
+                    "label": "Channel",
+                    "description": "Resolve the decision with roles.",
+                },
+            ],
+            "allow_other": True,
+        }
+    }
+    script.write_text(
+        "\n".join([
+            "import json, sys",
+            "sys.stdin.readline()",
+            f"plan = {plan!r}",
+            "print(json.dumps({'type':'system','session_id':'claude-plan-session'}), flush=True)",
+            "print(json.dumps({'type':'result','session_id':'claude-plan-session','result':json.dumps(plan)}), flush=True)",
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+    route = "/api/actions/chat-orchestrator"
+    headers = {"x-zf-web-token": "test-token"}
+
+    first = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "message": "Help me choose the route",
+        },
+    )
+
+    assert first.status_code == 200
+    request = first.json()["reply"]["plan_request"]
+    assert request["valid"] is True
+    assert request["request_event_id"].startswith("evt-")
+    assert request["backend"] == "claude-headless"
+    assert request["provider_session_id"] == "claude-plan-session"
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    reply = [event for event in events if event.type == "kanban.agent.reply"][-1]
+    requested = [
+        event for event in events
+        if event.type == "kanban.agent.plan.requested"
+    ][-1]
+    assert requested.id == request["request_event_id"]
+    assert requested.causation_id == reply.id
+
+    response_payload = {
+        "request_event_id": request["request_event_id"],
+        "request_id": request["request_id"],
+        "revision": request["revision"],
+        "question_id": request["question_id"],
+        "option_id": "research",
+        "answer": "forged text",
+    }
+    mismatched = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "codex-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "plan_response": response_payload,
+        },
+    )
+    assert mismatched.status_code == 409
+    assert mismatched.json()["status"] == "plan_context_mismatch"
+
+    second = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "plan_response": response_payload,
+        },
+    )
+
+    assert second.status_code == 200
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    answered = [
+        event for event in events
+        if event.type == "kanban.agent.plan.answered"
+    ]
+    assert len(answered) == 1
+    assert answered[0].payload["answer"] == "Research (Recommended)"
+    continuation = [
+        event for event in events
+        if event.type == "user.message"
+        and event.causation_id == answered[0].id
+    ][0]
+    assert "Answer: Research (Recommended)" in (
+        continuation.payload["message"]
+    )
+    assert continuation.payload["thread_key"] == "main"
+    requested_after_answer = [
+        event
+        for event in events
+        if event.type == "kanban.agent.plan.requested"
+    ]
+    assert len(requested_after_answer) == 2
+    assert (
+        requested_after_answer[-1].payload["plan_request"][
+            "originating_message_event_id"
+        ]
+        == request["originating_message_event_id"]
+    )
+
+    user_message_count = len([
+        event for event in events if event.type == "user.message"
+    ])
+    duplicate = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "plan_response": response_payload,
+        },
+    )
+
+    assert duplicate.status_code == 200
+    assert duplicate.json()["status"] == "already_answered"
+    final_events = EventLog(state_dir / "events.jsonl").read_all()
+    assert len([
+        event for event in final_events if event.type == "user.message"
+    ]) == user_message_count
+
+
+def test_chat_orchestrator_discusses_exact_pending_plan_without_answering(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = tmp_path / "plan-discussion-stdin.jsonl"
+    script = _fake_claude_script(tmp_path)
+    monkeypatch.setenv("FAKE_CLAUDE_CAPTURE", str(capture))
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    request = extract_plan_request(
+        json.dumps({
+            "plan_request": {
+                "header": "Delivery route",
+                "id": "route",
+                "question": "Which delivery route should we use?",
+                "options": [
+                    {
+                        "id": "direct",
+                        "label": "Direct",
+                        "description": "Create the task directly.",
+                    },
+                    {
+                        "id": "research",
+                        "label": "Research",
+                        "description": "Collect evidence first.",
+                    },
+                ],
+            },
+        }),
+        plan_context={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "turn_id": "turn-plan",
+        },
+    )
+    assert request is not None
+    requested = ZfEvent(
+        type=PLAN_REQUESTED_EVENT,
+        actor="web",
+        correlation_id="plan-discussion",
+    )
+    request["request_event_id"] = requested.id
+    requested.payload = {
+        "source": "kanban-agent.headless",
+        "project_id": "project-a",
+        "conversation_id": "kanban:project-a",
+        "thread_key": "main",
+        "plan_request": request,
+        "request": request,
+    }
+    EventLog(state_dir / "events.jsonl").append(requested)
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+    route = "/api/actions/chat-orchestrator"
+    headers = {"x-zf-web-token": "test-token"}
+    discussion = {
+        "request_event_id": requested.id,
+        "request_id": request["request_id"],
+        "revision": request["revision"],
+    }
+
+    response = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "message": "Why is Direct recommended over Research?",
+            "plan_discussion": discussion,
+        },
+    )
+
+    assert response.status_code == 200
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    prompt = sent["message"]["content"][0]["text"]
+    assert "Why is Direct recommended over Research?" in prompt
+    assert '"schema_version": "kanban-plan-discussion.v1"' in prompt
+    assert '"request_event_id":' in prompt
+    assert "Chat about this plan before I choose" not in prompt
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    user_message = [
+        event for event in events
+        if event.type == "user.message"
+        and event.payload.get("message")
+        == "Why is Direct recommended over Research?"
+    ][-1]
+    persisted_discussion = user_message.payload["request"]["plan_discussion"]
+    assert persisted_discussion["request_event_id"] == requested.id
+    assert persisted_discussion["request_id"] == request["request_id"]
+    assert persisted_discussion["questions"][0]["id"] == "route"
+    assert not [
+        event for event in events
+        if event.type == "kanban.agent.plan.answered"
+    ]
+
+    stale = client.post(
+        route,
+        headers=headers,
+        json={
+            "backend": "claude-headless",
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+            "sync": True,
+            "message": "Discuss a stale revision",
+            "plan_discussion": {**discussion, "revision": 2},
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["status"] == "plan_request_revision_mismatch"
+
+
+def test_chat_orchestrator_rejects_combined_plan_and_approve_output(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "fake_claude_mixed_interaction.py"
+    mixed = {
+        "plan_request": {
+            "header": "Route",
+            "id": "route",
+            "question": "Which route?",
+            "options": [
+                {"id": "research", "label": "Research"},
+                {"id": "channel", "label": "Channel"},
+            ],
+        },
+        "action_proposal": {
+            "action": "create-task",
+            "payload": {
+                "title": "Mixed output must not execute",
+                "contract": {"behavior": "b", "verification": "v"},
+            },
+        },
+    }
+    script.write_text(
+        "\n".join([
+            "import json, sys",
+            "sys.stdin.readline()",
+            f"mixed = {mixed!r}",
+            "print(json.dumps({'type':'system','session_id':'mixed-session'}), flush=True)",
+            "print(json.dumps({'type':'result','session_id':'mixed-session','result':json.dumps(mixed)}), flush=True)",
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_CMD",
+        f"{sys.executable} {script}",
+    )
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "sync": True,
+            "message": "create a task, but ask me which route first",
+        },
+    )
+
+    assert response.status_code == 200
+    reply = response.json()["reply"]
+    assert "action_proposal" not in reply
+    assert reply["plan_request"]["valid"] is False
+    assert "mutually exclusive" in reply["plan_request"]["validation_error"]
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    assert not [
+        event for event in events
+        if event.type == "operator.action.proposed"
+    ]
 
 
 def test_chat_orchestrator_validates_workflow_proposal_against_project_config(

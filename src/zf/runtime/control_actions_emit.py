@@ -48,11 +48,13 @@ class ActionEmitMixin:
         reason: str,
         status_code: int = 422,
         status: str = "failed",
+        extra: dict | None = None,
     ) -> dict:
         payload = {
             "action": action,
             "requested_action": requested_action,
             "reason": reason,
+            **(extra or {}),
         }
         event = self.writer.emit(
             "runtime.action.failed",
@@ -78,4 +80,5 @@ class ActionEmitMixin:
             "requested_action": requested_action,
             "reason": reason,
             "event_id": event.id,
+            **(extra or {}),
         }

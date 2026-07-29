@@ -13,6 +13,7 @@ import type { UIEvent as ReactUIEvent } from "react";
 import type { ChannelPermissionProfile } from "../../app/sharedTypes";
 import { TablePage, agentConversationScrollSignature, asRecordArray, asStringArray, channelIdOf, channelNameOf, recordString, recordValue, scrollElementToBottom, textValue } from "../../app/shared";
 import { previewItemsFromRefs } from "../agent-session/previewRegistry";
+import { canonicalChannelPrd } from "./workflowPlanning";
 
 const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((module) => ({
   default: module.ChannelEmojiPicker,
@@ -365,9 +366,11 @@ export function ChannelPage({
   onPostMessage,
   onRemoveMember,
   onRequestSynthesis,
+  onResolveQuestion,
   onSetMemberPermission,
   onSearchHistory,
   onSetDiscussionMode,
+  onConsensusDecision,
   onWorkflowRequest,
   selectedChannelId,
   workflowRoles,
@@ -390,17 +393,21 @@ export function ChannelPage({
   onPostMessage: (text: string, refs?: Record<string, unknown>) => Promise<void>;
   onRemoveMember: (memberId: string) => Promise<void>;
   onRequestSynthesis: (targetMemberId?: string) => Promise<void>;
+  onResolveQuestion: (questionId: string, threadId: string, resolution: string, answer: string) => Promise<void>;
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
   onSearchHistory: (query: string, threadId?: string) => Promise<ChannelHistorySearchResult>;
   onSetDiscussionMode: (mode: string, defaultResponderId?: string) => Promise<void>;
-  onWorkflowRequest: (patternId: string, taskId: string, reason: string) => Promise<void>;
+  onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string) => Promise<void>;
+  onWorkflowRequest: (taskId: string, reason: string, threadId: string) => Promise<void>;
   selectedChannelId: string;
   workflowRoles: RoleSummary[];
 }) {
   const [composerText, setComposerText] = useState("");
   const [postingCount, setPostingCount] = useState(0);
   const [composerError, setComposerError] = useState("");
-  const [workflowDraft, setWorkflowDraft] = useState({ patternId: "", taskId: "", reason: "" });
+  const [workflowDraft, setWorkflowDraft] = useState({ taskId: "", reason: "" });
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
+  const [consensusBlocker, setConsensusBlocker] = useState("");
   const [controlsBusy, setControlsBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<ChannelTab>("chat");
   const [drawer, setDrawer] = useState<ChannelDrawerKey | null>(null);
@@ -470,17 +477,37 @@ export function ChannelPage({
   // open-questions ledger are projection truth — surface them so the
   // operator can supervise a debate without reading events.jsonl.
   const discussionBand = useMemo(() => {
-    const sessions = Object.values(detail?.discussions ?? {});
-    const active = sessions.find((session) => {
-      const state = String((session as Record<string, unknown>).state || "");
+    const sessions = Object.entries(detail?.discussions ?? {});
+    const selectedActive = sessions.find(([threadId, session]) => {
+      const state = String(session.state || "");
+      return threadId === activeChannelThreadId && state && state !== "idle";
+    });
+    const activeEntry = selectedActive ?? sessions.find(([, session]) => {
+      const state = String(session.state || "");
       return state && state !== "idle";
-    }) as Record<string, unknown> | undefined;
+    });
+    const active = activeEntry?.[1];
     const questions = Object.values(detail?.open_questions ?? {})
       .map((item) => item as Record<string, unknown>);
+    const questionThreadId = String(
+      questions.find((item) => String(item.status || "") === "open")
+        ?.thread_id || "",
+    );
+    const threadId = activeEntry?.[0]
+      || (questions.some((item) => (
+        String(item.status || "") === "open"
+        && String(item.thread_id || "main") === activeChannelThreadId
+      )) ? activeChannelThreadId : questionThreadId)
+      || activeChannelThreadId
+      || "main";
     const openQuestions = questions
-      .filter((item) => String(item.status || "") === "open")
+      .filter((item) => (
+        String(item.status || "") === "open"
+        && String(item.thread_id || "main") === threadId
+      ))
       .map((item) => ({
         id: String(item.question_id || ""),
+        threadId: String(item.thread_id || "main"),
         text: String(item.question || ""),
         category: String(item.category || ""),
         askedBy: String(item.asked_by || ""),
@@ -514,6 +541,7 @@ export function ChannelPage({
     return {
       phaseNum,
       phaseLabel,
+      threadId,
       stalled,
       quietMinutes: Math.max(1, Math.round(quietMs / 60000)),
       roster: Array.isArray(active?.roster) ? (active?.roster as unknown[]) : [],
@@ -521,7 +549,7 @@ export function ChannelPage({
       totalCount: questions.length,
       resolvedCount: questions.length - openQuestions.length,
     };
-  }, [detail]);
+  }, [activeChannelThreadId, detail]);
   function quoteDiscussionQuestion(text: string) {
     insertComposerText(`Re “${text}”: `);
   }
@@ -616,6 +644,9 @@ export function ChannelPage({
   );
   const messages = detail?.messages ?? detail?.recent_messages ?? [];
   const syntheses = detail?.syntheses ?? [];
+  const controlThreadId = discussionBand?.threadId || activeChannelThreadId || "main";
+  const canonicalPrd = canonicalChannelPrd(detail, controlThreadId);
+  const threadConsensus = detail?.consensus?.[controlThreadId] ?? {};
   const workflowRequests = detail?.workflow_requests ?? [];
   const replyRequests = detail?.reply_requests ?? [];
   const contextPacks = detail?.context_packs ?? [];
@@ -684,6 +715,8 @@ export function ChannelPage({
     setMentionOpen(false);
     setMentionQuery("");
     setHistorySearchOpen(false);
+    setQuestionAnswers({});
+    setConsensusBlocker("");
   }, [selectedChannelId]);
   function toggleDrawer(nextDrawer: ChannelDrawerKey) {
     setDrawer((current) => current === nextDrawer ? null : nextDrawer);
@@ -1278,28 +1311,21 @@ export function ChannelPage({
           event.preventDefault();
           void runControl(async () => {
             await onWorkflowRequest(
-              workflowDraft.patternId.trim(),
               workflowDraft.taskId.trim(),
-              workflowDraft.reason.trim() || "requested from channel",
+              workflowDraft.reason.trim() || "Execute the canonical Channel PRD.",
+              controlThreadId,
             );
-            setWorkflowDraft({ patternId: "", taskId: "", reason: "" });
+            setWorkflowDraft({ taskId: "", reason: "" });
           });
         }}
       >
         <div className="inline-heading">
           <h3>Workflow Request</h3>
-          <span className="muted">kernel gated</span>
+          <span className={`metric-chip ${canonicalPrd.ready ? "" : "chip-warn"}`}>
+            {canonicalPrd.ready ? "canonical PRD" : "PRD pending"}
+          </span>
         </div>
         <div className="channel-control-form-grid">
-          <label className="channel-control-field">
-            <span>Pattern</span>
-            <input
-              className="filter-input"
-              placeholder="pattern id"
-              value={workflowDraft.patternId}
-              onChange={(event) => setWorkflowDraft({ ...workflowDraft, patternId: event.target.value })}
-            />
-          </label>
           <label className="channel-control-field">
             <span>Task</span>
             <input
@@ -1310,19 +1336,19 @@ export function ChannelPage({
             />
           </label>
           <label className="channel-control-field channel-control-field-wide">
-            <span>Reason</span>
+            <span>Objective</span>
             <input
               className="filter-input"
-              placeholder="reason"
+              placeholder="workflow objective"
               value={workflowDraft.reason}
               onChange={(event) => setWorkflowDraft({ ...workflowDraft, reason: event.target.value })}
             />
           </label>
         </div>
         <div className="channel-control-actions">
-          <button className="icon-button primary" disabled={!actionReady || controlsBusy || !workflowDraft.patternId.trim() || !workflowDraft.taskId.trim()} type="submit">
+          <button className="icon-button primary" disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !workflowDraft.taskId.trim()} type="submit">
             <PlayCircle size={16} />
-            Request
+            Plan workflow
           </button>
         </div>
       </form>
@@ -2100,6 +2126,10 @@ export function ChannelPage({
         || actionResult?.action === "channel-delete"
         || actionResult?.action === "channel-clear-history"
         || actionResult?.action === "channel-post-message"
+        || actionResult?.action === "channel-question-resolve"
+        || actionResult?.action === "channel-consensus-confirm"
+        || actionResult?.action === "channel-consensus-block"
+        || actionResult?.action === "chat-orchestrator"
         || actionResult?.action === "channel.add_member"
         || actionResult?.action === "channel-owner-report"
       ) && shouldShowChannelActionNotice(actionResult) ? (
@@ -2156,11 +2186,7 @@ export function ChannelPage({
                     <ul className="channel-discussion-questions">
                       {discussionBand.openQuestions.map((q) => (
                         <li key={q.id}>
-                          <button
-                            title="Quote into composer"
-                            type="button"
-                            onClick={() => quoteDiscussionQuestion(q.text)}
-                          >
+                          <div className="channel-discussion-question-main">
                             {q.category ? (
                               <span className={`channel-discussion-cat cat-${q.category}`}>
                                 {q.category.replace("_", " ")}
@@ -2168,10 +2194,98 @@ export function ChannelPage({
                             ) : null}
                             <span className="channel-discussion-qtext">{q.text}</span>
                             {q.askedBy ? <small>{q.askedBy}</small> : null}
-                          </button>
+                            <button
+                              className="channel-question-icon"
+                              title="Quote into composer"
+                              type="button"
+                              onClick={() => quoteDiscussionQuestion(q.text)}
+                            >
+                              <Quote size={14} />
+                            </button>
+                          </div>
+                          <div className="channel-discussion-answer">
+                            <input
+                              className="filter-input"
+                              placeholder="Answer"
+                              value={questionAnswers[`${q.threadId}:${q.id}`] ?? ""}
+                              onChange={(event) => setQuestionAnswers({
+                                ...questionAnswers,
+                                [`${q.threadId}:${q.id}`]: event.target.value,
+                              })}
+                            />
+                            <button
+                              className="icon-button primary"
+                              disabled={!actionReady || controlsBusy || !(questionAnswers[`${q.threadId}:${q.id}`] ?? "").trim()}
+                              type="button"
+                              onClick={() => void runControl(async () => {
+                                const answerKey = `${q.threadId}:${q.id}`;
+                                await onResolveQuestion(q.id, q.threadId, "answered", (questionAnswers[answerKey] ?? "").trim());
+                                setQuestionAnswers((current) => ({ ...current, [answerKey]: "" }));
+                              })}
+                            >
+                              <Send size={14} />
+                              Answer
+                            </button>
+                            <button
+                              className="icon-button"
+                              disabled={!actionReady || controlsBusy}
+                              type="button"
+                              onClick={() => void runControl(() => onResolveQuestion(q.id, q.threadId, "out_of_scope", ""))}
+                            >
+                              <Archive size={14} />
+                              Out of scope
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>
+                  ) : null}
+                  {recordString(threadConsensus, "artifact_ref") && !recordString(threadConsensus, "reached_event_id") ? (
+                    <div className="channel-consensus-control">
+                      <span className="channel-discussion-qtext">
+                        {Boolean(threadConsensus.human_confirmed)
+                          ? "Owner confirmed; waiting for required signatures"
+                          : "Canonical PRD awaiting owner decision"}
+                      </span>
+                      <input
+                        className="filter-input"
+                        placeholder="Blocker"
+                        value={consensusBlocker}
+                        onChange={(event) => setConsensusBlocker(event.target.value)}
+                      />
+                      <button
+                        className="icon-button primary"
+                        disabled={!actionReady || controlsBusy || Boolean(threadConsensus.human_confirmed)}
+                        type="button"
+                        onClick={() => void runControl(() => onConsensusDecision(
+                          "confirm",
+                          controlThreadId,
+                          recordString(threadConsensus, "artifact_ref"),
+                          recordString(threadConsensus, "artifact_digest"),
+                        ))}
+                      >
+                        <FileText size={14} />
+                        Confirm
+                      </button>
+                      <button
+                        className="icon-button"
+                        disabled={!actionReady || controlsBusy || !consensusBlocker.trim()}
+                        type="button"
+                        onClick={() => void runControl(async () => {
+                          await onConsensusDecision(
+                            "block",
+                            controlThreadId,
+                            recordString(threadConsensus, "artifact_ref"),
+                            recordString(threadConsensus, "artifact_digest"),
+                            consensusBlocker.trim(),
+                          );
+                          setConsensusBlocker("");
+                        })}
+                      >
+                        <X size={14} />
+                        Block
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               ) : null}

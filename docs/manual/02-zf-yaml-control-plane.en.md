@@ -9,6 +9,25 @@
 may submit intent through events, the CLI, or controlled APIs, but they must not
 write business truth or introduce a second task schema.
 
+### 1.1 Why Project creation no longer asks for YAML
+
+Web `Add/Open Project` no longer asks the operator to select YAML, a Controller,
+kind, lane, or role. This simplifies admission; it does not remove `zf.yaml`:
+
+- when the directory already has a valid `zf.yaml`, Inspect chooses only open,
+  register, or initialize-state behavior and preserves the configuration;
+- when no configuration exists, Initialize generates one default multi-kind
+  `zf.yaml`;
+- Project Brief, Stack, and Provider enrich project context, command Profile,
+  and provider policy; they do not select a Workflow;
+- when Kanban Agent recommends a Workflow for an existing Task, it may use only
+  routes expanded from that Project's current `zf.yaml`.
+
+Each Project therefore keeps one canonical `zf.yaml`. Use
+`zf profile bootstrap` or an explicit migration when adopting a single
+Controller or changing an existing control plane, with operator review before
+write. Do not put YAML selection back into normal Project admission.
+
 Minimal shape:
 
 ```yaml

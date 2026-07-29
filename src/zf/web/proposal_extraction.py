@@ -40,6 +40,16 @@ def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
         payload.get("template_id") or ""
     ).strip():
         return "template_id is required"
+    if action == "channel-create-and-start":
+        if not str(payload.get("template_id") or "").strip():
+            return "template_id is required"
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("objective", "message", "text")
+        ):
+            return "objective, message, or text is required"
+    if action in {"workflow-start", "task-workflow-start"}:
+        return "workflow-start must originate from a task_workflow Plan"
     if action == "channel-discussion-start":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"

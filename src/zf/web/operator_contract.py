@@ -11,12 +11,15 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "operator-intent-create",
     "operator-intent-approve",
     "operator-intent-reject",
+    "kanban-plan-apply",
     "create-task",
     "update-task",
     "archive-task",
     "link-evidence",
     "request-fanout",
     "workflow-request",
+    "workflow-start",
+    "task-workflow-start",
     "workflow-submit",
     "workflow-invoke",
     "research-start",
@@ -26,7 +29,11 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "idea-to-product",
     "start-collaboration",
     "channel-create-from-template",
+    "channel-create-and-start",
     "channel-discussion-start",
+    "channel-question-resolve",
+    "channel-consensus-confirm",
+    "channel-consensus-block",
     "start-operator-session",
     "dispatch-task",
     "request-verify",
@@ -53,6 +60,37 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "runtime-resume",
 )
 
+PROJECT_OPERATOR_CONTROLLED_ACTIONS = frozenset({
+    "operator-intent-create",
+    "operator-intent-approve",
+    "operator-intent-reject",
+    "replan-approve",
+    "replan-defer",
+    "replan-reject",
+    "plan-approve",
+    "plan-reject",
+    "workflow-request",
+    "workflow-start",
+    "task-workflow-start",
+    "workflow-submit",
+    "workflow-batch-resume",
+    "candidate-rework-apply",
+    "idea-to-product",
+    "provider-dev-chat-start",
+    "provider-dev-chat-send",
+    "provider-dev-chat-stop",
+    "workflow-config-propose",
+    "workflow-config-validate",
+    "workflow-config-apply",
+    "runtime-stop",
+    "runtime-restart",
+    "runtime-resume",
+    "failure-closeout",
+    "failure-closeout-activate",
+    "real-e2e-run",
+    "run-contract-review",
+})
+
 KANBAN_AGENT_CAPABILITIES = (
     "read_shared_project_context",
     "read_runtime_projections",
@@ -71,11 +109,13 @@ KANBAN_AGENT_CAPABILITIES = (
     "start_research_fanout",
     "adopt_research_result",
     "request_workflow_requirement",
+    "start_task_workflow_route",
     "request_workflow_submit",
     "request_workflow_batch_resume",
     "request_candidate_rework",
     "request_collaboration",
     "create_channel_from_template",
+    "create_and_start_channel",
     "start_channel_discussion",
     "request_supervisor_diagnosis",
     "request_autoresearch_diagnosis",
@@ -94,7 +134,6 @@ KANBAN_AGENT_FORBIDDEN_CAPABILITIES = (
     "role_terminal_control",
     "orchestrator_terminal_control",
     "direct_role_dispatch",
-    "direct_git_mutation",
     "direct_task_status_mutation",
     "direct_runtime_stop_restart",
     "direct_workflow_config_write",
@@ -229,6 +268,8 @@ CANONICAL_ACTIONS = {
     "channel-new": "channel-create",
     "channel.create_from_template": "channel-create-from-template",
     "channel.template.create": "channel-create-from-template",
+    "channel.create_and_start": "channel-create-and-start",
+    "channel.setup.apply": "channel-create-and-start",
     "channel.discussion.start": "channel-discussion-start",
     "channel.add_member": "channel-invite-member",
     "channel-add-member": "channel-invite-member",
@@ -239,6 +280,9 @@ CANONICAL_ACTIONS = {
     "channel.delete": "channel-delete",
     "channel.history.clear": "channel-clear-history",
     "channel.synthesis.request": "channel-synthesis-request",
+    "channel.question.resolve": "channel-question-resolve",
+    "channel.consensus.confirm": "channel-consensus-confirm",
+    "channel.consensus.block": "channel-consensus-block",
     "channel.mark_read": "channel-mark-read",
     "channel.handoff": "channel-handoff",
     "channel.discussion_mode": "channel-discussion-mode",
@@ -267,7 +311,9 @@ CANONICAL_ACTIONS = {
     "plan.approve": "plan-approve",
     "plan.reject": "plan-reject",
     "workflow.invoke": "workflow-invoke",
-    "workflow.start": "workflow-invoke",
+    "workflow.start": "workflow-start",
+    "task.workflow.start": "workflow-start",
+    "workflow.route.start": "workflow-start",
     "research.start": "research-start",
     "research.fanout.start": "research-start",
     "research.adopt": "research-adopt",
@@ -306,28 +352,59 @@ def canonical_action(action_name: str) -> str:
 # attaches this as the member's reply_contract. Shape rules mirror what
 # normalize_proposed_task_contract expects (racing-e2e contract-shape fix).
 KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
-    "Action proposals: you are the ZaoFu Kanban Agent on this channel. "
+    "Plan and Approve interactions: you are the ZaoFu Kanban Agent on this channel. "
     "Read-only requests (introduce, explain, analyze, debug, review, why) must "
-    "be answered in plain text without action_proposal JSON, and never include "
+    "be answered in plain text without plan_request or action_proposal JSON, and never include "
     "example action_proposal JSON in explanations. Only when the operator "
+    "must choose one to three unresolved routes or parameters, end the reply with "
+    "exactly one compact fenced json block containing plan_request. A single "
+    "question may use header, id, question, options, allow_other, and reason; "
+    "multiple pure clarification questions use a questions array with one to "
+    "three entries. Each question has two or three mutually exclusive options "
+    "with exactly one recommended option first. Multi-question Plans cannot bind "
+    "an action. Never request secrets, never combine "
+    "plan_request with action_proposal. Ordinary Plan requests are clarification, "
+    "not permission or approval. A Channel setup Plan is the sole bounded "
+    "exception: set submit_action=channel-create-and-start, "
+    "submit_label='Create & start', allow_other=false, and give every option "
+    "an exact submit_payload containing template_id plus optional name/overrides. "
+    "The selected option atomically creates the Channel and members, posts the "
+    "original requirement, and starts the discussion without a second proposal. "
+    "When turn context contains plan_discussion, answer the visible user message "
+    "against that exact pending Plan and keep it pending unless a revised Plan is "
+    "needed. The signed answer otherwise continues in this channel "
+    "thread. Only when the operator "
     "explicitly asks to create, track, or schedule work, end your reply with a "
     "compact fenced json block containing "
     '{"action_proposal": {"action": "create-task", "payload": {"title": ..., '
     '"contract": {"behavior": ..., "verification": ..., "acceptance": ...}}, '
     '"reason": ...}}. '
+    "For tracked execution, add payload.workflow_plan with a task-specific "
+    "question and two or three options selected only from the active workflow "
+    "route catalog. Executable options contain route_id, label, description, "
+    "recommended, and optional parameters; a no-run option uses mode=defer. "
+    "The runtime creates the Task before binding and showing that Plan. Task "
+    "approval never starts a Workflow. Do not include Channel creation as a "
+    "workflow option; Channel is an independent collaboration surface. "
     "contract.behavior and contract.verification must each be a single string "
     "(join multiple checks with newlines, not a JSON list); contract.scope, if "
     "present, must contain only repo-relative path globs like src/** — put any "
     "non-path scope prose in the behavior text instead. For product ideas "
     "prefer action=idea-to-product with payload.objective. The operator must "
     "approve every proposal before it runs; never claim the task was created. "
-    "When the operator explicitly asks to create a collaboration channel, use "
-    "action=channel-create-from-template with payload.template_id and optional "
-    "payload.name/overrides. When asked to start a channel discussion, use "
+    "When a requirement benefits from a new collaboration Channel, use the "
+    "action-bound Channel setup Plan above. Explain the tradeoff in each description; "
+    "the runtime displays exact member roles, member count, and max_rounds from "
+    "submit_payload. Do not ask the operator to create the Channel "
+    "or post the first message manually. For a direct non-chat API request, use "
+    "action=channel-create-and-start with template_id and the requirement. "
+    "When asked to start a discussion in an existing Channel, use "
     "action=channel-discussion-start with payload.channel_id and "
-    "payload.objective. When asked to run the fixed research fanout, use "
-    "action=research-start with payload.task_id and payload.topic. When asked "
-    "to run a configured workflow, use action=workflow-invoke with "
-    "payload.task_id and payload.pattern_id. These are proposals, not completed "
-    "effects, until owner approval succeeds."
+    "payload.objective. For an existing Task, return a task_workflow Plan whose "
+    "executable options use mode=propose, action=workflow-start, and exact "
+    "task_id, route_id, objective, config_digest, and parameters. The selected "
+    "option is bound to the current task_contract_digest and becomes a separate "
+    "Approve proposal. workflow-invoke(pattern_id) is "
+    "a compatibility adapter and must not be the normal Kanban product output. "
+    "These are proposals, not completed effects, until owner approval succeeds."
 )

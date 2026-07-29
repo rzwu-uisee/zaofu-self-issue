@@ -69,7 +69,10 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             ),
             _member("arch", skill="zf-cr"),
             _member("critic", skill="zf-harness-evaluator-scoring"),
-            _member("synthesizer", skill="zf-harness-spec-bridge"),
+            _member(
+                "synthesizer",
+                skill="zf-channel-discussion-synthesizer",
+            ),
             _member("security_reviewer", optional=True),
         ],
         "writer_roles": ["product_pm"],
@@ -294,6 +297,12 @@ def materialize_channel_template(
     discussion["participants"] = [
         str(member["member_id"]) for member in enabled_members
     ]
+    discussion["default_responder_id"] = str(
+        discussion.get("default_responder_id")
+        or discussion.get("synthesizer")
+        or writer_role
+        or ""
+    )
     discussion["max_rounds"] = max_rounds
     discussion["max_parallel_replies"] = max_parallel_replies
     if deadlines:

@@ -9,6 +9,19 @@ def validate_collaboration_action_payload(
     action: str,
     payload: dict,
 ) -> str:
+    if action == "kanban-plan-apply":
+        plan_response = payload.get("plan_response")
+        if not isinstance(plan_response, dict):
+            return "plan_response is required"
+        for field in (
+            "request_event_id",
+            "request_id",
+            "revision",
+            "question_id",
+            "option_id",
+        ):
+            if not str(plan_response.get(field) or "").strip():
+                return f"plan_response.{field} is required"
     if action in {
         "chat-orchestrator",
         "provider-dev-chat-start",
@@ -25,6 +38,19 @@ def validate_collaboration_action_payload(
             and not isinstance(payload.get("overrides"), dict)
         ):
             return "overrides must be a mapping"
+    if action == "channel-create-and-start":
+        if not str(payload.get("template_id") or "").strip():
+            return "template_id is required"
+        if (
+            payload.get("overrides") is not None
+            and not isinstance(payload.get("overrides"), dict)
+        ):
+            return "overrides must be a mapping"
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("message", "objective", "text")
+        ):
+            return "message or objective is required"
     if action == "channel-discussion-start":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
@@ -47,6 +73,23 @@ def validate_collaboration_action_payload(
             and template_id != "research-fanout.fixed.v1"
         ):
             return "template_id must be research-fanout.fixed.v1"
+    if action in {"workflow-start", "task-workflow-start"}:
+        if not str(payload.get("task_id") or "").strip():
+            return "task_id is required"
+        if not str(payload.get("task_contract_digest") or "").strip():
+            return "task_contract_digest is required"
+        if not str(payload.get("route_id") or "").strip():
+            return "route_id is required"
+        if not any(
+            str(payload.get(key) or "").strip()
+            for key in ("objective", "message")
+        ):
+            return "objective or message is required"
+        if (
+            payload.get("parameters") is not None
+            and not isinstance(payload.get("parameters"), dict)
+        ):
+            return "parameters must be a mapping"
     if action == "research-adopt":
         for key in (
             "request_id",

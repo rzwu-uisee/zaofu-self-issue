@@ -65,6 +65,8 @@ class ProjectInitializer:
         workspace_register: bool | None = None,
         create_root: bool = False,
         notes: str = "",
+        instruction_stack: str = "",
+        instruction_surface: str = "",
     ) -> ProjectInitResult:
         project_root = Path(cwd).resolve()
         if create_root:
@@ -115,9 +117,11 @@ class ProjectInitializer:
                 project_root,
                 config=context.config,
                 state_dir=state_dir,
+                stack=instruction_stack,
+                surface=instruction_surface,
             )
-            # doc-125:操作员备注 → CLAUDE.md。收进共享 initializer,CLI(`zf init
-            # --notes`)与 Web New Project(description)走同一路径,消除入口不对称。
+            # doc-125:操作员备注 → CLAUDE.md。CLI(`zf init --notes`)与 Web
+            # 显式 notes 走同一路径；Project Description 留在 zf.yaml。
             if notes.strip():
                 from zf.core.profile.apply import apply_project_notes
                 notes_applied = apply_project_notes(

@@ -211,7 +211,7 @@ test("Channel Group and Kanban Agent real interaction audit", async ({ page, req
   }
   await expect(proposalCards).toContainText("Create task proposal", { timeout: 30_000 });
   await expect(page.locator(".agent-session")).toContainText("Fix Channel Group interactive E2E gap");
-  await proposalCards.getByRole("button", { name: "Create Task" }).click();
+  await proposalCards.getByRole("button", { name: "Approve" }).click();
   await expect.poll(async () => JSON.stringify((await json(request, "/api/snapshot")).tasks ?? {}), {
     timeout: 20_000,
   }).toContain("Fix Channel Group interactive E2E gap");

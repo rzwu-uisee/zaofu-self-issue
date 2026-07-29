@@ -118,3 +118,53 @@ def test_real_transport_send_message_supports_open_id_receive_type():
     assert body["receive_id"] == "ou_07bf51fbbd81df6de99e2f327bbc2d59"
     assert body["msg_type"] == "text"
     assert json.loads(body["content"])["text"] == "hello"
+
+
+def test_real_transport_delete_message_uses_recall_endpoint():
+    requests = []
+
+    def fake_urlopen(request, timeout=15):
+        requests.append(request)
+        return FakeResponse({"code": 0, "msg": "ok"})
+
+    transport = FeishuHttpTransport(
+        base_url="https://open.feishu.cn/open-apis",
+        tenant_access_token="tenant-token",
+        request_func=fake_urlopen,
+    )
+
+    assert transport.delete_message("om_test_message")
+
+    request = requests[0]
+    assert request.method == "DELETE"
+    assert request.full_url.endswith("/im/v1/messages/om_test_message")
+    assert request.data is None
+    assert request.headers["Authorization"] == "Bearer tenant-token"
+
+
+def test_real_transport_list_recent_preserves_deleted_tombstone():
+    def fake_urlopen(request, timeout=15):
+        return FakeResponse({
+            "code": 0,
+            "data": {
+                "items": [{
+                    "message_id": "om_recalled",
+                    "chat_id": "oc_test",
+                    "msg_type": "interactive",
+                    "deleted": True,
+                    "updated": True,
+                    "body": {"content": "{}"},
+                }],
+            },
+        })
+
+    transport = FeishuHttpTransport(
+        tenant_access_token="tenant-token",
+        request_func=fake_urlopen,
+    )
+
+    rows = transport.list_recent("oc_test")
+
+    assert rows[0]["message_id"] == "om_recalled"
+    assert rows[0]["deleted"] is True
+    assert rows[0]["updated"] is True

@@ -85,7 +85,7 @@ def infer_operator_intent(
         "跑成产品",
     )):
         intent_type = "idea_to_product"
-        proposed_actions = ["create-task", "workflow-invoke"]
+        proposed_actions = ["create-task", "workflow-start"]
         risk = "medium"
         requires_confirmation = True
     if _has_any(lowered, (

@@ -140,6 +140,8 @@ export async function updateOnboarding(payload: {
   action: "step" | "complete" | "skip" | "reset";
   step?: number;
   backend?: string;
+  primary_backend?: string;
+  mixed_enabled?: boolean;
   notifications?: string;
 }): Promise<Record<string, unknown>> {
   const response = await fetch("/api/workspace/onboarding", {
@@ -158,7 +160,63 @@ export async function updateOnboarding(payload: {
   return data;
 }
 
-export async function validateWorkspaceProjectPath(root: string): Promise<Record<string, unknown>> {
+export type ProjectAdmissionAction =
+  | "open"
+  | "register"
+  | "initialize_state"
+  | "initialize_project"
+  | "blocked";
+
+export interface ProjectAdmissionDiagnostic {
+  severity: "STOP" | "WARN" | "INFO" | string;
+  kind: string;
+  message: string;
+}
+
+export interface WorkspaceProjectPathInspection {
+  schema_version: "workspace.project-admission.v1";
+  ok: boolean;
+  status: "valid" | "missing" | "invalid";
+  root: string;
+  root_resolved: string;
+  root_exists: boolean;
+  config_path: string;
+  has_config: boolean;
+  config_loadable: boolean;
+  state_dir_resolved: string;
+  state_dir_exists: boolean;
+  state_ready: boolean;
+  diagnostics: ProjectAdmissionDiagnostic[];
+  project_profile: {
+    schema: string;
+    layout: string;
+    confidence: string;
+    languages: string[];
+    surfaces: string[];
+    gate_cmds: string[];
+    units: Array<{
+      root: string;
+      language: string;
+      frameworks: string[];
+      surface: string;
+      build_cmd: string;
+      test_cmd: string;
+      gate_cmds: string[];
+      has_tests: boolean;
+    }>;
+  };
+  admission: {
+    action: ProjectAdmissionAction;
+    label: string;
+    reason: string;
+    project_id: string;
+  };
+}
+
+export async function validateWorkspaceProjectPath(
+  root: string,
+  workspace = "default",
+): Promise<WorkspaceProjectPathInspection> {
   const response = await fetch("/api/workspace/projects/validate-path", {
     method: "POST",
     headers: {
@@ -166,9 +224,15 @@ export async function validateWorkspaceProjectPath(root: string): Promise<Record
       "Content-Type": "application/json",
       ...webActionAuthHeaders(),
     },
-    body: JSON.stringify({ root }),
+    body: JSON.stringify({ root, workspace }),
   });
-  return (await response.json()) as Record<string, unknown>;
+  const data = (await response.json()) as WorkspaceProjectPathInspection & {
+    reason?: string;
+  };
+  if (!response.ok) {
+    throw new Error(data.reason || `project inspection returned ${response.status}`);
+  }
+  return data;
 }
 
 export async function registerWorkspaceProject(payload: {
@@ -232,6 +296,8 @@ export async function initWorkspaceProject(payload: {
   source_root?: string;
   target_root?: string;
   backend?: string;
+  verify_backend?: string;
+  mixed_enabled?: boolean;
   lanes?: number;
   strictness?: string;
   parity_scope?: string | string[];
@@ -244,6 +310,7 @@ export async function initWorkspaceProject(payload: {
   scaffold?: boolean;
   intent?: string;
   description?: string;
+  notes?: string;
 }): Promise<Record<string, unknown>> {
   const response = await fetch("/api/workspace/projects/init", {
     method: "POST",
@@ -743,6 +810,15 @@ export async function postChannelMessage(
 
 export function getWorkflowGraph(projectId?: string): Promise<WorkflowGraph> {
   return requestJson<WorkflowGraph>(`${projectPrefix(projectId)}/workflow/graph`);
+}
+
+export async function getWebSession(): Promise<NonNullable<RuntimeSummary["web_session"]>> {
+  const response = await fetch("/api/web-session", {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`web session fetch returned ${response.status}`);
+  return response.json();
 }
 
 export interface RegressionCase {

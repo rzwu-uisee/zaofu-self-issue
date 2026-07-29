@@ -3,7 +3,7 @@
 > Audience: operators, engineering leads, and contributors who need to run,
 > observe, and troubleshoot a ZaoFu multi-agent delivery workflow.
 >
-> Last verified against the CLI: 2026-07-17.
+> Last verified against the CLI, Web, and Docker Playwright: 2026-07-29.
 >
 > This is the consolidated English manual. The topic-specific Chinese manuals
 > in this directory remain the deeper reference for individual subsystems.
@@ -144,62 +144,62 @@ Provider login and host sandbox support are external prerequisites. A valid
 
 ## 4. Initialize a Project
 
-### 4.1 Preferred bootstrap path
+### 4.1 Preferred Web path
 
-For a new or external project, use the bootstrap script:
+Start the Workspace shell with a controlled action token:
+
+```bash
+export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
+uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
+```
+
+Complete Provider, Environment, Access, and Ready onboarding. Then select
+`Add Project`, enter a server-side path, and run Inspect. Disk truth selects
+open, register, initialize state, initialize Project, or blocked. Only
+initialization asks for Project Name, Project Brief, Stack, Primary Provider,
+and optional Mixed team.
+
+![Current Add/Open Project form](assets/project-add-open-current.png)
+
+The form does not select YAML, Controller, kind, lane, or role. A valid existing
+`zf.yaml` is preserved; an unconfigured directory receives one default
+multi-kind `zf.yaml`. Project Brief enters `project.description` and the
+managed `AGENTS.md` Project Context. Stack populates the command Profile but
+does not choose a Workflow.
+
+### 4.2 Bootstrap script path
+
+Use the script when Project creation should also perform Git readiness,
+validation, and startup dry-run:
 
 ```bash
 tools/init-project.sh \
   --project-dir /path/to/project \
-  --preset safe-team \
+  --name example-project \
+  --description "Background, target users, scope, and current stage" \
+  --stack python \
+  --backend codex \
+  --verify-backend claude-code \
   --yes
 ```
 
-With an existing configuration:
+The greenfield path delegates to `zf project init --kind multi`. For an
+explicit existing config compatibility path, use `--source-config`.
 
-```bash
-tools/init-project.sh \
-  --project-dir /path/to/project \
-  --source-config /path/to/project/zf-codex.yaml \
-  --yes
-```
+### 4.3 Direct Project CLI
 
-The script prepares `zf.yaml`, initializes runtime state, updates project
-instructions, registers the workspace when requested, checks Git requirements,
-and performs a dry-run preflight.
-
-### 4.2 Direct CLI path
-
-```bash
-cd /path/to/project
-
-uv run zf presets
-uv run zf init --preset safe-team --workspace-register --with-bootstrap
-uv run zf validate --cold-start
-```
-
-Useful alternatives:
-
-```bash
-uv run zf init --skip-instruction-docs
-uv run zf init --no-workspace-register
-uv run zf init --env-check
-```
-
-`zf init --force` reinitializes runtime truth. Do not use it on a state
-directory whose evidence must be retained.
-
-### 4.3 Project workflow container
-
-Create a long-lived, multi-kind Project container by omitting `--kind`:
+Create a long-lived, multi-kind Project by omitting `--kind`:
 
 ```bash
 uv run zf project init \
   --name my-product \
+  --description "Durable project background and goal" \
   --root /path/to/my-product \
   --create \
   --git-init \
-  --backend claude-code \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
   --workspace-register
 ```
 
@@ -208,6 +208,23 @@ workflow. Explicit `--kind issue|prd|refactor` remains a compatibility path for
 a single-kind Controller. `--request-kind` describes an optional initial
 Request; only an explicit `--apply` may submit it, and readiness still fails
 closed on missing fields or open questions.
+
+### 4.4 Existing configuration and explicit Bootstrap
+
+For an existing `zf.yaml`, initialize or repair runtime state without replacing
+the control plane:
+
+```bash
+cd /path/to/project
+uv run zf init --workspace-register
+uv run zf validate --cold-start
+```
+
+Use `zf profile bootstrap` only when explicitly inspecting or materializing a
+single Controller/profile recommendation. `zf init --preset safe-team` remains
+a compatibility/configuration path, not the default Add/Open Project flow.
+`zf init --force` reinitializes runtime truth and must not be used when evidence
+must be retained.
 
 The `zf flow` commands create intake, classification, clarification, draft, and
 preflight artifacts. Use `flow clarify --confirm` to confirm the requirement
@@ -390,8 +407,9 @@ command for dirty worktrees.
 uv run zf chat "Implement a small feature with tests and review evidence."
 ```
 
-This appends a `user.message` and lets the active workflow decide whether to
-clarify, plan, create tasks, or dispatch work.
+This appends a `user.message`. In Web, Kanban Agent can also perform normal
+coding directly in its provider session. A Task is created only when the
+operator asks to track/execute work or confirms a `Create Task` proposal.
 
 ### 8.2 Deterministic task creation
 
@@ -409,7 +427,29 @@ uv run zf spec validate /path/to/spec.md --strict
 uv run zf spec ingest /path/to/spec.md
 ```
 
-### 8.3 Plan approval
+### 8.3 Task-bound Workflow start
+
+An existing Task is required for Research and delivery Workflow start. All
+surfaces use the active route catalog:
+
+```bash
+uv run zf workflow routes --task "$TASK_ID" --format json
+
+uv run zf workflow start \
+  --task "$TASK_ID" \
+  --route research:fixed \
+  --objective "Research account recovery and produce evidence-backed advice" \
+  --parameters-json '{"expected_output":"research synthesis plus PRD inputs"}' \
+  --propose \
+  --format json
+```
+
+Kanban Plan selects an active route and parameters. It creates a separate
+Approve proposal; only an authorized operator applies the exact proposal.
+`research:fixed` is available only when the current Project catalog exposes it.
+Its output does not automatically create or start a delivery Task.
+
+### 8.4 Runtime plan-hold approval
 
 When the workflow enables a human plan hold:
 
@@ -423,7 +463,9 @@ uv run zf plan reject <plan_id> --reason "scope is incomplete"
 Approval is a controlled state transition. Agents must not approve their own
 plan or bypass the hold with a hand-edited event.
 
-### 8.4 Completion is evidence-gated
+This runtime plan hold is separate from the Kanban clarification/route Plan.
+
+### 8.5 Completion is evidence-gated
 
 `zf kanban move <task_id> done` is not an unrestricted status write. The kernel
 can reject it when review, test, judge, discriminator, contract, or artifact
@@ -539,8 +581,21 @@ mechanism.
 
 ### 12.1 Channels
 
-A Channel is an event-driven shared conversation. The stable CLI surface is
-currently:
+A Channel is a dynamic shared conversation. The recommended entry is a Kanban
+Agent Channel setup Plan. Each option binds a built-in template, exact members,
+roles, member count, writer scope, and rounds. Selecting `Create & start`
+atomically creates the Channel and Members, posts the original requirement, and
+starts `fanout_then_synthesis`. `Chat about` keeps the Plan pending for
+customization.
+
+![Channel setup Plan](assets/kanban-channel-plan.png)
+
+Built-in templates are `prd-clarification`, `research-review`,
+`architecture-review`, `quick-change`, and `incident-triage`. A Channel does
+not require a Task and does not directly ignite a Workflow. Synthesis remains a
+collaboration artifact; confirm a `Create Task` proposal before delivery.
+
+The stable low-level CLI surface is:
 
 ```bash
 uv run zf channel say <channel_id> \
@@ -552,14 +607,18 @@ uv run zf channel say <channel_id> \
 Messages, mentions, streaming deltas, replies, and member lifecycle events are
 projected from `channel.*` events.
 
-Current limitations:
+General `channel list/show/invite/synth` CLI commands are not stable. Those
+actions use Kanban Plan, Web APIs, or ControlledAction surfaces.
 
-- general `channel list/show/invite/synth` CLI commands are not stable;
-- advanced multi-speaker policy is still evolving;
-- complex multi-provider collaboration must be verified against the current
-  code and event chain.
+### 12.2 Research Workflow versus Research Channel
 
-### 12.2 Feishu direct bridge
+`research-review` is a Channel discussion template. It does not start the fixed
+Research Workflow. `research:fixed` requires an existing Task, explicit fanout
+intent, availability in `zf workflow routes`, Plan selection, and separate
+Approve. It uses `source_researcher`, `product_analyst`,
+`technical_analyst`, `risk_critic`, and `synthesizer`.
+
+### 12.3 Feishu direct bridge
 
 Install the Feishu extra, configure credentials outside Git, and start the
 in-process WebSocket bridge:
@@ -581,7 +640,7 @@ Feishu can carry messages, status cards, plan approvals, and controlled action
 requests. It must not directly mutate kernel truth. Identity and approval
 checks fail closed.
 
-### 12.3 Read-only synchronization
+### 12.4 Read-only synchronization
 
 Automation summaries and Kanban projections can be mirrored to Feishu Docx and
 Bitable:

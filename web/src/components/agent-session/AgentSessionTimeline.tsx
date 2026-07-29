@@ -6,6 +6,8 @@ import type {
   AgentSessionActionProposal,
   AgentSessionCard,
   AgentSessionPart,
+  AgentSessionPlanRequest,
+  AgentSessionPlanResponse,
   AgentProviderCapability,
   AgentSessionRun,
   AgentSessionStatus,
@@ -16,6 +18,7 @@ import { MarkdownText } from "./MarkdownText";
 import { completedRunNotices } from "./notices";
 import { actionImpactRows, previewItemsFromRefs, type PreviewItem } from "./previewRegistry";
 import { formatOutputStats, formatToolDuration, getOutputPreview, prettyPrintIfJson, rawOutputLabel, rawOutputRefFromRefs, type RawOutputRef } from "./toolOutput";
+import { actionPresentation } from "./actionPresentation";
 
 // Opens a preview part into the fullscreen side pane. null when preview-split
 // isn't available (compact/docked), so preview cards render non-clickable.
@@ -24,6 +27,7 @@ import { segmentRunParts, type ToolRunSegment } from "./toolGrouping";
 import { cleanToolTitle, iconForToolName } from "./toolIcon";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { runStartTimestamp, toolCallCount } from "./liveRunIndicator";
+import { ApproveInteractionActions, PlanInteractionForm } from "./AgentInteractionControls";
 
 interface AgentSessionTimelineProps {
   conversation: AgentConversation;
@@ -45,6 +49,10 @@ interface AgentSessionTimelineProps {
   onActiveThreadChange?: (threadId: string) => void;
   onSplitThreadChange?: (threadId: string) => void;
   onApproveProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onRejectProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onReviseProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onSubmitPlan?: (request: AgentSessionPlanRequest, response: AgentSessionPlanResponse, cardId: string) => void;
+  onChatAboutPlan?: (request: AgentSessionPlanRequest, cardId: string) => void;
   onAnswerQuestion?: (card: AgentSessionCard) => void;
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
@@ -71,6 +79,10 @@ export function AgentSessionTimeline({
   onActiveThreadChange,
   onSplitThreadChange,
   onApproveProposal,
+  onRejectProposal,
+  onReviseProposal,
+  onSubmitPlan,
+  onChatAboutPlan,
   onAnswerQuestion,
   onCancelQueued,
   onCancelRun,
@@ -151,6 +163,10 @@ export function AgentSessionTimeline({
                   extraCards={thread.id === activeThread?.id ? extraCards : []}
                   onAnswerQuestion={onAnswerQuestion}
                   onApproveProposal={onApproveProposal}
+                  onRejectProposal={onRejectProposal}
+                  onReviseProposal={onReviseProposal}
+                  onSubmitPlan={onSubmitPlan}
+                  onChatAboutPlan={onChatAboutPlan}
                   onCancelQueued={onCancelQueued}
                   onCancelRun={onCancelRun}
                   providerCapabilities={providerCapabilities}
@@ -190,6 +206,10 @@ function ThreadPane({
   emptyTitle,
   extraCards,
   onApproveProposal,
+  onRejectProposal,
+  onReviseProposal,
+  onSubmitPlan,
+  onChatAboutPlan,
   onAnswerQuestion,
   onCancelQueued,
   onCancelRun,
@@ -208,6 +228,10 @@ function ThreadPane({
   emptyTitle: string;
   extraCards: AgentSessionCard[];
   onApproveProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onRejectProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onReviseProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onSubmitPlan?: (request: AgentSessionPlanRequest, response: AgentSessionPlanResponse, cardId: string) => void;
+  onChatAboutPlan?: (request: AgentSessionPlanRequest, cardId: string) => void;
   onAnswerQuestion?: (card: AgentSessionCard) => void;
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
@@ -220,7 +244,6 @@ function ThreadPane({
   showRunProvider: boolean;
   thread: AgentSessionThread;
 }) {
-  const cards = [...thread.turns.flatMap((turn) => turn.cards), ...extraCards];
   return (
     <section className="agent-session-pane" aria-label={thread.title}>
       {!compact ? (
@@ -268,6 +291,19 @@ function ThreadPane({
                 showRunProvider={showRunProvider}
               />
             ))}
+            {turn.cards.length ? (
+              <StackedCards
+                actionBusyId={actionBusyId}
+                cards={turn.cards}
+                onAnswerQuestion={onAnswerQuestion}
+                onApproveProposal={onApproveProposal}
+                onRejectProposal={onRejectProposal}
+                onReviseProposal={onReviseProposal}
+                onSubmitPlan={onSubmitPlan}
+                onChatAboutPlan={onChatAboutPlan}
+                onCancelQueued={onCancelQueued}
+              />
+            ) : null}
           </article>
         )) : (
           <div className="agent-session-empty inline">
@@ -277,12 +313,16 @@ function ThreadPane({
           </div>
         )}
       </div>
-      {cards.length ? (
+      {extraCards.length ? (
         <StackedCards
           actionBusyId={actionBusyId}
-          cards={cards}
+          cards={extraCards}
           onAnswerQuestion={onAnswerQuestion}
           onApproveProposal={onApproveProposal}
+          onRejectProposal={onRejectProposal}
+          onReviseProposal={onReviseProposal}
+          onSubmitPlan={onSubmitPlan}
+          onChatAboutPlan={onChatAboutPlan}
           onCancelQueued={onCancelQueued}
         />
       ) : null}
@@ -994,36 +1034,111 @@ function StackedCards({
   cards,
   onAnswerQuestion,
   onApproveProposal,
+  onRejectProposal,
+  onReviseProposal,
+  onSubmitPlan,
+  onChatAboutPlan,
   onCancelQueued,
 }: {
   actionBusyId: string;
   cards: AgentSessionCard[];
   onAnswerQuestion?: (card: AgentSessionCard) => void;
   onApproveProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onRejectProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onReviseProposal?: (proposal: AgentSessionActionProposal, cardId: string) => void;
+  onSubmitPlan?: (request: AgentSessionPlanRequest, response: AgentSessionPlanResponse, cardId: string) => void;
+  onChatAboutPlan?: (request: AgentSessionPlanRequest, cardId: string) => void;
   onCancelQueued?: (cardId: string) => void;
 }) {
   return (
     <div className="agent-stacked-cards">
-      {cards.map((card) => (
-        <div className={`agent-stack-card ${card.kind}`} key={card.id}>
-          <div>
-            <span className="agent-card-kind">{card.kind}</span>
-            <strong>{card.title}</strong>
-            {card.body ? <p>{card.body}</p> : null}
-            {card.kind === "proposal" && card.proposal ? <ActionPreviewBody proposal={card.proposal} refs={card.refs} /> : null}
-            {card.refs ? <AttachmentChips refs={card.refs} /> : null}
-          </div>
-          {card.kind === "proposal" && card.proposal ? (
-            <button
-              className="agent-inline-button primary"
-              disabled={!card.proposal.valid || actionBusyId === card.id}
-              type="button"
-              onClick={() => onApproveProposal?.(card.proposal as AgentSessionActionProposal, card.id)}
-            >
-              {actionBusyId === card.id ? "Running" : card.actionLabel || "Approve"}
-            </button>
+      {cards.map((card) => {
+        const isPlan = card.kind === "plan" || card.kind === "question";
+        const isApprove = card.kind === "approve" || card.kind === "proposal";
+        const planCompleted = Boolean(isPlan && card.planRequest?.response);
+        const compatibilityClass = isPlan
+          ? "plan question"
+          : isApprove
+            ? "approve proposal"
+            : card.kind;
+        const proposalExecuted = card.payload?.resolution === "executed";
+        const presentation = card.proposal
+          ? actionPresentation(card.proposal.action)
+          : null;
+        const receiptSubject = card.proposal
+          ? actionImpactRows(card.proposal.action, card.proposal.payload)
+            .find((row) => row.label !== "action")?.value
+          : "";
+        return (
+        <div
+          className={`agent-stack-card ${compatibilityClass} ${card.status === "completed" ? "is-completed" : ""}`}
+          key={card.id}
+        >
+          {!planCompleted && !(isApprove && card.status === "completed") ? (
+            <div className="agent-interaction-copy">
+              <span className="agent-card-kind">
+                {isPlan ? "Question" : isApprove ? "Confirmation" : card.kind}
+              </span>
+              <strong>{presentation?.title || card.title}</strong>
+              {card.body ? <p>{card.body}</p> : null}
+              {isApprove && card.proposal ? (
+                <ActionPreviewBody proposal={card.proposal} refs={card.refs} />
+              ) : card.refs ? (
+                <AttachmentChips refs={card.refs} />
+              ) : null}
+            </div>
           ) : null}
-          {card.kind === "question" && onAnswerQuestion ? (
+          {isApprove && card.proposal ? (
+            card.status === "completed" ? (
+              <div className={`agent-action-receipt ${proposalExecuted ? "" : "muted"}`}>
+                {proposalExecuted
+                  ? <Check aria-hidden="true" size={14} />
+                  : <XCircle aria-hidden="true" size={14} />}
+                <span className="agent-plan-receipt-copy">
+                  <small>{receiptSubject || card.title}</small>
+                  <strong>
+                    {proposalExecuted
+                      ? presentation?.completedLabel || "Action completed"
+                      : "Cancelled"}
+                  </strong>
+                </span>
+              </div>
+            ) : (
+              <ApproveInteractionActions
+                busy={actionBusyId === card.id}
+                proposal={card.proposal}
+                onApprove={onApproveProposal
+                  ? () => onApproveProposal(card.proposal as AgentSessionActionProposal, card.id)
+                  : undefined}
+                onReject={onRejectProposal
+                  ? () => onRejectProposal(card.proposal as AgentSessionActionProposal, card.id)
+                  : undefined}
+                onRevise={onReviseProposal
+                  ? () => onReviseProposal(card.proposal as AgentSessionActionProposal, card.id)
+                  : undefined}
+              />
+            )
+          ) : null}
+          {isPlan && card.planRequest ? (
+            card.status === "stale" ? (
+              <div className="agent-plan-receipt muted">
+                <CircleSlash aria-hidden="true" size={14} />
+                <span>Superseded</span>
+              </div>
+            ) : (
+              <PlanInteractionForm
+                busy={actionBusyId === card.id}
+                request={card.planRequest}
+                onChatAbout={onChatAboutPlan
+                  ? () => onChatAboutPlan(card.planRequest as AgentSessionPlanRequest, card.id)
+                  : undefined}
+                onSubmit={onSubmitPlan
+                  ? (response) => onSubmitPlan(card.planRequest as AgentSessionPlanRequest, response, card.id)
+                  : undefined}
+              />
+            )
+          ) : null}
+          {isPlan && !card.planRequest && onAnswerQuestion ? (
             <button className="agent-inline-button primary" type="button" onClick={() => onAnswerQuestion(card)}>
               {card.actionLabel || "Answer"}
             </button>
@@ -1034,27 +1149,56 @@ function StackedCards({
             </button>
           ) : null}
         </div>
-      ))}
+      )})}
     </div>
   );
 }
 
 function ActionPreviewBody({ proposal, refs }: { proposal: AgentSessionActionProposal; refs?: Record<string, unknown> }) {
   const rows = actionImpactRows(proposal.action, proposal.payload);
+  const summaryLabels = new Set([
+    "channel",
+    "name",
+    "objective",
+    "patch",
+    "task",
+    "template",
+    "title",
+    "topic",
+    "workflow",
+  ]);
+  const userRows = rows.filter((row) => row.label !== "action");
+  const preferredRows = userRows.filter((row) => summaryLabels.has(row.label));
+  const summaryRows = (preferredRows.length ? preferredRows : userRows).slice(0, 3);
+  const detailRows = rows.filter((row) => !summaryRows.includes(row));
+  const hasRefs = refItems(refs).length > 0;
   const isPatch = proposal.action === "apply-patch-proposal";
   return (
     <div className="agent-action-preview">
-      <dl>
-        {rows.map((row) => (
+      {summaryRows.length ? <dl>
+        {summaryRows.map((row) => (
           <Fragment key={`${row.label}-${row.value}`}>
             <dt>{row.label}</dt>
             <dd className={row.label === "task" || row.label === "patch" ? "mono" : ""}>{row.value}</dd>
           </Fragment>
         ))}
-      </dl>
+      </dl> : null}
       {proposal.validationError ? <p className="agent-action-warning">{proposal.validationError}</p> : null}
       {isPatch ? <p className="agent-action-warning">Patch apply is gated: preview, dirty-tree guard, audit, and rollback artifact are required before execution.</p> : null}
-      {refs ? <AttachmentChips refs={refs} /> : null}
+      {detailRows.length || hasRefs ? (
+        <details className="agent-interaction-details">
+          <summary>Details</summary>
+          {detailRows.length ? <dl>
+            {detailRows.map((row) => (
+              <Fragment key={`${row.label}-${row.value}`}>
+                <dt>{row.label}</dt>
+                <dd className={row.label === "task" || row.label === "patch" ? "mono" : ""}>{row.value}</dd>
+              </Fragment>
+            ))}
+          </dl> : null}
+          {hasRefs ? <AttachmentChips refs={refs} /> : null}
+        </details>
+      ) : null}
     </div>
   );
 }

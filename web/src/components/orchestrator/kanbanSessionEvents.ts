@@ -41,14 +41,34 @@ export function isKanbanAgentSessionEvent(
   if (eventType === "user.message") {
     if (payload.target !== "kanban-agent") return false;
     if (payload.runtime_delivery !== "headless") return false;
-  } else if (!(
+  } else if (eventType === "task.created") {
+    const request = payload.request && typeof payload.request === "object"
+      ? payload.request as Record<string, unknown>
+      : {};
+    if (!textValue(payload.proposal_event_id || request.proposal_event_id).trim()) return false;
+  } else if (![
+    "kanban.agent.action.proposed",
+    "kanban.agent.proposal.resolved",
+    "operator.action.proposed",
+    "operator.action.resolved",
+  ].includes(eventType) && !(
     eventType.startsWith("kanban.agent.turn.")
     || eventType.startsWith("kanban.agent.message.")
+    || eventType.startsWith("kanban.agent.plan.")
     || eventType === "kanban.agent.reply"
     || eventType.startsWith("agent.session.")
   )) {
     return false;
   }
+  if (
+    eventType === "operator.action.proposed"
+    && (!payload.proposal || typeof payload.proposal !== "object")
+  ) return false;
+  if (
+    ["operator.action.proposed", "operator.action.resolved"].includes(eventType)
+    && !textValue(payload.conversation_id).trim()
+    && !textValue(payload.turn_id).trim()
+  ) return false;
 
   const payloadProjectId = textValue(payload.project_id).trim();
   if (args.projectId && payloadProjectId && payloadProjectId !== args.projectId) return false;

@@ -1,11 +1,7 @@
-// First-run welcome wizard (orca-modeled: progress rail, detect-prefill,
-// skip, resume). Shown only when onboarding is not completed/skipped; the
-// gate lives server-side (core/workspace/onboarding.py). STEP 3 reuses the
-// existing New Project modal so "add project" is one flow, not two.
+// First-run host setup. Project admission starts after this wizard.
 import { useEffect, useMemo, useState } from "react";
 
-import { getOnboarding, inspectBootstrap, updateOnboarding } from "../../api/client";
-import type { BootstrapInspect } from "../../api/client";
+import { getOnboarding, updateOnboarding } from "../../api/client";
 import type { OnboardingStatus } from "../../api/types";
 
 const TONE = {
@@ -17,36 +13,30 @@ const TONE = {
 
 interface StepDef { id: string; num: number; title: string; subtitle: string }
 const STEPS: StepDef[] = [
-  { id: "backend", num: 1, title: "选后端", subtitle: "哪个 AI 后端驱动 agent" },
-  { id: "preflight", num: 2, title: "环境自检", subtitle: "启动硬依赖当场验" },
-  { id: "project", num: 3, title: "第一个项目", subtitle: "描述 · 探测 · 创建" },
-  { id: "launch", num: 4, title: "就绪", subtitle: "启动第一轮" },
+  { id: "backend", num: 1, title: "Provider", subtitle: "选择本机可用的 Coding Agent provider" },
+  { id: "preflight", num: 2, title: "Environment", subtitle: "核实 ZaoFu 的宿主环境" },
+  { id: "access", num: 3, title: "Access", subtitle: "授权当前浏览器执行受控操作" },
+  { id: "ready", num: 4, title: "Ready", subtitle: "Workspace 已可使用" },
 ];
 
 interface Props {
-  hasProject: boolean;               // whether a project got created (STEP 3)
-  onOpenProjectWizard: (prefill?: { root?: string; preset?: string; stack?: string; description?: string }) => void;
-  onDone: () => void;                // completed or skipped -> re-fetch + dismiss
+  accessReady: boolean;
+  onDone: () => void;
   onSaveToken: (token: string) => void;
   tokenPresent: boolean;
 }
 
 export function WelcomeWizard({
-  hasProject,
+  accessReady,
   onDone,
-  onOpenProjectWizard,
   onSaveToken,
   tokenPresent,
 }: Props) {
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [stepIdx, setStepIdx] = useState(0);
   const [backend, setBackend] = useState("");
+  const [mixedEnabled, setMixedEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [inspectRoot, setInspectRoot] = useState("");
-  const [inspect, setInspect] = useState<BootstrapInspect | null>(null);
-  const [inspectBusy, setInspectBusy] = useState(false);
-  const [devLang, setDevLang] = useState("auto");   // 语言/栈偏好 → AGENTS.md 栈段
-  const [comments, setComments] = useState("");      // 项目备注 → CLAUDE.md
   const [error, setError] = useState("");
   const [tokenDraft, setTokenDraft] = useState("");
 
@@ -54,12 +44,16 @@ export function WelcomeWizard({
     getOnboarding().then((s) => {
       setStatus(s);
       setStepIdx(Math.min(Math.max((s.step || 1) - 1, 0), STEPS.length - 1));
-      if (s.backend) setBackend(s.backend);
+      if (s.primary_backend || s.backend) setBackend(s.primary_backend || s.backend);
       else {
-        const pre = s.backends.find((b) => b.detected && !b.always_available)
-          ?? s.backends.find((b) => b.always_available);
+        const primaryBackends = s.backends.filter(
+          (item) => item.id === "codex" || item.id === "claude-code",
+        );
+        const pre = primaryBackends.find((b) => b.detected)
+          ?? primaryBackends[0];
         if (pre) setBackend(pre.id);
       }
+      setMixedEnabled(Boolean(s.mixed_enabled && s.mixed_available));
     }).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
 
@@ -68,10 +62,19 @@ export function WelcomeWizard({
     () => (status?.preflight ?? []).every((c) => c.ok), [status]);
 
   async function persistStep(nextIdx: number) {
+    if (!accessReady) {
+      setStepIdx(nextIdx);
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      await updateOnboarding({ action: "step", step: nextIdx + 1, backend });
+      await updateOnboarding({
+        action: "step",
+        step: nextIdx + 1,
+        primary_backend: backend,
+        mixed_enabled: mixedEnabled,
+      });
       setStepIdx(nextIdx);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -83,7 +86,11 @@ export function WelcomeWizard({
     setBusy(true);
     setError("");
     try {
-      await updateOnboarding({ action: "complete", backend });
+      await updateOnboarding({
+        action: "complete",
+        primary_backend: backend,
+        mixed_enabled: mixedEnabled,
+      });
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -117,15 +124,15 @@ export function WelcomeWizard({
   const canContinue =
     (cur.id === "backend" && !!backend)
     || (cur.id === "preflight" && preflightOk)
-    || (cur.id === "project" && hasProject)
-    || cur.id === "launch";
+    || (cur.id === "access" && accessReady)
+    || cur.id === "ready";
 
   return (
     <div style={overlay} data-testid="welcome-wizard">
       <div style={card}>
         {/* header + progress rail */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-          <div style={{ fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: TONE.muted }}>
+          <div style={{ fontSize: 11, letterSpacing: 0, textTransform: "uppercase", color: TONE.muted }}>
             设置 ZaoFu · STEP {cur.num}/{STEPS.length}
           </div>
           <button type="button" onClick={skipAll} disabled={busy} data-testid="welcome-skip"
@@ -143,50 +150,6 @@ export function WelcomeWizard({
         </div>
         <h2 style={{ margin: "0 0 2px", fontSize: 18 }}>{cur.title}</h2>
         <div style={{ color: TONE.muted, fontSize: 13, marginBottom: 16 }}>{cur.subtitle}</div>
-        <div
-          data-testid="welcome-action-token"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) auto",
-            gap: 8,
-            alignItems: "center",
-            padding: 10,
-            marginBottom: 14,
-            border: `1px solid ${TONE.line}`,
-            borderRadius: 8,
-            background: TONE.bg,
-          }}
-        >
-          <input
-            aria-label="Web action token"
-            type="password"
-            value={tokenDraft}
-            onChange={(event) => setTokenDraft(event.target.value)}
-            placeholder={tokenPresent ? "替换 Web action token" : "远程主机操作需要 Web action token"}
-            style={{
-              minWidth: 0,
-              font: "inherit",
-              fontSize: 12.5,
-              padding: "7px 9px",
-              border: `1px solid ${TONE.line}`,
-              borderRadius: 6,
-              background: TONE.panel,
-              color: TONE.text,
-            }}
-          />
-          <button
-            type="button"
-            disabled={!tokenDraft.trim()}
-            onClick={() => {
-              onSaveToken(tokenDraft);
-              setTokenDraft("");
-              setError("");
-            }}
-            style={ghostBtn}
-          >
-            {tokenPresent ? "替换 token" : "保存 token"}
-          </button>
-        </div>
         {error ? (
           <div
             role="alert"
@@ -199,26 +162,56 @@ export function WelcomeWizard({
 
         <div style={{ minHeight: 220 }}>
           {cur.id === "backend" ? (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              {status.backends.map((b) => (
-                <button key={b.id} type="button" data-testid={`welcome-backend-${b.id}`}
-                  onClick={() => setBackend(b.id)}
-                  style={{
-                    textAlign: "left", padding: "12px 14px", borderRadius: 8, cursor: "pointer",
-                    border: `1px solid ${backend === b.id ? TONE.brand : TONE.line}`,
-                    background: backend === b.id ? "color-mix(in oklab, var(--brand) 8%, transparent)" : TONE.panel,
-                    opacity: b.detected ? 1 : 0.5,
-                  }}>
-                  <div style={{ fontWeight: 600 }}>
-                    {backend === b.id ? "● " : "○ "}{b.id}
-                    {b.detected ? <span style={{ color: TONE.ok, fontSize: 11, marginLeft: 8 }}>✓ 已检测</span>
-                      : <span style={{ color: TONE.faint, fontSize: 11, marginLeft: 8 }}>未检测</span>}
-                  </div>
-                  <div style={{ fontSize: 11, color: TONE.faint, fontFamily: "var(--font-mono, monospace)", marginTop: 3 }}>
-                    {b.path || b.note || "稍后装"}
-                  </div>
-                </button>
-              ))}
+            <div style={{ display: "grid", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {status.backends.filter(
+                  (item) => item.id === "codex" || item.id === "claude-code",
+                ).map((b) => (
+                  <button key={b.id} type="button" data-testid={`welcome-backend-${b.id}`}
+                    onClick={() => setBackend(b.id)}
+                    style={{
+                      textAlign: "left", padding: "12px 14px", borderRadius: 8, cursor: "pointer",
+                      border: `1px solid ${backend === b.id ? TONE.brand : TONE.line}`,
+                      background: backend === b.id ? "color-mix(in oklab, var(--brand) 8%, transparent)" : TONE.panel,
+                      opacity: b.detected ? 1 : 0.5,
+                    }}>
+                    <div style={{ fontWeight: 600 }}>
+                      {backend === b.id ? "● " : "○ "}{b.id}
+                      {b.detected ? <span style={{ color: TONE.ok, fontSize: 11, marginLeft: 8 }}>✓ 已检测</span>
+                        : <span style={{ color: TONE.faint, fontSize: 11, marginLeft: 8 }}>未检测</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: TONE.faint, fontFamily: "var(--font-mono, monospace)", marginTop: 3 }}>
+                      {b.path || b.note || "稍后装"}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <label style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr)",
+                gap: 10,
+                alignItems: "start",
+                padding: "11px 12px",
+                border: `1px solid ${TONE.line}`,
+                borderRadius: 8,
+                color: status.mixed_available ? TONE.text : TONE.faint,
+              }}>
+                <input
+                  checked={mixedEnabled}
+                  data-testid="welcome-mixed-enabled"
+                  disabled={!status.mixed_available}
+                  type="checkbox"
+                  onChange={(event) => setMixedEnabled(event.target.checked)}
+                />
+                <span>
+                  <strong style={{ display: "block", fontSize: 13 }}>Mixed team</strong>
+                  <span style={{ display: "block", marginTop: 2, fontSize: 11, color: TONE.faint }}>
+                    {status.mixed_available
+                      ? "独立 verify lane 使用另一 provider"
+                      : "需要同时检测到 Codex 和 Claude Code"}
+                  </span>
+                </span>
+              </label>
             </div>
           ) : null}
 
@@ -245,105 +238,70 @@ export function WelcomeWizard({
             </div>
           ) : null}
 
-          {cur.id === "project" ? (
+          {cur.id === "access" ? (
             <div>
-              <div style={{ fontSize: 13, color: TONE.muted, marginBottom: 10 }}>
-                ZaoFu 套在已有代码库上跑。先探测目标项目,自动产出 setup/门禁/文档候选。
-              </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                <input data-testid="welcome-inspect-root" value={inspectRoot}
-                  onChange={(e) => setInspectRoot(e.target.value)}
-                  placeholder="目标目录,如 ~/workspace/hermes-refactor/cangjie"
+              <div
+                data-testid="welcome-action-token"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  gap: 8,
+                  alignItems: "center",
+                  padding: 12,
+                  border: `1px solid ${accessReady ? TONE.ok : TONE.line}`,
+                  borderRadius: 8,
+                  background: TONE.bg,
+                }}
+              >
+                <input
+                  aria-label="Web action token"
+                  type="password"
+                  value={tokenDraft}
+                  onChange={(event) => setTokenDraft(event.target.value)}
+                  placeholder={tokenPresent ? "替换 Web action token" : "输入 Web action token"}
                   style={{
-                    flex: 1, font: "inherit", fontSize: 13, padding: "7px 10px",
-                    border: `1px solid ${TONE.line}`, borderRadius: 7, background: TONE.panel, color: TONE.text,
-                  }} />
-                <button type="button" data-testid="welcome-inspect-btn" disabled={!inspectRoot.trim() || inspectBusy}
-                  onClick={async () => {
-                    setInspectBusy(true);
-                    setError("");
-                    try { setInspect(await inspectBootstrap(inspectRoot.trim(), backend || 'claude')); }
-                    catch (err) {
-                      setInspect(null);
-                      setError(err instanceof Error ? err.message : String(err));
-                    }
-                    finally { setInspectBusy(false); }
+                    minWidth: 0,
+                    font: "inherit",
+                    fontSize: 12.5,
+                    padding: "7px 9px",
+                    border: `1px solid ${TONE.line}`,
+                    borderRadius: 6,
+                    background: TONE.panel,
+                    color: TONE.text,
                   }}
-                  style={{ ...ghostBtn, opacity: inspectRoot.trim() ? 1 : 0.4 }}>
-                  {inspectBusy ? "探测中…" : "探测项目"}
+                />
+                <button
+                  type="button"
+                  disabled={!tokenDraft.trim()}
+                  onClick={() => {
+                    onSaveToken(tokenDraft);
+                    setTokenDraft("");
+                    setError("");
+                  }}
+                  style={ghostBtn}
+                >
+                  {tokenPresent ? "替换 token" : "保存 token"}
                 </button>
               </div>
-
-              {inspect ? (
-                <div data-testid="welcome-candidates" style={{ marginBottom: 12 }}>
-                  {inspect.confidence === "low" || !inspect.candidates.length ? (
-                    <div style={{ fontSize: 12.5, color: TONE.warn }}>
-                      置信度低(空/新仓)—— 代码落地后再探,先用空模板创建。
-                    </div>
-                  ) : (
-                    <>
-                      <div style={{ fontSize: 12, color: TONE.faint, marginBottom: 6 }}>
-                        探到 <b style={{ color: TONE.text }}>{inspect.stack}</b> · {inspect.layout} · 候选(创建时以 apply_profile 写入):
-                      </div>
-                      {inspect.candidates.map((c) => (
-                        <div key={c.kind} data-testid={`welcome-cand-${c.kind}`}
-                          style={{ fontSize: 12.5, padding: "4px 0", borderTop: `1px solid ${TONE.line}` }}>
-                          <span style={{ color: TONE.ok }}>☑ </span>
-                          <b>{c.label}</b>{" "}
-                          <span style={{ fontFamily: "var(--font-mono, monospace)", color: TONE.muted }}>
-                            {c.value ?? (c.values ? c.values.join(" · ") : Object.entries(c.facts ?? {}).map(([k, v]) => `${k}=${v}`).join(" · "))}
-                          </span>
-                          <div style={{ fontSize: 11, color: TONE.faint }}>{c.note}</div>
-                        </div>
-                      ))}
-                    </>
-                  )}
-                </div>
-              ) : null}
-
-              {!hasProject ? (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
-                  <label style={{ fontSize: 12, color: TONE.muted }}>
-                    开发语言(写进 AGENTS.md 栈段;auto = 用探测结果)
-                    <select data-testid="welcome-dev-lang" value={devLang}
-                      onChange={(e) => setDevLang(e.target.value)}
-                      style={{ marginLeft: 8, font: "inherit", fontSize: 12.5, padding: "5px 8px",
-                        border: `1px solid ${TONE.line}`, borderRadius: 6, background: TONE.panel, color: TONE.text }}>
-                      {["auto", "python", "node", "go", "rust"].map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </label>
-                  <textarea data-testid="welcome-comments" value={comments}
-                    onChange={(e) => setComments(e.target.value)} rows={3}
-                    placeholder="项目备注 / 特殊约束 / 团队约定 → 写进 CLAUDE.md,让 agent 读到真相而非模板"
-                    style={{ font: "inherit", fontSize: 12.5, padding: "7px 10px",
-                      border: `1px solid ${TONE.line}`, borderRadius: 7, background: TONE.panel, color: TONE.text, resize: "vertical" }} />
-                </div>
-              ) : null}
-
-              {hasProject ? (
-                <div data-testid="welcome-project-done" style={{ color: TONE.ok, fontSize: 13 }}>✓ 项目已创建,可继续。</div>
-              ) : (
-                <button type="button" data-testid="welcome-add-project"
-                  onClick={() => onOpenProjectWizard({
-                    root: inspect?.root || inspectRoot.trim() || undefined,
-                    preset: inspect?.recommended_flow || undefined,
-                    stack: devLang !== "auto" ? devLang : undefined,
-                    description: comments.trim() || undefined,
-                  })}
-                  style={primaryBtn}>+ 用探测结果创建项目(controller flow)</button>
-              )}
+              <div
+                data-testid="welcome-access-status"
+                style={{ marginTop: 12, fontSize: 13, color: accessReady ? TONE.ok : TONE.warn }}
+              >
+                {accessReady ? "当前浏览器已授权。" : "需要授权后才能完成设置。"}
+              </div>
             </div>
           ) : null}
 
-          {cur.id === "launch" ? (
+          {cur.id === "ready" ? (
             <div>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, marginBottom: 16 }}>
-                <span>✓ 后端 <b>{backend || "—"}</b></span>
-                <span>{preflightOk ? "✓" : "✗"} 环境自检</span>
-                <span>{hasProject ? "✓ 项目已建" : "○ 未建项目"}</span>
+                <span>Provider <b>{backend || "未指定"}</b></span>
+                <span>Team <b>{mixedEnabled ? "mixed" : "single"}</b></span>
+                <span>Environment {preflightOk ? "ready" : "skipped"}</span>
+                <span>Access {accessReady ? "granted" : "required"}</span>
               </div>
               <div style={{ fontSize: 13, color: TONE.muted, marginBottom: 8 }}>
-                完成后进入 dashboard,带你看:🔁 Loop 环怎么转 · ▦ Board 任务 · 📥 Inbox 你要裁的。
+                完成后进入 Workspace。Project 可在需要时通过 Add Project 打开或初始化。
               </div>
             </div>
           ) : null}
@@ -356,12 +314,12 @@ export function WelcomeWizard({
           <div style={{ flex: 1, textAlign: "center", fontSize: 12, color: TONE.faint }}>
             {cur.num} / {STEPS.length}
           </div>
-          {cur.id !== "launch" && cur.id !== "project" ? (
+          {cur.id !== "ready" && cur.id !== "access" ? (
             <button type="button" onClick={() => persistStep(stepIdx + 1)} style={linkBtn}>跳过此步</button>
           ) : null}
-          {cur.id === "launch" ? (
+          {cur.id === "ready" ? (
             <button type="button" data-testid="welcome-finish" disabled={busy}
-              onClick={finish} style={primaryBtn}>🚀 完成,进入 dashboard</button>
+              onClick={finish} style={primaryBtn}>进入 Workspace</button>
           ) : (
             <button type="button" data-testid="welcome-continue" disabled={!canContinue || busy}
               onClick={() => persistStep(stepIdx + 1)}
@@ -375,10 +333,11 @@ export function WelcomeWizard({
 
 const overlay: React.CSSProperties = {
   position: "fixed", inset: 0, zIndex: 1000, background: "var(--bg)",
-  display: "grid", placeItems: "center", padding: 24,
+  display: "grid", placeItems: "center", padding: 16, overflow: "hidden",
 };
 const card: React.CSSProperties = {
-  width: "100%", maxWidth: 640, background: "var(--panel)",
+  boxSizing: "border-box", width: "100%", maxWidth: 640,
+  maxHeight: "calc(100dvh - 32px)", overflowY: "auto", background: "var(--panel)",
   border: "1px solid var(--line)", borderRadius: 12, padding: "22px 26px",
   boxShadow: "0 20px 60px rgba(0,0,0,.25)",
 };

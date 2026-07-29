@@ -44,7 +44,7 @@ _KNOWN_TEMPLATE_KEYS = frozenset({
     "backend", "model", "permission_mode", "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds", "budget_usd",
     "skills_by_stage", "allowed_tools", "plugins",
-    "role_kind_by_stage",
+    "role_kind_by_stage", "backend_by_stage",
     # 真实 hermes 文件暴露的两个声明位(topology 仍归生成层,声明式扩展,
     # 不开手写 role 覆盖口):
     "publishes_extra_by_stage",  # e.g. impl 额外发 dev.blocked
@@ -64,6 +64,7 @@ class LaneRoleTemplateSpec:
     plugins: tuple[str, ...] = ()
     skills_by_stage: dict[str, tuple[str, ...]] = field(default_factory=dict)
     role_kind_by_stage: dict[str, str] = field(default_factory=dict)
+    backend_by_stage: dict[str, str] = field(default_factory=dict)
     publishes_extra_by_stage: dict[str, tuple[str, ...]] = field(
         default_factory=dict,
     )
@@ -94,6 +95,11 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
         raise LaneRoleTemplateError(
             f"{context}.lane_role_template.role_kind_by_stage must be a mapping"
         )
+    backends_raw = raw.get("backend_by_stage") or {}
+    if not isinstance(backends_raw, dict):
+        raise LaneRoleTemplateError(
+            f"{context}.lane_role_template.backend_by_stage must be a mapping"
+        )
     return LaneRoleTemplateSpec(
         backend=str(raw.get("backend") or "claude-code"),
         model=str(raw.get("model") or ""),
@@ -113,6 +119,11 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
         },
         role_kind_by_stage={
             str(stage): str(kind) for stage, kind in kinds_raw.items()
+        },
+        backend_by_stage={
+            str(stage): str(backend)
+            for stage, backend in backends_raw.items()
+            if str(backend).strip()
         },
         publishes_extra_by_stage={
             str(stage): tuple(str(e) for e in events or [])
@@ -186,7 +197,10 @@ def generate_lane_roles(
             base = RoleConfig(
                 name=name,
                 instance_id=name,
-                backend=template.backend,
+                backend=template.backend_by_stage.get(
+                    stage.stage_id,
+                    template.backend,
+                ),
                 model=template.model,
                 role_kind=role_kind,
                 permission_mode=template.permission_mode,

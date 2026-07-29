@@ -1,10 +1,10 @@
 # 20 Project Creation, Bootstrap, and Workflow Ignition
 
 > Audience: operators creating a ZaoFu Project from an empty directory or an
-> existing repository, then safely submitting the first PRD, Issue, or
-> Refactor workflow.
+> existing repository, then safely igniting the first Workflow through Kanban
+> Agent, Channel, Research, or CLI.
 >
-> Last verified against the CLI and Web UI: 2026-07-22.
+> Last verified against the CLI and Web UI: 2026-07-29.
 
 ## 1. Project, Request, and Run are different lifecycles
 
@@ -28,7 +28,7 @@ The ZaoFu source repository's root `zf.yaml` now defaults to the standard
 `PrdFlow` for ZaoFu's own delivery work. It is not the new-project template.
 New Projects still default to multi-kind and no ignition.
 
-## 2. Four commands that serve different purposes
+## 2. Five commands that serve different purposes
 
 | Command | Purpose | Starts a workflow |
 |---|---|---|
@@ -36,10 +36,16 @@ New Projects still default to multi-kind and no ignition.
 | `zf project init` | Create the Project container, `zf.yaml`, state dir, and optional workspace registration | No by default |
 | `zf init` | Initialize or repair runtime state for an existing `zf.yaml` | No |
 | `zf start` | Start workers, sidecars, and the watcher, then wait for entry events | Does not invent a Request |
+| `zf workflow routes/start` | Query routes for an existing Task, propose, and apply with authorization | Only `start --apply` ignites |
 
-The ignition action is `zf flow submit --apply`, or the explicit
-`zf project init ... --apply` fast path. For a light topology, `flow submit
---apply` appends both the acceptance events and the correlated `prd.requested`
+For a typed Flow intake, ignition is `zf flow submit --apply`, or the explicit
+`zf project init ... --apply` fast path. The unified Task-bound entry for
+Kanban Agent, Channel members, Coding Agents, and CLI is `zf workflow start`:
+first `--propose`, then an operator applies the exact proposal with
+authorization.
+
+For a light topology, `flow submit --apply` appends both the acceptance events
+and the correlated `prd.requested`
 or `issue.requested` entry event in one `EventWriter` transaction. Do not emit
 a second entry event manually; that would create another run identity.
 
@@ -94,17 +100,22 @@ Omit `--kind` to create the default multi-kind Project:
 ```bash
 uv run --project "$ZAOFU_ROOT" zf project init \
   --name my-product \
+  --description "Durable project background, goals, and constraints" \
   --root "$TARGET_PROJECT" \
   --create \
   --git-init \
-  --backend claude-code \
+  --backend codex \
+  --verify-backend claude-code \
+  --stack python \
   --workspace-register
 ```
 
 This creates the root and canonical config, allocates Project-specific runtime
-and session names, materializes Issue/PRD/Refactor routes, and registers the
-Project. Issue defaults to one lane, PRD to two, and Refactor to five. It does
-not submit a Request or emit a workflow invoke.
+and session names, materializes Issue/PRD/Refactor routes, writes Project Brief
+to `zf.yaml` and the managed `AGENTS.md` context, creates a Stack command
+Profile, compiles the optional verify backend into an independent verification
+lane, and registers the Project. Issue defaults to one lane, PRD to two, and
+Refactor to five. It does not submit a Request or emit a workflow invoke.
 
 Remove `--git-init` for an existing Git repository. Remove `--create` when the
 directory must already exist.
@@ -291,7 +302,7 @@ Use them only for a bounded Project that will not carry another request kind.
 Long-lived products should stay multi-kind. Features use a light PRD route;
 Issues default to one lane.
 
-## 7. Web Project creation and Bootstrap Inspect
+## 7. Web global onboarding and Add/Open Project
 
 Enable controlled Web mutations and start the workspace shell:
 
@@ -305,39 +316,141 @@ uv run --project "$ZAOFU_ROOT" zf web \
 
 In first-run onboarding:
 
-1. Select a provider backend.
+1. Select Codex or Claude Code as the primary provider, and optionally enable
+   Mixed team when both providers are detected.
 2. Pass the environment preflight.
-3. Enter the target directory and run Bootstrap Inspect.
-4. Review the Controller, setup, quality-check, and instruction candidates.
-5. Open Add Project and select Create.
-6. Use `kind: multi` for a long-lived Project, then select backend, stack,
-   scale, and intent.
-7. Select profile overlay or scaffold as needed, Validate, then Initialize.
+3. Authorize the browser action session.
+4. Complete onboarding into the Workspace. Zero Projects is valid.
 
-![Bootstrap Inspect shows Controller, setup, gate, and instruction candidates](assets/project-bootstrap-inspect.png)
+To add a Project, enter its server path and inspect it. The backend returns one
+action: open, register, initialize state, initialize Project, or block. Only
+Project initialization asks for a name, optional Project brief, detected or
+declared stack, primary provider, and Mixed team policy.
 
-![New Project uses multi-kind while initialization remains separate from ignition](assets/project-create-multi-kind.png)
+![Current Add/Open Project form](assets/project-add-open-current.png)
 
-Web Initialize has the same semantics as CLI `project init`: it creates and
-registers the Project but does not ignite a workflow. Later requirements enter
-the same Request service through Kanban Agent, Channel, or CLI.
+The brief remains canonical as `project.description`, appears in Project
+Overview, and is projected into the managed Project Context section in
+`AGENTS.md`. The detected or declared stack and build/test/gate commands enter
+the managed Profile section. `CLAUDE.md` points to `AGENTS.md` instead of
+duplicating that provider-neutral context.
 
-## 8. Controlled ignition from Kanban Agent and Channel
+Web greenfield creation, CLI `project init`, and `tools/init-project.sh` reuse
+`init_flow_project`. Web creates the seed and Git HEAD for a missing or empty
+target; the script additionally handles interactive Git readiness for existing
+directories, validation, and startup dry-run. These paths create and register
+the Project but do not ignite a Workflow. Requirements may be discussed
+through Kanban Agent, Channel, or CLI. A Task-bound Workflow starts only after a
+Task is explicitly created/confirmed and its Plan and Approve steps complete.
 
-- Kanban Agent may clarify the objective, acceptance criteria, and kind/tier/
-  lane proposal.
-- Channel consensus may move a Request to ready/proposed.
-- Neither surface writes truth files or invokes a workflow directly.
-- Final ignition requires a token-gated Web action, owner approval card, or CLI
-  `--apply`.
-- Revisions and requirement digests remain traceable under one `request_id`.
+## 8. Controlled ignition from Kanban Agent, Channel, and Research
+
+### 8.1 Choose the requirement entry after Project creation
+
+| Entry | Existing Task required | Direct ignition |
+|---|---:|---:|
+| Normal Kanban Agent coding | No | No; ordinary provider-session work |
+| `Create Task` | No | No; creates tracking only |
+| Channel setup/discussion | No | No; creates collaboration and starts discussion |
+| Research Workflow | Yes | Separate Approve after Plan |
+| PRD/Issue/Refactor/Planning Workflow | Yes | Separate Approve after Plan |
+
+After the Project opens, Kanban Agent classifies the concrete requirement,
+complexity, and acceptance target. It may recommend only active routes from the
+current `zf.yaml` catalog and must not invent topology, pattern, lanes, or roles
+from chat text.
+
+### 8.2 Channel produces collaboration artifacts only
+
+Selecting a Channel setup Plan may directly execute
+`channel-create-and-start`, atomically creating the Channel and template
+Members, posting the original requirement, and starting discussion:
+
+![Channel setup Plan](assets/kanban-channel-plan.png)
+
+This is the bounded Plan direct-apply exception. It does not allow Channel to
+ignite a Workflow. Channel/Research synthesis, a canonical PRD, or another
+conclusion does not automatically create a Task. The operator explicitly asks
+for and confirms a `Create Task` proposal. PRD decomposition, the planning
+artifact, and `task_map` are produced later by the selected Workflow planning
+stage.
+
+### 8.3 Task-bound Workflow uses Plan then Approve
+
+All surfaces use the same service for an existing Task:
+
+```text
+zf workflow routes --task TASK-ID
+-> semantic planner recommends an active route
+-> Plan selects route and parameters
+-> workflow start proposal
+-> separate approval of the exact proposal
+-> workflow.invoke.requested
+```
+
+![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
+
+![Exact Workflow proposal approval](assets/kanban-task-workflow-approve.png)
+
+Plan supports `Chat about` and `Customize` for source/input refs, expected
+output, scope, or another route-changing parameter. Selecting a route creates a
+proposal; it does not mean the Workflow is running.
+
+CLI uses the same surface-neutral service:
+
+```bash
+zf workflow routes --task TASK-ID --format json
+
+zf workflow start \
+  --task TASK-ID \
+  --route research:fixed \
+  --objective "Research account recovery and produce evidence-backed advice" \
+  --parameters-json '{"expected_output":"research synthesis plus PRD inputs"}' \
+  --propose \
+  --format json
+```
+
+Only an authorized operator applies the exact proposal:
+
+```bash
+zf workflow start \
+  --proposal-event-id EVENT-ID \
+  --authorization-ref APPROVAL-REF \
+  --authorization-token "$ZF_WORKFLOW_ACTION_TOKEN" \
+  --apply \
+  --format json
+```
+
+Provider and Coding Agent processes must not receive or inspect
+`ZF_WORKFLOW_ACTION_TOKEN`.
+
+### 8.4 Research is a registered Workflow route
+
+The fixed route is `research:fixed` and is selectable only when available in
+the current Project catalog. It requires a Task and uses
+`source_researcher`, `product_analyst`, `technical_analyst`, `risk_critic`,
+and `synthesizer`. Outputs include summary, evidence refs, open questions, and
+PRD/Refactor prompt inputs.
+
+The `research-review` Channel template is discussion only; it does not
+implicitly start Research Workflow. After Research, the operator still decides
+whether to create or update a delivery Task. ZaoFu does not automatically
+ignite a PRD Workflow.
 
 ## 9. Troubleshooting
 
 ### Initialize completed but no tasks exist
 
-This is expected. Initialize creates the Project. Approve a Request and verify
-that the running watcher consumed `workflow.invoke.requested`.
+This is expected. Initialize creates only the Project. Normal coding can start
+directly. For a controlled Workflow, create or confirm a Task, complete the
+Workflow Plan and Approve steps, then verify that the running watcher consumed
+`workflow.invoke.requested`.
+
+### Channel produced a PRD but no Task exists
+
+This is the intended boundary. Channel output is a collaboration artifact, not
+an execution commitment. Ask Kanban Agent for a `Create Task` proposal, confirm
+it, and then select a Workflow for that Task.
 
 ### `zf start` produced idle panes
 
@@ -363,10 +476,18 @@ repository root config.
 ## 10. Completion checklist
 
 - One canonical `zf.yaml` exists for the Project.
+- `project.name`, `project.description`, provider policy, and the managed
+  `AGENTS.md` Project Context/Profile match the Project Brief, Stack, and real
+  commands.
 - State dir, tmux session, branch prefixes, and ports do not collide.
 - Workspace registration and Dashboard switching resolve the correct Project.
 - Bootstrap recommendations were reviewed and checks execute in the target.
-- The Request has objective, acceptance, correct roots, and no open questions.
-- Submit dry-run has no STOP; explicit approval precedes apply.
+- Channel output intended for delivery was explicitly confirmed as a real
+  Task; no implicit Task creation occurred.
+- The Task-bound route comes from the current catalog and binds the exact
+  Task/config digest.
+- The Request or Task has objective, acceptance, correct refs/roots, and no
+  open questions.
+- Submit/proposal preview has no STOP; explicit approval precedes apply.
 - The `zf start` watcher stays alive and events, tasks, and workers are visible.
 - Stop only the configured Project with `zf stop`; never use `tmux kill-server`.

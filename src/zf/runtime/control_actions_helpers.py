@@ -9,6 +9,7 @@ from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task
 from zf.core.task.schema import TaskContract
 from zf.core.task.schema import TaskEvidence
+from zf.core.task.schema import task_contract_from_mapping
 from zf.core.task.store import TaskStore
 from zf.runtime.automation_projection import AUTOMATIONS
 from zf.runtime.channel_contracts import CHANNEL_DISCUSSION_MODES
@@ -246,20 +247,7 @@ def _synthesis_target_member(channel: dict[str, Any]) -> str:
 
 
 def _task_contract_from_payload(value: object) -> TaskContract:
-    if not isinstance(value, dict):
-        return TaskContract()
-    return TaskContract(
-        behavior=str(value.get("behavior") or ""),
-        verification=str(value.get("verification") or ""),
-        verification_tiers=_string_list(value.get("verification_tiers")),
-        validation=(
-            value.get("validation") if isinstance(value.get("validation"), dict) else {}
-        ),
-        scope=_string_list(value.get("scope")),
-        exclusions=_string_list(value.get("exclusions")),
-        acceptance=str(value.get("acceptance") or "exit_code=0"),
-        rework_to=str(value.get("rework_to") or ""),
-    )
+    return task_contract_from_mapping(value)
 
 
 def _task_evidence_from_payload(task: Task, value: object) -> TaskEvidence | None:
@@ -386,6 +374,32 @@ def validate_shared_action_payload(
             payload.get("overrides"), dict
         ):
             return "overrides must be a mapping"
+    if action == "channel-create-and-start":
+        if not _required_text(payload, "template_id"):
+            return "template_id is required"
+        if payload.get("overrides") is not None and not isinstance(
+            payload.get("overrides"), dict
+        ):
+            return "overrides must be a mapping"
+        if not (
+            _required_text(payload, "message")
+            or _required_text(payload, "objective")
+            or _required_text(payload, "text")
+        ):
+            return "message or objective is required"
+    if action == "kanban-plan-apply":
+        response = payload.get("plan_response")
+        if not isinstance(response, dict):
+            return "plan_response is required"
+        for field in (
+            "request_event_id",
+            "request_id",
+            "revision",
+            "question_id",
+            "option_id",
+        ):
+            if not str(response.get(field) or "").strip():
+                return f"plan_response.{field} is required"
     if action == "channel-discussion-start":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
@@ -423,6 +437,22 @@ def validate_shared_action_payload(
     if action == "channel-synthesis-request":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
+    if action == "channel-question-resolve":
+        if not _required_text(payload, "channel_id"):
+            return "channel_id is required"
+        if not _required_text(payload, "question_id"):
+            return "question_id is required"
+        if _required_text(payload, "resolution") not in {
+            "answered",
+            "assumption",
+            "out_of_scope",
+        }:
+            return "resolution must be answered, assumption, or out_of_scope"
+    if action in {
+        "channel-consensus-confirm",
+        "channel-consensus-block",
+    } and not _required_text(payload, "channel_id"):
+        return "channel_id is required"
     if action == "workflow-request":
         if not (
             _required_text(payload, "objective")
@@ -431,6 +461,23 @@ def validate_shared_action_payload(
             or _required_text(payload, "artifact_ref")
         ):
             return "objective, message, source_ref, or artifact_ref is required"
+    if action in {"workflow-start", "task-workflow-start"}:
+        if not _required_text(payload, "task_id"):
+            return "task_id is required"
+        if not _required_text(payload, "task_contract_digest"):
+            return "task_contract_digest is required"
+        if not _required_text(payload, "route_id"):
+            return "route_id is required"
+        if not (
+            _required_text(payload, "objective")
+            or _required_text(payload, "message")
+        ):
+            return "objective or message is required"
+        if payload.get("parameters") is not None and not isinstance(
+            payload.get("parameters"),
+            dict,
+        ):
+            return "parameters must be a mapping"
     if action == "workflow-submit":
         if not (_required_text(payload, "intake_ref") or _required_text(payload, "intake")):
             return "intake_ref is required"

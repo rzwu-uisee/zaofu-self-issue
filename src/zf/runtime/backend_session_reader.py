@@ -41,7 +41,10 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from zf.core.events.log import EventLog
 
 # Patchable in tests
 CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"

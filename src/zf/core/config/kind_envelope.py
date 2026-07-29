@@ -72,6 +72,7 @@ def _norm_template(value: Any) -> Any:
             "permissionMode": "permission_mode",
             "skillsByStage": "skills_by_stage",
             "roleKindByStage": "role_kind_by_stage",
+            "backendByStage": "backend_by_stage",
             "allowedTools": "allowed_tools",
             "budgetUsd": "budget_usd",
             "contextWarningThreshold": "context_warning_threshold",

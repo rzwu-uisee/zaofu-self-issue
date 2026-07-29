@@ -4,6 +4,7 @@ const token = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
 const taskId = process.env.ZF_DOC156_TASK_ID ?? "";
 const channelId = process.env.ZF_DOC156_CHANNEL_ID ?? "";
 const requestId = process.env.ZF_DOC156_REQUEST_ID ?? "";
+const evidenceDir = process.env.ZF_PLAYWRIGHT_EVIDENCE_DIR ?? "";
 
 type EventItem = {
   seq: number;
@@ -116,19 +117,44 @@ async function reopenAgent(page: Page): Promise<void> {
   await expect(dialog).toBeVisible();
 }
 
-async function sendProposal(page: Page, message: string, previewText: string): Promise<void> {
-  const input = page.getByPlaceholder("Tell me what to do...");
+async function sendProposal(
+  page: Page,
+  message: string,
+  previewText: string,
+  actionLabel: string,
+): Promise<void> {
+  const dialog = page.getByRole("dialog", { name: "Kanban Agent" });
+  await expect(dialog.locator(".agent-state-pill")).toHaveText("active", {
+    timeout: 15_000,
+  });
+  const input = dialog.locator("textarea.headless-input");
+  await expect(input).toBeVisible({ timeout: 15_000 });
   await input.fill(message);
-  await page.getByRole("button", { name: "Send message" }).click();
+  await dialog.getByRole("button", { name: "Send message" }).click();
   const card = page.locator(".agent-stack-card.proposal").filter({ hasText: previewText }).last();
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await expect(card.getByRole("button", { name: "Run action" })).toBeEnabled();
+  await expect(card.getByRole("button", { name: actionLabel })).toBeEnabled();
 }
 
-async function approveProposal(page: Page, previewText: string): Promise<void> {
+async function approveProposal(page: Page, previewText: string, actionLabel: string): Promise<void> {
   const card = page.locator(".agent-stack-card.proposal").filter({ hasText: previewText }).last();
   await expect(card).toBeVisible({ timeout: 30_000 });
-  await card.getByRole("button", { name: "Run action" }).click();
+  await card.getByRole("button", { name: actionLabel }).click();
+}
+
+async function captureAgent(page: Page, name: string): Promise<void> {
+  if (!evidenceDir) return;
+  await page.getByRole("dialog", { name: "Kanban Agent" }).screenshot({
+    path: `${evidenceDir}/${name}.png`,
+  });
+}
+
+async function capturePage(page: Page, name: string): Promise<void> {
+  if (!evidenceDir) return;
+  await page.screenshot({
+    fullPage: true,
+    path: `${evidenceDir}/${name}.png`,
+  });
 }
 
 function payloadText(event: EventItem): string {
@@ -154,17 +180,69 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
 
   await openAgent(page, id);
 
-  await sendProposal(
-    page,
-    "DOC156_CHANNEL_CREATE create the quick-change channel and wait for approval.",
-    "quick-change",
+  const channelRequirement = (
+    "DOC156_CHANNEL_SETUP review the delivery design, identify implementation "
+    + "and test risks, and produce a structured recommendation."
   );
-  await approveProposal(page, "quick-change");
-  await waitForEvents(request, id, cursor, (events) => events.some((event) => (
-    event.type === "channel.created"
-    && event.payload?.channel_id === channelId
-    && (event.payload?.scope as Record<string, unknown> | undefined)?.template !== undefined
-  )));
+  const setupDialog = page.getByRole("dialog", { name: "Kanban Agent" });
+  const agentInput = setupDialog.locator("textarea.headless-input");
+  await agentInput.fill(channelRequirement);
+  await setupDialog.getByRole("button", { name: "Send message" }).click();
+  const channelPlan = page.locator(".agent-stack-card.plan").filter({
+    hasText: "DOC156_CHANNEL_SETUP",
+  }).last();
+  await expect(channelPlan).toBeVisible({ timeout: 30_000 });
+  await expect(channelPlan).toContainText("Quick change (Recommended)");
+  await expect(channelPlan).toContainText("tech leader, dev reviewer, qa analyst");
+  await expect(channelPlan).toContainText("3 members");
+  await expect(channelPlan).toContainText("8 rounds");
+  await expect(channelPlan).toContainText("Architecture review");
+  await expect(channelPlan).not.toContainText("Other");
+  await expect(
+    page.locator(".agent-stack-card.approve").filter({ hasText: "quick-change" }),
+  ).toHaveCount(0);
+  await channelPlan.getByLabel("Quick change (Recommended)").check();
+  await expect(
+    channelPlan.getByRole("button", { name: "Create & start" }),
+  ).toBeEnabled();
+  await captureAgent(page, "03-channel-setup-plan");
+
+  await channelPlan.getByRole("button", { name: "Create & start" }).click();
+  const channelEvents = await waitForEvents(request, id, cursor, (events) => (
+    events.some((event) => (
+      event.type === "channel.created"
+      && event.payload?.channel_id === channelId
+      && (event.payload?.scope as Record<string, unknown> | undefined)?.template !== undefined
+    ))
+    && events.some((event) => (
+      event.type === "channel.discussion.started"
+      && event.payload?.channel_id === channelId
+    ))
+    && events.some((event) => (
+      event.type === "channel.synthesis.proposed"
+      && event.payload?.channel_id === channelId
+    ))
+  ), 90_000);
+  const seededMessages = await Promise.all(channelEvents
+    .filter((event) => (
+      event.type === "channel.message.posted"
+      && event.payload?.channel_id === channelId
+    ))
+    .map((event) => hydrateEvent(request, id, event)));
+  const seededRequirement = seededMessages.find(
+    (event) => payloadText(event).includes("DOC156_CHANNEL_SETUP"),
+  );
+  expect(seededRequirement).toBeDefined();
+  const planAnswers = await Promise.all(channelEvents
+    .filter((event) => event.type === "kanban.agent.plan.answered")
+    .map((event) => hydrateEvent(request, id, event)));
+  const planAnswer = planAnswers.find((event) => (
+    event.payload?.applied_action === "channel-create-and-start"
+  ));
+  expect(planAnswer).toBeDefined();
+  await expect(
+    page.locator(".agent-stack-card.approve").filter({ hasText: "quick-change" }),
+  ).toHaveCount(0);
 
   const channel = await apiJson<Record<string, unknown>>(
     request,
@@ -177,25 +255,97 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(channelText).toContain("qa_analyst");
   expect(channelText).toContain("workspace_writer");
 
-  await sendProposal(
-    page,
-    "DOC156_DISCUSSION_START start the template discussion and wait for approval.",
-    "Produce a structured delivery recommendation",
+  await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
+  await page.goto(
+    `/?project=${encodeURIComponent(id)}&page=channels&channel=${encodeURIComponent(channelId)}`,
   );
-  await approveProposal(page, "Produce a structured delivery recommendation");
-  const discussionEvents = await waitForEvents(request, id, cursor, (events) => {
-    const replies = events.filter((event) => (
+  await expect(page.locator(".status-pill.status-live")).toBeVisible({ timeout: 90_000 });
+  const channelPage = page.locator(".channel-page");
+  await expect(channelPage).toContainText("Doc 156 live review", { timeout: 30_000 });
+  await expect(channelPage).toContainText(channelId);
+  await expect(channelPage).toContainText("DOC156_CHANNEL_SETUP", {
+    timeout: 30_000,
+  });
+
+  await page.getByTitle("Members").click();
+  const memberDrawer = page.locator(".channel-drawer");
+  await expect(memberDrawer).toContainText("tech_leader");
+  const techLeaderMember = memberDrawer.locator(".channel-member-item").filter({
+    hasText: "tech_leader",
+  }).first();
+  const techLeaderActions = techLeaderMember.locator('button[title^="Actions for "]');
+  await expect(techLeaderActions).toBeVisible({ timeout: 15_000 });
+  await techLeaderActions.click();
+  const messageTechLeader = techLeaderMember.getByRole("button", { name: "Message" });
+  await expect(messageTechLeader).toBeVisible({ timeout: 15_000 });
+  await capturePage(page, "04-channel-member-selection");
+  await messageTechLeader.click();
+  await page.getByTitle("Close drawer").click();
+
+  const composer = page.getByRole("textbox", {
+    name: "Message Doc 156 live review",
+  });
+  await expect(composer).toContainText("@tech_leader");
+  const channelChatMarker = "DOC156_MEMBER_CHAT";
+  const channelChatCursor = await eventCursor(request, id);
+  await composer.pressSequentially(
+    `${channelChatMarker} review this change and reply in this channel.`,
+  );
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(channelPage).toContainText(channelChatMarker, { timeout: 30_000 });
+  await expect(channelPage).toContainText(
+    "tech_leader received the channel request",
+    { timeout: 60_000 },
+  );
+  const channelChatEvents = await waitForEvents(
+    request,
+    id,
+    channelChatCursor,
+    (events) => events.some((event) => (
       event.type === "channel.agent.reply.completed"
-      && event.task_id === taskId
       && event.payload?.channel_id === channelId
       && event.payload?.thread_id === "main"
-    ));
-    return replies.length === 3 && events.some((event) => (
-      event.type === "channel.synthesis.proposed"
-      && event.payload?.channel_id === channelId
-    ));
-  }, 90_000);
-  const synthesisSummary = discussionEvents.find((event) => (
+    )),
+  );
+  const channelChatReplySummary = channelChatEvents.find((event) => (
+    event.type === "channel.agent.reply.completed"
+    && event.payload?.channel_id === channelId
+    && event.payload?.thread_id === "main"
+  ));
+  expect(channelChatReplySummary).toBeDefined();
+  const channelChatReply = await hydrateEvent(
+    request,
+    id,
+    channelChatReplySummary as EventItem,
+  );
+  expect(channelChatReply.payload?.target_member_id).toBe("tech_leader");
+
+  const followupMarker = "DOC156_CHANNEL_CONTINUE";
+  await composer.pressSequentially(
+    `${followupMarker} narrow the recommendation without a manual mention.`,
+  );
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(channelPage).toContainText(
+    `tech_leader received the channel request: ${followupMarker}`,
+    { timeout: 60_000 },
+  );
+  await expect.poll(async () => {
+    const followedUpChannel = await apiJson<Record<string, unknown>>(
+      request,
+      `/api/channels/${encodeURIComponent(channelId)}`,
+    );
+    const followedUpChannelText = JSON.stringify(followedUpChannel);
+    return (
+      followedUpChannelText.includes(followupMarker)
+      && followedUpChannelText.includes("default_responder")
+    );
+  }, { timeout: 30_000, intervals: [100, 250, 500] }).toBeTruthy();
+  await expect(channelPage).toContainText(followupMarker, { timeout: 30_000 });
+  await capturePage(page, "05-channel-chat");
+
+  await page.getByRole("button", { name: "Open Kanban Agent" }).click();
+  await expect(page.getByRole("dialog", { name: "Kanban Agent" })).toBeVisible();
+  const synthesisSummary = channelEvents.find((event) => (
     event.type === "channel.synthesis.proposed"
     && event.payload?.channel_id === channelId
   ));
@@ -208,6 +358,7 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
     page,
     "DOC156_RESEARCH_START run the fixed research fanout and wait for approval.",
     "Collect evidence for the Doc 156 delivery decision",
+    "Start research",
   );
   const pendingBeforeReload = await apiJson<{ items?: unknown[] }>(
     request,
@@ -216,13 +367,15 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(JSON.stringify(pendingBeforeReload.items ?? [])).toContain("research-start");
 
   await reopenAgent(page);
-  await expect(page.locator(".agent-session")).toContainText("DOC156_RESEARCH_START");
+  await expect(
+    page.getByRole("dialog", { name: "Kanban Agent" }).locator(".agent-session"),
+  ).toContainText("DOC156_RESEARCH_START");
   await expect(
     page.locator(".agent-stack-card.proposal").filter({
       hasText: "Collect evidence for the Doc 156 delivery decision",
     }).last(),
   ).toBeVisible();
-  await approveProposal(page, "Collect evidence for the Doc 156 delivery decision");
+  await approveProposal(page, "Collect evidence for the Doc 156 delivery decision", "Start research");
 
   const researchEvents = await waitForEvents(request, id, cursor, (events) => events.some((event) => (
     event.type === "fanout.aggregate.completed"
@@ -256,8 +409,9 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
     page,
     `DOC156_ADOPT ${JSON.stringify(adoption)}`,
     adoption.artifact_digest,
+    "Adopt research",
   );
-  await approveProposal(page, adoption.artifact_digest);
+  await approveProposal(page, adoption.artifact_digest, "Adopt research");
   const adoptionEvents = await waitForEvents(
     request,
     id,
@@ -273,12 +427,57 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(adopted.payload?.artifact_digest).toBe(adoption.artifact_digest);
 
   const deliveryCursor = await eventCursor(request, id);
-  await sendProposal(
-    page,
-    "DOC156_WORKFLOW_START start delivery-smoke and wait for approval.",
-    "delivery-smoke",
+  const workflowMarker = "DOC156_WORKFLOW_PLAN";
+  const dialog = page.getByRole("dialog", { name: "Kanban Agent" });
+  await expect(dialog.locator(".agent-state-pill")).toHaveText("active", {
+    timeout: 15_000,
+  });
+  const input = dialog.locator("textarea.headless-input");
+  await expect(input).toBeVisible({ timeout: 15_000 });
+  await input.fill(
+    `${workflowMarker} clarify which configured workflow to run before proposing it.`,
   );
-  await approveProposal(page, "delivery-smoke");
+  await dialog.getByRole("button", { name: "Send message" }).click();
+  const workflowPlan = page.locator(".agent-stack-card.plan").filter({
+    hasText: workflowMarker,
+  }).last();
+  await expect(workflowPlan).toBeVisible({ timeout: 30_000 });
+  await expect(workflowPlan).toContainText("Delivery smoke (Recommended)");
+  await expect(workflowPlan).toContainText("Research fanout");
+  await expect(workflowPlan).toContainText("Customize");
+  await expect(
+    page.locator(".agent-stack-card.approve").filter({ hasText: "delivery-smoke" }),
+  ).toHaveCount(0);
+  await captureAgent(page, "06-workflow-definition-plan");
+
+  await workflowPlan.getByLabel("Delivery smoke (Recommended)").check();
+  await workflowPlan.getByRole("button", { name: "Continue" }).click();
+  const workflowInputPlan = page.locator(".agent-stack-card.plan").filter({
+    hasText: "DOC156_WORKFLOW_INPUT",
+  }).last();
+  await expect(workflowInputPlan).toBeVisible({ timeout: 30_000 });
+  await expect(workflowInputPlan).toContainText(
+    "Channel synthesis (Recommended)",
+  );
+  await expect(workflowInputPlan).toContainText("Task only");
+  await expect(
+    page.locator(".agent-stack-card.approve").filter({ hasText: "delivery-smoke" }),
+  ).toHaveCount(0);
+  await captureAgent(page, "07-workflow-input-plan");
+  await workflowInputPlan.getByLabel(
+    "Channel synthesis (Recommended)",
+  ).check();
+  await workflowInputPlan.getByRole("button", { name: "Continue" }).click();
+  const workflowApprove = page.locator(".agent-stack-card.approve").filter({
+    hasText: "delivery-smoke",
+  }).last();
+  await expect(workflowApprove).toBeVisible({ timeout: 30_000 });
+  await expect(workflowApprove).toContainText("Confirmation");
+  await expect(
+    workflowApprove.getByRole("button", { name: "Start workflow" }),
+  ).toBeEnabled();
+  await captureAgent(page, "08-workflow-confirmation");
+  await workflowApprove.getByRole("button", { name: "Start workflow" }).click();
   const deliveryEvents = await waitForEvents(request, id, deliveryCursor, (events) => (
     events.some((event) => event.type === "workflow.invoke.accepted")
     && events.some((event) => event.type === "fanout.started")
@@ -319,6 +518,17 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(dispatch?.payload?.role_instance).toBe("delivery_worker");
   expect(dispatch?.payload?.run_id).toBeTruthy();
   expect(busy?.payload?.to).toBe("busy");
+  const workflowPlanEvents = await eventsAfter(request, id, deliveryCursor);
+  expect(
+    workflowPlanEvents.filter((event) => event.type === "kanban.agent.plan.requested"),
+  ).toHaveLength(2);
+  const workflowPlanAnswers = workflowPlanEvents.filter(
+    (event) => event.type === "kanban.agent.plan.answered",
+  );
+  expect(workflowPlanAnswers.map((event) => event.payload?.answer)).toEqual([
+    "Delivery smoke (Recommended)",
+    "Channel synthesis (Recommended)",
+  ]);
 
   await waitForEvents(request, id, deliveryCursor, (events) => events.some((event) => (
     event.type === "codex.hook.user_prompt_submit"
@@ -340,11 +550,10 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
 
   const allEvents = await eventsAfter(request, id, cursor);
   const markers = [
-    "DOC156_CHANNEL_CREATE",
-    "DOC156_DISCUSSION_START",
+    "DOC156_CHANNEL_SETUP",
     "DOC156_RESEARCH_START",
     "DOC156_ADOPT",
-    "DOC156_WORKFLOW_START",
+    workflowMarker,
   ];
   const completedTurns = markers.map((marker) => {
     const userMessage = allEvents.find((event) => (
@@ -356,7 +565,7 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
       && event.correlation_id === userMessage?.correlation_id
     ));
   }).filter((event): event is EventItem => Boolean(event));
-  expect(completedTurns).toHaveLength(5);
+  expect(completedTurns).toHaveLength(4);
   const threadIds = new Set(completedTurns.map((event) => String(event.payload?.thread_id ?? "")));
   const providerSessions = new Set(
     completedTurns.map((event) => String(event.payload?.provider_session_id ?? "")),
@@ -372,8 +581,11 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(pendingAfter.items ?? []).toHaveLength(0);
 
   await reopenAgent(page);
+  const agentSession = page
+    .getByRole("dialog", { name: "Kanban Agent" })
+    .locator(".agent-session");
   for (const marker of markers) {
-    await expect(page.locator(".agent-session")).toContainText(marker);
+    await expect(agentSession).toContainText(marker);
   }
 
   const productErrors = consoleErrors.filter((line) => !line.includes("favicon"));

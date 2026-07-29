@@ -93,6 +93,12 @@ def _trigger_targets_stage(
     observed_kind = flow_kind_from_payload(payload)
     if expected_kind and observed_kind and expected_kind != observed_kind:
         return False
+    if trigger == "workflow.invoke.requested":
+        requested_pattern = str(
+            payload.get("pattern_id") or payload.get("stage_id") or ""
+        ).strip()
+        if requested_pattern:
+            return requested_pattern == stage_id
     if trigger != "lane.stage.completed":
         return True
     expected_slot = stage_id.rsplit("-", 1)[-1]
@@ -396,6 +402,11 @@ def stall_redispatch_event(
     return ZfEvent(
         type=finding.trigger,
         actor="zf-stall-redispatch",
+        task_id=(
+            getattr(latest_trigger, "task_id", None)
+            or str(payload.get("task_id") or "")
+            or None
+        ),
         payload=payload,
         correlation_id=getattr(latest_trigger, "correlation_id", "") or finding.fingerprint,
     )

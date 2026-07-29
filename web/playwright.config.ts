@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const chromiumExecutablePath = process.env.ZF_E2E_CHROMIUM_EXECUTABLE_PATH;
+
 export default defineConfig({
   testDir: "./tests",
   timeout: 20_000,
@@ -13,7 +15,12 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions: chromiumExecutablePath
+          ? { executablePath: chromiumExecutablePath }
+          : undefined,
+      },
     },
   ],
 });

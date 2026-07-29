@@ -79,6 +79,7 @@ class ChannelMessageActionsMixin:
         action: str,
         requested_action: str,
         payload: dict,
+        emit_completion: bool = True,
     ) -> dict:
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         thread_id = _optional_str(payload.get("thread_id")) or "main"
@@ -246,15 +247,20 @@ class ChannelMessageActionsMixin:
                         "source": self.surface,
                     },
                 )
-        self._completed(
-            requested=requested,
-            event=event,
-            action=action,
-            requested_action=requested_action,
-            status="posted",
-            task_id=_task_id_from_payload(payload),
-            extra={"channel_id": channel_id, "thread_id": thread_id, "message_id": message_id},
-        )
+        if emit_completion:
+            self._completed(
+                requested=requested,
+                event=event,
+                action=action,
+                requested_action=requested_action,
+                status="posted",
+                task_id=_task_id_from_payload(payload),
+                extra={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "message_id": message_id,
+                },
+            )
         return {
             "_status_code": 202,
             "ok": True,

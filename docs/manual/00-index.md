@@ -7,8 +7,9 @@ English documentation is available through the topic-by-topic
 [English manual index](00-index.en.md) or the consolidated
 [ZaoFu Operator Manual](zaofu-operator-manual.en.md).
 
-首次运行从 [01 快速开始](01-quickstart.md) 进入 production Controller 主路径；
-需要理解 kernel、运行真相和任务生命周期时再读[架构总览](architecture.md)。
+首次运行从 [01 快速开始](01-quickstart.md) 进入 Onboarding、Add/Open Project、
+Kanban Agent 与首个受控 Workflow；需要理解 kernel、运行真相和任务生命周期时再读
+[架构总览](architecture.md)。
 
 ## 0. 架构总览
 
@@ -16,10 +17,10 @@ English documentation is available through the topic-by-topic
 
 ## 1. 入门
 
-- [01 快速开始](01-quickstart.md) — Controller 推荐/审批/物化、项目初始化、
-  cold-start、dry-run 与首个 workflow request
+- [01 快速开始](01-quickstart.md) — 安装 Onboarding、Add/Open Project、Project
+  Brief/Stack、Channel、Research 与首个 Task Workflow
 - [20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md) —
-  multi-kind Project、需求澄清、显式批准、CLI/Web 点火完整路径
+  multi-kind Project、`zf.yaml`/Bootstrap 边界、Task、显式批准与 CLI/Web 点火完整路径
 
 ## 2. 核心使用
 
@@ -41,7 +42,8 @@ English documentation is available through the topic-by-topic
 ## 4. 飞书集成与 Channel 协作
 
 - **[19 Feishu AI-Native 直连 Bridge 使用手册](19-feishu-ai-native-direct-bridge.md) — 当前主入口:`zf feishu bridge --watch` 直连飞书,群/单聊流式问答 + 点按钮审批闭环,无需 OpenClaw / 公网 webhook**
-- [15 Channel 协作使用手册](15-channel-collaboration.md) — `zf channel say`、@mention 触发回复、channel.* 事件链(当前可用范围)
+- [15 Channel 协作使用手册](15-channel-collaboration.md) — Kanban Plan 自动建
+  Channel/成员、模板讨论、继续对话、Task 提案与飞书投影
 - [11 Feishu Automation / Kanban Sync 专题](11-feishu-automation-kanban-sync.md) — 自动化文档与 Kanban 表同步
 
 > OpenClaw 转发链路(旧 `zf bridge openclaw-feishu`)已废弃,统一改用直连方案(19)。

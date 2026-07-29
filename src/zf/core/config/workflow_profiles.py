@@ -59,6 +59,7 @@ _KNOWN_PARAM_KEYS_V3 = _KNOWN_PARAM_KEYS | frozenset({
     "deliveryPolicy", "delivery_policy",
     "moduleParityRole", "module_parity_role",
     "verifyBridgeRole", "verify_bridge_role",
+    "verifyBackend", "verify_backend",
     "roleDefaults", "role_defaults",
     "roleSkillBundles", "role_skill_bundles",
     "semanticSubmitProfiles", "semantic_submit_profiles",
@@ -68,6 +69,7 @@ _COMMON_PRODUCT_FLOW_KEYS = frozenset({
     "flowProfile", "flow_profile",
     "lanes", "laneCount", "lane_count",
     "backend",
+    "verifyBackend", "verify_backend",
     "entryTrigger", "entry_trigger",
     "taskMapRef", "task_map_ref",
     "roleDefaults", "role_defaults",
@@ -292,6 +294,7 @@ def _artifact_package_mode_param(params: dict[str, Any]) -> str:
 def _lane_role_template(
     *,
     backend: str,
+    verify_backend: str = "",
     role_defaults: dict[str, Any],
 ) -> dict[str, Any]:
     template: dict[str, Any] = {
@@ -302,6 +305,8 @@ def _lane_role_template(
     for field in _LANE_ROLE_DEFAULT_FIELDS:
         if field in role_defaults:
             template[field] = role_defaults[field]
+    if verify_backend and verify_backend != backend:
+        template["backend_by_stage"] = {"verify": verify_backend}
     return template
 
 
@@ -569,6 +574,12 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
          .get("backend"))
         or "claude-code"
     )
+    verify_backend = str(_pick(
+        params,
+        "verifyBackend",
+        "verify_backend",
+        default="",
+    ))
 
     children_cfg = []
     scan_roles = []
@@ -671,6 +682,10 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
 
     template = dict(_pick(params, "laneRoleTemplate", "lane_role_template") or {})
     template.setdefault("backend", backend)
+    if verify_backend and verify_backend != backend:
+        backend_by_stage = dict(template.get("backend_by_stage") or {})
+        backend_by_stage.setdefault("verify", verify_backend)
+        template["backend_by_stage"] = backend_by_stage
     template.setdefault(
         "permission_mode",
         str(role_defaults.get("permission_mode") or "bypass"),
@@ -1011,6 +1026,12 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     )
     lanes = int(_pick(params, "lanes", "laneCount", "lane_count", default=1))
     backend = str(_pick(params, "backend", default="codex"))
+    verify_backend = str(_pick(
+        params,
+        "verifyBackend",
+        "verify_backend",
+        default="",
+    ))
     topology = str(_pick(params, "topology", default="fanout")).strip() or "fanout"
     if topology not in {"fanout", "light"}:
         raise WorkflowProfileError(
@@ -1020,6 +1041,7 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
         return _expand_product_flow_light(
             params,
             backend=backend,
+            verify_backend=verify_backend,
             flow_kind="issue",
             entry_default="issue.requested",
             pipeline_id="issue-lanes",
@@ -1130,6 +1152,7 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     ]
     lane_template = _lane_role_template(
         backend=backend,
+        verify_backend=verify_backend,
         role_defaults=role_defaults,
     )
     if _role_skills(bundles, "fix"):
@@ -1178,7 +1201,12 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     }
 
 
-def _expand_prd_flow_light(params: dict, *, backend: str) -> dict[str, Any]:
+def _expand_prd_flow_light(
+    params: dict,
+    *,
+    backend: str,
+    verify_backend: str = "",
+) -> dict[str, Any]:
     """批D(prd-goal e2e 复盘):小任务轻拓扑。
 
     textstat 实弹:编排固定成本 ≈ 实际工作量的 200%,"塞得进单上下文
@@ -1191,6 +1219,7 @@ def _expand_prd_flow_light(params: dict, *, backend: str) -> dict[str, Any]:
     return _expand_product_flow_light(
         params,
         backend=backend,
+        verify_backend=verify_backend,
         flow_kind="prd",
         entry_default="prd.requested",
         pipeline_id="prd-lanes",
@@ -1207,6 +1236,7 @@ def _expand_product_flow_light(
     params: dict,
     *,
     backend: str,
+    verify_backend: str,
     flow_kind: str,
     entry_default: str,
     pipeline_id: str,
@@ -1240,6 +1270,7 @@ def _expand_product_flow_light(
     ]
     lane_template = _lane_role_template(
         backend=backend,
+        verify_backend=verify_backend,
         role_defaults=role_defaults,
     )
     if _role_skills(bundles, "impl"):
@@ -1303,13 +1334,23 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
         )
     lanes = int(_pick(params, "lanes", "laneCount", "lane_count", default=2))
     backend = str(_pick(params, "backend", default="codex"))
+    verify_backend = str(_pick(
+        params,
+        "verifyBackend",
+        "verify_backend",
+        default="",
+    ))
     topology = str(_pick(params, "topology", default="fanout")).strip() or "fanout"
     if topology not in {"fanout", "light"}:
         raise WorkflowProfileError(
             f"PrdFlow: unknown topology {topology!r} (fanout|light)"
         )
     if topology == "light":
-        return _expand_prd_flow_light(params, backend=backend)
+        return _expand_prd_flow_light(
+            params,
+            backend=backend,
+            verify_backend=verify_backend,
+        )
     entry = str(_pick(
         params, "entryTrigger", "entry_trigger",
         default="prd.requested",
@@ -1432,6 +1473,7 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
     ]
     lane_template = _lane_role_template(
         backend=backend,
+        verify_backend=verify_backend,
         role_defaults=role_defaults,
     )
     if _role_skills(bundles, "impl"):

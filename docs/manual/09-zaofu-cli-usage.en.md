@@ -87,8 +87,11 @@ Stop the harness with `uv run zf stop`.
 
 | Command | Purpose |
 |---|---|
-| `uv run zf project init --name NAME --root PATH` | Create the default multi-kind Project without ignition |
+| `uv run zf project init --name NAME --root PATH [--description TEXT] [--stack STACK]` | Create the default multi-kind Project and context without ignition |
 | `uv run zf project init --kind KIND ...` | Create an explicit single-kind Controller |
+| `uv run zf workflow routes --task TASK --format json` | Query active routes available to the Task |
+| `uv run zf workflow start --task TASK --route ROUTE --propose` | Create a Task-bound Workflow proposal |
+| `uv run zf workflow start --proposal-event-id EVENT --apply ...` | Apply the exact proposal with operator authorization |
 | `uv run zf flow intake ...` | Create a requirement intake |
 | `uv run zf flow classify ...` | Classify Issue/PRD/Refactor/Feature |
 | `uv run zf flow clarify --confirm ...` | Clarify and confirm the requirement snapshot |
@@ -96,7 +99,9 @@ Stop the harness with `uv run zf stop`.
 | `uv run zf flow submit --dry-run ...` | Preview ignition admission without mutation |
 | `uv run zf flow submit --apply ...` | Explicitly approve and emit the workflow invoke |
 
-Initialization, runtime startup, and ignition are separate actions. See
+Initialization, runtime startup, and ignition are separate actions. Research
+and delivery Workflows require an existing Task; `--propose` does not ignite.
+See
 [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
 for complete examples and option guidance.
 
@@ -292,6 +297,7 @@ Cleanup applies only to rebuildable projections, not truth files.
 | `uv run zf feishu push --watch` | Push events directly to Feishu |
 | `uv run zf feishu serve --host 0.0.0.0 --port 8000` | Run the webhook server |
 | `uv run zf feishu send-test --message "hello"` | Send a test message |
+| `uv run zf feishu live-smoke --to "$CHAT_ID" --purpose kanban_agent --confirm-real-api` | Verify real auth, send, list, update, and recall with the exact purpose credential; the temporary card is recalled by default |
 | `uv run zf feishu init-targets --transport real --write-env` | Create Automation and Kanban targets |
 | `uv run zf feishu sync-automations --dry-run` | Preview Automation document output |
 | `uv run zf feishu sync-automation-insights-table --dry-run` | Preview the insights table |

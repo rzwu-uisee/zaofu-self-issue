@@ -18,6 +18,7 @@ import type {
   Snapshot,
 } from "../api/types";
 import { channelIdOf } from "./shared";
+import { LatestRequestGate } from "./latestRequestGate";
 import type { PageId } from "./sharedTypes";
 import { pageLoadsDeliveryFeatures, snapshotLoadKindForPage } from "./pageLoadPolicy";
 
@@ -33,6 +34,7 @@ interface ProjectStreamGapRecoveryOptions {
   setChannelLoadError: (value: string | null) => void;
   setSelectedChannelId: (value: string) => void;
   setChannelDetail: (value: ChannelDetail) => void;
+  channelDetailRequestGate: LatestRequestGate;
   setKanbanPendingProposals: (value: PendingKanbanProposal[]) => void;
   setError: (value: string | null) => void;
 }
@@ -89,11 +91,13 @@ export function useProjectStreamGapRecovery(
     }
 
     let nextChannelDetail: ChannelDetail | undefined;
+    let channelDetailTicket = 0;
     let recoveredChannelId = current.selectedChannelId;
     if (nextChannels) {
       if (!recoveredChannelId || !nextChannels.channels.some((item) => channelIdOf(item) === recoveredChannelId)) {
         recoveredChannelId = channelIdOf(nextChannels.channels[0]) || "ch-zaofu";
       }
+      channelDetailTicket = current.channelDetailRequestGate.issue();
       nextChannelDetail = await getChannelDetail(recoveredChannelId, projectId);
     }
 
@@ -107,7 +111,9 @@ export function useProjectStreamGapRecovery(
       current.setChannelsPage(nextChannels);
       current.setChannelLoadError(null);
       current.setSelectedChannelId(recoveredChannelId);
-      if (nextChannelDetail) current.setChannelDetail(nextChannelDetail);
+      if (nextChannelDetail && current.channelDetailRequestGate.isCurrent(channelDetailTicket)) {
+        current.setChannelDetail(nextChannelDetail);
+      }
     }
     if (nextProposals) current.setKanbanPendingProposals(nextProposals.items ?? []);
     current.setError(null);

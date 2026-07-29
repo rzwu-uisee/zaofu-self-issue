@@ -44,9 +44,15 @@ export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
 uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
 ```
 
-首次引导中的 Bootstrap Inspect 只读探测技术栈、Controller、setup、quality checks
-和指令文档候选。Add Project 的 Initialize 只创建/注册 Project，不会直接启动
-workflow；后续 Request 仍需澄清和显式批准。完整截图与步骤见
+首次引导只完成 Provider、Environment、Access 和 Ready，不创建 Project。
+`Add Project` 先对服务端路径执行 Inspect，再按磁盘真相 open、register、
+initialize state、initialize Project 或 blocked。只有 initialize Project 显示
+Project Name、Project Brief、Stack、Primary Provider 和 Mixed team；不再选择 YAML、
+Controller、kind、lane 或 role。
+
+![Add/Open Project 当前创建表单](assets/project-add-open-current.png)
+
+Initialize 只创建/注册 Project，不会创建 Task 或启动 Workflow。完整边界与步骤见
 [20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
 
 ## 2. 运行中观测
@@ -90,18 +96,19 @@ uv run zf runs for-task <task_id>
 
 ## 3. Docker Playwright
 
-Web Playwright 测试默认用 Docker,不要在宿主机安装浏览器:
+Web Playwright 测试默认用 Docker,不要在宿主机安装浏览器。先在宿主执行
+`npm --prefix web ci` 或确认 `web/node_modules` 已准备好；浏览器安装必须有超时：
 
 ```bash
-docker volume create zaofu-pw-browsers >/dev/null
-docker run --rm --user root --entrypoint /bin/sh --network host \
-  -v "$PWD:/workspace" \
-  -v zaofu-pw-browsers:/tmp/ms-playwright \
-  -w /workspace/web \
-  -e PLAYWRIGHT_BROWSERS_PATH=/tmp/ms-playwright \
+docker run --rm --network host \
+  --user "$(id -u):$(id -g)" \
+  --entrypoint bash \
+  -v "$PWD:/work" \
+  -w /work/web \
+  -e PLAYWRIGHT_BROWSERS_PATH=0 \
   -e ZF_WEB_BASE_URL=http://127.0.0.1:5175 \
   mcp/playwright:latest \
-  -lc "npx playwright install chromium && npx playwright test --project=chromium --workers=1"
+  -lc 'set -euo pipefail; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test --project=chromium --workers=1'
 ```
 
 前置条件:
@@ -174,7 +181,10 @@ uv run python -m tests.e2e.verify_real_state_web \
 
 ## 6. Full-stack Validation Scorecard
 
-Full-stack validation scorecard 用于把真实 E2E 的证据收敛成可审计报告。它不会启动新的 worker,只读取已有 state,检查 issue / PRD / refactor 三类任务入口、Web dashboard 关键投影、new task / Kanban Agent / channel 三条入口、channel 与 Kanban Agent 触发 fanout workflow 的证据,以及真实 Codex hook / usage 证据。
+Full-stack validation scorecard 用于把真实 E2E 的证据收敛成可审计报告。它不会启动新的
+worker，只读取已有 state，检查 issue / PRD / refactor 三类任务入口、Web dashboard
+关键投影、New Task / Kanban Agent / Channel 三条入口、Task-bound fanout Workflow
+证据，以及真实 Codex hook / usage 证据。Channel 讨论本身不应被当作直接点火证据。
 
 推荐在真实 run 后执行:
 

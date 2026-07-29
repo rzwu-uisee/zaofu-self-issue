@@ -75,7 +75,7 @@ import {
   getTaskDiff,
   getTaskTimeline,
   getTraceDetail,
-  createWorkflowIntake,
+  getWebSession,
   getWorkspaceProjects,
   getOnboarding,
   initWorkspaceProject,
@@ -83,17 +83,13 @@ import {
   postAction,
   postChannelMessage,
   registerWorkspaceProject,
-  listPresets,
-  type PresetInfo,
-  inspectBootstrap,
-  type BootstrapInspect,
-  recommendProfile,
   removeWorkspaceProject,
   search,
   searchChannelHistory,
   touchWorkspaceProject,
   unlockWebSession,
   validateWorkspaceProjectPath,
+  type WorkspaceProjectPathInspection,
 } from "../api/client";
 import type { PendingKanbanProposal } from "../api/client";
 import { mergeAutopilotDescriptors } from "./triageProposals";
@@ -115,8 +111,10 @@ import { BoardColumn } from "../components/kanban/BoardColumn";
 import { buildObservabilityEventWindow } from "./observabilityModel";
 import { ProjectEventBus } from "./projectEventBus";
 import { pageTitle } from "./pageMetadata";
+import { LatestRequestGate } from "./latestRequestGate";
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute } from "./lazyRoutes";
+import { createChannelActionAdapter } from "./channelActionAdapter";
 import { useProjectObservabilityData } from "./useProjectObservabilityData";
 import { useProjectStreamGapRecovery } from "./projectStreamGapRecovery";
 import {
@@ -146,11 +144,13 @@ import type {
   IntegrationQueueEntry,
   IntegrationQueueProjection,
   MetricsSnapshotProjection,
+  OnboardingStatus,
   OverviewPulse,
   RecentEvent,
   RepairActionProjection,
   RepairActionRecord,
   RoleSummary,
+  RuntimeSummary,
   RunSummary,
   SearchResult,
   SkillsSummary,
@@ -177,7 +177,10 @@ import {
 import { PlanApprovalPanel } from "../components/delivery-trace/PlanApprovalPanel";
 import { BoardWorkbench } from "../components/kanban/BoardWorkbench";
 import { TaskDetail } from "../components/kanban/TaskDetail";
-import { ProjectInitOnboarding } from "../components/workspace/ProjectInitOnboarding";
+import {
+  ProjectAdmissionModal,
+  type ProjectAdmissionDraft,
+} from "../components/workspace/ProjectAdmissionModal";
 import { WorkspaceRail } from "../components/workspace/WorkspaceRail";
 import { WelcomeWizard } from "../components/workspace/WelcomeWizard";
 import { AddAgentModal } from "../components/modals/AddAgentModal";
@@ -226,24 +229,6 @@ const REFRESH_EVENT_PREFIXES = [
 interface NewChannelDraft {
   name: string;
   channelId: string;
-}
-
-interface ProjectWizardDraft {
-  mode: "existing" | "create";
-  root: string;
-  workspace: string;
-  preset: string;
-  kind: string;
-  sourceRoot: string;
-  stateDir: string;
-  force: boolean;
-  intent: string;
-  applyProfile: boolean;
-  stack: string;
-  scale: string;
-  scaffold: boolean;
-  description: string;
-  backend: string;
 }
 
 interface RuntimeActionState {
@@ -395,24 +380,25 @@ function emptyNewChannelDraft(): NewChannelDraft {
   };
 }
 
-function emptyProjectWizardDraft(): ProjectWizardDraft {
+function emptyProjectWizardDraft(
+  onboarding?: OnboardingStatus | null,
+): ProjectAdmissionDraft {
   return {
-    mode: "existing",
     root: "",
-    workspace: "default",
-    preset: "minimal",
-    kind: "multi",
-    sourceRoot: "",
-    stateDir: "",
-    force: false,
-    intent: "build",
-    applyProfile: true,
-    stack: "auto",
-    scale: "auto",
-    scaffold: false,
+    name: "",
     description: "",
-    backend: "claude",
+    stack: "",
+    backend: onboarding?.primary_backend || onboarding?.backend || "codex",
+    mixedEnabled: Boolean(
+      onboarding?.mixed_available && onboarding?.mixed_enabled,
+    ),
   };
+}
+
+function projectNameFromPath(path: string): string {
+  const normalized = path.trim().replace(/[\\/]+$/, "");
+  const parts = normalized.split(/[\\/]/);
+  return parts[parts.length - 1] || "zaofu-project";
 }
 
 function storedThemeMode(): ThemeMode {
@@ -480,7 +466,7 @@ function projectLifecycleReason(project: WorkspaceProject | null | undefined): s
 }
 
 function headlessActionProposal(payload: Record<string, unknown>): HeadlessActionProposal | null {
-  // Web panel replies carry `action_proposal`; kanban.agent.action.proposed
+  // Web panel replies carry `action_proposal`; operator.action.proposed
   // events (e.g. the Feishu-surface loop) carry the same object as `proposal`.
   const proposal = recordValue(payload.action_proposal) ?? recordValue(payload.proposal);
   if (!proposal) return null;
@@ -569,9 +555,15 @@ function canonicalChatBackend(backend: OperatorBackend): OperatorBackend {
   return backend;
 }
 
-function runtimeActionState(snapshot: Snapshot | null, tokenPresent: boolean): RuntimeActionState {
-  const webSession = snapshot?.runtime.web_session;
-  const mutationEnabled = Boolean(snapshot?.runtime.actions?.mutation_enabled) || tokenPresent;
+function runtimeActionState(
+  snapshot: Snapshot | null,
+  tokenPresent: boolean,
+  fallbackWebSession: RuntimeSummary["web_session"] | null,
+): RuntimeActionState {
+  const webSession = snapshot?.runtime.web_session ?? fallbackWebSession;
+  const mutationEnabled = Boolean(snapshot?.runtime.actions?.mutation_enabled)
+    || Boolean(webSession && webSession.mode !== "read_only")
+    || tokenPresent;
   const sessionActionReady = Boolean(webSession?.actions_enabled);
   const tokenFallbackAvailable = Boolean(tokenPresent)
     || webSession?.mode === "token_required"
@@ -655,6 +647,7 @@ export function App() {
   const [webActionTokenPresent, setWebActionTokenPresent] = useState(() =>
     Boolean(storedWebActionToken()),
   );
+  const [webSessionStatus, setWebSessionStatus] = useState<NonNullable<RuntimeSummary["web_session"]> | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => storedThemeMode());
   const [agentPanelMode, setAgentPanelMode] = useState<AgentPanelMode>("collapsed");
   const [agentPanelHasOpened, setAgentPanelHasOpened] = useState(false);
@@ -663,15 +656,32 @@ export function App() {
   const [newChannelDraft, setNewChannelDraft] = useState<NewChannelDraft>(() => emptyNewChannelDraft());
   const [addAgentOpen, setAddAgentOpen] = useState(false);
   const [addAgentDraft, setAddAgentDraft] = useState<AddAgentDraft>(() => emptyAddAgentDraft());
+  const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [projectWizardOpen, setProjectWizardOpen] = useState(false);
-  const [projectWizardDraft, setProjectWizardDraft] = useState<ProjectWizardDraft>(() => emptyProjectWizardDraft());
-  const [projectWizardResult, setProjectWizardResult] = useState<Record<string, unknown> | null>(null);
+  const [projectWizardDraft, setProjectWizardDraft] = useState<ProjectAdmissionDraft>(() => emptyProjectWizardDraft());
+  const [projectWizardInspection, setProjectWizardInspection] = useState<WorkspaceProjectPathInspection | null>(null);
+  const [projectWizardBusy, setProjectWizardBusy] = useState(false);
+  const [projectWizardError, setProjectWizardError] = useState("");
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
     getOnboarding()
-      .then((o) => { if (!cancelled) setShowWelcome(o.show_welcome); })
+      .then((o) => {
+        if (!cancelled) {
+          setOnboardingStatus(o);
+          setShowWelcome(o.show_welcome);
+        }
+      })
       .catch(() => { if (!cancelled) setShowWelcome(false); });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    getWebSession()
+      .then((session) => {
+        if (!cancelled) setWebSessionStatus(session);
+      })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
   const [orchestratorFocusSignal, setOrchestratorFocusSignal] = useState(0);
@@ -683,9 +693,12 @@ export function App() {
   const liveRefreshRef = useRef<((event: RecentEvent, reason: "event" | "gap" | "error") => void) | null>(null);
   const lastSeqRef = useRef(0);
   const selectedChannelIdRef = useRef(selectedChannelId);
+  const channelDetailRequestGateRef = useRef(new LatestRequestGate());
   const recoverStreamGap = useProjectStreamGapRecovery({
     activeProjectId, page, selectedChannelId, lastSeqRef, setEvents, setSnapshot, setDeliveryFeaturesPage,
-    setChannelsPage, setChannelLoadError, setSelectedChannelId, setChannelDetail, setKanbanPendingProposals, setError,
+    setChannelsPage, setChannelLoadError, setSelectedChannelId, setChannelDetail,
+    channelDetailRequestGate: channelDetailRequestGateRef.current,
+    setKanbanPendingProposals, setError,
   });
 
   const selectedTask = useMemo(() => {
@@ -700,8 +713,8 @@ export function App() {
     return null;
   }, [selectedTaskId, snapshot, taskDetail]);
   const actionGate = useMemo(
-    () => runtimeActionState(snapshot, webActionTokenPresent),
-    [snapshot, webActionTokenPresent],
+    () => runtimeActionState(snapshot, webActionTokenPresent, webSessionStatus),
+    [snapshot, webActionTokenPresent, webSessionStatus],
   );
   const activeProject = useMemo(
     () => workspaceProjects.find((project) => project.project_id === activeProjectId) ?? null,
@@ -730,8 +743,8 @@ export function App() {
     return page;
   }, [activeProjectId]);
 
-  const loadSnapshot = useCallback(async () => {
-    const snapshotKind = snapshotLoadKindForPage(page);
+  const loadSnapshot = useCallback(async (kindOverride?: "light" | "full") => {
+    const snapshotKind = kindOverride ?? snapshotLoadKindForPage(page);
     if (snapshotKind === "none") return null;
     const requestedProjectId = activeProjectId || "";
     const ticket = projectRequestScope.capture(requestedProjectId);
@@ -851,6 +864,8 @@ export function App() {
         page === "triage"
         && (eventType === "kanban.agent.action.proposed"
           || eventType === "kanban.agent.proposal.resolved"
+          || eventType === "operator.action.proposed"
+          || eventType === "operator.action.resolved"
           || eventType === "task.created")
       ) {
         scheduleSlice("kanban-proposals", () => void loadKanbanProposals());
@@ -861,9 +876,11 @@ export function App() {
           const channelId = textValue(payload.channel_id) || selectedChannelIdRef.current;
           if (!channelId || channelId === selectedChannelIdRef.current) {
             const ticket = projectRequestScope.capture(activeProjectId);
+            const detailTicket = channelDetailRequestGateRef.current.issue();
             void getChannelDetail(selectedChannelIdRef.current || "ch-zaofu", activeProjectId || undefined)
               .then((detail) => {
                 if (!projectRequestScope.isCurrent(ticket)) return;
+                if (!channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
                 if (selectedChannelIdRef.current === channelId || !channelId) setChannelDetail(detail);
               })
               .catch(() => undefined);
@@ -1196,10 +1213,11 @@ export function App() {
       setChannelDetail(null);
       return;
     }
+    const detailTicket = channelDetailRequestGateRef.current.issue();
     void getChannelDetail(selectedChannelId, activeProjectId || undefined).then((detail) => {
-      if (!cancelled) setChannelDetail(detail);
+      if (!cancelled && channelDetailRequestGateRef.current.isCurrent(detailTicket)) setChannelDetail(detail);
     }).catch((err) => {
-      if (cancelled) return;
+      if (cancelled || !channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
       const message = err instanceof Error ? err.message : String(err);
       setChannelLoadError(message);
       setChannelDetail(null);
@@ -1367,62 +1385,80 @@ export function App() {
   async function validateProjectWizardPath() {
     const root = projectWizardDraft.root.trim();
     if (!root) return;
-    const result = await validateWorkspaceProjectPath(root);
-    setProjectWizardResult(result);
+    setProjectWizardBusy(true);
+    setProjectWizardError("");
+    try {
+      const result = await validateWorkspaceProjectPath(root);
+      setProjectWizardInspection(result);
+      if (result.admission.action === "initialize_project") {
+        setProjectWizardDraft((current) => (
+          current.root.trim() === root && !current.name.trim()
+            ? { ...current, name: projectNameFromPath(result.root_resolved) }
+            : current
+        ));
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (reason.includes("missing or invalid web action token/session")) {
+        window.localStorage.removeItem("zf.webActionToken");
+        setWebActionTokenPresent(false);
+      }
+      setProjectWizardInspection(null);
+      setProjectWizardError(reason);
+    } finally {
+      setProjectWizardBusy(false);
+    }
   }
 
   async function submitProjectWizard() {
     const root = projectWizardDraft.root.trim();
-    if (!root) return;
-    const rawKind = projectWizardDraft.kind.trim();
-    const kind = projectWizardDraft.mode === "create"
-      ? (["multi", "issue", "prd", "refactor"] as const).find((item) => item === rawKind) ?? ""
-      : "";
-    const payload = {
-      root,
-      workspace: projectWizardDraft.workspace.trim() || "default",
-      preset: kind ? undefined : projectWizardDraft.preset,
-      kind: kind || undefined,
-      source_root: kind === "refactor" ? projectWizardDraft.sourceRoot.trim() || undefined : undefined,
-      backend: kind
-        ? (projectWizardDraft.backend === "claude" ? "claude-code" : projectWizardDraft.backend)
-        : undefined,
-      state_dir: projectWizardDraft.stateDir.trim() || undefined,
-      force: projectWizardDraft.force,
-      apply_profile: projectWizardDraft.applyProfile,
-      stack: projectWizardDraft.stack === "auto" ? undefined : projectWizardDraft.stack,
-      scale: projectWizardDraft.scale === "auto" ? undefined : projectWizardDraft.scale,
-      scaffold: projectWizardDraft.scaffold,
-      intent: projectWizardDraft.intent,
-      description: projectWizardDraft.description.trim() || undefined,
-    };
-    const result = projectWizardDraft.mode === "create"
-      ? await initWorkspaceProject(payload)
-      : await registerWorkspaceProject({
-        root,
-        workspace: payload.workspace,
-      });
-    if (actionFailed(result) && actionFailureReason(result).includes("missing or invalid web action token/session")) {
-      window.localStorage.removeItem("zf.webActionToken");
-      setWebActionTokenPresent(false);
+    const action = projectWizardInspection?.admission.action;
+    if (!root || !action || action === "blocked") return;
+    setProjectWizardBusy(true);
+    setProjectWizardError("");
+    try {
+      if (action === "open") {
+        const projectId = projectWizardInspection.admission.project_id;
+        if (!projectId) throw new Error("registered project id is missing");
+        switchProject(projectId);
+        setProjectWizardOpen(false);
+        return;
+      }
+
+      const result = action === "register"
+        ? await registerWorkspaceProject({ root, workspace: "default" })
+        : await initWorkspaceProject({
+          root,
+          workspace: "default",
+          ...(action === "initialize_project" ? {
+            name: projectWizardDraft.name.trim(),
+            description: projectWizardDraft.description.trim() || undefined,
+            stack: projectWizardDraft.stack || undefined,
+            backend: projectWizardDraft.backend,
+            mixed_enabled: projectWizardDraft.mixedEnabled,
+          } : {}),
+        });
+      if (actionFailed(result)) {
+        const reason = actionFailureReason(result) || "project action failed";
+        if (reason.includes("missing or invalid web action token/session")) {
+          window.localStorage.removeItem("zf.webActionToken");
+          setWebActionTokenPresent(false);
+        }
+        setProjectWizardError(reason);
+        return;
+      }
+
+      const project = recordValue(result.project);
+      const projectId = textValue(project?.project_id).trim();
+      if (!projectId) throw new Error("project action did not return a project id");
+      await loadWorkspaceProjects();
+      switchProject(projectId);
+      setProjectWizardOpen(false);
+    } catch (err) {
+      setProjectWizardError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProjectWizardBusy(false);
     }
-    setProjectWizardResult(result);
-    const project = recordValue(result.project);
-    const projectId = textValue(project?.project_id).trim();
-    if (result.ok !== false && kind && kind !== "multi" && projectId) {
-      // doc 125 §7.3: kind init flows straight into intake so the new project
-      // has a next step instead of ending at "yaml written".
-      const intake = await createWorkflowIntake(projectId, {
-        kind,
-        objective: projectWizardDraft.description.trim() || undefined,
-        source_root: kind === "refactor" ? projectWizardDraft.sourceRoot.trim() || undefined : undefined,
-        request_id: `wfint-web-${Date.now()}`,
-      });
-      setProjectWizardResult({ ...result, intake });
-    }
-    await loadWorkspaceProjects();
-    if (result.ok !== false && projectId) switchProject(projectId);
-    if (result.ok !== false) setProjectWizardOpen(false);
   }
 
   async function initializeActiveProject() {
@@ -1430,10 +1466,7 @@ export function App() {
     const result = await initWorkspaceProject({
       root: activeProject.root,
       workspace: "default",
-      preset: activeProject.lifecycle?.has_config === false ? "minimal" : undefined,
-      force: false,
     });
-    setProjectWizardResult(result);
     setActionResult(result as unknown as ActionResponse);
     await loadWorkspaceProjects();
     await refresh();
@@ -1446,12 +1479,16 @@ export function App() {
     let refreshTimer: ReturnType<typeof window.setInterval> | null = null;
     let refreshBusy = false;
     async function refreshChannelProjection() {
+      const detailTicket = channelDetailRequestGateRef.current.issue();
       const [detail, recent] = await Promise.all([
         getChannelDetail(channelId, projectId),
         getRecentEvents(60, projectId),
       ]);
       if (!projectRequestScope.isCurrent(ticket)) return;
-      if (selectedChannelIdRef.current === channelId) setChannelDetail(detail);
+      if (selectedChannelIdRef.current === channelId
+        && channelDetailRequestGateRef.current.isCurrent(detailTicket)) {
+        setChannelDetail(detail);
+      }
       setEvents(recent.slice().reverse());
     }
     function refreshWhilePosting() {
@@ -1492,17 +1529,22 @@ export function App() {
     }
   }
 
-  async function submitChannelWorkflowRequest(patternId: string, taskId: string, reason: string) {
-    await submitAction("workflow-invoke", {
-      channel_id: selectedChannelId || "ch-zaofu",
-      thread_id: "main",
-      pattern_id: patternId,
-      task_id: taskId,
-      requested_by: "operator",
-      reason,
-      source: "web-channel-workflow",
-    });
-  }
+  const channelActions = createChannelActionAdapter({
+    activeProjectId,
+    channelDetail,
+    prepareTaskAgent: (taskId) => {
+      setSelectedTaskId(taskId);
+      openTaskAgent();
+    },
+    readStoredBackend: () => (
+      typeof window === "undefined"
+        ? ""
+        : window.localStorage.getItem("zf.operatorBackend") ?? ""
+    ),
+    selectedChannelId,
+    snapshot,
+    submitAction,
+  });
 
   async function submitChannelDiscussionMode(mode: string, defaultResponderId?: string) {
     await submitAction("channel-discussion-mode", {
@@ -1621,6 +1663,7 @@ export function App() {
 
   async function unlockSession(passcode: string) {
     const result = await unlockWebSession(passcode);
+    if (result.session) setWebSessionStatus(result.session);
     setActionResult({
       ok: result.ok,
       status: result.status,
@@ -1633,6 +1676,7 @@ export function App() {
 
   async function lockSession() {
     const result = await lockWebSession();
+    if (result.session) setWebSessionStatus(result.session);
     setActionResult({
       ok: result.ok,
       status: result.status,
@@ -1668,9 +1712,11 @@ export function App() {
     setWebActionTokenPresent(false);
   }
 
-  function openProjectWizard(prefill: Partial<ProjectWizardDraft> = {}) {
-    setProjectWizardDraft({ ...emptyProjectWizardDraft(), ...prefill });
-    setProjectWizardResult(null);
+  function openProjectWizard() {
+    setProjectWizardDraft(emptyProjectWizardDraft(onboardingStatus));
+    setProjectWizardInspection(null);
+    setProjectWizardError("");
+    setProjectWizardBusy(false);
     setProjectWizardOpen(true);
   }
 
@@ -1678,6 +1724,9 @@ export function App() {
     setAgentPanelHasOpened(true);
     setAgentPanelMode((mode) => (mode === "fullscreen" ? "fullscreen" : "docked"));
     setOrchestratorFocusSignal((value) => value + 1);
+    if (!snapshot && activeProjectId) {
+      void loadSnapshot("light");
+    }
   }
 
   async function submitAddAgentToChannel() {
@@ -1841,13 +1890,14 @@ export function App() {
   if (showWelcome) {
     return (
       <WelcomeWizard
-        hasProject={workspaceProjects.length > 0}
+        accessReady={actionGate.actionReady}
         tokenPresent={webActionTokenPresent}
         onSaveToken={saveWebActionToken}
-        onOpenProjectWizard={(prefill) => {
-          openProjectWizard({ ...prefill, mode: "create", applyProfile: true });
+        onDone={() => {
+          setShowWelcome(false);
+          void getOnboarding().then(setOnboardingStatus).catch(() => undefined);
+          void loadWorkspaceProjects();
         }}
-        onDone={() => { setShowWelcome(false); void loadWorkspaceProjects(); }}
       />
     );
   }
@@ -1946,10 +1996,12 @@ export function App() {
                 onMarkRead={(threadId) => markChannelRead(threadId)}
                 onSearchHistory={(query, threadId) => runChannelHistorySearch(query, threadId)}
                 onRequestSynthesis={(targetMemberId) => requestChannelSynthesis(targetMemberId)}
+                onResolveQuestion={channelActions.resolveQuestion}
                 onSetDiscussionMode={(mode, defaultResponderId) => submitChannelDiscussionMode(mode, defaultResponderId)}
+                onConsensusDecision={channelActions.decideConsensus}
                 onRemoveMember={(memberId) => removeChannelMember(memberId)}
                 onSetMemberPermission={(memberId, permissionProfile) => setChannelMemberPermission(memberId, permissionProfile)}
-                onWorkflowRequest={(patternId, taskId, reason) => submitChannelWorkflowRequest(patternId, taskId, reason)}
+                onWorkflowRequest={channelActions.submitWorkflowRequest}
                 selectedChannelId={selectedChannelId}
                 workflowRoles={snapshot?.roles ?? []}
               />
@@ -2136,15 +2188,38 @@ export function App() {
         />
       ) : null}
       {projectWizardOpen ? (
-        <ProjectWizardModal
+        <ProjectAdmissionModal
+          accessMode={
+            actionGate.passcodeRequired
+              ? "passcode"
+              : actionGate.mutationEnabled
+                ? "token"
+                : "unavailable"
+          }
           actionReady={actionGate.actionReady}
+          availableBackends={onboardingStatus?.backends ?? []}
+          busy={projectWizardBusy}
           draft={projectWizardDraft}
+          error={projectWizardError}
+          inspection={projectWizardInspection}
+          mixedAvailable={Boolean(onboardingStatus?.mixed_available)}
           onClose={() => setProjectWizardOpen(false)}
-          onDraftChange={setProjectWizardDraft}
-          onSaveToken={saveWebActionToken}
+          onAuthorize={async (credential) => {
+            if (actionGate.passcodeRequired) {
+              const result = await unlockSession(credential);
+              return { ok: result.ok, reason: result.reason };
+            }
+            saveWebActionToken(credential);
+            return { ok: true };
+          }}
+          onDraftChange={(draft) => {
+            const rootChanged = draft.root !== projectWizardDraft.root;
+            setProjectWizardDraft(draft);
+            if (rootChanged) setProjectWizardInspection(null);
+            setProjectWizardError("");
+          }}
+          onInspect={() => void validateProjectWizardPath()}
           onSubmit={() => void submitProjectWizard()}
-          onValidate={() => void validateProjectWizardPath()}
-          result={projectWizardResult}
         />
       ) : null}
       {commandOpen ? (
@@ -2486,6 +2561,9 @@ function ProjectHomePage({
         <div>
           <span className="badge badge-info">Project Overview</span>
           <h2>{snapshot?.project.name || "Project"}</h2>
+          {snapshot?.project.description ? (
+            <p data-testid="project-description">{snapshot.project.description}</p>
+          ) : null}
           <p className="muted">
             snapshot #{snapshot?.seq ?? 0} · {formatTime(snapshot?.generated_at ?? "") || "not generated"}
           </p>
@@ -2792,6 +2870,10 @@ function TriagePage({
       // render their Accept in; the proposal-only triage queue is their
       // approval entry point.
       || event.type === "kanban.agent.action.proposed"
+      || (
+        event.type === "operator.action.proposed"
+        && Boolean(asRecord(event.payload).proposal)
+      )
     ))
     .slice(0, 12);
   const blocked = tasks.filter((task) => task.status === "blocked" || Boolean(task.blocked_reason));
@@ -3139,392 +3221,6 @@ function NewChannelModal({
           </button>
           <button className="icon-button" type="button" onClick={() => onDraftChange(emptyNewChannelDraft())}>
             Reset
-          </button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ProfileRecommendation({ data }: { data: Record<string, unknown> }) {
-  const profile = (data.profile ?? {}) as Record<string, unknown>;
-  const rec = (data.recommendation ?? {}) as Record<string, unknown>;
-  if (!rec.archetype) {
-    const detail = String(data.detail ?? "探测失败:路径不存在或无可识别栈");
-    return <div className="muted" data-testid="reco-error">{detail}</div>;
-  }
-  const roles = Array.isArray(rec.roles) ? (rec.roles as string[]) : [];
-  const roleCount = typeof rec.role_count === "number" ? (rec.role_count as number) : roles.length;
-  const catalog = String(rec.catalog ?? "");
-  const checks = Array.isArray(rec.required_checks) ? (rec.required_checks as string[]) : [];
-  const langs = Array.isArray(profile.languages) ? (profile.languages as string[]).join("+") : "";
-  return (
-    <div className="card" data-testid="reco-panel">
-      <div>探测: {langs || "unknown"} · fullstack=<b data-testid="reco-fullstack">{String(profile.is_fullstack)}</b></div>
-      <div>荐 archetype: <b data-testid="reco-archetype">{String(rec.archetype)}</b>
-        {catalog ? <span className="pill" data-testid="reco-catalog">{catalog}</span> : null}
-        {" · "}roles(<b data-testid="reco-role-count">{roleCount}</b>){roles.length ? `: ${roles.join(", ")}` : ""}</div>
-      <div>harness_profile: <b data-testid="reco-harness">{String(rec.harness_profile)}</b></div>
-      <div>required_checks: {checks.join(", ") || "(空)"}</div>
-      {rec.misroute ? <div className="warn" data-testid="reco-misroute">⚠ {String(rec.misroute)}</div> : null}
-      <div className="muted">preset 已默认选中推荐值,可在上方下拉改选(recommend-confirm)</div>
-    </div>
-  );
-}
-
-function ProjectWizardModal({
-  actionReady,
-  draft,
-  onClose,
-  onDraftChange,
-  onSaveToken,
-  onSubmit,
-  onValidate,
-  result,
-}: {
-  actionReady: boolean;
-  draft: ProjectWizardDraft;
-  onClose: () => void;
-  onDraftChange: (draft: ProjectWizardDraft) => void;
-  onSaveToken: (token: string) => void;
-  onSubmit: () => void;
-  onValidate: () => void;
-  result: Record<string, unknown> | null;
-}) {
-  const update = (patch: Partial<ProjectWizardDraft>) => onDraftChange({ ...draft, ...patch });
-  const validRoot = draft.root.trim();
-  const [tokenInput, setTokenInput] = useState("");
-  const [presets, setPresets] = useState<PresetInfo[]>([]);
-  const [reco, setReco] = useState<Record<string, unknown> | null>(null);
-  const [inspect, setInspect] = useState<BootstrapInspect | null>(null);
-  const [detecting, setDetecting] = useState(false);
-  useEffect(() => {
-    let active = true;
-    listPresets()
-      .then((items) => { if (active && items.length) setPresets(items); })
-      .catch(() => {});
-    return () => { active = false; };
-  }, []);
-  async function detectAndRecommend() {
-    const declaredStack = draft.stack !== "auto";
-    if (!validRoot && !declaredStack) return;
-    setDetecting(true);
-    try {
-      const res = await recommendProfile(validRoot || ".", draft.intent, {
-        stack: declaredStack ? draft.stack : undefined,
-        scale: draft.scale === "auto" ? undefined : draft.scale,
-        backend: draft.backend,
-      });
-      setReco(res);
-      const recommendation = (res.recommendation ?? {}) as Record<string, unknown>;
-      const archetype = String(recommendation.archetype ?? "");
-      if (archetype) update({ preset: archetype });
-      // BootstrapInspector: surface the concrete setup/gate/doc/flow candidates
-      // apply_profile would write, so the operator sees them before Initialize.
-      if (validRoot) inspectBootstrap(validRoot, draft.backend).then(setInspect).catch(() => setInspect(null));
-    } finally {
-      setDetecting(false);
-    }
-  }
-  async function inspectExisting() {
-    if (!validRoot) return;
-    setDetecting(true);
-    try { setInspect(await inspectBootstrap(validRoot, draft.backend)); }
-    catch { setInspect(null); }
-    finally { setDetecting(false); }
-  }
-  function saveToken() {
-    onSaveToken(tokenInput);
-    setTokenInput("");
-  }
-  const presetRank = (p: PresetInfo): number =>
-    p.name.includes("-v3-") ? 0 : p.kind === "flow" ? 1 : 2;
-  const presetOptions: PresetInfo[] = presets.length
-    ? [...presets].sort((a, b) => presetRank(a) - presetRank(b))
-    : ["minimal", "code-assist"].map(
-        (name) => ({ name, description: "", roleCount: 0, kind: "preset", backend: "" }),
-      );
-  useEffect(() => {
-    if (draft.preset === "minimal" && presetOptions.length && presetOptions[0].name !== "minimal") {
-      update({ preset: presetOptions[0].name });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presets.length]);
-  const selectedPreset = presetOptions.find((p) => p.name === draft.preset);
-  const candidatePanel = inspect ? (
-    <div className="card" data-testid="wizard-candidates">
-      {inspect.confidence === "low" || !inspect.candidates.length ? (
-        <div className="muted">置信度低(空/新仓)—— 代码落地后再探,先用空模板创建。</div>
-      ) : (
-        <>
-          <div className="muted">
-            探到 <b>{inspect.stack}</b> · {inspect.layout} · 候选(勾选项由 apply profile 写入):
-          </div>
-          {inspect.candidates.map((c) => (
-            <div key={c.kind} data-testid={`wizard-cand-${c.kind}`}>
-              ☑ <b>{c.label}</b>{" "}
-              <span className="mono">
-                {c.value ?? (c.values ? c.values.join(" · ") : Object.entries(c.facts ?? {}).map(([k, v]) => `${k}=${v}`).join(" · "))}
-              </span>
-              <div className="muted">{c.note}</div>
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  ) : null;
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal-panel" role="dialog" aria-modal="true" aria-label="Workspace Project">
-        <div className="section-heading">
-          <div>
-            <h2>Workspace Project</h2>
-            <span className="muted">{draft.mode === "create" ? "initialize" : "register"}</span>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose}>Close</button>
-        </div>
-        <div className="modal-body">
-          <div className="tab-row compact-tabs">
-            <button
-              className={`tab-button ${draft.mode === "existing" ? "active" : ""}`}
-              type="button"
-              onClick={() => update({ mode: "existing" })}
-            >
-              Existing
-            </button>
-            <button
-              className={`tab-button ${draft.mode === "create" ? "active" : ""}`}
-              type="button"
-              onClick={() => update({ mode: "create" })}
-            >
-              Create
-            </button>
-          </div>
-          <input
-            autoFocus
-            className="filter-input"
-            placeholder="/path/to/project"
-            value={draft.root}
-            onChange={(event) => update({ root: event.target.value })}
-          />
-          <div className="field-row">
-            <input
-              className="filter-input"
-              placeholder="workspace"
-              value={draft.workspace}
-              onChange={(event) => update({ workspace: event.target.value })}
-            />
-            {draft.mode === "create" ? (
-              <select
-                className="filter-input"
-                data-testid="wizard-kind"
-                value={draft.kind}
-                onChange={(event) => update({ kind: event.target.value })}
-              >
-                <option value="">shape: preset / archetype</option>
-                <option value="multi">kind: multi — 先澄清，再选择工作流</option>
-                <option value="issue">kind: issue — 修 bug / 小变更</option>
-                <option value="prd">kind: prd — 新产品 / 新功能</option>
-                <option value="refactor">kind: refactor — 迁移 / 复刻</option>
-              </select>
-            ) : null}
-            {draft.mode === "create" && !draft.kind ? (
-              <select
-                className="filter-input"
-                data-testid="wizard-preset"
-                value={draft.preset}
-                onChange={(event) => update({ preset: event.target.value })}
-              >
-                {presetOptions.map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.description ? `${p.name} — ${p.description}` : p.name}
-                  </option>
-                ))}
-              </select>
-            ) : null}
-          </div>
-          {draft.mode === "existing" ? (
-            <>
-              <div className="field-row">
-                <button
-                  className="icon-button"
-                  type="button"
-                  data-testid="wizard-inspect-existing"
-                  disabled={!validRoot || detecting}
-                  onClick={inspectExisting}
-                >
-                  {detecting ? "探测中…" : "探测项目 (Bootstrap Inspect)"}
-                </button>
-              </div>
-              {candidatePanel}
-              {inspect && inspect.has_config === false ? (
-                <div className="warn" data-testid="wizard-bare-repo">
-                  该目录尚未初始化(无 zf.yaml)—— Register 会失败。
-                  <button
-                    className="icon-button"
-                    type="button"
-                    data-testid="wizard-bootstrap-init"
-                    onClick={() => update({
-                      mode: "create",
-                      kind: "",
-                      preset: inspect.recommended_flow || draft.preset,
-                      applyProfile: true,
-                    })}
-                  >
-                    → 用探测结果初始化 (转 Create)
-                  </button>
-                </div>
-              ) : null}
-            </>
-          ) : null}
-          {draft.mode === "create" && draft.kind === "refactor" ? (
-            <input
-              className="filter-input"
-              data-testid="wizard-source-root"
-              placeholder="source root — 被复刻的旧项目路径 (只读保护)"
-              value={draft.sourceRoot}
-              onChange={(event) => update({ sourceRoot: event.target.value })}
-            />
-          ) : null}
-          {draft.mode === "create" && !draft.kind && selectedPreset?.description ? (
-            <div className="muted" data-testid="archetype-desc">
-              [{selectedPreset.kind}] {selectedPreset.name}: {selectedPreset.description}
-              {selectedPreset.roleCount ? ` · ${selectedPreset.roleCount} roles` : ""}
-            </div>
-          ) : null}
-          {draft.mode === "create" ? (
-            <div className="field-row">
-              <select
-                className="filter-input"
-                data-testid="wizard-stack"
-                value={draft.stack}
-                onChange={(event) => update({ stack: event.target.value })}
-              >
-                <option value="auto">stack: auto-detect</option>
-                <option value="python">stack: python</option>
-                <option value="node">stack: node</option>
-                <option value="go">stack: go</option>
-                <option value="rust">stack: rust</option>
-              </select>
-              <select
-                className="filter-input"
-                data-testid="wizard-scale"
-                value={draft.scale}
-                onChange={(event) => update({ scale: event.target.value })}
-              >
-                <option value="auto">scale: auto</option>
-                <option value="hobby">scale: hobby</option>
-                <option value="internal">scale: internal</option>
-                <option value="launch">scale: launch</option>
-              </select>
-              <select
-                className="filter-input"
-                data-testid="wizard-backend"
-                value={draft.backend}
-                onChange={(event) => update({ backend: event.target.value })}
-              >
-                <option value="claude">backend: claude</option>
-                <option value="codex">backend: codex</option>
-              </select>
-            </div>
-          ) : null}
-          {draft.mode === "create" ? (
-            <div className="field-row">
-              <select
-                className="filter-input"
-                data-testid="wizard-intent"
-                value={draft.intent}
-                onChange={(event) => update({ intent: event.target.value })}
-              >
-                <option value="build">intent: build</option>
-                <option value="refactor">intent: refactor</option>
-                <option value="review">intent: review</option>
-                <option value="maintain">intent: maintain</option>
-              </select>
-              <button
-                className="icon-button"
-                type="button"
-                data-testid="wizard-detect"
-                disabled={(!validRoot && draft.stack === "auto") || detecting}
-                onClick={detectAndRecommend}
-              >
-                {detecting ? "Detecting…" : draft.stack === "auto" ? "Detect & Recommend" : "Recommend (declared)"}
-              </button>
-            </div>
-          ) : null}
-          {draft.mode === "create" && reco ? <ProfileRecommendation data={reco} /> : null}
-          {draft.mode === "create" ? candidatePanel : null}
-          {draft.mode === "create" ? (
-            <>
-              <label className="checkbox-row">
-                <input
-                  checked={draft.applyProfile}
-                  type="checkbox"
-                  data-testid="wizard-apply-profile"
-                  onChange={(event) => update({ applyProfile: event.target.checked })}
-                />
-                <span>apply profile overlay (fill required_checks + AGENTS.md)</span>
-              </label>
-              <label className="checkbox-row">
-                <input
-                  checked={draft.scaffold}
-                  type="checkbox"
-                  data-testid="wizard-scaffold"
-                  onChange={(event) => update({ scaffold: event.target.checked })}
-                />
-                <span>scaffold src/tests/README (from-0 0→1, cold-start ready)</span>
-              </label>
-              <textarea
-                className="filter-input"
-                data-testid="wizard-description"
-                placeholder="项目说明 / 备注 (comments) — 这项目是干嘛的 / 特殊约束 / 团队约定 → 写进 CLAUDE.md"
-                rows={3}
-                value={draft.description}
-                onChange={(event) => update({ description: event.target.value })}
-              />
-              <input
-                className="filter-input"
-                placeholder="state dir override"
-                value={draft.stateDir}
-                onChange={(event) => update({ stateDir: event.target.value })}
-              />
-              <label className="checkbox-row">
-                <input
-                  checked={draft.force}
-                  type="checkbox"
-                  onChange={(event) => update({ force: event.target.checked })}
-                />
-                <span>force</span>
-              </label>
-            </>
-          ) : null}
-          {!actionReady ? (
-            <div className="token-row agent-auth-row">
-              <span className="mono">project actions: token needed</span>
-              <input
-                className="filter-input"
-                placeholder="action token"
-                type="password"
-                value={tokenInput}
-                onChange={(event) => setTokenInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") saveToken();
-                }}
-              />
-              <button className="icon-button" type="button" onClick={saveToken}>
-                Save
-              </button>
-            </div>
-          ) : null}
-          <ProjectInitOnboarding result={result} />
-          {result ? <PreBlock value={result} /> : null}
-        </div>
-        <div className="action-row">
-          <button className="icon-button" disabled={!validRoot} type="button" onClick={onValidate}>
-            Validate
-          </button>
-          <button className="icon-button primary" disabled={!actionReady || !validRoot} type="button" onClick={onSubmit}>
-            {draft.mode === "create" ? "Initialize" : "Register"}
           </button>
         </div>
       </section>

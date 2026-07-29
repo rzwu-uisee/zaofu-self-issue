@@ -28,7 +28,7 @@ from zf.runtime.cli_command import zf_cli_cmd
 # hashes in a scratch CODEX_HOME, ran codex-cli 0.144.1 headless — all five
 # zaofu hooks fired (codex.hook.session_start/user_prompt_submit/... landed in
 # events.jsonl). A drifted hash would have left the hooks untrusted and silent.
-CODEX_HASH_VERIFIED_VERSION = "0.144"
+CODEX_HASH_VERIFIED_VERSION = "0.145"
 
 
 CODEX_HOOK_EVENTS: tuple[tuple[str, str], ...] = (

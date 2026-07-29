@@ -4,8 +4,8 @@ This directory contains ZaoFu's user-facing documentation. The manuals are
 organized from architecture and onboarding through operations, observability,
 integrations, and evaluation.
 
-For the production Controller onboarding path, start with
-[01 Quick Start](01-quickstart.en.md). Use the
+For installation onboarding, Add/Open Project, Kanban Agent, and the first
+controlled Workflow, start with [01 Quick Start](01-quickstart.en.md). Use the
 [ZaoFu Operator Manual](zaofu-operator-manual.en.md) for a consolidated
 reference or the topic index below for focused coverage.
 
@@ -16,10 +16,12 @@ reference or the topic index below for focused coverage.
 
 ## 1. Getting Started
 
-- [01 Quick Start](01-quickstart.en.md) - Controller recommendation, approval,
-  materialization, project validation, dry-run, and the first workflow request.
+- [01 Quick Start](01-quickstart.en.md) - installation onboarding, Add/Open
+  Project, Project Brief and Stack, Channel, Research, and the first Task
+  Workflow.
 - [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md) -
-  the complete multi-kind Project, clarification, approval, CLI, and Web path.
+  the complete multi-kind Project, `zf.yaml` and Bootstrap boundary, Task,
+  approval, CLI, and Web path.
 
 ## 2. Core Operation
 
@@ -41,7 +43,9 @@ reference or the topic index below for focused coverage.
 ## 4. Feishu and Channel Collaboration
 
 - [19 Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md)
-- [15 Channel Collaboration](15-channel-collaboration.en.md)
+- [15 Channel Collaboration](15-channel-collaboration.en.md) - Kanban Plan
+  creation of Channels and members, template discussion, continuation, Task
+  proposals, and Feishu projection.
 - [11 Feishu Automation and Kanban Sync](11-feishu-automation-kanban-sync.en.md)
 
 The legacy OpenClaw Feishu forwarding path is deprecated. Use the direct

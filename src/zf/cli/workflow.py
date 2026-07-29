@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -11,7 +13,9 @@ from typing import Any, Iterable
 
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.config.project_context import resolve_project_context
+from zf.core.events import EventWriter
 from zf.core.events.factory import event_log_from_project
+from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.core.workflow.inspection import (
@@ -28,6 +32,12 @@ from zf.runtime.hook_registry import project_hook_registry
 from zf.runtime.profile_policy import gate_policy_for_task
 from zf.runtime.stage_contract import evaluate_stage_contract
 from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
+from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.workflow_start import (
+    WORKFLOW_START_ACTION,
+    WorkflowStartService,
+    workflow_start_proposal,
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -59,6 +69,45 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Write inspect JSON/MD under project.state_dir artifacts",
     )
     inspect.set_defaults(func=_run_inspect)
+
+    routes = sub.add_parser(
+        "routes",
+        help="List active workflow routes bound to a Task",
+    )
+    routes.add_argument("--task", required=True)
+    routes.add_argument("--format", choices=["md", "json"], default="md")
+    routes.add_argument("--state-dir", default=None)
+    routes.set_defaults(func=_run_routes)
+
+    start = sub.add_parser(
+        "start",
+        help="Preview, propose, or apply a Task-bound workflow route",
+    )
+    mode = start.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--preview", action="store_true")
+    mode.add_argument("--propose", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    start.add_argument("--task", default="")
+    start.add_argument("--route", default="")
+    start.add_argument("--objective", default="")
+    start.add_argument(
+        "--parameters-json",
+        default="{}",
+        help="Route parameters as one JSON object",
+    )
+    start.add_argument("--proposal-event-id", default="")
+    start.add_argument("--authorization-ref", default="")
+    start.add_argument(
+        "--authorization-token",
+        default="",
+        help=(
+            "Operator token matching ZF_WORKFLOW_ACTION_TOKEN; "
+            "never expose it to a provider session"
+        ),
+    )
+    start.add_argument("--format", choices=["md", "json"], default="md")
+    start.add_argument("--state-dir", default=None)
+    start.set_defaults(func=_run_start)
 
     # EVAL-WORKFLOW-AUDIT-001 (doc 43 §2.3): per-task completeness audit
     audit = sub.add_parser(
@@ -107,7 +156,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def _run(args: argparse.Namespace) -> int:
     print(
         "Usage: zf workflow render | zf workflow inspect | "
-        "zf workflow audit | zf workflow gates | zf workflow hooks",
+        "zf workflow routes | zf workflow start | zf workflow audit | "
+        "zf workflow gates | zf workflow hooks",
         file=sys.stderr,
     )
     return 2
@@ -165,6 +215,237 @@ def _run_inspect(args: argparse.Namespace) -> int:
             for kind, path in artifact_refs.items():
                 print(f"  - {kind}: {path}")
     return 1 if inspection_failed(report, strict=args.strict) else 0
+
+
+def _workflow_context(state_dir: str | None):
+    context = resolve_project_context(
+        explicit_state_dir=state_dir,
+        require_config=True,
+        load_config_with_explicit=True,
+    )
+    if context.config is None:
+        raise ConfigError(f"Config file not found: {context.config_path}")
+    return context
+
+
+def _run_routes(args: argparse.Namespace) -> int:
+    try:
+        context = _workflow_context(args.state_dir)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    result = WorkflowStartService(
+        context.state_dir,
+        context.config,
+    ).routes(task_id=args.task)
+    _print_start_result(result, output_format=args.format)
+    return 0 if result.get("ok") else 1
+
+
+def _run_start(args: argparse.Namespace) -> int:
+    try:
+        context = _workflow_context(args.state_dir)
+        parameters = json.loads(args.parameters_json)
+    except (ConfigError, json.JSONDecodeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(parameters, dict):
+        print("Error: --parameters-json must be a JSON object", file=sys.stderr)
+        return 2
+
+    service = WorkflowStartService(context.state_dir, context.config)
+    if args.apply:
+        result = _apply_workflow_start(
+            context=context,
+            service=service,
+            proposal_event_id=str(args.proposal_event_id or "").strip(),
+            authorization_ref=str(args.authorization_ref or "").strip(),
+            authorization_token=str(args.authorization_token or ""),
+        )
+    else:
+        payload = {
+            "task_id": str(args.task or "").strip(),
+            "route_id": str(args.route or "").strip(),
+            "objective": str(args.objective or "").strip(),
+            "parameters": parameters,
+            "origin": "cli",
+        }
+        if args.propose:
+            writer = EventWriter(
+                event_log_from_project(
+                    context.state_dir,
+                    config=context.config,
+                )
+            )
+            result = service.propose(
+                writer,
+                payload,
+                actor="operator:cli",
+                origin="cli",
+            )
+        else:
+            result = service.preview(
+                payload,
+                require_bindings=False,
+                origin="cli",
+            )
+            if result.get("ok"):
+                result["status"] = "preview"
+    _print_start_result(result, output_format=args.format)
+    return _start_exit_code(result)
+
+
+def _apply_workflow_start(
+    *,
+    context,
+    service: WorkflowStartService,
+    proposal_event_id: str,
+    authorization_ref: str,
+    authorization_token: str,
+) -> dict[str, Any]:
+    if not proposal_event_id:
+        return {
+            "ok": False,
+            "status": "invalid_payload",
+            "action": WORKFLOW_START_ACTION,
+            "reason": "proposal_event_id is required for --apply",
+        }
+    if not authorization_ref:
+        return {
+            "ok": False,
+            "status": "authorization_required",
+            "action": WORKFLOW_START_ACTION,
+            "reason": "authorization_ref is required for --apply",
+        }
+    expected_token = os.environ.get("ZF_WORKFLOW_ACTION_TOKEN", "")
+    if not expected_token:
+        return {
+            "ok": False,
+            "status": "authorization_not_configured",
+            "action": WORKFLOW_START_ACTION,
+            "reason": (
+                "ZF_WORKFLOW_ACTION_TOKEN must be configured by the operator"
+            ),
+        }
+    if not authorization_token:
+        return {
+            "ok": False,
+            "status": "authorization_required",
+            "action": WORKFLOW_START_ACTION,
+            "reason": "authorization token is required for --apply",
+        }
+    if not secrets.compare_digest(
+        authorization_token.encode("utf-8"),
+        expected_token.encode("utf-8"),
+    ):
+        return {
+            "ok": False,
+            "status": "authorization_invalid",
+            "action": WORKFLOW_START_ACTION,
+            "reason": "authorization token is invalid",
+        }
+    writer = EventWriter(
+        event_log_from_project(context.state_dir, config=context.config)
+    )
+    proposal = workflow_start_proposal(
+        writer.event_log.read_all(),
+        proposal_event_id,
+    )
+    if proposal is None:
+        return {
+            "ok": False,
+            "status": "proposal_not_found",
+            "action": WORKFLOW_START_ACTION,
+            "reason": "valid workflow-start proposal was not found",
+        }
+    payload = dict(proposal.get("payload") or {})
+    payload.update({
+        "proposal_event_id": proposal_event_id,
+        "authorization_ref": authorization_ref,
+    })
+    preview = service.preview(
+        payload,
+        require_bindings=True,
+        origin="cli",
+    )
+    if not preview.get("ok"):
+        return preview
+    requested = writer.emit(
+        "control.action.requested",
+        actor="operator:cli",
+        task_id=str(payload.get("task_id") or ""),
+        payload=redact_obj({
+            "action": WORKFLOW_START_ACTION,
+            "proposal_event_id": proposal_event_id,
+            "authorization_ref": authorization_ref,
+        }),
+    )
+    return ControlledActionService(
+        context.state_dir,
+        writer,
+        config=context.config,
+        project_root=context.project_root,
+        actor="operator:cli",
+        source="cli",
+        surface="cli",
+    ).execute(
+        action=WORKFLOW_START_ACTION,
+        requested_action="zf workflow start --apply",
+        payload=payload,
+        requested=requested,
+    )
+
+
+def _print_start_result(
+    result: dict[str, Any],
+    *,
+    output_format: str,
+) -> None:
+    if output_format == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    status = str(result.get("status") or "unknown")
+    print(f"workflow start: {status}")
+    for key in (
+        "task_id",
+        "route_id",
+        "proposal_event_id",
+        "workflow_run_id",
+        "event_id",
+    ):
+        value = result.get(key)
+        if value:
+            print(f"- {key}: `{value}`")
+    routes = result.get("routes")
+    if isinstance(routes, list):
+        for route in routes:
+            if not isinstance(route, dict):
+                continue
+            print(
+                "- "
+                f"`{route.get('route_id') or ''}` "
+                f"({route.get('topology') or 'unknown'}, "
+                f"roles={len(route.get('roles') or [])})"
+            )
+    if not result.get("ok"):
+        print(f"- reason: {result.get('reason') or 'workflow start failed'}")
+
+
+def _start_exit_code(result: dict[str, Any]) -> int:
+    if result.get("ok"):
+        return 0
+    status = str(result.get("status") or "")
+    if status.startswith("authorization_"):
+        return 3
+    if status in {
+        "preflight_blocked",
+        "workflow_route_unavailable",
+        "workflow_task_stale",
+    }:
+        return 4
+    if status in {"invalid_payload", "proposal_not_found"}:
+        return 2
+    return 1
 
 
 # ---------------------------------------------------------------------------

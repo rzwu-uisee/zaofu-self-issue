@@ -42,7 +42,10 @@ from zf.runtime.recovery_sufficiency import build_artifact_recovery_refs
 from zf.runtime.rework_triage import REWORK_RETRY_CLASSIFICATIONS
 from zf.runtime.task_refs import runtime_materialized_dirty_files
 from zf.runtime.transport import transport_error_diagnostics
-from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
+from zf.runtime.workflow_anchor import (
+    is_workflow_dispatch_managed_task,
+    is_workflow_fanout_anchor_task,
+)
 from zf.runtime.workflow_inputs import render_workflow_input_briefing_section
 from zf.runtime.canonical_recovery import (
     classify_recovery_scope,
@@ -512,7 +515,7 @@ class DispatchMixin(
         self._event_writer = writer
 
     def _assign_ready_backlog_task(self, task: Task) -> Task:
-        if is_workflow_fanout_anchor_task(task):
+        if is_workflow_dispatch_managed_task(task):
             return task
         if task.assigned_to or not self._contract_ready_for_backlog_scheduler(task):
             return task
@@ -668,7 +671,7 @@ class DispatchMixin(
         for task in candidates:
             if task.status in {"done", "cancelled", "blocked"}:
                 continue
-            if is_workflow_fanout_anchor_task(task):
+            if is_workflow_dispatch_managed_task(task):
                 continue
             if _task_quiesced_by_terminal_run(task, terminal_run_keys):
                 continue

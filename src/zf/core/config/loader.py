@@ -330,6 +330,13 @@ def _parse_project_setup_script(project_data: dict) -> str:
     return str(setup or "").strip()
 
 
+def _parse_project_description(project_data: dict) -> str:
+    description = project_data.get("description", "")
+    if description and not isinstance(description, str):
+        raise ConfigError("project.description must be a string")
+    return str(description or "").strip()
+
+
 def _build_constraints(data: dict | None) -> ConstraintsConfig:
     if not data:
         return ConstraintsConfig()
@@ -1995,6 +2002,7 @@ def load_config(path: Path) -> ZfConfig:
         preset=raw.get("preset", ""),
         project=ProjectConfig(
             name=project_data["name"],
+            description=_parse_project_description(project_data),
             workspace=project_data.get("workspace", "."),
             state_dir=project_data.get("state_dir", ".zf"),
             setup_script=_parse_project_setup_script(project_data),

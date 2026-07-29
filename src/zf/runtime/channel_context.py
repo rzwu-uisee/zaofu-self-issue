@@ -46,6 +46,11 @@ def build_channel_context_pack(
         max_messages=profile_limits["max_messages"],
         max_text_chars=profile_limits["max_text_chars"],
     )
+    question_ledger = _select_question_ledger(
+        channel,
+        thread_id=thread_id,
+        max_entries=profile_limits["question_entries"],
+    )
     context_pack_id = _stable_context_pack_id(
         channel_id,
         thread_id,
@@ -80,6 +85,7 @@ def build_channel_context_pack(
             }
             for item in selected
         ],
+        "question_ledger": question_ledger,
         "artifact_refs": _select_artifact_refs(
             channel,
             selected_messages=selected,
@@ -90,8 +96,10 @@ def build_channel_context_pack(
             "max_messages": profile_limits["max_messages"],
             "max_text_chars": profile_limits["max_text_chars"],
             "max_role_definition_chars": profile_limits["role_definition_chars"],
+            "max_question_entries": profile_limits["question_entries"],
             "max_skill_refs": 8,
             "selected_messages": len(selected),
+            "selected_questions": len(question_ledger),
             "visibility_profile": profile,
         },
     }
@@ -162,6 +170,38 @@ def _select_messages(
     return list(reversed(selected))
 
 
+def _select_question_ledger(
+    channel: dict[str, Any] | None,
+    *,
+    thread_id: str,
+    max_entries: int,
+) -> list[dict[str, str]]:
+    raw = (channel or {}).get("open_questions") or []
+    items = list(raw.values()) if isinstance(raw, dict) else list(raw)
+    selected = [
+        item
+        for item in items
+        if isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+    ][-max_entries:]
+    return [
+        {
+            "question_id": str(item.get("question_id") or ""),
+            "question": _excerpt(str(item.get("question") or ""), 320),
+            "category": str(item.get("category") or ""),
+            "asked_by": str(item.get("asked_by") or ""),
+            "status": str(item.get("status") or ""),
+            "resolution": str(item.get("resolution") or ""),
+            "resolved_by": str(item.get("resolved_by") or ""),
+            "answer": _excerpt(str(item.get("answer") or ""), 600),
+            "risk_note": _excerpt(str(item.get("risk_note") or ""), 240),
+            "opened_event_id": str(item.get("opened_event_id") or ""),
+            "resolved_event_id": str(item.get("resolved_event_id") or ""),
+        }
+        for item in selected
+    ]
+
+
 def _stable_context_pack_id(
     channel_id: str,
     thread_id: str,
@@ -176,11 +216,11 @@ def _stable_context_pack_id(
 
 def _profile_limits(profile: str, *, max_messages: int, max_text_chars: int) -> dict[str, int]:
     defaults = {
-        "minimal": {"max_messages": 6, "max_text_chars": 2400},
-        "planner": {"max_messages": 12, "max_text_chars": 6000},
-        "reviewer": {"max_messages": 10, "max_text_chars": 5000},
-        "owner_report": {"max_messages": 8, "max_text_chars": 4000},
-        "full_audit": {"max_messages": 20, "max_text_chars": 10000},
+        "minimal": {"max_messages": 6, "max_text_chars": 2400, "question_entries": 12},
+        "planner": {"max_messages": 12, "max_text_chars": 6000, "question_entries": 32},
+        "reviewer": {"max_messages": 10, "max_text_chars": 5000, "question_entries": 24},
+        "owner_report": {"max_messages": 8, "max_text_chars": 4000, "question_entries": 24},
+        "full_audit": {"max_messages": 20, "max_text_chars": 10000, "question_entries": 48},
     }
     selected = defaults.get(profile, defaults["minimal"])
     role_definition_chars = {
@@ -194,6 +234,7 @@ def _profile_limits(profile: str, *, max_messages: int, max_text_chars: int) -> 
         "max_messages": min(max(selected["max_messages"], 1), max(max_messages, selected["max_messages"])),
         "max_text_chars": min(max(selected["max_text_chars"], 1), max(max_text_chars, selected["max_text_chars"])),
         "role_definition_chars": role_definition_chars,
+        "question_entries": selected["question_entries"],
     }
 
 

@@ -2106,6 +2106,30 @@ def test_project_scripts_default_empty(tmp_path: Path):
     assert load_config(cfg_path).project.setup_script == ""
 
 
+def test_project_description_parsed_and_validated(tmp_path: Path):
+    cfg_path = tmp_path / "zf.yaml"
+    cfg_path.write_text(
+        "version: '1.0'\n"
+        "project:\n"
+        "  name: demo\n"
+        "  description: Multi-agent delivery harness\n",
+        encoding="utf-8",
+    )
+    assert load_config(cfg_path).project.description == (
+        "Multi-agent delivery harness"
+    )
+
+    cfg_path.write_text(
+        "version: '1.0'\n"
+        "project:\n"
+        "  name: demo\n"
+        "  description: [invalid]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="project.description must be a string"):
+        load_config(cfg_path)
+
+
 def test_project_scripts_unknown_key_rejected(tmp_path: Path):
     cfg_path = tmp_path / "zf.yaml"
     cfg_path.write_text(

@@ -42,10 +42,17 @@ export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
 uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
 ```
 
-Bootstrap Inspect is read-only and proposes stack, Controller, setup, quality
-checks, and instruction documents. Add Project / Initialize creates and
-registers the Project but does not ignite a workflow. Clarification and explicit
-approval are still required. See
+First-run onboarding configures Provider, Environment, Access, and Ready; it
+does not create a Project. `Add Project` inspects the server path and chooses
+open, register, initialize state, initialize Project, or blocked from disk
+truth. Only Project initialization shows Project Name, Project Brief, Stack,
+Primary Provider, and Mixed team. It no longer asks for YAML, Controller, kind,
+lane, or role.
+
+![Current Add/Open Project form](assets/project-add-open-current.png)
+
+Initialize creates and registers only the Project. It does not create a Task or
+ignite a Workflow. See
 [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
 for screenshots and the complete path.
 
@@ -92,18 +99,20 @@ uv run zf runs for-task <task_id>
 ## 3. Docker Playwright
 
 Run browser tests in Docker. Do not install browsers on the host unless that is
-an explicit requirement:
+an explicit requirement. Run `npm --prefix web ci` on the host, or otherwise
+prepare `web/node_modules`, before the container command. Browser installation
+must be bounded:
 
 ```bash
-docker volume create zaofu-pw-browsers >/dev/null
-docker run --rm --user root --entrypoint /bin/sh --network host \
-  -v "$PWD:/workspace" \
-  -v zaofu-pw-browsers:/tmp/ms-playwright \
-  -w /workspace/web \
-  -e PLAYWRIGHT_BROWSERS_PATH=/tmp/ms-playwright \
+docker run --rm --network host \
+  --user "$(id -u):$(id -g)" \
+  --entrypoint bash \
+  -v "$PWD:/work" \
+  -w /work/web \
+  -e PLAYWRIGHT_BROWSERS_PATH=0 \
   -e ZF_WEB_BASE_URL=http://127.0.0.1:5175 \
   mcp/playwright:latest \
-  -lc "npx playwright install chromium && npx playwright test --project=chromium --workers=1"
+  -lc 'set -euo pipefail; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test --project=chromium --workers=1'
 ```
 
 Prerequisites:
@@ -181,7 +190,8 @@ uv run python -m tests.e2e.verify_real_state_web \
 The scorecard condenses evidence from an existing real E2E run into an
 auditable report. It does not start workers. It checks issue, PRD, and refactor
 intake; key Web projections; New Task, Kanban Agent, and Channel entry points;
-fanout workflow evidence; and real Codex hook and usage evidence.
+Task-bound fanout Workflow evidence; and real Codex hook and usage evidence.
+Channel discussion itself is not direct Workflow-ignition proof.
 
 ```bash
 PYTHONPATH=src python -m tests.e2e.full_stack_validation \

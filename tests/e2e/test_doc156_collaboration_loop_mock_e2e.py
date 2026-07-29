@@ -53,7 +53,7 @@ def _approved_action(
     payload: dict,
 ) -> dict:
     proposal = writer.emit(
-        "kanban.agent.action.proposed",
+        "operator.action.proposed",
         actor="web",
         task_id=str(payload.get("task_id") or "") or None,
         payload={
@@ -377,6 +377,6 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         for event in events
     )
     assert sum(
-        event.type == "kanban.agent.proposal.resolved"
+        event.type == "operator.action.resolved"
         for event in events
     ) == 5

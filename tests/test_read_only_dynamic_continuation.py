@@ -251,6 +251,52 @@ def test_operator_action_after_reservation_supersedes_before_dispatch(
     assert operation["reason"] == "pending_operator_or_control_action"
 
 
+def test_resolved_exact_operator_proposal_does_not_block_dispatch(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    config = _config()
+    action = _seed(state_dir, log, writer, config=config)
+    writer.emit(
+        "operator.action.proposed",
+        actor="operator",
+        correlation_id="RUN-DYN-1",
+        payload={
+            "workflow_run_id": "RUN-DYN-1",
+            "proposal": {
+                "proposal_id": "OP-RESOLVED-1",
+                "action": "workflow-start",
+                "valid": True,
+            },
+        },
+    )
+    proposed = log.read_all()[-1]
+    writer.emit(
+        "operator.action.resolved",
+        actor="operator",
+        correlation_id="RUN-DYN-1",
+        payload={
+            "proposal_event_id": proposed.id,
+            "proposal_id": "OP-RESOLVED-1",
+            "resolution": "executed",
+        },
+    )
+
+    result = execute_read_only_continuation(
+        state_dir,
+        config=config,
+        event_log=log,
+        writer=writer,
+        action=action,
+    )
+
+    assert result.status == "dispatched"
+    assert any(
+        event.type == "workflow.invoke.requested"
+        for event in log.read_all()
+    )
+
+
 def test_operator_race_before_dispatch_consumption_supersedes_operation(
     tmp_path: Path,
 ) -> None:

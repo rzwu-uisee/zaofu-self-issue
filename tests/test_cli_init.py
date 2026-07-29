@@ -31,8 +31,7 @@ def test_init_creates_zf_directory(tmp_path: Path, monkeypatch):
 
 
 def test_init_notes_flag_appends_to_claude_md(tmp_path: Path, monkeypatch):
-    """`zf init --notes` writes operator notes into CLAUDE.md — same shared
-    path as Web New Project 'description' (CLI/Web 入口不对称已抹平)."""
+    """`zf init --notes` remains an explicit Claude-specific instruction."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "zf.yaml").write_text('version: "1.0"\nproject:\n  name: test\n')
 
@@ -67,6 +66,51 @@ def test_init_creates_project_instruction_docs(tmp_path: Path, monkeypatch):
     assert "required artifact/sidecar" in agents_text
     assert "runtime truth" not in agents_text
     assert "AGENTS.md" in claude_md.read_text(encoding="utf-8")
+
+
+def test_init_enriches_agents_with_project_context_and_detected_stack(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "zf.yaml").write_text(
+        'version: "1.0"\n'
+        "project:\n"
+        "  name: context-project\n"
+        "  description: Build a release control plane for platform teams.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "context-project"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tests").mkdir()
+
+    assert main(["init"]) == 0
+
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert agents_text.count("ZF:PROJECT-CONTEXT:START") == 1
+    assert "Build a release control plane for platform teams." in agents_text
+    assert agents_text.count("ZF:PROFILE:START") == 1
+    assert "python" in agents_text
+    assert "test: `pytest`" in agents_text
+    claude_text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "开始工作前先阅读 `AGENTS.md`" in claude_text
+    assert "Build a release control plane" not in claude_text
+
+
+def test_init_declared_stack_enriches_empty_project(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "zf.yaml").write_text(
+        'version: "1.0"\nproject:\n  name: greenfield\n',
+        encoding="utf-8",
+    )
+
+    assert main(["init", "--stack", "go"]) == 0
+
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "confidence: declared" in agents_text
+    assert "go test ./..." in agents_text
 
 
 def test_init_preserves_existing_instruction_docs(tmp_path: Path, monkeypatch):

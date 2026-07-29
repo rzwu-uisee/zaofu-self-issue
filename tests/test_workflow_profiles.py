@@ -110,6 +110,38 @@ class TestExpansion:
             )
         ] == ["issue"]
 
+    def test_multi_kind_flow_supports_project_description_and_mixed_verify(
+        self,
+        tmp_path,
+    ):
+        path = tmp_path / "zf.yaml"
+        docs = draft_multi_kind_project_spec(
+            backend="codex",
+            verify_backend="claude-code",
+            project_name="mixed-demo",
+            project_description="Cross-provider delivery project",
+            project_root=tmp_path,
+        )
+        path.write_text(
+            yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        cfg = load_config(path)
+
+        assert cfg.project.description == "Cross-provider delivery project"
+        assert cfg.orchestrator.backend == "codex"
+        assert {
+            role.backend
+            for role in cfg.roles
+            if "verify-lane" in role.name
+        } == {"claude-code"}
+        assert {
+            role.backend
+            for role in cfg.roles
+            if role.role_kind == "writer"
+        } == {"codex"}
+
     def test_one_reference_expands_full_flow(self, tmp_path):
         cfg = load_config(_flow_yaml(tmp_path))
         # scan/plan 段(profile stages)+ lane 链(G3 物化)全到位

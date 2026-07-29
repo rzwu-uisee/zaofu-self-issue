@@ -563,13 +563,25 @@ class TestApiSnapshot:
         EventLog(state_dir / "events.jsonl").append(
             ZfEvent(type="loop.started", actor="zf-cli")
         )
-        local_client = TestClient(create_app(state_dir, project_root=project_root))
+        cfg = ZfConfig(project=ProjectConfig(
+            name="project",
+            description="Durable project context",
+            state_dir=str(state_dir),
+        ))
+        local_client = TestClient(create_app(
+            state_dir,
+            config=cfg,
+            project_root=project_root,
+        ))
 
         data = local_client.get("/api/snapshot").json()
+        light = local_client.get("/api/snapshot/light").json()
         runtime = local_client.get("/api/runtime").json()
 
         assert data["project"]["root"] == str(project_root.resolve())
         assert data["project"]["state_dir"] == str(state_dir.resolve())
+        assert data["project"]["description"] == "Durable project context"
+        assert light["project"]["description"] == "Durable project context"
         assert (
             runtime["agent_surface"]["shared_context"]["project_root"]
             == str(project_root.resolve())
@@ -1241,6 +1253,7 @@ class TestApiWorkbenchProjections:
         assert runtime["actions"]["mutation_enabled"] is False
         assert runtime["web_session"]["mode"] == "read_only"
         assert runtime["agent_surface"]["id"] == "kanban-agent"
+        assert runtime["agent_surface"]["permission_profile"] == "dangerous_full"
         assert runtime["agent_surface"]["shared_context"]["project_root"] == str(state_dir.parent)
         assert (
             runtime["agent_surface"]["shared_context"]["mode"]

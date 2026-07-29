@@ -90,3 +90,28 @@ def test_unclaimed_sla_skips_workflow_fanout_anchor():
     created.ts = datetime.fromtimestamp(now - 700, tz=timezone.utc).isoformat()
 
     assert unclaimed_warnings([anchor], [created], now_ts=now) == []
+
+
+def test_unclaimed_sla_skips_workflow_managed_parent():
+    now = time.time()
+    from datetime import datetime, timezone
+
+    task = Task(
+        id="TASK-WORKFLOW-PARENT",
+        title="workflow-managed parent",
+        status="backlog",
+        contract=TaskContract(
+            evidence_contract={"execution_owner": "workflow"},
+        ),
+    )
+    created = ZfEvent(
+        type="task.created",
+        actor="web",
+        task_id=task.id,
+    )
+    created.ts = datetime.fromtimestamp(
+        now - 700,
+        tz=timezone.utc,
+    ).isoformat()
+
+    assert unclaimed_warnings([task], [created], now_ts=now) == []

@@ -97,6 +97,10 @@ class FeishuTransport(ABC):
         chat_type}. Used by catchup-on-restart (W5). Default: none."""
         return []
 
+    def delete_message(self, message_id: str) -> bool:
+        """Recall a message sent by this bot. Unsupported transports fail closed."""
+        return False
+
     def bot_open_id(self) -> str:
         """This app's bot open_id, for "was I the @-target" filtering in a
         multi-bot group. Empty when unknown (callers fail open)."""
@@ -110,6 +114,7 @@ class MockFeishuTransport(FeishuTransport):
         self.sent_messages: list[FeishuMessage] = []
         self.updated_messages: list[tuple[str, str]] = []
         self.updated_sequences: list[tuple[str, int]] = []
+        self.deleted_message_ids: list[str] = []
         self.recent_messages: list[dict] = []  # catchup: inject list_recent rows
         self.bot_open_id_value: str = ""       # mention-filter: inject this bot's id
 
@@ -135,6 +140,15 @@ class MockFeishuTransport(FeishuTransport):
 
     def list_recent(self, chat_id: str, *, page_size: int = 50) -> list[dict]:
         return list(self.recent_messages)
+
+    def delete_message(self, message_id: str) -> bool:
+        self.deleted_message_ids.append(message_id)
+        self.recent_messages = [
+            item
+            for item in self.recent_messages
+            if str(item.get("message_id") or "") != message_id
+        ]
+        return True
 
     def bot_open_id(self) -> str:
         return self.bot_open_id_value
@@ -235,8 +249,14 @@ class FeishuHttpTransport(FeishuTransport):
                                               or sender.get("id_type") or "")},
                 "mentions": mentions,
                 "chat_type": str(item.get("chat_type") or ""),
+                "deleted": bool(item.get("deleted")),
+                "updated": bool(item.get("updated")),
             })
         return rows
+
+    def delete_message(self, message_id: str) -> bool:
+        self._request_json("DELETE", f"/im/v1/messages/{message_id}", None)
+        return True
 
     def bot_open_id(self) -> str:
         if getattr(self, "_bot_open_id", None) is None:

@@ -544,6 +544,39 @@ def test_workflow_invoke_cold_start_anchor_is_not_dispatched_directly(tmp_path: 
         assert getattr(transport.sent[0][3], "trace_id", "")
 
 
+def test_workflow_managed_parent_is_not_dispatched_as_ordinary_task(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _empty_state(tmp_path)
+    task = Task(
+        id="TASK-WORKFLOW-PARENT",
+        title="Execute only through the selected workflow",
+        contract=TaskContract(
+            behavior="Run the selected workflow.",
+            verification="Observe the workflow fanout.",
+            verification_tiers=["runtime"],
+            evidence_contract={"execution_owner": "workflow"},
+        ),
+    )
+    TaskStore(state_dir / "kanban.json").add(task)
+    created = ZfEvent(
+        type="task.created",
+        actor="web",
+        task_id=task.id,
+        payload={"task": {"id": task.id}},
+    )
+    log.append(created)
+
+    for _ in range(3):
+        orch.run_once(events=[created])
+
+    assert transport.sent == []
+    assert not any(
+        event.type == "task.dispatched" and event.task_id == task.id
+        for event in log.read_all()
+    )
+
+
 def test_workflow_invoke_rejects_blocking_open_questions(tmp_path: Path) -> None:
     _state_dir, log, _transport, orch = _state(tmp_path)
 

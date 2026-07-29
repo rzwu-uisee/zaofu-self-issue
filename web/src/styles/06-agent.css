@@ -222,34 +222,6 @@
   overflow: hidden;
 }
 
-.headless-thread-context {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--line-soft);
-  background: color-mix(in oklab, var(--panel) 92%, var(--surface-2));
-  color: var(--muted-foreground);
-  font-size: var(--text-12);
-}
-
-.headless-thread-context strong {
-  flex: 0 0 auto;
-  color: var(--text);
-  font-weight: 650;
-}
-
-.headless-thread-context span {
-  min-width: 0;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  color: var(--text);
-}
-
 .headless-input {
   min-height: 74px;
   max-height: 168px;

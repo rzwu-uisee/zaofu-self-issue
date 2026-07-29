@@ -16,6 +16,7 @@ from zf.core.task.lifecycle import derive_phase
 from zf.core.task.schema import Task
 from zf.core.task.schema import TaskContract
 from zf.core.task.schema import TaskEvidence
+from zf.core.task.schema import task_contract_from_mapping
 from zf.core.task.store import TaskStore
 from zf.integrations.feishu.views import TaskView
 from zf.runtime.execution_route import project_execution_route
@@ -1705,20 +1706,7 @@ def _task_id_from_payload(payload: dict) -> str | None:
 
 
 def _task_contract_from_payload(value: object) -> TaskContract:
-    if not isinstance(value, dict):
-        return TaskContract()
-    return TaskContract(
-        behavior=str(value.get("behavior") or ""),
-        verification=str(value.get("verification") or ""),
-        verification_tiers=_string_list(value.get("verification_tiers")),
-        validation=(
-            value.get("validation") if isinstance(value.get("validation"), dict) else {}
-        ),
-        scope=_string_list(value.get("scope")),
-        exclusions=_string_list(value.get("exclusions")),
-        acceptance=str(value.get("acceptance") or "exit_code=0"),
-        rework_to=str(value.get("rework_to") or ""),
-    )
+    return task_contract_from_mapping(value)
 
 
 def _task_updates_from_payload(task: Task, payload: dict) -> dict:

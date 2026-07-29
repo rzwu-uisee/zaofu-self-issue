@@ -5,7 +5,7 @@ a Feishu user saying 创建任务 never got a create-task proposal, because
 run_channel_reply_turn has no proposal extraction. These tests drive
 run_specialist_conversation with a patched reply turn (standing in for the
 synchronous dispatch) and assert the same extractor/gates as the Web panel:
-kanban.agent.action.proposed is emitted, contract shapes are normalized
+operator.action.proposed is emitted, contract shapes are normalized
 (5fca581c), the explicit-phrase gate holds, and only agent_kind=kanban_agent
 gets the loop. P3b: the auto-provisioned channel name carries a chat suffix.
 """
@@ -61,6 +61,29 @@ def _proposal_reply_json() -> str:
     }, ensure_ascii=False)
 
 
+def _plan_reply_json() -> str:
+    return json.dumps({
+        "plan_request": {
+            "header": "开发路径",
+            "id": "route",
+            "question": "先研究还是直接拉群讨论？",
+            "options": [
+                {
+                    "id": "research",
+                    "label": "Research (Recommended)",
+                    "description": "先收集证据。",
+                },
+                {
+                    "id": "channel",
+                    "label": "Channel",
+                    "description": "直接邀请角色讨论。",
+                },
+            ],
+            "allow_other": True,
+        }
+    }, ensure_ascii=False)
+
+
 def _patch_reply_turn(monkeypatch, state_dir: Path, writer: EventWriter, reply_text: str):
     """Stand in for the synchronous dispatch: fold the agent's reply before
     run_specialist_conversation projects the channel for extraction."""
@@ -102,7 +125,7 @@ def _run(state_dir: Path, writer: EventWriter, *, text: str, agent_kind: str = "
 def _proposed_events(state_dir: Path):
     return [
         e for e in EventLog(state_dir / "events.jsonl").read_all()
-        if e.type == "kanban.agent.action.proposed"
+        if e.type == "operator.action.proposed"
     ]
 
 
@@ -129,6 +152,33 @@ def test_feishu_create_task_message_emits_normalized_proposal(tmp_path, monkeypa
     assert payload["conversation_id"] == f"feishu-kanban_agent-{CHAT_ID}"
     # caller gets the proposal for the Feishu receipt card
     assert result["action_proposal"]["action"] == "create-task"
+
+
+def test_feishu_plan_reply_emits_durable_request_with_channel_context(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir, writer = _writer(tmp_path)
+    _patch_reply_turn(monkeypatch, state_dir, writer, _plan_reply_json())
+
+    result = _run(state_dir, writer, text="帮我选择下一步路径")
+
+    requested = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "kanban.agent.plan.requested"
+    ]
+    assert len(requested) == 1
+    payload = requested[0].payload
+    request = payload["plan_request"]
+    assert request["request_event_id"] == requested[0].id
+    assert request["valid"] is True
+    assert payload["channel_id"] == f"feishu-kanban_agent-{CHAT_ID}"
+    assert payload["thread_id"] == "main"
+    assert payload["member_id"] == "kanban-agent"
+    assert payload["refs"]["feishu"]["chat_id"] == CHAT_ID
+    assert result["plan_request"]["request_id"] == request["request_id"]
+    assert "action_proposal" not in result
 
 
 def test_feishu_readonly_message_suppresses_proposal(tmp_path, monkeypatch):

@@ -5,6 +5,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 zaofu_root="$(cd "$script_dir/.." && pwd)"
 
 project_dir=""
+project_name=""
+project_description=""
+backend="codex"
+verify_backend=""
+stack=""
 source_config=""
 preset=""
 workspace="default"
@@ -25,15 +30,21 @@ Usage:
 
 Purpose:
   Bootstrap a project so it is ready for ZaoFu runtime startup:
-  - materialize zf.yaml from --source-config or --preset
+  - create a multi-kind project through `zf project init`, or materialize
+    zf.yaml from --source-config / --preset for compatibility
   - initialize runtime state with zf init
-  - generate AGENTS.md and CLAUDE.md if missing
+  - generate project-aware AGENTS.md and CLAUDE.md if missing
   - keep project.state_dir out of git
   - ensure git repo + HEAD when worktree mode is enabled
   - validate config/instructions and optionally run zf start --dry-run
 
 Options:
   --project-dir PATH          Target project directory. Created if missing.
+  --name NAME                 Project name. Defaults to the directory name.
+  --description TEXT          Project background and goal for zf.yaml/AGENTS.md.
+  --backend ID                Primary provider. Default: codex.
+  --verify-backend ID         Optional independent verification provider.
+  --stack ID                  Declared stack: python|node|go|rust.
   --source-config PATH        Copy this config to <project>/zf.yaml if missing.
   --preset NAME              Generate zf.yaml through `zf init --preset NAME`.
   --workspace NAME           Workspace registry name. Default: default.
@@ -120,6 +131,26 @@ while [[ $# -gt 0 ]]; do
       project_dir="${2:?--project-dir requires a value}"
       shift 2
       ;;
+    --name)
+      project_name="${2:?--name requires a value}"
+      shift 2
+      ;;
+    --description)
+      project_description="${2:?--description requires a value}"
+      shift 2
+      ;;
+    --backend)
+      backend="${2:?--backend requires a value}"
+      shift 2
+      ;;
+    --verify-backend)
+      verify_backend="${2:?--verify-backend requires a value}"
+      shift 2
+      ;;
+    --stack)
+      stack="${2:?--stack requires a value}"
+      shift 2
+      ;;
     --source-config)
       source_config="${2:?--source-config requires a value}"
       shift 2
@@ -188,12 +219,17 @@ case "$git_policy" in
   auto|always|require|skip) ;;
   *) fail "--git-policy must be one of: auto, always, require, skip" ;;
 esac
+case "$stack" in
+  ""|python|node|go|rust) ;;
+  *) fail "--stack must be one of: python, node, go, rust" ;;
+esac
 if [[ -n "$source_config" && -n "$preset" ]]; then
   fail "--source-config and --preset are mutually exclusive"
 fi
 
 project_dir="$(abs_path "$project_dir")"
 [[ -z "$source_config" ]] || source_config="$(abs_path "$source_config")"
+[[ -n "$project_name" ]] || project_name="$(basename "$project_dir")"
 
 log "project: $project_dir"
 run mkdir -p "$project_dir"
@@ -212,8 +248,42 @@ if [[ -n "$source_config" ]]; then
   fi
 fi
 
-if [[ ! -e "$project_dir/zf.yaml" && -z "$preset" && ! ( "$dry_run" == "1" && -n "$source_config" ) ]]; then
-  fail "zf.yaml not found. Provide --source-config PATH or --preset NAME."
+if [[ ! -e "$project_dir/zf.yaml" && -z "$preset" && -z "$source_config" ]]; then
+  log "creating multi-kind project through zf project init"
+  project_init_args=(
+    project init
+    --kind multi
+    --name "$project_name"
+    --root .
+    --backend "$backend"
+    --create
+    --workspace "$workspace"
+  )
+  if [[ -n "$project_description" ]]; then
+    project_init_args+=(--description "$project_description")
+  fi
+  if [[ -n "$verify_backend" ]]; then
+    project_init_args+=(--verify-backend "$verify_backend")
+  fi
+  if [[ -n "$stack" ]]; then
+    project_init_args+=(--stack "$stack")
+  fi
+  if [[ -n "$state_dir_arg" ]]; then
+    project_init_args+=(--state-dir "$state_dir_arg")
+  fi
+  if [[ "$workspace_register" == "1" ]]; then
+    project_init_args+=(--workspace-register)
+  else
+    project_init_args+=(--no-workspace-register)
+  fi
+  if [[ "$force_init" == "1" ]]; then
+    project_init_args+=(--force)
+  fi
+  run_zf "${project_init_args[@]}"
+  if [[ "$dry_run" == "1" ]]; then
+    log "dry-run stops before zf project init creates zf.yaml"
+    exit 0
+  fi
 fi
 
 resolve_state_dir() {

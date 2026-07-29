@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any
 
@@ -140,6 +140,62 @@ class TaskContract:
     #    "test":   {"enabled": False}}
     # Empty dict = inherit yaml default verbatim (current behavior).
     quality_gates_override: dict = field(default_factory=dict)
+
+
+def task_contract_from_mapping(value: object) -> TaskContract:
+    """Materialize every known TaskContract field without schema drift."""
+    if not isinstance(value, dict):
+        return TaskContract()
+
+    defaults = TaskContract()
+    normalized: dict[str, Any] = {}
+    for contract_field in fields(TaskContract):
+        name = contract_field.name
+        if name not in value:
+            continue
+        raw = value[name]
+        default = getattr(defaults, name)
+        if isinstance(default, list):
+            if name == "acceptance_criteria":
+                normalized[name] = (
+                    [item for item in raw if item not in (None, "")]
+                    if isinstance(raw, list)
+                    else []
+                )
+            elif isinstance(raw, list):
+                normalized[name] = [
+                    str(item).strip()
+                    for item in raw
+                    if str(item).strip()
+                ]
+            elif isinstance(raw, str):
+                normalized[name] = [
+                    item.strip()
+                    for item in raw.split(",")
+                    if item.strip()
+                ]
+            else:
+                normalized[name] = []
+        elif isinstance(default, dict):
+            normalized[name] = dict(raw) if isinstance(raw, dict) else {}
+        elif isinstance(default, bool):
+            if isinstance(raw, str):
+                normalized[name] = raw.strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+            else:
+                normalized[name] = bool(raw)
+        elif isinstance(default, int):
+            try:
+                normalized[name] = int(raw)
+            except (TypeError, ValueError):
+                normalized[name] = default
+        else:
+            normalized[name] = str(raw or default)
+    return TaskContract(**normalized)
 
 
 @dataclass

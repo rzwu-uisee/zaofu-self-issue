@@ -1,9 +1,10 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const token = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
 const projectRoot = process.env.ZF_REAL_CODING_PROJECT_ROOT ?? "";
+const evidenceDir = process.env.ZF_PLAYWRIGHT_EVIDENCE_DIR ?? "";
 
 type EventItem = {
   seq: number;
@@ -89,6 +90,19 @@ function payloadText(event: EventItem): string {
   return JSON.stringify(event.payload ?? {});
 }
 
+function completedUserForMarker(
+  events: EventItem[],
+  marker: string,
+): EventItem | undefined {
+  const users = events.filter((event) => (
+    event.type === "user.message" && payloadText(event).includes(marker)
+  ));
+  return [...users].reverse().find((user) => events.some((event) => (
+    event.type === "kanban.agent.turn.completed"
+    && event.correlation_id === user.correlation_id
+  )));
+}
+
 async function waitForTurn(
   request: APIRequestContext,
   id: string,
@@ -102,21 +116,13 @@ async function waitForTurn(
   let events: EventItem[] = [];
   await expect.poll(async () => {
     events = await eventsAfter(request, id, cursor);
-    const user = events.find((event) => (
-      event.type === "user.message" && payloadText(event).includes(marker)
-    ));
-    return Boolean(user && events.some((event) => (
-      event.type === "kanban.agent.turn.completed"
-      && event.correlation_id === user.correlation_id
-    )));
+    return Boolean(completedUserForMarker(events, marker));
   }, {
     timeout: 180_000,
     intervals: [250, 500, 1000],
   }).toBeTruthy();
 
-  const user = events.find((event) => (
-    event.type === "user.message" && payloadText(event).includes(marker)
-  ));
+  const user = completedUserForMarker(events, marker);
   expect(user).toBeDefined();
   const replySummary = events.find((event) => (
     event.type === "kanban.agent.reply"
@@ -161,6 +167,9 @@ async function openAgent(page: Page, id: string): Promise<void> {
   await expect(
     page.getByRole("button", { name: /Agent backend: Codex/ }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("radiogroup", { name: "Kanban Agent permission profile" }),
+  ).toHaveCount(0);
 }
 
 async function reopenAgent(page: Page): Promise<void> {
@@ -175,31 +184,60 @@ async function reopenAgent(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
-async function selectDangerousFull(page: Page): Promise<void> {
-  const full = page.getByRole("radio", { name: "Full", exact: true });
-  await full.click();
-  await expect(full).toHaveAttribute("aria-checked", "true");
+async function capture(page: Page, name: string): Promise<void> {
+  if (!evidenceDir) {
+    return;
+  }
+  mkdirSync(evidenceDir, { recursive: true });
+  await page.screenshot({
+    path: `${evidenceDir}/${name}.png`,
+    fullPage: true,
+  });
 }
 
-async function sendDangerousTurn(
+async function sendCodingTurn(
   page: Page,
   message: string,
   replyMarker: string,
 ): Promise<void> {
-  let confirmationCount = 0;
+  const input = page.getByPlaceholder("Tell me what to do...");
+  await input.fill(message);
+  let dangerousAccessConfirmed = false;
   page.once("dialog", async (dialog) => {
     expect(dialog.type()).toBe("confirm");
     expect(dialog.message()).toContain("full shell and Git access");
-    confirmationCount += 1;
+    dangerousAccessConfirmed = true;
     await dialog.accept();
   });
-  const input = page.getByPlaceholder("Tell me what to do...");
-  await input.fill(message);
   await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.locator(".agent-text-part").filter({
+  expect(dangerousAccessConfirmed).toBe(true);
+  const reply = page.locator(".agent-text-part").filter({
     hasText: replyMarker,
-  }).last()).toBeVisible({ timeout: 180_000 });
-  expect(confirmationCount).toBe(1);
+  }).last();
+  const escalation = page.getByRole("button", {
+    name: "Run once with full access",
+  });
+  await expect.poll(async () => (
+    await reply.isVisible().catch(() => false)
+  ), {
+    timeout: 180_000,
+    intervals: [250, 500, 1000],
+  }).toBeTruthy();
+  await expect(reply).toBeVisible({ timeout: 180_000 });
+  await expect(escalation).not.toBeVisible();
+}
+
+function expectPermissionMapping(
+  turn: Awaited<ReturnType<typeof waitForTurn>>,
+): void {
+  expect(turn.reply.payload?.permission_profile).toBe("dangerous_full");
+  expect(turn.completed.payload?.permission_profile).toBe("dangerous_full");
+  expect(turn.permission.payload?.permission_profile).toBe("dangerous_full");
+  const snapshot = turn.permission.payload?.snapshot as
+    | Record<string, unknown>
+    | undefined;
+  expect(snapshot?.sandbox_policy).toBe("danger-full-access");
+  expect(snapshot?.approval_policy).toBe("never");
 }
 
 test("real Codex edits code and resumes the Kanban Agent session", async ({
@@ -211,7 +249,6 @@ test("real Codex edits code and resumes the Kanban Agent session", async ({
   const id = await projectId(request);
   const cursor = await eventCursor(request, id);
   await openAgent(page, id);
-  await selectDangerousFull(page);
 
   const initialSource = readFileSync(
     `${projectRoot}/counter.py`,
@@ -220,7 +257,7 @@ test("real Codex edits code and resumes the Kanban Agent session", async ({
   expect(initialSource).toContain("NotImplementedError");
 
   const firstMarker = "ZF_REAL_CODING_TURN_ONE_DONE";
-  await sendDangerousTurn(
+  await sendCodingTurn(
     page,
     [
       "ZF_REAL_CODING_TURN_ONE.",
@@ -243,27 +280,18 @@ test("real Codex edits code and resumes the Kanban Agent session", async ({
   expect(firstSource).not.toContain("NotImplementedError");
 
   expect(first.reply.payload?.backend).toBe("codex-headless");
-  expect(first.reply.payload?.permission_profile).toBe("dangerous_full");
   expect(first.reply.payload?.resumed).toBe(false);
-  expect(first.completed.payload?.permission_profile).toBe("dangerous_full");
-  expect(first.permission.payload?.permission_profile).toBe(
-    "dangerous_full",
-  );
-  const firstSnapshot = first.permission.payload?.snapshot as
-    | Record<string, unknown>
-    | undefined;
-  expect(firstSnapshot?.sandbox_policy).toBe("danger-full-access");
-  expect(firstSnapshot?.approval_policy).toBe("never");
+  expectPermissionMapping(first);
+  await capture(page, "01-real-coding-turn-one");
 
   await reopenAgent(page);
   await expect(
-    page.getByRole("radio", { name: "Read", exact: true }),
-  ).toHaveAttribute("aria-checked", "true");
-  await selectDangerousFull(page);
+    page.getByRole("radiogroup", { name: "Kanban Agent permission profile" }),
+  ).toHaveCount(0);
 
   const secondMarker = "ZF_REAL_CODING_TURN_TWO_DONE";
   const secondCursor = await eventCursor(request, id);
-  await sendDangerousTurn(
+  await sendCodingTurn(
     page,
     [
       "ZF_REAL_CODING_TURN_TWO.",
@@ -288,14 +316,9 @@ test("real Codex edits code and resumes the Kanban Agent session", async ({
   expect(finalSource).toContain("start");
 
   expect(second.reply.payload?.backend).toBe("codex-headless");
-  expect(second.reply.payload?.permission_profile).toBe("dangerous_full");
   expect(second.reply.payload?.resumed).toBe(true);
-  expect(second.completed.payload?.permission_profile).toBe(
-    "dangerous_full",
-  );
-  expect(second.permission.payload?.permission_profile).toBe(
-    "dangerous_full",
-  );
+  expectPermissionMapping(second);
+  await capture(page, "02-real-coding-turn-two-resumed");
   const firstSession = String(
     first.reply.payload?.provider_session_id ?? "",
   );

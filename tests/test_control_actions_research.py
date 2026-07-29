@@ -17,6 +17,8 @@ from zf.core.events import EventLog, EventWriter
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_route_catalog import workflow_route_catalog
 
 
 def _config() -> ZfConfig:
@@ -119,6 +121,126 @@ def test_research_start_invokes_fixed_template(tmp_path: Path) -> None:
     )
     assert invoke.payload["source_refs"]["template_id"] == "research-fanout.fixed.v1"
     assert invoke.payload["source_refs"]["topic"] == "Kanban collaboration closure"
+
+
+def test_workflow_start_resolves_fixed_research_route(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    task = TaskStore(state_dir / "kanban.json").get("TASK-RESEARCH")
+    assert task is not None
+    catalog = workflow_route_catalog(service.config)
+
+    result = _execute(service, writer, "workflow-start", {
+        "task_id": task.id,
+        "task_contract_digest": task_workflow_binding_digest(task),
+        "route_id": "research:fixed",
+        "config_digest": catalog["config_digest"],
+        "objective": "Compare workflow orchestration approaches.",
+        "parameters": {
+            "expected_output": "Evidence-backed recommendation.",
+        },
+    })
+
+    assert result["ok"] is True
+    assert result["route_id"] == "research:fixed"
+    assert result["template_id"] == "research-fanout.fixed.v1"
+    invoke = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "workflow.invoke.requested"
+    )
+    assert invoke.task_id == task.id
+    assert invoke.payload["pattern_id"] == "research-fanout"
+    assert invoke.payload["expected_output"] == (
+        "Evidence-backed recommendation."
+    )
+
+
+def test_workflow_start_rejects_stale_task_or_config_binding(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    task = store.get("TASK-RESEARCH")
+    assert task is not None
+    task_digest = task_workflow_binding_digest(task)
+    config_digest = workflow_route_catalog(service.config)["config_digest"]
+    store.update(task.id, title="Changed research contract")
+    changed_task = store.get(task.id)
+    assert changed_task is not None
+
+    stale_task = _execute(service, writer, "workflow-start", {
+        "task_id": task.id,
+        "task_contract_digest": task_digest,
+        "route_id": "research:fixed",
+        "config_digest": config_digest,
+        "objective": "Do not start stale work.",
+    })
+    stale_config = _execute(service, writer, "workflow-start", {
+        "task_id": task.id,
+        "task_contract_digest": task_workflow_binding_digest(changed_task),
+        "route_id": "research:fixed",
+        "config_digest": "sha256:stale",
+        "objective": "Do not start stale work.",
+    })
+
+    assert stale_task["status"] == "workflow_task_stale"
+    assert stale_config["status"] == "workflow_route_unavailable"
+    assert not any(
+        event.type == "workflow.invoke.requested"
+        for event in writer.event_log.read_all()
+    )
+
+
+def test_workflow_start_allows_only_registered_general_reader_entry(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    service.config.roles.append(
+        RoleConfig(
+            name="architecture_reader",
+            backend="mock",
+            role_kind="reader",
+        )
+    )
+    service.config.workflow.stages.append(
+        WorkflowStageConfig(
+            id="architecture-review",
+            trigger="workflow.invoke.requested",
+            topology="single_reader",
+            roles=["architecture_reader"],
+        )
+    )
+    task = TaskStore(state_dir / "kanban.json").get("TASK-RESEARCH")
+    assert task is not None
+    catalog = workflow_route_catalog(service.config)
+    payload = {
+        "task_id": task.id,
+        "task_contract_digest": task_workflow_binding_digest(task),
+        "config_digest": catalog["config_digest"],
+        "objective": "Review the runtime authority boundary.",
+    }
+
+    rejected = _execute(service, writer, "task-workflow-start", {
+        **payload,
+        "route_id": "general:unregistered-stage",
+    })
+    started = _execute(service, writer, "task-workflow-start", {
+        **payload,
+        "route_id": "general:architecture-review",
+    })
+
+    assert rejected["status"] == "workflow_route_unavailable"
+    assert started["ok"] is True
+    assert started["action"] == "workflow-start"
+    invoke = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "workflow.invoke.requested"
+    )
+    assert invoke.payload["pattern_id"] == "architecture-review"
+    assert invoke.task_id == task.id
 
 
 def test_research_start_fails_before_event_when_stage_is_missing(tmp_path: Path) -> None:

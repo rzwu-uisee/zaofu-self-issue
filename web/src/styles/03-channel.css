@@ -855,22 +855,31 @@
   border-top: 1px solid var(--line-soft);
 }
 .channel-discussion-questions li + li { border-top: 1px dashed var(--line-soft); }
-.channel-discussion-questions button {
+.channel-discussion-question-main {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  border: none;
-  background: transparent;
   color: inherit;
   font-size: var(--text-12, 12px);
   text-align: left;
   padding: 5px 2px;
-  cursor: pointer;
-  border-radius: 6px;
 }
-.channel-discussion-questions button:hover {
+.channel-question-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.channel-question-icon:hover {
   background: color-mix(in oklab, var(--brand) 7%, transparent);
+  color: var(--foreground);
 }
 .channel-discussion-cat {
   flex: none;
@@ -907,6 +916,35 @@
 .channel-discussion-questions small {
   flex: none;
   color: var(--muted-foreground);
+}
+.channel-discussion-answer,
+.channel-consensus-control {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
+  gap: 6px;
+  align-items: center;
+  padding: 0 2px 7px;
+}
+.channel-consensus-control {
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) auto auto;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 7px;
+}
+.channel-discussion-answer .filter-input,
+.channel-consensus-control .filter-input {
+  min-width: 0;
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .channel-discussion-answer,
+  .channel-consensus-control {
+    grid-template-columns: 1fr auto;
+  }
+  .channel-consensus-control > span,
+  .channel-consensus-control > input {
+    grid-column: 1 / -1;
+  }
 }
 
 /* stalled debate: thin warning chip instead of a proud status card */

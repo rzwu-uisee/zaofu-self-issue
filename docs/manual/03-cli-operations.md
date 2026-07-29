@@ -12,6 +12,12 @@ uv run zf <command>
 `uv sync --extra dev --extra web --extra stream-json`。如果已经安装 `zf`,
 可把前缀替换为 `zf`。
 
+仓库 Python 关键正确性 lint:
+
+```bash
+uv run ruff check src tests
+```
+
 ## 1. 初始化与配置
 
 | 命令 | 用途 |
@@ -80,9 +86,12 @@ uv run zf doctor
 | `zf kanban open` | 查看非终态 tasks |
 | `zf kanban pending` | 查看 backlog tasks |
 | `zf task trace <task_id>` | 查看 task 因果链 |
-| `zf project init --name NAME --root PATH` | 默认创建 multi-kind Project 容器并初始化运行态，不点火 |
+| `zf project init --name NAME --root PATH [--description TEXT] [--stack STACK] [--verify-backend ID]` | 默认创建 multi-kind Project、项目上下文与运行态，不点火 |
 | `zf project init --kind issue\|prd\|refactor ...` | 兼容入口：显式创建单 kind Controller |
 | `zf project review-spine` | 生成 project spine review |
+| `zf workflow routes --task TASK --format json` | 查询当前 `zf.yaml` 对该 Task 开放的 route |
+| `zf workflow start --task TASK --route ROUTE --propose` | 创建 Task-bound Workflow proposal，不点火 |
+| `zf workflow start --proposal-event-id EVENT --apply ...` | 经 operator 授权应用 exact proposal 并点火 |
 | `zf flow intake` | 接收 issue/PRD/refactor 输入并生成 intake artifact |
 | `zf flow classify` | 分类任务类型 |
 | `zf flow clarify --confirm` | 补齐 requirement 并确认不可变提交快照 |
@@ -102,8 +111,9 @@ TASK_ID="$(
 uv run zf kanban assign "$TASK_ID" dev
 ```
 
-`project init`、`zf start` 和 workflow 点火是三个独立动作。默认初始化不会产生
-`workflow.invoke.requested`；完整流程见
+`project init`、`zf start` 和 Workflow 点火是三个独立动作。Research 与交付
+Workflow 都要求已有 Task；默认初始化和 `workflow start --propose` 都不会产生
+`workflow.invoke.requested`。完整流程见
 [20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
 
 ## 4. 事件

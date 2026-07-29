@@ -31,6 +31,7 @@ class ChannelTemplateActionsMixin:
         action: str,
         requested_action: str,
         payload: dict,
+        emit_completion: bool = True,
     ) -> dict:
         template_id = _required_text(payload, "template_id")
         materialized, error = materialize_channel_template(
@@ -46,6 +47,25 @@ class ChannelTemplateActionsMixin:
                 reason=error or "channel template preflight failed",
                 status_code=422,
                 status="invalid_template",
+            )
+        expected_digest = str(
+            payload.get("expected_materialization_digest") or ""
+        ).strip()
+        if (
+            expected_digest
+            and expected_digest != materialized["materialization_digest"]
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=(
+                    "channel template materialization changed after Plan "
+                    "selection was presented"
+                ),
+                status_code=409,
+                status="template_superseded",
             )
         name = str(payload.get("name") or materialized["name"])
         channel_id = _normal_channel_id(
@@ -67,6 +87,15 @@ class ChannelTemplateActionsMixin:
                     "requested_action": requested_action,
                     "channel_id": channel_id,
                     "template": template,
+                    "template_id": template_id,
+                    "name": name,
+                    "member_count": len(materialized["members"]),
+                    "participants": list(
+                        materialized["discussion"]["participants"]
+                    ),
+                    "max_rounds": int(
+                        materialized["discussion"]["max_rounds"]
+                    ),
                 }
             return self._failed(
                 requested=requested,
@@ -198,23 +227,24 @@ class ChannelTemplateActionsMixin:
                 "source": self.surface,
             },
         )
-        self._completed(
-            requested=requested,
-            event=event,
-            action=action,
-            requested_action=requested_action,
-            status="created",
-            task_id=_task_id_from_payload(payload),
-            extra={
-                "channel_id": channel_id,
-                "template_id": template_id,
-                "template_version": materialized["template_version"],
-                "template_digest": materialized["template_digest"],
-                "materialization_digest": materialized[
-                    "materialization_digest"
-                ],
-            },
-        )
+        if emit_completion:
+            self._completed(
+                requested=requested,
+                event=event,
+                action=action,
+                requested_action=requested_action,
+                status="created",
+                task_id=_task_id_from_payload(payload),
+                extra={
+                    "channel_id": channel_id,
+                    "template_id": template_id,
+                    "template_version": materialized["template_version"],
+                    "template_digest": materialized["template_digest"],
+                    "materialization_digest": materialized[
+                        "materialization_digest"
+                    ],
+                },
+            )
         return {
             "_status_code": 202,
             "ok": True,
@@ -230,7 +260,154 @@ class ChannelTemplateActionsMixin:
                 "materialization_digest"
             ],
             "member_count": len(materialized["members"]),
+            "participants": list(materialized["discussion"]["participants"]),
+            "max_rounds": int(materialized["discussion"]["max_rounds"]),
             "event_id": event.id,
+        }
+
+    def _channel_create_and_start(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        created = self._channel_create_from_template(
+            requested=requested,
+            action=action,
+            requested_action=requested_action,
+            payload=payload,
+            emit_completion=False,
+        )
+        if not created.get("ok"):
+            return created
+
+        channel_id = str(created["channel_id"])
+        thread_id = str(payload.get("thread_id") or "main")
+        message = str(
+            payload.get("message")
+            or payload.get("objective")
+            or payload.get("text")
+            or ""
+        ).strip()
+        message_id = str(
+            payload.get("message_id")
+            or f"msg-{requested.id.removeprefix('evt-')}"
+        )
+        events = self.writer.event_log.read_all()
+        prior_message = next(
+            (
+                event
+                for event in reversed(events)
+                if event.type == "channel.message.posted"
+                and str(event.payload.get("channel_id") or "") == channel_id
+                and str(event.payload.get("thread_id") or "main") == thread_id
+                and str(event.payload.get("message_id") or "") == message_id
+            ),
+            None,
+        )
+        prior_start = next(
+            (
+                event
+                for event in reversed(events)
+                if event.type == "channel.discussion.started"
+                and str(event.payload.get("channel_id") or "") == channel_id
+                and str(event.payload.get("thread_id") or "main") == thread_id
+                and str(event.payload.get("requirement_message_id") or "")
+                == message_id
+            ),
+            None,
+        )
+        if prior_message is not None and prior_start is not None:
+            started = {
+                "ok": True,
+                "status": "existing",
+                "event_id": prior_message.id,
+                "message_id": message_id,
+                "participants": list(created.get("participants") or []),
+            }
+            completion_event = prior_message
+        else:
+            started = self._channel_discussion_start(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload={
+                    **payload,
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "message_id": message_id,
+                    "message": message,
+                },
+                emit_completion=False,
+            )
+            if not started.get("ok"):
+                return {
+                    **started,
+                    "channel_id": channel_id,
+                    "creation_status": str(created.get("status") or ""),
+                }
+            completion_event = next(
+                (
+                    event
+                    for event in reversed(self.writer.event_log.read_all())
+                    if event.id == str(started.get("event_id") or "")
+                ),
+                None,
+            )
+        if completion_event is None:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason="channel discussion start event is missing",
+                status_code=500,
+                status="event_missing",
+            )
+
+        participants = list(
+            started.get("participants")
+            or created.get("participants")
+            or []
+        )
+        self._completed(
+            requested=requested,
+            event=completion_event,
+            action=action,
+            requested_action=requested_action,
+            status="started",
+            task_id=_task_id_from_payload(payload),
+            extra={
+                "channel_id": channel_id,
+                "template_id": str(created.get("template_id") or ""),
+                "member_count": int(created.get("member_count") or 0),
+                "participants": participants,
+                "max_rounds": int(created.get("max_rounds") or 0),
+                "message_id": message_id,
+                "thread_id": thread_id,
+            },
+        )
+        return {
+            "_status_code": 202,
+            "ok": True,
+            "status": "started",
+            "action": action,
+            "requested_action": requested_action,
+            "channel_id": channel_id,
+            "name": str(created.get("name") or ""),
+            "template_id": str(created.get("template_id") or ""),
+            "creation_status": str(created.get("status") or ""),
+            "member_count": int(created.get("member_count") or 0),
+            "participants": participants,
+            "max_rounds": int(created.get("max_rounds") or 0),
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "event_id": completion_event.id,
+            "reply_request_count": int(
+                started.get("reply_request_count") or 0
+            ),
         }
 
     def _channel_discussion_start(
@@ -240,6 +417,7 @@ class ChannelTemplateActionsMixin:
         action: str,
         requested_action: str,
         payload: dict,
+        emit_completion: bool = True,
     ) -> dict:
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         channel = project_channel(self.state_dir, channel_id) or {}
@@ -278,6 +456,7 @@ class ChannelTemplateActionsMixin:
                 ).removeprefix("@all ").strip(),
                 "mentions": ["all"],
             },
+            emit_completion=emit_completion,
         )
         if result.get("ok"):
             result["status"] = "started"

@@ -1,11 +1,13 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 const token = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
+const evidenceDir = process.env.ZF_PLAYWRIGHT_EVIDENCE_DIR ?? "";
 
 type EventItem = {
   seq: number;
   id: string;
   type: string;
+  task_id?: string | null;
   causation_id?: string | null;
   correlation_id?: string | null;
   payload?: Record<string, unknown>;
@@ -14,6 +16,10 @@ type EventItem = {
 type EventPage = {
   items?: EventItem[];
   current_seq?: number;
+};
+
+type EventDetail = {
+  event?: EventItem;
 };
 
 type Snapshot = {
@@ -55,6 +61,19 @@ async function eventsAfter(
   return Array.isArray(page.items) ? page.items : [];
 }
 
+async function hydrateEvent(
+  request: APIRequestContext,
+  id: string,
+  event: EventItem,
+): Promise<EventItem> {
+  const detail = await apiJson<EventDetail>(
+    request,
+    `/api/projects/${encodeURIComponent(id)}/events/${encodeURIComponent(event.id)}`,
+  );
+  expect(detail.event).toBeDefined();
+  return detail.event as EventItem;
+}
+
 async function waitForEvents(
   request: APIRequestContext,
   id: string,
@@ -92,11 +111,26 @@ async function primeBrowser(page: Page, withToken = true): Promise<void> {
 }
 
 async function openKanbanAgent(page: Page, id: string, withToken = true): Promise<void> {
+  page.on("dialog", async (dialog) => {
+    if (
+      dialog.type() === "confirm"
+      && dialog.message()
+        === "Grant this Kanban Agent turn full shell and Git access?"
+    ) {
+      await dialog.accept();
+      return;
+    }
+    await dialog.dismiss();
+  });
   await primeBrowser(page, withToken);
   await page.goto(`/?project=${encodeURIComponent(id)}`);
   await expect(page.locator(".status-pill.status-live")).toBeVisible({ timeout: 90_000 });
   await page.getByRole("button", { name: "Open Kanban Agent" }).click();
-  await expect(page.getByRole("dialog", { name: "Kanban Agent" })).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "Kanban Agent" });
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByRole("radiogroup", { name: "Kanban Agent permission profile" }),
+  ).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Agent backend: Claude/ })).toBeVisible();
 }
 
@@ -104,6 +138,13 @@ async function sendMessage(page: Page, message: string): Promise<void> {
   const input = page.getByPlaceholder("Tell me what to do...");
   await input.fill(message);
   await page.getByRole("button", { name: "Send message" }).click();
+}
+
+async function captureAgent(page: Page, name: string): Promise<void> {
+  if (!evidenceDir) return;
+  await page.getByRole("dialog", { name: "Kanban Agent" }).screenshot({
+    path: `${evidenceDir}/${name}.png`,
+  });
 }
 
 function snapshotHasTitle(snapshot: Snapshot, title: string): boolean {
@@ -152,7 +193,7 @@ test("KBA-02 readonly stream completes without proposal or task mutation", async
   expect(types).toContain("kanban.agent.turn.started");
   expect(types).toContain("kanban.agent.turn.completed");
   expect(types).not.toContain("kanban.agent.turn.delta");
-  expect(types).not.toContain("kanban.agent.action.proposed");
+  expect(types).not.toContain("operator.action.proposed");
   expect(types).not.toContain("task.created");
 
   const after = await apiJson<Snapshot>(request, `/api/projects/${encodeURIComponent(id)}/snapshot`);
@@ -169,9 +210,10 @@ test("KBA-03 create-task proposal mutates canonical state only after acceptance"
   await openKanbanAgent(page, id);
   await sendMessage(page, `${marker} create a task proposal and wait for my approval`);
   const proposals = page.locator(".agent-stacked-cards");
-  await expect(proposals).toContainText("Create task proposal", { timeout: 30_000 });
+  await expect(proposals).toContainText("Create task", { timeout: 30_000 });
   await expect(proposals).toContainText(title);
   await expect(page.locator(".agent-text-part").filter({ hasText: '{"action_proposal"' })).toHaveCount(0);
+  await captureAgent(page, "01-create-task-confirmation");
 
   const pendingBefore = await apiJson<{ items?: unknown[] }>(
     request,
@@ -183,11 +225,13 @@ test("KBA-03 create-task proposal mutates canonical state only after acceptance"
   const beforeEvents = await eventsAfter(request, id, cursor);
   expect(beforeEvents.some((event) => event.type === "task.created")).toBeFalsy();
 
-  await proposals.getByRole("button", { name: "Create Task" }).click();
+  await proposals.getByRole("button", { name: "Create task" }).click();
   await expect.poll(async () => {
     const snapshot = await apiJson<Snapshot>(request, `/api/projects/${encodeURIComponent(id)}/snapshot`);
     return snapshotHasTitle(snapshot, title);
   }, { timeout: 30_000 }).toBeTruthy();
+  await expect(proposals).toContainText("Task created", { timeout: 30_000 });
+  await captureAgent(page, "02-create-task-approved");
 
   const acceptedEvents = await waitForEvents(request, id, cursor, (items) => {
     const accepted = items.find((event) => (
@@ -199,7 +243,7 @@ test("KBA-03 create-task proposal mutates canonical state only after acceptance"
     )));
   });
   const proposalSeq = acceptedEvents.find((event) => (
-    event.type === "kanban.agent.action.proposed" && eventPayloadContains(event, title)
+    event.type === "operator.action.proposed" && eventPayloadContains(event, title)
   ))?.seq ?? 0;
   const accepted = acceptedEvents.find((event) => (
     event.type === "runtime.action.accepted"
@@ -252,6 +296,349 @@ test("KBA-04 two turns resume one provider session and survive reload", async ({
   await page.getByRole("button", { name: "Open Kanban Agent" }).click();
   await expect(page.locator(".agent-session")).toContainText(markerA, { timeout: 30_000 });
   await expect(page.locator(".agent-session")).toContainText(markerB, { timeout: 30_000 });
+});
+
+test("KBA-PLAN Plan choice resumes into Approve and survives reload", async ({ page, request }) => {
+  const id = await projectId(request);
+  const cursor = await eventCursor(request, id);
+  const marker = `KBA_PLAN_${Date.now().toString(36)}`;
+  const title = `Kanban Plan delivery ${marker}`;
+
+  await openKanbanAgent(page, id);
+  await sendMessage(
+    page,
+    `${marker} create a task, but ask which delivery route to use first`,
+  );
+  const planCard = page.locator(".agent-stack-card.plan").filter({ hasText: marker }).last();
+  await expect(planCard).toBeVisible({ timeout: 30_000 });
+  await expect(planCard).toContainText("Question");
+  await expect(planCard).toContainText("Direct");
+  await expect(planCard.locator(".agent-plan-recommended")).toHaveText("Recommended");
+  await expect(planCard).toContainText("Research");
+  await expect(planCard).toContainText("Customize");
+  await expect(planCard.getByRole("button", { name: "Chat about" })).toBeEnabled();
+  await expect(planCard.getByRole("button", { name: "Continue" })).toBeDisabled();
+
+  await planCard.getByLabel("Direct (Recommended)").check();
+  await planCard.getByRole("button", { name: "Continue" }).click();
+  await expect(planCard).toContainText("Plan summary", { timeout: 30_000 });
+  await expect(planCard).toContainText("Plan complete");
+  await expect(planCard).toContainText("Direct (Recommended)");
+  const approveCard = page.locator(".agent-stack-card.approve").filter({ hasText: title }).last();
+  await expect(approveCard).toBeVisible({ timeout: 30_000 });
+  await expect(approveCard).toContainText("Confirmation");
+  await expect(approveCard.getByRole("button", { name: "Create task" })).toBeEnabled();
+  await expect(approveCard.getByRole("button", { name: "Edit" })).toBeEnabled();
+  await expect(approveCard.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  await expect(
+    page.locator(".agent-user-message").filter({ hasText: "Plan: Delivery route" }),
+  ).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.locator(".status-pill.status-live")).toBeVisible({ timeout: 90_000 });
+  await page.getByRole("button", { name: "Open Kanban Agent" }).click();
+  const refreshedPlan = page.locator(".agent-stack-card.plan").filter({ hasText: marker }).last();
+  await expect(refreshedPlan).toContainText("Direct (Recommended)", { timeout: 30_000 });
+  await expect(refreshedPlan.getByRole("button", { name: "Continue" })).toHaveCount(0);
+  const refreshedApprove = page.locator(".agent-stack-card.approve").filter({ hasText: title }).last();
+  await expect(refreshedApprove.getByRole("button", { name: "Create task" })).toBeEnabled();
+  await refreshedApprove.getByRole("button", { name: "Create task" }).click();
+
+  await expect.poll(async () => {
+    const snapshot = await apiJson<Snapshot>(
+      request,
+      `/api/projects/${encodeURIComponent(id)}/snapshot`,
+    );
+    return snapshotHasTitle(snapshot, title);
+  }, { timeout: 30_000 }).toBeTruthy();
+  await expect(refreshedApprove).toContainText("Task created", { timeout: 30_000 });
+  await expect(refreshedApprove.getByRole("button", { name: "Create task" })).toHaveCount(0);
+
+  const events = await waitForEvents(request, id, cursor, (items) => (
+    items.some((event) => event.type === "kanban.agent.plan.answered")
+    && (() => {
+      const proposal = items.find((event) => (
+        event.type === "operator.action.proposed"
+        && eventPayloadContains(event, title)
+      ));
+      return Boolean(proposal && items.some((event) => (
+        event.type === "task.created"
+        && event.payload?.proposal_event_id === proposal.id
+      )));
+    })()
+  ));
+  expect(events.filter((event) => event.type === "kanban.agent.plan.requested")).toHaveLength(1);
+  expect(events.filter((event) => event.type === "kanban.agent.plan.answered")).toHaveLength(1);
+  const planAnswer = events.find((event) => event.type === "kanban.agent.plan.answered");
+  expect(planAnswer?.payload?.answer).toBe("Direct (Recommended)");
+  const completedTurns = events.filter((event) => event.type === "kanban.agent.turn.completed");
+  expect(completedTurns).toHaveLength(2);
+  expect(completedTurns[0]?.payload?.provider_session_id).toBe(
+    completedTurns[1]?.payload?.provider_session_id,
+  );
+});
+
+test("KBA-PLAN multiple clarification questions submit atomically", async ({
+  page,
+  request,
+}) => {
+  const id = await projectId(request);
+  const cursor = await eventCursor(request, id);
+  const marker = `KBA_MULTI_PLAN_${Date.now().toString(36)}`;
+
+  await openKanbanAgent(page, id);
+  await sendMessage(
+    page,
+    `${marker} clarify the route and evidence depth before continuing`,
+  );
+  const plan = page.locator(".agent-stack-card.plan").filter({
+    hasText: marker,
+  }).last();
+  await expect(plan).toBeVisible({ timeout: 30_000 });
+  await expect(plan).toContainText("1 of 2");
+  await expect(plan).toContainText("2 of 2");
+  await expect(plan.locator(".agent-plan-recommended")).toHaveCount(2);
+  const continueButton = plan.getByRole("button", { name: "Continue" });
+  await expect(continueButton).toBeDisabled();
+  await captureAgent(page, "08-multi-question-plan");
+  await plan.getByLabel("Direct").check();
+  await expect(continueButton).toBeDisabled();
+  await plan.getByLabel("Focused").check();
+  await expect(continueButton).toBeEnabled();
+
+  await continueButton.click();
+  await expect(plan).toContainText("Plan summary", { timeout: 30_000 });
+  await expect(plan).toContainText("Direct");
+  await expect(plan).toContainText("Focused");
+  await captureAgent(page, "09-multi-question-summary");
+  const events = await waitForEvents(request, id, cursor, (items) => (
+    items.some((event) => event.type === "kanban.agent.plan.answered")
+    && items.some((event) => event.type === "kanban.agent.turn.completed")
+  ));
+  const answered = await hydrateEvent(
+    request,
+    id,
+    events.find(
+      (event) => event.type === "kanban.agent.plan.answered",
+    ) as EventItem,
+  );
+  expect(answered.payload?.answers).toEqual([
+    { question_id: "route", option_id: "direct", answer: "Direct" },
+    { question_id: "evidence", option_id: "focused", answer: "Focused" },
+  ]);
+  expect(events.some(
+    (event) => event.type === "operator.action.proposed",
+  )).toBeFalsy();
+});
+
+test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", async ({
+  page,
+  request,
+}) => {
+  const id = await projectId(request);
+  const cursor = await eventCursor(request, id);
+  const marker = `KBA_CHANNEL_${Date.now().toString(36)}`;
+
+  await openKanbanAgent(page, id);
+  await sendMessage(
+    page,
+    `${marker} create the recommended collaboration Channel and start it`,
+  );
+  const plan = page.locator(".agent-stack-card.plan").filter({
+    hasText: marker,
+  }).last();
+  await expect(plan).toBeVisible({ timeout: 30_000 });
+  await expect(plan).toContainText("Quick change");
+  await expect(plan.locator(".agent-plan-recommended")).toHaveText("Recommended");
+  await expect(plan).toContainText("3 members");
+  await expect(plan).toContainText("4 rounds");
+  await expect(plan).not.toContainText("Customize");
+  await expect(plan.getByRole("button", { name: "Chat about" })).toBeEnabled();
+  await plan.getByLabel("Quick change (Recommended)").check();
+  await captureAgent(page, "03-channel-setup-plan");
+  await plan.getByRole("button", { name: "Create & start" }).click();
+
+  const events = await waitForEvents(request, id, cursor, (items) => (
+    items.some((event) => event.type === "channel.created")
+    && items.some((event) => event.type === "channel.discussion.started")
+    && items.some((event) => event.type === "kanban.agent.plan.answered")
+  ));
+  const answered = await hydrateEvent(
+    request,
+    id,
+    events.find(
+      (event) => event.type === "kanban.agent.plan.answered",
+    ) as EventItem,
+  );
+  expect(answered.payload?.applied_action).toBe("channel-create-and-start");
+  expect(events.some((event) => event.type === "workflow.invoke.requested")).toBeFalsy();
+  await expect(plan).toContainText("Plan summary");
+  await expect(plan).toContainText("Plan applied");
+  await expect(plan).toContainText("Quick change (Recommended)");
+});
+
+test("KBA-WORKFLOW Create Task leads to Plan, then Approve, then invoke", async ({
+  page,
+  request,
+}) => {
+  const id = await projectId(request);
+  const cursor = await eventCursor(request, id);
+  const marker = `KBA_TASK_WORKFLOW_${Date.now().toString(36)}`;
+  const title = `Task workflow ${marker}`;
+
+  await openKanbanAgent(page, id);
+  await sendMessage(
+    page,
+    `${marker} create a Task and recommend a workflow before starting it`,
+  );
+  const create = page.locator(".agent-stack-card.approve").filter({
+    hasText: title,
+  }).last();
+  await expect(create).toBeVisible({ timeout: 30_000 });
+  await expect(create.getByRole("button", { name: "Create task" })).toBeEnabled();
+  await create.getByRole("button", { name: "Create task" }).click();
+
+  const taskAndPlanEvents = await waitForEvents(
+    request,
+    id,
+    cursor,
+    (items) => (
+      items.some((event) => event.type === "task.created")
+      && items.some(
+        (event) => event.type === "kanban.agent.plan.requested",
+      )
+    ),
+  );
+  const created = taskAndPlanEvents.find(
+    (event) => event.type === "task.created",
+  );
+  expect(created?.task_id).toBeTruthy();
+  const requestedPlan = taskAndPlanEvents.find(
+    (event) => event.type === "kanban.agent.plan.requested",
+  );
+  expect(requestedPlan?.task_id).toBe(created?.task_id);
+  expect(
+    taskAndPlanEvents.some((event) => event.type === "workflow.invoke.requested"),
+  ).toBeFalsy();
+
+  const plan = page.locator(".agent-stack-card.plan").filter({
+    hasText: marker,
+  }).last();
+  await expect(plan).toBeVisible({ timeout: 30_000 });
+  await expect(plan).toContainText("Research first");
+  await expect(plan.locator(".agent-plan-recommended")).toHaveText("Recommended");
+  await expect(plan).toContainText("research / fanout reader");
+  await expect(plan).toContainText("Output: research report");
+  await expect(plan).toContainText("Customize");
+  const chatAbout = plan.getByRole("button", { name: "Chat about" });
+  await expect(chatAbout).toBeEnabled();
+  await chatAbout.click();
+  const discussion = page.locator(".headless-plan-discussion");
+  await expect(discussion).toContainText("Workflow route");
+  const composer = page.getByPlaceholder("Ask about Workflow route...");
+  await expect(composer).toHaveValue("");
+  await expect(plan.getByRole("button", { name: "Continue" })).toBeVisible();
+  const discussionMarker = `KBA_PLAN_DISCUSS_${Date.now().toString(36)}`;
+  const discussionCursor = await eventCursor(request, id);
+  await composer.fill(`${discussionMarker} compare the recommended route without answering the Plan`);
+  await page.getByRole("button", { name: "Send message" }).click();
+  const discussionEvents = await waitForEvents(
+    request,
+    id,
+    discussionCursor,
+    (items) => eventChainForMarker(items, discussionMarker).some(
+      (event) => event.type === "kanban.agent.turn.completed",
+    ),
+  );
+  const discussionChain = eventChainForMarker(
+    discussionEvents,
+    discussionMarker,
+  );
+  const discussionUser = await hydrateEvent(
+    request,
+    id,
+    discussionChain.find(
+      (event) => event.type === "user.message",
+    ) as EventItem,
+  );
+  const discussionRequest = discussionUser.payload?.request as
+    | Record<string, unknown>
+    | undefined;
+  const discussionBinding = discussionRequest?.plan_discussion as
+    | Record<string, unknown>
+    | undefined;
+  expect(discussionBinding?.request_event_id).toBe(requestedPlan?.id);
+  expect(discussionChain.some(
+    (event) => event.type === "kanban.agent.plan.answered",
+  )).toBeFalsy();
+  expect(discussionChain.some(
+    (event) => event.type === "operator.action.proposed",
+  )).toBeFalsy();
+  await captureAgent(page, "10-workflow-chat-about");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(plan).toBeVisible();
+  const mobileOverflow = await plan.evaluate((element) => (
+    element.scrollWidth > element.clientWidth + 1
+  ));
+  expect(mobileOverflow).toBeFalsy();
+  await captureAgent(page, "04-task-workflow-plan-mobile");
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await plan.getByLabel("Research first (Recommended)").check();
+  await captureAgent(page, "05-task-workflow-plan");
+  await plan.getByRole("button", { name: "Continue" }).click();
+  await expect(plan).toContainText("Plan summary", { timeout: 30_000 });
+  await expect(plan).toContainText("Ready for confirmation");
+  await expect(plan).toContainText("Research first (Recommended)");
+  await captureAgent(page, "11-task-workflow-plan-summary");
+  const approve = page.locator(".agent-stack-card.approve").filter({
+    hasText: "research:fixed",
+  }).last();
+  await expect(approve).toBeVisible({ timeout: 30_000 });
+  await expect(approve).toContainText("Confirmation");
+  await expect(approve).toContainText(String(created?.task_id));
+  await expect(
+    approve.getByRole("button", { name: "Start workflow" }),
+  ).toBeEnabled();
+
+  const beforeApprove = await eventsAfter(request, id, cursor);
+  expect(
+    beforeApprove.some((event) => event.type === "workflow.invoke.requested"),
+  ).toBeFalsy();
+  await captureAgent(page, "06-task-workflow-confirmation");
+  await approve.getByRole("button", { name: "Start workflow" }).click();
+
+  const completed = await waitForEvents(request, id, cursor, (items) => (
+    items.some((event) => (
+      event.type === "workflow.invoke.requested"
+      && event.task_id === created?.task_id
+    ))
+    && items.some(
+      (event) => event.type === "operator.action.resolved",
+    )
+  ));
+  const invoke = await hydrateEvent(
+    request,
+    id,
+    completed.find((event) => (
+      event.type === "workflow.invoke.requested"
+      && event.task_id === created?.task_id
+    )) as EventItem,
+  );
+  expect(invoke.payload?.pattern_id).toBe("research-fanout");
+  expect(completed.filter((event) => (
+    event.type === "workflow.invoke.requested"
+    && event.task_id === created?.task_id
+  ))).toHaveLength(1);
+  expect(completed.filter((event) => (
+    event.type === "operator.action.proposed"
+    && eventPayloadContains(event, "workflow-start")
+  ))).toHaveLength(1);
+  await expect(approve).toContainText("Workflow started", {
+    timeout: 30_000,
+  });
+  await captureAgent(page, "07-task-workflow-started");
 });
 
 test("KBA-05 interrupt cancels only the active run and the next turn recovers", async ({ page, request }) => {

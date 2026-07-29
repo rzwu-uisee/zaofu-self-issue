@@ -1,150 +1,249 @@
 # Channel Collaboration
 
-> Audience: operators coordinating one or more agents in a shared conversation
-> and projecting that conversation to Web or Feishu.
+> Audience: operators who want multiple agents to collaborate around one
+> requirement and continue the conversation in Web or Feishu.
 >
-> Status: the implemented core includes posting, mention-triggered replies, and
-> event projections. Some multi-member policies, direct channel-to-workflow
-> bridging, and provider adapters remain incomplete.
+> Status: Kanban Plan Channel creation, template members, original requirement
+> posting, `fanout_then_synthesis`, and continued conversation are implemented.
+> This manual reflects real E2E checked on 2026-07-28.
 
-## 1. What a Channel Is
+## 1. Current Channel Group model
 
-A Channel is an event-driven shared conversation. Users and agent members post
-messages; mentioned agents reply; the lifecycle is recorded as `channel.*`
-events in `events.jsonl` and can be rebuilt as a projection.
+The product may call the experience Channel Group. The kernel canonical model
+is:
 
-There is no static `channel group` section in `zf.yaml`. Channels are created at
-runtime through `channel.created`, and the model is channel plus members.
-Inbound messages can come from Feishu or Web. A Feishu `target: agent` creates a
-temporary channel; `target: channel` routes to an existing one.
+```text
+Channel
+├── Members (provider agent / runtime role / human / observer)
+├── Messages and threads
+├── Discussion policy
+├── Writer role and writer scope
+└── Synthesis artifacts and event refs
+```
 
-### 1.1 Channel to Workflow Request
+A Channel is a dynamic runtime object established by `channel.created` and
+subsequent `channel.*` events. There is no static `channel group` block in
+`zf.yaml`. The control plane still supplies provider, runtime-role, permission,
+and integration constraints.
 
-Inside an initialized Project, the controlled `workflow-request` action can
-create or revise a Request proposal. It creates intake, resolves the kind, runs
-a submit preview, and returns `clarification_required` or `proposal_ready`. It
-does not emit `workflow.invoke.requested`; explicit Project workflow-submit
-approval remains required. See
-[20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
-for the complete Project/Request/Run path.
+Channel is independent from Workflow:
 
-## 2. Post with `zf channel say`
+- creating or discussing in a Channel does not require a Task;
+- Channel supports clarification, review, debate, and consensus;
+- Channel output does not automatically create a Task;
+- Channel does not directly start Research or delivery;
+- to execute, confirm a `Create Task` proposal and then choose a Workflow for
+  that Task.
 
-The stable Channel CLI command is `say`. It uses the
-`channel-post-message` controlled action rather than directly holding Feishu
-credentials or invoking a transport:
+## 2. Recommended entry: Kanban Agent creates the Channel
+
+Do not start by selecting `New Channel`, inviting each member, or copying the
+first requirement. Tell Kanban Agent that the requirement needs collaboration:
+
+```text
+Create a PRD clarification Channel for the login security change. Include
+product, architecture, critic, and security views, use at most 12 rounds, and
+produce a traceable synthesis.
+```
+
+Kanban Agent returns an action-bound Channel setup Plan. Each option binds:
+
+- `template_id`;
+- optional Channel name;
+- exact member roles and count;
+- optional provider/model overrides;
+- budget such as `max_rounds`;
+- writer role and restricted writer scope.
+
+![Channel setup Plan with template, members, and rounds](assets/kanban-channel-plan.png)
+
+Select an option and `Create & start`. One atomic action:
+
+```text
+channel-create-and-start
+-> creates the Channel
+-> materializes Members, role context, skills, and permissions
+-> posts the original requirement that triggered the Plan
+-> starts discussion
+-> fanout blind replies
+-> relay / critique
+-> synthesis
+```
+
+There is no second Approve card. Channel setup is the bounded direct-apply
+exception for Plan; the browser action session/token must still be valid. Other
+risky actions retain separate approval.
+
+### `Chat about`
+
+`Chat about` does not apply or discard the Plan. It sends additional context to
+the same Kanban Agent session, allowing changes to:
+
+- discussion rounds;
+- optional roles;
+- scope and expected output;
+- primary provider, model, or budget;
+- writer scope.
+
+The agent should update the Plan rather than asking the operator to edit JSON.
+
+## 3. Built-in Channel templates
+
+All current built-in templates use `fanout_then_synthesis`:
+
+| Template | Default members | Writer |
+|---|---|---|
+| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`, optional `security_reviewer` | `product_pm`, normally limited to `docs/design/**` and `docs/impl/**` |
+| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `researcher`, limited to research artifacts |
+| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `arch` |
+| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `tech_leader` |
+| `incident-triage` | `tech_leader`, `qa_analyst`, optional `security_reviewer` | `tech_leader` |
+
+Templates are not arbitrary role-name collections. Required roles cannot be
+disabled. Only allowed optional roles, backend, model, writer, writer scope,
+and budget overrides are accepted. Non-writers normally remain read-only so
+every participant cannot modify the Project concurrently.
+
+## 4. Discussion, synthesis, and continuation
+
+`fanout_then_synthesis` has three phases:
+
+1. `phase1_blind`: independent replies avoid anchoring;
+2. `phase2_relay`: participants relay, challenge, and add evidence;
+3. `phase3_synthesis`: the template synthesizer/default responder converges.
+
+The event chain covers Channel/Member creation, message posting, reply
+request/start/delta/complete, discussion phases, and synthesis refs. Observe it
+through Web, `zf events`, or Feishu projections.
+
+After synthesis the Channel remains interactive. A human can ask follow-up
+questions, add another requirement, or continue the original topic without
+recreating the Channel:
+
+![Channel after synthesis, ready for continuation](assets/kanban-channel-synthesis.png)
+
+PRD Clarification can produce a canonical PRD or requirement snapshot. It is
+still a collaboration artifact, not an execution Task. To proceed:
+
+```text
+Create a Task proposal from the current synthesis. Do not start a Workflow yet.
+```
+
+After Task confirmation, enter the Task-bound Workflow Plan. PRD decomposition,
+the planning artifact, and `task_map` belong to the selected Workflow planning
+stage; Channel and Kanban Agent must not fabricate them early.
+
+## 5. Channel versus Research Workflow
+
+`research-review` is a Channel template for multi-role review or lightweight
+discussion around existing material. It does not implicitly start the fixed
+Research fanout.
+
+Research Workflow requires:
+
+1. a real Task;
+2. an explicit Research fanout request;
+3. available `research:fixed` in the current Project's
+   `zf workflow routes`;
+4. a Kanban Plan route selection;
+5. separate approval of the exact proposal.
+
+The fixed roles are `source_researcher`, `product_analyst`,
+`technical_analyst`, `risk_critic`, and `synthesizer`:
+
+![Fixed Research roles and request surface](assets/research-workflow-surface.png)
+
+Research returns a summary, evidence refs, open questions, and PRD/Refactor
+prompt inputs. The operator then decides whether to create a delivery Task.
+ZaoFu does not automatically convert the result into a PRD Workflow.
+
+## 6. Low-level CLI: post to an existing Channel
+
+The stable CLI command is `zf channel say`:
 
 ```bash
 zf channel say <channel_id> \
-  --text "Review passed; @dev may merge" \
+  --text "Add failure scenarios and ask @critic to review." \
   --member-id reviewer \
-  --mention dev
+  --mention critic
 ```
 
-| Option | Meaning | Default |
+| Argument | Meaning | Default |
 |---|---|---|
-| `channel_id` | Target channel | required |
-| `--text` | Message text | required |
+| `channel_id` | Target Channel | Required |
+| `--text` | Message body | Required |
 | `--member-id` | Sender member identity | `agent` |
-| `--mention` | Mention a member; repeatable | none |
-| `--state-dir` | Explicit runtime state | project context |
+| `--mention` | Mentioned member, repeatable | Empty |
+| `--state-dir` | Explicit runtime state directory | Project context |
 
-The action emits `channel.message.posted`. A mention matching an agent member
-requests its reply.
+The command runs the `channel-post-message` ControlledAction and appends
+`channel.message.posted`. It does not write `events.jsonl` directly or hold
+Feishu credentials.
 
-## 3. Conversation Event Chain
+`list`, `show`, `invite`, and `synth` are not stable Channel CLI subcommands.
+Creation, invitation, permission, discussion, and synthesis use Kanban Plan,
+Web APIs, or other ControlledAction surfaces.
 
-```mermaid
-sequenceDiagram
-  participant U as User (Feishu/Web)
-  participant K as Kernel
-  participant A as Agent member
-  U->>K: channel.message.posted (mentions=[dev])
-  K->>K: channel.mention.detected
-  K->>A: channel.agent.reply.requested
-  A-->>K: channel.agent.reply.started
-  A-->>K: channel.message.stream.delta
-  A->>K: channel.agent.reply.completed
-  K->>U: channel.message.posted (assistant)
-```
+## 7. Feishu association
 
-Observe messages with:
-
-```bash
-zf events --last 50 | grep channel.
-zf channel say ch-zaofu --text "status?" --member-id agent
-```
-
-Member lifecycle events include `channel.member.invited`,
-`channel.member.added`, `channel.member.connected`,
-`channel.member.suspended`, and `channel.member.removed`.
-
-## 4. Route Feishu into a Channel
-
-Bind a Feishu group to an agent:
+A Feishu group can target an existing Channel or an agent-direct session:
 
 ```yaml
 integrations:
   feishu_routing:
     oc_<chat_id>:
-      target: agent
-      backend: codex
-      cwd: /path/to/repo
-      default_member: zf-coder
+      target: channel
+      channel_id: ch-login-security
 ```
 
-This creates a temporary `agent-<chat_id>` channel and agent member. To deliver
-to an existing multi-member channel, configure `target: channel` and
-`channel_id`; see [Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md).
+`target: agent` establishes an agent Channel session for that chat.
+`target: channel` posts into the selected multi-member Channel. Inbound intent,
+button approval, and outbound projection still close through events and
+ControlledAction; they do not mutate Task or Workflow canonical state.
 
-## 5. Current Boundaries
+See [19 Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md).
 
-- Only `zf channel say` is a stable Channel CLI command. List, show, invite,
-  synthesize, and archive actions use controlled Web/API paths where available.
-- Speaker policies such as round-robin and leader delegation are not complete.
-- Discussion mode supports `mention_relay` with bounded relay depth and
-  `fanout_then_synthesis` with blind-answer, relay, and synthesis phases.
-- Under the default `manual_mention` mode, an agent reply does not automatically
-  fan out. `channel.route.blocked: auto_route_not_allowed` is expected behavior.
-- The proposal bridge is implemented, but `channel.synthesis.proposed` must not
-  become `workflow.invoke.requested` without readiness and explicit Project
-  workflow-submit approval. That separation is an intentional safety boundary.
-- Direct `target: agent` replies work; complex multi-provider collaboration is
-  not yet a stable contract.
+## 8. Member and permission values
 
-## 6. Member Values
+Common ControlledAction `member_type` values include:
 
-`channel-invite-member` rejects unknown enum values with HTTP 422.
+`provider_agent`, `runtime-role`, `human`, `observer`, `readonly-reviewer`,
+and `owner_delegate`.
 
-Supported `member_type` values include `automation_reporter`, `claude-code`,
-`codex`, `hermes`, `human`, `observer`, `openclaw`, `owner_delegate`, `persona`,
-`persona_agent`, `provider_agent`, `readonly-reviewer`, `runtime-role`, and
-`runtime_role_binding`. Bind a configured workflow role with `runtime-role` and
-`workflow_role_binding: {"role": "<instance_id>"}`.
+Common `channel_role` values include:
 
-Supported `channel_role` values include `arch`, `automation_reporter`, `critic`,
-`dev_reviewer`, `facilitator`, `observer`, `owner_delegate`, `product_pm`,
-`qa_analyst`, `researcher`, `security_reviewer`, `spine_reviewer`,
-`synthesizer`, and `tech_leader`.
+`product_pm`, `arch`, `critic`, `synthesizer`, `researcher`,
+`security_reviewer`, `dev_reviewer`, `qa_analyst`, and `tech_leader`.
 
-Example:
+Bind a role declared in `zf.yaml` with `runtime-role` and
+`workflow_role_binding: {"role": "<instance_id>"}`. Channel member
+`skill_refs` materialize literal skill paths and do not reuse Workflow-role
+skill-pool conflict resolution.
 
-```json
-{
-  "channel_id": "ch-demo",
-  "member_id": "prd-author",
-  "backend": "codex",
-  "member_type": "runtime-role",
-  "channel_role": "product_pm",
-  "skill_refs": ["zf-channel-discussion-participant"],
-  "workflow_role_binding": {"role": "prd-author"}
-}
+Templates or token-gated actions validate permission, writer role, and scope.
+Starting the host with danger-full-access does not automatically grant every
+Channel member Project write access.
+
+## 9. Observation and diagnosis
+
+```bash
+zf events --last 100 | grep channel.
+zf status --workers
 ```
 
-Channel member `skill_refs` materialize literal `skills/<name>/SKILL.md` paths;
-they do not use the workflow-role skill-pool conflict resolver.
+Check:
 
-## 7. Related Manuals
+- `channel.created` and the expected template digest;
+- all required Members are added and connected;
+- the original requirement has exactly one `channel.message.posted`;
+- discussion reaches the expected phase;
+- the synthesis artifact/ref exists;
+- retries reuse the same Channel through idempotency;
+- provider login, budget, or writer scope is not blocking replies.
 
-- [Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md)
-- [Architecture](architecture.en.md)
+## Related
+
+- [01 Quick Start](01-quickstart.en.md)
+- [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
+- [19 Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md)
+- [`zf.yaml` Control Plane and Runtime State](02-zf-yaml-control-plane.en.md)

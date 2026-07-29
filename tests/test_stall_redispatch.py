@@ -87,6 +87,24 @@ def test_redispatch_hydrates_flow_kind_from_stage_scope():
     assert redispatch.payload["flow_kind"] == "issue"
 
 
+def test_redispatch_preserves_task_scope():
+    trigger = ZfEvent(
+        type="candidate.ready",
+        task_id="TASK-1",
+        payload={"task_id": "TASK-1", "candidate_ref": "candidate-1"},
+    )
+    events = [
+        trigger,
+        *[_ev("orchestrator.decision.recorded") for _ in range(6)],
+    ]
+    finding = detect_structural_stalls(events, stages=STAGES)[0]
+
+    redispatch = stall_redispatch_event(finding, events)
+
+    assert redispatch is not None
+    assert redispatch.task_id == "TASK-1"
+
+
 def test_redispatch_returns_none_at_cap():
     finding = _finding()
     evs = [_ev("candidate.ready", candidate_ref="x")]

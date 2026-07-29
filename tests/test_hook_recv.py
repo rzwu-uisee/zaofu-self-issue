@@ -10,6 +10,7 @@ import yaml
 
 from zf.cli.hook_recv import run as hook_recv_run
 from zf.core.events.log import EventLog
+from zf.core.events.model import ZfEvent
 from zf.core.security.signing import EventSigner
 from zf.core.state.role_sessions import RoleSessionRegistry
 
@@ -215,8 +216,6 @@ class TestRegistryReverseLookup:
 
 
 def _evt(etype: str, eid: str, payload: dict) -> "ZfEvent":
-    from zf.core.events.model import ZfEvent
-
     return ZfEvent(type=etype, actor="zf-cli", payload=payload, id=eid)
 
 

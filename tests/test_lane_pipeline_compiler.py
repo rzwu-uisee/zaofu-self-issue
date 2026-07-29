@@ -398,6 +398,24 @@ class TestLaneRoleTemplate:
         assert len(metas) == 12
         assert all(m.source == "generated" for m in metas)
 
+    def test_backend_by_stage_materializes_cross_provider_verify_roles(
+        self,
+        tmp_path,
+    ):
+        cfg = self._load(
+            self._raw_with_template(
+                backend_by_stage={"verify": "claude-code"},
+            ),
+            tmp_path=tmp_path,
+        )
+
+        assert next(
+            role for role in cfg.roles if role.name == "dev-lane-0"
+        ).backend == "codex"
+        assert next(
+            role for role in cfg.roles if role.name == "verify-lane-0"
+        ).backend == "claude-code"
+
     def test_generated_roles_satisfy_compile_role_check(self, tmp_path):
         cfg = self._load(self._raw_with_template(), tmp_path=tmp_path)
         from zf.core.workflow.inspection import build_workflow_inspection_report

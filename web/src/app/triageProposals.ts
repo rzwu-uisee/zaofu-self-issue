@@ -2,7 +2,7 @@
 //
 // Bug (channel-kanban E2E 2026-07-09): the Triage proposal-only queue built its
 // Accept cards only from the bounded live recent-events slice
-// (events.filter(kanban.agent.action.proposed).slice(0, 12)). Kanban-agent
+// (events.filter(operator.action.proposed).slice(0, 12)). Kanban-agent
 // proposals are ledger truth that must survive the event window and the
 // originating browser session (see OrchestratorPanel + the
 // /kanban-agent/pending-proposals projection). Once a still-pending proposal

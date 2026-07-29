@@ -110,7 +110,7 @@
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 40;
   display: grid;
   place-items: center;
   background: rgba(0, 0, 0, 0.58);
@@ -133,6 +133,142 @@
   gap: 9px;
   padding: 12px;
   overflow: auto;
+}
+
+.project-admission-modal {
+  width: min(680px, 100%);
+}
+
+.project-admission-heading {
+  min-height: 58px;
+}
+
+.project-admission-body {
+  min-height: 280px;
+  align-content: start;
+  gap: 16px;
+  padding: 16px;
+}
+
+.project-admission-path {
+  display: grid;
+  gap: 7px;
+  color: var(--muted-foreground);
+  font-size: var(--text-12);
+  font-weight: var(--font-weight-medium);
+}
+
+.project-admission-path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.project-admission-path-row .filter-input {
+  min-width: 0;
+}
+
+.project-admission-result {
+  display: grid;
+  gap: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.project-admission-verdict {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-admission-verdict .muted {
+  overflow-wrap: anywhere;
+}
+
+.project-admission-facts {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.project-admission-facts div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.project-admission-facts dt {
+  color: var(--muted-foreground);
+  font-size: var(--text-12);
+}
+
+.project-admission-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+}
+
+.project-admission-diagnostics {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-admission-diagnostics li {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-12);
+}
+
+.project-admission-diagnostics li span:last-child {
+  overflow-wrap: anywhere;
+}
+
+.project-admission-empty {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.project-admission-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 560px) {
+  .modal-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .project-admission-modal {
+    width: 100%;
+    max-height: 92dvh;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 8px 8px 0 0;
+  }
+
+  .project-admission-path-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-admission-path-row .icon-button {
+    justify-content: center;
+  }
+
 }
 
 .command-palette {

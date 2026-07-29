@@ -26,6 +26,7 @@ KANBAN_AGENT_PERMISSION_PROFILES = (
     "isolated_writer",
     "dangerous_full",
 )
+KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE = "dangerous_full"
 
 
 def _now() -> str:
@@ -252,6 +253,8 @@ def emit_provider_permission_snapshot(
 
 
 __all__ = [
+    "KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE",
+    "KANBAN_AGENT_PERMISSION_PROFILES",
     "build_provider_permission_snapshot",
     "claude_permission_mode_for_profile",
     "codex_security_config_for_profile",

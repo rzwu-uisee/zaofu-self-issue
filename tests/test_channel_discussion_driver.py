@@ -406,6 +406,65 @@ def _run_to_phase3(tmp_path: Path):
     return state_dir, writer
 
 
+def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    initial_requests = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]
+    assert len(initial_requests) == 1
+
+    writer.emit(
+        "channel.synthesis.proposed",
+        actor="pm-1",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "request_id": initial_requests[0].payload["request_id"],
+            "artifact_ref": "channel-artifacts/ch-disc/draft.md",
+            "artifact_digest": "draft-digest",
+            "open_questions": ["Which threshold is approved?"],
+            "source": "runtime",
+        },
+    )
+    _open_question(writer, "q-synthesis", asked_by="pm-1")
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+    assert detail["discussions"]["main"]["phase_reason"] == (
+        "synthesis_questions_opened"
+    )
+
+    _resolve(
+        writer,
+        "q-synthesis",
+        resolution="answered",
+        actor="operator",
+    )
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+
+    requests = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]
+    assert len(requests) == 2
+    assert requests[0].payload["request_id"] != requests[1].payload["request_id"]
+    assert project_channel(state_dir, CH)["discussions"]["main"]["state"] == (
+        "phase3_synthesis"
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 2
+
+
 def _consensus(writer: EventWriter, etype: str, actor: str, **payload) -> None:
     writer.emit(
         f"channel.consensus.{etype}",
@@ -468,10 +527,12 @@ def test_all_mention_without_roster_does_not_start(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sprint2 P0-1: exit hook — reached triggers idea-to-product proposal
+# Canonical exit: reached closes the room without starting product work
 # ---------------------------------------------------------------------------
 
-def test_consensus_reached_proposes_idea_to_product(tmp_path: Path) -> None:
+def test_consensus_reached_does_not_auto_create_task_or_workflow(
+    tmp_path: Path,
+) -> None:
     state_dir, writer = _run_to_phase3(tmp_path)
     _consensus(writer, "proposed", "pm-1",
                artifact_ref=".zf/channel-artifacts/clarified.md", proposed_by="pm-1")
@@ -481,25 +542,25 @@ def test_consensus_reached_proposes_idea_to_product(tmp_path: Path) -> None:
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     events = EventLog(state_dir / "events.jsonl").read_all()
     types = [e.type for e in events]
-    assert "operator.intent.created" in types
-    assert "operator.action.proposed" in types
-    proposal = [e for e in events if e.type == "operator.action.proposed"][-1]
-    actions = [p["action"] for p in proposal.payload["proposals"]]
-    assert actions == ["create-task", "workflow-invoke"]
-    assert proposal.payload["requires_owner_confirmation"] is True
-    create_task = proposal.payload["proposals"][0]["payload"]
-    contract = create_task["contract"]
-    assert contract["spec_ref"] == ".zf/channel-artifacts/clarified.md"
-    assert contract["handoff_artifacts"] == [".zf/channel-artifacts/clarified.md"]
-    # must round-trip through the fixed TaskContract schema (a free-form key
-    # here crashes TaskStore.get on read-back — caught live in sprint 3)
-    from zf.core.task.schema import TaskContract
-    TaskContract(**contract)
+    assert "channel.consensus.reached" in types
+    assert "channel.discussion.closed" in types
+    assert "operator.intent.created" not in types
+    assert "operator.action.proposed" not in types
+    assert "workflow.invoke.requested" not in types
+    assert "task.created" not in types
 
-    # idempotent: re-advance must not propose twice
+    # idempotent: re-advance must not add product side effects
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     events = EventLog(state_dir / "events.jsonl").read_all()
-    assert len([e for e in events if e.type == "operator.action.proposed"]) == 1
+    assert not [
+        event
+        for event in events
+        if event.type in {
+            "operator.action.proposed",
+            "workflow.invoke.requested",
+            "task.created",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,11 @@ _MAX_EVENT_REFS_PER_PAYLOAD_KEY = 100
 KANBAN_AGENT_HISTORY_TYPES = (
     "user.message",
     "kanban.agent.reply",
+    "kanban.agent.action.proposed",
+    "kanban.agent.proposal.resolved",
+    "operator.action.proposed",
+    "operator.action.resolved",
+    "task.created",
     "agent.session.run.started",
     "agent.session.run.completed",
     "agent.session.run.failed",
@@ -99,6 +104,7 @@ KANBAN_AGENT_HISTORY_TYPES = (
 KANBAN_AGENT_HISTORY_PREFIXES = (
     "kanban.agent.turn.",
     "kanban.agent.message.",
+    "kanban.agent.plan.",
 )
 KANBAN_AGENT_CONTEXT_TYPES = (
     "user.message",
@@ -1376,11 +1382,34 @@ def _kanban_agent_history_event_matches(
             return False
         if str(payload.get("runtime_delivery") or "") != "headless":
             return False
-    elif not (
+    elif event_type == "task.created":
+        if not str(payload.get("proposal_event_id") or ""):
+            return False
+    elif event_type not in {
+        "kanban.agent.action.proposed",
+        "kanban.agent.proposal.resolved",
+        "operator.action.proposed",
+        "operator.action.resolved",
+    } and not (
         event_type.startswith("kanban.agent.turn.")
         or event_type.startswith("kanban.agent.message.")
+        or event_type.startswith("kanban.agent.plan.")
         or event_type == "kanban.agent.reply"
         or event_type.startswith("agent.session.")
+    ):
+        return False
+    if (
+        event_type == "operator.action.proposed"
+        and not isinstance(payload.get("proposal"), dict)
+    ):
+        return False
+    if (
+        event_type in {
+            "operator.action.proposed",
+            "operator.action.resolved",
+        }
+        and not str(payload.get("conversation_id") or "").strip()
+        and not str(payload.get("turn_id") or "").strip()
     ):
         return False
     payload_project = str(payload.get("project_id") or "").strip()
@@ -1389,9 +1418,14 @@ def _kanban_agent_history_event_matches(
     payload_conversation = str(payload.get("conversation_id") or "").strip()
     if conversation_id and payload_conversation and payload_conversation != conversation_id:
         return False
-    payload_thread = str(payload.get("thread_key") or payload.get("thread_id") or "").strip() or "main"
-    if thread_id and payload_thread != thread_id:
-        return False
+    if event_type not in {
+        "kanban.agent.proposal.resolved",
+        "operator.action.resolved",
+        "task.created",
+    }:
+        payload_thread = str(payload.get("thread_key") or payload.get("thread_id") or "").strip() or "main"
+        if thread_id and payload_thread != thread_id:
+            return False
     # NOTE (frontend-stress S9/S10 2026-07-15): do NOT exclude by backend.
     # The kanban-agent conversation is one durable thread per (project, thread_id)
     # that legitimately spans backends — a user may switch codex<->claude mid
@@ -1475,6 +1509,7 @@ def _payload_slim(payload: dict[str, Any]) -> dict[str, Any]:
         "answer",
         "status",
         "backend",
+        "permission_profile",
         "project_id",
         "conversation_id",
         "task_id",
@@ -1507,6 +1542,7 @@ def _payload_slim(payload: dict[str, Any]) -> dict[str, Any]:
         # question and the answer into two separate turns in the web timeline
         # (operator report 2026-07-16).
         "message_event_id",
+        "permission_escalation_retry_for",
         "thread_id",
         "attention_id",
         "fingerprint",
@@ -1535,6 +1571,16 @@ def _payload_slim(payload: dict[str, Any]) -> dict[str, Any]:
         "resumed",
         "fallback_reason",
         "mutates_task_state",
+        "plan_request",
+        "plan_response",
+        "request_event_id",
+        "request_id",
+        "request_digest",
+        "revision",
+        "proposal_event_id",
+        "question_id",
+        "option_id",
+        "answers",
         "action_proposal",
         # kanban.agent.action.proposed carries the proposal object under
         # `proposal` (both Web-panel and Feishu emitters); without it the
@@ -1549,7 +1595,12 @@ def _payload_slim(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(key)
         if value in (None, ""):
             continue
-        if key in {"action_proposal", "proposal"} and isinstance(value, dict):
+        if key in {
+            "action_proposal",
+            "plan_request",
+            "plan_response",
+            "proposal",
+        } and isinstance(value, dict):
             keep[key] = redact_obj(value)
             continue
         if isinstance(value, (str, int, float, bool)):

@@ -68,9 +68,85 @@ export interface AgentSessionActionProposal {
   validationError?: string;
 }
 
+export interface AgentSessionPlanOption {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+  submitAction?: string;
+  submitMode?: "apply" | "continue" | "propose";
+  submitDetails?: {
+    templateId?: string;
+    templateName?: string;
+    taskId?: string;
+    objective?: string;
+    memberCount?: number;
+    roles?: string[];
+    maxRounds?: number;
+    routeId?: string;
+    family?: string;
+    kind?: string;
+    tier?: string;
+    topology?: string;
+    writerRoles?: string[];
+    verifyRoles?: string[];
+    laneCount?: number;
+    outputProfile?: string;
+  };
+}
+
+export interface AgentSessionPlanQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options: AgentSessionPlanOption[];
+  allowOther: boolean;
+}
+
+export interface AgentSessionPlanAnswer {
+  questionId: string;
+  optionId: string;
+  answer: string;
+}
+
+export interface AgentSessionPlanResponse {
+  requestEventId: string;
+  requestId: string;
+  revision: number;
+  questionId: string;
+  optionId: string;
+  answer: string;
+  answers: AgentSessionPlanAnswer[];
+  answerEventId?: string;
+}
+
+export interface AgentSessionPlanRequest {
+  requestEventId: string;
+  requestId: string;
+  requestDigest?: string;
+  revision: number;
+  header: string;
+  subjectType?: "channel_setup" | "clarification" | "task_workflow";
+  questionId: string;
+  question: string;
+  options: AgentSessionPlanOption[];
+  allowOther: boolean;
+  questions: AgentSessionPlanQuestion[];
+  reason?: string;
+  valid: boolean;
+  validationError?: string;
+  response?: AgentSessionPlanResponse;
+  backend?: string;
+  providerSessionId?: string;
+  submitAction?: string;
+  submitMode?: "apply" | "continue" | "propose";
+  submitLabel?: string;
+  configDigest?: string;
+}
+
 export interface AgentSessionCard {
   id: string;
-  kind: "question" | "proposal" | "queue" | "run-status" | "capability" | "context-ledger" | "preview";
+  kind: "plan" | "approve" | "question" | "proposal" | "queue" | "run-status" | "capability" | "context-ledger" | "preview";
   title: string;
   body?: string;
   status?: AgentSessionStatus;
@@ -78,6 +154,7 @@ export interface AgentSessionCard {
   threadId?: string;
   actionLabel?: string;
   proposal?: AgentSessionActionProposal;
+  planRequest?: AgentSessionPlanRequest;
   payload?: Record<string, unknown>;
   refs?: Record<string, unknown>;
 }

@@ -7,9 +7,12 @@ projections group them correctly.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zf.core.bootstrap.feature_template import BOOTSTRAP_FEATURE_ID
+
+if TYPE_CHECKING:
+    from zf.core.task.schema import Task
 
 
 # Each template is a plain dict → installer converts to Task() with TaskContract().

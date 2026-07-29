@@ -61,6 +61,17 @@ def controlled_action_capability_projection() -> dict[str, Any]:
         _cap("channel-clear-history", mutates_truth=True, required_fields=("channel_id",), owner_approval_required=True),
         _cap("channel-mark-read", mutates_truth=True, required_fields=("channel_id",), requires_token=False),
         _cap("channel-synthesis", mutates_truth=True, required_fields=("channel_id", "decision", "summary")),
+        _cap(
+            "workflow-start",
+            mutates_truth=True,
+            required_fields=(
+                "task_id",
+                "route_id",
+                "task_contract_digest",
+                "config_digest",
+            ),
+            owner_approval_required=True,
+        ),
         _cap("workflow-invoke", mutates_truth=True, required_fields=("task_id", "pattern_id")),
         _cap("research-start", mutates_truth=True, required_fields=("task_id", "topic")),
         _cap(

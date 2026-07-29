@@ -8,6 +8,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.verification.event_schema import EventSchemaRegistry, channel_event_schema_rules
 from zf.runtime.channel_context import build_channel_context_pack
 from zf.runtime.channel_projection import project_channel, project_channels, search_channel_history
+from zf.runtime.channel_sidecar import channel_context_pack_event_payload
 from zf.runtime.control_actions import ControlledActionService
 
 
@@ -718,6 +719,89 @@ def test_channel_projection_records_attachments_and_context_artifact_refs(tmp_pa
     refs = pack["artifact_refs"]
     assert {item["name"] for item in refs} == {"notes.md", "review.md"}
     assert all("content" not in item for item in refs)
+
+
+def test_channel_context_pack_includes_resolved_question_ledger(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id="ch-zaofu",
+        payload={"channel_id": "ch-zaofu", "name": "zaofu"},
+    )
+    writer.emit(
+        "channel.question.opened",
+        actor="critic",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "main",
+            "question_id": "q-threshold",
+            "question": "What landing threshold is approved?",
+            "category": "synthesis",
+            "asked_by": "critic",
+        },
+    )
+    writer.emit(
+        "channel.question.resolved",
+        actor="operator",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "main",
+            "question_id": "q-threshold",
+            "resolution": "answered",
+            "resolved_by": "owner:operator",
+            "answer": "Vertical speed <= 4.2 m/s.",
+        },
+    )
+    detail = project_channel(state_dir, "ch-zaofu")
+    assert detail is not None
+
+    pack = build_channel_context_pack(
+        detail,
+        channel_id="ch-zaofu",
+        thread_id="main",
+        target_member_id="synthesizer",
+        trigger_message_id="msg-synthesis-2",
+        visibility_profile="planner",
+    )
+    assert pack["question_ledger"] == [{
+        "question_id": "q-threshold",
+        "question": "What landing threshold is approved?",
+        "category": "synthesis",
+        "asked_by": "critic",
+        "status": "resolved",
+        "resolution": "answered",
+        "resolved_by": "owner:operator",
+        "answer": "Vertical speed <= 4.2 m/s.",
+        "risk_note": "",
+        "opened_event_id": detail["open_questions"][0]["opened_event_id"],
+        "resolved_event_id": detail["open_questions"][0]["resolved_event_id"],
+    }]
+
+    built = writer.emit(
+        "channel.context_pack.built",
+        actor="runtime",
+        correlation_id="ch-zaofu",
+        payload=channel_context_pack_event_payload(
+            state_dir,
+            pack,
+            created_by="test",
+            source_event_id="evt-source",
+        ),
+    )
+    projected = project_channel(state_dir, "ch-zaofu")
+    assert projected is not None
+    assert projected["context_packs"][-1]["question_ledger"] == (
+        pack["question_ledger"]
+    )
+    assert built.payload["question_ref_count"] == 1
 
 
 def test_channel_context_pack_includes_state_update_artifact_refs(tmp_path: Path) -> None:

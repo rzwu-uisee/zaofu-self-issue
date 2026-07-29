@@ -56,9 +56,13 @@ from zf.runtime.workflow_inputs import (
 )
 
 from zf.runtime.control_actions_channel_msg import ChannelMessageActionsMixin
+from zf.runtime.control_actions_channel_consensus import (
+    ChannelConsensusActionsMixin,
+)
 from zf.runtime.control_actions_channel_admin import ChannelAdminActionsMixin
 from zf.runtime.control_actions_channel_templates import ChannelTemplateActionsMixin
 from zf.runtime.control_actions_plan import PlanApprovalActionsMixin
+from zf.runtime.control_actions_plan_apply import PlanApplyActionsMixin
 from zf.runtime.control_actions_proposals import ProposalExecutionActionsMixin
 from zf.runtime.control_actions_product import ProductActionsMixin
 from zf.runtime.control_actions_ops import OpsActionsMixin
@@ -100,11 +104,13 @@ from zf.runtime.control_actions_helpers import (  # noqa: F401 — re-export mov
 
 class ControlledActionService(
     ProposalExecutionActionsMixin,
+    ChannelConsensusActionsMixin,
     ChannelMessageActionsMixin,
     ChannelTemplateActionsMixin,
     ChannelAdminActionsMixin,
     ProductActionsMixin,
     PlanApprovalActionsMixin,
+    PlanApplyActionsMixin,
     OpsActionsMixin,
     WorkflowResumeActionsMixin,
     CandidateReworkActionsMixin,
@@ -194,6 +200,13 @@ class ControlledActionService(
                 requested_action=requested_action,
                 payload=payload,
             )
+        if action == "kanban-plan-apply":
+            return self._kanban_plan_apply(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
         if action == "channel-post-message":
             return self._channel_post_message(
                 requested=requested,
@@ -210,6 +223,13 @@ class ControlledActionService(
             )
         if action == "channel-create-from-template":
             return self._channel_create_from_template(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "channel-create-and-start":
+            return self._channel_create_and_start(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
@@ -278,10 +298,39 @@ class ControlledActionService(
                 requested_action=requested_action,
                 payload=payload,
             )
+        if action == "channel-question-resolve":
+            return self._channel_question_resolve(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action in {
+            "channel-consensus-confirm",
+            "channel-consensus-block",
+        }:
+            return self._channel_consensus_decision(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+                decision=(
+                    "confirm"
+                    if action == "channel-consensus-confirm"
+                    else "block"
+                ),
+            )
         if action == "workflow-request":
             return self._workflow_request(
                 requested=requested,
                 action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action in {"workflow-start", "task-workflow-start"}:
+            return self._workflow_start(
+                requested=requested,
+                action="workflow-start",
                 requested_action=requested_action,
                 payload=payload,
             )

@@ -5,6 +5,7 @@ import { getAgentSessionHistory, getKanbanPendingProposals } from "../../api/cli
 import type { PendingKanbanProposal } from "../../api/client";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
 import { ComposerSubmitButton } from "../../components/agent-session/ComposerSubmitButton";
+import { actionPresentation } from "../../components/agent-session/actionPresentation";
 import { deriveComposerStatus } from "../../components/agent-session/workState";
 import { useWorkingTitle } from "../../components/agent-session/useWorkingTitle";
 import { buildKanbanConversation } from "../../components/agent-session/projection";
@@ -16,13 +17,21 @@ import {
   kanbanAgentProjectId,
   kanbanThreadStorageKey,
 } from "./kanbanAgentHistoryPolicy";
-import type { AgentConversation, AgentProviderCapability, AgentSessionActionProposal, AgentSessionCard, AgentSessionThreadRef } from "../../components/agent-session/types";
+import type {
+  AgentConversation,
+  AgentProviderCapability,
+  AgentSessionActionProposal,
+  AgentSessionCard,
+  AgentSessionPlanRequest,
+  AgentSessionPlanResponse,
+  AgentSessionThreadRef,
+} from "../../components/agent-session/types";
 import {
   kanbanAgentSessionEventsFromLive,
   mergeBoundedKanbanSessionEvents,
   mergeEventsByIdentity,
 } from "./kanbanSessionEvents";
-import { ChevronDown, Maximize2, Minimize2, Minus, Plus, Send } from "lucide-react";
+import { ChevronDown, Maximize2, MessageCircle, Minimize2, Minus, Plus, Send, ShieldAlert, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentPanelMode, OrchestratorContext, OperatorBackend } from "../../app/sharedTypes";
 import { actionFailed, actionFailureReason, agentConversationScrollSignature, recordValue, scrollElementToBottom, stringify, supportLabel, textValue } from "../../app/shared";
@@ -43,6 +52,7 @@ interface HeadlessQueueItem {
   threadId: string;
   message: string;
   createdAt: string;
+  requestPatch?: Record<string, unknown>;
 }
 
 
@@ -51,31 +61,21 @@ interface HeadlessPendingMessage extends HeadlessQueueItem {
   turnId: string;
 }
 
-type PermissionProfile =
-  | "read_only"
-  | "operator"
-  | "workspace_writer"
-  | "isolated_writer"
-  | "dangerous_full";
-
-const PERMISSION_PROFILES: Array<{ id: PermissionProfile; label: string; title: string }> = [
-  { id: "read_only", label: "Read", title: "Read only" },
-  { id: "operator", label: "Operate", title: "Controlled actions" },
-  { id: "workspace_writer", label: "Write", title: "Write current workspace" },
-  { id: "isolated_writer", label: "Isolate", title: "Write linked worktree" },
-  { id: "dangerous_full", label: "Full", title: "Full shell and Git access" },
-];
-
-
-function storedPermissionProfile(): PermissionProfile {
-  if (typeof window === "undefined") return "read_only";
-  const stored = window.localStorage.getItem("zf.kanbanPermissionProfile");
-  if (stored === "dangerous_full") return "read_only";
-  return PERMISSION_PROFILES.some((item) => item.id === stored)
-    ? stored as PermissionProfile
-    : "read_only";
+interface SubmitHeadlessOptions {
+  backendOverride?: OperatorBackend;
+  dangerousAck?: boolean;
+  force?: boolean;
+  permissionProfileOverride?: string;
+  projectionFirst?: boolean;
+  requestPatch?: Record<string, unknown>;
 }
 
+interface PermissionEscalation {
+  backend: OperatorBackend;
+  failureEventId: string;
+  message: string;
+  reason: string;
+}
 
 function slashAction(message: string): { action: string; payload: Record<string, unknown> } | null {
   const trimmed = message.trim();
@@ -257,6 +257,62 @@ function isChatBackend(backend: OperatorBackend): boolean {
   return isHeadlessBackend(backend) || backend === "claude-code" || backend === "codex";
 }
 
+function latestPermissionEscalation(
+  events: RecentEvent[],
+  args: {
+    conversationId: string;
+    dismissedEventIds: string[];
+    projectId: string;
+    threadId: string;
+  },
+): PermissionEscalation | null {
+  const byId = new Map(
+    events
+      .filter((event) => Boolean(event.id))
+      .map((event) => [textValue(event.id), event]),
+  );
+  const dismissed = new Set(args.dismissedEventIds);
+  const retried = new Set(
+    events
+      .filter((event) => event.type === "user.message")
+      .map((event) => textValue(event.payload?.permission_escalation_retry_for).trim())
+      .filter(Boolean),
+  );
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const failed = events[index];
+    const payload = failed?.payload ?? {};
+    const failureEventId = textValue(failed?.id).trim();
+    if (
+      failed?.type !== "kanban.agent.turn.failed"
+      || payload.status !== "sandbox_unsupported"
+      || payload.permission_profile !== "workspace_writer"
+      || textValue(payload.backend) !== "codex-headless"
+      || !failureEventId
+      || dismissed.has(failureEventId)
+      || retried.has(failureEventId)
+    ) {
+      continue;
+    }
+    if (args.projectId && textValue(payload.project_id) !== args.projectId) continue;
+    if (args.conversationId && textValue(payload.conversation_id) !== args.conversationId) continue;
+    if (args.threadId && textValue(payload.thread_key) !== args.threadId) continue;
+
+    const replyEventId = textValue(payload.reply_event_id || failed?.causation_id).trim();
+    const reply = byId.get(replyEventId);
+    const user = reply ? byId.get(textValue(reply.causation_id).trim()) : undefined;
+    const backend = asOperatorBackend(payload.backend);
+    const message = textValue(user?.payload?.message).trim();
+    if (!backend || !message) continue;
+    return {
+      backend,
+      failureEventId,
+      message,
+      reason: textValue(payload.reason || "Workspace isolation is unavailable on this host."),
+    };
+  }
+  return null;
+}
+
 
 function kanbanChatBackend(backend: OperatorBackend): OperatorBackend | null {
   if (backend === "claude-code" || backend === "claude-headless") return "claude-headless";
@@ -353,11 +409,10 @@ export function OrchestratorPanel({
   const [operatorBackendTouched, setOperatorBackendTouched] = useState(() => (
     Boolean(storedHeadlessBackend())
   ));
-  const [permissionProfile, setPermissionProfile] = useState<PermissionProfile>(
-    storedPermissionProfile,
-  );
   const [operatorError, setOperatorError] = useState("");
+  const [dismissedPermissionEscalations, setDismissedPermissionEscalations] = useState<string[]>([]);
   const [headlessMessage, setHeadlessMessage] = useState("");
+  const [headlessPlanDiscussion, setHeadlessPlanDiscussion] = useState<AgentSessionPlanRequest | null>(null);
   const [headlessSubmitting, setHeadlessSubmitting] = useState(false);
   const [headlessProposalRunning, setHeadlessProposalRunning] = useState("");
   const [pendingProposals, setPendingProposals] = useState<PendingKanbanProposal[]>([]);
@@ -401,6 +456,9 @@ export function OrchestratorPanel({
   const allowedActions = snapshot?.runtime.actions?.allowed ?? [];
   const webSession = snapshot?.runtime.web_session;
   const agentSurface = snapshot?.runtime.agent_surface;
+  const permissionProfile = textValue(
+    agentSurface?.permission_profile,
+  ).trim() || "dangerous_full";
   const mutationEnabled = Boolean(snapshot?.runtime.actions?.mutation_enabled);
   const headlessProjectId = kanbanAgentProjectId(activeProjectId, snapshot?.project?.project_id || "");
   const headlessConversationId = kanbanAgentConversationId(headlessProjectId);
@@ -644,12 +702,14 @@ export function OrchestratorPanel({
       window.localStorage.setItem(kanbanThreadStorageKey(activeProjectId), next);
     }
     setHeadlessMessage("");
+    setHeadlessPlanDiscussion(null);
     setOperatorError("");
     headlessInputRef.current?.focus();
   }
 
   function selectHeadlessThread(threadId: string) {
     setHeadlessThreadKey(threadId);
+    setHeadlessPlanDiscussion(null);
     if (headlessSplitThreadKey === threadId) setHeadlessSplitThreadKey("");
     if (typeof window !== "undefined") {
       window.localStorage.setItem(kanbanThreadStorageKey(activeProjectId), threadId);
@@ -657,22 +717,45 @@ export function OrchestratorPanel({
     headlessInputRef.current?.focus();
   }
 
-  function queueHeadlessMessage(message: string) {
+  function queueHeadlessMessage(
+    message: string,
+    requestPatch?: Record<string, unknown>,
+  ) {
     const item: HeadlessQueueItem = {
       id: `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
       threadId: headlessThreadKey,
       message,
       createdAt: new Date().toISOString(),
+      requestPatch,
     };
     setHeadlessQueue((current) => [...current, item]);
     setHeadlessMessage("");
   }
 
-  async function submitHeadlessMessage(messageOverride?: string, options: { force?: boolean; projectionFirst?: boolean } = {}) {
+  async function submitHeadlessMessage(messageOverride?: string, options: SubmitHeadlessOptions = {}) {
     const message = (messageOverride ?? headlessMessage).trim();
-    if (!message || !isChatBackend(operatorBackend) || headlessSubmitting) return;
-    if (activeThreadBusy && !options.force) {
-      queueHeadlessMessage(message);
+    const targetBackend = options.backendOverride ?? operatorBackend;
+    const turnPermissionProfile = options.permissionProfileOverride ?? permissionProfile;
+    const explicitRequestPatch = options.requestPatch ?? {};
+    const discussionRequestPatch = (
+      headlessPlanDiscussion
+      && !("plan_response" in explicitRequestPatch)
+      && !("plan_discussion" in explicitRequestPatch)
+    ) ? {
+        plan_discussion: {
+          request_event_id: headlessPlanDiscussion.requestEventId,
+          request_id: headlessPlanDiscussion.requestId,
+          revision: headlessPlanDiscussion.revision,
+        },
+      } : {};
+    const requestPatch = {
+      ...discussionRequestPatch,
+      ...explicitRequestPatch,
+    };
+    const isPlanDiscussion = "plan_discussion" in requestPatch;
+    if (!message || !isChatBackend(targetBackend) || headlessSubmitting) return;
+    if (activeThreadBusy && !options.force && !isPlanDiscussion) {
+      queueHeadlessMessage(message, requestPatch);
       return;
     }
     if (!canUseAction("chat-orchestrator")) {
@@ -702,6 +785,7 @@ export function OrchestratorPanel({
       : null;
     const stillOnUncorrectedDefault = (
       !operatorBackendTouched
+      && !options.backendOverride
       && operatorBackend === "claude-headless"
       && !!configuredChatBackend
       && configuredChatBackend !== "claude-headless"
@@ -713,7 +797,8 @@ export function OrchestratorPanel({
     const directAction = slashAction(message);
     if (
       !directAction
-      && permissionProfile === "dangerous_full"
+      && turnPermissionProfile === "dangerous_full"
+      && !options.dangerousAck
       && !window.confirm("Grant this Kanban Agent turn full shell and Git access?")
     ) {
       return;
@@ -748,7 +833,7 @@ export function OrchestratorPanel({
         threadId: headlessThreadKey,
         turnId,
         message,
-        backend: operatorBackend,
+        backend: targetBackend,
         createdAt: new Date().toISOString(),
       };
       setHeadlessPendingMessages((current) => [
@@ -756,10 +841,11 @@ export function OrchestratorPanel({
         pendingMessage,
       ]);
       const result = await Promise.resolve(onAction("chat-orchestrator", {
+        ...requestPatch,
         ...contextPayload(),
-        backend: operatorBackend,
-        permission_profile: permissionProfile,
-        dangerous_ack: permissionProfile === "dangerous_full" || undefined,
+        backend: targetBackend,
+        permission_profile: turnPermissionProfile,
+        dangerous_ack: turnPermissionProfile === "dangerous_full" || undefined,
         scope: desiredOperatorScope,
         message,
         turn_id: turnId,
@@ -778,6 +864,9 @@ export function OrchestratorPanel({
         return;
       }
       setOperatorError("");
+      if (isPlanDiscussion) {
+        setHeadlessPlanDiscussion(null);
+      }
     } catch (err) {
       setOperatorError(err instanceof Error ? err.message : String(err));
       setHeadlessMessage(message);
@@ -787,6 +876,25 @@ export function OrchestratorPanel({
     } finally {
       setHeadlessSubmitting(false);
     }
+  }
+
+  async function runPermissionEscalation() {
+    const pending = permissionEscalation;
+    if (!pending) return;
+    setDismissedPermissionEscalations((current) => (
+      current.includes(pending.failureEventId)
+        ? current
+        : [...current, pending.failureEventId]
+    ));
+    await submitHeadlessMessage(pending.message, {
+      backendOverride: pending.backend,
+      dangerousAck: true,
+      force: true,
+      permissionProfileOverride: "dangerous_full",
+      requestPatch: {
+        permission_escalation_retry_for: pending.failureEventId,
+      },
+    });
   }
 
   async function runHeadlessProposal(proposal: AgentSessionActionProposal, key: string) {
@@ -805,10 +913,136 @@ export function OrchestratorPanel({
       if (!("task_id" in payload) && proposal.action !== "create-task" && context.taskId) {
         payload.task_id = context.taskId;
       }
-      await Promise.resolve(onAction(proposal.action, payload));
+      const result = await Promise.resolve(onAction(proposal.action, payload));
+      if (actionFailed(result)) {
+        setOperatorError(actionFailureReason(result));
+        return;
+      }
+      setOperatorError("");
     } finally {
       setHeadlessProposalRunning("");
+      setPendingProposalsRefresh((value) => value + 1);
     }
+  }
+
+  async function rejectHeadlessProposal(proposal: AgentSessionActionProposal, key: string) {
+    if (!proposal.proposalEventId || !canUseAction("kanban-proposal-dismiss")) return;
+    setHeadlessProposalRunning(key);
+    try {
+      const result = await Promise.resolve(onAction("kanban-proposal-dismiss", {
+        project_id: headlessProjectId,
+        proposal_event_id: proposal.proposalEventId,
+        reason: "rejected from Kanban Agent Approve interaction",
+      }));
+      if (actionFailed(result)) {
+        setOperatorError(actionFailureReason(result));
+        return;
+      }
+      setOperatorError("");
+    } finally {
+      setHeadlessProposalRunning("");
+      setPendingProposalsRefresh((value) => value + 1);
+    }
+  }
+
+  function reviseHeadlessProposal(proposal: AgentSessionActionProposal) {
+    const proposalId = proposal.proposalEventId || proposal.proposalId || proposal.action;
+    setHeadlessMessage(
+      `Revise proposal ${proposalId} for ${proposal.action}: ${proposal.reason || "adjust the proposed action before approval"}`,
+    );
+    headlessInputRef.current?.focus();
+  }
+
+  async function submitPlanResponse(
+    request: AgentSessionPlanRequest,
+    response: AgentSessionPlanResponse,
+    key: string,
+  ) {
+    if (
+      headlessPlanDiscussion?.requestEventId === request.requestEventId
+    ) {
+      setHeadlessPlanDiscussion(null);
+    }
+    setHeadlessProposalRunning(key);
+    try {
+      const selectedOption = request.options.find(
+        (option) => option.id === response.optionId,
+      );
+      const submitAction = (
+        selectedOption?.submitAction
+        || request.submitAction
+        || ""
+      );
+      const submitMode = (
+        selectedOption?.submitMode
+        || request.submitMode
+        || (submitAction ? "apply" : "continue")
+      );
+      if (submitAction && submitMode !== "continue") {
+        if (!canUseAction("kanban-plan-apply")) {
+          setOperatorError(`action kanban-plan-apply is ${actionState}`);
+          return;
+        }
+        const result = await Promise.resolve(onAction("kanban-plan-apply", {
+          project_id: headlessProjectId,
+          conversation_id: headlessConversationId,
+          thread_id: headlessThreadKey,
+          task_id: context.taskId || undefined,
+          plan_response: {
+            request_event_id: response.requestEventId,
+            request_id: response.requestId,
+            revision: response.revision,
+            question_id: response.questionId,
+            option_id: response.optionId,
+            answer: response.answer,
+            answers: response.answers.map((answer) => ({
+              question_id: answer.questionId,
+              option_id: answer.optionId,
+              answer: answer.answer,
+            })),
+          },
+        }));
+        if (actionFailed(result)) {
+          setOperatorError(actionFailureReason(result));
+          return;
+        }
+        setOperatorError("");
+        return;
+      }
+      await submitHeadlessMessage(
+        `Plan: ${request.question}\nAnswer: ${response.answer}`,
+        {
+          force: true,
+          backendOverride: (
+            asOperatorBackend(request.backend)
+            ?? operatorBackend
+          ),
+          requestPatch: {
+            plan_response: {
+              request_event_id: response.requestEventId,
+              request_id: response.requestId,
+              revision: response.revision,
+              question_id: response.questionId,
+              option_id: response.optionId,
+              answer: response.answer,
+              answers: response.answers.map((answer) => ({
+                question_id: answer.questionId,
+                option_id: answer.optionId,
+                answer: answer.answer,
+              })),
+            },
+          },
+        },
+      );
+    } finally {
+      setHeadlessProposalRunning("");
+      setPendingProposalsRefresh((value) => value + 1);
+    }
+  }
+
+  function chatAboutPlan(request: AgentSessionPlanRequest) {
+    setHeadlessPlanDiscussion(request);
+    headlessInputRef.current?.focus();
   }
 
   async function runPendingProposal(item: PendingKanbanProposal) {
@@ -917,16 +1151,6 @@ export function OrchestratorPanel({
     setBackendMenuOpen(false);
   }
 
-  function selectPermissionProfile(profile: PermissionProfile) {
-    setPermissionProfile(profile);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(
-        "zf.kanbanPermissionProfile",
-        profile === "dangerous_full" ? "read_only" : profile,
-      );
-    }
-  }
-
   function saveToken() {
     onSaveToken(tokenInput);
     setTokenInput("");
@@ -953,6 +1177,21 @@ export function OrchestratorPanel({
     () => mergeEventsByIdentity(headlessHistoryEvents, headlessBufferedEvents, events),
     [events, headlessBufferedEvents, headlessHistoryEvents],
   );
+  const permissionEscalation = useMemo(() => latestPermissionEscalation(
+    headlessConversationEvents,
+    {
+      conversationId: headlessConversationId,
+      dismissedEventIds: dismissedPermissionEscalations,
+      projectId: headlessProjectId,
+      threadId: headlessThreadKey,
+    },
+  ), [
+    dismissedPermissionEscalations,
+    headlessConversationEvents,
+    headlessConversationId,
+    headlessProjectId,
+    headlessThreadKey,
+  ]);
   const headlessConversation = useMemo(() => buildKanbanConversation({
     activeThreadId: headlessThreadKey,
     backend: operatorBackend,
@@ -970,9 +1209,6 @@ export function OrchestratorPanel({
   ), [headlessConversation, headlessPendingMessages]);
   const activeHeadlessThread = visibleHeadlessConversation.threads.find((thread) => thread.id === headlessThreadKey)
     ?? visibleHeadlessConversation.threads[0];
-  const activeHeadlessPrompt = activeHeadlessThread
-    ? [...activeHeadlessThread.turns].reverse().find((turn) => turn.user)?.user
-    : undefined;
   const activeThreadBusy = Boolean(
     activeHeadlessThread
     && ["streaming", "submitted", "queued", "waiting_input"].includes(activeHeadlessThread.status),
@@ -1032,7 +1268,10 @@ export function OrchestratorPanel({
     if (!next) return undefined;
     const timer = window.setTimeout(() => {
       setHeadlessQueue((current) => current.filter((item) => item.id !== next.id));
-      void submitHeadlessMessage(next.message, { force: true });
+      void submitHeadlessMessage(next.message, {
+        force: true,
+        requestPatch: next.requestPatch,
+      });
     }, 650);
     return () => window.clearTimeout(timer);
   }, [activeThreadBusy, headlessQueue, headlessSubmitting, headlessThreadKey]);
@@ -1053,6 +1292,8 @@ export function OrchestratorPanel({
     : "Save a valid action token to send messages. Existing replies will still appear here.";
   const headlessPlaceholder = !headlessCanChat
     ? "Save action token to send..."
+    : headlessPlanDiscussion
+      ? `Ask about ${headlessPlanDiscussion.header || "this plan"}...`
     : taskRefOn && context.taskId
       ? `问关于 ${context.taskId} 的任何事(状态 / 合同 / 证据 / 时间线…)`
       : "Tell me what to do...";
@@ -1203,12 +1444,6 @@ export function OrchestratorPanel({
         </form> : null}
 
         <div className="headless-chat">
-          {activeHeadlessPrompt?.content ? (
-            <div className="headless-thread-context" title={activeHeadlessPrompt.content}>
-              <strong>{activeHeadlessPrompt.label || "You"}</strong>
-              <span>{activeHeadlessPrompt.content}</span>
-            </div>
-          ) : null}
           <div
             className="headless-thread"
             ref={headlessThreadRef}
@@ -1251,6 +1486,10 @@ export function OrchestratorPanel({
                 headlessInputRef.current?.focus();
               }}
               onApproveProposal={(proposal, cardId) => void runHeadlessProposal(proposal, cardId)}
+              onRejectProposal={(proposal, cardId) => void rejectHeadlessProposal(proposal, cardId)}
+              onReviseProposal={(proposal) => reviseHeadlessProposal(proposal)}
+              onSubmitPlan={(request, response, cardId) => void submitPlanResponse(request, response, cardId)}
+              onChatAboutPlan={(request) => chatAboutPlan(request)}
               onCancelQueued={(cardId) => setHeadlessQueue((current) => current.filter((item) => item.id !== cardId))}
               onCancelRun={(runId) => void cancelHeadlessRun(runId)}
               providerCapabilities={headlessCapabilities}
@@ -1288,11 +1527,12 @@ export function OrchestratorPanel({
               {pendingProposals.map((item) => {
                 const expanded = Boolean(pendingProposalExpanded[item.proposal_event_id]);
                 const error = pendingProposalErrors[item.proposal_event_id] || "";
+                const presentation = actionPresentation(item.action);
                 return (
                   <div className="headless-pending-entry" key={item.proposal_event_id}>
                     <div className="headless-pending-item">
                       <div className="headless-pending-main">
-                        <strong>{item.title || item.action}</strong>
+                        <strong>{item.title || presentation.title}</strong>
                         <small>
                           {item.action}
                           {item.ts ? ` · ${item.ts.slice(11, 16)} UTC` : ""}
@@ -1315,7 +1555,9 @@ export function OrchestratorPanel({
                         type="button"
                         onClick={() => void runPendingProposal(item)}
                       >
-                        {item.action === "create-task" ? "Create Task" : "Run"}
+                        {pendingProposalBusy === item.proposal_event_id
+                          ? presentation.busyLabel
+                          : presentation.confirmLabel}
                       </button>
                       <button
                         className="headless-pending-dismiss"
@@ -1376,7 +1618,55 @@ export function OrchestratorPanel({
                 </div>
               )
             ) : null}
-            {operatorError ? (
+            {headlessPlanDiscussion ? (
+              <div className="headless-plan-discussion">
+                <MessageCircle aria-hidden="true" size={15} />
+                <span>
+                  <small>Discussing plan</small>
+                  <strong>{headlessPlanDiscussion.header || "Plan"}</strong>
+                </span>
+                <button
+                  aria-label="Stop discussing plan"
+                  className="headless-plan-discussion-close"
+                  title="Remove plan context"
+                  type="button"
+                  onClick={() => setHeadlessPlanDiscussion(null)}
+                >
+                  <X aria-hidden="true" size={14} />
+                </button>
+              </div>
+            ) : null}
+            {permissionEscalation ? (
+              <div className="headless-permission-request" role="alert">
+                <ShieldAlert aria-hidden="true" size={18} />
+                <span>
+                  <strong>Full access required</strong>
+                  <small>
+                    Workspace isolation is unavailable on this host. Retry only this turn
+                    with full shell and Git access.
+                  </small>
+                </span>
+                <div className="headless-permission-actions">
+                  <button
+                    className="agent-inline-button"
+                    type="button"
+                    onClick={() => setDismissedPermissionEscalations((current) => [
+                      ...current,
+                      permissionEscalation.failureEventId,
+                    ])}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="agent-inline-button primary"
+                    type="button"
+                    onClick={() => void runPermissionEscalation()}
+                  >
+                    Run once with full access
+                  </button>
+                </div>
+              </div>
+            ) : operatorError ? (
               <div className="headless-composer-alert" role="alert">{operatorError}</div>
             ) : !headlessCanChat ? (
               // Surfaced from the very moment the panel opens (not only after a
@@ -1398,7 +1688,7 @@ export function OrchestratorPanel({
               className="headless-input"
               placeholder={headlessPlaceholder}
               aria-invalid={!headlessCanChat || undefined}
-              disabled={headlessSubmitting}
+              disabled={headlessSubmitting || Boolean(permissionEscalation)}
               value={headlessMessage}
               onChange={(event) => setHeadlessMessage(event.target.value)}
               onKeyDown={(event) => {
@@ -1413,33 +1703,9 @@ export function OrchestratorPanel({
               }}
             />
             <div className="headless-composer-footer">
-              <div
-                className="agent-permission-segments"
-                role="radiogroup"
-                aria-label="Kanban Agent permission profile"
-              >
-                {PERMISSION_PROFILES
-                  .filter((profile) => (
-                    !agentSurface?.permission_profiles?.length
-                    || agentSurface.permission_profiles.includes(profile.id)
-                  ))
-                  .map((profile) => (
-                    <button
-                      key={profile.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={permissionProfile === profile.id}
-                      className={permissionProfile === profile.id ? "active" : ""}
-                      title={profile.title}
-                      onClick={() => selectPermissionProfile(profile.id)}
-                    >
-                      {profile.label}
-                    </button>
-                  ))}
-              </div>
               <ComposerSubmitButton
                 className="headless-send-button"
-                disabled={!headlessMessage.trim()}
+                disabled={!headlessMessage.trim() || Boolean(permissionEscalation)}
                 iconSize={21}
                 status={deriveComposerStatus(activeHeadlessThread?.status, headlessSubmitting)}
                 onStop={activeHeadlessRun ? () => void cancelHeadlessRun(activeHeadlessRun.id) : undefined}

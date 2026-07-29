@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, fields
 @dataclass
 class ProjectConfig:
     name: str = ""
+    description: str = ""
     workspace: str = "."
     state_dir: str = ".zf"
     # project.scripts.setup:项目自声明的 worktree 就绪脚本,workdir 铸造

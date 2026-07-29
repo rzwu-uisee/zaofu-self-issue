@@ -98,8 +98,11 @@ uv run zf stop
 
 | 命令 | 用途 |
 |---|---|
-| `uv run zf project init --name NAME --root PATH` | 创建默认 multi-kind Project，不点火 |
+| `uv run zf project init --name NAME --root PATH [--description TEXT] [--stack STACK]` | 创建默认 multi-kind Project 与项目上下文，不点火 |
 | `uv run zf project init --kind KIND ...` | 创建显式单 kind Controller |
+| `uv run zf workflow routes --task TASK --format json` | 查询 Task 可用 active route |
+| `uv run zf workflow start --task TASK --route ROUTE --propose` | 创建 Task-bound Workflow proposal |
+| `uv run zf workflow start --proposal-event-id EVENT --apply ...` | 经 operator 授权应用 exact proposal |
 | `uv run zf flow intake ...` | 创建 requirement intake |
 | `uv run zf flow classify ...` | 分类 Issue/PRD/Refactor/Feature |
 | `uv run zf flow clarify --confirm ...` | 澄清并确认 requirement snapshot |
@@ -107,7 +110,8 @@ uv run zf stop
 | `uv run zf flow submit --dry-run ...` | 只读预览点火 admission |
 | `uv run zf flow submit --apply ...` | 显式批准并写入 workflow invoke |
 
-初始化、启动 runtime 和点火相互独立。参数与完整示例见
+初始化、启动 runtime 和点火相互独立。Research/交付 Workflow 都要求已有 Task；
+`--propose` 不点火。参数与完整示例见
 [20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
 
 建议启动前至少跑:
@@ -342,6 +346,7 @@ Memory 和 skills 是 worker 上下文材料,不是第二控制面。修改 work
 | `uv run zf feishu push --watch` | 从 events 直连推送飞书通知 / 卡片(FeishuHttpTransport) |
 | `uv run zf feishu serve --host 0.0.0.0 --port 8000` | 启动飞书 webhook server(公网 webhook 模式,长连接见 `bridge --watch`) |
 | `uv run zf feishu send-test --message "hello"` | 发送测试消息 |
+| `uv run zf feishu live-smoke --to "$CHAT_ID" --purpose kanban_agent --confirm-real-api` | 用 exact purpose credential 实测认证、发送、读取、更新和撤回；默认清理测试卡片 |
 | `uv run zf feishu init-targets --transport real --write-env` | 创建 Automation 文档、Kanban 多维表格和字段,并写入 `.env` |
 | `uv run zf feishu sync-automations --dry-run` | 预览 daily/weekly/project Automation 飞书文档输出 |
 | `uv run zf feishu sync-automations --transport real --document-id "$FEISHU_AUTOMATION_DOCUMENT_ID"` | 同步 Automation 报告到飞书文档 |
@@ -438,7 +443,7 @@ bug-fix-cycle, backlog, workspace, project
 | `trace` | `show`, `record-fixture`, `replay-fixture`, `spans`, `operation`, `gantt` |
 | `workflow` | `render`, `audit` |
 | `runs` | `list`, `rebuild`, `reconcile`, `for-task` |
-| `feishu` | `handle`, `push`, `serve`, `send-test`, `init-targets`, `sync-automations`, `sync-automation-insights-table`, `sync-kanban-table`, `cron-template` |
+| `feishu` | `handle`, `push`, `serve`, `send-test`, `live-smoke`, `init-targets`, `sync-automations`, `sync-automation-insights-table`, `sync-kanban-table`, `cron-template` |
 | `skills` | `list`, `doctor` |
 | `state` | `clean`, `reconcile` |
 | `autoresearch` | `run`, `discover-bugs`, `triggers`, `self-repair`, `loop`, `campaign` |

@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.log import EventLog
-from zf.runtime.kanban_proposals import pending_kanban_proposals
+from zf.runtime.kanban_proposals import (
+    PROPOSAL_EVENT_TYPES,
+    PROPOSAL_RESOLVED_EVENT_TYPES,
+    pending_kanban_proposals,
+)
 
 
 def build_kanban_proposal_card(item: dict[str, Any]) -> dict[str, Any]:
@@ -262,10 +266,12 @@ def push_kanban_proposal_cards_once(
 def _proposal_items(events) -> dict[str, dict[str, Any]]:
     items: dict[str, dict[str, Any]] = {}
     for event in events:
-        if event.type != "kanban.agent.action.proposed":
+        if event.type not in PROPOSAL_EVENT_TYPES:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         proposal = payload.get("proposal") if isinstance(payload.get("proposal"), dict) else {}
+        if not proposal:
+            continue
         proposal_id = str(proposal.get("proposal_id") or event.id)
         item = {
             **proposal,
@@ -285,7 +291,7 @@ def _proposal_resolution(events, item: dict[str, Any]) -> str:
     proposal_event_id = str(item.get("proposal_event_id") or "")
     for event in reversed(events):
         payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type == "kanban.agent.proposal.resolved" and (
+        if event.type in PROPOSAL_RESOLVED_EVENT_TYPES and (
             str(payload.get("proposal_id") or "") == proposal_id
             or str(payload.get("proposal_event_id") or "") == proposal_event_id
         ):

@@ -3,13 +3,174 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import asdict
 from pathlib import Path
 
 from zf.core.events import ZfEvent
+from zf.core.task.store import TaskStore
 from zf.runtime.control_actions_helpers import _required_text, _string_list
+from zf.runtime.workflow_delivery import (
+    apply_flow_submit,
+    build_flow_submit_preview,
+)
+from zf.runtime.workflow_intake import build_flow_intake
+from zf.runtime.workflow_anchor import (
+    is_workflow_managed_task,
+    mark_workflow_managed_task,
+)
+from zf.runtime.workflow_start import WorkflowStartService
 
 
 class WorkflowRequestActionsMixin:
+    def _workflow_start(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        preview = WorkflowStartService(
+            self.state_dir,
+            self.config,
+        ).preview(
+            payload,
+            require_bindings=True,
+            origin=self.surface,
+        )
+        if not preview.get("ok"):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=str(preview.get("task_id") or "") or None,
+                reason=str(preview.get("reason") or "workflow preflight blocked"),
+                status_code=int(preview.get("_status_code") or 409),
+                status=str(preview.get("status") or "preflight_blocked"),
+            )
+        normalized = dict(preview.get("payload") or {})
+        task_id = str(normalized.get("task_id") or "")
+        route_id = str(normalized.get("route_id") or "")
+        objective = str(normalized.get("objective") or "")
+        route = dict(preview.get("route") or {})
+        parameters = (
+            dict(normalized.get("parameters"))
+            if isinstance(normalized.get("parameters"), dict)
+            else {}
+        )
+        task_store = TaskStore(self.state_dir / "kanban.json")
+        workflow_task = task_store.get(task_id)
+        if (
+            workflow_task is not None
+            and not is_workflow_managed_task(workflow_task)
+        ):
+            mark_workflow_managed_task(workflow_task)
+            task_store.update(task_id, contract=workflow_task.contract)
+            self.writer.emit(
+                "task.contract.update",
+                actor=self.actor,
+                task_id=task_id,
+                causation_id=requested.id,
+                correlation_id=requested.correlation_id,
+                payload={
+                    "source": "workflow_start",
+                    "contract": asdict(workflow_task.contract),
+                    "execution_owner": "workflow",
+                },
+            )
+        common_payload = {
+            **parameters,
+            "task_id": task_id,
+            "objective": objective,
+            "route_id": route_id,
+            "pattern_id": str(route.get("entry_pattern_id") or ""),
+            "requested_by": self.actor,
+            "reason": _required_text(payload, "reason")
+            or f"approved task workflow route {route_id}",
+        }
+        for key in (
+            "artifact_refs",
+            "channel_id",
+            "source_refs",
+            "thread_id",
+        ):
+            value = normalized.get(key)
+            if value not in (None, "", [], {}):
+                common_payload[key] = value
+        adapter = str(route.get("start_adapter") or "")
+        if adapter == "fixed_research":
+            result = self._research_start(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload={
+                    **common_payload,
+                    "topic": str(
+                        parameters.get("topic")
+                        or objective
+                    ),
+                },
+            )
+        elif adapter == "registered_general":
+            result = self._workflow_invoke(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=common_payload,
+            )
+        elif adapter == "delivery_request_submit":
+            request_result = self._workflow_request(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload={
+                    **common_payload,
+                    "kind": str(route.get("kind") or ""),
+                },
+            )
+            if not request_result.get("ok"):
+                return {
+                    **request_result,
+                    "route_id": route_id,
+                    "route": route,
+                }
+            result = self._workflow_submit(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload={
+                    **common_payload,
+                    "kind": str(route.get("kind") or ""),
+                    "intake_ref": str(
+                        request_result.get("intake_ref") or ""
+                    ),
+                },
+            )
+            result["workflow_request"] = {
+                key: request_result.get(key)
+                for key in (
+                    "request_id",
+                    "intake_ref",
+                    "workflow_input_manifest_ref",
+                    "submit_preview_ref",
+                )
+            }
+        else:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=task_id,
+                reason=f"workflow route {route_id!r} has no start adapter",
+                status_code=409,
+                status="workflow_route_unavailable",
+            )
+        result.update({
+            "route_id": route_id,
+            "route": route,
+        })
+        return result
+
     def _workflow_request(
         self,
         *,
@@ -59,11 +220,6 @@ class WorkflowRequestActionsMixin:
             self.state_dir,
             _required_text(payload, "source_ref") or _required_text(payload, "artifact_ref"),
         )
-        from zf.cli.flow import (
-            build_flow_intake,
-            build_flow_submit_preview,
-        )
-
         intake = build_flow_intake(
             kind=_required_text(payload, "kind") or "auto",
             source_ref=source_ref,
@@ -83,6 +239,15 @@ class WorkflowRequestActionsMixin:
             created_by=self.actor,
             channel_id=_required_text(payload, "channel_id"),
             thread_id=_required_text(payload, "thread_id"),
+            source_refs=(
+                {
+                    str(key): str(value)
+                    for key, value in payload.get("source_refs", {}).items()
+                    if str(key).strip() and str(value).strip()
+                }
+                if isinstance(payload.get("source_refs"), dict)
+                else {}
+            ),
             output=self.project_root / "docs" / "intake" / f"{request_id}.md",
         )
         preview = build_flow_submit_preview(
@@ -147,8 +312,6 @@ class WorkflowRequestActionsMixin:
         ).expanduser()
         if not config_ref.is_absolute():
             config_ref = self.project_root / config_ref
-        from zf.cli.flow import apply_flow_submit
-
         result = apply_flow_submit(
             config_path=config_ref,
             intake_path=intake_path,

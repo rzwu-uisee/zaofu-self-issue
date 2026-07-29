@@ -395,7 +395,12 @@ def advance_discussion(
             return emitted
         if _ledger_converged(channel, session, thread_id):
             synthesizer = str(session.get("synthesizer") or "")
-            request_id = _stable_synthesis_request_id(channel_id, thread_id, str(session.get("started_event_id") or ""))
+            request_id = _stable_synthesis_request_id(
+                channel_id,
+                thread_id,
+                str(session.get("started_event_id") or ""),
+                generation=_next_synthesis_generation(channel, thread_id),
+            )
             if not _synthesis_already_requested(channel, request_id):
                 writer.emit(
                     "channel.synthesis.requested",
@@ -469,6 +474,21 @@ def advance_discussion(
             )
             emitted.append("channel.discussion.phase.changed")
             return emitted
+        if _thread_has_open_questions(channel, thread_id):
+            writer.emit(
+                "channel.discussion.phase.changed",
+                actor=actor,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "phase": "phase2_relay",
+                    "reason": "synthesis_questions_opened",
+                    "source": source,
+                },
+            )
+            emitted.append("channel.discussion.phase.changed")
+            return emitted
         if _consensus_reached(channel, session, thread_id, consensus):
             artifact_ref = str(consensus.get("artifact_ref") or "")
             if not consensus.get("reached_event_id"):
@@ -485,24 +505,6 @@ def advance_discussion(
                     },
                 )
                 emitted.append("channel.consensus.reached")
-                # doc 122 §9 exit hook: the clarified requirement flows onward
-                # as an idea-to-product PROPOSAL (create-task + workflow-invoke,
-                # still owner-gated) — the room feeds the workflow, never
-                # mutates it. Fires exactly once: it lives inside the
-                # reached_event_id guard.
-                emitted.extend(_propose_idea_to_product(
-                    state_dir,
-                    writer,
-                    channel=channel,
-                    session=session,
-                    reached=reached,
-                    artifact_ref=artifact_ref,
-                    channel_id=channel_id,
-                    thread_id=thread_id,
-                    actor=actor,
-                    config=config,
-                    project_root=project_root,
-                ))
             writer.emit(
                 "channel.discussion.closed",
                 actor=actor,
@@ -583,7 +585,14 @@ def _consensus_reached(
 ) -> bool:
     if not consensus.get("artifact_ref"):
         return False
-    roster = {str(m) for m in session.get("roster") or []}
+    required_signers = {
+        str(member_id)
+        for member_id in consensus.get("required_signers") or []
+        if str(member_id)
+    }
+    roster = required_signers or {
+        str(m) for m in session.get("roster") or []
+    }
     signed = set((consensus.get("signed") or {}).keys())
     if not roster or not roster <= signed:
         return False
@@ -602,6 +611,28 @@ def _synthesis_already_requested(channel: dict[str, Any], request_id: str) -> bo
         if isinstance(item, dict) and str(item.get("request_id") or "") == request_id:
             return True
     return False
+
+
+def _next_synthesis_generation(channel: dict[str, Any], thread_id: str) -> int:
+    prior = sum(
+        1
+        for item in channel.get("synthesis_requests") or []
+        if isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+    )
+    return prior + 1
+
+
+def _thread_has_open_questions(
+    channel: dict[str, Any],
+    thread_id: str,
+) -> bool:
+    return any(
+        isinstance(question, dict)
+        and str(question.get("thread_id") or "main") == thread_id
+        and str(question.get("status") or "") == "open"
+        for question in channel.get("open_questions") or []
+    )
 
 
 def _reject_invalid_resolutions(
@@ -645,9 +676,18 @@ def _reject_invalid_resolutions(
     return emitted
 
 
-def _stable_synthesis_request_id(channel_id: str, thread_id: str, started_event_id: str) -> str:
+def _stable_synthesis_request_id(
+    channel_id: str,
+    thread_id: str,
+    started_event_id: str,
+    *,
+    generation: int,
+) -> str:
     digest = hashlib.sha1(
-        f"synthesis:{channel_id}:{thread_id}:{started_event_id}".encode("utf-8"),
+        (
+            f"synthesis:{channel_id}:{thread_id}:{started_event_id}:"
+            f"generation:{generation}"
+        ).encode("utf-8"),
     ).hexdigest()[:16]
     return f"synth-{digest}"
 
@@ -811,64 +851,3 @@ def sweep_discussion_deadlines(
             )
             ticked += 1
     return ticked
-
-
-# ---------------------------------------------------------------------------
-# P0-1: exit hook — clarified artifact flows into idea-to-product
-# ---------------------------------------------------------------------------
-
-def _propose_idea_to_product(
-    state_dir: Path,
-    writer: EventWriter,
-    *,
-    channel: dict[str, Any],
-    session: dict[str, Any],
-    reached: Any,
-    artifact_ref: str,
-    channel_id: str,
-    thread_id: str,
-    actor: str,
-    config: Any | None,
-    project_root: Path | None,
-) -> list[str]:
-    requirement_text = ""
-    requirement_id = str(session.get("requirement_message_id") or "")
-    for message in channel.get("messages") or []:
-        if isinstance(message, dict) and str(message.get("message_id") or "") == requirement_id:
-            requirement_text = str(message.get("text") or "")
-            break
-    objective = (requirement_text or f"channel {channel_id} clarified requirement")[:500]
-    from zf.runtime.control_actions import ControlledActionService
-
-    service = ControlledActionService(
-        Path(state_dir),
-        writer,
-        config=config,
-        project_root=project_root,
-        actor=actor,
-        source="channel-discussion",
-        surface="channel",
-    )
-    result = service.execute(
-        action="idea-to-product",
-        requested_action="idea-to-product",
-        payload={
-            "objective": objective,
-            "artifact_ref": artifact_ref,
-            "channel_id": channel_id,
-            "thread_id": thread_id,
-            "consensus_event_id": getattr(reached, "id", ""),
-            # the created task must carry the clarified artifact — otherwise
-            # prd-author never sees the discussion's output (doc 122 §9).
-            # TaskContract is a fixed schema: spec_ref is the canonical "input
-            # spec" slot and handoff_artifacts the handoff list; free-form keys
-            # would crash TaskStore.get on read-back.
-            "contract": {
-                "spec_ref": artifact_ref,
-                "handoff_artifacts": [artifact_ref] if artifact_ref else [],
-                "source_ref": f"channel:{channel_id}/{thread_id}",
-            },
-        },
-        requested=reached,
-    )
-    return ["operator.action.proposed"] if result.get("ok") else []

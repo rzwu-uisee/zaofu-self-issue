@@ -7,6 +7,9 @@ path.
 
 from __future__ import annotations
 
+from typing import Any
+
+
 def kanban_agent_inbound_reply(state_dir, config, event, writer) -> dict[str, Any]:
     """Handle one Feishu→kanban_agent inbound message."""
     from zf.integrations.feishu.agent_conversation import run_specialist_conversation

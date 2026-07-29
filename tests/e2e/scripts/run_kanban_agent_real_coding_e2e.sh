@@ -6,6 +6,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 FIXTURE="$ROOT/tests/e2e/fixtures/kanban-real-coding"
 RUN_ROOT=""
 WEB_PORT=""
+EVIDENCE_DIR="${ZF_PLAYWRIGHT_EVIDENCE_DIR:-}"
 KEEP=0
 DOCKER_IMAGE="${ZF_PLAYWRIGHT_IMAGE:-mcp/playwright:latest}"
 
@@ -16,12 +17,15 @@ Usage: tests/e2e/scripts/run_kanban_agent_real_coding_e2e.sh [options]
 Options:
   --run-root PATH  Isolated run root. Default: /tmp/zf-kanban-real-coding-<utc>
   --port PORT      Web port. Default: first free port at 8002+
+  --evidence-dir PATH
+                   Retain browser screenshots outside the run root
   --keep           Retain the run root after completion for diagnosis
   -h, --help       Show this help
 
-This is a real-provider test. Playwright selects Codex + dangerous_full in an
-isolated temporary Git project, accepts the per-turn warning, drives two coding
-turns, and proves native provider-session resume plus hidden functional tests.
+This is a real-provider test. Playwright starts from the Web Kanban
+dangerous_full default in an isolated temporary Git project. The test drives
+two coding turns and proves there is no workspace-write fallback, while also
+covering native provider-session resume plus hidden functional tests.
 USAGE
 }
 
@@ -29,6 +33,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-root) RUN_ROOT="$2"; shift 2 ;;
     --port) WEB_PORT="$2"; shift 2 ;;
+    --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -78,6 +83,7 @@ STAMP="$(date -u +%Y%m%d-%H%M%S)"
 RUN_ROOT="${RUN_ROOT:-/tmp/zf-kanban-real-coding-${STAMP}}"
 PROJECT_ROOT="$RUN_ROOT/project"
 WORKSPACE_HOME="$RUN_ROOT/workspace-home"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$RUN_ROOT/evidence}"
 STATE_DIR="$PROJECT_ROOT/.zf"
 TOKEN="zf-real-coding-${STAMP}-$$"
 WEB_PORT="${WEB_PORT:-$(pick_port 8002)}"
@@ -86,7 +92,8 @@ WEB_PID=""
 WEB_PGID=""
 INITIALIZED=0
 
-mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME"
+mkdir -p "$PROJECT_ROOT" "$WORKSPACE_HOME" "$EVIDENCE_DIR"
+EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"
 cp "$FIXTURE/.gitignore" "$PROJECT_ROOT/.gitignore"
 cp "$FIXTURE/zf.yaml" "$PROJECT_ROOT/zf.yaml"
 cp "$FIXTURE/counter.py" "$PROJECT_ROOT/counter.py"
@@ -183,12 +190,14 @@ docker run --rm --network host \
   --entrypoint bash \
   -v "$ROOT:/work" \
   -v "$RUN_ROOT:/zf-run" \
+  -v "$EVIDENCE_DIR:/zf-evidence" \
   -w /work/web \
   -e HOME=/tmp/zf-playwright-home \
   -e PLAYWRIGHT_BROWSERS_PATH=0 \
   -e ZF_WEB_BASE_URL="http://127.0.0.1:$WEB_PORT" \
   -e ZF_WEB_ACTION_TOKEN_FOR_TEST="$TOKEN" \
   -e ZF_REAL_CODING_PROJECT_ROOT=/zf-run/project \
+  -e ZF_PLAYWRIGHT_EVIDENCE_DIR=/zf-evidence \
   "$DOCKER_IMAGE" \
   -lc 'set -euo pipefail; mkdir -p "$HOME"; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test tests/kanban-agent-real-coding.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
 
@@ -221,7 +230,7 @@ coding_replies = [
     event for event in events
     if event.get("type") == "kanban.agent.reply"
     and event.get("payload", {}).get("backend") == "codex-headless"
-    and event.get("payload", {}).get("permission_profile") == "dangerous_full"
+    and "_DONE" in str(event.get("payload", {}).get("answer") or "")
 ]
 completed = [
     event for event in events
@@ -231,11 +240,34 @@ completed = [
 snapshots = [
     event for event in events
     if event.get("type") == "provider.permission.snapshot.recorded"
-    and event.get("payload", {}).get("permission_profile") == "dangerous_full"
+    and event.get("causation_id") in {
+        reply.get("id") for reply in coding_replies
+    }
 ]
 assert len(coding_replies) == 2, len(coding_replies)
 assert len(completed) == 2, len(completed)
 assert len(snapshots) == 2, len(snapshots)
+profiles = {
+    event.get("payload", {}).get("permission_profile")
+    for event in snapshots
+}
+assert profiles == {"dangerous_full"}, profiles
+for event in snapshots:
+    snapshot = event.get("payload", {}).get("snapshot", {})
+    assert snapshot.get("sandbox_policy") == "danger-full-access", snapshot
+    assert snapshot.get("approval_policy") == "never", snapshot
+sandbox_fallbacks = [
+    event for event in events
+    if event.get("type") == "kanban.agent.reply"
+    and event.get("payload", {}).get("status") == "sandbox_unsupported"
+]
+permission_retries = [
+    event for event in events
+    if event.get("type") == "user.message"
+    and event.get("payload", {}).get("permission_escalation_retry_for")
+]
+assert not sandbox_fallbacks, len(sandbox_fallbacks)
+assert not permission_retries, len(permission_retries)
 sessions = {
     event["payload"].get("provider_session_id")
     for event in coding_replies
@@ -261,7 +293,8 @@ assert subprocess.run(
 print(json.dumps({
     "coding_turns": len(completed),
     "codex_replies": len(coding_replies),
-    "danger_confirmations_required": 2,
+    "permission_profiles": sorted(profiles),
+    "sandbox_fallbacks": len(sandbox_fallbacks),
     "permission_snapshots": len(snapshots),
     "provider_sessions": len(sessions),
     "resumed_turns": sum(
