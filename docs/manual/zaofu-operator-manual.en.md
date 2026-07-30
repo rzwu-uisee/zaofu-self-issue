@@ -146,12 +146,19 @@ Provider login and host sandbox support are external prerequisites. A valid
 
 ### 4.1 Preferred Web path
 
-Start the Workspace shell with a controlled action token:
+Start the Workspace shell through the canonical trusted-local launcher:
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
+tools/start-webkanban.sh \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --workspace-only
 ```
+
+The launcher builds Web, reuses or creates the controlled action token, loads
+Workspace/provider environment variables, and applies the trusted-local Codex
+headless sandbox policy. It prints the action token at startup; a stable token
+may be stored in the uncommitted repository `.env`.
 
 Complete Provider, Environment, Access, and Ready onboarding. Then select
 `Add Project`, enter a server-side path, and run Inspect. Disk truth selects
@@ -510,8 +517,13 @@ Install the Web extra and start the dashboard:
 
 ```bash
 uv sync --extra web
-uv run zf web --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```
+
+Use `tools/start-webkanban.sh --port 8001 --status` to verify tmux, API, and
+the effective Codex headless policy. Use `--no-build` for a restart when the
+bundle is already current. Direct `uv run zf web ...` is reserved for low-level
+debugging and inherits only the shell and target Project `.env`.
 
 Use `0.0.0.0` only on a trusted network or for a controlled Docker test.
 
@@ -753,7 +765,8 @@ Do not ask review/test/judge to evaluate an unpinned worker branch.
 
 ### Web returns 500 or shows the wrong project
 
-Confirm the project root and state directory:
+Confirm the project root and state directory. This is a low-level state-dir
+debug path, so it does not apply trusted-local launcher defaults:
 
 ```bash
 uv run zf web --state-dir /absolute/path/to/state-dir \
@@ -766,11 +779,22 @@ uv run zf state reconcile --dry-run
 
 ```bash
 uv run zf doctor provider --backend codex --json
+tools/start-webkanban.sh --port 8001 --status
 ```
 
-Repair host namespace/bubblewrap support when possible. Dangerous sandbox
-bypass is appropriate only for an explicitly trusted, bounded local smoke and
-must be recorded in the validation report.
+If Web reports `sandbox=workspace-write` with `unshare failed: Operation not
+permitted`, and launcher status says `tmux: stopped` while port 8001 is
+listening, stop the exact non-launcher PID and restart:
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
+```
+
+The trusted-local launcher intentionally defaults Codex headless to
+`danger-full-access`; verify that value in status output. This disables the
+normal OS sandbox and is appropriate only for an explicitly trusted local
+repository and network. Shared or production-like hosts must repair namespace
+or bubblewrap support instead.
 
 ### A tmux session is stuck
 

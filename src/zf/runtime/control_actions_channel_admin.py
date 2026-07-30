@@ -1,12 +1,18 @@
 """ChannelAdminActionsMixin — controlled-action handlers (moved verbatim from control_actions.py)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 from typing import Any
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
-from zf.core.skills.provenance import resolve_skill_source
+from zf.core.state.atomic_io import atomic_write_text
+from zf.core.skills.provenance import (
+    resolve_builtin_skill_source,
+    resolve_skill_source,
+)
 from zf.runtime.channel_contracts import normalize_channel_role
 from zf.runtime.channel_contracts import normalize_channel_skill_refs
 from zf.runtime.channel_contracts import normalize_member_type
@@ -31,25 +37,23 @@ def _materialize_channel_skill_refs(
     project_root: Path,
     state_dir: Path,
     config: Any,
-) -> None:
-    """Copy each channel skill_ref's source dir to the project-root-relative
-    path the ref names, if it isn't already there.
-
-    Channel members run with cwd=project_root (channel_adapter.py) and
-    resolve `skill_refs` as literal `skills/<name>/SKILL.md` paths — unlike
-    `roles:`, which go through `skills.materialize: copy` into an isolated
-    workdir, nothing previously copied the actual skill content into that
-    project-root location. Members then had only the path string in their
-    system prompt and could not read the file (2026-07-03 racing-codex e2e
-    finding #4).
-    """
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Resolve logical refs without mutating the target project's source."""
+    unresolved: list[str] = []
+    resolved: list[dict[str, str]] = []
     for ref in skill_refs:
         parts = ref.split("/")
         if len(parts) != 3 or parts[0] != "skills" or parts[2] != "SKILL.md":
+            unresolved.append(ref)
             continue
         name = parts[1]
-        target = project_root / "skills" / name / "SKILL.md"
-        if target.exists():
+        project_target = project_root / "skills" / name / "SKILL.md"
+        if project_target.exists():
+            resolved.append(_resolved_channel_skill(
+                logical_ref=ref,
+                path=project_target,
+                source="project",
+            ))
             continue
         source = resolve_skill_source(
             project_root=project_root,
@@ -57,10 +61,74 @@ def _materialize_channel_skill_refs(
             name=name,
             config=config,
         )
+        if source is None:
+            source = resolve_builtin_skill_source(name)
         if source is None or not source.is_file():
+            unresolved.append(ref)
             continue
+        target = state_dir / "runtime-skills" / name / "SKILL.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source.parent, target.parent, dirs_exist_ok=True)
+        resolved.append(_resolved_channel_skill(
+            logical_ref=ref,
+            path=target,
+            source=str(source),
+        ))
+    if resolved:
+        _write_runtime_skill_manifest(state_dir, resolved)
+    return unresolved, resolved
+
+
+def _resolved_channel_skill(
+    *,
+    logical_ref: str,
+    path: Path,
+    source: str,
+) -> dict[str, str]:
+    return {
+        "logical_ref": logical_ref,
+        "resolved_path": str(path.resolve()),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "source": source,
+    }
+
+
+def _write_runtime_skill_manifest(
+    state_dir: Path,
+    resolved: list[dict[str, str]],
+) -> None:
+    manifest_path = state_dir / "runtime-skills" / "manifest.json"
+    existing: list[dict[str, str]] = []
+    if manifest_path.is_file():
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            existing = [
+                item
+                for item in raw.get("skills") or []
+                if isinstance(item, dict)
+            ]
+        except (OSError, ValueError):
+            existing = []
+    by_ref = {
+        str(item.get("logical_ref") or ""): item
+        for item in [*existing, *resolved]
+        if str(item.get("logical_ref") or "")
+    }
+    atomic_write_text(
+        manifest_path,
+        json.dumps(
+            {
+                "schema_version": "channel.runtime_skills.v1",
+                "skills": [
+                    by_ref[key] for key in sorted(by_ref)
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
 
 
 class ChannelAdminActionsMixin:
@@ -134,7 +202,10 @@ class ChannelAdminActionsMixin:
         write_policy = permission_profile_write_policy(permission_profile)
         permissions = normalize_permissions(payload.get("permissions"), member_type=member_type)
         skill_refs = normalize_channel_skill_refs(payload.get("skill_refs"))
-        _materialize_channel_skill_refs(
+        (
+            unresolved_skill_refs,
+            resolved_skill_refs,
+        ) = _materialize_channel_skill_refs(
             skill_refs,
             project_root=self.project_root or self.state_dir.parent,
             state_dir=self.state_dir,
@@ -147,6 +218,27 @@ class ChannelAdminActionsMixin:
         )
         role_context_ref = normalize_role_context_ref(payload.get("role_context_ref"))
         provider_binding_id = _provider_binding_id(payload)
+        if unresolved_skill_refs:
+            return self._channel_reject_member(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                member_id=member_id,
+                provider=provider,
+                backend=str(payload.get("backend") or provider),
+                member_type=member_type,
+                channel_role=channel_role,
+                visibility_profile=visibility_profile,
+                permissions=permissions,
+                provider_binding_id=provider_binding_id,
+                reason=(
+                    "channel skill refs could not be resolved: "
+                    + ", ".join(unresolved_skill_refs)
+                ),
+            )
         remote_agent_id = ""
         provider_session_id = ""
         openclaw_capabilities: dict[str, Any] = {}
@@ -218,6 +310,7 @@ class ChannelAdminActionsMixin:
                 "write_policy": write_policy,
                 "role_context_ref": role_context_ref,
                 "skill_refs": skill_refs,
+                "resolved_skill_refs": resolved_skill_refs,
                 "scope": str(payload.get("scope") or "channel"),
                 "permissions": permissions,
                 "backing_worker_session_id": str(payload.get("backing_worker_session_id") or ""),

@@ -13,12 +13,7 @@ from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
 from zf.core.task.lifecycle import derive_phase
 from zf.core.task.store import TaskStore
-from zf.integrations.feishu.clients import (
-    FeishuHttpBitableClient,
-    FeishuHttpDocumentClient,
-    MockFeishuBitableClient,
-    MockFeishuDocumentClient,
-)
+from zf.integrations.feishu.client_ports import BitableClient, DocumentClient
 from zf.integrations.feishu.renderers import (
     automation_row_key_field,
     build_automation_insight_records,
@@ -31,10 +26,6 @@ from zf.integrations.feishu.renderers import (
 )
 from zf.integrations.feishu.transport import FeishuTransportError
 from zf.runtime.automation_projection import project_automations
-
-
-DocumentClient = MockFeishuDocumentClient | FeishuHttpDocumentClient
-BitableClient = MockFeishuBitableClient | FeishuHttpBitableClient
 
 
 def now_iso() -> str:
@@ -178,6 +169,7 @@ def sync_kanban_bitable(
     writer: EventWriter | None = None,
     field_map: dict[str, str] | None = None,
     include_archive_days: int | None = 30,
+    task_ids: set[str] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     store = TaskStore(Path(state_dir) / "kanban.json")
@@ -186,6 +178,8 @@ def sync_kanban_bitable(
         if include_archive_days is None
         else store.list_all_with_archive(last_days=include_archive_days)
     )
+    if task_ids is not None:
+        tasks = [task for task in tasks if task.id in task_ids]
     try:
         events = EventLog(Path(state_dir) / "events.jsonl").read_all()
     except Exception:
@@ -221,36 +215,18 @@ def sync_kanban_bitable(
         task_id = str(fields.get(task_id_field) or "").strip()
         if not task_id:
             continue
-        record_id = ledger.bitable_record_id(
+        action, was_recreated = _upsert_bitable_record(
+            client=client,
+            ledger=ledger,
             app_token=app_token,
             table_id=table_id,
-            task_id=task_id,
+            stable_key=task_id,
+            key_field=task_id_field,
+            fields=fields,
         )
-        if record_id:
-            try:
-                client.update_record(app_token, table_id, record_id, fields)
-                updated += 1
-            except FeishuTransportError as exc:
-                if not _is_deleted_bitable_record_error(exc):
-                    raise
-                record_id = client.create_record(app_token, table_id, fields)
-                ledger.set_bitable_record_id(
-                    app_token=app_token,
-                    table_id=table_id,
-                    task_id=task_id,
-                    record_id=record_id,
-                )
-                created += 1
-                recreated += 1
-        else:
-            record_id = client.create_record(app_token, table_id, fields)
-            ledger.set_bitable_record_id(
-                app_token=app_token,
-                table_id=table_id,
-                task_id=task_id,
-                record_id=record_id,
-            )
-            created += 1
+        created += int(action == "created")
+        updated += int(action == "updated")
+        recreated += int(was_recreated)
 
     _emit_sync_event(
         writer,
@@ -322,36 +298,18 @@ def sync_automation_bitable(
         if not row_key:
             continue
         current_row_keys.add(row_key)
-        record_id = ledger.bitable_record_id(
+        action, was_recreated = _upsert_bitable_record(
+            client=client,
+            ledger=ledger,
             app_token=app_token,
             table_id=table_id,
-            task_id=row_key,
+            stable_key=row_key,
+            key_field=row_key_field,
+            fields=fields,
         )
-        if record_id:
-            try:
-                client.update_record(app_token, table_id, record_id, fields)
-                updated += 1
-            except FeishuTransportError as exc:
-                if not _is_deleted_bitable_record_error(exc):
-                    raise
-                record_id = client.create_record(app_token, table_id, fields)
-                ledger.set_bitable_record_id(
-                    app_token=app_token,
-                    table_id=table_id,
-                    task_id=row_key,
-                    record_id=record_id,
-                )
-                created += 1
-                recreated += 1
-        else:
-            record_id = client.create_record(app_token, table_id, fields)
-            ledger.set_bitable_record_id(
-                app_token=app_token,
-                table_id=table_id,
-                task_id=row_key,
-                record_id=record_id,
-            )
-            created += 1
+        created += int(action == "created")
+        updated += int(action == "updated")
+        recreated += int(was_recreated)
 
     stale_updated = _mark_stale_automation_rows(
         project_id=project_id,
@@ -442,6 +400,80 @@ def _emit_sync_event(
     if writer is None:
         return
     writer.append(ZfEvent(type=event_type, actor="zf-cli", payload=payload))
+
+
+def _upsert_bitable_record(
+    *,
+    client: BitableClient,
+    ledger: FeishuSyncLedger,
+    app_token: str,
+    table_id: str,
+    stable_key: str,
+    key_field: str,
+    fields: dict[str, Any],
+) -> tuple[str, bool]:
+    record_id = ledger.bitable_record_id(
+        app_token=app_token,
+        table_id=table_id,
+        task_id=stable_key,
+    )
+    deleted = False
+    if record_id:
+        try:
+            client.update_record(app_token, table_id, record_id, fields)
+            return "updated", False
+        except FeishuTransportError as exc:
+            if not _is_deleted_bitable_record_error(exc):
+                raise
+            deleted = True
+
+    remote_record_id = _find_remote_record_id(
+        client,
+        app_token,
+        table_id,
+        key_field=key_field,
+        key_value=stable_key,
+    )
+    if remote_record_id:
+        client.update_record(app_token, table_id, remote_record_id, fields)
+        ledger.set_bitable_record_id(
+            app_token=app_token,
+            table_id=table_id,
+            task_id=stable_key,
+            record_id=remote_record_id,
+        )
+        return "updated", False
+
+    record_id = client.create_record(app_token, table_id, fields)
+    ledger.set_bitable_record_id(
+        app_token=app_token,
+        table_id=table_id,
+        task_id=stable_key,
+        record_id=record_id,
+    )
+    return "created", deleted
+
+
+def _find_remote_record_id(
+    client: BitableClient,
+    app_token: str,
+    table_id: str,
+    *,
+    key_field: str,
+    key_value: str,
+) -> str:
+    finder = getattr(client, "find_record_id", None)
+    if not callable(finder):
+        return ""
+    return str(
+        finder(
+            app_token,
+            table_id,
+            key_field=key_field,
+            key_value=key_value,
+        )
+        or ""
+    ).strip()
 
 
 def _bitable_key(app_token: str, table_id: str, task_id: str) -> str:

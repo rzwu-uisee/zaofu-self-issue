@@ -71,6 +71,7 @@ _VALID_AUTORESEARCH_TRIGGER_MODES = ("off", "manual", "supervised", "continuous"
 _VALID_AUTORESEARCH_REPAIR_MODES = ("proposal_only", "bounded_repair")
 _VALID_REPAIR_BACKENDS = ("codex", "claude-code")
 _VALID_FEISHU_INBOUND_MODES = ("bridge",)
+_VALID_FEISHU_PROJECTION_BACKENDS = ("lark-cli",)
 _VALID_SEVERITIES = ("low", "medium", "high", "critical")
 _ENV_SUB_RE = re.compile(
     r"\$\{(?P<name>[A-Z_][A-Z0-9_]*)(?::-(?P<default>[^}]*))?\}"
@@ -127,6 +128,7 @@ from zf.core.config.schema import (  # noqa: E402
     RuntimeRunManagerResidentAgentConfig,
     RuntimeRunManagerSourceRepairConfig,
     RuntimeFeishuInboundConfig,
+    RuntimeFeishuProjectionConfig,
     ProvidersConfig,
     OpenClawProviderConfig,
     OpenClawRemoteBindingConfig,
@@ -2988,6 +2990,7 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
     run_manager_raw = data.get("run_manager") or {}
     autoresearch_resident_raw = data.get("autoresearch_resident") or {}
     feishu_inbound_raw = data.get("feishu_inbound") or {}
+    feishu_projection_raw = data.get("feishu_projection") or {}
     if not isinstance(workdirs_raw, dict):
         raise ConfigError("runtime.workdirs must be a mapping")
     if not isinstance(git_raw, dict):
@@ -3000,6 +3003,8 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
         raise ConfigError("runtime.autoresearch_resident must be a mapping")
     if not isinstance(feishu_inbound_raw, dict):
         raise ConfigError("runtime.feishu_inbound must be a mapping")
+    if not isinstance(feishu_projection_raw, dict):
+        raise ConfigError("runtime.feishu_projection must be a mapping")
     resident_raw = run_manager_raw.get("resident_agent") or {}
     if not isinstance(resident_raw, dict):
         raise ConfigError("runtime.run_manager.resident_agent must be a mapping")
@@ -3182,6 +3187,47 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
         for value in feishu_allowed_senders_raw
         if str(value or "").strip()
     ]
+    feishu_projection_backend = str(
+        feishu_projection_raw.get("backend", "lark-cli") or "lark-cli"
+    ).strip()
+    if feishu_projection_backend not in _VALID_FEISHU_PROJECTION_BACKENDS:
+        raise ConfigError(
+            f"Invalid runtime.feishu_projection.backend {feishu_projection_backend!r}: "
+            f"must be one of {_VALID_FEISHU_PROJECTION_BACKENDS}"
+        )
+    try:
+        feishu_projection_poll_interval = float(
+            feishu_projection_raw.get("poll_interval_seconds", 2.0)
+        )
+        feishu_projection_reconcile_interval = float(
+            feishu_projection_raw.get("reconcile_interval_seconds", 3600.0)
+        )
+        feishu_projection_archive_days = int(
+            feishu_projection_raw.get("include_archive_days", 30)
+        )
+        feishu_projection_max_actions = int(
+            feishu_projection_raw.get("max_actions_per_tick", 20)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "runtime.feishu_projection numeric values must be valid numbers"
+        ) from exc
+    if feishu_projection_poll_interval <= 0:
+        raise ConfigError(
+            "runtime.feishu_projection.poll_interval_seconds must be > 0"
+        )
+    if feishu_projection_reconcile_interval <= 0:
+        raise ConfigError(
+            "runtime.feishu_projection.reconcile_interval_seconds must be > 0"
+        )
+    if feishu_projection_archive_days < 0:
+        raise ConfigError(
+            "runtime.feishu_projection.include_archive_days must be >= 0"
+        )
+    if feishu_projection_max_actions <= 0:
+        raise ConfigError(
+            "runtime.feishu_projection.max_actions_per_tick must be > 0"
+        )
     candidate_strategy = str(git_raw.get("candidate_strategy", "cherry-pick"))
     if candidate_strategy not in _VALID_CANDIDATE_STRATEGIES:
         raise ConfigError(
@@ -3339,6 +3385,28 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
                 default=True,
             ),
             allowed_senders=feishu_allowed_senders,
+        ),
+        feishu_projection=RuntimeFeishuProjectionConfig(
+            enabled=_bool_value(
+                feishu_projection_raw.get("enabled"),
+                default=False,
+            ),
+            backend=feishu_projection_backend,
+            auto_create_target=_bool_value(
+                feishu_projection_raw.get("auto_create_target"),
+                default=False,
+            ),
+            base_name=str(feishu_projection_raw.get("base_name") or "").strip(),
+            table_name=str(
+                feishu_projection_raw.get("table_name") or "Kanban"
+            ).strip(),
+            time_zone=str(
+                feishu_projection_raw.get("time_zone") or "Asia/Shanghai"
+            ).strip(),
+            poll_interval_seconds=feishu_projection_poll_interval,
+            reconcile_interval_seconds=feishu_projection_reconcile_interval,
+            include_archive_days=feishu_projection_archive_days,
+            max_actions_per_tick=feishu_projection_max_actions,
         ),
     )
 

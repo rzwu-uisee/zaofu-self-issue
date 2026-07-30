@@ -66,6 +66,9 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "task_map.ready",
     "workflow.invoke.requested",
     "channel.synthesis.requested",
+    "channel.question.dedup.requested",
+    "channel.question.dedup.applied",
+    "channel.cross_review.requested",
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",
     "fanout.aggregate.rebuild.requested",
@@ -181,12 +184,16 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # the live watcher will never deliver.
     "channel.agent.reply.completed",
     "channel.question.opened",
+    "channel.question.updated",
     "channel.question.resolved",
     "channel.question.merged",
+    "channel.cross_review.completed",
+    "channel.cross_review.rejected",
     "channel.questions.frozen",
     "channel.consensus.proposed",
     "channel.consensus.signed",
     "channel.consensus.blocked",
+    "channel.consensus.review.rejected",
     # α-3 (2026-05-17): worker.probe.silent wakes run_once so
     # downstream consumers (web UI badges, follow-up reaction) see the
     # signal in real time.

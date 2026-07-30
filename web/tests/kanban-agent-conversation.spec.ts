@@ -267,6 +267,53 @@ test("KBA-03 create-task proposal mutates canonical state only after acceptance"
   await expect(page.locator(".agent-session")).toContainText(marker, { timeout: 30_000 });
 });
 
+test("KBA-03B invalid semantic evidence remains visible and non-executable", async ({ page, request }) => {
+  const id = await projectId(request);
+  const cursor = await eventCursor(request, id);
+  const marker = `KBA_INVALID_${Date.now().toString(36)}`;
+  const title = `Invalid Kanban Agent proposal ${marker}`;
+
+  await openKanbanAgent(page, id);
+  await sendMessage(
+    page,
+    `${marker} explain proposal parsing without creating anything`,
+  );
+
+  const approveCard = page.locator(".agent-stack-card.approve").filter({
+    hasText: title,
+  }).last();
+  await expect(approveCard).toBeVisible({ timeout: 30_000 });
+  await expect(approveCard).toContainText(
+    "intent.source_quote must occur verbatim in the user semantic context",
+  );
+  await expect(
+    approveCard.getByRole("button", { name: "Create task" }),
+  ).toBeDisabled();
+  await captureAgent(page, "03-invalid-semantic-evidence");
+
+  const pending = await apiJson<{ items?: Array<Record<string, unknown>> }>(
+    request,
+    `/api/projects/${encodeURIComponent(id)}/kanban-agent/pending-proposals`,
+  );
+  const invalid = (pending.items ?? []).find((item) => (
+    String(item.title ?? "") === title
+  ));
+  expect(invalid?.valid).toBe(false);
+  expect(String(invalid?.validation_error ?? "")).toContain(
+    "intent.source_quote must occur verbatim",
+  );
+
+  const snapshot = await apiJson<Snapshot>(
+    request,
+    `/api/projects/${encodeURIComponent(id)}/snapshot`,
+  );
+  expect(snapshotHasTitle(snapshot, title)).toBeFalsy();
+  const events = await eventsAfter(request, id, cursor);
+  expect(events.some((event) => (
+    event.type === "task.created" && eventPayloadContains(event, title)
+  ))).toBeFalsy();
+});
+
 test("KBA-04 two turns resume one provider session and survive reload", async ({ page, request }) => {
   const id = await projectId(request);
   const cursor = await eventCursor(request, id);

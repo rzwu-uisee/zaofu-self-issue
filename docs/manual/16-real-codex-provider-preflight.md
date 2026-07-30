@@ -19,6 +19,8 @@ uv run zf doctor provider --backend codex --json
 
 ```text
 bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+Codex sandbox unsupported for sandbox=workspace-write:
+unshare: unshare failed: Operation not permitted
 ```
 
 ## 2. E2E 策略
@@ -36,18 +38,48 @@ codex exec --dangerously-bypass-approvals-and-sandbox --json "$PROMPT"
 
 该 bypass 只适合临时 E2E 或受控 smoke,不应成为生产 worker 默认权限。
 
-Channel / Kanban Agent 的真实 Codex headless 默认使用 `workspace-write`
-或 `read-only` sandbox。如果预检显示 `sandbox: unsupported`,Web 侧会在
-启动真实 Codex turn 前返回 `sandbox_unsupported`,避免等待超时。若这是
-本机受信任项目里的临时写入验证,可以显式配置:
+### 2.1 WebKanban 启动模式
+
+Channel 成员的权限 profile 通常映射为 `workspace-write` 或 `read-only` sandbox。
+如果预检显示 `sandbox: unsupported`,Web 会在启动真实 Codex turn 前返回
+`sandbox_unsupported`,避免等待超时。
+
+可信本地开发机应使用 canonical launcher：
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+```
+
+该 launcher 会加载 action token、Workspace provider 环境，并在未显式覆盖时为
+可信本地 WebKanban 设置：
+
+```text
+ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
+ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+```
+
+检查实际启动策略：
+
+```bash
+tools/start-webkanban.sh --port 8001 --status
+```
+
+必须看到 `codex_headless_sandbox: danger-full-access`、`tmux: running` 和
+`api: ok`。`zf doctor provider` 仍可能报告宿主普通 sandbox 不可用；它检查的是
+host capability，不是 launcher 是否已显式 bypass。
+
+直接 `uv run zf web ...` 是低层调试入口，只继承 shell 和目标 Project `.env`，
+不会自动采用 launcher 默认值。确实需要直接启动可信本地实例时，先显式配置：
 
 ```bash
 export ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
+export ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+uv run zf web --host 127.0.0.1 --port 8001
 ```
 
-然后重启 WebKanban。该配置会关闭 Codex headless 的普通 sandbox,只能在
-受信任本地项目和短期诊断中使用;长期修复仍应优先恢复宿主机
-namespace / bubblewrap 能力。
+`danger-full-access` 会关闭 Codex headless 的普通 OS sandbox。它只适用于明确受信任
+的本地代码库和网络；共享主机、非可信项目或 production-like 环境应修复
+namespace / bubblewrap，而不是使用 bypass。
 
 ## 3. Channel 失败判断
 

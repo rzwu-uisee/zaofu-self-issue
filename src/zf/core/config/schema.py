@@ -1373,6 +1373,20 @@ class RuntimeFeishuInboundConfig:
 
 
 @dataclass
+class RuntimeFeishuProjectionConfig:
+    enabled: bool = False
+    backend: str = "lark-cli"
+    auto_create_target: bool = False
+    base_name: str = ""
+    table_name: str = "Kanban"
+    time_zone: str = "Asia/Shanghai"
+    poll_interval_seconds: float = 2.0
+    reconcile_interval_seconds: float = 3600.0
+    include_archive_days: int = 30
+    max_actions_per_tick: int = 20
+
+
+@dataclass
 class RuntimeConfig:
     workdirs: WorkdirConfig = field(default_factory=WorkdirConfig)
     git: GitIsolationConfig = field(default_factory=GitIsolationConfig)
@@ -1385,6 +1399,9 @@ class RuntimeConfig:
     )
     feishu_inbound: RuntimeFeishuInboundConfig = field(
         default_factory=RuntimeFeishuInboundConfig,
+    )
+    feishu_projection: RuntimeFeishuProjectionConfig = field(
+        default_factory=RuntimeFeishuProjectionConfig,
     )
 
 

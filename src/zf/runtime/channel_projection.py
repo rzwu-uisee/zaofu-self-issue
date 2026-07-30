@@ -22,12 +22,20 @@ from zf.runtime.channel_contracts import (
     permission_profile_write_policy,
 )
 from zf.runtime.channel_roles import normalize_role_context_ref
+from zf.runtime.channel_question_graph import (
+    normalize_question_payload,
+    owner_questionnaire,
+    question_frontier,
+    question_graph_digest,
+    validate_question_graph,
+)
 from zf.runtime.channel_run_owner import (
     RUN_ACTIVE_STATUSES,
     provider_run_record,
     stable_provider_run_id,
 )
 from zf.runtime.channel_sidecar import hydrate_channel_context_pack_payload
+from zf.runtime.provider_usage import sum_turn_usage
 
 
 CHANNEL_EVENT_TYPES = {
@@ -88,13 +96,21 @@ CHANNEL_EVENT_TYPES = {
     "channel.relay.routed",
     "channel.relay.suppressed",
     "channel.question.opened",
+    "channel.question.updated",
     "channel.question.resolved",
     "channel.question.merged",
+    "channel.question.dedup.requested",
+    "channel.question.dedup.applied",
+    "channel.question.dedup.rejected",
     "channel.question.resolve.rejected",
     "channel.questions.frozen",
+    "channel.cross_review.requested",
+    "channel.cross_review.completed",
+    "channel.cross_review.rejected",
     "channel.consensus.proposed",
     "channel.consensus.signed",
     "channel.consensus.blocked",
+    "channel.consensus.review.rejected",
     "channel.consensus.reached",
     "channel.message.posted",
     "channel.message.delivered",
@@ -424,8 +440,12 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_relay(channel, event, payload)
         elif event.type == "channel.question.resolve.rejected":
             _apply_question_resolve_rejected(channel, event, payload)
+        elif event.type.startswith("channel.question.dedup."):
+            _apply_question_dedup(channel, event, payload)
         elif event.type == "channel.questions.frozen":
             _apply_questions_frozen(channel, event, payload)
+        elif event.type.startswith("channel.cross_review."):
+            _apply_cross_review(channel, event, payload)
         elif event.type.startswith("channel.question."):
             _apply_question(channel, event, payload)
         elif event.type.startswith("channel.consensus."):
@@ -473,6 +493,7 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "attention": [],
         "syntheses": [],
         "synthesis_requests": [],
+        "question_dedup_requests": [],
         "workflow_requests": [],
         "mentions_detected": [],
         "routes": [],
@@ -495,6 +516,8 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         },
         "discussions": {},
         "open_questions": {},
+        "question_graph_rejections": [],
+        "cross_reviews": {},
         "question_activity": [],
         "questions_frozen": {},
         "consensus": {},
@@ -582,6 +605,11 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
     )
     member["skill_refs"] = normalize_channel_skill_refs(
         payload.get("skill_refs") if "skill_refs" in payload else member.get("skill_refs", []),
+    )
+    member["resolved_skill_refs"] = (
+        redact_obj(payload.get("resolved_skill_refs"))
+        if isinstance(payload.get("resolved_skill_refs"), list)
+        else member.get("resolved_skill_refs", [])
     )
     member["scope"] = _payload_str(payload, "scope") or member.get("scope", "")
     if isinstance(payload.get("writer_scope"), list):
@@ -832,6 +860,7 @@ def _apply_history_cleared(channel: dict[str, Any], event: ZfEvent, payload: dic
     channel["handoffs"] = []
     channel["state_updates"] = []
     channel["synthesis_requests"] = []
+    channel["question_dedup_requests"] = []
     channel["history_cleared_at"] = event.ts
     channel["history_clear_event_id"] = event.id
     channel["history_clear_reason"] = _payload_str(payload, "reason")
@@ -1057,6 +1086,12 @@ def _apply_agent_session(channel: dict[str, Any], event: ZfEvent, payload: dict[
     status = _session_run_status(event.type, payload)
     run["status"] = status
     run["updated_at"] = event.ts
+    if isinstance(payload.get("usage"), dict):
+        run["usage"] = redact_obj(payload.get("usage"))
+    if isinstance(payload.get("usage_accounting"), dict):
+        run["usage_accounting"] = redact_obj(
+            payload.get("usage_accounting")
+        )
     if status == "streaming":
         run["started_at"] = run.get("started_at") or event.ts
         _upsert_session_part(
@@ -1303,11 +1338,23 @@ def _apply_context_pack(
         "routing_reason": _payload_str(payload, "routing_reason"),
         "role_context_ref": _payload_str(payload, "role_context_ref"),
         "skill_refs": _string_list(payload.get("skill_refs")),
+        "resolved_skill_refs": payload.get("resolved_skill_refs") if isinstance(payload.get("resolved_skill_refs"), list) else [],
         "skill_metadata": payload.get("skill_metadata") if isinstance(payload.get("skill_metadata"), list) else [],
+        "collaboration_contract": payload.get("collaboration_contract") if isinstance(payload.get("collaboration_contract"), dict) else {},
         "role_definition": payload.get("role_definition") if isinstance(payload.get("role_definition"), dict) else {},
         "summary": _payload_str(payload, "summary"),
         "message_refs": payload.get("message_refs") if isinstance(payload.get("message_refs"), list) else [],
         "question_ledger": payload.get("question_ledger") if isinstance(payload.get("question_ledger"), list) else [],
+        "question_ledger_digest": _payload_str(payload, "question_ledger_digest"),
+        "question_ledger_complete": bool(payload.get("question_ledger_complete")),
+        "question_frontier": payload.get("question_frontier") if isinstance(payload.get("question_frontier"), list) else [],
+        "question_frontier_digest": _payload_str(payload, "question_frontier_digest"),
+        "owner_questionnaire": payload.get("owner_questionnaire") if isinstance(payload.get("owner_questionnaire"), list) else [],
+        "owner_questionnaire_digest": _payload_str(payload, "owner_questionnaire_digest"),
+        "cross_review_index": payload.get("cross_review_index") if isinstance(payload.get("cross_review_index"), list) else [],
+        "cross_review_index_digest": _payload_str(payload, "cross_review_index_digest"),
+        "contribution_index": payload.get("contribution_index") if isinstance(payload.get("contribution_index"), list) else [],
+        "contribution_index_digest": _payload_str(payload, "contribution_index_digest"),
         "artifact_refs": payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else [],
         "report_refs": payload.get("report_refs") if isinstance(payload.get("report_refs"), list) else [],
         "limits": payload.get("limits") if isinstance(payload.get("limits"), dict) else {},
@@ -1468,12 +1515,38 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
     thread_id = _payload_str(payload, "thread_id") or "main"
     question_id = _payload_str(payload, "question_id") or event.id
     if event.type == "channel.question.opened":
+        existing = channel["open_questions"].get(question_id)
+        if isinstance(existing, dict):
+            return
+        normalized, error = normalize_question_payload(
+            payload,
+            question_id=question_id,
+            question=_payload_str(payload, "question"),
+            asked_by=_payload_str(payload, "asked_by") or event.actor,
+            member_ids=channel.get("members", {}).keys(),
+        )
+        candidate = {
+            **normalized,
+            "thread_id": thread_id,
+            "status": "open",
+        }
+        graph_error = error or validate_question_graph([
+            *channel["open_questions"].values(),
+            candidate,
+        ])
+        if graph_error:
+            channel["question_graph_rejections"].append({
+                "question_id": question_id,
+                "thread_id": thread_id,
+                "event_id": event.id,
+                "reason": graph_error,
+                "ts": event.ts,
+            })
+            return
         channel["open_questions"][question_id] = redact_obj({
             "question_id": question_id,
             "thread_id": thread_id,
-            "question": _payload_str(payload, "question"),
-            "category": _payload_str(payload, "category"),
-            "asked_by": _payload_str(payload, "asked_by") or event.actor,
+            **normalized,
             "status": "open",
             "opened_event_id": event.id,
             "ts": event.ts,
@@ -1483,9 +1556,46 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
     question = channel["open_questions"].get(question_id)
     if not isinstance(question, dict):
         return
+    if event.type == "channel.question.updated":
+        if str(question.get("status") or "") != "open":
+            return
+        normalized, error = normalize_question_payload(
+            {**question, **payload},
+            question_id=question_id,
+            question=str(question.get("question") or ""),
+            asked_by=str(question.get("asked_by") or event.actor),
+            member_ids=channel.get("members", {}).keys(),
+        )
+        candidate = {**question, **normalized}
+        records = [
+            candidate if key == question_id else value
+            for key, value in channel["open_questions"].items()
+        ]
+        graph_error = error or validate_question_graph(records)
+        if graph_error:
+            channel["question_graph_rejections"].append({
+                "question_id": question_id,
+                "thread_id": thread_id,
+                "event_id": event.id,
+                "reason": graph_error,
+                "ts": event.ts,
+            })
+            return
+        question.update(redact_obj({
+            **normalized,
+            "updated_event_id": event.id,
+            "updated_at": event.ts,
+        }))
+        _question_activity(channel, event, thread_id)
+        return
     if event.type == "channel.question.resolved":
         resolution = _payload_str(payload, "resolution")
-        if resolution not in {"answered", "assumption", "out_of_scope"}:
+        if resolution not in {
+            "answered",
+            "assumption",
+            "out_of_scope",
+            "evidence",
+        }:
             return
         resolved_by = _payload_str(payload, "resolved_by") or event.actor
         agent_ids = _channel_agent_member_ids(channel)
@@ -1501,6 +1611,31 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
             })
             _question_activity(channel, event, thread_id)
             return
+        if resolution == "evidence":
+            evidence_refs = _string_list(payload.get("evidence_refs"))
+            target_member_id = str(
+                question.get("target_member_id") or ""
+            )
+            if (
+                str(question.get("kind") or "") != "fact"
+                or not evidence_refs
+                or resolved_by not in agent_ids
+                or (
+                    target_member_id not in {"", "owner"}
+                    and resolved_by != target_member_id
+                )
+            ):
+                channel["rejected_resolutions"].append({
+                    "question_id": question_id,
+                    "thread_id": thread_id,
+                    "event_id": event.id,
+                    "actor": event.actor,
+                    "reason": "invalid_evidence_resolution",
+                    "ts": event.ts,
+                })
+                _question_activity(channel, event, thread_id)
+                return
+            question["evidence_refs"] = evidence_refs
         question["status"] = "resolved"
         question["resolution"] = resolution
         question["resolved_by"] = resolved_by
@@ -1511,10 +1646,119 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
         return
     if event.type == "channel.question.merged":
         into = _payload_str(payload, "into_question_id")
+        target = channel["open_questions"].get(into)
+        if (
+            question.get("status") != "open"
+            or not isinstance(target, dict)
+            or target.get("status") != "open"
+            or str(target.get("thread_id") or "main") != thread_id
+            or into == question_id
+        ):
+            return
         question["status"] = "merged"
         question["merged_into"] = into
         question["merged_event_id"] = event.id
         _question_activity(channel, event, thread_id)
+
+
+def _apply_cross_review(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    request_id = _payload_str(payload, "request_id") or event.id
+    item = channel["cross_reviews"].setdefault(request_id, {
+        "request_id": request_id,
+    })
+    if event.type == "channel.cross_review.requested":
+        if item.get("requested_event_id"):
+            return
+        item.update(redact_obj({
+            "thread_id": _payload_str(payload, "thread_id") or "main",
+            "question_id": _payload_str(payload, "question_id"),
+            "target_member_id": _payload_str(payload, "target_member_id"),
+            "prompt": _payload_str(payload, "prompt"),
+            "reason": _payload_str(payload, "reason"),
+            "source_refs": _string_list(payload.get("source_refs")),
+            "dissent": payload.get("dissent") if isinstance(payload.get("dissent"), list) else [],
+            "status": "pending",
+            "requested_event_id": event.id,
+            "ts": event.ts,
+        }))
+        return
+    item.update(redact_obj({
+        "status": (
+            "completed"
+            if event.type == "channel.cross_review.completed"
+            else "rejected"
+        ),
+        "result_event_id": event.id,
+        "summary": _payload_str(payload, "summary"),
+        "answer": _payload_str(payload, "answer"),
+        "reason": _payload_str(payload, "reason"),
+        "artifact_ref": _payload_str(payload, "artifact_ref"),
+        "artifact_digest": _payload_str(payload, "artifact_digest"),
+        "source_refs": _string_list(payload.get("source_refs")),
+        "evidence_refs": _string_list(payload.get("evidence_refs")),
+        "updated_at": event.ts,
+    }))
+
+
+def _apply_question_dedup(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    request_id = _payload_str(payload, "request_id") or event.id
+    existing = next(
+        (
+            item
+            for item in channel["question_dedup_requests"]
+            if str(item.get("request_id") or "") == request_id
+        ),
+        None,
+    )
+    if event.type == "channel.question.dedup.requested":
+        if existing is not None:
+            return
+        channel["question_dedup_requests"].append(redact_obj({
+            "request_id": request_id,
+            "event_id": event.id,
+            "thread_id": _payload_str(payload, "thread_id") or "main",
+            "target_member_id": _payload_str(payload, "target_member_id"),
+            "ledger_digest": _payload_str(payload, "ledger_digest"),
+            "question_count": payload.get("question_count") or 0,
+            "status": "requested",
+            "source": _payload_str(payload, "source"),
+            "ts": event.ts,
+        }))
+        return
+    if existing is None:
+        existing = {
+            "request_id": request_id,
+            "thread_id": _payload_str(payload, "thread_id") or "main",
+        }
+        channel["question_dedup_requests"].append(existing)
+    existing.update(redact_obj({
+        "result_event_id": event.id,
+        "status": (
+            "applied"
+            if event.type == "channel.question.dedup.applied"
+            else "rejected"
+        ),
+        "reason": _payload_str(payload, "reason"),
+        "input_ledger_digest": _payload_str(
+            payload,
+            "input_ledger_digest",
+        ),
+        "output_ledger_digest": _payload_str(
+            payload,
+            "output_ledger_digest",
+        ),
+        "group_count": payload.get("group_count") or 0,
+        "merge_count": payload.get("merge_count") or 0,
+        "updated_at": event.ts,
+    }))
 
 
 def _apply_question_resolve_rejected(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
@@ -1572,10 +1816,21 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "member_id": _payload_str(payload, "member_id") or event.actor,
             "blocker_question_id": _payload_str(payload, "blocker_question_id"),
             "blocker_question": _payload_str(payload, "blocker_question"),
+            "dissent": _payload_str(payload, "dissent"),
+            "evidence_refs": _string_list(payload.get("evidence_refs")),
             "event_id": event.id,
             "ts": event.ts,
         })
         item["reopened"] = False
+        return
+    if event.type == "channel.consensus.review.rejected":
+        item.setdefault("review_rejections", []).append({
+            "member_id": _payload_str(payload, "member_id") or event.actor,
+            "review_id": _payload_str(payload, "review_id"),
+            "reason": _payload_str(payload, "reason"),
+            "event_id": event.id,
+            "ts": event.ts,
+        })
         return
     if event.type == "channel.consensus.reached":
         item["reached_event_id"] = event.id
@@ -1610,10 +1865,19 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         ),
         "artifact_ref": _payload_str(payload, "artifact_ref"),
         "artifact_digest": _payload_str(payload, "artifact_digest"),
+        "contract_ref": _payload_str(payload, "contract_ref"),
+        "contract_digest": _payload_str(payload, "contract_digest"),
         "spec_path": _payload_str(payload, "spec_path"),
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),
+        "consumed_contribution_refs": _string_list(
+            payload.get("consumed_contribution_refs")
+        ),
+        "consumed_contribution_digests": _string_list(
+            payload.get("consumed_contribution_digests")
+        ),
         "confidence": _payload_str(payload, "confidence"),
+        "dissent": payload.get("dissent") if isinstance(payload.get("dissent"), list) else [],
     }
     channel["syntheses"].append(redact_obj(item))
 
@@ -1783,6 +2047,26 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         channel_id=str(channel.get("channel_id") or ""),
     ))
     linked_events = channel["linked_events"]
+    question_thread_ids = {
+        str(item.get("thread_id") or "main")
+        for item in channel["open_questions"].values()
+        if isinstance(item, dict)
+    } | {
+        str(thread_id)
+        for thread_id in channel["discussions"]
+    } | {"main"}
+    question_frontiers = {
+        thread_id: question_frontier(channel, thread_id=thread_id)
+        for thread_id in sorted(question_thread_ids)
+    }
+    owner_questionnaires = {
+        thread_id: owner_questionnaire(channel, thread_id=thread_id)
+        for thread_id in sorted(question_thread_ids)
+    }
+    question_graph_digests = {
+        thread_id: question_graph_digest(channel, thread_id=thread_id)
+        for thread_id in sorted(question_thread_ids)
+    }
     out = {
         "schema_version": "channel.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1807,12 +2091,14 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "attention": channel["attention"],
         "syntheses": channel["syntheses"],
         "synthesis_requests": channel["synthesis_requests"],
+        "question_dedup_requests": channel["question_dedup_requests"],
         "workflow_requests": workflow_requests,
         "mentions_detected": channel["mentions_detected"],
         "routes": channel["routes"],
         "reply_requests": reply_requests,
         "provider_runs": provider_runs,
         "agent_session_runs": agent_session_runs,
+        "usage_summary": sum_turn_usage(agent_session_runs),
         "typing": typing,
         "active_typing": active_typing,
         "attachments": attachments,
@@ -1838,6 +2124,17 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "open_questions": sorted(
             channel["open_questions"].values(),
             key=lambda item: str(item.get("ts") or ""),
+        ),
+        "question_frontiers": question_frontiers,
+        "owner_questionnaires": owner_questionnaires,
+        "question_graph_digests": question_graph_digests,
+        "question_graph_rejections": channel["question_graph_rejections"],
+        "cross_reviews": sorted(
+            channel["cross_reviews"].values(),
+            key=lambda item: (
+                str(item.get("thread_id") or ""),
+                str(item.get("request_id") or ""),
+            ),
         ),
         "question_activity": channel["question_activity"],
         "questions_frozen": channel["questions_frozen"],

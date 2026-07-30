@@ -34,6 +34,7 @@ export FEISHU_AUTOMATION_BITABLE_APP_TOKEN="bascn_xxx"
 export FEISHU_AUTOMATION_BITABLE_TABLE_ID="tbl_xxx"
 export FEISHU_BITABLE_APP_TOKEN="bascn_xxx"
 export FEISHU_BITABLE_TABLE_ID="tbl_xxx"
+export FEISHU_FOLDER_TOKEN="fld_xxx"
 ```
 
 也可以使用 URL,CLI 会自动解析文档 token、Base token 和 `table=` 查询参数:
@@ -46,6 +47,27 @@ export FEISHU_BITABLE_URL="https://xxx.feishu.cn/base/bascn_xxx?table=tbl_xxx"
 
 也可以直接设置 `FEISHU_TENANT_ACCESS_TOKEN`,跳过 app_id/app_secret 换 token。
 
+Docx/Base 真实同步推荐使用 `lark-cli` backend。需要确保 `lark-cli >= 1.0.47`
+可从 `PATH` 找到。ZaoFu 会把上述凭据映射给子进程,固定使用 Feishu 品牌、
+bot 身份和 JSON 输出,不会把 secret 放进命令参数。只有 app ID/secret 时,
+ZaoFu 会 mint 并短时复用 tenant token;显式
+`FEISHU_TENANT_ACCESS_TOKEN` 优先。
+
+```bash
+lark-cli --version
+```
+
+Backend 含义:
+
+- `--backend lark-cli`: 推荐的 Docx/Base 外部执行端口。
+- `--backend mock`: 只用于本地 deterministic 测试。
+- 旧 `--transport real` 仍兼容,等价于 `--backend lark-cli`;不要同时传
+  `--backend` 和 `--transport`。
+
+飞书群聊、流式卡片、WebSocket、callback 和 approval 仍使用 ZaoFu 原生
+`FeishuHttpTransport`,不会经过 `lark-cli`。已经移除的只是 Docx/Base 原生
+投影 client；实时消息 transport 仍是必要组件。
+
 ## 初始化飞书目标
 
 如果还没有文档或多维表格,先用显式初始化命令创建目标,不要让 daily/hourly
@@ -53,7 +75,7 @@ export FEISHU_BITABLE_URL="https://xxx.feishu.cn/base/bascn_xxx?table=tbl_xxx"
 
 ```bash
 uv run zf feishu init-targets \
-  --transport real \
+  --backend lark-cli \
   --write-env
 ```
 
@@ -89,16 +111,23 @@ uv run zf feishu init-targets --dry-run
 本地测试 CLI 写 `.env` 行为可用 mock:
 
 ```bash
-uv run zf feishu init-targets --transport mock --write-env
+uv run zf feishu init-targets --backend mock --write-env
 ```
 
 真实创建需要飞书应用具备创建文档、多维表格、字段的 OpenAPI 权限。即使
 `.env` 里有个人 app secret,OpenAPI 调用仍以该应用的 tenant token 身份执行;
 若指定 `--folder-token`,还要确保应用对该云盘目录有写权限。
 
-Automation / Kanban 视图布局配置还需要飞书应用开通 `base:view:write_only`。
-缺少该 scope 时,同步命令仍可通过 `--no-ensure-layouts` 同步记录、字段和
-视图,但不会自动设置筛选、可见字段、排序和 Kanban 分组。
+完整初始化至少涉及 `base:app:create`、`base:table:read/create/update/delete`。
+对已有表执行投影至少涉及 `base:field:read/create`、`base:view:read`、
+`base:view:write_only`、`base:record:read/create/update`;真实删除恢复测试另需
+`base:record:delete`。scope 已开通仍不等于资源已授权,目标 Base/Table 还必须对
+该应用可见。
+
+只缺少 `base:view:write_only` 时,全量同步命令可通过
+`--no-ensure-layouts` 同步记录、字段和视图,但不会自动设置筛选、可见字段、
+排序和 Kanban 分组。常驻 projector 当前要求其配置的完整结构权限,不会静默
+降级或切换应用。
 
 ## Dry Run
 
@@ -124,7 +153,7 @@ Automation 报告同步到飞书文档:
 
 ```bash
 uv run zf feishu sync-automations \
-  --transport real \
+  --backend lark-cli \
   --document-id "$FEISHU_AUTOMATION_DOCUMENT_ID"
 ```
 
@@ -132,14 +161,14 @@ uv run zf feishu sync-automations \
 
 ```bash
 uv run zf feishu sync-automations \
-  --transport real \
+  --backend lark-cli \
   --document-url "$FEISHU_AUTOMATION_DOCUMENT_URL"
 ```
 
 Automation Insights 同步到飞书多维表格:
 
 ```bash
-uv run zf feishu sync-automation-insights-table --transport real
+uv run zf feishu sync-automation-insights-table --backend lark-cli
 ```
 
 如果 `.env` 已有 `FEISHU_BITABLE_APP_TOKEN` 但还没有
@@ -161,7 +190,7 @@ uv run zf feishu sync-automation-insights-table --transport real
 
 ```bash
 uv run zf feishu sync-automation-insights-table \
-  --transport real \
+  --backend lark-cli \
   --automation daily-brief
 ```
 
@@ -169,7 +198,7 @@ Kanban 同步到飞书多维表格:
 
 ```bash
 uv run zf feishu sync-kanban-table \
-  --transport real \
+  --backend lark-cli \
   --app-token "$FEISHU_BITABLE_APP_TOKEN" \
   --table-id "$FEISHU_BITABLE_TABLE_ID"
 ```
@@ -178,7 +207,7 @@ uv run zf feishu sync-kanban-table \
 
 ```bash
 uv run zf feishu sync-kanban-table \
-  --transport real \
+  --backend lark-cli \
   --bitable-url "$FEISHU_BITABLE_URL"
 ```
 
@@ -196,21 +225,21 @@ Gantt 视图暂不默认创建。飞书 Gantt 需要明确的日期型 `start_ti
 `kanban.json` 时使用:
 
 ```bash
-uv run zf feishu sync-kanban-table --transport real --active-only
+uv run zf feishu sync-kanban-table --backend lark-cli --active-only
 ```
 
 如果只想写记录,不自动补字段和视图,使用:
 
 ```bash
-uv run zf feishu sync-automation-insights-table --transport real --no-ensure-views
-uv run zf feishu sync-kanban-table --transport real --no-ensure-views
+uv run zf feishu sync-automation-insights-table --backend lark-cli --no-ensure-views
+uv run zf feishu sync-kanban-table --backend lark-cli --no-ensure-views
 ```
 
 如果要保留飞书页面里手工调整过的视图布局,但仍希望补齐字段和缺失视图,使用:
 
 ```bash
-uv run zf feishu sync-automation-insights-table --transport real --no-ensure-layouts
-uv run zf feishu sync-kanban-table --transport real --no-ensure-layouts
+uv run zf feishu sync-automation-insights-table --backend lark-cli --no-ensure-layouts
+uv run zf feishu sync-kanban-table --backend lark-cli --no-ensure-layouts
 ```
 
 如果 Kanban 远端记录被删,同步会按 `Task ID` 重新创建记录并修复本地 ledger。
@@ -223,12 +252,84 @@ Base/Table、补字段、覆盖 `.env` 里的 `FEISHU_BITABLE_APP_TOKEN`、
 
 ```bash
 uv run zf feishu sync-kanban-table \
-  --transport real \
+  --backend lark-cli \
   --field task_id=任务ID \
   --field title=标题 \
   --field status=状态 \
   --field assigned_to=负责人
 ```
+
+## 事件驱动 Kanban 闭环
+
+小时级 cron 仍可作为独立全量同步,但低延迟路径可由 `zf start` 管理常驻
+projector。启用后,它消费 `task.status_changed`,按 Task ID 合并连续变化,读取
+TaskStore 最新状态后写入 Base:
+
+```yaml
+runtime:
+  feishu_projection:
+    enabled: true
+    backend: lark-cli
+    auto_create_target: false
+    poll_interval_seconds: 2
+    reconcile_interval_seconds: 3600
+    include_archive_days: 30
+    max_actions_per_tick: 20
+```
+
+一次运行或前台观察:
+
+```bash
+uv run zf feishu project-kanban --once --backend lark-cli
+uv run zf feishu project-kanban --watch --backend lark-cli
+uv run zf feishu project-kanban --once --reconcile --backend lark-cli
+```
+
+如果当前项目还没有 Kanban Base/Table，可显式允许 projector 首次创建:
+
+```yaml
+runtime:
+  feishu_projection:
+    enabled: true
+    backend: lark-cli
+    auto_create_target: true
+    base_name: "ZaoFu Kanban - my-project"
+    table_name: Kanban
+    time_zone: Asia/Shanghai
+```
+
+此模式要求 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`（或 tenant token）以及
+`FEISHU_FOLDER_TOKEN`。也可以只执行一次:
+
+```bash
+uv run zf feishu project-kanban \
+  --once \
+  --create-target-if-missing \
+  --folder-token "$FEISHU_FOLDER_TOKEN"
+```
+
+创建流程会补齐字段、Grid/Kanban 视图和推荐布局，然后把非 secret 的
+`app_token` / `table_id` 原子写入:
+
+```text
+<project.state_dir>/integrations/feishu/kanban-target.json
+```
+
+该项目级目标优先于进程中继承的全局 `FEISHU_BITABLE_*`，避免多个项目写入同一
+张表。首次创建带单写锁；如果字段或视图初始化中断，下次启动会继续补齐已有
+Base/Table，不会重复创建。`auto_create_target` 默认关闭，且仅处理“本项目尚无
+目标”的初始化；远端 Base/Table 被人工删除时仍会 fail closed，由操作者清理该
+项目目标记录后重新初始化，避免静默改投新资源。
+
+`zf start`/`zf stop` 管理 sidecar 生命周期。cursor 位于
+`project.state_dir/integrations/feishu/kanban-projector-cursor.json`;
+日志位于 `project.state_dir/logs/feishu-kanban-projector.log`。失败会保留
+pending 并持久退避,不会回滚 canonical TaskStore 状态。cursor 损坏、事件日志
+截断或 reconcile 周期到期时执行全量收敛。一个项目同一时刻只允许一个 projector
+owner。
+
+当本地 sync ledger 丢失时,同步会先按 `Task ID` / `Row Key` 搜索远端并验证
+精确相等:唯一命中会修复 ledger,零命中才创建,多个精确命中会 fail closed。
 
 ## Cron
 
@@ -243,6 +344,7 @@ uv run zf feishu cron-template --daily-time 09:00 --hourly-minute 5
 - Automation 每天同步一次。
 - Automation Insights 每天同步一次。
 - Kanbanboard 每小时同步一次。
+- 生成命令固定使用 `--backend lark-cli`。
 - 日志写到 `project.state_dir/logs/feishu-automation-sync.log` 和 `project.state_dir/logs/feishu-kanban-sync.log`。
 
 安装时把输出粘贴到 `crontab -e`。cron 运行目录会固定到当前项目根目录,并显式带 `--state-dir`,不会误写到 `$PWD/.zf`。

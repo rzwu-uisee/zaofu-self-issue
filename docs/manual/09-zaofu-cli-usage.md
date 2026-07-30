@@ -336,9 +336,11 @@ Memory 和 skills 是 worker 上下文材料,不是第二控制面。修改 work
 
 | 命令 | 用途 |
 |---|---|
-| `uv run zf web --host 127.0.0.1 --port 8001` | 启动本地 Web dashboard |
-| `uv run zf web --host 0.0.0.0 --port 8001` | 暴露给容器/局域网 |
-| `uv run zf web --workspace-only` | 只启动 workspace 视图 |
+| `tools/start-webkanban.sh --host 127.0.0.1 --port 8001` | 推荐：启动可信本地 WebKanban |
+| `tools/start-webkanban.sh --port 8001 --status` | 检查 tmux、端口、API 和 headless 策略 |
+| `tools/start-webkanban.sh --port 8001 --stop` | 停止该端口对应的 WebKanban session |
+| `uv run zf web --host 127.0.0.1 --port 8001` | 低层 Web 调试入口 |
+| `uv run zf web --workspace-only` | 低层 workspace-only 调试入口 |
 | `uv run zf workspace providers openclaw list` | 查看 workspace OpenClaw binding |
 | `uv run zf workspace providers openclaw set remote --base-url URL --timeout-seconds 120` | 写入 OpenClaw binding，默认等待 120 秒 |
 | `uv run zf feishu bridge --watch` | **直连飞书常驻 bridge**(长连接,群/单聊流式问答 + 点按钮审批,无需 OpenClaw / webhook;见手册 19) |
@@ -347,22 +349,30 @@ Memory 和 skills 是 worker 上下文材料,不是第二控制面。修改 work
 | `uv run zf feishu serve --host 0.0.0.0 --port 8000` | 启动飞书 webhook server(公网 webhook 模式,长连接见 `bridge --watch`) |
 | `uv run zf feishu send-test --message "hello"` | 发送测试消息 |
 | `uv run zf feishu live-smoke --to "$CHAT_ID" --purpose kanban_agent --confirm-real-api` | 用 exact purpose credential 实测认证、发送、读取、更新和撤回；默认清理测试卡片 |
-| `uv run zf feishu init-targets --transport real --write-env` | 创建 Automation 文档、Kanban 多维表格和字段,并写入 `.env` |
+| `uv run zf feishu init-targets --backend lark-cli --write-env` | 通过 lark-cli 创建 Automation 文档、Kanban 多维表格和字段,并写入 `.env` |
 | `uv run zf feishu sync-automations --dry-run` | 预览 daily/weekly/project Automation 飞书文档输出 |
-| `uv run zf feishu sync-automations --transport real --document-id "$FEISHU_AUTOMATION_DOCUMENT_ID"` | 同步 Automation 报告到飞书文档 |
-| `uv run zf feishu sync-automations --transport real --document-url "$FEISHU_AUTOMATION_DOCUMENT_URL"` | 通过飞书文档 URL 同步 Automation |
+| `uv run zf feishu sync-automations --backend lark-cli --document-id "$FEISHU_AUTOMATION_DOCUMENT_ID"` | 同步 Automation 报告到飞书文档 |
+| `uv run zf feishu sync-automations --backend lark-cli --document-url "$FEISHU_AUTOMATION_DOCUMENT_URL"` | 通过飞书文档 URL 同步 Automation |
 | `uv run zf feishu sync-automation-insights-table --dry-run` | 预览 Automation insight 多维表格输出 |
 | `uv run zf feishu sync-kanban-table --dry-run` | 预览 Kanbanboard 飞书表格输出 |
-| `uv run zf feishu sync-kanban-table --transport real --app-token "$FEISHU_BITABLE_APP_TOKEN" --table-id "$FEISHU_BITABLE_TABLE_ID"` | 同步 Kanbanboard 到飞书多维表格 |
-| `uv run zf feishu sync-kanban-table --transport real --bitable-url "$FEISHU_BITABLE_URL"` | 通过飞书多维表格 URL 同步 Kanbanboard |
+| `uv run zf feishu sync-kanban-table --backend lark-cli --app-token "$FEISHU_BITABLE_APP_TOKEN" --table-id "$FEISHU_BITABLE_TABLE_ID"` | 同步 Kanbanboard 到飞书多维表格 |
+| `uv run zf feishu project-kanban --once --backend lark-cli` | 单轮消费事件并投影 Kanban |
+| `uv run zf feishu project-kanban --once --create-target-if-missing --folder-token "$FEISHU_FOLDER_TOKEN"` | 为当前项目首次创建 Base/Table 后执行一轮事件投影 |
+| `uv run zf feishu project-kanban --watch --backend lark-cli` | 前台运行常驻 Kanban projector |
 | `uv run zf feishu cron-template` | 生成每日 Automation + 每小时 Kanbanboard cron 示例 |
 | `uv run zf hook-recv --event EVENT` | 从 stdin 接 Claude Code hook JSON |
 
-Web 里的写动作应走 token-gated action path。常用本地启动脚本:
+Web 里的写动作应走 token-gated action path。Channel / Kanban Agent 的常规本地
+启动必须优先使用 launcher：
 
 ```bash
-tools/start-webkanban.sh --no-build
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```
+
+launcher 统一处理 Web build、action token、Workspace/provider 环境、Codex
+headless sandbox 策略、tmux 与重启。直接 `zf web` 只继承当前 shell 和目标
+Project `.env`；专用 state-dir 调试可以使用，但不会自动采用 launcher 的
+trusted-local 默认值。重启且不需要重新构建时使用 `--no-build`。
 
 如需固定本地 Web/Kanban Agent action token,在仓库 `.env` 写入
 `ZF_WEB_ACTION_TOKEN=...`。不要提交 `.env`。
@@ -443,7 +453,7 @@ bug-fix-cycle, backlog, workspace, project
 | `trace` | `show`, `record-fixture`, `replay-fixture`, `spans`, `operation`, `gantt` |
 | `workflow` | `render`, `audit` |
 | `runs` | `list`, `rebuild`, `reconcile`, `for-task` |
-| `feishu` | `handle`, `push`, `serve`, `send-test`, `live-smoke`, `init-targets`, `sync-automations`, `sync-automation-insights-table`, `sync-kanban-table`, `cron-template` |
+| `feishu` | `handle`, `push`, `serve`, `send-test`, `live-smoke`, `init-targets`, `sync-automations`, `sync-automation-insights-table`, `sync-kanban-table`, `project-kanban`, `cron-template` |
 | `skills` | `list`, `doctor` |
 | `state` | `clean`, `reconcile` |
 | `autoresearch` | `run`, `discover-bugs`, `triggers`, `self-repair`, `loop`, `campaign` |

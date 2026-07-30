@@ -97,6 +97,18 @@ def resolve_skill_source(
     return resolution.path
 
 
+def resolve_builtin_skill_source(name: str) -> Path | None:
+    """Resolve one ZaoFu-shipped Skill for a built-in runtime template.
+
+    This is intentionally separate from normal role Skill resolution. External
+    projects must still opt into configured Skill sources for workflow roles;
+    only built-in runtime templates may request this fallback explicitly.
+    """
+    normalized = _normalize_dependency_name(name)
+    path = _zaofu_repo_root() / "skills" / normalized / "SKILL.md"
+    return path if path.is_file() else None
+
+
 def resolve_skill(
     *,
     project_root: Path,

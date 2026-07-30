@@ -972,6 +972,7 @@ def run(args: argparse.Namespace) -> int:
     event_log = None
     transport = None
     feishu_inbound_sidecar = None
+    feishu_projection_sidecar = None
     autoresearch_resident_sidecar = None
     try:
         # 5. Set up event log and session
@@ -1331,6 +1332,9 @@ def run(args: argparse.Namespace) -> int:
             from zf.runtime.feishu_inbound_sidecar import (
                 start_feishu_inbound_sidecar,
             )
+            from zf.runtime.feishu_projection_sidecar import (
+                start_feishu_projection_sidecar,
+            )
 
             autoresearch_resident_sidecar = start_autoresearch_resident_sidecar(
                 config=config,
@@ -1340,6 +1344,13 @@ def run(args: argparse.Namespace) -> int:
                 dry_run=dry_run,
             )
             feishu_inbound_sidecar = start_feishu_inbound_sidecar(
+                config=config,
+                state_dir=state_dir,
+                project_root=project_root,
+                event_log=event_log,
+                dry_run=dry_run,
+            )
+            feishu_projection_sidecar = start_feishu_projection_sidecar(
                 config=config,
                 state_dir=state_dir,
                 project_root=project_root,
@@ -1557,6 +1568,15 @@ def run(args: argparse.Namespace) -> int:
 
             stop_feishu_inbound_sidecar(
                 feishu_inbound_sidecar,
+                event_log=event_log,
+            )
+        if feishu_projection_sidecar is not None:
+            from zf.runtime.feishu_projection_sidecar import (
+                stop_feishu_projection_sidecar,
+            )
+
+            stop_feishu_projection_sidecar(
+                feishu_projection_sidecar,
                 event_log=event_log,
             )
         if dry_run or not foreground:

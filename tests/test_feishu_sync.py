@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -11,7 +12,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
-from zf.integrations.feishu.clients import (
+from zf.integrations.feishu.mock_clients import (
     MockFeishuBitableClient,
     MockFeishuDocumentClient,
 )
@@ -122,6 +123,45 @@ def test_sync_automation_bitable_upserts_summary_and_insight_rows(tmp_path: Path
     assert any(row[2]["Automation"] == "daily-brief" for row in client.created)
     events = EventLog(state_dir / "events.jsonl").read_all()
     assert any(event.type == "feishu.automation_bitable.synced" for event in events)
+
+
+def test_sync_kanban_repairs_missing_local_ledger_from_remote_key(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-REMOTE", title="remote key repair")
+    )
+    client = MockFeishuBitableClient()
+    first_ledger = FeishuSyncLedger.for_state_dir(state_dir)
+
+    first = sync_kanban_bitable(
+        state_dir=state_dir,
+        project_id="proj",
+        project_name="Project",
+        app_token="app",
+        table_id="tbl",
+        client=client,
+        ledger=first_ledger,
+    )
+    first_ledger.path.unlink()
+    second = sync_kanban_bitable(
+        state_dir=state_dir,
+        project_id="proj",
+        project_name="Project",
+        app_token="app",
+        table_id="tbl",
+        client=client,
+        ledger=FeishuSyncLedger.for_state_dir(state_dir),
+    )
+
+    assert first["created"] == 1
+    assert second["created"] == 0
+    assert second["updated"] == 1
+    assert len(client.created) == 1
+    repaired = json.loads(first_ledger.path.read_text(encoding="utf-8"))
+    assert "rec-1" in repaired["bitable_records"].values()
 
 
 def test_sync_kanban_bitable_upserts_by_ledger(tmp_path: Path) -> None:
@@ -509,6 +549,31 @@ def test_cli_feishu_sync_accepts_feishu_urls_from_dotenv(tmp_path: Path, monkeyp
 
     assert main(["feishu", "sync-kanban-table"]) == 0
     assert "tbl-url" in capsys.readouterr().out
+
+
+def test_explicit_bitable_targets_override_environment_urls(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FEISHU_BITABLE_URL",
+        "https://example.feishu.cn/base/app-env?table=tbl-env",
+    )
+    monkeypatch.setenv(
+        "FEISHU_AUTOMATION_BITABLE_URL",
+        "https://example.feishu.cn/base/app-auto-env?table=tbl-auto-env",
+    )
+    args = SimpleNamespace(
+        app_token="app-explicit",
+        table_id="tbl-explicit",
+        bitable_url="",
+    )
+
+    assert cli_feishu._resolve_bitable_target(args) == (
+        "app-explicit",
+        "tbl-explicit",
+    )
+    assert cli_feishu._resolve_automation_bitable_target(args) == (
+        "app-explicit",
+        "tbl-explicit",
+    )
 
 
 def test_cli_feishu_cron_template(tmp_path: Path, monkeypatch, capsys) -> None:

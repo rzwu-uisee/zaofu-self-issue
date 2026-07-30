@@ -1,9 +1,14 @@
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   CircleStop,
   ExternalLink,
   FileDiff,
   GitFork,
+  Info,
+  MoreHorizontal,
+  PackageCheck,
   Pause,
   Play,
   RefreshCw,
@@ -28,8 +33,29 @@ import {
   stringify,
   textValue,
 } from "../../app/shared";
-
-type WorkflowRequest = Record<string, unknown>;
+import {
+  SectionHeading,
+  StatusBadge,
+  WorkflowDiagnostics,
+  WorkflowEmpty,
+  WorkflowExecutionPlan,
+  WorkflowList,
+} from "./WorkflowProposalParts";
+import {
+  diagnosticSeverity,
+  expectedOutputLabel,
+  numberValue,
+  readinessPresentation,
+  requestTitle,
+  shortDigest,
+  stageLevels,
+  stageRoleLabel,
+  stagesForCurrentFlow,
+  WORKFLOW_VIEWS,
+  workflowViewForRequest,
+  type WorkflowRequest,
+  type WorkflowView,
+} from "./workflowProposalModel";
 
 export function WorkflowProposalPage({
   actionReady,
@@ -54,6 +80,7 @@ export function WorkflowProposalPage({
   const [error, setError] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [feedback, setFeedback] = useState<ActionResponse | null>(null);
+  const [view, setView] = useState<WorkflowView>("decision");
 
   const loadRequests = useCallback(async () => {
     if (!projectId) {
@@ -98,9 +125,12 @@ export function WorkflowProposalPage({
     setLoading(true);
     setDetail(null);
     void loadRequests();
-    const timer = window.setInterval(() => void loadRequests(), 8000);
+    const timer = window.setInterval(() => {
+      void loadRequests();
+      void loadDetail();
+    }, 8000);
     return () => window.clearInterval(timer);
-  }, [loadRequests]);
+  }, [loadDetail, loadRequests]);
 
   useEffect(() => {
     void loadDetail();
@@ -147,23 +177,42 @@ export function WorkflowProposalPage({
     }
   }
 
-  const statusCounts = useMemo(() => {
-    const counts: Record<string, number> = {};
+  const requestsByView = useMemo(() => {
+    const grouped: Record<WorkflowView, WorkflowRequest[]> = {
+      decision: [],
+      active: [],
+      history: [],
+    };
     for (const request of requests) {
-      const status = textValue(request.status) || "unknown";
-      counts[status] = (counts[status] ?? 0) + 1;
+      grouped[workflowViewForRequest(request)].push(request);
     }
-    return counts;
+    return grouped;
   }, [requests]);
+
+  const visibleRequests = requestsByView[view];
+
+  useEffect(() => {
+    if (!requests.length) return;
+    if (!visibleRequests.length) {
+      const nextView = WORKFLOW_VIEWS.find((item) => requestsByView[item.id].length)?.id;
+      if (nextView && nextView !== view) setView(nextView);
+      return;
+    }
+    if (!visibleRequests.some((item) => textValue(item.request_id) === selectedId)) {
+      setSelectedId(textValue(visibleRequests[0]?.request_id));
+    }
+  }, [requests.length, requestsByView, selectedId, view, visibleRequests]);
 
   return (
     <div className="workflow-proposal-page" data-testid="workflow-proposal-page">
       <header className="workflow-proposal-toolbar">
         <div>
-          <h2>Workflow Proposals</h2>
+          <h2>Workflows</h2>
           <span className="muted">
-            {requests.length} requests
-            {statusCounts.proposed ? ` / ${statusCounts.proposed} awaiting decision` : ""}
+            {requests.length} workflows
+            {requestsByView.decision.length
+              ? ` / ${requestsByView.decision.length} awaiting decision`
+              : ""}
           </span>
         </div>
         <button
@@ -191,14 +240,33 @@ export function WorkflowProposalPage({
         </div>
       ) : null}
 
+      <nav className="workflow-view-tabs" aria-label="Workflow lifecycle">
+        {WORKFLOW_VIEWS.map((item) => (
+          <button
+            aria-selected={view === item.id}
+            className={view === item.id ? "active" : ""}
+            key={item.id}
+            role="tab"
+            type="button"
+            onClick={() => {
+              setFeedback(null);
+              setView(item.id);
+            }}
+          >
+            <span>{item.label}</span>
+            <strong>{requestsByView[item.id].length}</strong>
+          </button>
+        ))}
+      </nav>
+
       {loading ? (
-        <WorkflowEmpty title="Loading workflow proposals" />
+        <WorkflowEmpty title="Loading workflows" />
       ) : requests.length === 0 ? (
-        <WorkflowEmpty title="No workflow proposals" />
+        <WorkflowEmpty title="No workflows" />
       ) : (
         <div className="workflow-proposal-workbench">
           <aside className="workflow-request-list" aria-label="Workflow requests">
-            {requests.map((request) => {
+            {visibleRequests.map((request) => {
               const requestId = textValue(request.request_id);
               const synthesisStatus = textValue(asRecord(request.operation).queue_status);
               return (
@@ -215,10 +283,12 @@ export function WorkflowProposalPage({
                     <strong>{requestTitle(request)}</strong>
                     <StatusBadge status={textValue(request.status)} />
                   </span>
-                  <span className="mono">{requestId}</span>
-                  <small>
-                    {textValue(request.kind) || "flow"} / revision {textValue(request.revision) || "1"}
-                    {synthesisStatus ? ` / synthesis ${synthesisStatus}` : ""}
+                  <small title={requestId}>
+                    <span>{textValue(request.kind) || "flow"}</span>
+                    <span>Revision {textValue(request.revision) || "1"}</span>
+                    {["queued", "running"].includes(synthesisStatus) ? (
+                      <span>Synthesis {synthesisStatus}</span>
+                    ) : null}
                   </small>
                 </button>
               );
@@ -232,6 +302,7 @@ export function WorkflowProposalPage({
                 actionState={actionState}
                 busyAction={busyAction}
                 detail={detail}
+                key={selectedId}
                 onApply={(payload) => void execute("workflow-config-apply", payload)}
                 onApprove={(payload) => void execute("workflow-submit", payload)}
                 onCancel={(payload) => void execute("workflow-cancel", payload)}
@@ -278,6 +349,7 @@ function WorkflowProposalDetail({
   onRunPause: (payload: Record<string, unknown>) => void;
   onRunResume: (payload: Record<string, unknown>) => void;
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const request = detail.result;
   const requirement = detail.requirement;
   const proposal = detail.proposal;
@@ -324,8 +396,19 @@ function WorkflowProposalDetail({
   const stages = asRecordArray(asRecord(proposal.stage_graph).nodes);
   const blockers = asRecordArray(proposal.blockers);
   const preflight = asRecord(proposal.preflight);
-  const warnings = asRecordArray(preflight.diagnostics).filter(
-    (item) => textValue(item.severity).toUpperCase() !== "STOP",
+  const diagnostics = asRecordArray(preflight.diagnostics);
+  const stopDiagnostics = diagnostics.filter((item) => diagnosticSeverity(item) === "STOP");
+  const warningDiagnostics = diagnostics.filter((item) => diagnosticSeverity(item) === "WARN");
+  const infoDiagnostics = diagnostics.filter((item) => diagnosticSeverity(item) === "INFO");
+  const severityCounts = asRecord(asRecord(preflight.summary).diagnostics);
+  const blockerCount = Math.max(blockers.length, numberValue(severityCounts.STOP, stopDiagnostics.length));
+  const warningCount = Math.max(
+    warningDiagnostics.length,
+    numberValue(severityCounts.WARN, warningDiagnostics.length),
+  );
+  const infoCount = Math.max(
+    infoDiagnostics.length,
+    numberValue(severityCounts.INFO, infoDiagnostics.length),
   );
   const closure = asRecord(proposal.closure);
   const roles = asRecordArray(closure.roles);
@@ -333,7 +416,16 @@ function WorkflowProposalDetail({
   const configDiff = asRecord(artifacts.config_diff);
   const shortFlowSpec = asRecord(artifacts.short_flow_spec);
   const completionProfile = asRecord(proposal.completion_profile);
+  const expectedOutputs = asRecordArray(completionProfile.required_delivery_artifacts);
   const estimated = asRecord(proposal.estimated);
+  const planStages = stagesForCurrentFlow(
+    stages,
+    shortFlowSpec,
+    textValue(request.kind),
+    textValue(proposal.flow_family),
+  );
+  const planLevels = stageLevels(planStages);
+  const explicitDag = planStages.some((stage) => asStringArray(stage.dependencies).length > 0);
   const synthesisStatus = textValue(operation.queue_status);
   const synthesisCancellable = ["queued", "running"].includes(synthesisStatus);
   const cancelPayload = {
@@ -350,84 +442,43 @@ function WorkflowProposalDetail({
     request_id: requestId,
     reason: "requested by workflow proposal operator",
   };
+  const isDecision = requestStatus === "proposed";
+  const runVisible = submitted
+    || Boolean(terminal)
+    || ["queued", "running", "paused"].includes(runStatus);
+  const hasOverflowActions = (
+    isDecision
+    || synthesisCancellable
+    || ["queued", "running", "paused"].includes(runStatus)
+  );
+  const readiness = readinessPresentation({
+    blockerCount,
+    requestStatus,
+    runStatus,
+    terminal,
+  });
+  const advancedId = `workflow-advanced-${requestId}`;
 
   return (
     <>
       <header className="workflow-proposal-detail-head">
         <div>
-          <span className="eyebrow">Requirement revision {textValue(request.revision)}</span>
+          <span className="eyebrow">
+            {textValue(proposal.flow_family) || textValue(request.kind) || "Workflow"}
+            {" / "}
+            Revision {textValue(request.revision)}
+          </span>
           <h3>{textValue(requirement.objective) || requestId}</h3>
           <div className="workflow-proposal-meta">
             <StatusBadge status={requestStatus} />
-            <span>{textValue(proposal.flow_family) || textValue(request.kind)}</span>
-            <span>{textValue(proposal.risk_class) || "not classified"}</span>
-            <code title={proposalDigest}>{shortDigest(proposalDigest)}</code>
+            {textValue(proposal.risk_class) ? <span>{textValue(proposal.risk_class)}</span> : null}
             {synthesisStatus ? (
               <StatusBadge status={`synthesis ${synthesisStatus}`} />
             ) : null}
           </div>
         </div>
         <div className="workflow-proposal-actions">
-          {runStatus === "running" ? (
-            <button
-              className="icon-button"
-              disabled={!actionReady || busyAction !== "" || !runId}
-              title={!actionReady ? actionState : "Pause new dispatch for this Run"}
-              type="button"
-              onClick={() => onRunPause(runControlPayload)}
-            >
-              <Pause aria-hidden="true" size={16} />
-              {busyAction === "run-pause" ? "Pausing" : "Pause Run"}
-            </button>
-          ) : null}
-          {runStatus === "paused" ? (
-            <button
-              className="icon-button"
-              disabled={!actionReady || busyAction !== "" || !runId}
-              title={!actionReady ? actionState : "Resume this Run"}
-              type="button"
-              onClick={() => onRunResume(runControlPayload)}
-            >
-              <Play aria-hidden="true" size={16} />
-              {busyAction === "run-resume" ? "Resuming" : "Resume Run"}
-            </button>
-          ) : null}
-          {["queued", "running", "paused"].includes(runStatus) ? (
-            <button
-              className="icon-button danger"
-              disabled={!actionReady || busyAction !== "" || !runId}
-              title={!actionReady ? actionState : "Cancel this Run"}
-              type="button"
-              onClick={() => onRunCancel(runControlPayload)}
-            >
-              <CircleStop aria-hidden="true" size={16} />
-              {busyAction === "run-cancel" ? "Cancelling" : "Cancel Run"}
-            </button>
-          ) : null}
-          {synthesisCancellable ? (
-            <button
-              className="icon-button danger"
-              disabled={
-                !actionReady
-                || busyAction !== ""
-                || !cancelPayload.operation_id
-                || !cancelPayload.request_hash
-              }
-              title={!actionReady ? actionState : "Cancel workflow synthesis"}
-              type="button"
-              onClick={() => onCancel(cancelPayload)}
-            >
-              <CircleStop aria-hidden="true" size={16} />
-              {busyAction === "workflow-cancel" ? "Cancelling" : "Cancel synthesis"}
-            </button>
-          ) : null}
-          {submitted || terminal ? (
-            <button className="icon-button" type="button" onClick={onOpenRuns}>
-              <ExternalLink aria-hidden="true" size={16} />
-              Runs
-            </button>
-          ) : null}
-          {changeMode === "config_change" && !configApplied ? (
+          {changeMode === "config_change" && !configApplied && isDecision ? (
             <button
               className="icon-button"
               disabled={!actionReady || !approvable || busyAction !== "" || !validationResultRef.ref}
@@ -439,209 +490,303 @@ function WorkflowProposalDetail({
               {busyAction === "workflow-config-apply" ? "Applying" : "Apply config"}
             </button>
           ) : null}
-          <button
-            className="icon-button danger"
-            disabled={!actionReady || !approvable || busyAction !== ""}
-            title={!actionReady ? actionState : "Reject this exact proposal"}
-            type="button"
-            onClick={() => onReject({
-              ...decisionPayload,
-              reason: "operator rejected proposal",
-            })}
-          >
-            <X aria-hidden="true" size={16} />
-            {busyAction === "workflow-reject" ? "Rejecting" : "Reject"}
-          </button>
-          <button
-            className="icon-button primary"
-            disabled={
-              !actionReady
-              || !approvable
-              || busyAction !== ""
-              || (changeMode === "config_change" && !configApplied)
-            }
-            title={
-              !actionReady
-                ? actionState
-                : changeMode === "config_change" && !configApplied
-                  ? "Apply the approved config change first"
-                  : "Approve this exact proposal and start its run"
-            }
-            type="button"
-            onClick={() => onApprove(submitPayload)}
-          >
-            <Play aria-hidden="true" size={16} />
-            {busyAction === "workflow-submit" ? "Starting" : "Approve & Run"}
-          </button>
+          {isDecision ? (
+            <button
+              className="icon-button primary"
+              disabled={
+                !actionReady
+                || !approvable
+                || busyAction !== ""
+                || (changeMode === "config_change" && !configApplied)
+              }
+              title={
+                !actionReady
+                  ? actionState
+                  : changeMode === "config_change" && !configApplied
+                    ? "Apply the approved config change first"
+                    : "Approve this exact proposal and start its run"
+              }
+              type="button"
+              onClick={() => onApprove(submitPayload)}
+            >
+              <Play aria-hidden="true" size={16} />
+              {busyAction === "workflow-submit" ? "Starting" : "Approve & Run"}
+            </button>
+          ) : null}
+          {runVisible ? (
+            <button
+              className="icon-button primary"
+              type="button"
+              onClick={onOpenRuns}
+            >
+              <ExternalLink aria-hidden="true" size={16} />
+              Open Run
+            </button>
+          ) : null}
+          {hasOverflowActions ? (
+            <details className="workflow-action-menu">
+              <summary
+                aria-label="More workflow actions"
+                className="icon-button"
+                title="More actions"
+              >
+                <MoreHorizontal aria-hidden="true" size={17} />
+              </summary>
+              <div role="menu">
+                {runStatus === "running" ? (
+                  <button
+                    disabled={!actionReady || busyAction !== "" || !runId}
+                    title={!actionReady ? actionState : "Pause new dispatch for this Run"}
+                    type="button"
+                    onClick={() => onRunPause(runControlPayload)}
+                  >
+                    <Pause aria-hidden="true" size={15} />
+                    {busyAction === "run-pause" ? "Pausing" : "Pause Run"}
+                  </button>
+                ) : null}
+                {runStatus === "paused" ? (
+                  <button
+                    disabled={!actionReady || busyAction !== "" || !runId}
+                    title={!actionReady ? actionState : "Resume this Run"}
+                    type="button"
+                    onClick={() => onRunResume(runControlPayload)}
+                  >
+                    <Play aria-hidden="true" size={15} />
+                    {busyAction === "run-resume" ? "Resuming" : "Resume Run"}
+                  </button>
+                ) : null}
+                {synthesisCancellable ? (
+                  <button
+                    disabled={
+                      !actionReady
+                      || busyAction !== ""
+                      || !cancelPayload.operation_id
+                      || !cancelPayload.request_hash
+                    }
+                    title={!actionReady ? actionState : "Cancel workflow synthesis"}
+                    type="button"
+                    onClick={() => onCancel(cancelPayload)}
+                  >
+                    <CircleStop aria-hidden="true" size={15} />
+                    {busyAction === "workflow-cancel" ? "Cancelling" : "Cancel synthesis"}
+                  </button>
+                ) : null}
+                {isDecision ? (
+                  <button
+                    className="danger"
+                    disabled={!actionReady || !approvable || busyAction !== ""}
+                    title={!actionReady ? actionState : "Reject this exact proposal"}
+                    type="button"
+                    onClick={() => onReject({
+                      ...decisionPayload,
+                      reason: "operator rejected proposal",
+                    })}
+                  >
+                    <X aria-hidden="true" size={15} />
+                    {busyAction === "workflow-reject" ? "Rejecting" : "Reject proposal"}
+                  </button>
+                ) : null}
+                {["queued", "running", "paused"].includes(runStatus) ? (
+                  <button
+                    className="danger"
+                    disabled={!actionReady || busyAction !== "" || !runId}
+                    title={!actionReady ? actionState : "Cancel this Run"}
+                    type="button"
+                    onClick={() => onRunCancel(runControlPayload)}
+                  >
+                    <CircleStop aria-hidden="true" size={15} />
+                    {busyAction === "run-cancel" ? "Cancelling" : "Cancel Run"}
+                  </button>
+                ) : null}
+              </div>
+            </details>
+          ) : null}
         </div>
       </header>
 
-      <section className="workflow-proposal-requirement">
-        <WorkflowList title="Acceptance" items={asStringArray(requirement.acceptance)} />
-        <WorkflowList title="Constraints" items={asStringArray(requirement.constraints)} />
-        <WorkflowList title="Open questions" items={asStringArray(requirement.open_questions)} />
-      </section>
-
-      <section className="workflow-proposal-section">
-        <SectionHeading
-          icon={GitFork}
-          meta={`${stages.length} stages / expected topology`}
-          title="Proposal Graph"
-        />
-        <div className="workflow-proposal-stage-graph" data-testid="workflow-proposal-graph">
-          {stages.length ? stages.map((stage, index) => (
-            <div className="workflow-proposal-stage" key={textValue(stage.id) || String(index)}>
-              <span>{index + 1}</span>
-              <strong>{textValue(stage.id) || `stage-${index + 1}`}</strong>
-              <small>
-                {textValue(stage.topology) || "direct"}
-                {stage.role ? ` / ${textValue(stage.role)}` : ""}
-              </small>
-            </div>
-          )) : <span className="muted">No declared stages</span>}
+      <section
+        className={`workflow-readiness tone-${readiness.tone}`}
+        data-testid="workflow-readiness"
+      >
+        {readiness.tone === "error" ? (
+          <AlertTriangle aria-hidden="true" size={19} />
+        ) : readiness.tone === "info" ? (
+          <Info aria-hidden="true" size={19} />
+        ) : (
+          <CheckCircle2 aria-hidden="true" size={19} />
+        )}
+        <div>
+          <span className="eyebrow">Readiness</span>
+          <strong>{readiness.title}</strong>
+          <small>
+            {blockerCount} blockers
+            {" / "}
+            {warningCount} warnings
+            {" / "}
+            {infoCount} info
+          </small>
         </div>
+        {(blockerCount || warningCount || infoCount) ? (
+          <button
+            className="workflow-inline-action"
+            type="button"
+            onClick={() => {
+              setAdvancedOpen(true);
+              window.requestAnimationFrame(() => {
+                document.getElementById(advancedId)?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                });
+              });
+            }}
+          >
+            Review details
+          </button>
+        ) : null}
       </section>
 
-      {(blockers.length || warnings.length) ? (
-        <section className="workflow-proposal-section">
-          <SectionHeading
-            icon={ShieldCheck}
-            meta={`${blockers.length} blockers / ${warnings.length} warnings`}
-            title="Preflight"
-          />
-          <div className="workflow-proposal-diagnostics">
-            {[...blockers, ...warnings].map((item, index) => (
-              <div
-                className={textValue(item.severity).toUpperCase() === "STOP" ? "tone-error" : "tone-warn"}
-                key={`${textValue(item.kind)}-${index}`}
-              >
-                <strong>{textValue(item.kind) || textValue(item.title) || "diagnostic"}</strong>
-                <span>{textValue(item.message) || textValue(item.reason)}</span>
-              </div>
+      {expectedOutputs.length ? (
+        <section className="workflow-expected-output">
+          <PackageCheck aria-hidden="true" size={19} />
+          <div>
+            <span className="eyebrow">Expected output</span>
+            {expectedOutputs.map((output, index) => (
+              <strong key={`${textValue(output.name)}-${index}`}>
+                {expectedOutputLabel(output)}
+              </strong>
             ))}
           </div>
         </section>
       ) : null}
 
-      <div className="workflow-proposal-two-column">
-        <section className="workflow-proposal-section">
-          <SectionHeading icon={Check} meta={`${roles.length} roles`} title="Execution Closure" />
-          <div className="workflow-proposal-role-list">
-            {roles.map((role, index) => {
-              const execution = asRecord(role.execution);
-              return (
-                <div key={`${textValue(role.name)}-${index}`}>
-                  <strong>{textValue(role.name) || textValue(role.instance_id) || "role"}</strong>
-                  <span>{textValue(role.backend) || "default backend"}</span>
-                  <code>{textValue(execution.default_profile) || "direct-v1"}</code>
+      <section className="workflow-proposal-section workflow-plan-section">
+        <SectionHeading
+          icon={GitFork}
+          meta={`${planStages.length} of ${stages.length} stages`}
+          title="Execution Plan"
+        />
+        <WorkflowExecutionPlan
+          explicitDag={explicitDag}
+          levels={planLevels}
+          stages={planStages}
+        />
+      </section>
+
+      <section className="workflow-proposal-section workflow-requirements">
+        <SectionHeading icon={Check} meta="confirmed requirement" title="Requirements" />
+        <div>
+          <WorkflowList title="Acceptance" items={asStringArray(requirement.acceptance)} />
+          <WorkflowList title="Constraints" items={asStringArray(requirement.constraints)} />
+          {asStringArray(requirement.open_questions).length ? (
+            <WorkflowList title="Open questions" items={asStringArray(requirement.open_questions)} />
+          ) : null}
+        </div>
+      </section>
+
+      <details
+        className="workflow-proposal-advanced"
+        id={advancedId}
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span>
+            <ShieldCheck aria-hidden="true" size={15} />
+            <strong>Advanced audit details</strong>
+          </span>
+          <small>diagnostics, bindings, roles and FlowSpec</small>
+        </summary>
+        <div className="workflow-proposal-advanced-body">
+          {(blockerCount || warningCount || infoCount) ? (
+            <section className="workflow-proposal-section">
+              <SectionHeading
+                icon={ShieldCheck}
+                meta={`${blockerCount} blockers / ${warningCount} warnings / ${infoCount} info`}
+                title="Preflight diagnostics"
+              />
+              <WorkflowDiagnostics
+                blockers={blockers.length ? blockers : stopDiagnostics}
+                info={infoDiagnostics}
+                warnings={warningDiagnostics}
+              />
+            </section>
+          ) : null}
+
+          <div className="workflow-proposal-two-column">
+            <section className="workflow-proposal-section">
+              <SectionHeading icon={Check} meta={`${roles.length} roles`} title="Execution Closure" />
+              <dl className="workflow-proposal-kv">
+                <dt>Profiles</dt>
+                <dd>{profiles.map(([id]) => id).join(", ") || "direct-v1"}</dd>
+                <dt>Delivery policy</dt>
+                <dd>{textValue(completionProfile.delivery_policy) || "report_only"}</dd>
+                <dt>Stages</dt>
+                <dd>{textValue(estimated.stages) || stages.length}</dd>
+                <dt>Roles</dt>
+                <dd>{textValue(estimated.roles) || roles.length}</dd>
+              </dl>
+              <details className="workflow-advanced-subsection">
+                <summary>Role mapping <span>{roles.length}</span></summary>
+                <div className="workflow-proposal-role-list">
+                  {roles.map((role, index) => {
+                    const execution = asRecord(role.execution);
+                    return (
+                      <div key={`${textValue(role.name)}-${index}`}>
+                        <strong>{textValue(role.name) || textValue(role.instance_id) || "role"}</strong>
+                        <span>{textValue(role.backend) || "default backend"}</span>
+                        <code>{textValue(execution.default_profile) || "direct-v1"}</code>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </details>
+            </section>
+
+            <section className="workflow-proposal-section">
+              <SectionHeading icon={ShieldCheck} meta={changeMode} title="Decision Binding" />
+              <dl className="workflow-proposal-kv">
+                <dt>Proposal</dt>
+                <dd className="mono">{shortDigest(proposalDigest)}</dd>
+                <dt>Requirement</dt>
+                <dd className="mono">{shortDigest(textValue(request.requirement_spec_digest))}</dd>
+                <dt>Effective config</dt>
+                <dd className="mono">{shortDigest(textValue(asRecord(proposal.effective_config_ref).sha256))}</dd>
+                <dt>Config apply</dt>
+                <dd>{changeMode === "config_change" ? (configApplied ? "applied" : "required") : "not required"}</dd>
+                <dt>Run</dt>
+                <dd>{terminal || (submitted ? "submitted" : "not started")}</dd>
+              </dl>
+            </section>
           </div>
-          <dl className="workflow-proposal-kv">
-            <dt>Profiles</dt>
-            <dd>{profiles.map(([id]) => id).join(", ") || "direct-v1"}</dd>
-            <dt>Delivery policy</dt>
-            <dd>{textValue(completionProfile.delivery_policy) || "report_only"}</dd>
-            <dt>Stages</dt>
-            <dd>{textValue(estimated.stages) || stages.length}</dd>
-            <dt>Roles</dt>
-            <dd>{textValue(estimated.roles) || roles.length}</dd>
-          </dl>
-        </section>
 
-        <section className="workflow-proposal-section">
-          <SectionHeading icon={ShieldCheck} meta={changeMode} title="Decision Binding" />
-          <dl className="workflow-proposal-kv">
-            <dt>Proposal</dt>
-            <dd className="mono">{shortDigest(proposalDigest)}</dd>
-            <dt>Requirement</dt>
-            <dd className="mono">{shortDigest(textValue(request.requirement_spec_digest))}</dd>
-            <dt>Effective config</dt>
-            <dd className="mono">{shortDigest(textValue(asRecord(proposal.effective_config_ref).sha256))}</dd>
-            <dt>Config apply</dt>
-            <dd>{changeMode === "config_change" ? (configApplied ? "applied" : "required") : "not required"}</dd>
-            <dt>Run</dt>
-            <dd>{terminal || (submitted ? "submitted" : "not started")}</dd>
-          </dl>
-        </section>
-      </div>
+          <details className="workflow-advanced-subsection">
+            <summary>Effective topology <span>{stages.length} stages</span></summary>
+            <div className="workflow-effective-topology">
+              {stages.map((stage, index) => (
+                <div key={`${textValue(stage.id)}-${index}`}>
+                  <strong>{textValue(stage.id) || `stage-${index + 1}`}</strong>
+                  <span>{stageRoleLabel(stage)}</span>
+                  <code>{textValue(stage.trigger) || "dependency driven"}</code>
+                </div>
+              ))}
+            </div>
+          </details>
 
-      <section className="workflow-proposal-section">
-        <SectionHeading icon={FileDiff} meta={textValue(configDiff.changed) === "true" ? "changed" : changeMode} title="Config Diff" />
-        <pre className="workflow-proposal-code">
-          {textValue(configDiff.unified_diff) || "No zf.yaml changes"}
-        </pre>
-      </section>
+          {textValue(configDiff.changed) === "true" ? (
+            <section className="workflow-proposal-section">
+              <SectionHeading icon={FileDiff} meta="changed" title="Config Diff" />
+              <pre className="workflow-proposal-code">{textValue(configDiff.unified_diff)}</pre>
+            </section>
+          ) : null}
 
-      <section className="workflow-proposal-section">
-        <SectionHeading icon={GitFork} meta="short FlowSpec" title="FlowSpec" />
-        <pre className="workflow-proposal-code">{stringify(shortFlowSpec)}</pre>
-      </section>
+          <details className="workflow-advanced-subsection">
+            <summary>FlowSpec <span>raw snapshot</span></summary>
+            <pre className="workflow-proposal-code">{stringify(shortFlowSpec)}</pre>
+          </details>
+        </div>
+      </details>
     </>
   );
-}
-
-function SectionHeading({
-  icon: Icon,
-  meta,
-  title,
-}: {
-  icon: typeof GitFork;
-  meta: string;
-  title: string;
-}) {
-  return (
-    <div className="workflow-proposal-section-head">
-      <span><Icon aria-hidden="true" size={15} /><strong>{title}</strong></span>
-      <small>{meta}</small>
-    </div>
-  );
-}
-
-function WorkflowList({ items, title }: { items: string[]; title: string }) {
-  return (
-    <div>
-      <strong>{title}</strong>
-      {items.length ? (
-        <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
-      ) : <span className="muted">None</span>}
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const normalized = status || "unknown";
-  const tone = (
-    ["running", "submitted", "approved"].includes(normalized)
-      ? "info"
-      : ["proposed", "ready", "draft"].includes(normalized)
-        ? "warn"
-        : normalized === "rejected"
-          ? "err"
-          : "muted"
-  );
-  return <span className={`badge badge-${tone}`}>{normalized}</span>;
-}
-
-function WorkflowEmpty({ title }: { title: string }) {
-  return (
-    <div className="workflow-proposal-empty">
-      <GitFork aria-hidden="true" size={24} />
-      <strong>{title}</strong>
-    </div>
-  );
-}
-
-function requestTitle(request: WorkflowRequest): string {
-  return textValue(request.objective)
-    || textValue(request.title)
-    || textValue(request.request_id)
-    || "Workflow request";
-}
-
-function shortDigest(value: string): string {
-  return value ? value.slice(0, 12) : "-";
 }
 
 function decisionFeedback(result: ActionResponse): string {

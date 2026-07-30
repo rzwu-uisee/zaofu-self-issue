@@ -13,17 +13,22 @@ uv sync --extra dev --extra web
 For local access:
 
 ```bash
-uv run zf web --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```
 
 For Docker Playwright or trusted LAN access:
 
 ```bash
-uv run zf web --host 0.0.0.0 --port 5175
+tools/start-webkanban.sh --host 0.0.0.0 --port 5175
 ```
 
-Only bind to `0.0.0.0` on a trusted network. To inspect a state directory from
-another worktree or simulation:
+`tools/start-webkanban.sh` is the canonical trusted-local WebKanban launcher.
+It owns the Web build, action token, Workspace/provider environment, Codex
+headless sandbox policy, tmux session, and restart behavior. Only bind to
+`0.0.0.0` on a trusted network.
+
+Use the low-level `zf web` entry point when only inspecting a state directory
+from another worktree or simulation:
 
 ```bash
 uv run zf web \
@@ -32,14 +37,33 @@ uv run zf web \
   --port 5175
 ```
 
+Direct `zf web` inherits only the current shell and target Project `.env`; it
+does not apply the launcher's trusted-local sandbox defaults. Prefer the
+launcher for real Channel or Kanban Agent Codex turns. Otherwise repair host
+sandbox support or explicitly configure
+`ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX` before launch.
+
 ### 1.1 Create a Project from the Workspace shell
 
-For Project creation or registration, start the workspace shell with a
-controlled action token:
+For Project creation or registration, start the workspace shell through the
+launcher:
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
+tools/start-webkanban.sh \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --workspace-only
+```
+
+The launcher reuses or creates the action token and prints it at startup. To
+pin a token, set `ZF_WEB_ACTION_TOKEN` in the uncommitted repository `.env`.
+
+Common lifecycle commands:
+
+```bash
+tools/start-webkanban.sh --port 8001 --status
+tools/start-webkanban.sh --port 8001 --stop
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
 ```
 
 First-run onboarding configures Provider, Environment, Access, and Ready; it

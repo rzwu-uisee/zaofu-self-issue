@@ -10,6 +10,7 @@ import pytest
 from zf.core.config.loader import load_config
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref, sidecar_path
 from zf.runtime.workflow_requests import (
     load_workflow_request,
@@ -22,6 +23,7 @@ from zf.runtime.workflow_synthesis import (
     enqueue_workflow_synthesis,
     run_workflow_synthesis,
 )
+from zf.runtime.workflow_synthesis_proposal import build_synthesis_proposal
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     load_workflow_operation,
@@ -230,6 +232,51 @@ def test_research_synthesis_expands_only_registered_generic_template(
         outcome.result,
         sort_keys=True,
     ).lower()
+
+
+def test_generic_synthesis_proposal_uses_generated_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    descriptor = write_immutable_json_sidecar(
+        state_dir,
+        {
+            "parameters": {},
+            "generic_workflow_spec": {"entry": "scope"},
+        },
+        root="workflow/synthesis/test/flow-specs",
+        kind="workflow_short_flow_spec",
+        schema_version="workflow-short-flow-spec.v1",
+        created_by="test",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_preview(**kwargs):
+        captured.update(kwargs)
+        return {"status": "GO"}
+
+    monkeypatch.setattr(
+        "zf.cli.flow.build_flow_submit_preview",
+        fake_preview,
+    )
+
+    result = build_synthesis_proposal(
+        state_dir=state_dir,
+        result={
+            "selected_flow_family": "Workflow",
+            "short_flow_spec_ref": descriptor,
+        },
+        result_ref={"ref": "synthesis.json", "sha256": "abc"},
+        operation_context={
+            "config_ref": str(tmp_path / "zf.yaml"),
+            "intake_ref": str(tmp_path / "intake.md"),
+        },
+        actor="test",
+    )
+
+    assert result == {"status": "GO"}
+    assert captured["pattern_id"] == "scope"
 
 
 @pytest.mark.parametrize(

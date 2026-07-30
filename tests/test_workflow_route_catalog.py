@@ -105,3 +105,44 @@ def test_catalog_only_exposes_registered_reader_general_entries() -> None:
         "general:architecture-review",
         expected_config_digest="sha256:stale",
     ) is None
+
+
+def test_catalog_does_not_duplicate_delivery_route_for_kind_alias() -> None:
+    canonical_route = SimpleNamespace(
+        alias="",
+        default_tier="default",
+        pattern_id="prd-scan",
+        tier_routes={},
+    )
+    config = SimpleNamespace(
+        roles=[
+            SimpleNamespace(
+                name="planner",
+                instance_id="planner",
+                role_kind="reader",
+            ),
+        ],
+        workflow=SimpleNamespace(
+            kind_routes={
+                "feat": SimpleNamespace(alias="prd"),
+                "prd": canonical_route,
+            },
+            affinity_lanes={},
+            stages=[
+                SimpleNamespace(
+                    id="prd-scan",
+                    trigger="workflow.invoke.requested",
+                    topology="single_reader",
+                    roles=["planner"],
+                    flow_kind="prd",
+                ),
+            ],
+        ),
+    )
+
+    route_ids = [
+        route["route_id"]
+        for route in workflow_route_catalog(config)["routes"]
+    ]
+
+    assert route_ids == ["delivery:prd:default"]

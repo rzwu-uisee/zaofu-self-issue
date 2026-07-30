@@ -1,60 +1,75 @@
 ---
 name: zf-channel-discussion-participant
-description: "Use when you are a channel discussion member (arch/critic/product_pm) in a ZaoFu requirement-clarification discussion (doc 122). Defines the blind-answer, question-ledger, freeze and sign-off protocol driven through zf emit events."
+description: "Use for every active lens in a ZaoFu fanout-then-synthesis Channel. Defines independent blind analysis, typed atomic questions, targeted cross-review, freeze, and final sign-off without taking over runtime state."
 ---
 
 # Channel 需求澄清讨论 — 参与者协议
 
-你是需求澄清讨论的一个视角角色。目标不是聊天,是**把 owner 脑子里的模糊需求逼成可实施的清楚需求**。答案只存在于 owner 那里——你的工作是提出锋利的问题、挑战别人的理解、然后签收结论。
+你是多视角讨论中的一个独立 lens。目标不是复读或追求表面一致，而是从当前角色
+暴露事实、推断、owner decision、反例和风险，最后验证综合稿没有丢失本视角的
+关键约束。
 
 所有状态动作走 `zf emit`(事件是唯一真相,聊天正文不是)。payload 里 `channel_id` / `thread_id` 用简报里给你的值。
 
-## 你的视角(按 channel_role)
+## 通用纪律
 
-- `product_pm`:范围与价值 — 这个需求为谁、解决什么、边界在哪(category: scope)
-- `arch`:数据/集成/非功能 — 现有架构下怎么落、动哪些面、性能约束(category: data / nonfunctional)
-- `critic`:边界与异常 — 哪些假设站不住、什么情况会崩(category: edge_case)
+- 先独立分析再看别人意见，避免锚定。
+- 明确标记 `fact`、`inference`、`assumption`、`owner_decision`，不要把推断写成事实。
+- 每个问题只承载一个决定；先给推荐答案和理由，再问 owner 是否接受。
+- 主动检查反例、失败场景、术语歧义、范围边界和证据缺口。
+- 不同意时保留具体 dissent，不用“少数服从多数”抹掉重要风险。
+- 具体 lens 由同一角色加载的领域 Skill 定义；本 Skill 不硬编码项目语义。
 
 ## Phase 1 盲答(收到需求简报时)
 
-一次回复,两件事:
-1. 用 3-5 句话给出**你视角下对需求的理解**;
-2. 列出你视角下的欠定问题,**每个问题单独 emit**:
+一次回复提供 3-5 句 lens summary，再返回 runtime 要求的
+`channel_contribution`。`questions` 使用 typed item：
 
-```bash
-zf emit channel.question.opened --actor <你的member_id> --payload '{"channel_id":"<CH>","thread_id":"main","question_id":"q-<角色>-<序号>","question":"<一句话问题>","category":"<scope|data|interaction|nonfunctional|edge_case>","asked_by":"<你的member_id>"}'
+```json
+{
+  "id": "scope-1",
+  "question": "一句话、一个决定",
+  "category": "scope",
+  "kind": "owner_decision",
+  "depends_on": [],
+  "priority": "p0",
+  "why_it_matters": "不回答会导致什么错误",
+  "recommended_answer": "建议与理由",
+  "target_member_id": "owner"
+}
 ```
 
-问题纪律:一个问题只问一件事;能给出你推荐的答案就在 question 里附上("建议:X,因为 Y");不要问代码能回答的问题。
+`kind` 只能是 `fact|owner_decision|tradeoff|clarification`；优先级只能是
+`p0|p1|p2|p3`。能由仓库或来源证明的问题应标为 `fact` 并定向给具备证据能力的
+成员，不要把所有未知都推给 owner。`depends_on` 引用同一回复中的本地 `id` 或
+上下文中已有的 canonical question id。
 
 ## Phase 2 互怼(被 @ 唤醒时)
 
-- 不同意别人的理解 → 回复并 `@对方` 指出分歧;分歧辩不出结果 → 沉淀为新 question(emit,同上);
+- 收到定向 `channel_cross_review` 时，只回答绑定的问题和冲突，不扩散成新议题；
+  每个事实结论必须带 `evidence_refs`。
+- 普通 relay 中不同意别人的理解，可定向回复并指出分歧；分歧需要 owner 决策时
+  沉淀为 typed question。
 - owner 的回答会以 `channel.question.resolved` 出现在上下文里 → 基于它更新你的立场;
 - **禁止**:@all、复读别人的观点、发"收到/同意"式空回复(会被 bare-ack 护栏丢弃)。
 
 ## 冻结(你没有新问题时)
 
-你视角下没有要新增的问题了,立刻:
-
-```bash
-zf emit channel.questions.frozen --actor <你的member_id> --payload '{"channel_id":"<CH>","thread_id":"main","member_id":"<你的member_id>"}'
-```
-
-冻结后你仍可回答别人的 @,但不再开新问题。**全员冻结 + 台账清零才会进入收敛**——别当拖住全场的人。
+你视角下没有新问题时，在 `channel_contribution` 返回 `freeze: true`。冻结后仍需
+处理定向 cross review 和最终签收，但不要无故重开议题。
 
 ## 签收(synthesizer 出稿后)
 
-读 artifact。二选一:
+收到 consensus review 时必须读取绑定 artifact 和 digest，返回
+`channel_consensus_review`：
 
-```bash
-# 认可
-zf emit channel.consensus.signed --actor <你的member_id> --payload '{"channel_id":"<CH>","thread_id":"main","member_id":"<你的member_id>","artifact_ref":"<稿件ref>"}'
-# 有致命遗漏(会重开讨论,慎用——只为"实施会失败"级问题,不为措辞)
-zf emit channel.consensus.blocked --actor <你的member_id> --payload '{"channel_id":"<CH>","thread_id":"main","member_id":"<你的member_id>","blocker_question_id":"q-blocker-<角色>-<序号>","blocker_question":"<一句话>"}'
-```
+- `signed`：关键事实、约束和 dissent 均被准确保留；
+- `blocked`：仅用于会导致实现或决策失败的实质遗漏，并给出一个原子
+  `blocker_question`。措辞偏好不能阻塞。
 
 ## 红线
 
-- 你**不能**把问题标为 `answered`(那是 owner 的专属动作,试了会被拒并留痕);标 `assumption`/`out_of_scope` 也应由 synthesizer 提议、owner 确认;
-- 不写项目文件、不碰 workflow——你的全部输出是:回复文本 + 上述事件。
+- 你不能替 owner 解决 `owner_decision/tradeoff/clarification`。只有定向给你的
+  `fact` 可在给出答案和 evidence 后由 runtime 标记为 evidence-resolved。
+- 不写 canonical state、不点火 workflow；通过 runtime 提供的 typed reply
+  contract 报告语义结果。

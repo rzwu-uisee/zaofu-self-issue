@@ -211,8 +211,10 @@ uv run zf metrics snapshot
 
 | 命令 | 用途 |
 |---|---|
-| `zf web --host 127.0.0.1 --port 8001` | 启动本地 dashboard |
-| `zf web --host 0.0.0.0 --port 5175` | 对容器/局域网暴露 dashboard |
+| `tools/start-webkanban.sh --host 127.0.0.1 --port 8001` | 推荐：启动可信本地 dashboard，并统一加载 token/provider/sandbox 环境 |
+| `tools/start-webkanban.sh --port 8001 --status` | 检查 tmux、端口、API 与 Codex headless 生效策略 |
+| `zf web --host 127.0.0.1 --port 8001` | 低层调试入口；只继承 shell 与 Project `.env` |
+| `zf web --host 0.0.0.0 --port 5175` | 低层容器/局域网调试入口 |
 | `zf feishu ...` | 飞书适配相关命令 |
 | `zf workspace providers openclaw list` | 查看 workspace OpenClaw provider 绑定 |
 | `zf workspace providers openclaw set ...` | 写入 workspace OpenClaw provider 绑定 |
@@ -223,7 +225,9 @@ uv run zf metrics snapshot
 | `zf goal ...` | goal/evaluation 状态操作 |
 | `zf failure ...` | failure signal/诊断入口 |
 
-`0.0.0.0` 只应在可信网络或本地 Docker 测试中使用。
+Channel / Kanban Agent 的正常本地运行应使用 launcher，避免直接 `zf web` 漏掉
+`ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX`、Workspace provider token 或 action
+token。`0.0.0.0` 只应在可信网络或本地 Docker 测试中使用。
 
 ## 9. Runtime State 清理
 

@@ -27,12 +27,22 @@ from typing import Any
 
 from zf.core.events import EventWriter
 from zf.runtime.channel_projection import project_channel, project_channels
+from zf.runtime.channel_question_dedup import (
+    question_ledger,
+    question_ledger_digest,
+    stable_question_dedup_request_id,
+)
 
 RELAY_MODES = {"mention_relay", "fanout_then_synthesis"}
 DEFAULT_MAX_RELAY_DEPTH = 4
 DISCUSSION_STATES = {"idle", "phase1_blind", "phase2_relay", "phase3_synthesis"}
 AGENT_MEMBER_TYPES = {"provider_agent", "persona_agent", "persona"}
-QUESTION_RESOLUTIONS = {"answered", "assumption", "out_of_scope"}
+QUESTION_RESOLUTIONS = {
+    "answered",
+    "assumption",
+    "out_of_scope",
+    "evidence",
+}
 
 
 @dataclass(frozen=True)
@@ -367,7 +377,7 @@ def advance_discussion(
             ))
             return emitted
         if _phase1_complete(channel, session, thread_id):
-            writer.emit(
+            changed = writer.emit(
                 "channel.discussion.phase.changed",
                 actor=actor,
                 correlation_id=channel_id,
@@ -380,6 +390,40 @@ def advance_discussion(
                 },
             )
             emitted.append("channel.discussion.phase.changed")
+            ledger = question_ledger(channel, thread_id=thread_id)
+            if any(item["status"] == "open" for item in ledger):
+                request_id = stable_question_dedup_request_id(
+                    channel_id,
+                    thread_id,
+                    str(session.get("started_event_id") or ""),
+                )
+                if not _question_dedup_already_requested(
+                    channel,
+                    request_id,
+                ):
+                    writer.emit(
+                        "channel.question.dedup.requested",
+                        actor=actor,
+                        task_id=changed.task_id,
+                        causation_id=changed.id,
+                        correlation_id=channel_id,
+                        payload={
+                            "schema_version": "channel.question.dedup.v1",
+                            "channel_id": channel_id,
+                            "thread_id": thread_id,
+                            "request_id": request_id,
+                            "target_member_id": str(
+                                session.get("synthesizer") or ""
+                            ),
+                            "ledger_digest": question_ledger_digest(
+                                channel,
+                                thread_id=thread_id,
+                            ),
+                            "question_count": len(ledger),
+                            "source": source,
+                        },
+                    )
+                    emitted.append("channel.question.dedup.requested")
         return emitted
 
     if state == "phase2_relay":
@@ -563,6 +607,19 @@ def _ledger_converged(channel: dict[str, Any], session: dict[str, Any], thread_i
             continue
         if str(question.get("status") or "") == "open":
             return False
+    cross_reviews = channel.get("cross_reviews") or []
+    candidates = (
+        list(cross_reviews.values())
+        if isinstance(cross_reviews, dict)
+        else list(cross_reviews)
+    )
+    if any(
+        isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+        and str(item.get("status") or "") != "completed"
+        for item in candidates
+    ):
+        return False
     # Zero questions with everyone frozen is legitimate convergence: nothing
     # was unclear. The freeze set is the gate, not the question count.
     return True
@@ -611,6 +668,17 @@ def _synthesis_already_requested(channel: dict[str, Any], request_id: str) -> bo
         if isinstance(item, dict) and str(item.get("request_id") or "") == request_id:
             return True
     return False
+
+
+def _question_dedup_already_requested(
+    channel: dict[str, Any],
+    request_id: str,
+) -> bool:
+    return any(
+        isinstance(item, dict)
+        and str(item.get("request_id") or "") == request_id
+        for item in channel.get("question_dedup_requests") or []
+    )
 
 
 def _next_synthesis_generation(channel: dict[str, Any], thread_id: str) -> int:
@@ -668,7 +736,9 @@ def _reject_invalid_resolutions(
                 "thread_id": thread_id,
                 "question_id": str(attempt.get("question_id") or ""),
                 "attempt_event_id": attempt_id,
-                "reason": "answered_requires_human",
+                "reason": str(
+                    attempt.get("reason") or "answered_requires_human"
+                ),
                 "source": source,
             },
         )

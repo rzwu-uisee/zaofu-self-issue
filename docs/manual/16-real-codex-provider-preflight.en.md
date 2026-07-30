@@ -19,6 +19,8 @@ fail with an error such as:
 
 ```text
 bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+Codex sandbox unsupported for sandbox=workspace-write:
+unshare: unshare failed: Operation not permitted
 ```
 
 ## 2. E2E Policy
@@ -33,17 +35,51 @@ codex exec --dangerously-bypass-approvals-and-sandbox --json "$PROMPT"
 
 This bypass is for controlled smoke testing, not a production worker default.
 
-Channel and Kanban Agent headless Codex normally use `workspace-write` or
-`read-only`. When preflight reports unsupported sandboxing, Web returns
-`sandbox_unsupported` before starting the turn. For a short-lived write test in
-an explicitly trusted local project:
+### 2.1 WebKanban Launch Modes
+
+Channel permission profiles normally map to `workspace-write` or `read-only`
+sandboxing. When preflight reports unsupported sandboxing, Web returns
+`sandbox_unsupported` before starting the real Codex turn.
+
+Use the canonical launcher on a trusted local development host:
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+```
+
+The launcher loads the action token and Workspace provider environment. Unless
+explicitly overridden, it configures trusted-local WebKanban with:
+
+```text
+ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
+ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+```
+
+Verify the effective launch policy:
+
+```bash
+tools/start-webkanban.sh --port 8001 --status
+```
+
+The result must include `codex_headless_sandbox: danger-full-access`,
+`tmux: running`, and `api: ok`. `zf doctor provider` may still report that the
+host's normal sandbox is unsupported; it checks host capability, not whether
+the launcher explicitly bypassed it.
+
+Direct `uv run zf web ...` is a low-level debugging entry point. It inherits
+only the shell and target Project `.env` and does not apply launcher defaults.
+When a trusted local instance must be started directly, configure it explicitly:
 
 ```bash
 export ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
+export ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+uv run zf web --host 127.0.0.1 --port 8001
 ```
 
-Restart WebKanban after setting it. This disables the normal sandbox; restoring
-host namespace or bubblewrap support remains the long-term fix.
+`danger-full-access` disables the normal Codex headless OS sandbox. Use it only
+for an explicitly trusted local repository and network. Shared hosts,
+untrusted projects, and production-like environments must repair namespace or
+bubblewrap support instead of using bypass.
 
 ## 3. Channel Failure Signals
 

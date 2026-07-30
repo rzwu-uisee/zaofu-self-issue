@@ -35,6 +35,9 @@ from zf.core.verification.evidence import (
 from zf.runtime.channel_adapter import dispatch_reply_request
 from zf.runtime.channel_router import route_channel_message
 from zf.runtime.channel_synthesis_reactor import (
+    react_channel_consensus_proposed,
+    react_channel_cross_review_requested,
+    react_channel_question_dedup_requested,
     react_channel_synthesis_requested,
 )
 from zf.runtime.cli_command import zf_cli_cmd
@@ -148,13 +151,25 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("task.fanout.requested", "_on_task_fanout_requested"),
     ("channel.message.posted", "_on_channel_message_posted"),
     ("channel.agent.reply.requested", "_on_channel_agent_reply_requested"),
+    (
+        "channel.question.dedup.requested",
+        "_on_channel_question_dedup_requested",
+    ),
+    (
+        "channel.cross_review.requested",
+        "_on_channel_cross_review_requested",
+    ),
     ("channel.synthesis.requested", "_on_channel_synthesis_requested"),
     ("channel.agent.reply.completed", "_on_channel_discussion_event"),
     ("channel.question.opened", "_on_channel_discussion_event"),
     ("channel.question.resolved", "_on_channel_discussion_event"),
     ("channel.question.merged", "_on_channel_discussion_event"),
+    ("channel.question.updated", "_on_channel_discussion_event"),
+    ("channel.question.dedup.applied", "_on_channel_discussion_event"),
+    ("channel.cross_review.completed", "_on_channel_discussion_event"),
+    ("channel.cross_review.rejected", "_on_channel_discussion_event"),
     ("channel.questions.frozen", "_on_channel_discussion_event"),
-    ("channel.consensus.proposed", "_on_channel_discussion_event"),
+    ("channel.consensus.proposed", "_on_channel_consensus_proposed"),
     ("channel.consensus.signed", "_on_channel_discussion_event"),
     ("channel.consensus.blocked", "_on_channel_discussion_event"),
     ("cost.budget.exceeded", "_on_cost_budget_exceeded"),
@@ -5859,6 +5874,27 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     ) -> OrchestratorDecision | None:
         react_channel_synthesis_requested(self, event)
         return None
+
+    def _on_channel_question_dedup_requested(
+        self,
+        event: ZfEvent,
+    ) -> OrchestratorDecision | None:
+        react_channel_question_dedup_requested(self, event)
+        return None
+
+    def _on_channel_cross_review_requested(
+        self,
+        event: ZfEvent,
+    ) -> OrchestratorDecision | None:
+        react_channel_cross_review_requested(self, event)
+        return None
+
+    def _on_channel_consensus_proposed(
+        self,
+        event: ZfEvent,
+    ) -> OrchestratorDecision | None:
+        react_channel_consensus_proposed(self, event)
+        return self._on_channel_discussion_event(event)
 
     def _on_channel_agent_reply_requested(self, event: ZfEvent) -> OrchestratorDecision | None:
         """Raw `zf emit channel.agent.reply.requested` dispatches to the

@@ -168,6 +168,24 @@ def test_channel_route_blocked_never_unknown_actionable() -> None:
     assert _pending_semantic_event_actions([event]) == []
 
 
+def test_channel_question_dedup_rejection_routes_to_run_manager_first() -> None:
+    spec = spec_for_event("channel.question.dedup.rejected")
+
+    assert spec is not None
+    assert spec.event_class == "expected_negative"
+    assert spec.problem_class == "contract"
+    assert spec.owner_route == "run_manager"
+    assert spec.run_manager_semantics == ("pending_action",)
+    assert spec.autoresearch_eligible is False
+    assert spec.effective_notification_policy == "run_manager_first"
+    assert spec.effective_recovery_policy == "run_manager"
+    assert spec.dedupe_key_fields == (
+        "channel_id",
+        "thread_id",
+        "request_id",
+    )
+
+
 def test_role_lifecycle_suspended_is_normal_observation() -> None:
     spec = spec_for_event("role.lifecycle.suspended")
 

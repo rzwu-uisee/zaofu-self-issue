@@ -28,12 +28,12 @@ Kanban Agent 与首个受控 Workflow；需要理解 kernel、运行真相和任
 - [03 CLI 操作手册](03-cli-operations.md) — 日常操作命令流程
 - [04 Harness 运行流程](04-harness-runtime.md) — 三层架构、任务链路、stuck/orphan/recovery、签收口径
 - [05 Skills、Workdir 与 Git Evidence](05-skills-workdirs-git-evidence.md) — 技能分层、worktree 隔离、证据链
-- [07 故障排查](07-troubleshooting.md) — 常见故障场景与诊断命令
+- [07 故障排查](07-troubleshooting.md) — 常见故障、WebKanban 启动漂移与诊断命令
 - [09 ZaoFu CLI 命令参考](09-zaofu-cli-usage.md) — CLI 全量命令参考(reference)
 
 ## 3. 观测、计划与诊断
 
-- [06 Web、观测与 E2E](06-web-observability-e2e.md) — `zf web` Dashboard、运行中观测、E2E 入口
+- [06 Web、观测与 E2E](06-web-observability-e2e.md) — canonical WebKanban launcher、运行中观测、E2E 入口
 - [08 New Task、Agent 与 Squad](08-new-task-agent-squad.md) — Web 新任务入口与 assignment intent
 - [13 Plan、Task Map 与 Orchestrator 调度手册](13-plan-task-map-orchestrator-dispatch.md) — 计划到调度的链路
 - [14 Delivery Trace 使用手册（zf trace）](14-delivery-trace-usage.md) — 交付追踪与 drift 报告
@@ -54,5 +54,5 @@ Kanban Agent 与首个受控 Workflow；需要理解 kernel、运行真相和任
 - [10 Autoresearch 使用手册](10-autoresearch-usage.md) — 场景注入、loop、self-repair
 - [Autoresearch Orchestrator 使用手册](autoresearch-orchestrator.md) — 外层 supervisor 长程评估
 - [Autoresearch Campaign 使用手册](autoresearch-campaign.md) — 批量验收场景
-- [16 真实 Codex Provider Preflight](16-real-codex-provider-preflight.md) — `zf doctor provider --backend codex` 预检
+- [16 真实 Codex Provider Preflight](16-real-codex-provider-preflight.md) — sandbox 预检、可信本地 launcher 与安全边界
 - [18 Product Fanout 真实 E2E 手册](18-product-fanout-real-e2e.md) — 维护者 / QA 验证向

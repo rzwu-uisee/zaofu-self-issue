@@ -55,15 +55,16 @@ Start the Workspace Dashboard:
 
 ```bash
 export ZAOFU_ROOT=/path/to/zaofu
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-
-uv run --project "$ZAOFU_ROOT" zf web \
+"$ZAOFU_ROOT/tools/start-webkanban.sh" \
   --host 127.0.0.1 \
   --port 8001 \
   --workspace-only
 ```
 
-Open `http://127.0.0.1:8001/`. Bind to `0.0.0.0` only on a trusted network.
+The launcher builds Web, reuses or creates the Web action token, loads
+Workspace provider environment variables, and applies the trusted-local
+Codex headless sandbox policy. Open `http://127.0.0.1:8001/`. Bind to
+`0.0.0.0` only on a trusted network.
 
 Completion signal: the Dashboard opens at installation onboarding. This guide
 does not require creating a throwaway Project during installation.

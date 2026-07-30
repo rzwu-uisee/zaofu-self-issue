@@ -10,10 +10,12 @@ import pytest
 import yaml
 
 from zf.cli.main import main
+from zf.cli import feishu as cli_feishu
 from zf.cli.feishu import _parse_channel_targets
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.integrations.feishu.approval import ApprovalStore
+from zf.integrations.feishu.mock_clients import MockFeishuBitableClient
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 
@@ -48,6 +50,175 @@ def test_feishu_help_is_registered(capsys):
         main(["feishu", "--help"])
     out = capsys.readouterr().out
     assert "handle" in out
+    assert "project-kanban" in out
+
+
+def test_projection_backend_and_legacy_transport_are_mutually_exclusive(
+    project: Path,
+    capsys,
+):
+    result = main([
+        "feishu",
+        "sync-kanban-table",
+        "--dry-run",
+        "--backend",
+        "lark-cli",
+        "--transport",
+        "mock",
+    ])
+
+    assert result == 1
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_legacy_real_projection_transport_routes_to_lark_cli(
+    project: Path,
+    monkeypatch,
+):
+    selected = []
+    monkeypatch.setattr(
+        cli_feishu,
+        "_build_bitable_client",
+        lambda backend: selected.append(backend) or MockFeishuBitableClient(),
+    )
+
+    result = main([
+        "feishu",
+        "sync-kanban-table",
+        "--dry-run",
+        "--transport",
+        "real",
+    ])
+
+    assert result == 0
+    assert selected == ["lark-cli"]
+
+
+def test_project_kanban_once_uses_registered_cli_entrypoint(
+    project: Path,
+    monkeypatch,
+    capsys,
+):
+    state_dir = project / "runtime-state"
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-PROJECTION", title="Project me"),
+    )
+    client = MockFeishuBitableClient()
+    monkeypatch.setenv("FEISHU_BITABLE_APP_TOKEN", "app")
+    monkeypatch.setenv("FEISHU_BITABLE_TABLE_ID", "tbl")
+    monkeypatch.setattr(
+        "zf.cli.feishu_projection.LarkCliBitableClient",
+        lambda: client,
+    )
+
+    result = main([
+        "feishu",
+        "project-kanban",
+        "--once",
+        "--backend",
+        "lark-cli",
+    ])
+
+    assert result == 0
+    assert len(client.created) == 1
+    assert "reconciled=True" in capsys.readouterr().out
+    event_types = {
+        event.type
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+    }
+    assert {
+        "feishu.kanban_projection.started",
+        "feishu.kanban_projection.reconciled",
+        "feishu.kanban_projection.stopped",
+    } <= event_types
+
+
+def test_project_kanban_can_create_project_scoped_target(
+    project: Path,
+    monkeypatch,
+    capsys,
+):
+    state_dir = project / "runtime-state"
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-BOOTSTRAP", title="Bootstrap target"),
+    )
+    for key in (
+        "FEISHU_BITABLE_APP_TOKEN",
+        "FEISHU_BITABLE_TABLE_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("FEISHU_FOLDER_TOKEN", "fld-project")
+    client = MockFeishuBitableClient()
+    monkeypatch.setattr(
+        "zf.cli.feishu_projection.LarkCliBitableClient",
+        lambda: client,
+    )
+
+    result = main([
+        "feishu",
+        "project-kanban",
+        "--once",
+        "--create-target-if-missing",
+    ])
+
+    assert result == 0
+    assert client.created_bases[0]["folder_token"] == "fld-project"
+    assert client.created_tables[0]["name"] == "Kanban"
+    assert len(client.created) == 1
+    target = json.loads(
+        (
+            state_dir
+            / "integrations"
+            / "feishu"
+            / "kanban-target.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert target["app_token"] == "app-mock-1"
+    assert target["table_id"] == "tbl-mock-1"
+    assert "reconciled=True" in capsys.readouterr().out
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    event_types = {event.type for event in events}
+    assert "feishu.kanban_projection.target_created" in event_types
+    created_event = next(
+        event
+        for event in events
+        if event.type == "feishu.kanban_projection.target_created"
+    )
+    assert created_event.payload["app_token"] == "app-...ck-1"
+    assert created_event.payload["base_url"].endswith("/app-...ck-1")
+
+
+def test_project_kanban_explicit_state_dir_still_loads_project_config(
+    project: Path,
+    monkeypatch,
+    capsys,
+):
+    state_dir = project / "isolated-state"
+    state_dir.mkdir()
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-ISOLATED-PROJECTION", title="Project isolated state"),
+    )
+    client = MockFeishuBitableClient()
+    monkeypatch.setenv("FEISHU_BITABLE_APP_TOKEN", "app")
+    monkeypatch.setenv("FEISHU_BITABLE_TABLE_ID", "tbl")
+    monkeypatch.setattr(
+        "zf.cli.feishu_projection.LarkCliBitableClient",
+        lambda: client,
+    )
+
+    result = main([
+        "feishu",
+        "project-kanban",
+        "--state-dir",
+        str(state_dir),
+        "--once",
+        "--backend",
+        "lark-cli",
+    ])
+
+    assert result == 0
+    assert len(client.created) == 1
+    assert "reconciled=True" in capsys.readouterr().out
 
 
 def test_handle_status_query_uses_project_state_dir(

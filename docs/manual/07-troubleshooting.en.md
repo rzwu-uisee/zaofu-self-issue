@@ -165,6 +165,38 @@ Typical causes are unreadable `kanban.json` or `events.jsonl`, Web started from
 the wrong project, a deleted worktree referenced by `--state-dir`, a port
 collision, or projections created by an incompatible runtime version.
 
+### 8.1 Channel Group Reports Codex Sandbox Unsupported
+
+Typical error:
+
+```text
+Codex sandbox unsupported for sandbox=workspace-write:
+unshare: unshare failed: Operation not permitted
+```
+
+Inspect the host and effective WebKanban launch policy:
+
+```bash
+uv run zf doctor provider --backend codex --json
+tools/start-webkanban.sh --port 8001 --status
+ss -ltnp 'sport = :8001'
+```
+
+If status reports `tmux: stopped` while the port is listening, a direct
+`zf web` process outside the launcher owns port 8001. Stop the **exact PID**
+reported by `ss`; never use broad process matching. Restart from the repository
+root:
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
+```
+
+On a trusted local host, status should show
+`codex_headless_sandbox: danger-full-access`, `tmux: running`, and `api: ok`.
+Shared or untrusted hosts must repair namespace/bubblewrap support rather than
+using bypass. See
+[16 Real Codex Provider Preflight](16-real-codex-provider-preflight.en.md).
+
 ## 9. `kanban move done` Is Rejected
 
 This normally means the completion gate is working. Find the missing evidence:

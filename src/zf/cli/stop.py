@@ -89,6 +89,14 @@ def run(args: argparse.Namespace) -> int:
             stop_autoresearch_resident_sidecar_by_pidfile(state_dir)
         except Exception:
             pass
+        try:
+            from zf.runtime.feishu_projection_sidecar import (
+                stop_feishu_projection_sidecar_by_pidfile,
+            )
+
+            stop_feishu_projection_sidecar_by_pidfile(state_dir)
+        except Exception:
+            pass
         lock_path = state_dir / "loop.lock"
         lock_path.unlink(missing_ok=True)
         print(f"Force-stopped harness session: {session_name}")

@@ -832,6 +832,11 @@ def _build_channel_system_prompt(member: dict[str, Any]) -> str:
         for item in (member.get("skill_refs") or [])
         if str(item).strip()
     ][:8]
+    resolved_skill_refs = [
+        item
+        for item in (member.get("resolved_skill_refs") or [])
+        if isinstance(item, dict)
+    ][:8]
     prompt = (
         f"You are {member_id}, a {provider} agent participating in a ZaoFu Agent Channel. "
         f"Your channel role is {role}. Reply as a channel teammate. Keep the answer concise, "
@@ -843,6 +848,7 @@ def _build_channel_system_prompt(member: dict[str, Any]) -> str:
         f"Your channel permission_profile is {permission_profile}. "
         f"Write policy: {redact_obj(write_policy)}. "
         f"Channel skill refs: {redact_obj(skill_refs)}. "
+        f"Resolved channel skill refs: {redact_obj(resolved_skill_refs)}. "
         "If work should be executed by ZaoFu, recommend a controlled workflow/action request. "
         "Only write files when the permission_profile and write policy explicitly allow it."
     )
@@ -864,15 +870,6 @@ def _build_channel_prompt(
 ) -> str:
     context_pack = _context_pack_by_id(channel, str(request.get("context_pack_id") or ""))
     channel_id = str(channel.get("channel_id") or request.get("channel_id") or "")
-    recent = [
-        {
-            "member_id": item.get("member_id"),
-            "role": item.get("role"),
-            "text": str(item.get("text") or item.get("summary") or "")[:1000],
-        }
-        for item in (channel.get("messages") or channel.get("recent_messages") or [])[-8:]
-        if isinstance(item, dict)
-    ]
     response_contract = channel_reply_response_contract(
         channel,
         request,
@@ -889,7 +886,6 @@ def _build_channel_prompt(
         f"write_policy: {redact_obj(member.get('write_policy') if isinstance(member.get('write_policy'), dict) else permission_profile_write_policy(member.get('permission_profile')))}",
         f"skill_refs: {redact_obj(member.get('skill_refs') or [])}",
         f"context_pack: {redact_obj(context_pack)}",
-        f"recent_messages: {redact_obj(recent)}",
         f"response_contract: {response_contract}",
         "",
         "Trigger message:",

@@ -42,6 +42,16 @@ def build_synthesis_proposal(
         if isinstance(short_spec, Mapping)
         else {}
     )
+    generic_workflow_spec = (
+        short_spec.get("generic_workflow_spec")
+        if isinstance(short_spec, Mapping)
+        else {}
+    )
+    generic_entry = (
+        str(generic_workflow_spec.get("entry") or "")
+        if isinstance(generic_workflow_spec, Mapping)
+        else ""
+    )
     return build_flow_submit_preview(
         config_path=Path(str(operation_context.get("config_ref") or "")),
         intake_path=Path(str(operation_context.get("intake_ref") or "")),
@@ -50,6 +60,7 @@ def build_synthesis_proposal(
         pattern_id=str(
             operation_context.get("pattern_id")
             or parameters.get("pattern_id")
+            or generic_entry
             or ""
         ),
         requested_by=str(operation_context.get("requested_by") or actor),

@@ -6,8 +6,9 @@ run_channel_reply_turn has no proposal extraction. These tests drive
 run_specialist_conversation with a patched reply turn (standing in for the
 synchronous dispatch) and assert the same extractor/gates as the Web panel:
 operator.action.proposed is emitted, contract shapes are normalized
-(5fca581c), the explicit-phrase gate holds, and only agent_kind=kanban_agent
-gets the loop. P3b: the auto-provisioned channel name carries a chat suffix.
+(5fca581c), agent intent evidence is source-bound, and only
+agent_kind=kanban_agent gets the loop. P3b: the auto-provisioned channel
+name carries a chat suffix.
 """
 
 from __future__ import annotations
@@ -44,10 +45,14 @@ def _route(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def _proposal_reply_json() -> str:
+def _proposal_reply_json(source_quote: str = "创建任务") -> str:
     return json.dumps({
         "action_proposal": {
             "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": source_quote,
+            },
             "payload": {
                 "title": "实现赛车小游戏 MVP",
                 "contract": {
@@ -181,15 +186,21 @@ def test_feishu_plan_reply_emits_durable_request_with_channel_context(
     assert "action_proposal" not in result
 
 
-def test_feishu_readonly_message_suppresses_proposal(tmp_path, monkeypatch):
-    """The explicit-phrase gate must hold on Feishu exactly as on the Web."""
+def test_feishu_readonly_message_keeps_invalid_agent_proposal_visible(
+    tmp_path,
+    monkeypatch,
+):
     state_dir, writer = _writer(tmp_path)
     _patch_reply_turn(monkeypatch, state_dir, writer, _proposal_reply_json())
 
     result = _run(state_dir, writer, text="介绍一下当前项目进展")
 
-    assert _proposed_events(state_dir) == []
-    assert "action_proposal" not in result
+    proposed = _proposed_events(state_dir)
+    assert len(proposed) == 1
+    proposal = proposed[0].payload["proposal"]
+    assert proposal["valid"] is False
+    assert "source_quote must occur verbatim" in proposal["validation_error"]
+    assert result["action_proposal"]["valid"] is False
 
 
 def test_run_manager_agent_kind_gets_no_proposal_loop(tmp_path, monkeypatch):
@@ -232,6 +243,9 @@ def test_kanban_member_invite_carries_proposal_reply_contract(tmp_path, monkeypa
         if m.get("member_id") == "kanban-agent"
     )
     assert member["reply_contract"] == KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT
+    assert '"decision": "propose_action"' in member["reply_contract"]
+    assert "exact verbatim user substring" in member["reply_contract"]
+    assert "not through English or Chinese keyword spelling" in member["reply_contract"]
     prompt = _build_channel_system_prompt(member)
     assert KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT in prompt
 

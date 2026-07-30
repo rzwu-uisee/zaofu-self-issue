@@ -49,15 +49,15 @@ uv run zf doctor provider --backend codex
 
 ```bash
 export ZAOFU_ROOT=/path/to/zaofu
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-
-uv run --project "$ZAOFU_ROOT" zf web \
+"$ZAOFU_ROOT/tools/start-webkanban.sh" \
   --host 127.0.0.1 \
   --port 8001 \
   --workspace-only
 ```
 
-浏览器访问 `http://127.0.0.1:8001/`。只有在可信网络中才绑定 `0.0.0.0`。
+该 launcher 会构建 Web、复用或创建 Web action token、加载 Workspace provider
+环境，并为可信本地 Codex headless 应用兼容的 sandbox 策略。浏览器访问
+`http://127.0.0.1:8001/`。只有在可信网络中才绑定 `0.0.0.0`。
 
 完成标志：Dashboard 打开并进入安装 Onboarding。安装步骤只需要按本教程执行，
 本页不要求先创建示例 Project。

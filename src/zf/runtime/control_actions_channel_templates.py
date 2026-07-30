@@ -73,39 +73,67 @@ class ChannelTemplateActionsMixin:
             or f"{template_id}-{requested.id.removeprefix('evt-')[:10]}"
         )
         existing = project_channel(self.state_dir, channel_id) or {}
+        existing_template: dict = {}
         if existing.get("created_by_event"):
             scope = existing.get("scope") if isinstance(existing.get("scope"), dict) else {}
-            template = scope.get("template") if isinstance(scope.get("template"), dict) else {}
-            if template.get("materialization_digest") == materialized[
-                "materialization_digest"
-            ]:
-                return {
-                    "_status_code": 200,
-                    "ok": True,
-                    "status": "existing",
-                    "action": action,
-                    "requested_action": requested_action,
-                    "channel_id": channel_id,
-                    "template": template,
-                    "template_id": template_id,
-                    "name": name,
-                    "member_count": len(materialized["members"]),
-                    "participants": list(
-                        materialized["discussion"]["participants"]
-                    ),
-                    "max_rounds": int(
-                        materialized["discussion"]["max_rounds"]
-                    ),
-                }
+            existing_template = (
+                scope.get("template") if isinstance(scope.get("template"), dict) else {}
+            )
+            if (
+                existing_template.get("materialization_digest")
+                != materialized["materialization_digest"]
+            ):
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason="channel_id already exists with a different template",
+                    status_code=409,
+                    status="conflict",
+                )
+
+        unresolved_skill_refs: list[str] = []
+        for member in materialized["members"]:
+            unresolved, resolved = _materialize_channel_skill_refs(
+                list(member.get("skill_refs") or []),
+                project_root=self.project_root or self.state_dir.parent,
+                state_dir=self.state_dir,
+                config=self.config,
+            )
+            unresolved_skill_refs.extend(unresolved)
+            member["resolved_skill_refs"] = resolved
+        unresolved_skill_refs = list(dict.fromkeys(unresolved_skill_refs))
+        if unresolved_skill_refs:
             return self._failed(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
                 task_id=_task_id_from_payload(payload),
-                reason="channel_id already exists with a different template",
-                status_code=409,
-                status="conflict",
+                reason=(
+                    "channel template skill refs could not be resolved: "
+                    + ", ".join(unresolved_skill_refs)
+                ),
+                status_code=422,
+                status="invalid_template",
             )
+        if existing.get("created_by_event"):
+            return {
+                "_status_code": 200,
+                "ok": True,
+                "status": "existing",
+                "action": action,
+                "requested_action": requested_action,
+                "channel_id": channel_id,
+                "template": existing_template,
+                "template_id": template_id,
+                "name": name,
+                "member_count": len(materialized["members"]),
+                "participants": list(
+                    materialized["discussion"]["participants"]
+                ),
+                "max_rounds": int(materialized["discussion"]["max_rounds"]),
+            }
 
         created = self.writer.emit(
             "channel.created",
@@ -151,12 +179,6 @@ class ChannelTemplateActionsMixin:
             )
             profile = normalize_permission_profile(member.get("permission_profile"))
             skill_refs = list(member.get("skill_refs") or [])
-            _materialize_channel_skill_refs(
-                skill_refs,
-                project_root=self.project_root or self.state_dir.parent,
-                state_dir=self.state_dir,
-                config=self.config,
-            )
             event = self.writer.emit(
                 "channel.member.invited",
                 actor=self.actor,
@@ -184,6 +206,9 @@ class ChannelTemplateActionsMixin:
                     "write_policy": permission_profile_write_policy(profile),
                     "role_context_ref": str(member.get("role_context_ref") or ""),
                     "skill_refs": skill_refs,
+                    "resolved_skill_refs": list(
+                        member.get("resolved_skill_refs") or []
+                    ),
                     "scope": "channel-template",
                     "writer_scope": list(member.get("writer_scope") or []),
                     "permissions": normalize_permissions(

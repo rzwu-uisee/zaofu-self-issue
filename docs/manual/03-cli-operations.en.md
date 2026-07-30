@@ -163,11 +163,17 @@ budget enforcement.
 ## 8. Web and External Integrations
 
 ```bash
-uv run zf web --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --port 8001 --status
 uv run zf feishu bridge --watch
 uv run zf channel say <channel_id> --text "hello"
 uv run zf autoresearch --help
 ```
+
+The launcher is the normal trusted-local entry point for Channel and Kanban
+Agent use because it loads the action token, provider environment, and Codex
+headless sandbox policy. Direct `uv run zf web ...` is a low-level debugging
+entry point that inherits only the shell and Project `.env`.
 
 Web and integration mutations must use trusted, token-gated controlled action
 paths. Bind `0.0.0.0` only on a trusted network or for controlled Docker E2E.

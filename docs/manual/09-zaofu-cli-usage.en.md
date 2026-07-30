@@ -287,9 +287,11 @@ Cleanup applies only to rebuildable projections, not truth files.
 
 | Command | Purpose |
 |---|---|
-| `uv run zf web --host 127.0.0.1 --port 8001` | Start local Web |
-| `uv run zf web --host 0.0.0.0 --port 8001` | Expose Web to Docker or a LAN |
-| `uv run zf web --workspace-only` | Start only the workspace view |
+| `tools/start-webkanban.sh --host 127.0.0.1 --port 8001` | Recommended trusted-local WebKanban launcher |
+| `tools/start-webkanban.sh --port 8001 --status` | Inspect tmux, port, API, and headless policy |
+| `tools/start-webkanban.sh --port 8001 --stop` | Stop the WebKanban session for that port |
+| `uv run zf web --host 127.0.0.1 --port 8001` | Low-level Web debugging entry point |
+| `uv run zf web --workspace-only` | Low-level workspace-only debugging entry point |
 | `uv run zf workspace providers openclaw list` | Show OpenClaw bindings |
 | `uv run zf workspace providers openclaw set remote --base-url URL --timeout-seconds 120` | Configure a remote binding |
 | `uv run zf feishu bridge --watch` | Run the direct persistent Feishu bridge |
@@ -298,15 +300,32 @@ Cleanup applies only to rebuildable projections, not truth files.
 | `uv run zf feishu serve --host 0.0.0.0 --port 8000` | Run the webhook server |
 | `uv run zf feishu send-test --message "hello"` | Send a test message |
 | `uv run zf feishu live-smoke --to "$CHAT_ID" --purpose kanban_agent --confirm-real-api` | Verify real auth, send, list, update, and recall with the exact purpose credential; the temporary card is recalled by default |
-| `uv run zf feishu init-targets --transport real --write-env` | Create Automation and Kanban targets |
+| `uv run zf feishu init-targets --backend lark-cli --write-env` | Create Automation and Kanban targets through lark-cli |
 | `uv run zf feishu sync-automations --dry-run` | Preview Automation document output |
 | `uv run zf feishu sync-automation-insights-table --dry-run` | Preview the insights table |
 | `uv run zf feishu sync-kanban-table --dry-run` | Preview Kanban table output |
+| `uv run zf feishu project-kanban --once --backend lark-cli` | Run one event projection tick |
+| `uv run zf feishu project-kanban --once --create-target-if-missing --folder-token "$FEISHU_FOLDER_TOKEN"` | Create this project's Base/Table, then run one projection tick |
+| `uv run zf feishu project-kanban --watch --backend lark-cli` | Run the persistent Kanban projector |
 | `uv run zf feishu cron-template` | Generate cron examples |
 | `uv run zf hook-recv --event EVENT` | Receive Claude Code hook JSON from stdin |
 
-Web writes use token-gated controlled actions. For a stable local action token,
-set `ZF_WEB_ACTION_TOKEN` in the uncommitted repository `.env`.
+Web writes use token-gated controlled actions. Normal local Channel and Kanban
+Agent use should start through the launcher:
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+```
+
+The launcher owns the Web build, action token, Workspace/provider environment,
+Codex headless sandbox policy, tmux session, and restart behavior. Direct
+`zf web` inherits only the current shell and target Project `.env`; it remains
+valid for dedicated state-dir debugging but does not apply trusted-local
+launcher defaults. Use `--no-build` for a restart when the Web bundle is already
+current.
+
+For a stable local action token, set `ZF_WEB_ACTION_TOKEN` in the uncommitted
+repository `.env`.
 
 ## 11. Specs, Backlogs, and Operator Tools
 

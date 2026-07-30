@@ -315,12 +315,15 @@ zf project init --kind refactor ...
 设置受控写操作 token，并以 workspace 模式启动 Dashboard：
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-uv run --project "$ZAOFU_ROOT" zf web \
+"$ZAOFU_ROOT/tools/start-webkanban.sh" \
   --host 127.0.0.1 \
   --port 8001 \
   --workspace-only
 ```
+
+launcher 会复用或创建 action token，并统一加载 Workspace/provider 环境和可信本地
+Codex headless sandbox 策略。直接 `zf web` 是低层调试入口，不应作为 Channel /
+Kanban Agent 的默认启动方式。
 
 首次安装引导固定为：
 

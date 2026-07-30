@@ -38,6 +38,7 @@ class MockFeishuDocumentClient:
 class MockFeishuBitableClient:
     def __init__(self) -> None:
         self.created: list[tuple[str, str, dict[str, Any]]] = []
+        self.record_ids: list[str] = []
         self.updated: list[tuple[str, str, str, dict[str, Any]]] = []
         self.created_bases: list[dict[str, str]] = []
         self.created_tables: list[dict[str, str]] = []
@@ -162,7 +163,31 @@ class MockFeishuBitableClient:
     def create_record(self, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
         record_id = f"rec-{len(self.created) + 1}"
         self.created.append((app_token, table_id, dict(fields)))
+        self.record_ids.append(record_id)
         return record_id
+
+    def find_record_id(
+        self,
+        app_token: str,
+        table_id: str,
+        *,
+        key_field: str,
+        key_value: str,
+    ) -> str:
+        matches = [
+            record_id
+            for record_id, (created_app, created_table, fields) in zip(
+                self.record_ids,
+                self.created,
+                strict=False,
+            )
+            if created_app == app_token
+            and created_table == table_id
+            and str(fields.get(key_field)) == key_value
+        ]
+        if len(matches) > 1:
+            raise ValueError(f"multiple records match {key_field}={key_value!r}")
+        return matches[0] if matches else ""
 
     def update_record(
         self,

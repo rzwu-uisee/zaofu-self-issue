@@ -128,8 +128,6 @@ def _manifest(state_dir: Path, fanout_id: str) -> dict:
 def _record_required_reads(state_dir: Path, child: dict) -> None:
     payload = dict(child.get("payload") or {})
     payload.update({key: value for key, value in child.items() if key != "payload"})
-    if not payload.get("attempt_source_manifest"):
-        return
     manifest = hydrate_sidecar_ref(
         state_dir,
         payload["attempt_source_manifest"],
@@ -184,10 +182,6 @@ def test_rendered_controller_queue_releases_next_impl_task(
     # This test exercises affinity queue release with a synthetic completion;
     # impl-self-check admission has dedicated integration coverage.
     config.workflow.impl_self_check_required = False
-    config.workflow.flow_metadata_by_kind.setdefault(
-        kind,
-        {},
-    )["artifact_package_mode"] = "off"
     config.runtime.git.candidate_base_ref = "main"
     state_dir = Path(config.project.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)

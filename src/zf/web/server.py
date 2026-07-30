@@ -216,9 +216,6 @@ from zf.web.projections.common import (  # noqa: F401
     _action_payload,
     _action_request_identity,
     _payload_hash,
-    _message_allows_create_task_proposal,
-    _message_allows_idea_to_product_proposal,
-    normalize_proposed_task_contract,
     _is_lifecycle_probe_request,
     _emit_action_completed,
     _action_failed,
@@ -404,17 +401,13 @@ from zf.web.projections.workspace import (  # noqa: F401
     _project_action_envelope,
     _projection_reply_if_requested,
 )
-from zf.web.workflow_request_routes import (
-    build_workflow_request_router,
-    workflow_request_strings,
-)
+from zf.web import workflow_request_routes
+from zf.web.assets import web_repo_root
 _PACKAGE_REPO_ROOT = Path(__file__).resolve().parents[3]
 _INSTALLED_SOURCE_ROOT = installed_local_source_root()
-_REPO_ROOT = (
-    _INSTALLED_SOURCE_ROOT
-    if _INSTALLED_SOURCE_ROOT is not None
-    and (_INSTALLED_SOURCE_ROOT / "web").is_dir()
-    else _PACKAGE_REPO_ROOT
+_REPO_ROOT = web_repo_root(
+    _PACKAGE_REPO_ROOT,
+    _INSTALLED_SOURCE_ROOT,
 )
 _REACT_DIST_DIR = _REPO_ROOT / "web" / "dist"
 _react_dist_missing_warned = False
@@ -561,12 +554,21 @@ _ACTION_ALIASES = {
     "research.adopt",
     "workflow-request",
     "workflow.request",
-    "workflow-cancel", "workflow.cancel",
     "task-workflow-start",
     "task.workflow.start",
     "workflow.route.start",
     "workflow-submit",
     "workflow.submit",
+    "workflow-cancel",
+    "workflow.cancel",
+    "run-pause",
+    "run.pause",
+    "run-resume",
+    "run.resume",
+    "run-cancel",
+    "run.cancel",
+    "workflow-reject",
+    "workflow.reject",
     "workflow-batch-resume",
     "workflow.batch.resume",
     "candidate-rework-apply",
@@ -608,9 +610,6 @@ _ACTION_ALIASES = {
     "workflow.config.validate",
     "workflow-config-apply",
     "workflow.config.apply",
-    "run-pause", "run.pause",
-    "run-resume", "run.resume",
-    "run-cancel", "run.cancel",
     "runtime-stop",
     "runtime.stop",
     "runtime-restart",
@@ -664,7 +663,7 @@ def create_app(
     )
     default_project_opened_at = datetime.now(timezone.utc).isoformat()
 
-    app.include_router(build_workflow_request_router(
+    app.include_router(workflow_request_routes.build_workflow_request_router(
         default_project_id=default_project_id,
         default_state_dir=state_dir,
         default_config=config,
@@ -682,8 +681,10 @@ def create_app(
     from zf.web.run_dossier_routes import build_run_dossier_router
 
     app.include_router(build_run_dossier_router(
-        default_project_id=default_project_id, default_state_dir=state_dir,
-        default_config=config, default_project_root=project_root,
+        default_project_id=default_project_id,
+        default_state_dir=state_dir,
+        default_config=config,
+        default_project_root=project_root,
         resolve_project=_resolve_api_project,
     ))
 
@@ -3240,50 +3241,6 @@ def create_app(
     ) -> JSONResponse:
         payload = await _request_json(request)
         payload["channel_id"] = channel_id
-        if config is not None and not (project_root / "zf.yaml").exists():
-            writer = EventWriter(event_log_from_project(state_dir, config=config))
-            task_id = str(payload.get("task_id") or "")
-            pattern_id = str(payload.get("pattern_id") or "")
-            invoke = writer.append(ZfEvent(
-                type="workflow.invoke.requested",
-                actor="web",
-                task_id=task_id or None,
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": str(payload.get("thread_id") or "main"),
-                    "task_id": task_id,
-                    "pattern_id": pattern_id,
-                    "reason": str(payload.get("reason") or ""),
-                    "expected_output": str(payload.get("expected_output") or ""),
-                    "source": "workflow-request",
-                    "requested_by": str(payload.get("requested_by") or "channel"),
-                },
-            ))
-            writer.append(ZfEvent(
-                type="channel.state_update.posted",
-                actor="web",
-                task_id=task_id or None,
-                causation_id=invoke.id,
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": str(payload.get("thread_id") or "main"),
-                    "status": "workflow_proposal_ready",
-                    "summary": "workflow request is ready for explicit approval",
-                    "task_id": task_id,
-                    "refs": {},
-                    "source": "workflow-request",
-                },
-            ))
-            return JSONResponse({
-                "ok": True,
-                "status": "proposal_ready",
-                "action": "workflow-request",
-                "requested_action": "workflow-request",
-                "event_id": invoke.id,
-                "next_action": "approve through project workflow-submit with apply=true",
-            }, status_code=202)
         if config is not None and (project_root / "zf.yaml").exists():
             auth_error = _web_mutation_auth_error(
                 "workflow-submit",
@@ -3310,13 +3267,36 @@ def create_app(
                     created_by=str(payload.get("requested_by") or "channel"),
                     channel_id=channel_id,
                     thread_id=str(payload.get("thread_id") or ""),
-                    acceptance=tuple(workflow_request_strings(payload.get("acceptance"))),
-                    constraints=tuple(workflow_request_strings(payload.get("constraints"))),
-                    open_questions=tuple(workflow_request_strings(payload.get("open_questions"))),
-                    output=(project_root / "docs" / "intake" / f"{request_id}.md") if request_id else None,
+                    acceptance=tuple(
+                        workflow_request_routes.workflow_request_strings(
+                            payload.get("acceptance")
+                        )
+                    ),
+                    constraints=tuple(
+                        workflow_request_routes.workflow_request_strings(
+                            payload.get("constraints")
+                        )
+                    ),
+                    open_questions=tuple(
+                        workflow_request_routes.workflow_request_strings(
+                            payload.get("open_questions")
+                        )
+                    ),
+                    output=(
+                        project_root / "docs" / "intake" / f"{request_id}.md"
+                    ) if request_id else None,
                 )
                 intake_ref = str(intake.get("intake_ref") or "")
-                build_flow_intent(intake_path=Path(intake_ref), explicit_kind=str(payload.get("kind") or "auto"))
+                build_flow_intent(
+                    intake_path=Path(intake_ref),
+                    explicit_kind=str(payload.get("kind") or "auto"),
+                )
+            workflow_request_routes.confirm_workflow_intake(
+                state_dir=state_dir,
+                intake_ref=intake_ref,
+                actor=str(payload.get("requested_by") or "channel"),
+                config=config,
+            )
             result = build_flow_submit_preview(
                 config_path=project_root / "zf.yaml",
                 intake_path=Path(intake_ref),
@@ -5641,6 +5621,8 @@ def _web_action(
         payload,
         idempotency_key=x_idempotency_key,
     )
+    if canonical_action.startswith("workflow-"):
+        request_payload = _action_payload(payload, preserve_request_id=True)
     payload_hash = _payload_hash(request_payload)
     if idempotency_key:
         idempotency_state = _reserve_idempotency_key(
@@ -6647,15 +6629,13 @@ def _validate_action_payload(
         ):
             return "proposal_id or patch_ref is required"
     if action == "workflow-config-apply":
-        if not (
-            str(payload.get("patch_ref") or "").strip()
-            or isinstance(payload.get("proposal_ref"), dict)
+        if not str(payload.get("patch_ref") or "").strip() and not isinstance(
+            payload.get("proposal_ref"), dict
         ):
             return "patch_ref or proposal_ref is required"
-        if not (
-            str(payload.get("validation_result_ref") or "").strip()
-            or isinstance(payload.get("validation_result_ref"), dict)
-        ):
+        if not str(
+            payload.get("validation_result_ref") or ""
+        ).strip() and not isinstance(payload.get("validation_result_ref"), dict):
             return "validation_result_ref is required"
         if not str(
             payload.get("approval_ref")

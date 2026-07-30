@@ -1,0 +1,74 @@
+import {
+  diagnosticSeverity,
+  stageLevels,
+  stagesForCurrentFlow,
+  workflowViewForRequest,
+} from "../src/components/workflow/workflowProposalModel.js";
+
+function assert(condition: unknown, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+function testLifecycleBuckets(): void {
+  assert(workflowViewForRequest({ status: "proposed" }) === "decision", "proposals need a decision");
+  assert(workflowViewForRequest({ status: "running" }) === "active", "running workflows are active");
+  assert(workflowViewForRequest({ status: "rejected" }) === "history", "rejected workflows are history");
+}
+
+function testSeverityPreservesInfo(): void {
+  assert(diagnosticSeverity({ severity: "INFO" }) === "INFO", "INFO must not render as a warning");
+  assert(diagnosticSeverity({ severity: "WARN" }) === "WARN", "WARN must remain actionable");
+  assert(diagnosticSeverity({ severity: "STOP" }) === "STOP", "STOP must remain blocking");
+}
+
+function testCurrentFlowUsesDeclaredTasks(): void {
+  const stages = [
+    { id: "prd-scan" },
+    { id: "scope" },
+    { id: "collect-a", dependencies: ["scope"] },
+    { id: "collect-b", dependencies: ["scope"] },
+    { id: "synthesize", dependencies: ["collect-a", "collect-b"] },
+  ];
+  const flowSpec = {
+    documents: [{
+      kind: "Workflow",
+      spec: {
+        tasks: [
+          { name: "scope" },
+          { name: "collect-a" },
+          { name: "collect-b" },
+          { name: "synthesize" },
+        ],
+      },
+    }],
+  };
+  const selected = stagesForCurrentFlow(stages, flowSpec, "workflow", "Workflow");
+  assert(selected.length === 4, "the default graph should only show the current flow");
+  assert(!selected.some((stage) => stage.id === "prd-scan"), "unrelated flow stages must stay advanced");
+  const levels = stageLevels(selected);
+  assert(levels.length === 3, "dependency levels should preserve fanout and join");
+  assert(levels[1]?.length === 2, "parallel collectors should share one phase");
+  assert(levels[2]?.[0]?.id === "synthesize", "the join should follow both collectors");
+
+  const compactSnapshot = {
+    generic_workflow_spec: {
+      tasks: [
+        { name: "scope" },
+        { name: "collect-a" },
+        { name: "collect-b" },
+        { name: "synthesize" },
+      ],
+    },
+  };
+  const compactSelected = stagesForCurrentFlow(
+    stages,
+    compactSnapshot,
+    "workflow",
+    "Workflow",
+  );
+  assert(compactSelected.length === 4, "compact workflow snapshots must select declared tasks");
+}
+
+testLifecycleBuckets();
+testSeverityPreservesInfo();
+testCurrentFlowUsesDeclaredTasks();

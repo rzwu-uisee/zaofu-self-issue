@@ -45,8 +45,13 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
         getattr(getattr(config, "workflow", None), "kind_routes", {}) or {}
     )
     for kind, route in sorted(kind_routes.items()):
-        canonical_kind, resolved = _resolve_kind_route(kind_routes, str(kind), route)
-        if resolved is None or canonical_kind == "feat":
+        route_kind = str(kind).strip().lower()
+        canonical_kind, resolved = _resolve_kind_route(
+            kind_routes,
+            route_kind,
+            route,
+        )
+        if resolved is None or canonical_kind != route_kind:
             continue
         targets = _route_targets(resolved)
         for tier, pattern_id in targets:

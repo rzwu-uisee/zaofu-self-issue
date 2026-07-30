@@ -7,6 +7,25 @@
 > posting, `fanout_then_synthesis`, and continued conversation are implemented.
 > This manual reflects real E2E checked on 2026-07-28.
 
+## 0. Preflight Before Starting
+
+Start WebKanban for real Codex Channels through the canonical trusted-local
+launcher:
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --port 8001 --status
+```
+
+Some Channel templates contain `artifact_writer`, `project_writer`, or
+`workspace_writer` members. Direct `zf web` without an explicit sandbox
+environment maps those members to Codex `workspace-write`; a host without
+namespace/bubblewrap support returns `sandbox_unsupported`. Trusted-local
+status should report `codex_headless_sandbox: danger-full-access`,
+`tmux: running`, and `api: ok`. Shared or untrusted hosts must repair normal
+sandbox support instead of relying on bypass. See
+[16 Real Codex Provider Preflight](16-real-codex-provider-preflight.en.md).
+
 ## 1. Current Channel Group model
 
 The product may call the experience Channel Group. The kernel canonical model
@@ -89,20 +108,29 @@ The agent should update the Plan rather than asking the operator to edit JSON.
 
 ## 3. Built-in Channel templates
 
-All current built-in templates use `fanout_then_synthesis`:
+All current built-in templates use `fanout_then_synthesis`. Role context
+defines identity and stop rules; template `skill_refs` define the method for
+the current discussion:
 
-| Template | Default members | Writer |
-|---|---|---|
-| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`, optional `security_reviewer` | `product_pm`, normally limited to `docs/design/**` and `docs/impl/**` |
-| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `researcher`, limited to research artifacts |
-| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `arch` |
-| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `tech_leader` |
-| `incident-triage` | `tech_leader`, `qa_analyst`, optional `security_reviewer` | `tech_leader` |
+| Template | Default members | Writer | Method boundary |
+|---|---|---|---|
+| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`, optional `security_reviewer` | `product_pm`, normally limited to `docs/design/**` and `docs/impl/**` | participant question ledger plus synthesis; roles that translate owner intent load `grill` |
+| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `researcher`, limited to research artifacts | evidence-led discussion only; no Research trigger or Refactor task-map synthesis |
+| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `arch` | ZaoFu architecture, design-vs-implementation, security, and candidate gate methods |
+| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `tech_leader` | bounded change recommendation plus generic verification; browser E2E is on demand |
+| `incident-triage` | `tech_leader`, `qa_analyst`, optional `security_reviewer` | `tech_leader` | diagnosis and controlled-action proposal only; Run Manager/Kernel execute recovery |
 
 Templates are not arbitrary role-name collections. Required roles cannot be
 disabled. Only allowed optional roles, backend, model, writer, writer scope,
 and budget overrides are accepted. Non-writers normally remain read-only so
 every participant cannot modify the Project concurrently.
+
+A template role may bind multiple ordered `skill_refs`. Before Channel
+creation, every ref must resolve and materialize under
+`<project_root>/skills/<name>/SKILL.md`; a missing ref rejects before
+`channel.created`, preventing path-only members. In `grill`, atomic questioning
+means one decision per question. One blind-answer turn may still raise several
+independent questions.
 
 ## 4. Discussion, synthesis, and continuation
 

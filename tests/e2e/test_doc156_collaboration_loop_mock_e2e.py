@@ -12,9 +12,17 @@ from zf.core.events import EventLog, EventWriter, ZfEvent
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.channel_discussion import advance_discussion
+from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_question_dedup import (
+    apply_question_dedup_reply,
+)
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_reactor import EventReactorMixin
+from zf.runtime.channel_synthesis_reactor import (
+    react_channel_consensus_proposed,
+    react_channel_cross_review_requested,
+)
 
 
 RESEARCH_CONFIG = (
@@ -182,19 +190,29 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         thread_id="main",
         project_root=tmp_path,
     )
-    advance_discussion(
-        state_dir,
-        writer,
-        channel_id=channel_id,
-        thread_id="main",
-        project_root=tmp_path,
-    )
-    synthesis_request = next(
-        event
-        for event in reversed(log.read_all())
-        if event.type == "channel.synthesis.requested"
-        and event.payload.get("channel_id") == channel_id
-    )
+    synthesis_request = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        advance_discussion(
+            state_dir,
+            writer,
+            channel_id=channel_id,
+            thread_id="main",
+            project_root=tmp_path,
+        )
+        synthesis_request = next(
+            (
+                event
+                for event in reversed(log.read_all())
+                if event.type == "channel.synthesis.requested"
+                and event.payload.get("channel_id") == channel_id
+            ),
+            None,
+        )
+        if synthesis_request is not None:
+            break
+        time.sleep(0.02)
+    assert synthesis_request is not None
     host = SimpleNamespace(
         state_dir=state_dir,
         event_log=log,
@@ -392,3 +410,257 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         event.type == "operator.action.resolved"
         for event in events
     ) == 5
+
+
+def test_four_lens_discussion_cross_review_and_signoff_closes(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    service = ControlledActionService(
+        state_dir,
+        writer,
+        project_root=tmp_path,
+        actor="operator",
+        source="kanban-agent",
+        surface="web",
+    )
+    channel_id = "ch-four-lens-review"
+    thread_id = "main"
+
+    created = _approved_action(
+        service,
+        writer,
+        "channel-create-from-template",
+        {
+            "template_id": "architecture-review",
+            "channel_id": channel_id,
+            "overrides": {"backend": "fake"},
+        },
+    )
+    assert created["status"] == "created"
+    for question_id, target, question in (
+        (
+            "q-security",
+            "security_reviewer",
+            "Which boundary prevents untrusted writes?",
+        ),
+        (
+            "q-implementation",
+            "dev_reviewer",
+            "Which implementation path preserves replay?",
+        ),
+    ):
+        writer.emit(
+            "channel.question.opened",
+            actor="arch",
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "question_id": question_id,
+                "question": question,
+                "kind": "clarification",
+                "priority": "p0",
+                "target_member_id": target,
+                "asked_by": "arch",
+                "source": "test",
+            },
+        )
+    started = _approved_action(
+        service,
+        writer,
+        "channel-discussion-start",
+        {
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "message": "Review the delivery boundary from every role lens.",
+        },
+    )
+    assert started["participants"] == [
+        "arch",
+        "security_reviewer",
+        "dev_reviewer",
+        "critic",
+    ]
+
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        blind_replies = [
+            event
+            for event in log.read_all()
+            if event.type == "channel.agent.reply.completed"
+            and event.payload.get("thread_id") == thread_id
+        ]
+        if len(blind_replies) == 4:
+            break
+        time.sleep(0.02)
+    assert len(blind_replies) == 4
+
+    advance_discussion(
+        state_dir,
+        writer,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        project_root=tmp_path,
+    )
+    dedup_request = next(
+        event
+        for event in reversed(log.read_all())
+        if event.type == "channel.question.dedup.requested"
+    )
+    applied, reason = apply_question_dedup_reply(
+        state_dir=state_dir,
+        writer=writer,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        request_id=str(dedup_request.payload["request_id"]),
+        payload={
+            "ledger_digest": str(dedup_request.payload["ledger_digest"]),
+            "groups": [],
+            "question_updates": [
+                {
+                    "question_id": "q-security",
+                    "kind": "clarification",
+                    "priority": "p0",
+                    "target_member_id": "security_reviewer",
+                },
+                {
+                    "question_id": "q-implementation",
+                    "kind": "clarification",
+                    "priority": "p0",
+                    "target_member_id": "dev_reviewer",
+                },
+            ],
+            "cross_review_requests": [
+                {
+                    "question_id": "q-security",
+                    "target_member_ids": ["security_reviewer"],
+                    "prompt": "Challenge the proposed security boundary.",
+                    "reason": "The blind findings need a security counterexample.",
+                    "source_refs": ["event:blind-security"],
+                },
+                {
+                    "question_id": "q-implementation",
+                    "target_member_ids": ["dev_reviewer"],
+                    "prompt": "Challenge the replay-safe implementation path.",
+                    "reason": "The blind findings need an implementation check.",
+                    "source_refs": ["event:blind-implementation"],
+                },
+            ],
+        },
+        actor="arch",
+        source="test",
+        causation_id="reply-dedup",
+    )
+    assert (applied, reason) == (True, "applied")
+
+    host = SimpleNamespace(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=writer,
+        project_root=tmp_path,
+        config=None,
+        openclaw_client=None,
+    )
+    review_requests = [
+        event
+        for event in log.read_all()
+        if event.type == "channel.cross_review.requested"
+    ]
+    assert len(review_requests) == 2
+    for request in review_requests:
+        react_channel_cross_review_requested(host, request)
+        react_channel_cross_review_requested(host, request)
+    detail = project_channel(state_dir, channel_id)
+    assert {
+        (review["target_member_id"], review["status"])
+        for review in detail["cross_reviews"]
+    } == {
+        ("security_reviewer", "completed"),
+        ("dev_reviewer", "completed"),
+    }
+
+    for question_id in ("q-security", "q-implementation"):
+        resolved = _approved_action(
+            service,
+            writer,
+            "channel-question-resolve",
+            {
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "question_id": question_id,
+                "resolution": "answered",
+                "answer": f"Owner accepted the review for {question_id}.",
+            },
+        )
+        assert resolved["status"] == "resolved"
+
+    advance_discussion(
+        state_dir,
+        writer,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        project_root=tmp_path,
+    )
+    synthesis_request = next(
+        event
+        for event in reversed(log.read_all())
+        if event.type == "channel.synthesis.requested"
+    )
+    EventReactorMixin._on_channel_synthesis_requested(
+        host,
+        synthesis_request,
+    )
+    consensus = next(
+        event
+        for event in reversed(log.read_all())
+        if event.type == "channel.consensus.proposed"
+    )
+    assert consensus.payload["required_signers"] == [
+        "arch",
+        "security_reviewer",
+        "dev_reviewer",
+        "critic",
+    ]
+    react_channel_consensus_proposed(host, consensus)
+    react_channel_consensus_proposed(host, consensus)
+    signed = {
+        event.payload.get("member_id")
+        for event in log.read_all()
+        if event.type == "channel.consensus.signed"
+        and event.payload.get("artifact_digest")
+        == consensus.payload["artifact_digest"]
+    }
+    assert signed == {
+        "arch",
+        "security_reviewer",
+        "dev_reviewer",
+        "critic",
+    }
+
+    confirmed = _approved_action(
+        service,
+        writer,
+        "channel-consensus-confirm",
+        {
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "artifact_digest": consensus.payload["artifact_digest"],
+        },
+    )
+    assert confirmed["status"] == "confirmed"
+    advance_discussion(
+        state_dir,
+        writer,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        project_root=tmp_path,
+    )
+    assert any(
+        event.type == "channel.consensus.reached"
+        and event.payload.get("channel_id") == channel_id
+        for event in log.read_all()
+    )

@@ -307,12 +307,16 @@ Issues default to one lane.
 Enable controlled Web mutations and start the workspace shell:
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-uv run --project "$ZAOFU_ROOT" zf web \
+"$ZAOFU_ROOT/tools/start-webkanban.sh" \
   --host 127.0.0.1 \
   --port 8001 \
   --workspace-only
 ```
+
+The launcher reuses or creates the action token and consistently loads the
+Workspace/provider environment and trusted-local Codex headless sandbox
+policy. Direct `zf web` is a low-level debugging entry point, not the default
+Channel or Kanban Agent launcher.
 
 In first-run onboarding:
 

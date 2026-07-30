@@ -272,6 +272,10 @@ if "task proposal" in prompt or "整理成" in prompt or "create-task" in prompt
     result = {
         "action_proposal": {
             "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": "整理成一个 task proposal",
+            },
             "payload": {
                 "title": "Fix Channel Group interactive E2E gap",
                 "priority": 2,

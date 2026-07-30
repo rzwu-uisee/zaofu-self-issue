@@ -239,6 +239,8 @@ class GracefulShutdown:
 
         self._stop_autoresearch_sidecar()
         self.steps_completed.append("stop_autoresearch_sidecar")
+        self._stop_feishu_projection_sidecar()
+        self.steps_completed.append("stop_feishu_projection_sidecar")
 
         # Final flush of the in-process event index so latest_event_by_*
         # mappings observed in the dying watcher survive into the next
@@ -325,6 +327,8 @@ class GracefulShutdown:
 
         self._stop_autoresearch_sidecar()
         self.steps_completed.append("stop_autoresearch_sidecar")
+        self._stop_feishu_projection_sidecar()
+        self.steps_completed.append("stop_feishu_projection_sidecar")
 
         try:
             self.event_log.close()
@@ -357,6 +361,21 @@ class GracefulShutdown:
 
             stop_autoresearch_resident_sidecar_by_pidfile(
                 self.state_dir, event_log=self.event_log,
+            )
+        except Exception:
+            pass
+
+    def _stop_feishu_projection_sidecar(self) -> None:
+        """Cross-process teardown for the managed Feishu projector."""
+
+        try:
+            from zf.runtime.feishu_projection_sidecar import (
+                stop_feishu_projection_sidecar_by_pidfile,
+            )
+
+            stop_feishu_projection_sidecar_by_pidfile(
+                self.state_dir,
+                event_log=self.event_log,
             )
         except Exception:
             pass

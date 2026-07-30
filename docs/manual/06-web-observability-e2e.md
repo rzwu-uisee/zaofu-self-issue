@@ -13,7 +13,7 @@ uv sync --extra dev --extra web
 本地访问:
 
 ```bash
-uv run zf web \
+tools/start-webkanban.sh \
   --host 127.0.0.1 \
   --port 8001
 ```
@@ -21,12 +21,16 @@ uv run zf web \
 给 Docker Playwright 或局域网测试访问:
 
 ```bash
-uv run zf web \
+tools/start-webkanban.sh \
   --host 0.0.0.0 \
   --port 5175
 ```
 
-只在可信网络使用 `0.0.0.0`。如果调试另一个 worktree 的 state:
+`tools/start-webkanban.sh` 是可信本地 WebKanban 的 canonical launcher。它统一
+处理 Web build、action token、Workspace/provider 环境、Codex headless sandbox
+策略、tmux 和重启。只在可信网络使用 `0.0.0.0`。
+
+如果只需调试另一个 worktree 的 state，可以使用低层 `zf web` 入口:
 
 ```bash
 uv run zf web \
@@ -35,13 +39,31 @@ uv run zf web \
   --port 5175
 ```
 
+直接 `zf web` 只继承当前 shell 和目标 Project `.env`，不会自动采用 launcher
+的 trusted-local sandbox 默认值。需要运行 Channel / Kanban Agent 的真实 Codex
+时，优先使用 launcher；否则必须先修复宿主 sandbox，或显式配置
+`ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX`。
+
 ### 1.1 从 Workspace 创建 Project
 
-需要创建或注册 Project 时，建议以 workspace shell 启动，并配置受控写操作 token：
+需要创建或注册 Project 时，以 workspace shell 启动：
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 24)"
-uv run zf web --host 127.0.0.1 --port 8001 --workspace-only
+tools/start-webkanban.sh \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --workspace-only
+```
+
+launcher 会复用或创建 action token，并在启动输出中给出 token。固定 token 可以写入
+未提交的仓库 `.env`，变量名为 `ZF_WEB_ACTION_TOKEN`。
+
+常用生命周期命令：
+
+```bash
+tools/start-webkanban.sh --port 8001 --status
+tools/start-webkanban.sh --port 8001 --stop
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
 ```
 
 首次引导只完成 Provider、Environment、Access 和 Ready，不创建 Project。

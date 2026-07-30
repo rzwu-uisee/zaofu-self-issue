@@ -359,6 +359,73 @@ def test_load_runtime_feishu_inbound_config(tmp_path: Path):
     assert inbound.require_routing is False
 
 
+def test_load_runtime_feishu_projection_config(tmp_path: Path):
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n"
+        "  name: test\n"
+        "runtime:\n"
+        "  feishu_projection:\n"
+        "    enabled: true\n"
+        "    backend: lark-cli\n"
+        "    auto_create_target: true\n"
+        "    base_name: ZaoFu Kanban - test\n"
+        "    table_name: Delivery\n"
+        "    time_zone: Asia/Shanghai\n"
+        "    poll_interval_seconds: 3.5\n"
+        "    reconcile_interval_seconds: 600\n"
+        "    include_archive_days: 14\n"
+        "    max_actions_per_tick: 7\n"
+    )
+
+    cfg = load_config(p)
+
+    projection = cfg.runtime.feishu_projection
+    assert projection.enabled is True
+    assert projection.backend == "lark-cli"
+    assert projection.auto_create_target is True
+    assert projection.base_name == "ZaoFu Kanban - test"
+    assert projection.table_name == "Delivery"
+    assert projection.time_zone == "Asia/Shanghai"
+    assert projection.poll_interval_seconds == 3.5
+    assert projection.reconcile_interval_seconds == 600
+    assert projection.include_archive_days == 14
+    assert projection.max_actions_per_tick == 7
+
+
+def test_load_runtime_feishu_projection_rejects_removed_native_backend(
+    tmp_path: Path,
+):
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n"
+        "  name: test\n"
+        "runtime:\n"
+        "  feishu_projection:\n"
+        "    backend: native\n"
+    )
+
+    with pytest.raises(ConfigError, match="runtime.feishu_projection.backend"):
+        load_config(p)
+
+
+def test_load_runtime_feishu_projection_rejects_invalid_values(tmp_path: Path):
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n"
+        "  name: test\n"
+        "runtime:\n"
+        "  feishu_projection:\n"
+        "    backend: shell\n"
+    )
+
+    with pytest.raises(ConfigError, match="runtime.feishu_projection.backend"):
+        load_config(p)
+
+
 def test_load_runtime_autoresearch_resident_config(tmp_path: Path):
     p = tmp_path / "zf.yaml"
     p.write_text(

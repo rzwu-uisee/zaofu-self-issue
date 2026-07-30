@@ -20,17 +20,20 @@ from zf.core.events.factory import event_log_from_project
 from zf.core.events.log import EventLog
 from zf.core.workspace import stable_project_id
 from zf.integrations.feishu.approval import ApprovalStore
+from zf.integrations.feishu.client_ports import BitableClient
 from zf.integrations.feishu.callback_security import (
     identity_auth_levels,
     resolve_identity,
     verify_feishu_signature,
 )
 from zf.integrations.feishu.callback_token import verify_action
-from zf.integrations.feishu.clients import (
-    FeishuHttpBitableClient,
-    FeishuHttpDocumentClient,
+from zf.integrations.feishu.mock_clients import (
     MockFeishuBitableClient,
     MockFeishuDocumentClient,
+)
+from zf.integrations.feishu.lark_cli import (
+    LarkCliBitableClient,
+    LarkCliDocumentClient,
 )
 from zf.integrations.feishu.controls import ControlHandler
 from zf.integrations.feishu.delivery_card import push_delivery_cards_once
@@ -298,7 +301,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=[],
         choices=["daily-brief", "weekly-review", "project-monitor"],
     )
-    sync_automations.add_argument("--transport", choices=["mock", "real"], default="mock")
+    _add_projection_backend_args(sync_automations)
     sync_automations.add_argument("--dry-run", action="store_true")
     sync_automations.set_defaults(func=run_sync_automations)
 
@@ -318,7 +321,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default=[],
         choices=["daily-brief", "weekly-review", "project-monitor"],
     )
-    sync_automation_table.add_argument("--transport", choices=["mock", "real"], default="mock")
+    _add_projection_backend_args(sync_automation_table)
     sync_automation_table.add_argument("--table-name", default="Automation Insights")
     sync_automation_table.add_argument("--base-name", default="")
     sync_automation_table.add_argument("--folder-token", default="")
@@ -366,7 +369,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default="",
         help="Feishu Bitable/Base URL; app token and table query are extracted automatically",
     )
-    sync_kanban.add_argument("--transport", choices=["mock", "real"], default="mock")
+    _add_projection_backend_args(sync_kanban)
     sync_kanban.add_argument(
         "--field",
         action="append",
@@ -418,6 +421,34 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     sync_kanban.add_argument("--dry-run", action="store_true")
     sync_kanban.set_defaults(func=run_sync_kanban_table)
 
+    project_kanban = feishu_subparsers.add_parser(
+        "project-kanban",
+        help="Project task.status_changed events into Feishu Base",
+    )
+    project_kanban.add_argument("--state-dir", default=None)
+    project_kanban.add_argument(
+        "--backend",
+        choices=["lark-cli"],
+        default="",
+    )
+    project_kanban.add_argument("--app-token", default="")
+    project_kanban.add_argument("--table-id", default="")
+    project_kanban.add_argument(
+        "--create-target-if-missing",
+        action="store_true",
+        help="Create a project-scoped Base/Table when no target is configured",
+    )
+    project_kanban.add_argument("--folder-token", default="")
+    project_kanban.add_argument("--base-name", default="")
+    project_kanban.add_argument("--table-name", default="")
+    project_kanban.add_argument("--timezone", default="")
+    project_mode = project_kanban.add_mutually_exclusive_group()
+    project_mode.add_argument("--once", action="store_true")
+    project_mode.add_argument("--watch", action="store_true")
+    project_kanban.add_argument("--reconcile", action="store_true")
+    project_kanban.add_argument("--poll-interval-seconds", type=float, default=0.0)
+    project_kanban.set_defaults(func=_run_project_kanban)
+
     init_targets = feishu_subparsers.add_parser(
         "init-targets",
         help="Create Feishu Docx/Base/Table targets for Automation and Kanban sync",
@@ -439,7 +470,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default="Asia/Shanghai",
         help="Bitable timezone used when creating the Base",
     )
-    init_targets.add_argument("--transport", choices=["mock", "real"], default="real")
+    _add_projection_backend_args(init_targets, default_backend="lark-cli")
     init_targets.add_argument(
         "--field",
         action="append",
@@ -473,6 +504,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     cron.add_argument("--command", default="uv run zf")
     cron.add_argument("--daily-time", default="09:00", help="HH:MM in the cron host timezone")
     cron.add_argument("--hourly-minute", type=int, default=5)
+    cron.add_argument(
+        "--backend",
+        choices=["lark-cli"],
+        default="lark-cli",
+        help="Projection backend rendered into generated cron commands",
+    )
     cron.set_defaults(func=run_cron_template)
 
 
@@ -480,10 +517,31 @@ def _run_root(args: argparse.Namespace) -> int:
     print(
         "Usage: zf feishu "
         "{handle,push,serve,send-test,live-smoke,sync-automations,"
-        "sync-automation-insights-table,sync-kanban-table,init-targets,cron-template} ...",
+        "sync-automation-insights-table,sync-kanban-table,project-kanban,"
+        "init-targets,cron-template} ...",
         file=sys.stderr,
     )
     return 1
+
+
+def _add_projection_backend_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default_backend: str = "mock",
+) -> None:
+    parser.add_argument(
+        "--backend",
+        choices=["mock", "lark-cli"],
+        default="",
+        help=f"Docx/Base projection backend (default: {default_backend})",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["mock", "real"],
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(projection_backend_default=default_backend)
 
 
 def _run_consume(args: argparse.Namespace) -> int:
@@ -498,6 +556,12 @@ def _run_bridge(args: argparse.Namespace) -> int:
     from zf.cli.feishu_consume import run_bridge
 
     return run_bridge(args)
+
+
+def _run_project_kanban(args: argparse.Namespace) -> int:
+    from zf.cli.feishu_projection import run_project_kanban
+
+    return run_project_kanban(args)
 
 
 def _run_live_smoke(args: argparse.Namespace) -> int:
@@ -1424,6 +1488,7 @@ def run_sync_automations(args: argparse.Namespace) -> int:
         context = resolve_project_context(
             explicit_state_dir=getattr(args, "state_dir", None),
         )
+        backend = _resolve_projection_backend(args)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -1443,7 +1508,7 @@ def run_sync_automations(args: argparse.Namespace) -> int:
             project_id=project_id,
             project_name=project_name,
             document_id=document_id or "dry-run",
-            client=_build_document_client(args.transport),
+            client=_build_document_client(backend),
             ledger=FeishuSyncLedger.for_state_dir(context.state_dir),
             writer=None if args.dry_run else EventWriter(event_log_from_project(
                 context.state_dir,
@@ -1471,6 +1536,7 @@ def run_sync_automation_insights_table(args: argparse.Namespace) -> int:
             explicit_state_dir=getattr(args, "state_dir", None),
         )
         field_map = _parse_field_map(args.field)
+        backend = _resolve_projection_backend(args)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -1485,7 +1551,11 @@ def run_sync_automation_insights_table(args: argparse.Namespace) -> int:
         )
         return 1
 
-    client = _build_bitable_client(args.transport)
+    try:
+        client = _build_bitable_client(backend)
+    except (ConfigError, FeishuTransportError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     if (
         app_token
         and not table_id
@@ -1630,6 +1700,7 @@ def run_sync_kanban_table(args: argparse.Namespace) -> int:
             explicit_state_dir=getattr(args, "state_dir", None),
         )
         field_map = _parse_field_map(args.field)
+        backend = _resolve_projection_backend(args)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -1646,7 +1717,11 @@ def run_sync_kanban_table(args: argparse.Namespace) -> int:
     include_archive_days = (
         None if args.active_only else max(0, int(args.include_archive_days))
     )
-    client = _build_bitable_client(args.transport)
+    try:
+        client = _build_bitable_client(backend)
+    except (ConfigError, FeishuTransportError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     try:
         schema: dict[str, Any] = {"created": [], "existing": []}
         views: dict[str, Any] = {"created": [], "existing": []}
@@ -1750,6 +1825,7 @@ def run_init_targets(args: argparse.Namespace) -> int:
             explicit_state_dir=getattr(args, "state_dir", None),
         )
         field_map = _parse_field_map(args.field)
+        backend = _resolve_projection_backend(args)
     except ConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -1793,8 +1869,8 @@ def run_init_targets(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        document_client = _build_document_client(args.transport)
-        bitable_client = _build_bitable_client(args.transport)
+        document_client = _build_document_client(backend)
+        bitable_client = _build_bitable_client(backend)
         document = document_client.create_document(
             title=document_title,
             folder_token=folder_token,
@@ -1911,10 +1987,11 @@ def run_cron_template(args: argparse.Namespace) -> int:
     command = str(args.command).strip() or "uv run zf"
     log_dir = shlex.quote(str(context.state_dir / "logs"))
     state_flag = f"--state-dir {shlex.quote(str(context.state_dir))}"
+    backend_flag = f"--backend {shlex.quote(str(args.backend))}"
     print("# Daily Automation -> Feishu Docx")
     print(
         f"{minute} {hour} * * * cd {root} && mkdir -p {log_dir} && "
-        f"{command} feishu sync-automations {state_flag} --transport real "
+        f"{command} feishu sync-automations {state_flag} {backend_flag} "
         "--document-id \"$FEISHU_AUTOMATION_DOCUMENT_ID\" "
         f">> {log_dir}/feishu-automation-sync.log 2>&1"
     )
@@ -1922,14 +1999,14 @@ def run_cron_template(args: argparse.Namespace) -> int:
     print("# Daily Automation Insights -> Feishu Bitable")
     print(
         f"{minute} {hour} * * * cd {root} && mkdir -p {log_dir} && "
-        f"{command} feishu sync-automation-insights-table {state_flag} --transport real "
+        f"{command} feishu sync-automation-insights-table {state_flag} {backend_flag} "
         f">> {log_dir}/feishu-automation-insights-sync.log 2>&1"
     )
     print("")
     print("# Hourly Kanban -> Feishu Bitable")
     print(
         f"{hourly_minute} * * * * cd {root} && mkdir -p {log_dir} && "
-        f"{command} feishu sync-kanban-table {state_flag} --transport real "
+        f"{command} feishu sync-kanban-table {state_flag} {backend_flag} "
         "--app-token \"$FEISHU_BITABLE_APP_TOKEN\" "
         "--table-id \"$FEISHU_BITABLE_TABLE_ID\" "
         f">> {log_dir}/feishu-kanban-sync.log 2>&1"
@@ -2736,7 +2813,7 @@ def _recreate_kanban_bitable_target(
     args: argparse.Namespace,
     *,
     context: ProjectContext,
-    client: MockFeishuBitableClient | FeishuHttpBitableClient,
+    client: BitableClient,
     project_name: str,
     field_map: dict[str, str],
 ) -> tuple[str, str, str]:
@@ -2783,7 +2860,7 @@ def _create_automation_insight_table_target(
     args: argparse.Namespace,
     *,
     context: ProjectContext,
-    client: MockFeishuBitableClient | FeishuHttpBitableClient,
+    client: BitableClient,
     app_token: str,
     project_name: str,
     field_map: dict[str, str],
@@ -2844,7 +2921,7 @@ def _create_automation_insight_table_target(
 def _ensure_automation_insight_table_shape(
     args: argparse.Namespace,
     *,
-    client: MockFeishuBitableClient | FeishuHttpBitableClient,
+    client: BitableClient,
     app_token: str,
     table_id: str,
     field_map: dict[str, str],
@@ -2894,20 +2971,36 @@ def _build_transport(kind: str) -> FeishuTransport:
     raise ConfigError(f"unknown Feishu transport: {kind}")
 
 
-def _build_document_client(kind: str) -> MockFeishuDocumentClient | FeishuHttpDocumentClient:
+def _resolve_projection_backend(args: argparse.Namespace) -> str:
+    backend = str(getattr(args, "backend", "") or "").strip()
+    transport = str(getattr(args, "transport", "") or "").strip()
+    if backend and transport:
+        raise ConfigError("--backend and legacy --transport are mutually exclusive")
+    if backend:
+        return backend
+    if transport:
+        return {"mock": "mock", "real": "lark-cli"}[transport]
+    return str(getattr(args, "projection_backend_default", "mock") or "mock")
+
+
+def _build_document_client(
+    kind: str,
+) -> MockFeishuDocumentClient | LarkCliDocumentClient:
     if kind == "mock":
         return MockFeishuDocumentClient()
-    if kind == "real":
-        return FeishuHttpDocumentClient()
-    raise ConfigError(f"unknown Feishu document transport: {kind}")
+    if kind == "lark-cli":
+        return LarkCliDocumentClient()
+    raise ConfigError(f"unknown Feishu document backend: {kind}")
 
 
-def _build_bitable_client(kind: str) -> MockFeishuBitableClient | FeishuHttpBitableClient:
+def _build_bitable_client(
+    kind: str,
+) -> MockFeishuBitableClient | LarkCliBitableClient:
     if kind == "mock":
         return MockFeishuBitableClient()
-    if kind == "real":
-        return FeishuHttpBitableClient()
-    raise ConfigError(f"unknown Feishu Bitable transport: {kind}")
+    if kind == "lark-cli":
+        return LarkCliBitableClient()
+    raise ConfigError(f"unknown Feishu Bitable backend: {kind}")
 
 
 def _resolve_document_id(args: argparse.Namespace) -> str:
@@ -2948,8 +3041,10 @@ def _resolve_bitable_target(args: argparse.Namespace) -> tuple[str, str]:
         if ref.table_id and not url_table:
             url_table = ref.table_id
 
-    app_token = url_app or (explicit_app if "://" not in explicit_app else "") or (
-        env_app if "://" not in env_app else ""
+    app_token = (
+        (explicit_app if "://" not in explicit_app else "")
+        or url_app
+        or (env_app if "://" not in env_app else "")
     )
     table_id = explicit_table or url_table or env_table
     return app_token, table_id
@@ -2983,8 +3078,8 @@ def _resolve_automation_bitable_target(args: argparse.Namespace) -> tuple[str, s
             url_table = ref.table_id
 
     app_token = (
-        url_app
-        or (explicit_app if "://" not in explicit_app else "")
+        (explicit_app if "://" not in explicit_app else "")
+        or url_app
         or (env_app if "://" not in env_app else "")
         or (fallback_app if "://" not in fallback_app else "")
     )

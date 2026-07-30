@@ -33,6 +33,7 @@ export FEISHU_AUTOMATION_BITABLE_APP_TOKEN="bascn_xxx"
 export FEISHU_AUTOMATION_BITABLE_TABLE_ID="tbl_xxx"
 export FEISHU_BITABLE_APP_TOKEN="bascn_xxx"
 export FEISHU_BITABLE_TABLE_ID="tbl_xxx"
+export FEISHU_FOLDER_TOKEN="fld_xxx"
 ```
 
 URLs are also accepted and parsed automatically:
@@ -46,12 +47,28 @@ export FEISHU_BITABLE_URL="https://example.feishu.cn/base/bascn_xxx?table=tbl_xx
 `FEISHU_TENANT_ACCESS_TOKEN` may be supplied directly instead of exchanging the
 app ID and secret.
 
+Use `lark-cli >= 1.0.47` as the preferred Docx/Base backend:
+
+```bash
+lark-cli --version
+```
+
+`--backend lark-cli` delegates structured resource operations to the CLI, and
+`--backend mock` is deterministic test mode. Legacy `--transport real` remains
+an alias for `--backend lark-cli`; do not pass both options. ZaoFu maps
+credentials into the child environment and fixes Feishu brand, bot identity,
+and JSON output. Secrets are not placed in argv. With only an app ID and
+secret, ZaoFu mints and briefly reuses a tenant token; an explicit
+`FEISHU_TENANT_ACCESS_TOKEN` takes precedence. IM, streaming cards, WebSocket,
+callbacks, and approvals still use `FeishuHttpTransport`. Only the former
+native Docx/Base projection clients were removed.
+
 ## 3. Initialize Targets
 
 Create external resources explicitly rather than during scheduled sync:
 
 ```bash
-uv run zf feishu init-targets --transport real --write-env
+uv run zf feishu init-targets --backend lark-cli --write-env
 ```
 
 Important options include `--folder-token`, `--document-title`, `--base-name`,
@@ -72,13 +89,21 @@ uv run zf feishu init-targets --dry-run
 Test `.env` writes with mock transport:
 
 ```bash
-uv run zf feishu init-targets --transport mock --write-env
+uv run zf feishu init-targets --backend mock --write-env
 ```
 
-The app needs OpenAPI permissions to create documents, bases, fields, and
-views. Layout configuration additionally needs `base:view:write_only`. Without
-that scope, use `--no-ensure-layouts` to sync records and required structures
-without changing view layout.
+Full initialization uses `base:app:create` and
+`base:table:read/create/update/delete`. Projection into an existing table uses
+at least `base:field:read/create`, `base:view:read`,
+`base:view:write_only`, and `base:record:read/create/update`; real
+delete-and-recreate validation also needs `base:record:delete`. Scopes alone
+do not grant access to a target Base/Table; the resource must also be shared
+with the app.
+
+If only `base:view:write_only` is missing, full-sync commands may use
+`--no-ensure-layouts` to keep record/field/view synchronization without
+changing layout. The resident projector requires its configured structure
+permissions and never silently falls back or switches applications.
 
 ## 4. Dry Run
 
@@ -96,7 +121,7 @@ Append Automation reports to a document:
 
 ```bash
 uv run zf feishu sync-automations \
-  --transport real \
+  --backend lark-cli \
   --document-id "$FEISHU_AUTOMATION_DOCUMENT_ID"
 ```
 
@@ -105,7 +130,7 @@ uv run zf feishu sync-automations \
 Sync Automation Insights:
 
 ```bash
-uv run zf feishu sync-automation-insights-table --transport real
+uv run zf feishu sync-automation-insights-table --backend lark-cli
 ```
 
 If the Automation table does not exist but the Base token does, the command can
@@ -116,7 +141,7 @@ Sync Kanban:
 
 ```bash
 uv run zf feishu sync-kanban-table \
-  --transport real \
+  --backend lark-cli \
   --app-token "$FEISHU_BITABLE_APP_TOKEN" \
   --table-id "$FEISHU_BITABLE_TABLE_ID"
 ```
@@ -141,19 +166,89 @@ Override field names for an existing table:
 
 ```bash
 uv run zf feishu sync-kanban-table \
-  --transport real \
+  --backend lark-cli \
   --field task_id=TaskID \
   --field title=Title \
   --field status=Status \
   --field assigned_to=Owner
 ```
 
-## 6. Cron
+## 6. Event-Driven Kanban Projection
+
+Enable the managed projector for low-latency `task.status_changed` projection:
+
+```yaml
+runtime:
+  feishu_projection:
+    enabled: true
+    backend: lark-cli
+    auto_create_target: false
+    poll_interval_seconds: 2
+    reconcile_interval_seconds: 3600
+    include_archive_days: 30
+    max_actions_per_tick: 20
+```
+
+Run it once, watch it directly, or force a full reconcile:
+
+```bash
+uv run zf feishu project-kanban --once --backend lark-cli
+uv run zf feishu project-kanban --watch --backend lark-cli
+uv run zf feishu project-kanban --once --reconcile --backend lark-cli
+```
+
+To let the projector create a Kanban Base/Table when this project has no
+target, enable the capability explicitly:
+
+```yaml
+runtime:
+  feishu_projection:
+    enabled: true
+    backend: lark-cli
+    auto_create_target: true
+    base_name: "ZaoFu Kanban - my-project"
+    table_name: Kanban
+    time_zone: Asia/Shanghai
+```
+
+This requires `FEISHU_APP_ID`, `FEISHU_APP_SECRET` (or a tenant token), and
+`FEISHU_FOLDER_TOKEN`. A one-shot equivalent is:
+
+```bash
+uv run zf feishu project-kanban \
+  --once \
+  --create-target-if-missing \
+  --folder-token "$FEISHU_FOLDER_TOKEN"
+```
+
+The bootstrap creates fields, Grid/Kanban views, and recommended layouts, then
+atomically stores non-secret target IDs at
+`<project.state_dir>/integrations/feishu/kanban-target.json`. This
+project-scoped target takes precedence over inherited global
+`FEISHU_BITABLE_*` values. Bootstrap is single-writer and resumes an incomplete
+shape on the next start without creating another Base. The option defaults to
+off. A remotely deleted Base/Table still fails closed; remove the scoped
+target record and reinitialize deliberately rather than silently switching to
+a new resource.
+
+`zf start` and `zf stop` own the sidecar lifecycle. Its durable cursor is under
+`project.state_dir/integrations/feishu/`, and its log is
+`project.state_dir/logs/feishu-kanban-projector.log`. Failures retain pending
+task IDs with persisted backoff and never roll back canonical TaskStore state.
+Invalid cursors, truncated event logs, and periodic reconciliation force a full
+sync. Only one projector may own a project at a time.
+
+When the local ledger is missing, sync performs an exact remote lookup by
+`Task ID` or `Row Key`. One match repairs the ledger, no match creates a row,
+and duplicate exact matches fail closed.
+
+## 7. Cron
 
 ```bash
 uv run zf feishu cron-template --daily-time 09:00 --hourly-minute 5
 ```
 
-The default template syncs Automation and Insights daily and Kanban hourly. It
-writes logs under `project.state_dir/logs/` and fixes the project root and state
-directory explicitly, preventing cron from accidentally using `$PWD/.zf`.
+The default template syncs Automation and Insights daily and Kanban hourly
+using `--backend lark-cli`. It writes logs under `project.state_dir/logs/` and
+fixes the project root and state directory explicitly, preventing cron from
+accidentally using `$PWD/.zf`.

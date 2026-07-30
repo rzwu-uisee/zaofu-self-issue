@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from zf.integrations.feishu.clients import MockFeishuBitableClient
+from zf.integrations.feishu.mock_clients import MockFeishuBitableClient
 from zf.integrations.feishu.renderers import build_automation_insight_records
 from zf.integrations.feishu.sync import FeishuSyncLedger, sync_automation_bitable
 

@@ -270,7 +270,9 @@ class FeishuHttpTransport(FeishuTransport):
     def parse_webhook(self, data: dict) -> FeishuWebhookEvent | None:
         return parse_webhook_payload(data)
 
-    def _tenant_token(self) -> str:
+    def resolve_tenant_access_token(self, *, force_refresh: bool = False) -> str:
+        if force_refresh:
+            self.tenant_access_token = ""
         if self.tenant_access_token:
             return self.tenant_access_token
         if not self.app_id or not self.app_secret:
@@ -288,6 +290,9 @@ class FeishuHttpTransport(FeishuTransport):
             raise FeishuTransportError("Feishu token response did not include tenant_access_token")
         self.tenant_access_token = token
         return token
+
+    def _tenant_token(self) -> str:
+        return self.resolve_tenant_access_token()
 
     def _request_json(
         self,

@@ -1029,7 +1029,11 @@ class KanbanHeadlessAgent:
             "question or options. "
             "If a state change is needed, describe the exact controlled action for "
             "the Web action gate. Only when the operator explicitly asks to create, "
-            "track, or schedule work should you propose create-task. The turn "
+            "track, or schedule work should you propose create-task. Decide that "
+            "intent semantically in the operator's language; do not rely on English "
+            "or Chinese keyword spelling. Negated requests, explanations, examples, "
+            "and questions about how creation works are not creation requests. Ask a "
+            "Plan question when the intent is ambiguous. The turn "
             "context contains workflow_route_catalog from the active expanded "
             "zf.yaml. Use the zf-workflow-start-planner method when available for "
             "semantic classification, clarification, and route recommendation, and "
@@ -1045,8 +1049,12 @@ class KanbanHeadlessAgent:
             "task_id, and publishes the Workflow Plan; Task approval does not start "
             "a Workflow. Omit workflow_plan only when the operator explicitly asks "
             "for tracking without execution. When proposing "
-            "an action, include a compact JSON "
-            "object with action_proposal: {action, payload, reason}. For product "
+            "an action, end the reply with exactly one compact fenced JSON object "
+            "with action_proposal: {action, intent, payload, reason}; do not place "
+            "action proposal JSON earlier in prose. For create-task and "
+            'idea-to-product, intent must be {"decision": "propose_action", '
+            '"source_quote": "<exact verbatim substring from the user semantic '
+            'context that supports this proposal>"}. For product '
             "ideas, prefer action=idea-to-product with payload.objective. For "
             "workflow yaml changes or runtime restart/stop, propose "
             "workflow-config-* or runtime-* only as owner-approved/proposal-only "

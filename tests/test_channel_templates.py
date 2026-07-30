@@ -10,6 +10,9 @@ from zf.runtime.channel_discussion import advance_discussion
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
+from zf.runtime.channel_synthesis_reactor import (
+    react_channel_consensus_proposed,
+)
 from zf.runtime.channel_templates import (
     TEMPLATE_VERSION,
     materialize_channel_template,
@@ -55,6 +58,50 @@ def _execute(service, writer, action: str, payload: dict):
     )
 
 
+def test_template_role_skill_mappings_are_method_scoped():
+    participant = "skills/zf-channel-discussion-participant/SKILL.md"
+    synthesizer = "skills/zf-channel-discussion-synthesizer/SKILL.md"
+    for template_id in (
+        "prd-clarification",
+        "research-review",
+        "architecture-review",
+        "quick-change",
+        "incident-triage",
+    ):
+        materialized, error = materialize_channel_template(
+            template_id,
+            overrides={"backend": "fake"},
+        )
+        assert error == ""
+        assert materialized is not None
+        actual = {
+            member["channel_role"]: member["skill_refs"]
+            for member in materialized["members"]
+        }
+        assert all(participant in refs for refs in actual.values())
+        assert all(
+            "skills/grill/SKILL.md" not in refs
+            for refs in actual.values()
+        )
+        synth_role = materialized["discussion"]["synthesizer"]
+        assert synthesizer in actual[synth_role]
+
+    research, error = materialize_channel_template(
+        "research-review",
+        overrides={"backend": "fake"},
+    )
+    assert error == ""
+    assert research is not None
+    research_refs = {
+        ref
+        for member in research["members"]
+        for refs in [member["skill_refs"]]
+        for ref in refs
+    }
+    assert "skills/zf-research-fanout-trigger/SKILL.md" not in research_refs
+    assert "skills/zf-refactor-plan-synth/SKILL.md" not in research_refs
+
+
 def test_prd_template_persists_version_digest_roles_and_discussion(
     tmp_path: Path,
 ):
@@ -95,7 +142,8 @@ def test_prd_template_persists_version_digest_roles_and_discussion(
     assert members["product_pm"]["permission_profile"] == "project_writer"
     assert members["arch"]["permission_profile"] == "read_only"
     assert members["synthesizer"]["skill_refs"] == [
-        "skills/zf-channel-discussion-synthesizer/SKILL.md"
+        "skills/zf-channel-discussion-participant/SKILL.md",
+        "skills/zf-channel-discussion-synthesizer/SKILL.md",
     ]
     assert channel["discussion"]["mode"] == "fanout_then_synthesis"
     assert channel["discussion"]["synthesizer"] == "synthesizer"
@@ -117,6 +165,83 @@ def test_prd_template_persists_version_digest_roles_and_discussion(
         },
     )
     assert conflict["status"] == "conflict"
+
+
+def test_template_preflight_rejects_missing_skill_without_partial_channel(
+    tmp_path: Path,
+    monkeypatch,
+):
+    state_dir, log, writer, service = _runtime(tmp_path)
+    monkeypatch.setattr(
+        "zf.runtime.control_actions_channel_admin.resolve_builtin_skill_source",
+        lambda _name: None,
+    )
+
+    result = _execute(
+        service,
+        writer,
+        "channel-create-from-template",
+        {
+            "template_id": "quick-change",
+            "channel_id": "ch-missing-skill",
+            "overrides": {"backend": "fake"},
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "invalid_template"
+    assert "could not be resolved" in result["reason"]
+    assert project_channel(state_dir, "ch-missing-skill") is None
+    assert not [
+        event for event in log.read_all()
+        if event.type == "channel.created"
+        and event.payload.get("channel_id") == "ch-missing-skill"
+    ]
+
+
+def test_all_templates_materialize_every_skill_ref(tmp_path: Path):
+    state_dir, _, writer, service = _runtime(tmp_path)
+
+    for template_id in (
+        "prd-clarification",
+        "research-review",
+        "architecture-review",
+        "quick-change",
+        "incident-triage",
+    ):
+        result = _execute(
+            service,
+            writer,
+            "channel-create-from-template",
+            {
+                "template_id": template_id,
+                "channel_id": f"ch-{template_id}",
+                "overrides": {"backend": "fake"},
+            },
+        )
+        assert result["ok"] is True, result
+        materialized, error = materialize_channel_template(
+            template_id,
+            overrides={"backend": "fake"},
+        )
+        assert error == ""
+        assert materialized is not None
+        channel = project_channel(state_dir, f"ch-{template_id}")
+        by_role = {
+            member["channel_role"]: member
+            for member in channel["members"]
+        }
+        for member in materialized["members"]:
+            resolved = by_role[member["channel_role"]][
+                "resolved_skill_refs"
+            ]
+            assert len(resolved) == len(member["skill_refs"])
+            for descriptor in resolved:
+                assert Path(descriptor["resolved_path"]).is_file()
+                assert str(Path(descriptor["resolved_path"])).startswith(
+                    str(state_dir / "runtime-skills")
+                )
+        assert not (tmp_path / "skills").exists()
 
 
 def test_template_preflight_rejects_unknown_override_without_partial_channel(
@@ -696,15 +821,22 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
     assert started["participants"] == ["tech_leader", "dev_reviewer", "qa_analyst"]
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
+        events = log.read_all()
         completed = [
-            event for event in log.read_all()
+            event for event in events
             if event.type == "channel.agent.reply.completed"
             and event.payload.get("thread_id") == "review-1"
         ]
-        if len(completed) == 3:
+        findings = [
+            event for event in events
+            if event.type == "channel.finding.recorded"
+            and event.payload.get("thread_id") == "review-1"
+        ]
+        if len(completed) == 3 and len(findings) == 3:
             break
         time.sleep(0.02)
     assert len(completed) == 3
+    assert len(findings) == 3
     assert {
         event.payload["target_member_id"] for event in completed
     } == {"tech_leader", "dev_reviewer", "qa_analyst"}
@@ -782,9 +914,31 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
         == syntheses[0].payload["artifact_digest"]
     ]
     assert len(consensus) == 1
-    assert consensus[0].payload["required_signers"] == ["tech_leader"]
+    assert consensus[0].payload["required_signers"] == [
+        "tech_leader",
+        "dev_reviewer",
+        "qa_analyst",
+    ]
     assert any(
         event.type == "channel.consensus.signed"
         and event.payload.get("member_id") == "tech_leader"
         for event in events
     )
+    react_channel_consensus_proposed(host, consensus[0])
+    react_channel_consensus_proposed(host, consensus[0])
+    signed = {
+        event.payload.get("member_id")
+        for event in log.read_all()
+        if event.type == "channel.consensus.signed"
+        and event.payload.get("artifact_digest")
+        == syntheses[0].payload["artifact_digest"]
+    }
+    assert signed == {"tech_leader", "dev_reviewer", "qa_analyst"}
+    review_messages = [
+        event
+        for event in log.read_all()
+        if event.type == "channel.message.posted"
+        and isinstance(event.payload.get("refs"), dict)
+        and event.payload["refs"].get("consensus_review_id")
+    ]
+    assert len(review_messages) == 2

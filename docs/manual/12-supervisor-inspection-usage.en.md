@@ -135,7 +135,10 @@ create a task checkpoint.
 
 ```bash
 export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 16)"
-uv run zf web --host 127.0.0.1 --port 8002
+tools/start-webkanban.sh \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --token "$ZF_WEB_ACTION_TOKEN"
 ```
 
 From another terminal:
@@ -145,7 +148,7 @@ curl -sS \
   -H "x-zf-web-token: $ZF_WEB_ACTION_TOKEN" \
   -H "content-type: application/json" \
   -X POST \
-  http://127.0.0.1:8002/api/actions/maintenance.prepare \
+  http://127.0.0.1:8001/api/actions/maintenance.prepare \
   -d '{
     "trigger_id": "manual-supervisor-check",
     "reason": "operator requested supervised maintenance"

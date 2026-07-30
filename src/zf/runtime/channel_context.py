@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any
 
 from zf.core.security.redaction import redact_obj
@@ -11,6 +12,15 @@ from zf.runtime.channel_roles import (
     load_role_definition_excerpt,
     normalize_role_context_ref,
 )
+from zf.runtime.channel_question_dedup import (
+    question_ledger as canonical_question_ledger,
+    question_ledger_digest as canonical_question_ledger_digest,
+)
+from zf.runtime.channel_question_graph import (
+    owner_questionnaire,
+    question_frontier,
+)
+from zf.runtime.channel_templates import CHANNEL_TEMPLATES
 
 
 def build_channel_context_pack(
@@ -24,6 +34,7 @@ def build_channel_context_pack(
     channel_role: str = "",
     role_context_ref: str = "",
     skill_refs: object = None,
+    resolved_skill_refs: object = None,
     permission_profile: str = "",
     max_messages: int = 8,
     max_text_chars: int = 4000,
@@ -38,7 +49,26 @@ def build_channel_context_pack(
     normalized_permission_profile = normalize_permission_profile(permission_profile)
     safe_role_context_ref = normalize_role_context_ref(role_context_ref)
     safe_skill_refs = normalize_channel_skill_refs(skill_refs)
+    safe_resolved_skill_refs = (
+        [
+            redact_obj(item)
+            for item in resolved_skill_refs
+            if isinstance(item, dict)
+        ][:8]
+        if isinstance(resolved_skill_refs, list)
+        else []
+    )
     profile_limits = _profile_limits(profile, max_messages=max_messages, max_text_chars=max_text_chars)
+    trigger_refs = _trigger_message_refs(
+        channel,
+        trigger_message_id=trigger_message_id,
+    )
+    requires_complete_ledger = bool(
+        trigger_refs.get("question_dedup_request_id")
+        or trigger_refs.get("synthesis_request_id")
+        or trigger_refs.get("cross_review_request_id")
+        or trigger_refs.get("consensus_review_id")
+    )
     selected = _select_messages(
         list((channel or {}).get("messages") or (channel or {}).get("recent_messages") or []),
         thread_id=thread_id,
@@ -46,10 +76,38 @@ def build_channel_context_pack(
         max_messages=profile_limits["max_messages"],
         max_text_chars=profile_limits["max_text_chars"],
     )
-    question_ledger = _select_question_ledger(
+    question_ledger = (
+        canonical_question_ledger(channel, thread_id=thread_id)
+        if requires_complete_ledger
+        else _select_question_ledger(
+            channel,
+            thread_id=thread_id,
+            max_entries=profile_limits["question_entries"],
+        )
+    )
+    ledger_digest = (
+        canonical_question_ledger_digest(channel, thread_id=thread_id)
+        if requires_complete_ledger
+        else _stable_digest(question_ledger)
+    )
+    contribution_index = _contribution_index(channel, thread_id=thread_id)
+    frontier = question_frontier(channel, thread_id=thread_id)
+    questionnaire = owner_questionnaire(channel, thread_id=thread_id)
+    raw_cross_reviews = (channel or {}).get("cross_reviews") or []
+    cross_review_candidates = (
+        list(raw_cross_reviews.values())
+        if isinstance(raw_cross_reviews, dict)
+        else list(raw_cross_reviews)
+    )
+    cross_review_index = [
+        dict(item)
+        for item in cross_review_candidates
+        if isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+    ]
+    collaboration_contract = _collaboration_contract(
         channel,
         thread_id=thread_id,
-        max_entries=profile_limits["question_entries"],
     )
     context_pack_id = _stable_context_pack_id(
         channel_id,
@@ -57,6 +115,7 @@ def build_channel_context_pack(
         trigger_message_id,
         target_member_id,
     )
+    _, source_limits = context_pack_rejection_reason(channel)
     payload = {
         "context_pack_id": context_pack_id,
         "channel_id": channel_id,
@@ -68,7 +127,9 @@ def build_channel_context_pack(
         "permission_profile": normalized_permission_profile,
         "role_context_ref": safe_role_context_ref,
         "skill_refs": safe_skill_refs,
+        "resolved_skill_refs": safe_resolved_skill_refs,
         "skill_metadata": _skill_metadata(safe_skill_refs),
+        "collaboration_contract": collaboration_contract,
         "role_definition": load_role_definition_excerpt(
             safe_role_context_ref,
             max_chars=profile_limits["role_definition_chars"],
@@ -86,6 +147,16 @@ def build_channel_context_pack(
             for item in selected
         ],
         "question_ledger": question_ledger,
+        "question_ledger_digest": ledger_digest,
+        "question_ledger_complete": requires_complete_ledger,
+        "question_frontier": frontier,
+        "question_frontier_digest": _stable_digest(frontier),
+        "owner_questionnaire": questionnaire,
+        "owner_questionnaire_digest": _stable_digest(questionnaire),
+        "cross_review_index": cross_review_index,
+        "cross_review_index_digest": _stable_digest(cross_review_index),
+        "contribution_index": contribution_index,
+        "contribution_index_digest": _stable_digest(contribution_index),
         "artifact_refs": _select_artifact_refs(
             channel,
             selected_messages=selected,
@@ -100,7 +171,12 @@ def build_channel_context_pack(
             "max_skill_refs": 8,
             "selected_messages": len(selected),
             "selected_questions": len(question_ledger),
+            "frontier_questions": len(frontier),
+            "owner_questions": len(questionnaire),
+            "cross_reviews": len(cross_review_index),
+            "indexed_contributions": len(contribution_index),
             "visibility_profile": profile,
+            **source_limits,
         },
     }
     return redact_obj(payload)
@@ -120,10 +196,10 @@ def context_pack_rejection_reason(
         "max_source_messages": max_source_messages,
         "source_messages": len(messages),
     }
-    if source_chars > max_source_chars:
-        return "channel transcript exceeds context source budget", limits
-    if len(messages) > max_source_messages:
-        return "channel transcript exceeds context message budget", limits
+    limits["compaction_required"] = int(
+        source_chars > max_source_chars
+        or len(messages) > max_source_messages
+    )
     return "", limits
 
 
@@ -183,7 +259,9 @@ def _select_question_ledger(
         for item in items
         if isinstance(item, dict)
         and str(item.get("thread_id") or "main") == thread_id
-    ][-max_entries:]
+    ]
+    if max_entries > 0:
+        selected = selected[-max_entries:]
     return [
         {
             "question_id": str(item.get("question_id") or ""),
@@ -200,6 +278,116 @@ def _select_question_ledger(
         }
         for item in selected
     ]
+
+
+def _trigger_message_refs(
+    channel: dict[str, Any] | None,
+    *,
+    trigger_message_id: str,
+) -> dict[str, Any]:
+    for item in (channel or {}).get("messages") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("message_id") or "") != trigger_message_id:
+            continue
+        refs = item.get("refs")
+        return refs if isinstance(refs, dict) else {}
+    return {}
+
+
+def _collaboration_contract(
+    channel: dict[str, Any] | None,
+    *,
+    thread_id: str,
+) -> dict[str, Any]:
+    scope = (
+        (channel or {}).get("scope")
+        if isinstance((channel or {}).get("scope"), dict)
+        else {}
+    )
+    template = (
+        scope.get("template")
+        if isinstance(scope.get("template"), dict)
+        else {}
+    )
+    sessions = (channel or {}).get("discussions")
+    session = (
+        sessions.get(thread_id)
+        if isinstance(sessions, dict)
+        and isinstance(sessions.get(thread_id), dict)
+        else {}
+    )
+    template_id = str(template.get("id") or "")
+    return {
+        "schema_version": "channel.collaboration_contract.v1",
+        "selected_template": {
+            "id": template_id,
+            "version": str(template.get("version") or ""),
+            "digest": str(template.get("digest") or ""),
+            "materialization_digest": str(
+                template.get("materialization_digest") or ""
+            ),
+        },
+        "template_binding_status": (
+            "frozen" if template_id else "unbound"
+        ),
+        "allowed_template_ids": sorted(CHANNEL_TEMPLATES),
+        "discussion_phase": str(session.get("state") or "idle"),
+        "discussion_started_event_id": str(
+            session.get("started_event_id") or ""
+        ),
+        "requirement_message_id": str(
+            session.get("requirement_message_id") or ""
+        ),
+    }
+
+
+def _contribution_index(
+    channel: dict[str, Any] | None,
+    *,
+    thread_id: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in (channel or {}).get("linked_events") or []:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("type") or "") != "channel.finding.recorded":
+            continue
+        payload = (
+            event.get("payload")
+            if isinstance(event.get("payload"), dict)
+            else {}
+        )
+        if str(payload.get("thread_id") or "main") != thread_id:
+            continue
+        rows.append({
+            "event_id": str(event.get("id") or ""),
+            "member_id": str(payload.get("member_id") or ""),
+            "contract_status": str(payload.get("contract_status") or ""),
+            "artifact_ref": str(payload.get("artifact_ref") or ""),
+            "artifact_digest": str(payload.get("artifact_digest") or ""),
+            "source_refs": [
+                str(item)
+                for item in payload.get("source_refs") or []
+                if isinstance(item, str)
+            ],
+            "evidence_refs": [
+                str(item)
+                for item in payload.get("evidence_refs") or []
+                if isinstance(item, str)
+            ],
+        })
+    return rows
+
+
+def _stable_digest(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _stable_context_pack_id(

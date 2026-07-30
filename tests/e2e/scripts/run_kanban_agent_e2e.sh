@@ -120,8 +120,8 @@ quickstart_channel_request = (
 if quickstart_channel_request in text:
     marker = "KBA_CHANNEL_QUICKSTART"
 else:
-    match = re.search(r"KBA_[A-Z_]+_[a-z0-9]+", text, re.IGNORECASE)
-    marker = match.group(0) if match else "KBA_FAKE_DEFAULT"
+    matches = re.findall(r"KBA_[A-Z_]+_[a-z0-9]+", text, re.IGNORECASE)
+    marker = matches[-1] if matches else "KBA_FAKE_DEFAULT"
 
 emit({"type": "system", "session_id": provider_session_id})
 emit({
@@ -182,6 +182,10 @@ elif marker.startswith("KBA_TASK_WORKFLOW_"):
     result = {
         "action_proposal": {
             "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": "create a Task",
+            },
             "payload": {
                 "title": f"Task workflow {marker}",
                 "priority": 2,
@@ -226,6 +230,8 @@ elif marker.startswith("KBA_TASK_WORKFLOW_"):
         }
     }
     reply = json.dumps(result, ensure_ascii=False)
+elif marker.startswith("KBA_PLAN_DISCUSS_"):
+    reply = f"{marker} compared the routes without proposing or answering"
 elif marker.startswith("KBA_PLAN_") and "Answer:" not in text:
     result = {
         "plan_request": {
@@ -253,6 +259,10 @@ elif marker.startswith("KBA_PLAN_"):
     result = {
         "action_proposal": {
             "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": "create a task",
+            },
             "payload": {
                 "title": f"Kanban Plan delivery {marker}",
                 "priority": 2,
@@ -317,10 +327,33 @@ elif marker.startswith("KBA_MULTI_PLAN_") and "Answer:" not in text:
     reply = json.dumps(result, ensure_ascii=False)
 elif marker.startswith("KBA_MULTI_PLAN_"):
     reply = f"{marker} accepted both Plan answers without proposing an action"
+elif marker.startswith("KBA_INVALID_"):
+    result = {
+        "action_proposal": {
+            "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": "create this task now",
+            },
+            "payload": {
+                "title": f"Invalid Kanban Agent proposal {marker}",
+                "contract": {
+                    "behavior": "This proposal must remain non-executable.",
+                    "verification": "The UI shows the binding error and disables approval.",
+                },
+            },
+            "reason": "Deliberately mismatched semantic evidence for browser E2E.",
+        }
+    }
+    reply = json.dumps(result, ensure_ascii=False)
 elif marker.startswith("KBA_CREATE_"):
     result = {
         "action_proposal": {
             "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": "create a task proposal",
+            },
             "payload": {
                 "title": f"Kanban Agent proposal {marker}",
                 "priority": 2,

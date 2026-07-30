@@ -29,12 +29,14 @@ reference or the topic index below for focused coverage.
 - [03 CLI Operations](03-cli-operations.en.md)
 - [04 Harness Runtime](04-harness-runtime.en.md)
 - [05 Skills, Workdirs, and Git Evidence](05-skills-workdirs-git-evidence.en.md)
-- [07 Troubleshooting](07-troubleshooting.en.md)
+- [07 Troubleshooting](07-troubleshooting.en.md) - common failures, WebKanban
+  launch drift, and diagnostics
 - [09 ZaoFu CLI Reference](09-zaofu-cli-usage.en.md)
 
 ## 3. Planning, Observation, and Diagnosis
 
-- [06 Web, Observability, and E2E](06-web-observability-e2e.en.md)
+- [06 Web, Observability, and E2E](06-web-observability-e2e.en.md) - canonical
+  WebKanban launcher, runtime observation, and E2E entry points
 - [08 New Task, Agent, and Squad](08-new-task-agent-squad.en.md)
 - [12 Supervisor Inspection](12-supervisor-inspection-usage.en.md)
 - [13 Plan, Task Map, and Orchestrator Dispatch](13-plan-task-map-orchestrator-dispatch.en.md)
@@ -56,5 +58,6 @@ bridge documented in manual 19.
 - [10 Autoresearch](10-autoresearch-usage.en.md)
 - [Autoresearch Orchestrator](autoresearch-orchestrator.en.md)
 - [Autoresearch Campaign](autoresearch-campaign.en.md)
-- [16 Real Codex Provider Preflight](16-real-codex-provider-preflight.en.md)
+- [16 Real Codex Provider Preflight](16-real-codex-provider-preflight.en.md) -
+  sandbox preflight, trusted-local launcher, and safety boundaries
 - [18 Product Fanout Real E2E](18-product-fanout-real-e2e.en.md)

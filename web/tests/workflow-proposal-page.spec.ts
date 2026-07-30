@@ -95,12 +95,20 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
 
   const proposalPage = page.getByTestId("workflow-proposal-page");
   await expect(proposalPage).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Workflow Proposals" })).toBeVisible();
-  await expect(page.getByText(requestId, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Needs decision/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await expect(page.getByRole("heading", {
     name: "Fix checkout expiry and retain an auditable regression test.",
   })).toBeVisible();
   await expect(page.getByTestId("workflow-proposal-graph")).toBeVisible();
+  await expect(page.getByText("Execution Plan", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("workflow-readiness")).toContainText("Ready to run");
+  const advanced = page.locator(".workflow-proposal-advanced");
+  await expect(advanced).not.toHaveAttribute("open", "");
+  await advanced.locator("summary").first().click();
   await expect(page.getByText("Execution Closure", { exact: true })).toBeVisible();
   await expect(page.getByText("Decision Binding", { exact: true })).toBeVisible();
   await expect(page.getByText("direct-v1", { exact: true }).first()).toBeVisible();
@@ -138,7 +146,7 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
   await approve.click();
   expect((await submitted).status()).toBe(202);
   await expect(page.getByTestId("workflow-proposal-feedback")).toContainText("accepted");
-  await expect(page.getByRole("button", { name: "Runs" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Run" })).toBeVisible();
 
   const detailResponse = await request.get(
     `/api/projects/default/workflow-requests/${requestId}`,
@@ -164,9 +172,9 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
   };
   await page.reload({ waitUntil: "domcontentloaded" });
   await expect.poll(() => terminalProjectionHits).toBeGreaterThan(0);
-  await expect(page.getByText("run.goal.completed", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("workflow-readiness")).toContainText("Run completed");
   await expectNoViewportOverflow(page);
 
-  await page.getByRole("button", { name: "Runs" }).click();
+  await page.getByRole("button", { name: "Open Run" }).click();
   await expect(page).toHaveURL(/page=runs/);
 });

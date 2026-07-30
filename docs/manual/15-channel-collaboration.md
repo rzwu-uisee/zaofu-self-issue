@@ -5,6 +5,23 @@
 > 状态：Kanban Plan 自动建 Channel、模板成员、原始需求投递、
 > `fanout_then_synthesis` 与继续对话已实现；本手册按 2026-07-28 真实 E2E 更新。
 
+## 0. 启动前检查
+
+真实 Codex Channel 应通过可信本地 canonical launcher 启动 WebKanban：
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
+tools/start-webkanban.sh --port 8001 --status
+```
+
+部分 Channel 模板包含 `artifact_writer`、`project_writer` 或
+`workspace_writer`。直接 `zf web` 若没有显式 sandbox 环境，会让这些成员使用
+Codex `workspace-write`；不支持 namespace/bubblewrap 的宿主将返回
+`sandbox_unsupported`。可信本地 status 应显示
+`codex_headless_sandbox: danger-full-access`、`tmux: running` 和 `api: ok`。
+共享或非可信主机必须修复普通 sandbox，不得依赖 bypass。详见
+[16 真实 Codex Provider Preflight](16-real-codex-provider-preflight.md)。
+
 ## 1. Channel Group 的当前模型
 
 产品交互可以称为 Channel Group，kernel canonical 模型是：
@@ -82,19 +99,25 @@ Agent 应基于补充信息更新 Plan，而不是让用户改 JSON。
 
 ## 3. 内置 Channel 模板
 
-当前内置模板如下，均使用 `fanout_then_synthesis`：
+当前内置模板如下，均使用 `fanout_then_synthesis`。Role context 定义身份和停止
+条件，模板的 `skill_refs` 定义本轮讨论方法：
 
-| Template | 默认成员 | Writer |
-|---|---|---|
-| `prd-clarification` | `product_pm`、`arch`、`critic`、`synthesizer`，可选 `security_reviewer` | `product_pm`，默认限 `docs/design/**`、`docs/impl/**` |
-| `research-review` | `researcher`、`arch`、`critic`、`synthesizer` | `researcher`，默认限 research artifacts |
-| `architecture-review` | `arch`、`security_reviewer`、`dev_reviewer`、`critic` | `arch` |
-| `quick-change` | `tech_leader`、`dev_reviewer`、`qa_analyst` | `tech_leader` |
-| `incident-triage` | `tech_leader`、`qa_analyst`，可选 `security_reviewer` | `tech_leader` |
+| Template | 默认成员 | Writer | 方法边界 |
+|---|---|---|---|
+| `prd-clarification` | `product_pm`、`arch`、`critic`、`synthesizer`，可选 `security_reviewer` | `product_pm`，默认限 `docs/design/**`、`docs/impl/**` | participant question ledger + synthesizer；会转译 owner 意图的角色加载 `grill` |
+| `research-review` | `researcher`、`arch`、`critic`、`synthesizer` | `researcher`，默认限 research artifacts | evidence-led discussion only；不加载 Research trigger 或 Refactor task-map synth |
+| `architecture-review` | `arch`、`security_reviewer`、`dev_reviewer`、`critic` | `arch` | ZaoFu architecture、design-vs-implementation、安全和 candidate gate |
+| `quick-change` | `tech_leader`、`dev_reviewer`、`qa_analyst` | `tech_leader` | 有界变更建议 + 通用验收；browser E2E 仅按任务需要加载 |
+| `incident-triage` | `tech_leader`、`qa_analyst`，可选 `security_reviewer` | `tech_leader` | 只诊断并建议 controlled action；Run Manager/Kernel 执行恢复 |
 
 模板不是随意角色字符串集合。required role 不能被关闭；可选角色、backend、model、
 writer、writer scope 和预算只能通过模板允许的 override 修改。非 writer 默认降为
 read-only，避免所有成员同时改 Project。
+
+模板 role 可以绑定多个有序 `skill_refs`。创建 Channel 前，所有引用必须能解析并
+物化到 `<project_root>/skills/<name>/SKILL.md`；缺失引用会在
+`channel.created` 前拒绝，避免生成只有路径、没有内容的成员。`grill` 的原子提问
+表示每个 question 只承载一个决策，同一 blind-answer 回合仍可提出多个独立问题。
 
 ## 4. 讨论、收敛与继续输入
 

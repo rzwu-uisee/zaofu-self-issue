@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import zf.web.server as server
+from zf.web.assets import web_repo_root
 
 
 def test_ui_index_warns_once_when_dist_missing(tmp_path: Path, monkeypatch, capsys):
@@ -34,3 +35,20 @@ def test_ui_index_prefers_built_dist_without_warning(tmp_path: Path, monkeypatch
 
     assert server._ui_index() == dist / "index.html"
     assert "react dist not found" not in capsys.readouterr().err
+
+
+def test_web_repo_root_prefers_current_imported_source(tmp_path: Path):
+    package_root = tmp_path / "worktree"
+    installed_root = tmp_path / "editable-main"
+    (package_root / "web").mkdir(parents=True)
+    (installed_root / "web").mkdir(parents=True)
+
+    assert web_repo_root(package_root, installed_root) == package_root
+
+
+def test_web_repo_root_falls_back_to_editable_source(tmp_path: Path):
+    package_root = tmp_path / "installed-package"
+    installed_root = tmp_path / "editable-main"
+    (installed_root / "web").mkdir(parents=True)
+
+    assert web_repo_root(package_root, installed_root) == installed_root

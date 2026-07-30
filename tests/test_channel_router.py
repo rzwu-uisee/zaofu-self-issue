@@ -136,6 +136,8 @@ def test_channel_contract_accepts_facilitator_synthesizer_and_project_skill_refs
     assert normalize_channel_skill_refs("zf-fmea-risk-gate") == ["skills/zf-fmea-risk-gate/SKILL.md"]
     assert normalize_channel_skill_refs(["skills/zf-fmea-risk-gate/SKILL.md"]) == ["skills/zf-fmea-risk-gate/SKILL.md"]
     assert normalize_channel_skill_refs("../.codex/skills/x/SKILL.md") == []
+    assert normalize_channel_skill_refs("skills/../SKILL.md") == []
+    assert normalize_channel_skill_refs("skills/.hidden/SKILL.md") == []
     assert validate_channel_member_contract({
         "member_id": "synth-1",
         "member_type": "provider_agent",
@@ -1286,7 +1288,9 @@ def test_channel_adapter_skips_dispatch_when_target_already_running(tmp_path: Pa
     assert detail["members"][0]["presence"] == "running"
 
 
-def test_channel_router_rejects_context_pack_over_source_budget(tmp_path: Path) -> None:
+def test_channel_router_compacts_context_pack_over_source_budget(
+    tmp_path: Path,
+) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     writer = EventWriter(EventLog(state_dir / "events.jsonl"))
@@ -1346,10 +1350,13 @@ def test_channel_router_rejects_context_pack_over_source_budget(tmp_path: Path) 
     )
     detail = project_channel(state_dir, "ch-zaofu")
 
-    assert result.skipped[0]["reason"] == "context_pack_rejected"
+    assert result.skipped == []
+    assert result.targets == ["fake-1"]
     assert detail is not None
-    assert detail["context_packs"][0]["status"] == "rejected"
-    assert detail["reply_requests"] == []
+    assert detail["context_packs"][0]["status"] == "built"
+    assert detail["context_packs"][0]["limits"]["compaction_required"] == 1
+    assert len(detail["context_packs"][0]["message_refs"]) <= 6
+    assert len(detail["reply_requests"]) == 1
 
 
 def test_channel_handoff_guard_accepts_and_rejects(tmp_path: Path) -> None:

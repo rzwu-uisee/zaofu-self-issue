@@ -11,6 +11,7 @@ from zf.core.events import EventWriter, ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.runtime.agent_session_output import apply_agent_output_contract
 from zf.runtime.live_delta_bus import live_delta_bus_for_writer
+from zf.runtime.provider_usage import normalize_provider_usage
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,10 @@ class AgentSessionStreamEmitter:
             "status": status,
             "reason": reason,
             "usage": usage or {},
+            "usage_accounting": normalize_provider_usage(
+                usage,
+                backend=self.identity.backend or self.identity.provider,
+            ),
             "permission_snapshot": permission_snapshot or {},
             "permission_drift": permission_drift or {},
         }
@@ -195,6 +200,10 @@ class AgentSessionStreamEmitter:
                 "status": status,
                 "reason": reason,
                 "usage": usage or {},
+                "usage_accounting": normalize_provider_usage(
+                    usage,
+                    backend=self.identity.backend or self.identity.provider,
+                ),
                 "permission_snapshot": permission_snapshot or {},
                 "permission_drift": permission_drift or {},
             }),

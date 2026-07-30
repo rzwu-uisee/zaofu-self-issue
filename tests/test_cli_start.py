@@ -553,6 +553,47 @@ workflow:
             / "inspect.json"
         ).exists()
 
+    def test_start_dry_run_wires_enabled_feishu_projection_sidecar(
+        self,
+        project_dir: Path,
+        monkeypatch,
+    ):
+        config = yaml.safe_load(
+            (project_dir / "zf.yaml").read_text(encoding="utf-8")
+        )
+        config["runtime"] = {
+            "feishu_projection": {
+                "enabled": True,
+                "backend": "lark-cli",
+            }
+        }
+        (project_dir / "zf.yaml").write_text(
+            yaml.safe_dump(config),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
+        monkeypatch.setenv("FEISHU_APP_SECRET", "secret")
+        monkeypatch.setenv("FEISHU_BITABLE_APP_TOKEN", "app")
+        monkeypatch.setenv("FEISHU_BITABLE_TABLE_ID", "tbl")
+
+        result = main(["start", "--dry-run"])
+
+        assert result == 0
+        events = [
+            json.loads(line)
+            for line in (
+                project_dir / ".zf" / "events.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        started = [
+            event
+            for event in events
+            if event["type"] == "feishu.kanban_projection.started"
+        ]
+        assert started
+        assert started[-1]["payload"]["dry_run"] is True
+
     def test_start_registers_on_demand_role_without_spawning_or_materializing(
         self,
         project_dir: Path,
@@ -895,6 +936,23 @@ class TestZfStop:
         events_file = project_dir / ".zf" / "events.jsonl"
         events = events_file.read_text()
         assert "loop.stopped" in events or "session.stopped" in events
+
+    def test_force_stop_cleans_feishu_projection_by_pidfile(
+        self,
+        project_dir: Path,
+        monkeypatch,
+    ):
+        stopped = []
+        monkeypatch.setattr(
+            "zf.runtime.feishu_projection_sidecar."
+            "stop_feishu_projection_sidecar_by_pidfile",
+            lambda state_dir: stopped.append(Path(state_dir)) or True,
+        )
+
+        result = main(["stop", "--force"])
+
+        assert result == 0
+        assert stopped == [project_dir / ".zf"]
 
 
 class TestBootTmuxErrorFailClosed:

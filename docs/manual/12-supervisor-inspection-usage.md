@@ -212,7 +212,10 @@ jq '.findings[] | {kind,severity,title,task_id,source_ref,suggested_route}' \
 
 ```bash
 export ZF_WEB_ACTION_TOKEN="$(openssl rand -hex 16)"
-uv run zf web --host 127.0.0.1 --port 8002
+tools/start-webkanban.sh \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --token "$ZF_WEB_ACTION_TOKEN"
 ```
 
 另一个终端调用:
@@ -222,7 +225,7 @@ curl -sS \
   -H "x-zf-web-token: $ZF_WEB_ACTION_TOKEN" \
   -H "content-type: application/json" \
   -X POST \
-  http://127.0.0.1:8002/api/actions/maintenance.prepare \
+  http://127.0.0.1:8001/api/actions/maintenance.prepare \
   -d '{
     "trigger_id": "manual-supervisor-check",
     "reason": "operator requested supervised maintenance"
@@ -236,7 +239,7 @@ curl -sS \
   -H "x-zf-web-token: $ZF_WEB_ACTION_TOKEN" \
   -H "content-type: application/json" \
   -X POST \
-  http://127.0.0.1:8002/api/actions/maintenance.prepare \
+  http://127.0.0.1:8001/api/actions/maintenance.prepare \
   -d '{
     "trigger_id": "manual-supervisor-check",
     "reason": "pause before zaofu self-repair",
@@ -352,25 +355,15 @@ print("supervisor e2e passed")
 PY
 ```
 
-再验证 Web action:
+Web action 的确定性契约由定向 API 测试验证，无需再启动第二个 Dashboard:
 
 ```bash
-export ZF_WEB_ACTION_TOKEN="supervisor-e2e-token"
-uv run --project /path/to/zaofu zf web --host 127.0.0.1 --port 8002 &
-web_pid=$!
-sleep 2
-
-curl -sS \
-  -H "x-zf-web-token: $ZF_WEB_ACTION_TOKEN" \
-  -H "content-type: application/json" \
-  -X POST \
-  http://127.0.0.1:8002/api/actions/maintenance.prepare \
-  -d '{"trigger_id":"e2e","reason":"supervisor e2e"}' | jq
-
-kill "$web_pid"
+uv run --project /path/to/zaofu pytest \
+  /path/to/zaofu/tests/test_web_server.py::TestApiWebActions::test_maintenance_prepare_action_pauses_dispatch \
+  -q --no-cov
 ```
 
-检查:
+对真实项目做人工检查时，复用第 8 节的 `8001` Dashboard，并检查:
 
 ```bash
 grep -E 'runtime.maintenance.entered|dispatch.paused|web.action.completed' \

@@ -390,6 +390,51 @@ def test_open_question_blocks_convergence(tmp_path: Path) -> None:
     assert detail["discussions"]["main"]["state"] == "phase2_relay"
 
 
+def test_pending_cross_review_blocks_synthesis_until_completed(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase2(tmp_path)
+    _open_question(writer, "q-1")
+    _resolve(writer, "q-1", resolution="answered", actor="operator")
+    for member in ("pm-1", "arch-1", "critic-1"):
+        _freeze(writer, member)
+    writer.emit(
+        "channel.cross_review.requested",
+        actor="pm-1",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "request_id": "xreview-1",
+            "question_id": "q-1",
+            "target_member_id": "arch-1",
+            "prompt": "Verify the boundary.",
+            "reason": "Contributions conflict.",
+            "source": "test",
+        },
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert "channel.synthesis.requested" not in _types(state_dir)
+
+    writer.emit(
+        "channel.cross_review.completed",
+        actor="arch-1",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "request_id": "xreview-1",
+            "question_id": "q-1",
+            "target_member_id": "arch-1",
+            "summary": "Boundary verified.",
+            "source": "test",
+        },
+    )
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert "channel.synthesis.requested" in _types(state_dir)
+
+
 # ---------------------------------------------------------------------------
 # T4: consensus sign-off
 # ---------------------------------------------------------------------------

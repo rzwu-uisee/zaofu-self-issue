@@ -269,9 +269,11 @@ function readInitialQuery() {
   const page = params.get("page");
   const normalizedPage = page === "roles"
     ? "agents"
-    : page === "process" || page === "diagnostics"
-      ? "observability"
-      : page;
+    : page === "workflow"
+      ? "workflows"
+      : page === "process" || page === "diagnostics"
+        ? "observability"
+        : page;
   const view = params.get("view");
   const mobileDefaultList = window.matchMedia?.("(max-width: 680px)").matches ?? false;
   return {

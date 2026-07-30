@@ -140,6 +140,9 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     # channel_router.route_channel_message.
     "channel.message.posted",
     "channel.agent.reply.requested", "channel.synthesis.requested",
+    "channel.question.dedup.requested",
+    "channel.question.dedup.applied",
+    "channel.cross_review.requested",
     # 2026-07-03: channel discussion progression (blind-fanout ->
     # phase2_relay -> phase3_synthesis, doc 122) is likewise mechanical and
     # taskless — channel_discussion.py emits these with correlation_id=
@@ -153,8 +156,11 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     # replied). Same bug class and same fix as judge.passed above.
     "channel.agent.reply.completed",
     "channel.question.opened",
+    "channel.question.updated",
     "channel.question.resolved",
     "channel.question.merged",
+    "channel.cross_review.completed",
+    "channel.cross_review.rejected",
     "channel.questions.frozen",
     "channel.consensus.proposed",
     "channel.consensus.signed",

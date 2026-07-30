@@ -180,6 +180,36 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main runs rebuild
 - API 端口冲突。
 - runtime projection 旧版本字段与当前 Web 代码不匹配。
 
+### 8.1 Channel Group 报 Codex sandbox unsupported
+
+典型错误：
+
+```text
+Codex sandbox unsupported for sandbox=workspace-write:
+unshare: unshare failed: Operation not permitted
+```
+
+先确认宿主与当前 WebKanban 启动策略：
+
+```bash
+uv run zf doctor provider --backend codex --json
+tools/start-webkanban.sh --port 8001 --status
+ss -ltnp 'sport = :8001'
+```
+
+若 status 显示 `tmux: stopped`、但端口仍在监听，说明 8001 由 launcher 外的
+直接 `zf web` 进程占用。停止 `ss` 显示的**准确 PID**，不要使用 broad process
+matching，然后从仓库根重新启动：
+
+```bash
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
+```
+
+可信本地环境的 status 应显示
+`codex_headless_sandbox: danger-full-access`、`tmux: running` 和 `api: ok`。
+共享或非可信主机不得以 bypass 代替 namespace/bubblewrap 修复。完整边界见
+[16 真实 Codex Provider Preflight](16-real-codex-provider-preflight.md)。
+
 ## 9. `kanban move done` 被拒绝
 
 这是 gate 生效,不是 CLI bug。检查缺哪个前置事件:

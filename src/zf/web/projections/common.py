@@ -438,61 +438,6 @@ def _payload_hash(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _message_allows_create_task_proposal(message: str) -> bool:
-    """Whether the operator explicitly asked to create trackable work.
-
-    Empty input preserves helper/test compatibility. Runtime calls pass the
-    original user message so read-only turns cannot promote example JSON into
-    a real create-task proposal.
-    """
-    text = str(message or "").strip().lower()
-    if not text:
-        return True
-    explicit_phrases = (
-        "create task",
-        "create a task",
-        "create issue",
-        "create ticket",
-        "create backlog",
-        "add task",
-        "add a task",
-        "new task",
-        "make a task",
-        "turn this into a task proposal",
-        "make this a task proposal",
-        "convert this into a task proposal",
-        "track this",
-        "track it",
-        "创建任务",
-        "创建一个任务",
-        "新建任务",
-        "新增任务",
-        "建任务",
-        "建个任务",
-        "建一个任务",
-        "生成任务",
-        "生成backlog",
-        "生成 backlog",
-        "整理成一个 task proposal",
-        "整理成 task proposal",
-        "整理为 task proposal",
-        "整理成任务提案",
-        "整理为任务提案",
-        "创建backlog",
-        "创建 backlog",
-        "新增backlog",
-        "新增 backlog",
-        "建卡",
-        "开卡",
-        "建工单",
-        "创建工单",
-        "跟踪这个问题",
-        "跟踪这个bug",
-        "跟踪这个 bug",
-    )
-    return any(phrase in text for phrase in explicit_phrases)
-
-
 def _scope_entry_is_path_like(entry: object) -> bool:
     """A writer-fanout scope entry is a path or glob, never a prose sentence.
 
@@ -538,7 +483,17 @@ def _task_contract_field_names() -> frozenset[str]:
 
 def _contract_text(value: Any) -> str:
     if isinstance(value, (list, tuple)):
-        return "\n".join(str(item).strip() for item in value if str(item or "").strip())
+        return "\n".join(
+            text
+            for item in value
+            if (text := _contract_text(item))
+        )
+    if isinstance(value, dict):
+        return "\n".join(
+            f"{key}: {text}"
+            for key in sorted(value)
+            if (text := _contract_text(value[key]))
+        )
     return str(value or "").strip()
 
 
@@ -563,11 +518,33 @@ def normalize_proposed_task_contract(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     payload = dict(payload)
     contract = dict(contract)
-    verification = contract.get("verification")
-    if isinstance(verification, (list, tuple)):
-        contract["verification"] = "\n".join(
-            str(item).strip() for item in verification if str(item or "").strip()
+    if "behavior" in contract:
+        contract["behavior"] = _contract_text(contract.get("behavior"))
+    if "verification" in contract:
+        contract["verification"] = _contract_text(
+            contract.get("verification")
         )
+    acceptance = contract.get("acceptance")
+    if isinstance(acceptance, (list, tuple)):
+        criteria = [
+            text
+            for item in acceptance
+            if (text := _contract_text(item))
+        ]
+        existing = contract.get("acceptance_criteria")
+        existing_criteria = (
+            list(existing)
+            if isinstance(existing, (list, tuple))
+            else []
+        )
+        merged_criteria = list(existing_criteria)
+        for criterion in criteria:
+            if criterion not in merged_criteria:
+                merged_criteria.append(criterion)
+        contract["acceptance_criteria"] = merged_criteria
+        contract["acceptance"] = "\n".join(criteria)
+    elif isinstance(acceptance, dict):
+        contract["acceptance"] = _contract_text(acceptance)
     if not str(contract.get("verification") or "").strip():
         for synonym in _CONTRACT_VERIFICATION_SYNONYMS:
             text = _contract_text(contract.pop(synonym, None))
@@ -599,29 +576,6 @@ def normalize_proposed_task_contract(payload: dict[str, Any]) -> dict[str, Any]:
 def _append_note(payload: dict[str, Any], note: str) -> None:
     existing = str(payload.get("notes") or "").strip()
     payload["notes"] = f"{existing}\n{note}" if existing else note
-
-
-def _message_allows_idea_to_product_proposal(message: str) -> bool:
-    text = str(message or "").strip().lower()
-    if not text:
-        return True
-    explicit_phrases = (
-        "idea to product",
-        "productize",
-        "build this product",
-        "ship this product",
-        "from idea to product",
-        "从 idea 到产品",
-        "从想法到产品",
-        "跑成产品",
-        "做成产品",
-        "完整交付",
-        "从0到交付",
-        "从 0 到交付",
-        "触发工作流",
-        "启动工作流",
-    )
-    return any(phrase in text for phrase in explicit_phrases)
 
 
 def _is_lifecycle_probe_request(payload: dict, message: str) -> bool:

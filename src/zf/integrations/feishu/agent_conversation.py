@@ -445,6 +445,12 @@ def _emit_kanban_interaction(
     proposal = extract_action_proposal(
         reply_text,
         user_message=proposal_user_text or user_text,
+        proposal_context={
+            "conversation_id": channel_id,
+            "thread_id": thread_key,
+            "run_id": trigger_event.id,
+            "causation_id": origin_event_id,
+        },
     )
     if plan_request is not None and proposal is not None:
         plan_request = {
@@ -560,8 +566,8 @@ def _emit_kanban_action_proposal(
     """Extract an action proposal from the kanban agent's channel reply.
 
     Same extractor and gates as the Web panel headless turn (racing-e2e P1:
-    without this, a Feishu user saying 创建任务 only ever got prose back and no
-    task-creation loop existed on this surface). dispatch runs synchronously in
+    without this, a Feishu create intent only ever got prose back and no
+    task-creation loop existed on this surface). Dispatch runs synchronously in
     run_channel_reply_turn, so the assistant reply is already folded when we
     project here. Emits the same operator.action.proposed event the Web
     triage list renders with an Accept action — approval stays a controlled

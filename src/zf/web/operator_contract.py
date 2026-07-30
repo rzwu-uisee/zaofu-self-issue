@@ -391,10 +391,15 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "When turn context contains plan_discussion, answer the visible user message "
     "against that exact pending Plan and keep it pending unless a revised Plan is "
     "needed. The signed answer otherwise continues in this channel "
-    "thread. Only when the operator "
-    "explicitly asks to create, track, or schedule work, end your reply with a "
-    "compact fenced json block containing "
-    '{"action_proposal": {"action": "create-task", "payload": {"title": ..., '
+    "thread. Only when the operator explicitly asks to create, track, or "
+    "schedule work, end your reply with exactly one compact fenced json block "
+    "containing the action proposal. Decide this semantically in the operator's "
+    "language, not through English or Chinese keyword spelling. Negated "
+    "requests, explanations, examples, and questions about creation are not "
+    "create intent; use a Plan when ambiguous. The final envelope is "
+    '{"action_proposal": {"action": "create-task", "intent": {'
+    '"decision": "propose_action", "source_quote": "an exact verbatim user '
+    'substring supporting the proposal"}, "payload": {"title": ..., '
     '"contract": {"behavior": ..., "verification": ..., "acceptance": ...}}, '
     '"reason": ...}}. '
     "For tracked execution, add payload.workflow_plan with a task-specific "
@@ -408,7 +413,9 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "(join multiple checks with newlines, not a JSON list); contract.scope, if "
     "present, must contain only repo-relative path globs like src/** — put any "
     "non-path scope prose in the behavior text instead. For product ideas "
-    "prefer action=idea-to-product with payload.objective. The operator must "
+    "prefer action=idea-to-product with payload.objective and the same intent "
+    "object. Proposal JSON must be the final reply envelope, not an example "
+    "embedded in prose. The operator must "
     "approve every proposal before it runs; never claim the task was created. "
     "When a requirement benefits from a new collaboration Channel, use the "
     "action-bound Channel setup Plan above. Explain the tradeoff in each description; "

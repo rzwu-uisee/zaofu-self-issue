@@ -15,7 +15,7 @@ from zf.runtime.channel_contracts import (
 )
 
 
-TEMPLATE_VERSION = "2026-07-25.1"
+TEMPLATE_VERSION = "2026-07-30.2"
 WRITER_PROFILES = {
     "artifact_writer",
     "project_writer",
@@ -44,16 +44,19 @@ def _member(
     role: str,
     *,
     permission_profile: str = "read_only",
-    skill: str = "",
+    skills: tuple[str, ...] = (),
     optional: bool = False,
 ) -> dict[str, Any]:
     context_name = role.replace("_", "-")
+    skill_refs = list(
+        dict.fromkeys(f"skills/{skill}/SKILL.md" for skill in skills if skill.strip())
+    )
     return {
         "member_id": role,
         "channel_role": role,
         "permission_profile": permission_profile,
         "role_context_ref": f"channel_roles/{context_name}.md",
-        "skill_refs": [f"skills/{skill}/SKILL.md"] if skill else [],
+        "skill_refs": skill_refs,
         "optional": optional,
     }
 
@@ -65,15 +68,28 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             _member(
                 "product_pm",
                 permission_profile="project_writer",
-                skill="zf-harness-spec-freeze-contract",
+                skills=("zf-channel-discussion-participant",),
             ),
-            _member("arch", skill="zf-cr"),
-            _member("critic", skill="zf-harness-evaluator-scoring"),
+            _member("arch", skills=("zf-channel-discussion-participant",)),
+            _member(
+                "critic",
+                skills=("zf-channel-discussion-participant",),
+            ),
             _member(
                 "synthesizer",
-                skill="zf-channel-discussion-synthesizer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-discussion-synthesizer",
+                ),
             ),
-            _member("security_reviewer", optional=True),
+            _member(
+                "security_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-security-review",
+                ),
+                optional=True,
+            ),
         ],
         "writer_roles": ["product_pm"],
         "writer_scope": ["docs/design/**", "docs/impl/**"],
@@ -88,11 +104,39 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             _member(
                 "researcher",
                 permission_profile="artifact_writer",
-                skill="zf-research-fanout-trigger",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-research-participant",
+                    "zf-research-preflight-law",
+                    "source-verification",
+                ),
             ),
-            _member("arch", skill="zf-cr"),
-            _member("critic", skill="zf-harness-evaluator-scoring"),
-            _member("synthesizer", skill="zf-refactor-plan-synth"),
+            _member(
+                "arch",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-research-participant",
+                    "zf-research-preflight-law",
+                    "source-verification",
+                ),
+            ),
+            _member(
+                "critic",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-research-participant",
+                    "zf-research-preflight-law",
+                ),
+            ),
+            _member(
+                "synthesizer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-research-synthesizer",
+                    "zf-channel-discussion-synthesizer",
+                    "zf-research-preflight-law",
+                ),
+            ),
         ],
         "writer_roles": ["researcher"],
         "writer_scope": [".zf/research/**", "/tmp/zf-research/**"],
@@ -104,10 +148,38 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
     "architecture-review": {
         "name": "Architecture Review",
         "members": [
-            _member("arch", permission_profile="project_writer", skill="zf-cr"),
-            _member("security_reviewer", skill="zf-harness-evidence-collection"),
-            _member("dev_reviewer", skill="zf-refactor-generalization-audit"),
-            _member("critic", skill="zf-harness-evaluator-scoring"),
+            _member(
+                "arch",
+                permission_profile="project_writer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-discussion-synthesizer",
+                    "zf-cr",
+                    "zf-harness-design-impl-game-review",
+                ),
+            ),
+            _member(
+                "security_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-security-review",
+                    "zf-harness-evidence-collection",
+                ),
+            ),
+            _member(
+                "dev_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-harness-design-impl-game-review",
+                ),
+            ),
+            _member(
+                "critic",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-harness-gate-evaluator",
+                ),
+            ),
         ],
         "writer_roles": ["arch"],
         "writer_scope": ["docs/design/**", "docs/impl/**"],
@@ -122,10 +194,27 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             _member(
                 "tech_leader",
                 permission_profile="workspace_writer",
-                skill="zf-harness-verification-checklist",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-quick-change",
+                    "zf-channel-discussion-synthesizer",
+                ),
             ),
-            _member("dev_reviewer", skill="zf-cr"),
-            _member("qa_analyst", skill="zf-browser-e2e-contract"),
+            _member(
+                "dev_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-quick-change",
+                ),
+            ),
+            _member(
+                "qa_analyst",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-quick-change",
+                    "zf-harness-verification-checklist",
+                ),
+            ),
         ],
         "writer_roles": ["tech_leader"],
         "writer_scope": ["**"],
@@ -140,10 +229,29 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             _member(
                 "tech_leader",
                 permission_profile="workspace_writer",
-                skill="zf-workflow-resume-operator",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-incident-triage",
+                    "zf-channel-discussion-synthesizer",
+                ),
             ),
-            _member("qa_analyst", skill="zf-harness-evidence-collection"),
-            _member("security_reviewer", optional=True),
+            _member(
+                "qa_analyst",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-incident-triage",
+                    "zf-harness-evidence-collection",
+                ),
+            ),
+            _member(
+                "security_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-incident-triage",
+                    "zf-channel-security-review",
+                ),
+                optional=True,
+            ),
         ],
         "writer_roles": ["tech_leader"],
         "writer_scope": ["**"],

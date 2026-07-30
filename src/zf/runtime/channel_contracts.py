@@ -125,7 +125,9 @@ CHANNEL_DISCUSSION_MODES = {
     "debate_judge",
 }
 CHANNEL_PROVIDER_BINDING_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
-CHANNEL_SKILL_REF_RE = re.compile(r"^skills/[A-Za-z0-9_.-]+/SKILL\.md$")
+CHANNEL_SKILL_REF_RE = re.compile(
+    r"^skills/[A-Za-z0-9][A-Za-z0-9_.-]*/SKILL\.md$"
+)
 CHANNEL_ROLE_VISIBILITY_DEFAULTS = {
     "arch": "planner",
     "facilitator": "planner",

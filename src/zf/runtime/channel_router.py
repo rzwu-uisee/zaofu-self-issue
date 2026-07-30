@@ -354,6 +354,7 @@ def route_channel_message(
             channel_role=str(member.get("channel_role") or ""),
             role_context_ref=str(member.get("role_context_ref") or ""),
             skill_refs=member.get("skill_refs", []),
+            resolved_skill_refs=member.get("resolved_skill_refs", []),
             permission_profile=str(member.get("permission_profile") or ""),
         )
         writer.emit(

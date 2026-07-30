@@ -1,9 +1,8 @@
-"""2026-07-03 racing-codex e2e finding #4: channel member skill_refs must be
-copied to the project-root-relative path they name, not just referenced by
-path string in the system prompt."""
+"""Channel Skill refs resolve through a state-dir overlay without source dirt."""
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from zf.core.config.schema import ProjectConfig, SkillSourceConfig, ZfConfig
@@ -59,9 +58,24 @@ def test_channel_invite_materializes_skill_ref_from_skill_source(tmp_path: Path)
     })
 
     assert result.get("ok"), result
-    materialized = project_root / "skills" / "zf-channel-discussion-participant" / "SKILL.md"
+    materialized = (
+        project_root
+        / ".zf"
+        / "runtime-skills"
+        / "zf-channel-discussion-participant"
+        / "SKILL.md"
+    )
     assert materialized.is_file()
     assert materialized.read_text(encoding="utf-8") == "# participant protocol\n"
+    assert not (
+        project_root
+        / "skills"
+        / "zf-channel-discussion-participant"
+    ).exists()
+    manifest = (
+        project_root / ".zf" / "runtime-skills" / "manifest.json"
+    ).read_text(encoding="utf-8")
+    assert str(materialized) in manifest
 
 
 def test_channel_invite_skips_materialization_when_already_present(tmp_path: Path) -> None:
@@ -82,6 +96,12 @@ def test_channel_invite_skips_materialization_when_already_present(tmp_path: Pat
     assert result.get("ok"), result
     # unchanged — the pre-existing local copy is left as-is, not overwritten
     assert (existing / "SKILL.md").read_text(encoding="utf-8") == "# local copy\n"
+    assert not (
+        project_root
+        / ".zf"
+        / "runtime-skills"
+        / "zf-channel-discussion-participant"
+    ).exists()
 
 
 def test_channel_invite_without_skill_refs_materializes_nothing(tmp_path: Path) -> None:
@@ -96,3 +116,96 @@ def test_channel_invite_without_skill_refs_materializes_nothing(tmp_path: Path) 
 
     assert result.get("ok"), result
     assert not (project_root / "skills").exists()
+
+
+def test_channel_invite_rejects_unresolved_skill_ref(tmp_path: Path) -> None:
+    service, log, _project_root = _service(tmp_path)
+    _exec(service, "channel-create", {"channel_id": "ch-1", "name": "ch-1"})
+
+    result = _exec(service, "channel-invite-member", {
+        "channel_id": "ch-1",
+        "member_id": "arch-1",
+        "provider": "codex",
+        "channel_role": "arch",
+        "skill_refs": ["does-not-exist"],
+    })
+
+    assert result["ok"] is False
+    assert result["status"] == "rejected"
+    assert "skills/does-not-exist/SKILL.md" in result["reason"]
+    assert any(
+        event.type == "channel.member.add.rejected"
+        and event.payload.get("member_id") == "arch-1"
+        for event in log.read_all()
+    )
+    assert not any(
+        event.type == "channel.member.invited"
+        and event.payload.get("member_id") == "arch-1"
+        for event in log.read_all()
+    )
+
+
+def test_runtime_skill_overlay_keeps_target_git_worktree_clean(
+    tmp_path: Path,
+) -> None:
+    skills_repo = tmp_path / "external-skills"
+    skill_dir = skills_repo / "review-method"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# review method\n",
+        encoding="utf-8",
+    )
+    service, _log, project_root = _service(
+        tmp_path,
+        skill_sources=[
+            SkillSourceConfig(name="external", path=str(skills_repo)),
+        ],
+    )
+    (project_root / ".gitignore").write_text(".zf/\n", encoding="utf-8")
+    (project_root / "README.md").write_text("# target\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=project_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "add", ".gitignore", "README.md"],
+        cwd=project_root,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.test",
+            "commit",
+            "-qm",
+            "init",
+        ],
+        cwd=project_root,
+        check=True,
+    )
+    _exec(
+        service,
+        "channel-create",
+        {"channel_id": "ch-clean", "name": "ch-clean"},
+    )
+    result = _exec(service, "channel-invite-member", {
+        "channel_id": "ch-clean",
+        "member_id": "reviewer",
+        "provider": "codex",
+        "channel_role": "critic",
+        "skill_refs": ["review-method"],
+    })
+
+    assert result.get("ok"), result
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""

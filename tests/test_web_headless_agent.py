@@ -113,6 +113,27 @@ def _fake_codex_script(tmp_path: Path) -> Path:
     return script
 
 
+def _create_task_action_proposal(
+    payload: dict,
+    *,
+    source_quote: str = "创建任务",
+    reason: str = "",
+) -> dict:
+    proposal = {
+        "action_proposal": {
+            "action": "create-task",
+            "intent": {
+                "decision": "propose_action",
+                "source_quote": source_quote,
+            },
+            "payload": payload,
+        }
+    }
+    if reason:
+        proposal["action_proposal"]["reason"] = reason
+    return proposal
+
+
 def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
     state_dir: Path,
     tmp_path: Path,
@@ -1964,19 +1985,17 @@ def test_chat_orchestrator_extracts_create_task_proposal(
     monkeypatch: pytest.MonkeyPatch,
 ):
     script = tmp_path / "fake_claude_create_task.py"
-    proposal = {
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {
-                "title": "Add auth timeout retry",
-                "contract": {
-                    "behavior": "Retry transient auth timeout failures.",
-                    "verification": "Focused auth retry test passes.",
-                },
+    proposal = _create_task_action_proposal(
+        {
+            "title": "Add auth timeout retry",
+            "contract": {
+                "behavior": "Retry transient auth timeout failures.",
+                "verification": "Focused auth retry test passes.",
             },
-            "reason": "new work should be tracked as a task",
-        }
-    }
+        },
+        source_quote="create a task",
+        reason="new work should be tracked as a task",
+    )
     script.write_text(
         "\n".join([
             "import json",
@@ -2018,7 +2037,7 @@ def test_chat_orchestrator_extracts_create_task_proposal(
     assert proposal_data["valid"] is True
 
 
-def test_readonly_message_suppresses_example_create_task_proposal():
+def test_create_task_proposal_without_intent_is_invalid():
     from zf.web.server import _headless_action_proposal
 
     answer = json.dumps({
@@ -2034,10 +2053,12 @@ def test_readonly_message_suppresses_example_create_task_proposal():
         user_message="介绍下你自己",
     )
 
-    assert proposal is None
+    assert proposal is not None
+    assert proposal["valid"] is False
+    assert "intent is required" in proposal["validation_error"]
 
 
-def test_analyze_task_message_suppresses_create_task_proposal():
+def test_analyze_task_message_without_intent_is_invalid():
     from zf.web.server import _headless_action_proposal
 
     answer = json.dumps({
@@ -2053,19 +2074,22 @@ def test_analyze_task_message_suppresses_create_task_proposal():
         user_message="分析下 TASK-A734FF task",
     )
 
-    assert proposal is None
+    assert proposal is not None
+    assert proposal["valid"] is False
+    assert "intent is required" in proposal["validation_error"]
 
 
 def test_explicit_create_task_message_keeps_create_task_proposal():
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {"title": "Investigate TASK-A734FF failure"},
-            "reason": "operator asked to track it",
-        }
-    })
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {"title": "Investigate TASK-A734FF failure"},
+            source_quote="创建一个任务",
+            reason="operator asked to track it",
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(
         answer,
@@ -2082,17 +2106,17 @@ def test_proposal_list_verification_becomes_readable_text():
     persisted as a Python-list repr string (racing-e2e kanban-autonomy)."""
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {
                 "title": "赛车小游戏 MVP",
                 "contract": {
                     "verification": ["打开页面 3 秒内可开始", "按 ↑ 车辆加速"],
                 },
             },
-        }
-    })
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(answer, user_message="创建任务")
 
@@ -2107,10 +2131,9 @@ def test_proposal_prose_scope_moved_to_notes_paths_kept():
     fanout; keep only path-like entries in scope and preserve prose in notes."""
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {
                 "title": "赛车小游戏 MVP",
                 "contract": {
                     "scope": [
@@ -2120,8 +2143,9 @@ def test_proposal_prose_scope_moved_to_notes_paths_kept():
                     ],
                 },
             },
-        }
-    })
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(answer, user_message="创建任务")
 
@@ -2150,10 +2174,9 @@ def test_proposal_acceptance_synonym_maps_into_verification():
     acceptance criteria. Synonyms must map into verification."""
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {
                 "title": "实现键盘方向键和移动端触摸滑动操作",
                 "contract": {
                     "behavior": "接入键盘与触摸输入并映射到核心移动逻辑。",
@@ -2163,8 +2186,9 @@ def test_proposal_acceptance_synonym_maps_into_verification():
                     ],
                 },
             },
-        }
-    })
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(answer, user_message="创建任务")
 
@@ -2197,15 +2221,15 @@ def test_proposal_semantically_empty_contract_is_invalid():
     through as valid — the task would land with no behavior/verification."""
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {
                 "title": "空语义任务",
                 "contract": {"scope": ["src/**"]},
             },
-        }
-    })
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(answer, user_message="创建任务")
 
@@ -2217,12 +2241,10 @@ def test_proposal_semantically_empty_contract_is_invalid():
 def test_proposal_without_contract_stays_title_only_valid():
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {"title": "纯标题直建"},
-        }
-    })
+    answer = json.dumps(
+        _create_task_action_proposal({"title": "纯标题直建"}),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(answer, user_message="创建任务")
 
@@ -2232,13 +2254,14 @@ def test_proposal_without_contract_stays_title_only_valid():
 def test_explicit_task_proposal_message_keeps_create_task_proposal():
     from zf.web.server import _headless_action_proposal
 
-    answer = json.dumps({
-        "action_proposal": {
-            "action": "create-task",
-            "payload": {"title": "Fix Channel Group interactive E2E gap"},
-            "reason": "operator asked for a task proposal",
-        }
-    })
+    answer = json.dumps(
+        _create_task_action_proposal(
+            {"title": "Fix Channel Group interactive E2E gap"},
+            source_quote="整理成一个 task proposal",
+            reason="operator asked for a task proposal",
+        ),
+        ensure_ascii=False,
+    )
 
     proposal = _headless_action_proposal(
         answer,

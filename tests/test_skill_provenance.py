@@ -73,6 +73,23 @@ def test_missing_enabled_skill_becomes_warning_and_missing_entry(tmp_path: Path)
     assert "missing" in warnings[0]
 
 
+def test_builtin_channel_skill_is_not_an_implicit_workflow_role_source(
+    tmp_path: Path,
+):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    role = RoleConfig(name="dev", skills=["zf-channel-quick-change"])
+
+    entries = build_skill_lock_entries(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        role=role,
+    )
+
+    assert entries[0].status == "missing"
+    assert entries[0].source is None
+
+
 def test_external_skill_source_resolves_and_records_description(tmp_path: Path):
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
