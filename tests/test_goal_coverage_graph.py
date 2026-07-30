@@ -544,6 +544,71 @@ def test_goal_coverage_graph_keeps_current_closure_when_stale_closure_arrives_la
     assert any(item["code"] == "stale_goal_closure_result" for item in graph["diagnostics"])
 
 
+def test_goal_coverage_graph_accepts_equivalent_task_map_generation_encodings() -> None:
+    generation = "536e8b2e05d5acd499e79694e96973276da40d031bf62632b3d7395e360a1760"
+    shortened_generation = f"task-map-{generation[:20]}"
+    task_map = _task_map()
+    task_map["task_map_generation"] = generation
+    claim_set = build_goal_claim_set(
+        task_map,
+        workflow_run_id="RUN-1",
+        goal_id="F-GOAL",
+        task_map_generation=generation,
+    )
+    verification = ZfEvent(
+        id="verify-short-generation",
+        type="verify.passed",
+        task_id="TASK-A",
+        payload={
+            "verification_result": _verification_result(
+                task_map_generation=shortened_generation,
+            ),
+        },
+    )
+    closure = ZfEvent(
+        id="closure-short-generation",
+        type="goal.closure.rejected",
+        payload={
+            "goal_closure_result": _closure_result(
+                task_map_generation=shortened_generation,
+                goal_claim_set_digest=claim_set["claim_set_digest"],
+            ),
+        },
+    )
+
+    graph = build_goal_coverage_graph(
+        task_map=task_map,
+        tasks=_tasks(),
+        events=[
+            (1, verification),
+            (2, _admission_event(verification.id)),
+            (3, closure),
+            (4, _admission_event(
+                closure.id,
+                schema="goal-closure-result.v1",
+                task_id=None,
+            )),
+        ],
+        project_id="zaofu",
+        feature_id="F-GOAL",
+        goal_claim_set=claim_set,
+    )
+
+    claim = next(
+        node for node in graph["nodes"]
+        if node.get("goal_claim_id") == "CLAIM-A"
+    )
+    assert claim["task_verification"] == "passed"
+    assert claim["closure"] == "closed"
+    assert not any(
+        item["code"] in {
+            "stale_verification_result",
+            "stale_goal_closure_result",
+        }
+        for item in graph["diagnostics"]
+    )
+
+
 def test_goal_coverage_graph_planned_summary_counts_only_mandatory_claims() -> None:
     task_map = _task_map()
     task_map["goal_claims"].append({

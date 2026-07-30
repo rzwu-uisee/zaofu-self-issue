@@ -13,7 +13,7 @@ from zf.runtime.workflow_route_catalog import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_root_catalog_projects_delivery_and_fixed_research_routes() -> None:
+def test_root_catalog_projects_delivery_and_registered_research_routes() -> None:
     config = load_config(ROOT / "zf.yaml")
 
     first = workflow_route_catalog(config)
@@ -45,6 +45,12 @@ def test_root_catalog_projects_delivery_and_fixed_research_routes() -> None:
         "risk_critic",
         "synthesizer",
     ]
+    adaptive = routes["research:adaptive-pilot"]
+    assert adaptive["template_id"] == "research-adaptive.pilot.v1"
+    assert adaptive["entry_pattern_id"] == "research-adaptive"
+    assert adaptive["roles"] == ["research_root"]
+    assert adaptive["writer_roles"] == []
+    assert adaptive["rollout"] == "opt_in_pilot"
 
 
 def test_catalog_only_exposes_registered_reader_general_entries() -> None:

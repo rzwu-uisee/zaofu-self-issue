@@ -8,6 +8,7 @@ from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
+from zf.runtime.candidate_result_binding import same_task_map_generation
 from zf.runtime.goal_closure_result import (
     GoalClosureResultError,
     validate_goal_closure_result,
@@ -742,6 +743,11 @@ def _identity_stale_reasons(
         actual = str(result.get(field) or "").strip()
         if not actual:
             reasons.append(f"missing:{field}")
+        elif (
+            field == "task_map_generation"
+            and same_task_map_generation(actual, expected)
+        ):
+            continue
         elif actual != expected:
             reasons.append(f"mismatch:{field}")
     return reasons

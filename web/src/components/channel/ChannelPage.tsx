@@ -365,6 +365,7 @@ export function ChannelPage({
   onOpenChannel,
   onPostMessage,
   onRemoveMember,
+  onResearchAdopt,
   onRequestSynthesis,
   onResolveQuestion,
   onSetMemberPermission,
@@ -392,6 +393,7 @@ export function ChannelPage({
   onOpenChannel: (channelId: string) => void;
   onPostMessage: (text: string, refs?: Record<string, unknown>) => Promise<void>;
   onRemoveMember: (memberId: string) => Promise<void>;
+  onResearchAdopt: (payload: Record<string, unknown>) => Promise<void>;
   onRequestSynthesis: (targetMemberId?: string) => Promise<void>;
   onResolveQuestion: (questionId: string, threadId: string, resolution: string, answer: string) => Promise<void>;
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
@@ -409,6 +411,7 @@ export function ChannelPage({
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const [consensusBlocker, setConsensusBlocker] = useState("");
   const [controlsBusy, setControlsBusy] = useState(false);
+  const [researchActionBusyId, setResearchActionBusyId] = useState("");
   const [activeTab, setActiveTab] = useState<ChannelTab>("chat");
   const [drawer, setDrawer] = useState<ChannelDrawerKey | null>(null);
   const [channelSwitcherOpen, setChannelSwitcherOpen] = useState(false);
@@ -2296,6 +2299,7 @@ export function ChannelPage({
                 onScroll={handleChannelTimelineScroll}
               >
                 <AgentSessionTimeline
+                  actionBusyId={researchActionBusyId}
                   activeThreadId={activeChannelThreadId}
                   allowSplit={channelHasMultipleThreads}
                   allowPreviewSplit
@@ -2305,6 +2309,16 @@ export function ChannelPage({
                   emptyBody="Post a message or @mention an agent to start a channel run."
                   emptyTitle="No channel messages"
                   minimalRunActivity
+                  onAdoptResearchResult={(card, cardId) => {
+                    const payload = recordValue(
+                      card.payload?.adoptPayload,
+                    );
+                    if (!payload || researchActionBusyId) return;
+                    setResearchActionBusyId(cardId);
+                    void onResearchAdopt(payload).finally(() => {
+                      setResearchActionBusyId("");
+                    });
+                  }}
                   onActiveThreadChange={(threadId) => {
                     setActiveChannelThreadId(threadId);
                     if (channelSplitThreadId === threadId) setChannelSplitThreadId("");

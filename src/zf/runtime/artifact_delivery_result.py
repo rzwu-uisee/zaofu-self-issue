@@ -721,6 +721,7 @@ def _runtime_binding_issues(
         hydrate_call_result_envelope,
     )
 
+    admitted_envelopes: dict[str, Mapping[str, Any]] = {}
     for event in events:
         if str(getattr(event, "type", "") or "") != (
             "workflow.call.result.admitted"
@@ -755,15 +756,26 @@ def _runtime_binding_issues(
         ref = str(descriptor.get("ref") or "")
         if ref:
             admitted_refs.add(ref)
+            admitted_envelopes[ref] = envelope
 
     issues: list[dict[str, str]] = []
-    for ref in _strings(result.get("input_result_refs")):
+    input_result_refs = _strings(result.get("input_result_refs"))
+    for ref in input_result_refs:
         if ref not in admitted_refs:
             issues.append({
                 "field": "control_result.input_result_refs",
                 "code": "result_not_admitted",
                 "message": ref,
             })
+
+    from zf.runtime.artifact_delivery_evidence import (
+        artifact_delivery_evidence_binding_issues,
+    )
+
+    issues.extend(artifact_delivery_evidence_binding_issues(
+        result,
+        admitted_envelopes=admitted_envelopes,
+    ))
 
     current_generation = ""
     latest_claim_pin: Mapping[str, Any] | None = None

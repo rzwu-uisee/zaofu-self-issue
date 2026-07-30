@@ -5814,6 +5814,105 @@ def test_orphan_writer_fanout_manifest_is_cancelled_not_rebound(
     assert _manifest(state_dir, fanout_id)["status"] == "cancelled"
 
 
+def test_cancelled_run_closes_writer_resources_before_restart_recovery(
+    tmp_path: Path,
+):
+    state_dir, log, _transport, orch = _state(
+        tmp_path,
+        affinity_stage_slots=True,
+        affinity_lane_count=1,
+    )
+    task_map_path = state_dir / "artifacts" / "F-11111111" / "task_map.json"
+    task_map = json.loads(task_map_path.read_text(encoding="utf-8"))
+    task_map["tasks"] = task_map["tasks"][:1]
+    task_map_path.write_text(json.dumps(task_map), encoding="utf-8")
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-1",
+        title="cancelled writer",
+        status="backlog",
+        contract=TaskContract(
+            feature_id="F-11111111",
+            evidence_contract={
+                "workflow_run_id": "trace-1",
+                "source_refs": {
+                    "task_map_ref": ".zf/artifacts/F-11111111/task_map.json",
+                },
+            },
+        ),
+    ))
+    _start(orch)
+    fanout_id = _fanout_id(log)
+    child = _child(_manifest(state_dir, fanout_id), "TASK-1")
+    assert child["status"] == "dispatched"
+    from zf.runtime.workflow_operation import WorkflowOperationService
+
+    operations = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    )
+    operation = operations.ensure_operation(
+        workflow_run_id="trace-1",
+        operation_id="operation-trace-1",
+        operation_type="fanout_writer_child",
+        request={"attempt_domain": "task", "objective": "write TASK-1"},
+        task_id="TASK-1",
+    )
+    operations.mark_started(
+        operation_id=operation.operation_id,
+        request_hash=operation.request_hash,
+        workflow_run_id="trace-1",
+        task_id="TASK-1",
+    )
+
+    cancelled = EventWriter(log).append(ZfEvent(
+        type="run.cancelled",
+        actor="operator",
+        task_id="TASK-1",
+        correlation_id="trace-1",
+        payload={
+            "run_id": "trace-1",
+            "workflow_run_id": "trace-1",
+            "reason": "operator cancelled test run",
+        },
+    ))
+    orch.run_once(events=[cancelled])
+
+    events = log.read_all()
+    assert _manifest(state_dir, fanout_id)["status"] == "cancelled"
+    assert TaskStore(state_dir / "kanban.json").get("TASK-1").status == "cancelled"
+    assert any(
+        event.type == "fanout.child.dispatch_lost"
+        and event.payload.get("fanout_id") == fanout_id
+        and event.payload.get("run_id") == child["run_id"]
+        for event in events
+    )
+    assert any(
+        event.type == "workflow.operation.cancelled"
+        and event.payload.get("workflow_run_id") == "trace-1"
+        for event in events
+    )
+    assert orch._last_worker_state["dev-1"] == "idle"  # type: ignore[attr-defined]
+
+    rebound_before = sum(
+        event.type == "task.dispatch_context.bound"
+        and event.payload.get("fanout_id") == fanout_id
+        for event in events
+    )
+    restarted = Orchestrator(
+        state_dir,
+        orch.config,
+        _RecordingTransport(),
+    )  # type: ignore[arg-type]
+    restarted.run_once(events=[])
+    rebound_after = sum(
+        event.type == "task.dispatch_context.bound"
+        and event.payload.get("fanout_id") == fanout_id
+        for event in log.read_all()
+    )
+    assert rebound_after == rebound_before
+
+
 def test_heartbeat_with_stale_identity_is_not_adopted(
     tmp_path: Path,
 ):

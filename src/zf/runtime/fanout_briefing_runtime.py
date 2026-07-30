@@ -360,6 +360,12 @@ class FanoutBriefingMixin:
                 if str(item).strip()
             )
             stage_instruction_lines.append("")
+        from zf.runtime.research_adaptive_contract import apply_child_contract
+
+        apply_child_contract(
+            success_payload, child_payload, stage_instruction_lines,
+            str(context.stage_id or ""), str(context.fanout_id or ""),
+        )
         # FIX-14(bizsim r4 F14):briefing 样例与 schema 合约配对。schema 对
         # report 要求的字段必须出现在样例里——r4 全轮 9 份 verify report
         # 矩阵全 0 行,根因即"校验器不带教育"(payload-contract 教训重演)。
@@ -611,6 +617,7 @@ class FanoutBriefingMixin:
         from zf.runtime.stage_execution_card import (
             ARTIFACT_DELIVERY_RESULT_GUIDANCE,
             prepare_fanout_result_guidance,
+            render_review_subject_lines,
         )
 
         result_guidance, semantic_submit, result_prefix = (
@@ -878,6 +885,21 @@ class FanoutBriefingMixin:
                 cli_command=zf_cli_cmd(),
             )
             failure_command = success_command
+        from zf.runtime.stage_execution_card import render_fanout_submit_commands
+
+        command_lines = render_fanout_submit_commands(
+            success_command=success_command,
+            failure_command=failure_command,
+            semantic_submit=semantic_submit,
+        )
+        review_subject_lines = render_review_subject_lines(
+            candidate_ref=candidate_eval_ref,
+            candidate_head=candidate_eval_head,
+            candidate_prefix=candidate_prefix,
+            subject_pdd_id=subject_pdd_id,
+            verification_reader=verification_reader,
+            artifact_delivery=is_artifact_delivery,
+        )
         briefing_text = "\n".join([
                 f"# Fanout Reader Child: {child_id}",
                 "",
@@ -886,49 +908,16 @@ class FanoutBriefingMixin:
                 f"- run_id: `{run_id}`",
                 f"- target_ref: `{context.target_ref}`",
                 "",
-                # A3(v3 judge 顺序缺陷,三流 3/3 + prd-goal e2e 第 4 次
-                # 复现):candidate.ready 触发的终审必须评 candidate 本身;
-                # target_ref 是 ship 之后的合流目的地,审时可能不存在/为空。
-                *(
-                    [
-                        f"- candidate_ref: `{candidate_eval_ref}`",
-                        f"- candidate_head_commit: `{candidate_eval_head}`",
-                        "",
-                        "EVALUATE THE CANDIDATE: judge/inspect `candidate_ref` at "
-                        "`candidate_head_commit` — this is the deliverable under "
-                        "review. `target_ref` is only the merge DESTINATION after "
-                        "ship; it may be unresolved or stale at review time and its "
-                        "state MUST NOT be a rejection reason.",
-                        "",
-                    ]
-                    if candidate_eval_ref
-                    # LB-5:candidate_ref 缺席的验收读者仍拿受审对象语义,
-                    # 不许把 target_ref 状态当拒因(scan/plan 读者不适用)。
-                    else [
-                        "SUBJECT OF REVIEW: no candidate_ref accompanied this "
-                        "dispatch. If a deliverable branch exists (default "
-                        f"prefix `{candidate_prefix}/`"
-                        + (
-                            f", e.g. `{candidate_prefix}/{subject_pdd_id}`"
-                            if subject_pdd_id else ""
-                        )
-                        + "), evaluate THAT branch at its head. `target_ref` is "
-                        "only the merge DESTINATION after ship; it may be "
-                        "unresolved or empty at review time and its state MUST "
-                        "NOT be a rejection reason.",
-                        "",
-                    ]
-                    if verification_reader
-                    else []
-                ),
+                *review_subject_lines,
                 (
-                    "This is a planning reader: do not modify product "
-                    "implementation files, but write the plan/task-map artifacts "
-                    "and inline plan_ports required by this briefing."
-                    if is_plan_artifact_stage
-                    else (
-                        "Evaluate the target ref as a read-only fanout child."
-                        if not candidate_eval_ref and not verification_reader
+                        "This is a planning reader: do not modify product "
+                        "implementation files, but write the plan/task-map artifacts "
+                        "and inline plan_ports required by this briefing."
+                        if is_plan_artifact_stage
+                        else (
+                            "Evaluate the target ref as a read-only fanout child."
+                        if (not candidate_eval_ref or is_artifact_delivery)
+                        and not verification_reader
                         else "Read-only fanout child."
                     )
                 ),
@@ -948,16 +937,7 @@ class FanoutBriefingMixin:
                 *output_contract_lines,
                 "Use the runtime state dir explicitly because this role may run from a detached workdir.",
                 "",
-                "Success command:",
-                "```bash",
-                success_command,
-                "```",
-                "",
-                "Failure command:",
-                "```bash",
-                failure_command,
-                "```",
-                "",
+                *command_lines,
                 "Do not emit the aggregate success/failure event directly; the kernel publishes it after the fanout barrier or synth role finishes.",
                 "",
                 *result_guidance,

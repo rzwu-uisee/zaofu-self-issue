@@ -9,7 +9,15 @@ from zf.core.events import EventLog, EventWriter
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_anchor import (
+    bind_workflow_request_to_task,
+    mark_workflow_managed_task,
+)
 from zf.runtime.workflow_intake import build_flow_intake
+from zf.runtime.workflow_origin import (
+    build_workflow_origin_binding,
+    workflow_origin_digest,
+)
 from zf.runtime.workflow_start import WorkflowStartService
 from zf.web.operator_contract import canonical_action
 from zf.web.proposal_extraction import default_validate_payload
@@ -184,6 +192,69 @@ def test_service_rejects_missing_route_and_stale_bindings(
     assert missing_route["status"] == "workflow_route_unavailable"
     assert stale_task["status"] == "workflow_task_stale"
     assert stale_config["status"] == "workflow_route_unavailable"
+
+
+def test_service_uses_request_origin_and_rejects_target_override(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir = _project(tmp_path)
+    config = load_config(project_root / "zf.yaml")
+    origin = build_workflow_origin_binding(
+        source="kanban-agent",
+        project_id=config.project.name,
+        channel_id="ch-product",
+        thread_id="scope",
+    )
+    request_dir = state_dir / "workflow-requests"
+    request_dir.mkdir()
+    (request_dir / "REQ-START.json").write_text(
+        json.dumps({
+            "schema_version": "workflow.request.v1",
+            "request_id": "REQ-START",
+            "project_id": config.project.name,
+            "kind": "prd",
+            "status": "ready",
+            "revision": 2,
+            "origin_binding": origin,
+        }),
+        encoding="utf-8",
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    task = store.get("TASK-WORKFLOW-START")
+    assert task is not None
+    task = mark_workflow_managed_task(task)
+    task = bind_workflow_request_to_task(
+        task,
+        request_id="REQ-START",
+        request_revision=2,
+        origin_binding_digest=workflow_origin_digest(origin),
+    )
+    store.update(task.id, contract=task.contract)
+    service = WorkflowStartService(state_dir, config)
+
+    ready = service.preview(
+        {
+            "task_id": task.id,
+            "route_id": "research:fixed",
+            "objective": "Research product scope.",
+        },
+        require_bindings=False,
+    )
+    mismatch = service.preview(
+        {
+            **ready["payload"],
+            "channel_id": "ch-other",
+        },
+        require_bindings=True,
+    )
+
+    assert ready["ok"] is True
+    assert ready["payload"]["request_id"] == "REQ-START"
+    assert ready["payload"]["request_revision"] == 2
+    assert ready["payload"]["origin_binding"] == origin
+    assert ready["payload"]["channel_id"] == "ch-product"
+    assert ready["payload"]["thread_id"] == "scope"
+    assert mismatch["status"] == "origin_binding_mismatch"
 
 
 def test_cli_routes_propose_apply_and_replay_without_web(

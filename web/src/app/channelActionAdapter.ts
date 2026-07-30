@@ -125,7 +125,15 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     });
   }
 
+  async function adoptResearchResult(payload: Record<string, unknown>) {
+    await args.submitAction("research-adopt", {
+      ...payload,
+      source: "web-channel-research-result",
+    });
+  }
+
   return {
+    adoptResearchResult,
     decideConsensus,
     resolveQuestion,
     submitWorkflowRequest,

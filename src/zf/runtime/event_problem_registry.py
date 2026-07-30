@@ -441,6 +441,13 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             source="workflow_runtime",
             suggested_action_kind="diagnose_research_fanout_failure",
         ),
+        _flow_stage_expected(
+            "research.adaptive.failed",
+            failure_class="research_adaptive_failed",
+            title="Adaptive Research root failed",
+            source="workflow_runtime",
+            suggested_action_kind="diagnose_adaptive_research_failure",
+        ),
         _kernel_child_result("prd.critic.completed", failed=False),
         _kernel_child_result("prd.critic.failed", failed=True),
         _flow_stage_expected(

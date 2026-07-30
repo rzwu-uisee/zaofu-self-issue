@@ -10,6 +10,7 @@ from zf.core.events.model import ZfEvent
 from zf.runtime.generic_workflow_fanout import GENERIC_WORKFLOW_HANDOFF_KEYS
 from zf.runtime.orchestrator_types import OrchestratorDecision
 from zf.runtime.workstream_scope_guard import check_workstream_scope
+from zf.runtime.workflow_task_lifecycle import activate_workflow_managed_task
 
 
 _WORKFLOW_IDENTITY_KEYS = tuple(dict.fromkeys((
@@ -22,6 +23,7 @@ _WORKFLOW_IDENTITY_KEYS = tuple(dict.fromkeys((
     "requirement_spec_ref",
     "requirement_spec_digest",
     "request_revision",
+    "origin_binding",
     "workflow_proposal_ref",
     "workflow_proposal_digest",
     "effective_config_ref",
@@ -179,6 +181,18 @@ def _same_ref(left: Any, right: Any) -> bool:
 class DurableCallWorkflowMixin:
     """Host methods for stable nested-workflow operations."""
 
+    def _activate_workflow_task(self, accepted_event: ZfEvent) -> None:
+        updated = activate_workflow_managed_task(
+            task_store=self.task_store,
+            event_writer=self.event_writer,
+            accepted_event=accepted_event,
+        )
+        if updated is not None:
+            self._refresh_task_doc_projection(
+                updated,
+                source_event=accepted_event.type,
+            )
+
     def _on_workflow_invoke_requested(
         self,
         event: ZfEvent,
@@ -308,6 +322,8 @@ class DurableCallWorkflowMixin:
             ),
             None,
         )
+        if prior_accept is not None:
+            self._activate_workflow_task(prior_accept)
         if (
             prior_accept is not None
             and not str(
@@ -403,6 +419,8 @@ class DurableCallWorkflowMixin:
                 invoke_operation.status in {"running", "settled"}
                 or existing_accept is not None
             ):
+                if existing_accept is not None:
+                    self._activate_workflow_task(existing_accept)
                 if invoke_operation.status in {"requested", "reserved"} and existing_accept is not None:
                     from zf.runtime.call_result_runtime import workflow_operation_service
                     from zf.runtime.workflow_operation import load_workflow_operation
@@ -558,6 +576,7 @@ class DurableCallWorkflowMixin:
         fanout_request.payload["workflow_invoke_admitted"] = True
         accepted_event.payload["fanout_request_event_id"] = fanout_request.id
         self.event_writer.append(accepted_event)
+        self._activate_workflow_task(accepted_event)
         self._mark_workflow_request_running(
             payload,
             accepted_event=accepted_event,

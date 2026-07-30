@@ -26,20 +26,6 @@ from zf.runtime.workflow_intake import (
     _project_root_from_intake_path,
 )
 
-_LLM_ENV_KEYS = (
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "DOUBAO_API_KEY",
-    "ARK_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "KIMI_API_KEY",
-    "MOONSHOT_API_KEY",
-    "QWEN_API_KEY",
-    "DASHSCOPE_API_KEY",
-    "GLM_API_KEY",
-    "ZHIPUAI_API_KEY",
-)
-
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -748,8 +734,6 @@ def _environment_readiness_diagnostics(
     if str(metadata.get("environment_policy") or "") != "real_env_required":
         return []
     missing: list[str] = []
-    if not any(os.environ.get(key) for key in _LLM_ENV_KEYS):
-        missing.append("LLM_API_KEY")
     if shutil.which("docker") is None:
         missing.append("docker")
     if not missing:
@@ -760,8 +744,8 @@ def _environment_readiness_diagnostics(
         "kind": "environment_readiness_missing",
         "title": "真实环境依赖未就绪",
         "message": "缺少: " + ", ".join(missing),
-        "why_it_matters": "real_env_required 需要真实 LLM/Web/Playwright 环境，否则 verify 不能证明产品可用。",
-        "fix_it": "配置至少一个 LLM API key，并确保 Docker 可用；或显式使用 --allow-missing-env 只做 dry-run。",
+        "why_it_matters": "real_env_required 需要 Docker 承载真实 Web/Playwright 验证。",
+        "fix_it": "安装并启动 Docker；或显式使用 --allow-missing-env 只做 dry-run。",
         "safe_auto_fix": False,
     }]
 

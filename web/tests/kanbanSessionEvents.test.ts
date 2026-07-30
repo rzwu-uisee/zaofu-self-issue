@@ -8,6 +8,7 @@ import {
   parsePlanRequest,
   parsePlanResponse,
 } from "../src/components/agent-session/agentUiEvent.js";
+import { buildKanbanConversation } from "../src/components/agent-session/projection.js";
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -212,6 +213,108 @@ const proposalReceipts = kanbanAgentSessionEventsFromLive([
 assert(
   proposalReceipts.length === 3,
   "scoped proposal requests and receipts stay in the live session buffer without leaking CLI proposals",
+);
+
+const resultEvents = [
+  event(50, "workflow.result.available", {
+    schema_version: "workflow-result.v1",
+    result_kind: "research_report",
+    status: "available",
+    project_id: "proj-a",
+    origin_surface: "kanban_agent",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    request_id: "REQ-1",
+    request_revision: 1,
+    task_id: "TASK-1",
+    workflow_run_id: "wf-1",
+    terminal_event_id: "evt-terminal-1",
+    artifact_ref: "research/TASK-1/result.md",
+    artifact_digest: "a".repeat(64),
+    summary: "Evidence-backed result.",
+    origin_binding: {
+      schema_version: "workflow-origin-binding.v1",
+      surface: "kanban_agent",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+    },
+  }, "TASK-1"),
+  event(51, "workflow.research.adopted", {
+    project_id: "proj-a",
+    conversation_id: "kanban:proj-a",
+    thread_key: "thread-a",
+    request_id: "REQ-1",
+    request_revision: 1,
+    result_event_id: "evt-50",
+    artifact_digest: "a".repeat(64),
+    origin_binding: {
+      schema_version: "workflow-origin-binding.v1",
+      surface: "kanban_agent",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+    },
+  }, "TASK-1"),
+];
+const liveResultEvents = kanbanAgentSessionEventsFromLive(resultEvents, scope);
+assert(liveResultEvents.length === 2, "Kanban SSE keeps result available and adoption events");
+const resultConversation = buildKanbanConversation({
+  events: [
+    ...liveResultEvents,
+    event(52, "workflow.result.available", {
+      schema_version: "workflow-result.v1",
+      result_kind: "research_report",
+      status: "available",
+      project_id: "proj-a",
+      origin_surface: "kanban_agent",
+      conversation_id: "kanban:other",
+      thread_key: "thread-a",
+      request_id: "REQ-OTHER",
+      request_revision: 1,
+      task_id: "TASK-OTHER",
+      workflow_run_id: "wf-other",
+      terminal_event_id: "evt-terminal-other",
+      artifact_ref: "research/TASK-OTHER/result.md",
+      artifact_digest: "b".repeat(64),
+      summary: "Other conversation result.",
+    }, "TASK-OTHER"),
+    event(53, "workflow.result.available", {
+      schema_version: "workflow-result.v1",
+      result_kind: "research_report",
+      status: "available",
+      project_id: "proj-a",
+      origin_surface: "channel",
+      channel_id: "ch-other",
+      thread_id: "thread-a",
+      request_id: "REQ-CHANNEL",
+      request_revision: 1,
+      task_id: "TASK-CHANNEL",
+      workflow_run_id: "wf-channel",
+      terminal_event_id: "evt-terminal-channel",
+      artifact_ref: "research/TASK-CHANNEL/result.md",
+      artifact_digest: "c".repeat(64),
+      summary: "Channel result.",
+    }, "TASK-CHANNEL"),
+  ],
+  activeThreadId: "thread-a",
+  conversationId: "kanban:proj-a",
+  projectId: "proj-a",
+});
+const resultCards = resultConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.cards)
+  .filter((card) => card.kind === "workflow-result");
+assert(resultCards.length === 1, "Kanban result events fold into one result card");
+assert(resultCards[0]?.status === "completed", "Kanban adoption completes the result card");
+assert(
+  (resultCards[0]?.payload?.adoptPayload as Record<string, unknown>)?.request_id === "REQ-1",
+  "Kanban result card retains exact adoption lineage",
+);
+assert(
+  resultCards[0]?.refs?.artifact_ref === "research/TASK-1/result.md"
+  && resultCards[0]?.refs?.artifact_digest === "a".repeat(64),
+  "Kanban result card exposes the immutable artifact ref and digest",
 );
 
 console.log("kanbanSessionEvents.test.ts OK");

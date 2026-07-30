@@ -139,6 +139,15 @@ def write_workflow_input_manifest(
         "workflow_invoke_event_id": workflow_invoke_event_id,
         "task_id": task_id,
         "pattern_id": pattern_id,
+        "request_id": str(request_payload.get("request_id") or ""),
+        "request_revision": _int_value(
+            request_payload.get("request_revision")
+        ),
+        "origin_binding": redact_obj(
+            dict(request_payload.get("origin_binding") or {})
+            if isinstance(request_payload.get("origin_binding"), dict)
+            else {}
+        ),
         "source_refs": dict(source_refs),
         "artifact_refs": redact_obj(artifact_refs),
         "request": _request_summary(request_payload),
@@ -206,6 +215,15 @@ def workflow_input_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "workflow_input_manifest_ref": manifest_ref,
                 "source_refs": source_refs if isinstance(source_refs, dict) else {},
                 "artifact_refs": artifact_refs if isinstance(artifact_refs, list) else [],
+                "request_id": str(carrier.get("request_id") or ""),
+                "request_revision": _int_value(
+                    carrier.get("request_revision")
+                ),
+                "origin_binding": (
+                    dict(carrier.get("origin_binding"))
+                    if isinstance(carrier.get("origin_binding"), dict)
+                    else {}
+                ),
             }
     return {}
 
@@ -252,7 +270,10 @@ def _request_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "expected_output",
         "risk",
         "open_questions",
+        "origin_binding",
         "prompt_kind",
+        "request_id",
+        "request_revision",
         "workflow_prompt_ref",
     }
     return redact_obj({key: payload.get(key) for key in keep if key in payload})
@@ -284,6 +305,13 @@ def _dedupe_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _safe_id(value: str) -> str:
     text = _SAFE_RE.sub("-", str(value or "").strip()).strip("-._")
     return text or "workflow"
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _render_workflow_prompt(

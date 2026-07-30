@@ -940,6 +940,27 @@ export function OrchestratorPanel({
     }
   }
 
+  async function adoptResearchResult(card: AgentSessionCard, key: string) {
+    const payload = card.payload?.adoptPayload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return;
+    }
+    setHeadlessProposalRunning(key);
+    try {
+      const result = await Promise.resolve(onAction(
+        "research-adopt",
+        payload as Record<string, unknown>,
+      ));
+      if (actionFailed(result)) {
+        setOperatorError(actionFailureReason(result));
+        return;
+      }
+      setOperatorError("");
+    } finally {
+      setHeadlessProposalRunning("");
+    }
+  }
+
   function reviseHeadlessProposal(proposal: AgentSessionActionProposal) {
     const proposalId = proposal.proposalEventId || proposal.proposalId || proposal.action;
     setHeadlessMessage(
@@ -1190,10 +1211,11 @@ export function OrchestratorPanel({
   const headlessConversation = useMemo(() => buildKanbanConversation({
     activeThreadId: headlessThreadKey,
     backend: operatorBackend,
+    conversationId: headlessConversationId,
     events: headlessConversationEvents,
     knownThreads: headlessThreads,
     projectId: headlessProjectId,
-  }), [headlessConversationEvents, headlessProjectId, headlessThreadKey, headlessThreads, operatorBackend]);
+  }), [headlessConversationEvents, headlessConversationId, headlessProjectId, headlessThreadKey, headlessThreads, operatorBackend]);
   useEffect(() => {
     setHeadlessPendingMessages((current) => (
       current.filter((item) => !conversationHasHeadlessTurn(headlessConversation, item))
@@ -1480,6 +1502,7 @@ export function OrchestratorPanel({
               emptyTitle={headlessEmptyTitle}
               extraCards={headlessQueueCards}
               onActiveThreadChange={selectHeadlessThread}
+              onAdoptResearchResult={(card, cardId) => void adoptResearchResult(card, cardId)}
               onAnswerQuestion={(card) => {
                 setHeadlessMessage(card.body || "");
                 headlessInputRef.current?.focus();

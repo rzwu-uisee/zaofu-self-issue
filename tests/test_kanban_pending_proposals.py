@@ -17,11 +17,18 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 from zf.core.events import EventLog, EventWriter, ZfEvent
+from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.kanban_proposals import (
     pending_kanban_proposals,
     proposal_execution_gate,
 )
+from zf.runtime.workflow_anchor import (
+    bind_workflow_request_to_task,
+    mark_workflow_managed_task,
+)
+from zf.runtime.workflow_origin import workflow_origin_digest
 from zf.web.proposal_extraction import extract_action_proposal
 from zf.web.server import create_app
 
@@ -279,6 +286,16 @@ def test_research_adoption_proposal_preserves_semantic_request_id_through_web_ro
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     request_dir = state_dir / "workflow-requests"
     request_dir.mkdir()
+    origin = {
+        "schema_version": "workflow-origin-binding.v1",
+        "surface": "channel",
+        "source": "legacy",
+        "project_id": "",
+        "channel_id": "ch-research",
+        "thread_id": "main",
+        "conversation_id": "",
+        "thread_key": "",
+    }
     (request_dir / "REQ-ADOPT.json").write_text(
         json.dumps({
             "request_id": "REQ-ADOPT",
@@ -286,10 +303,62 @@ def test_research_adoption_proposal_preserves_semantic_request_id_through_web_ro
             "research_artifacts": [],
             "channel_id": "ch-research",
             "thread_id": "main",
+            "origin_binding": origin,
         }),
         encoding="utf-8",
     )
+    task = bind_workflow_request_to_task(
+        mark_workflow_managed_task(
+            Task(id="TASK-RESEARCH", title="Research")
+        ),
+        request_id="REQ-ADOPT",
+        request_revision=1,
+        origin_binding_digest=workflow_origin_digest(origin),
+    )
+    TaskStore(state_dir / "kanban.json").add(task)
+    terminal_event = ZfEvent(
+        id="evt-research-terminal",
+        type="fanout.aggregate.completed",
+        actor="orchestrator",
+        task_id="TASK-RESEARCH",
+        payload={
+            "fanout_id": "fanout-research",
+            "stage_id": "research-fanout",
+            "status": "completed",
+            "artifact_refs": [{
+                "kind": "research_report",
+                "ref": "research/report.md",
+                "sha256": digest,
+                "task_id": "TASK-RESEARCH",
+                "workflow_run_id": "wf-research",
+                "request_id": "REQ-ADOPT",
+                "request_revision": 1,
+            }],
+        },
+    )
+    result_event = ZfEvent(
+        id="evt-research-result",
+        type="workflow.result.available",
+        actor="zf-cli",
+        task_id="TASK-RESEARCH",
+        causation_id=terminal_event.id,
+        payload={
+            "schema_version": "workflow-result.v1",
+            "result_kind": "research_report",
+            "status": "available",
+            "request_id": "REQ-ADOPT",
+            "request_revision": 1,
+            "task_id": "TASK-RESEARCH",
+            "workflow_run_id": "wf-research",
+            "terminal_event_id": terminal_event.id,
+            "artifact_ref": "research/report.md",
+            "artifact_digest": digest,
+            "summary": "Adopt the verified research.",
+            "origin_binding": origin,
+        },
+    )
     action_payload = {
+        "result_event_id": result_event.id,
         "task_id": "TASK-RESEARCH",
         "request_id": "REQ-ADOPT",
         "request_revision": 1,
@@ -299,7 +368,10 @@ def test_research_adoption_proposal_preserves_semantic_request_id_through_web_ro
         "channel_id": "ch-research",
         "thread_id": "main",
     }
-    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+    event_log = EventLog(state_dir / "events.jsonl")
+    event_log.append(terminal_event)
+    event_log.append(result_event)
+    event_log.append(ZfEvent(
         id="evt-research-adopt",
         type="kanban.agent.action.proposed",
         actor="web",

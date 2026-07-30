@@ -31,6 +31,7 @@ from zf.runtime.plan_artifact_package import (
 from zf.runtime.run_contract import stable_json_sha256, write_run_contract_snapshot
 from zf.runtime.workflow_anchor import (
     mark_workflow_fanout_anchor,
+    mark_workflow_managed_task,
     workflow_anchor_task_ids,
 )
 from zf.web.server import create_app
@@ -822,6 +823,92 @@ def test_goal_dossier_excludes_workflow_anchor_from_task_roadmap(tmp_path: Path)
         gap for gap in dossier["gaps"]
         if gap.get("task_id") == "TASK-ROOT"
     ]
+
+
+def test_goal_dossier_excludes_workflow_managed_parent(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(id="TASK-A", title="A", status="done"))
+    store.add(mark_workflow_managed_task(Task(
+        id="TASK-PARENT",
+        title="operator-created workflow parent",
+        status="done",
+    )))
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        id="evt-start",
+        type="run.goal.started",
+        payload={"run_id": "run-managed", "goal_id": "GOAL-M"},
+    ))
+    log.append(ZfEvent(
+        id="evt-accepted",
+        type="workflow.invoke.accepted",
+        task_id="TASK-PARENT",
+        correlation_id="run-managed",
+        payload={
+            "run_id": "run-managed",
+            "workflow_run_id": "run-managed",
+            "task_id": "TASK-PARENT",
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-task",
+        type="task.assigned",
+        task_id="TASK-A",
+        payload={"run_id": "run-managed"},
+    ))
+    log.append(ZfEvent(
+        id="evt-completed",
+        type="run.goal.completed",
+        payload={
+            "run_id": "run-managed",
+            "goal_id": "GOAL-M",
+            "completed_task_ids": ["TASK-A"],
+        },
+    ))
+
+    dossier = build_goal_dossier(state_dir, "run-managed", now=NOW)
+
+    assert dossier["state"]["task_counts"] == {
+        "total": 1, "terminal": 1, "open": 0,
+    }
+    assert dossier["roadmap"]["task_order"] == ["TASK-A"]
+    assert dossier["roadmap"]["workflow_anchor_task_ids"] == ["TASK-PARENT"]
+
+
+def test_workflow_anchor_classification_recovers_archived_managed_parent(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    TaskStore(state_dir / "kanban.json")
+    events = [
+        ZfEvent(
+            id="evt-created",
+            type="task.created",
+            task_id="TASK-PARENT",
+            payload={"task_id": "TASK-PARENT", "source": "kanban-agent"},
+        ),
+        ZfEvent(
+            id="evt-accepted",
+            type="workflow.invoke.accepted",
+            task_id="TASK-PARENT",
+            payload={
+                "run_id": "run-managed",
+                "workflow_run_id": "run-managed",
+                "task_id": "TASK-PARENT",
+            },
+        ),
+    ]
+
+    assert workflow_anchor_task_ids(
+        state_dir,
+        ["TASK-PARENT"],
+        events,
+    ) == ["TASK-PARENT"]
 
 
 @pytest.mark.parametrize("flow_kind", ["workflow", "prd"])

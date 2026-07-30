@@ -306,6 +306,7 @@ def _append_admitted_stage_result(
             "attempt_id": "attempt-synthesize",
             "stage_id": "synthesize",
             "role_instance": "synthesizer",
+            "evidence_refs": [f"cmd:collect-current-input@{RUN_ID} exit=0"],
         },
         control_result={
             "schema_version": "stage-result.v1",
@@ -487,6 +488,55 @@ def test_artifact_delivery_admission_closes_goal_and_projects_evidence(
     assert result_rows["items"]
     assert report_rows["items"][0]["latest_locator"]["ref"] == (
         fixture["report_ref"]["ref"]
+    )
+
+
+def test_artifact_delivery_admission_allows_only_current_input_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    result = copy.deepcopy(fixture["result"])
+    input_ref = result["input_result_refs"][0]
+    envelope = json.loads(
+        (fixture["state_dir"] / input_ref).read_text(encoding="utf-8")
+    )
+    result["verification_evidence_refs"] = [
+        input_ref,
+        envelope["control_result"]["ref"],
+        envelope["evidence_refs"][0],
+        fixture["report_ref"]["ref"],
+    ]
+
+    assert artifact_delivery_admission_issues(
+        fixture["state_dir"],
+        normalize_artifact_delivery_result(result),
+        events=fixture["writer"].event_log.read_all(),
+    ) == []
+
+
+def test_artifact_delivery_admission_rejects_cross_run_evidence(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    result = copy.deepcopy(fixture["result"])
+    result["verification_evidence_refs"] = [
+        fixture["report_ref"]["ref"],
+        "artifacts/call-results/envelopes/prior-run.json",
+        "cmd:pytest@prior-candidate exit=0",
+        "git:prior-candidate:src/example.py:1",
+    ]
+
+    outcome = _admit(fixture, result)
+
+    assert outcome.admitted is False
+    assert outcome.repair_requested is True
+    unbound = [
+        issue
+        for issue in outcome.issues
+        if issue["code"] == "verification_evidence_not_bound"
+    ]
+    assert [item["message"] for item in unbound] == (
+        result["verification_evidence_refs"][1:]
     )
 
 

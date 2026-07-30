@@ -160,6 +160,7 @@ from zf.web.headless_agent import (
     canonical_headless_backend,
 )
 from zf.web.proposal_extraction import (
+    default_validate_payload,
     extract_action_proposal,
 )
 from zf.web import plan_runtime
@@ -677,15 +678,6 @@ def create_app(
         state_dir=state_dir,
         project_root=project_root,
         config=config,
-    ))
-    from zf.web.run_dossier_routes import build_run_dossier_router
-
-    app.include_router(build_run_dossier_router(
-        default_project_id=default_project_id,
-        default_state_dir=state_dir,
-        default_config=config,
-        default_project_root=project_root,
-        resolve_project=_resolve_api_project,
     ))
 
     react_dist = _react_dist_dir()
@@ -2239,6 +2231,41 @@ def create_app(
         )
         return JSONResponse(_run_detail(context.state_dir, run_id))
 
+    @app.get("/api/projects/{project_id}/runs/{run_id}/dossier")
+    def project_run_dossier(
+        project_id: str,
+        run_id: str,
+        section: str = "",
+        preview: bool = False,
+    ) -> JSONResponse:
+        from zf.runtime.goal_dossier import (
+            GoalDossierError,
+            build_cached_goal_dossier,
+            goal_dossier_view,
+        )
+
+        context = _resolve_api_project(
+            project_id,
+            default_project_id=default_project_id,
+            default_state_dir=state_dir,
+            default_config=config,
+            default_project_root=project_root,
+        )
+        try:
+            dossier = build_cached_goal_dossier(
+                context.state_dir,
+                run_id,
+                project_root=context.project_root,
+                config=context.config,
+            )
+            return JSONResponse(goal_dossier_view(
+                dossier,
+                section=section,
+                preview=preview,
+            ))
+        except GoalDossierError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/projects/{project_id}/search")
     def project_search(project_id: str, q: str = "", limit: int = 50) -> JSONResponse:
         context = _resolve_api_project(
@@ -3267,30 +3294,13 @@ def create_app(
                     created_by=str(payload.get("requested_by") or "channel"),
                     channel_id=channel_id,
                     thread_id=str(payload.get("thread_id") or ""),
-                    acceptance=tuple(
-                        workflow_request_routes.workflow_request_strings(
-                            payload.get("acceptance")
-                        )
-                    ),
-                    constraints=tuple(
-                        workflow_request_routes.workflow_request_strings(
-                            payload.get("constraints")
-                        )
-                    ),
-                    open_questions=tuple(
-                        workflow_request_routes.workflow_request_strings(
-                            payload.get("open_questions")
-                        )
-                    ),
-                    output=(
-                        project_root / "docs" / "intake" / f"{request_id}.md"
-                    ) if request_id else None,
+                    acceptance=tuple(workflow_request_routes.workflow_request_strings(payload.get("acceptance"))),
+                    constraints=tuple(workflow_request_routes.workflow_request_strings(payload.get("constraints"))),
+                    open_questions=tuple(workflow_request_routes.workflow_request_strings(payload.get("open_questions"))),
+                    output=(project_root / "docs" / "intake" / f"{request_id}.md") if request_id else None,
                 )
                 intake_ref = str(intake.get("intake_ref") or "")
-                build_flow_intent(
-                    intake_path=Path(intake_ref),
-                    explicit_kind=str(payload.get("kind") or "auto"),
-                )
+                build_flow_intent(intake_path=Path(intake_ref), explicit_kind=str(payload.get("kind") or "auto"))
             workflow_request_routes.confirm_workflow_intake(
                 state_dir=state_dir,
                 intake_ref=intake_ref,
@@ -6633,17 +6643,10 @@ def _validate_action_payload(
             payload.get("proposal_ref"), dict
         ):
             return "patch_ref or proposal_ref is required"
-        if not str(
-            payload.get("validation_result_ref") or ""
-        ).strip() and not isinstance(payload.get("validation_result_ref"), dict):
+        if not str(payload.get("validation_result_ref") or "").strip() and not isinstance(
+            payload.get("validation_result_ref"), dict
+        ):
             return "validation_result_ref is required"
-        if not str(
-            payload.get("approval_ref")
-            or payload.get("approved_by")
-            or payload.get("approver")
-            or ""
-        ).strip():
-            return "owner approval is required"
     if action == "channel-drain-replies":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
@@ -6666,8 +6669,8 @@ def _validate_action_payload(
         backend = str(payload.get("backend") or "").strip()
         if backend and backend not in {"deterministic", "codex", "claude", "claude-code"}:
             return "backend must be deterministic, codex, claude, or claude-code"
-    if action == "create-task" and not str(payload.get("title") or "").strip():
-        return "title is required"
+    if action == "create-task":
+        return default_validate_payload(action, payload)
     if action == "update-task" and not str(payload.get("task_id") or "").strip():
         return "task_id is required"
     if action == "archive-task" and not str(payload.get("task_id") or "").strip():

@@ -64,8 +64,20 @@ def workflow_anchor_task_ids(
         task_id
         for task_id in task_ids
         if (task := store.get(task_id)) is not None
-        and is_workflow_fanout_anchor_task(task)
+        and is_workflow_dispatch_managed_task(task)
     ]
+    for event in event_list:
+        if event.type != "workflow.invoke.accepted":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        for candidate in (event.task_id, payload.get("task_id")):
+            task_id = str(candidate or "").strip()
+            if not task_id or task_id not in task_ids or task_id in anchors:
+                continue
+            task = store.get(task_id)
+            if task is not None and not is_workflow_dispatch_managed_task(task):
+                continue
+            anchors.append(task_id)
     for event in event_list:
         if event.type != "workflow.invoke.requested":
             continue
@@ -136,6 +148,50 @@ def mark_workflow_managed_task(task: Task) -> Task:
     evidence["execution_owner"] = WORKFLOW_MANAGED_EXECUTION_OWNER
     task.contract.evidence_contract = evidence
     return task
+
+
+def bind_workflow_request_to_task(
+    task: Task,
+    *,
+    request_id: str,
+    request_revision: int,
+    origin_binding_digest: str,
+) -> Task:
+    """Pin one workflow-managed Task to the Request revision it executes."""
+
+    evidence = dict(getattr(task.contract, "evidence_contract", {}) or {})
+    evidence.update({
+        "workflow_request_id": str(request_id or "").strip(),
+        "workflow_request_revision": int(request_revision),
+        "workflow_origin_binding_digest": str(
+            origin_binding_digest or ""
+        ).strip(),
+    })
+    task.contract.evidence_contract = evidence
+    return task
+
+
+def workflow_task_request_binding(task: Task) -> dict[str, Any]:
+    contract = getattr(task, "contract", None)
+    evidence = getattr(contract, "evidence_contract", {}) if contract else {}
+    if not isinstance(evidence, dict):
+        return {}
+    request_id = str(evidence.get("workflow_request_id") or "").strip()
+    try:
+        request_revision = int(
+            evidence.get("workflow_request_revision") or 0
+        )
+    except (TypeError, ValueError):
+        request_revision = 0
+    if not request_id or request_revision < 1:
+        return {}
+    return {
+        "request_id": request_id,
+        "request_revision": request_revision,
+        "origin_binding_digest": str(
+            evidence.get("workflow_origin_binding_digest") or ""
+        ).strip(),
+    }
 
 
 def is_workflow_managed_task(task: Task) -> bool:

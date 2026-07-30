@@ -2026,6 +2026,7 @@ export function App() {
                 onSetDiscussionMode={(mode, defaultResponderId) => submitChannelDiscussionMode(mode, defaultResponderId)}
                 onConsensusDecision={channelActions.decideConsensus}
                 onRemoveMember={(memberId) => removeChannelMember(memberId)}
+                onResearchAdopt={channelActions.adoptResearchResult}
                 onSetMemberPermission={(memberId, permissionProfile) => setChannelMemberPermission(memberId, permissionProfile)}
                 onWorkflowRequest={channelActions.submitWorkflowRequest}
                 selectedChannelId={selectedChannelId}

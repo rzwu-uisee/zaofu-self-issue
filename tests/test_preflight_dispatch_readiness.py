@@ -15,6 +15,7 @@ from zf.runtime.preflight import (
     preflight_ok,
     run_preflight_checks,
 )
+from zf.runtime.workflow_preflight import _environment_readiness_diagnostics
 
 
 def test_dispatch_prompt_signature_passes_on_current_code():
@@ -167,3 +168,35 @@ def test_codex_headless_uses_codex_cli_auth_probe(monkeypatch):
     )
 
     assert _probe_provider_auth("codex-headless") == (True, "authenticated")
+
+
+def test_real_environment_does_not_require_api_key_after_provider_auth(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "zf.runtime.workflow_preflight.shutil.which",
+        lambda command: f"/usr/bin/{command}",
+    )
+
+    diagnostics = _environment_readiness_diagnostics(
+        {"environment_policy": "real_env_required"},
+        allow_missing_env=False,
+    )
+
+    assert diagnostics == []
+
+
+def test_real_environment_still_requires_docker(monkeypatch):
+    monkeypatch.setattr(
+        "zf.runtime.workflow_preflight.shutil.which",
+        lambda _command: None,
+    )
+
+    diagnostics = _environment_readiness_diagnostics(
+        {"environment_policy": "real_env_required"},
+        allow_missing_env=False,
+    )
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["severity"] == "STOP"
+    assert diagnostics[0]["message"] == "缺少: docker"

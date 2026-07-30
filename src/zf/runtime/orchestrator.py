@@ -852,6 +852,15 @@ class Orchestrator(
         decisions.extend(
             self._react_to_events(events, consumed_offset=consumed_offset)
         )
+        if periodic_sweep:
+            from zf.runtime.goal_terminal_reconciliation import (
+                reconcile_goal_terminal_task_settlement,
+            )
+            decisions.extend(reconcile_goal_terminal_task_settlement(self))
+            from zf.runtime.run_cancel_reconciliation import (
+                reconcile_cancelled_run_resources,
+            )
+            decisions.extend(reconcile_cancelled_run_resources(self))
         decisions.extend(self._reconcile_pending_handoffs())
         periodic.run_replay_sweep(self, events=events)
         if events is None or any(
@@ -2975,6 +2984,12 @@ class Orchestrator(
     def _apply_housekeeping(self, event: ZfEvent) -> None:
         """Layer 1 mechanical state writes — never decisions."""
         self._renew_task_attempt_lease(event)
+        if event.type == "run.cancelled":
+            from zf.runtime.run_cancel_reconciliation import (
+                reconcile_cancelled_run_resources,
+            )
+
+            reconcile_cancelled_run_resources(self, trigger_event=event)
         if event.type in {
             "fanout.child.dispatched",
             "fanout.child.completed",

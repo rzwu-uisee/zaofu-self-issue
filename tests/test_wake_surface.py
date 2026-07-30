@@ -40,7 +40,7 @@ def test_kept_events_still_wake():
 def test_wake_list_changes_are_explicit():
     # 快照锁:数量带 ±0 容差——增删唤醒源必须改本测试(显式决策)。
     assert len(WAKE_PATTERNS) == len(set(WAKE_PATTERNS))  # 无重复
-    assert len(WAKE_PATTERNS) == 155, (
+    assert len(WAKE_PATTERNS) == 156, (
         f"WAKE_PATTERNS={len(WAKE_PATTERNS)}; 唤醒面变更需同步本快照"
         f"(K2 基线 103-7=96;B14 plan 审核门显式 +3:plan.approval.requested /"
         f" plan.approved / plan.rejected —— 均 workflow 控制事件需唤醒"
@@ -63,12 +63,20 @@ def test_wake_list_changes_are_explicit():
         f"141 closure/result/gate/delivery truth edges +14 → 137; "
         f"task_map.ready claim-set pin + run.goal.completed settlement +2 → 139; "
         f"continuation effect/cancel/failure edges +5, drift/refresh 改为 "
-        f"batch-only -2 → 142; worker.launch_artifact.written housekeeping "
-        f"外部入口 +1 → 143; channel synthesis / dynamic fragment proposal / "
-        f"fanout aggregate rebuild +3 → 146; provider turn closure + "
-        f"run manager tick completion +2 → 148; four-flow channel question "
-        f"dedup/cross-review/consensus-review edges +7 → 155"
-    )
+        f"batch-only -2 → 142; D0 read-only dynamic continuation "
+        f"proposal +1:workflow.fragment.proposed → 143; aggregate rebuild "
+        f"redrive +1:fanout.aggregate.rebuild.requested → 144; restart-safe "
+        f"mechanical completion reconciliation +1:"
+            f"run.manager.tick.completed → 145; reader fanout async spawn "
+            f"liveness +1:worker.launch_artifact.written → 146; channel "
+            f"synthesis request bridge +1:channel.synthesis.requested → 147; "
+            f"Codex provider-native turn close bridge +1:"
+            f"provider.turn.closed → 148; Channel question dedup request/"
+            f"apply lifecycle +2 → 150; typed Channel question update, "
+            f"cross-review request/result, and consensus-review rejection "
+            f"lifecycle +5 → 155; controlled run cancel housekeeping "
+            f"+1:run.cancelled → 156"
+        )
 
 
 def test_wake_events_have_explicit_classification():

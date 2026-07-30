@@ -16,6 +16,12 @@ from zf.runtime.kanban_proposals import (
     proposal_payload_digest,
 )
 from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.workflow_origin import workflow_origin_digest
+from zf.runtime.workflow_requests import (
+    WorkflowRequestError,
+    require_current_workflow_request,
+)
 from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
     workflow_route_catalog,
@@ -133,6 +139,109 @@ class WorkflowStartService:
                 task_id=task_id,
             )
 
+        task_request = workflow_task_request_binding(task)
+        payload_request_id = str(
+            payload.get("request_id")
+            or parameters.get("request_id")
+            or ""
+        ).strip()
+        try:
+            payload_request_revision = int(
+                payload.get("request_revision")
+                or parameters.get("request_revision")
+                or 0
+            )
+        except (TypeError, ValueError):
+            payload_request_revision = 0
+        request_projection: dict[str, Any] = {}
+        if task_request:
+            if (
+                payload_request_id
+                and payload_request_id != task_request["request_id"]
+            ):
+                return _failure(
+                    "workflow_task_stale",
+                    "workflow Request does not match the Task binding",
+                    status_code=409,
+                    task_id=task_id,
+                )
+            if (
+                payload_request_revision
+                and payload_request_revision
+                != int(task_request["request_revision"])
+            ):
+                return _failure(
+                    "workflow_task_stale",
+                    "workflow Request revision does not match the Task binding",
+                    status_code=409,
+                    task_id=task_id,
+                )
+            try:
+                request_projection = require_current_workflow_request(
+                    self.state_dir,
+                    task_request["request_id"],
+                    int(task_request["request_revision"]),
+                )
+            except WorkflowRequestError as exc:
+                return _failure(
+                    "workflow_task_stale",
+                    str(exc),
+                    status_code=409,
+                    task_id=task_id,
+                )
+            if (
+                task_request.get("origin_binding_digest")
+                and task_request["origin_binding_digest"]
+                != workflow_origin_digest(
+                    request_projection["origin_binding"]
+                )
+            ):
+                return _failure(
+                    "workflow_task_stale",
+                    "workflow origin binding does not match the Task binding",
+                    status_code=409,
+                    task_id=task_id,
+                )
+            origin_binding = request_projection["origin_binding"]
+            canonical_channel = str(
+                origin_binding.get("channel_id") or ""
+            )
+            canonical_thread = str(
+                origin_binding.get("thread_id") or ""
+            )
+            supplied_channel = str(
+                payload.get("channel_id") or ""
+            ).strip()
+            supplied_thread = str(
+                payload.get("thread_id") or ""
+            ).strip()
+            if (
+                supplied_channel and supplied_channel != canonical_channel
+            ) or (
+                supplied_thread and supplied_thread != canonical_thread
+            ):
+                return _failure(
+                    "origin_binding_mismatch",
+                    (
+                        "workflow return target does not match the "
+                        "Workflow Request origin"
+                    ),
+                    status_code=409,
+                    task_id=task_id,
+                )
+            parameters = dict(parameters)
+            parameters["request_id"] = task_request["request_id"]
+            parameters["request_revision"] = int(
+                task_request["request_revision"]
+            )
+        elif payload_request_id:
+            return _failure(
+                "workflow_task_stale",
+                "workflow Request is not bound to the Task",
+                status_code=409,
+                task_id=task_id,
+            )
+
         catalog = workflow_route_catalog(self.config)
         config_digest = str(catalog.get("config_digest") or "")
         expected_config_digest = str(
@@ -190,6 +299,22 @@ class WorkflowStartService:
             "config_digest": config_digest,
             "origin": str(payload.get("origin") or origin or ""),
         }
+        if request_projection:
+            normalized.update({
+                "request_id": str(request_projection["request_id"]),
+                "request_revision": int(request_projection["revision"]),
+                "origin_binding": dict(
+                    request_projection["origin_binding"]
+                ),
+            })
+            origin_binding = request_projection["origin_binding"]
+            if origin_binding.get("surface") == "channel":
+                normalized["channel_id"] = str(
+                    origin_binding.get("channel_id") or ""
+                )
+                normalized["thread_id"] = str(
+                    origin_binding.get("thread_id") or "main"
+                )
         for key in (
             "artifact_refs",
             "channel_id",
@@ -198,6 +323,8 @@ class WorkflowStartService:
             "source_refs",
             "thread_id",
         ):
+            if request_projection and key in {"channel_id", "thread_id"}:
+                continue
             value = payload.get(key)
             if value not in (None, "", [], {}):
                 normalized[key] = value

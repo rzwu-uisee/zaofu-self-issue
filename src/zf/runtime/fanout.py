@@ -367,6 +367,9 @@ class FanoutManifestProjector:
             "workflow_input_manifest_ref": "",
             "workflow_prompt_ref": "",
             "prompt_kind": "",
+            "request_id": "",
+            "request_revision": 0,
+            "origin_binding": {},
             "trigger_payload": {},
             "source_refs": {},
             "artifact_refs": [],
@@ -400,6 +403,16 @@ class FanoutManifestProjector:
                     "workflow_input_manifest_ref": _payload_str(payload, "workflow_input_manifest_ref"),
                     "workflow_prompt_ref": _payload_str(payload, "workflow_prompt_ref"),
                     "prompt_kind": _payload_str(payload, "prompt_kind"),
+                    "request_id": _payload_str(payload, "request_id"),
+                    "request_revision": _payload_int(
+                        payload,
+                        "request_revision",
+                    ),
+                    "origin_binding": (
+                        dict(payload.get("origin_binding"))
+                        if isinstance(payload.get("origin_binding"), dict)
+                        else {}
+                    ),
                     "source_refs": (
                         dict(payload.get("source_refs"))
                         if isinstance(payload.get("source_refs"), dict)
@@ -449,6 +462,24 @@ class FanoutManifestProjector:
                     manifest["artifact_refs"] = list(payload.get("artifact_refs"))
                 if isinstance(payload.get("trigger_payload"), dict):
                     manifest["trigger_payload"] = dict(payload.get("trigger_payload"))
+                    trigger_payload = payload["trigger_payload"]
+                    manifest["request_id"] = (
+                        _payload_str(payload, "request_id")
+                        or _payload_str(trigger_payload, "request_id")
+                        or manifest.get("request_id", "")
+                    )
+                    manifest["request_revision"] = _int_value(
+                        payload.get("request_revision")
+                        or trigger_payload.get("request_revision")
+                        or manifest.get("request_revision")
+                    )
+                    origin_binding = (
+                        payload.get("origin_binding")
+                        if isinstance(payload.get("origin_binding"), dict)
+                        else trigger_payload.get("origin_binding")
+                    )
+                    if isinstance(origin_binding, dict):
+                        manifest["origin_binding"] = dict(origin_binding)
                 aggregate = payload.get("aggregate")
                 if isinstance(aggregate, dict):
                     manifest["aggregate_config"] = {
@@ -812,10 +843,28 @@ def _apply_child_metadata(child: dict, payload: dict) -> None:
     source_refs = payload.get("source_refs")
     if isinstance(source_refs, dict):
         child["source_refs"] = dict(source_refs)
-    for key in ("workflow_run_id", "workflow_input_manifest_ref", "workflow_prompt_ref", "prompt_kind", "channel_id", "thread_id", "pattern_id"):
+    for key in (
+        "workflow_run_id",
+        "workflow_input_manifest_ref",
+        "workflow_prompt_ref",
+        "prompt_kind",
+        "channel_id",
+        "thread_id",
+        "pattern_id",
+        "request_id",
+    ):
         value = _payload_str(payload, key)
         if value:
             child[key] = value
+    if "request_revision" in payload:
+        try:
+            child["request_revision"] = int(
+                payload.get("request_revision") or 0
+            )
+        except (TypeError, ValueError):
+            child["request_revision"] = 0
+    if isinstance(payload.get("origin_binding"), dict):
+        child["origin_binding"] = dict(payload["origin_binding"])
     verification_result = payload.get("verification_result")
     if isinstance(verification_result, dict):
         child["verification_result"] = dict(verification_result)
@@ -908,6 +957,19 @@ def _payload_str(payload: object, key: str) -> str:
         return ""
     value = payload.get(key)
     return str(value) if value not in (None, "") else ""
+
+
+def _payload_int(payload: object, key: str) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    return _int_value(payload.get(key))
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _safe_id(value: str) -> str:

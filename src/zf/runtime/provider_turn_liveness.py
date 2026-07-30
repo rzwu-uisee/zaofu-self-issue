@@ -25,6 +25,10 @@ def active_codex_turn(
     active: dict[tuple[str, str], ZfEvent] = {}
     recycling_turns: set[tuple[str, str]] | None = None
     for event in events:
+        if event.type == "loop.stopped":
+            active.clear()
+            recycling_turns = None
+            continue
         if event.actor != instance_id:
             continue
         if event.type not in {

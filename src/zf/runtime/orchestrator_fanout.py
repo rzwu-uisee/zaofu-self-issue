@@ -2590,8 +2590,6 @@ class FanoutCoordinationMixin(
 
     def _maybe_start_reader_fanout(self, event: ZfEvent) -> bool:
         trigger_payload = event.payload if isinstance(event.payload, dict) else {}
-        if self._run_fanout_dispatch_blocked(event):
-            return False
         if (
             event.type == "workflow.invoke.requested"
             and not str(trigger_payload.get("workflow_invoke_pattern_id") or "")
@@ -2603,6 +2601,8 @@ class FanoutCoordinationMixin(
             and self._fanout_stage_matches_trigger_event(stage, event)
         ]
         if not stages:
+            return False
+        if self._run_fanout_dispatch_blocked(event):
             return False
         from zf.runtime.fanout import FanoutChild, FanoutContext
 
@@ -3471,14 +3471,14 @@ class FanoutCoordinationMixin(
         if getattr(event, "type", "") == "plan.approved":
             self._resume_writer_fanout_on_plan_approved(event)
             return
-        if self._run_fanout_dispatch_blocked(event):
-            return
         stages = [
             stage for stage in getattr(self.config.workflow, "stages", [])
             if stage.topology == "fanout_writer_scoped" and stage.trigger == event.type
             and self._fanout_stage_matches_trigger_event(stage, event)
         ]
         if not stages:
+            return
+        if self._run_fanout_dispatch_blocked(event):
             return
         from zf.runtime.plan_artifact_package_runtime import admit_task_map_trigger_package
         event = admit_task_map_trigger_package(self, event, stages)
@@ -5923,6 +5923,13 @@ class FanoutCoordinationMixin(
                     manifest=manifest,
                     success_event=success_event,
                 )
+            from zf.runtime.research_delivery import (
+                project_direct_research_artifact,
+            )
+            artifact_payload = project_direct_research_artifact(
+                state_dir=self.state_dir, event_log=self.event_log,
+                manifest=manifest, artifact_payload=artifact_payload,
+            )
         elif (
             success_event == "flow.discovery.completed"
             and failure_event == "flow.discovery.failed"
@@ -6039,19 +6046,9 @@ class FanoutCoordinationMixin(
             causation_id=rebuild_request.id if rebuild_request is not None else None,
             correlation_id=trace_id,
         ))
-        self._consume_durable_fanout_aggregate_result(aggregate_event)
-        emit_fanout_channel_state_update(
-            writer=self.event_writer,
-            terminal_event=aggregate_event,
-            manifest={
-                **manifest,
-                "aggregate": aggregate_event.payload,
-                "artifact_refs": artifact_payload.get(
-                    "artifact_refs",
-                    manifest.get("artifact_refs", []),
-                ),
-            },
-        )
+        from zf.runtime.research_delivery import settle_research_delivery
+
+        settle_research_delivery(self, aggregate_event, manifest, artifact_payload, None)
         if publish_event:
             if publish_event in {
                 LANE_STAGE_HANDOFF_SUCCESS_EVENT,
@@ -7228,20 +7225,9 @@ class FanoutCoordinationMixin(
             causation_id=event.id,
             correlation_id=trace_id,
         ))
-        self._consume_durable_fanout_aggregate_result(aggregate_event)
-        emit_fanout_channel_state_update(
-            writer=self.event_writer,
-            terminal_event=aggregate_event,
-            manifest={
-                **manifest,
-                "aggregate": aggregate_event.payload,
-                "artifact_refs": artifact_payload.get(
-                    "artifact_refs",
-                    manifest.get("artifact_refs", []),
-                ),
-            },
-            synth_event=event,
-        )
+        from zf.runtime.research_delivery import settle_research_delivery
+
+        settle_research_delivery(self, aggregate_event, manifest, artifact_payload, event)
         if publish_event:
             children = [
                 child for child in manifest.get("children", [])

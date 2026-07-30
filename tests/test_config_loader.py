@@ -1160,6 +1160,7 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
         "verify-lane-0",
         "verify-lane-1",
         "orchestrator",
+        "research_root",
         "source_researcher",
         "product_analyst",
         "technical_analyst",
@@ -1171,6 +1172,19 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
         for stage in cfg.workflow.stages
         if stage.id == "research-fanout"
     )
+    adaptive_stage = next(
+        stage
+        for stage in cfg.workflow.stages
+        if stage.id == "research-adaptive"
+    )
+    assert [
+        child.role_instance for child in adaptive_stage.children
+    ] == ["research_root"]
+    assert adaptive_stage.aggregate.synth_role == ""
+    research_root = next(
+        role for role in cfg.roles if role.name == "research_root"
+    )
+    assert research_root.lifecycle.mode == "on_demand"
     assert research_stage.topology == "fanout_reader"
     assert [
         child.role_instance for child in research_stage.children
@@ -1181,6 +1195,7 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
         "risk_critic",
     ]
     assert [stage.id for stage in cfg.workflow.stages] == [
+        "research-adaptive",
         "research-fanout",
         "prd-scan",
         "prd-plan",

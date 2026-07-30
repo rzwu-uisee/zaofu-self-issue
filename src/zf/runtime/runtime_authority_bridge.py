@@ -258,6 +258,7 @@ class RuntimeAuthorityMixin:
             None,
         )
         if existing_accept is not None:
+            self._activate_workflow_task(existing_accept)
             return OrchestratorDecision(
                 action="observe",
                 task_id=task_id,
@@ -289,6 +290,7 @@ class RuntimeAuthorityMixin:
             if value not in (None, ""):
                 accepted.payload[key] = value
         accepted = self.event_writer.append(accepted)
+        self._activate_workflow_task(accepted)
         self._mark_workflow_request_running(payload, accepted_event=accepted)
 
         entry_payload = dict(raw_entry_payload)

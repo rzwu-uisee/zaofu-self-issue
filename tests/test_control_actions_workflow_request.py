@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
+
+import pytest
 
 from zf.core.config.loader import load_config
 from zf.core.events import ZfEvent
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
+from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
-from zf.runtime.workflow_requests import load_workflow_request
+from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.workflow_intake import build_flow_intake
+from zf.runtime.workflow_origin import workflow_origin_digest
+from zf.runtime.workflow_requests import (
+    WorkflowRequestError,
+    load_workflow_request,
+)
 from zf.runtime.workflow_synthesis import (
     WORKFLOW_SYNTHESIS_RESULT_SCHEMA,
     run_workflow_synthesis as _run_workflow_synthesis,
@@ -102,6 +113,159 @@ def test_request_is_proposed_before_explicit_submit(tmp_path: Path) -> None:
         event for event in log.read_all()
         if event.type == "workflow.invoke.requested"
     ]) == 1
+
+
+def test_channel_workflow_request_pins_canonical_origin(
+    tmp_path: Path,
+) -> None:
+    service, log = _service(tmp_path)
+
+    proposed = _execute(service, "workflow-request", {
+        "kind": "issue",
+        "objective": "Research session expiry evidence",
+        "backend": "mock",
+        "allow_missing_env": True,
+        "project_id": "demo",
+        "channel_id": "ch-product",
+        "thread_id": "session-expiry",
+        "conversation_id": "ignored-when-channel-is-primary",
+    })
+
+    assert proposed["ok"] is True
+    assert proposed["request_revision"] >= 1
+    origin = proposed["origin_binding"]
+    assert origin["schema_version"] == "workflow-origin-binding.v1"
+    assert origin["surface"] == "channel"
+    assert origin["channel_id"] == "ch-product"
+    assert origin["thread_id"] == "session-expiry"
+    projection = load_workflow_request(
+        service.state_dir,
+        proposed["request_id"],
+    )
+    assert projection["origin_binding"] == origin
+    manifest = Path(
+        projection["workflow_input_manifest_ref"]
+    )
+    assert manifest.exists()
+    assert json.loads(
+        manifest.read_text(encoding="utf-8")
+    )["origin_binding"] == origin
+    intake_event = next(
+        event
+        for event in log.read_all()
+        if event.type == "workflow.intake.created"
+    )
+    assert intake_event.payload["origin_binding"] == origin
+    service.source = "feishu-agent"
+    continued = _execute(service, "workflow-request", {
+        "request_id": proposed["request_id"],
+        "kind": "issue",
+        "objective": "Continue the same request from another adapter",
+        "backend": "mock",
+        "allow_missing_env": True,
+    })
+    assert continued["ok"] is True
+    assert continued["origin_binding"] == origin
+    service.source = "kanban-agent"
+    manifest_before = manifest.read_text(encoding="utf-8")
+
+    mismatch = _execute(service, "workflow-request", {
+        "request_id": proposed["request_id"],
+        "kind": "issue",
+        "objective": "Attempt to redirect the same request",
+        "backend": "mock",
+        "allow_missing_env": True,
+        "project_id": "demo",
+        "channel_id": "ch-other",
+        "thread_id": "main",
+    })
+
+    assert mismatch["status"] == "origin_binding_mismatch"
+    assert load_workflow_request(
+        service.state_dir,
+        proposed["request_id"],
+    )["origin_binding"] == origin
+    assert manifest.read_text(encoding="utf-8") == manifest_before
+
+
+def test_intake_rejects_origin_change_before_overwriting_sidecars(
+    tmp_path: Path,
+) -> None:
+    service, _log = _service(tmp_path)
+    proposed = _execute(service, "workflow-request", {
+        "request_id": "REQ-IMMUTABLE",
+        "kind": "issue",
+        "objective": "Preserve the canonical result destination",
+        "backend": "mock",
+        "allow_missing_env": True,
+        "project_id": "demo",
+        "channel_id": "ch-original",
+        "thread_id": "main",
+    })
+    source_manifest = (
+        tmp_path
+        / "artifacts"
+        / "workflow"
+        / "REQ-IMMUTABLE"
+        / "workflow-input-manifest.json"
+    )
+    before = source_manifest.read_text(encoding="utf-8")
+
+    with pytest.raises(WorkflowRequestError, match="canonical request origin"):
+        build_flow_intake(
+            kind="issue",
+            objective="Attempt to redirect the same request",
+            backend="mock",
+            project_id="demo",
+            request_id="REQ-IMMUTABLE",
+            source="channel",
+            channel_id="ch-other",
+            thread_id="main",
+            output=tmp_path / "docs" / "intake" / "REQ-IMMUTABLE.md",
+        )
+
+    assert source_manifest.read_text(encoding="utf-8") == before
+
+
+def test_workflow_submit_binds_existing_task_before_invoke(
+    tmp_path: Path,
+) -> None:
+    service, log = _service(tmp_path)
+    TaskStore(service.state_dir / "kanban.json").add(
+        Task(id="TASK-SUBMIT", title="Submit request")
+    )
+    proposed = _execute(service, "workflow-request", {
+        "kind": "issue",
+        "objective": "Fix session expiry and add a regression test",
+        "backend": "mock",
+        "task_id": "TASK-SUBMIT",
+        "allow_missing_env": True,
+    })
+
+    submitted = _execute(service, "workflow-submit", {
+        "intake_ref": proposed["intake_ref"],
+        "request_id": proposed["request_id"],
+        "proposal_ref": proposed["proposal_ref"],
+        "proposal_digest": proposed["proposal_digest"],
+        "kind": "issue",
+        "task_id": "TASK-SUBMIT",
+        "allow_missing_env": True,
+    })
+
+    assert submitted["ok"] is True
+    task = TaskStore(service.state_dir / "kanban.json").get("TASK-SUBMIT")
+    assert task is not None
+    assert workflow_task_request_binding(task) == {
+        "request_id": proposed["request_id"],
+        "request_revision": proposed["request_revision"],
+        "origin_binding_digest": workflow_origin_digest(
+            proposed["origin_binding"]
+        ),
+    }
+    event_types = [event.type for event in log.read_all()]
+    assert event_types.index("task.contract.update") < event_types.index(
+        "workflow.invoke.requested"
+    )
 
 
 def test_submit_and_reject_bind_exact_current_proposal(tmp_path: Path) -> None:

@@ -557,7 +557,10 @@ class GoalClosureBridgeMixin:
             if str(body.get("goal_id") or "") != goal_id:
                 continue
             generation = str(body.get("task_map_generation") or "")
-            if generation and generation != task_map_generation:
+            if generation and not same_task_map_generation(
+                generation,
+                task_map_generation,
+            ):
                 continue
             return {
                 "goal_claim_set_ref": str(body.get("goal_claim_set_ref") or ""),

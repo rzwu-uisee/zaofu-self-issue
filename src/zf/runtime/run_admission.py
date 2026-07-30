@@ -546,6 +546,8 @@ def record_run_dispatch_blocked(
 
     if not reason:
         return
+    if event is not None and event.type == "run.dispatch.blocked":
+        return
     events = runtime.event_log.read_all()
     candidate = str(run_id or "").strip()
     if not candidate and event is not None:

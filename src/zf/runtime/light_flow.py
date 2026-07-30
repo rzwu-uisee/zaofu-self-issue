@@ -64,6 +64,7 @@ def synthesize_light_task_map(
     ready_plan_ports: list[str] | None = None,
 ) -> dict[str, Any]:
     root = (target_root or ".").strip().rstrip("/") or "."
+    scope_root = "." if Path(root).is_absolute() else root
     task_id = f"{pdd_id.upper()}-{LIGHT_TASK_SUFFIX}" if pdd_id else LIGHT_TASK_SUFFIX
     requirement_ref = objective_ref or prd_ref
     objective_text = objective.strip() or f"Deliver the work described by {requirement_ref}"
@@ -78,7 +79,7 @@ def synthesize_light_task_map(
         refs,
         ready_matrix_refs=matrix_refs,
     )
-    path_prefix = "" if root == "." else f"{root}/"
+    path_prefix = "" if scope_root == "." else f"{scope_root}/"
     flow_label = _flow_label(flow_kind)
     acceptance_criteria = [
         f"All acceptance criteria in {requirement_ref} are met on the current tree.",
@@ -159,6 +160,7 @@ def maybe_synthesize_light_task_map(
     state_dir: Path,
     event_writer: Any,
     events: list[ZfEvent],
+    task_store: Any | None = None,
 ) -> ZfEvent | None:
     """入口触发 → 写 task_map + 发 task_map.ready(幂等)。"""
     payload = event.payload if isinstance(event.payload, dict) else {}
@@ -249,11 +251,18 @@ def maybe_synthesize_light_task_map(
             payload.get("target_root") or metadata.get("target_root") or ""
         ),
         workflow_refs=workflow_refs,
-        verification_commands=_light_verification_commands(
-            config=config,
-            workflow_refs=workflow_refs,
-            state_dir=state_dir,
-        ),
+        verification_commands=_dedupe_strings([
+            *_workflow_task_verification_commands(
+                event=event,
+                payload=payload,
+                task_store=task_store,
+            ),
+            *_light_verification_commands(
+                config=config,
+                workflow_refs=workflow_refs,
+                state_dir=state_dir,
+            ),
+        ]),
         flow_kind=flow_kind,
         ready_plan_ports=ready_plan_ports,
     )
@@ -451,6 +460,35 @@ def _light_verification_commands(
             continue
         commands.extend(getattr(gate, "required_checks", []) or [])
     return _dedupe_strings(commands)
+
+
+def _workflow_task_verification_commands(
+    *,
+    event: ZfEvent,
+    payload: dict[str, Any],
+    task_store: Any | None,
+) -> list[str]:
+    if task_store is None:
+        return []
+    task_id = str(event.task_id or payload.get("task_id") or "").strip()
+    if not task_id:
+        return []
+    try:
+        task = task_store.get(task_id)
+        contract = getattr(task, "contract", None)
+        if contract is None:
+            return []
+        from zf.runtime.verification_commands import (
+            task_contract_verification_commands,
+        )
+
+        return [
+            str(record.get("command") or "").strip()
+            for record in task_contract_verification_commands(contract)
+            if str(record.get("command") or "").strip()
+        ]
+    except Exception:
+        return []
 
 
 def _matrix_body_ready(body: dict[str, Any]) -> bool:

@@ -54,10 +54,21 @@ _GENERIC_ARTIFACT_CONTEXT_KEYS = (
     "run_contract_ref",
     "run_contract_digest",
 )
+ARTIFACT_DELIVERY_SUBJECT_GUIDANCE = (
+    "SUBJECT OF REVIEW: this artifact-delivery profile has no candidate branch. "
+    "Verify only the current Run's Controlled Artifact Inputs, declared "
+    "`input_result_refs`, and required delivery artifacts. Do not enumerate "
+    "`candidate/*`, global runtime artifacts, or evidence from another "
+    "`workflow_run_id`; the Kernel rejects unbound verification evidence.",
+)
 ARTIFACT_DELIVERY_RESULT_GUIDANCE = (
     "Artifact-delivery identity and `input_result_refs` are pinned by the "
     "Kernel. Do not add raw child result files, source manifests, or transcript "
     "refs as stage inputs.",
+    "`verification_evidence_refs` may cite only this Run's declared "
+    "`input_result_refs`, evidence/control refs carried by those admitted "
+    "envelopes, or the immutable refs declared in `artifacts[]`. Evidence from "
+    "another Run or from global runtime-state discovery is rejected.",
     "`goal_coverage[].supporting_artifact_refs` may reference only the immutable "
     "refs declared in `artifacts[]`.",
     "Test commands, screenshots, demos, and verification receipts belong in "
@@ -84,6 +95,45 @@ _IMMUTABLE_RESULT_FIELDS = frozenset({
     "run_contract_ref", "run_contract_digest",
     "input_result_refs",
 })
+
+
+def render_review_subject_lines(
+    *,
+    candidate_ref: str,
+    candidate_head: str,
+    candidate_prefix: str,
+    subject_pdd_id: str,
+    verification_reader: bool,
+    artifact_delivery: bool,
+) -> list[str]:
+    if candidate_ref and not artifact_delivery:
+        return [
+            f"- candidate_ref: `{candidate_ref}`",
+            f"- candidate_head_commit: `{candidate_head}`",
+            "",
+            "EVALUATE THE CANDIDATE: judge/inspect `candidate_ref` at "
+            "`candidate_head_commit` — this is the deliverable under review. "
+            "`target_ref` is only the merge DESTINATION after ship; it may be "
+            "unresolved or stale at review time and its state MUST NOT be a "
+            "rejection reason.",
+            "",
+        ]
+    if artifact_delivery:
+        return [*ARTIFACT_DELIVERY_SUBJECT_GUIDANCE, ""]
+    if not verification_reader:
+        return []
+    example = (
+        f", e.g. `{candidate_prefix}/{subject_pdd_id}`"
+        if subject_pdd_id else ""
+    )
+    return [
+        "SUBJECT OF REVIEW: no candidate_ref accompanied this dispatch. If a "
+        f"deliverable branch exists (default prefix `{candidate_prefix}/`"
+        f"{example}), evaluate THAT branch at its head. `target_ref` is only "
+        "the merge DESTINATION after ship; it may be unresolved or empty at "
+        "review time and its state MUST NOT be a rejection reason.",
+        "",
+    ]
 
 
 def compact_stage_context(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -172,12 +222,7 @@ def prepare_fanout_result_guidance(
         f"the enum value, and put rationale in `{result_prefix}summary` or "
         f"`{result_prefix}findings`.",
     ]
-    if semantic_submit:
-        guidance.append(
-            "The scratch JSON root is the semantic result. Keep all prefilled "
-            "fields at that root; do not add a profile wrapper or event identity."
-        )
-    else:
+    if not semantic_submit:
         guidance.append(
             "`fanout_id`, `stage_id`, `child_id`, `run_id`, `role_instance`, "
             "and `status` must stay as top-level payload fields; do not place "
@@ -198,6 +243,28 @@ def prepare_fanout_result_guidance(
             "and owner.",
         ])
     return guidance, semantic_submit, result_prefix
+
+
+def render_fanout_submit_commands(
+    *,
+    success_command: str,
+    failure_command: str,
+    semantic_submit: bool,
+) -> list[str]:
+    if semantic_submit:
+        return ["Success command:", "```bash", success_command, "```", ""]
+    return [
+        "Success command:",
+        "```bash",
+        success_command,
+        "```",
+        "",
+        "Failure command:",
+        "```bash",
+        failure_command,
+        "```",
+        "",
+    ]
 
 
 def prepare_profiled_stage_result(
@@ -238,17 +305,13 @@ def prepare_profiled_stage_result(
         "",
         f"- profile: `{profile_id}` revision `{profile_revision}`",
         f"- schema: `{profile.schema_version}`",
-        "- Submit only the stage semantic result below. The Kernel supplies "
-        "operation/run/task/attempt/dispatch identity and selects the canonical event.",
-        f"- Edit the complete semantic result at `{scratch}`; the file is "
-        "the signed scratch input for both success and failure.",
-        f"- The scratch root is the `{profile.semantic_field}` semantic body itself. "
-        f"Do not wrap it under `{profile.semantic_field}` or add event identity fields.",
-        "- Preserve the prefilled field placement; moving fields into a nested wrapper "
-        "is rejected instead of being silently truncated.",
-        "- For failure, set `execution_status`/`verdict` and exact findings in "
-        "that file before running the same submit command.",
-        "- The transport provides submit authorization; do not print or inspect its credential.",
+        f"- Edit `{scratch}`. Its JSON root is the complete "
+        f"`{profile.semantic_field}` body; preserve prefilled fields at the root. "
+        f"Do not wrap it under `{profile.semantic_field}` or add identity fields. "
+        "The Kernel supplies immutable identity and selects the canonical event.",
+        "- For failure, set `execution_status`/`verdict` and exact findings before "
+        "running the same command.",
+        "- Submit authorization is transport-owned; do not print or inspect it.",
         "",
     ]
     return command, lines
@@ -315,4 +378,6 @@ __all__ = [
     "prepare_profiled_stage_result",
     "prepare_result_file_command",
     "prepare_writer_execution_card",
+    "render_fanout_submit_commands",
+    "render_review_subject_lines",
 ]

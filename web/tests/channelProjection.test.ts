@@ -181,3 +181,70 @@ const ppRun = ppConv.threads.flatMap((t) => t.turns).flatMap((t) => t.runs).find
 assert(ppRun.status === "submitted", `provider pending row stays working, got ${ppRun.status}`);
 
 console.log("channelProjection provider-pending tests OK");
+
+const resultAvailableDetail = {
+  state_updates: [{
+    status: "research_result_available",
+    summary: "Evidence-backed result.",
+    thread_id: "main",
+    ts: "2026-07-30T10:00:00Z",
+    refs: {
+      workflow_result_event_id: "evt-result-1",
+      request_id: "REQ-1",
+      request_revision: 2,
+      artifact_ref: "research/TASK-1/result.md",
+      artifact_digest: "a".repeat(64),
+      adopt_payload: {
+        result_event_id: "evt-result-1",
+        request_id: "REQ-1",
+        request_revision: 2,
+        artifact_ref: "research/TASK-1/result.md",
+        artifact_digest: "a".repeat(64),
+      },
+    },
+  }],
+} as unknown as ChannelDetail;
+const availableConversation = buildChannelConversation(
+  resultAvailableDetail,
+  "ch-result",
+  "main",
+);
+const availableCard = availableConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.cards)
+  .find((card) => card.kind === "workflow-result");
+assert(availableCard?.status === "waiting_input", "available result waits for explicit adoption");
+assert(
+  (availableCard?.payload?.adoptPayload as Record<string, unknown>)?.request_id === "REQ-1",
+  "result card retains the exact controlled adoption payload",
+);
+assert(
+  availableCard?.refs?.artifact_ref === "research/TASK-1/result.md"
+  && availableCard?.refs?.artifact_digest === "a".repeat(64),
+  "result card exposes the immutable artifact ref and digest",
+);
+
+const adoptedConversation = buildChannelConversation({
+  ...resultAvailableDetail,
+  state_updates: [
+    ...(resultAvailableDetail.state_updates ?? []),
+    {
+      status: "research_adopted",
+      summary: "Evidence adopted.",
+      thread_id: "main",
+      ts: "2026-07-30T10:01:00Z",
+      refs: {
+        workflow_result_event_id: "evt-result-1",
+        artifact_digest: "a".repeat(64),
+      },
+    },
+  ],
+} as unknown as ChannelDetail, "ch-result", "main");
+const adoptedCards = adoptedConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.cards)
+  .filter((card) => card.kind === "workflow-result");
+assert(adoptedCards.length === 1, "available and adopted updates fold into one result card");
+assert(adoptedCards[0]?.status === "completed", "adoption completes the existing result card");
+
+console.log("channelProjection workflow-result tests OK");

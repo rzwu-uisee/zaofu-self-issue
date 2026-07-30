@@ -146,7 +146,7 @@ export interface AgentSessionPlanRequest {
 
 export interface AgentSessionCard {
   id: string;
-  kind: "plan" | "approve" | "question" | "proposal" | "queue" | "run-status" | "capability" | "context-ledger" | "preview";
+  kind: "plan" | "approve" | "question" | "proposal" | "queue" | "run-status" | "capability" | "context-ledger" | "preview" | "workflow-result";
   title: string;
   body?: string;
   status?: AgentSessionStatus;

@@ -601,6 +601,66 @@ def test_pause_resume_cancel_are_idempotent_and_fence_late_result(
     )
 
 
+def test_terminal_run_dispatch_blocked_event_does_not_self_amplify(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+    _control(runtime, action="run-cancel", run_id="RUN-A")
+    blocked = runtime.event_writer.append(ZfEvent(
+        type="run.dispatch.blocked",
+        actor="orchestrator",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "run_id": "RUN-A",
+            "workflow_run_id": "RUN-A",
+            "source_event_id": "source-1",
+            "reason": "run_terminal:cancelled",
+        },
+    ))
+    before = sum(
+        event.type == "run.dispatch.blocked"
+        for event in log.read_all()
+    )
+
+    runtime.run_once(events=[blocked])
+
+    assert sum(
+        event.type == "run.dispatch.blocked"
+        for event in log.read_all()
+    ) == before
+
+
+def test_terminal_run_non_stage_event_does_not_emit_dispatch_block(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+    _control(runtime, action="run-cancel", run_id="RUN-A")
+    snapshot = runtime.event_writer.append(ZfEvent(
+        type="runtime.snapshot.recorded",
+        actor="runtime",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "run_id": "RUN-A",
+            "workflow_run_id": "RUN-A",
+        },
+    ))
+    before = sum(
+        event.type == "run.dispatch.blocked"
+        for event in log.read_all()
+    )
+
+    runtime.run_once(events=[snapshot])
+
+    assert sum(
+        event.type == "run.dispatch.blocked"
+        for event in log.read_all()
+    ) == before
+
+
 def test_run_admission_config_defaults_and_concurrent_cap(
     tmp_path: Path,
 ) -> None:

@@ -257,6 +257,13 @@ def _reply_run_generation(payload: dict) -> int:
     return parsed if parsed > 0 else 1
 
 
+def _request_revision(payload: dict) -> int:
+    try:
+        return int(payload.get("request_revision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _payload_requests_writer_capability(payload: dict) -> bool:
     if bool(payload.get("write") or payload.get("writable")):
         return True
@@ -425,6 +432,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 state_dir=Path(self.state_dir),
                 event_writer=self.event_writer,
                 events=list(events),
+                task_store=self.task_store,
             )
         except Exception:
             pass
@@ -5563,6 +5571,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             "workflow_input_manifest_ref": str(payload.get("workflow_input_manifest_ref") or ""),
             "workflow_prompt_ref": str(payload.get("workflow_prompt_ref") or ""),
             "prompt_kind": str(payload.get("prompt_kind") or ""),
+            "request_id": str(payload.get("request_id") or ""),
+            "request_revision": _request_revision(payload),
+            "origin_binding": (
+                dict(payload.get("origin_binding"))
+                if isinstance(payload.get("origin_binding"), dict)
+                else {}
+            ),
             "artifact_refs": payload.get("artifact_refs")
             if isinstance(payload.get("artifact_refs"), list)
             else [],
@@ -5603,6 +5618,17 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             )
             child_event.payload["workflow_prompt_ref"] = str(payload.get("workflow_prompt_ref") or "")
             child_event.payload["prompt_kind"] = str(payload.get("prompt_kind") or "")
+            child_event.payload["request_id"] = str(
+                payload.get("request_id") or ""
+            )
+            child_event.payload["request_revision"] = _request_revision(
+                payload
+            )
+            child_event.payload["origin_binding"] = (
+                dict(payload.get("origin_binding"))
+                if isinstance(payload.get("origin_binding"), dict)
+                else {}
+            )
             child_event.payload["artifact_refs"] = (
                 payload.get("artifact_refs")
                 if isinstance(payload.get("artifact_refs"), list)

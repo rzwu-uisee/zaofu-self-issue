@@ -19,6 +19,7 @@ from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
     workflow_route_catalog,
 )
+from zf.runtime.workflow_anchor import workflow_task_request_binding
 
 
 TASK_WORKFLOW_PLAN_SCHEMA_VERSION = "task-workflow-plan.v1"
@@ -31,6 +32,8 @@ _PARAMETER_KEYS = frozenset({
     "expected_output",
     "open_questions",
     "risk",
+    "request_id",
+    "request_revision",
     "scope",
     "source_ref",
     "source_refs",
@@ -116,6 +119,33 @@ def build_task_workflow_plan_request(
         if parameter_error:
             errors.append(f"option {index}: {parameter_error}")
             continue
+        task_request = workflow_task_request_binding(task)
+        if task_request:
+            requested_id = str(parameters.get("request_id") or "").strip()
+            try:
+                requested_revision = int(
+                    parameters.get("request_revision") or 0
+                )
+            except (TypeError, ValueError):
+                requested_revision = 0
+            if requested_id and requested_id != task_request["request_id"]:
+                errors.append(
+                    f"option {index}: request_id does not match Task binding"
+                )
+                continue
+            if (
+                requested_revision
+                and requested_revision
+                != int(task_request["request_revision"])
+            ):
+                errors.append(
+                    f"option {index}: request_revision does not match Task binding"
+                )
+                continue
+            parameters["request_id"] = task_request["request_id"]
+            parameters["request_revision"] = int(
+                task_request["request_revision"]
+            )
         objective = str(
             raw_option.get("objective")
             or nested_objective

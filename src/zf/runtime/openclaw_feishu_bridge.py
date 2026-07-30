@@ -286,7 +286,11 @@ def _should_send_event(
     role = _payload_str(payload, "role")
     if role and role in set(bridge_binding.outbound.exclude_roles):
         return False
-    return bool(_payload_str(payload, "text") or _payload_str(payload, "message"))
+    return bool(
+        _payload_str(payload, "text")
+        or _payload_str(payload, "message")
+        or _payload_str(payload, "summary")
+    )
 
 
 def _delivered_source_ids(events: list[ZfEvent], *, bridge_id: str) -> set[str]:
@@ -312,7 +316,11 @@ def _format_feishu_message(
     channel_id = _payload_str(payload, "channel_id") or bridge_binding.zaofu.channel_id
     member_id = _payload_str(payload, "member_id") or event.actor or "zaofu"
     role = _payload_str(payload, "role") or "message"
-    text = _payload_str(payload, "text") or _payload_str(payload, "message")
+    text = (
+        _payload_str(payload, "text")
+        or _payload_str(payload, "message")
+        or _payload_str(payload, "summary")
+    )
     return f"[ZaoFu:{channel_id}] {member_id} ({role})\n{text}".strip()
 
 

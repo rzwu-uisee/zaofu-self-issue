@@ -1191,15 +1191,24 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "workflow_input_manifest_ref",
                 "missing_required_fields",
                 "open_questions",
+                "origin_binding",
             ],
         },
         "workflow.intake.clarification.required": {
             "required": request_base,
-            "optional": ["missing_required_fields", "open_questions"],
+            "optional": [
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.intake.ready": {
             "required": request_base,
-            "optional": ["missing_required_fields", "open_questions"],
+            "optional": [
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.request.updated": {
             "required": request_base,
@@ -1207,23 +1216,44 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "previous_revision",
                 "missing_required_fields",
                 "open_questions",
+                "origin_binding",
             ],
         },
         "workflow.request.proposed": {
             "required": request_base,
-            "optional": ["run_id", "missing_required_fields", "open_questions"],
+            "optional": [
+                "run_id",
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.request.approved": {
             "required": request_base,
-            "optional": ["run_id", "missing_required_fields", "open_questions"],
+            "optional": [
+                "run_id",
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.request.submitted": {
             "required": request_base,
-            "optional": ["run_id", "missing_required_fields", "open_questions"],
+            "optional": [
+                "run_id",
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.request.running": {
             "required": request_base,
-            "optional": ["run_id", "missing_required_fields", "open_questions"],
+            "optional": [
+                "run_id",
+                "missing_required_fields",
+                "open_questions",
+                "origin_binding",
+            ],
         },
         "workflow.submit.requested": {
             "required": [
@@ -1300,6 +1330,7 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "request_revision",
                 "light_entry_trigger",
                 "light_entry_payload",
+                "origin_binding",
             ],
         },
         "workflow.invoke.accepted": {
@@ -1316,6 +1347,7 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "workflow_prompt_ref",
                 "prompt_kind",
                 "artifact_refs",
+                "origin_binding",
             ],
         },
         "workflow.invoke.rejected": {
@@ -1421,7 +1453,54 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "summary",
                 "source_event_id",
             ],
-            "optional": ["channel_id", "thread_id"],
+            "optional": [
+                "channel_id",
+                "thread_id",
+                "project_id",
+                "origin_surface",
+                "conversation_id",
+                "thread_key",
+                "origin_binding",
+                "result_event_id",
+                "task_id",
+                "workflow_run_id",
+                "terminal_event_id",
+            ],
+        },
+        "workflow.result.available": {
+            "required": [
+                "schema_version",
+                "result_kind",
+                "status",
+                "task_id",
+                "workflow_run_id",
+                "terminal_event_id",
+                "artifact_ref",
+                "artifact_digest",
+                "summary",
+                "origin_binding",
+            ],
+            "optional": [
+                "project_id",
+                "origin_surface",
+                "request_id",
+                "request_revision",
+                "conversation_id",
+                "thread_key",
+                "channel_id",
+                "thread_id",
+                "fanout_id",
+                "stage_id",
+                "synth_event_id",
+            ],
+        },
+        "workflow.result.return.skipped": {
+            "required": [
+                "schema_version",
+                "result_event_id",
+                "reason",
+                "origin_binding",
+            ],
         },
     }
 

@@ -14,6 +14,8 @@ from zf.core.config.workflow_profiles import (
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.task.schema import Task, TaskContract
+from zf.core.task.store import TaskStore
 from zf.runtime.light_flow import (
     light_flow_entry_triggers,
     light_flow_metadata,
@@ -314,6 +316,21 @@ def test_synthesized_task_map_does_not_bind_unready_workflow_matrices() -> None:
     assert "verification" not in task
 
 
+def test_absolute_target_root_uses_worktree_relative_scope() -> None:
+    payload = synthesize_light_task_map(
+        pdd_id="issue",
+        objective="Fix the regression",
+        prd_ref="docs/issue.md",
+        target_root="/tmp/project",
+        verification_commands=["python3 -m unittest"],
+        flow_kind="issue",
+    )
+
+    task = payload["tasks"][0]
+    assert task["allowed_paths"] == ["**", "README.md"]
+    assert payload["shared_conventions"]["test_path_prefix"] == "tests"
+
+
 def test_synthesized_task_map_binds_only_explicit_ready_matrix_ports() -> None:
     payload = synthesize_light_task_map(
         pdd_id="default",
@@ -407,6 +424,54 @@ def test_entry_trigger_synthesizes_and_emits(tmp_path: Path) -> None:
     assert written["tasks"][0]["verification"] == "python app/verify.py"
     assert written["tasks"][0]["validation"]["commands"][0]["id"] == (
         "light-verification-1"
+    )
+
+
+def test_entry_inherits_workflow_task_verification(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-ISSUE",
+        title="Fix the regression",
+        contract=TaskContract(
+            verification="python3 -m unittest discover -s tests -v",
+        ),
+    ))
+    log = EventLog(state_dir / "events.jsonl")
+    emitted = maybe_synthesize_light_task_map(
+        event=ZfEvent(
+            type="prd.requested",
+            actor="web",
+            task_id="TASK-ISSUE",
+            payload={
+                "task_id": "TASK-ISSUE",
+                "pdd_id": "workflow-issue",
+                "objective": "Fix the regression",
+            },
+        ),
+        config=_light_config(),
+        state_dir=state_dir,
+        event_writer=EventWriter(log),
+        events=[],
+        task_store=store,
+    )
+
+    assert emitted is not None
+    task_map = json.loads(
+        (
+            state_dir
+            / "artifacts"
+            / "workflow-issue"
+            / "task_map.json"
+        ).read_text()
+    )
+    task = task_map["tasks"][0]
+    assert task["verification"] == (
+        "python3 -m unittest discover -s tests -v"
+    )
+    assert task["validation"]["commands"][0]["command"] == (
+        "python3 -m unittest discover -s tests -v"
     )
 
 

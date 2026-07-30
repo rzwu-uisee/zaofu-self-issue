@@ -6,12 +6,20 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 from zf.cli.flow import build_flow_intake
 from zf.core.events import EventWriter, ZfEvent
 from zf.core.events.factory import event_log_from_project
 from zf.core.config.loader import load_config
+from zf.core.task.store import TaskStore
+from zf.runtime.workflow_anchor import (
+    bind_workflow_request_to_task,
+    mark_workflow_managed_task,
+)
+from zf.runtime.workflow_origin import workflow_origin_digest
+from zf.runtime.workflow_requests import load_workflow_request
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -48,6 +56,34 @@ def _prepare_request(args: argparse.Namespace) -> int:
     )
     if not result.get("request_projection_ref"):
         raise SystemExit("workflow request projection was not created")
+    projection = load_workflow_request(args.state_dir, args.request_id)
+    task_store = TaskStore(args.state_dir / "kanban.json")
+    task = task_store.get(args.task_id)
+    if task is None:
+        raise SystemExit(f"research task does not exist: {args.task_id}")
+    origin_binding = dict(projection.get("origin_binding") or {})
+    bind_workflow_request_to_task(
+        mark_workflow_managed_task(task),
+        request_id=args.request_id,
+        request_revision=int(projection.get("revision") or 0),
+        origin_binding_digest=workflow_origin_digest(origin_binding),
+    )
+    task_store.update(task.id, contract=task.contract)
+    _writer(args.project_root, args.state_dir).emit(
+        "task.contract.update",
+        actor="doc156-e2e",
+        task_id=task.id,
+        payload={
+            "source": "doc156_prepare_request",
+            "contract": asdict(task.contract),
+            "execution_owner": "workflow",
+            "request_id": args.request_id,
+            "request_revision": int(projection.get("revision") or 0),
+            "origin_binding_digest": workflow_origin_digest(
+                origin_binding
+            ),
+        },
+    )
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -164,10 +200,51 @@ def _finish_research(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         label="research aggregate artifact",
     )
+    result = _wait_for(
+        writer,
+        lambda events: next((
+            event
+            for event in reversed(events)
+            if event.type == "workflow.result.available"
+            and event.payload.get("terminal_event_id") == aggregate.id
+        ), None),
+        timeout=args.timeout,
+        label="research result return",
+    )
+    workflow_run_id = str(
+        aggregate.payload.get("workflow_run_id")
+        or started.payload.get("workflow_run_id")
+        or ""
+    )
+    if not workflow_run_id:
+        raise RuntimeError("research aggregate is missing workflow_run_id")
+    if not any(
+        event.type == "run.completed"
+        and (
+            event.payload.get("workflow_run_id") == workflow_run_id
+            or event.payload.get("run_id") == workflow_run_id
+        )
+        for event in writer.event_log.read_all()
+    ):
+        writer.append(ZfEvent(
+            type="run.completed",
+            actor="orchestrator",
+            task_id=args.task_id,
+            causation_id=aggregate.id,
+            correlation_id=workflow_run_id,
+            payload={
+                "workflow_run_id": workflow_run_id,
+                "run_id": workflow_run_id,
+                "status": "completed",
+                "source_event_id": aggregate.id,
+            },
+        ))
     print(json.dumps({
         "fanout_id": fanout_id,
         "artifact_ref": aggregate.payload["research_artifact_ref"],
         "artifact_digest": aggregate.payload["research_artifact_digest"],
+        "result_event_id": result.id,
+        "workflow_run_id": workflow_run_id,
     }, sort_keys=True))
     return 0
 

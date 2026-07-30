@@ -368,6 +368,7 @@ export function buildKanbanConversation(args: {
   taskId?: string;
   backend?: string;
   projectId?: string;
+  conversationId?: string;
 }): AgentConversation {
   const threads = new Map<string, AgentSessionThread>();
   const turnToMessage = new Map<string, string>();
@@ -381,17 +382,38 @@ export function buildKanbanConversation(args: {
   // (`seq ?? 0`) made the first delta create the run's turn BEFORE the
   // user.message turn existed, so the question rendered below the answer
   // (operator report 2026-07-16).
-  const accepted = args.events.slice().sort((left, right) => {
-    const leftSeq = left.seq ?? Number.MAX_SAFE_INTEGER;
-    const rightSeq = right.seq ?? Number.MAX_SAFE_INTEGER;
-    if (leftSeq !== rightSeq) return leftSeq - rightSeq;
-    return String(left.ts || "").localeCompare(String(right.ts || ""));
-  });
+  const accepted = args.events
+    .filter((event) => {
+      if (
+        event.type !== "workflow.result.available"
+        && event.type !== "workflow.research.adopted"
+      ) return true;
+      const payload = event.payload ?? {};
+      const origin = recordValue(payload.origin_binding) ?? {};
+      const surface = textValue(
+        payload.origin_surface
+        || origin.surface
+        || (payload.conversation_id ? "kanban_agent" : ""),
+      ).trim();
+      const conversationId = textValue(
+        payload.conversation_id || origin.conversation_id,
+      ).trim();
+      return surface === "kanban_agent"
+        && Boolean(conversationId)
+        && (!args.conversationId || conversationId === args.conversationId);
+    })
+    .sort((left, right) => {
+      const leftSeq = left.seq ?? Number.MAX_SAFE_INTEGER;
+      const rightSeq = right.seq ?? Number.MAX_SAFE_INTEGER;
+      if (leftSeq !== rightSeq) return leftSeq - rightSeq;
+      return String(left.ts || "").localeCompare(String(right.ts || ""));
+    });
   const planResponsesByEvent = new Map<string, ReturnType<typeof parsePlanResponse>>();
   const planResponsesByRevision = new Map<string, ReturnType<typeof parsePlanResponse>>();
   const planAnswerEventIds = new Set<string>();
   const latestPlanRevisions = new Map<string, number>();
   const proposalResolutions = new Map<string, string>();
+  const adoptedResearchResults = new Set<string>();
   for (const event of accepted) {
     if (event.type === "kanban.agent.plan.answered") {
       const response = parsePlanResponse(event.payload ?? {}, textValue(event.id));
@@ -427,6 +449,15 @@ export function buildKanbanConversation(args: {
           textValue(event.payload?.resolution || "resolved"),
         );
       }
+    } else if (event.type === "workflow.research.adopted") {
+      const resultEventId = textValue(
+        event.payload?.result_event_id,
+      ).trim();
+      const artifactDigest = textValue(
+        event.payload?.artifact_digest,
+      ).trim();
+      if (resultEventId) adoptedResearchResults.add(resultEventId);
+      if (artifactDigest) adoptedResearchResults.add(artifactDigest);
     } else if (event.type === "task.created") {
       const request = recordValue(event.payload?.request);
       const proposalEventId = textValue(
@@ -471,6 +502,55 @@ export function buildKanbanConversation(args: {
         };
       }
       thread.updatedAt = event.ts;
+      continue;
+    }
+    if (event.type === "workflow.result.available") {
+      const resultEventId = textValue(event.id).trim();
+      const artifactDigest = textValue(payload.artifact_digest).trim();
+      const adopted = adoptedResearchResults.has(resultEventId)
+        || adoptedResearchResults.has(artifactDigest);
+      const thread = ensureThread(threads, threadId);
+      const turn = ensureTurn(
+        thread,
+        `workflow-result-${resultEventId || artifactDigest}`,
+        event.ts,
+      );
+      addCard(turn, {
+        id: `workflow-result-${resultEventId || artifactDigest}`,
+        kind: "workflow-result",
+        title: "Research result",
+        body: textValue(payload.summary),
+        status: adopted ? "completed" : "waiting_input",
+        threadId,
+        payload: {
+          adopted,
+          adoptPayload: {
+            result_event_id: resultEventId,
+            request_id: payload.request_id,
+            request_revision: payload.request_revision,
+            task_id: payload.task_id,
+            workflow_run_id: payload.workflow_run_id,
+            terminal_event_id: payload.terminal_event_id,
+            artifact_ref: payload.artifact_ref,
+            artifact_digest: payload.artifact_digest,
+            summary: payload.summary,
+          },
+        },
+        refs: {
+          result_event_id: resultEventId,
+          request_id: payload.request_id,
+          request_revision: payload.request_revision,
+          task_id: payload.task_id,
+          workflow_run_id: payload.workflow_run_id,
+          terminal_event_id: payload.terminal_event_id,
+          artifact_ref: payload.artifact_ref,
+          artifact_digest: payload.artifact_digest,
+        },
+      });
+      thread.updatedAt = event.ts;
+      continue;
+    }
+    if (event.type === "workflow.research.adopted") {
       continue;
     }
     if (event.type === "kanban.agent.plan.requested") {

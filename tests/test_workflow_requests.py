@@ -105,6 +105,49 @@ def test_workflow_request_revision_reaches_ready_with_versioned_spec(tmp_path: P
     ]
 
 
+def test_existing_legacy_request_is_migrated_to_origin_binding(
+    tmp_path: Path,
+) -> None:
+    state_dir, manifest_ref, writer = _request_fixture(tmp_path)
+    register_workflow_intake(
+        state_dir,
+        manifest_ref,
+        actor="test",
+        writer=writer,
+    )
+    projection_path = state_dir / "workflow-requests" / "REQ-1.json"
+    legacy = json.loads(projection_path.read_text(encoding="utf-8"))
+    legacy.pop("origin_binding")
+    projection_path.write_text(
+        json.dumps(legacy, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = register_workflow_intake(
+        state_dir,
+        manifest_ref,
+        actor="test",
+        writer=writer,
+    )
+
+    assert resumed["origin_binding"] == {
+        "schema_version": "workflow-origin-binding.v1",
+        "surface": "cli",
+        "source": "legacy",
+        "project_id": "demo",
+        "channel_id": "",
+        "thread_id": "",
+        "conversation_id": "",
+        "thread_key": "",
+    }
+    effective = json.loads(
+        Path(resumed["workflow_input_manifest_ref"]).read_text(
+            encoding="utf-8",
+        )
+    )
+    assert effective["origin_binding"] == resumed["origin_binding"]
+
+
 def test_workflow_request_lifecycle_rejects_invalid_transition(tmp_path: Path) -> None:
     state_dir, manifest_ref, writer = _request_fixture(tmp_path)
     register_workflow_intake(state_dir, manifest_ref, actor="test", writer=writer)

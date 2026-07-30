@@ -10,6 +10,7 @@ from zf.core.config.schema import (
     OpenClawFeishuBridgeFeishuConfig,
     OpenClawFeishuBridgeInboundConfig,
     OpenClawFeishuBridgeOpenClawConfig,
+    OpenClawFeishuBridgeOutboundConfig,
     OpenClawFeishuBridgeZaofuConfig,
     OpenClawProviderConfig,
     OpenClawRemoteBindingConfig,
@@ -96,7 +97,11 @@ def _state(tmp_path: Path) -> tuple[EventLog, EventWriter]:
     return log, EventWriter(log)
 
 
-def _config(*, allowed_chat_ids: list[str] | None = None) -> ZfConfig:
+def _config(
+    *,
+    allowed_chat_ids: list[str] | None = None,
+    outbound_event_types: list[str] | None = None,
+) -> ZfConfig:
     return ZfConfig(
         project=ProjectConfig(name="demo", state_dir=".zf"),
         providers=ProvidersConfig(
@@ -132,6 +137,12 @@ def _config(*, allowed_chat_ids: list[str] | None = None) -> ZfConfig:
                         ),
                         inbound=OpenClawFeishuBridgeInboundConfig(
                             allowed_chat_ids=allowed_chat_ids or [],
+                        ),
+                        outbound=OpenClawFeishuBridgeOutboundConfig(
+                            include_event_types=(
+                                outbound_event_types
+                                or ["channel.message.posted"]
+                            ),
                         ),
                     ),
                 },
@@ -205,6 +216,44 @@ def test_openclaw_feishu_bridge_pushes_channel_message_once(tmp_path: Path) -> N
 
     assert second.sent == 0
     assert len(client.calls) == 1
+
+
+def test_openclaw_feishu_bridge_pushes_channel_result_summary(
+    tmp_path: Path,
+) -> None:
+    event_log, writer = _state(tmp_path)
+    source = writer.emit(
+        "channel.state_update.posted",
+        actor="zf-cli",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "main",
+            "status": "research_result_available",
+            "summary": "Research evidence is ready for review.",
+            "source": "runtime",
+        },
+    )
+    client = _FakeOpenClawClient()
+
+    result = push_openclaw_feishu_bridge_once(
+        event_log=event_log,
+        writer=writer,
+        config=_config(
+            outbound_event_types=["channel.state_update.posted"]
+        ),
+        client=client,
+    )
+
+    assert result.sent == 1
+    assert len(client.calls) == 1
+    assert "Research evidence is ready for review." in client.calls[0]["message"]
+    delivered = next(
+        event
+        for event in event_log.read_all()
+        if event.type == BRIDGE_DELIVERED
+    )
+    assert delivered.payload["source_event_id"] == source.id
 
 
 def test_openclaw_feishu_bridge_skips_loop_and_system_messages(tmp_path: Path) -> None:

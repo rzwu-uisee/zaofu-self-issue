@@ -312,6 +312,196 @@ class TestGoalTerminalSettlement:
         assert store.get("T-COMPLETED").status == "done"
         assert store.get("T-SIBLING").status == "in_progress"
 
+    def test_run_goal_closes_bound_workflow_managed_root(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="RUN-MANAGED",
+            title="operator-created workflow root",
+            status="in_progress",
+            contract=TaskContract(
+                evidence_contract={
+                    "execution_owner": "workflow",
+                    "workflow_request_id": "RUN-MANAGED",
+                },
+            ),
+        ))
+        store.add(Task(
+            id="T-COMPLETED",
+            title="completed child",
+            status="in_progress",
+            contract=TaskContract(feature_id="RUN-MANAGED"),
+        ))
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-MANAGED",
+                "workflow_run_id": "RUN-MANAGED",
+                "pdd_id": "RUN-MANAGED",
+                "feature_id": "RUN-MANAGED",
+                "completed_task_ids": ["T-COMPLETED"],
+            },
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[terminal])
+
+        assert store.get("RUN-MANAGED").status == "done"
+        assert store.get("T-COMPLETED").status == "done"
+
+    def test_run_goal_closes_workflow_parent_with_distinct_task_id(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="TASK-LIGHT",
+            title="operator-created light workflow parent",
+            status="backlog",
+            contract=TaskContract(
+                evidence_contract={
+                    "execution_owner": "workflow",
+                    "workflow_request_id": "RUN-LIGHT",
+                },
+            ),
+        ))
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-LIGHT",
+                "workflow_run_id": "RUN-LIGHT",
+                "pdd_id": "RUN-LIGHT",
+                "feature_id": "RUN-LIGHT",
+                "completed_task_ids": ["RUN-LIGHT-DELIVER-001"],
+            },
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[terminal])
+
+        assert store.get("TASK-LIGHT").status == "done"
+
+    def test_run_goal_does_not_close_root_bound_to_another_request(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="RUN-CURRENT",
+            title="restarted workflow root",
+            status="in_progress",
+            contract=TaskContract(
+                evidence_contract={
+                    "execution_owner": "workflow",
+                    "workflow_request_id": "RUN-CURRENT",
+                },
+            ),
+        ))
+        stale_terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-OLD",
+                "workflow_run_id": "RUN-OLD",
+                "pdd_id": "RUN-CURRENT",
+                "feature_id": "RUN-CURRENT",
+                "completed_task_ids": ["T-OLD"],
+            },
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[stale_terminal])
+
+        assert store.get("RUN-CURRENT").status == "in_progress"
+
+    def test_restart_reconciles_consumed_goal_terminal(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="RUN-RECOVER",
+            title="workflow root left open before restart",
+            status="in_progress",
+            contract=TaskContract(
+                evidence_contract={
+                    "execution_owner": "workflow",
+                    "workflow_request_id": "RUN-RECOVER",
+                },
+            ),
+        ))
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-RECOVER",
+                "workflow_run_id": "RUN-RECOVER",
+                "pdd_id": "RUN-RECOVER",
+                "feature_id": "RUN-RECOVER",
+                "completed_task_ids": ["T-COMPLETED"],
+            },
+        ))
+        SessionStore(state_dir / "session.yaml").update(
+            latest_event_offset=log.current_offset(),
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[])
+
+        assert store.get("RUN-RECOVER").status == "done"
+
+    def test_restart_reconciles_distinct_workflow_parent_after_requeue(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="TASK-RECOVER",
+            title="light workflow parent requeued during stop",
+            status="backlog",
+            contract=TaskContract(
+                evidence_contract={
+                    "execution_owner": "workflow",
+                    "workflow_request_id": "RUN-RECOVER-LIGHT",
+                },
+            ),
+        ))
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-RECOVER-LIGHT",
+                "workflow_run_id": "RUN-RECOVER-LIGHT",
+                "pdd_id": "RUN-RECOVER-LIGHT",
+                "feature_id": "RUN-RECOVER-LIGHT",
+                "completed_task_ids": ["RUN-RECOVER-LIGHT-DELIVER-001"],
+            },
+        ))
+        SessionStore(state_dir / "session.yaml").update(
+            latest_event_offset=log.current_offset(),
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[])
+
+        assert store.get("TASK-RECOVER").status == "done"
+
     def test_late_goal_terminal_does_not_close_replanned_task(
         self, state_dir: Path, legacy_config, transport
     ):

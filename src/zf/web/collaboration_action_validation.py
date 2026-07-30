@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zf.runtime.channel_contracts import CHANNEL_PERMISSION_PROFILES
+from zf.runtime.research_templates import RESEARCH_TEMPLATES_BY_ID
 
 
 def validate_collaboration_action_payload(
@@ -68,11 +69,18 @@ def validate_collaboration_action_payload(
         ):
             return "topic, objective, or message is required"
         template_id = str(payload.get("template_id") or "").strip()
-        if (
-            template_id
-            and template_id != "research-fanout.fixed.v1"
-        ):
-            return "template_id must be research-fanout.fixed.v1"
+        if template_id and template_id not in RESEARCH_TEMPLATES_BY_ID:
+            allowed = ", ".join(sorted(RESEARCH_TEMPLATES_BY_ID))
+            return f"template_id must be one of: {allowed}"
+        if str(payload.get("channel_id") or "").strip():
+            if not str(payload.get("request_id") or "").strip():
+                return "channel-bound research requires request_id"
+            try:
+                request_revision = int(payload.get("request_revision"))
+            except (TypeError, ValueError):
+                request_revision = 0
+            if request_revision < 1:
+                return "channel-bound research requires request_revision"
     if action in {"workflow-start", "task-workflow-start"}:
         if not str(payload.get("task_id") or "").strip():
             return "task_id is required"
@@ -92,6 +100,7 @@ def validate_collaboration_action_payload(
             return "parameters must be a mapping"
     if action == "research-adopt":
         for key in (
+            "result_event_id",
             "request_id",
             "request_revision",
             "artifact_ref",

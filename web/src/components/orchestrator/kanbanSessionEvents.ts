@@ -41,6 +41,19 @@ export function isKanbanAgentSessionEvent(
   if (eventType === "user.message") {
     if (payload.target !== "kanban-agent") return false;
     if (payload.runtime_delivery !== "headless") return false;
+  } else if ([
+    "workflow.result.available",
+    "workflow.research.adopted",
+  ].includes(eventType)) {
+    const origin = payload.origin_binding
+      && typeof payload.origin_binding === "object"
+      && !Array.isArray(payload.origin_binding)
+      ? payload.origin_binding as Record<string, unknown>
+      : {};
+    if (textValue(payload.origin_surface || origin.surface) !== "kanban_agent") {
+      return false;
+    }
+    if (!textValue(payload.conversation_id).trim()) return false;
   } else if (eventType === "task.created") {
     const request = payload.request && typeof payload.request === "object"
       ? payload.request as Record<string, unknown>

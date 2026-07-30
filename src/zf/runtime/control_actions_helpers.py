@@ -16,6 +16,7 @@ from zf.runtime.channel_contracts import CHANNEL_DISCUSSION_MODES
 from zf.runtime.channel_contracts import normalize_permissions
 from zf.runtime.channel_contracts import validate_channel_member_contract
 from zf.runtime.operator_intent import validate_operator_intent_payload
+from zf.runtime.research_templates import RESEARCH_TEMPLATES_BY_ID
 import hashlib
 import json
 import re
@@ -342,8 +343,24 @@ def validate_shared_action_payload(
     *,
     config: ZfConfig | None = None,
 ) -> str:
-    if action == "create-task" and not str(payload.get("title") or "").strip():
-        return "title is required"
+    if action == "create-task":
+        if not str(payload.get("title") or "").strip():
+            return "title is required"
+        execution_mode = str(payload.get("execution_mode") or "").strip()
+        if execution_mode and execution_mode not in {"direct", "workflow"}:
+            return "execution_mode must be direct or workflow"
+        if execution_mode == "direct" and payload.get("workflow_plan") is not None:
+            return "execution_mode direct cannot include workflow_plan"
+        request_id = _required_text(payload, "request_id")
+        if request_id:
+            try:
+                request_revision = int(payload.get("request_revision"))
+            except (TypeError, ValueError):
+                request_revision = 0
+            if request_revision < 1:
+                return "request_revision must be a positive integer"
+            if execution_mode == "direct":
+                return "workflow Request binding requires execution_mode workflow"
     if action == "update-task" and not str(payload.get("task_id") or "").strip():
         return "task_id is required"
     if action == "request-fanout":
@@ -523,10 +540,21 @@ def validate_shared_action_payload(
         ):
             return "topic, objective, or message is required"
         template_id = _required_text(payload, "template_id")
-        if template_id and template_id != "research-fanout.fixed.v1":
-            return "template_id must be research-fanout.fixed.v1"
+        if template_id and template_id not in RESEARCH_TEMPLATES_BY_ID:
+            allowed = ", ".join(sorted(RESEARCH_TEMPLATES_BY_ID))
+            return f"template_id must be one of: {allowed}"
+        if _required_text(payload, "channel_id"):
+            if not _required_text(payload, "request_id"):
+                return "channel-bound research requires request_id"
+            try:
+                request_revision = int(payload.get("request_revision"))
+            except (TypeError, ValueError):
+                request_revision = 0
+            if request_revision < 1:
+                return "channel-bound research requires request_revision"
     if action == "research-adopt":
         for key in (
+            "result_event_id",
             "request_id",
             "request_revision",
             "artifact_ref",
@@ -535,6 +563,12 @@ def validate_shared_action_payload(
         ):
             if payload.get(key) in (None, ""):
                 return f"{key} is required"
+        try:
+            request_revision = int(payload.get("request_revision"))
+        except (TypeError, ValueError):
+            request_revision = 0
+        if request_revision < 1:
+            return "request_revision must be a positive integer"
     if action == "channel-drain-replies":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"

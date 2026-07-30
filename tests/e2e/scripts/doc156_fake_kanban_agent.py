@@ -218,6 +218,7 @@ def _proposal(message: str) -> dict[str, Any]:
                 "channel_id": channel_id,
                 "thread_id": "main",
                 "request_id": request_id,
+                "request_revision": 1,
                 "reason": "Start the post-research delivery smoke workflow.",
                 "expected_output": "A live Codex worker accepts the dispatched task.",
             },

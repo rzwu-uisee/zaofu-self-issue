@@ -37,8 +37,23 @@ _FINAL_ACTION_FENCE = re.compile(
 
 def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
     """Minimal portable validation: mirrors the controlled-action hard gate."""
-    if action == "create-task" and not str(payload.get("title") or "").strip():
-        return "title is required"
+    if action == "create-task":
+        if not str(payload.get("title") or "").strip():
+            return "title is required"
+        execution_mode = str(payload.get("execution_mode") or "").strip()
+        if execution_mode and execution_mode not in {"direct", "workflow"}:
+            return "execution_mode must be direct or workflow"
+        if execution_mode == "direct" and payload.get("workflow_plan") is not None:
+            return "execution_mode direct cannot include workflow_plan"
+        if str(payload.get("request_id") or "").strip():
+            try:
+                request_revision = int(payload.get("request_revision"))
+            except (TypeError, ValueError):
+                request_revision = 0
+            if request_revision < 1:
+                return "request_revision must be a positive integer"
+            if execution_mode == "direct":
+                return "workflow Request binding requires execution_mode workflow"
     if action == "idea-to-product" and not any(
         str(payload.get(key) or "").strip()
         for key in ("objective", "message", "title")
@@ -79,8 +94,18 @@ def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
             for key in ("topic", "objective", "message")
         ):
             return "topic, objective, or message is required"
+        if str(payload.get("channel_id") or "").strip():
+            if not str(payload.get("request_id") or "").strip():
+                return "channel-bound research requires request_id"
+            try:
+                request_revision = int(payload.get("request_revision"))
+            except (TypeError, ValueError):
+                request_revision = 0
+            if request_revision < 1:
+                return "channel-bound research requires request_revision"
     if action == "research-adopt":
         for key in (
+            "result_event_id",
             "request_id",
             "artifact_ref",
             "artifact_digest",

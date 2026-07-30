@@ -6,10 +6,17 @@ import hashlib
 import json
 from typing import Any
 
+from zf.runtime.research_templates import (
+    ADAPTIVE_RESEARCH_TEMPLATE,
+    FIXED_RESEARCH_TEMPLATE,
+    RESEARCH_TEMPLATES,
+)
 
 WORKFLOW_ROUTE_CATALOG_SCHEMA_VERSION = "workflow-route-catalog.v1"
-FIXED_RESEARCH_ROUTE_ID = "research:fixed"
-FIXED_RESEARCH_PATTERN_ID = "research-fanout"
+ADAPTIVE_RESEARCH_ROUTE_ID = ADAPTIVE_RESEARCH_TEMPLATE.route_id
+ADAPTIVE_RESEARCH_PATTERN_ID = ADAPTIVE_RESEARCH_TEMPLATE.pattern_id
+FIXED_RESEARCH_ROUTE_ID = FIXED_RESEARCH_TEMPLATE.route_id
+FIXED_RESEARCH_PATTERN_ID = FIXED_RESEARCH_TEMPLATE.pattern_id
 
 
 def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
@@ -104,23 +111,26 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
                 "available": True,
             })
 
-    research_stage = stage_by_id.get(FIXED_RESEARCH_PATTERN_ID)
-    if research_stage is not None and _is_reader_entry(
-        research_stage,
-        role_kind_by_id=role_kind_by_id,
-    ):
-        claimed_entries.add(FIXED_RESEARCH_PATTERN_ID)
+    for template in RESEARCH_TEMPLATES:
+        research_stage = stage_by_id.get(template.pattern_id)
+        if research_stage is None or not _is_reader_entry(
+            research_stage,
+            role_kind_by_id=role_kind_by_id,
+        ):
+            continue
+        claimed_entries.add(template.pattern_id)
         research_roles = _stage_roles([research_stage])
         routes.append({
-            "route_id": FIXED_RESEARCH_ROUTE_ID,
+            "route_id": template.route_id,
             "family": "research",
             "kind": "research",
-            "tier": "fixed",
-            "entry_pattern_id": FIXED_RESEARCH_PATTERN_ID,
+            "tier": template.tier,
+            "template_id": template.template_id,
+            "entry_pattern_id": template.pattern_id,
             "topology": str(
                 getattr(research_stage, "topology", "") or "fanout_reader"
             ),
-            "stages": [FIXED_RESEARCH_PATTERN_ID],
+            "stages": [template.pattern_id],
             "roles": research_roles,
             "writer_roles": [],
             "verify_roles": [
@@ -129,7 +139,12 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
             ],
             "lane_count": 0,
             "output_profile": "research_report",
-            "start_adapter": "fixed_research",
+            "start_adapter": (
+                "adaptive_research"
+                if template is ADAPTIVE_RESEARCH_TEMPLATE
+                else "fixed_research"
+            ),
+            "rollout": template.rollout,
             "available": True,
         })
 
@@ -332,6 +347,8 @@ def _catalog_digest(routes: list[dict[str, Any]]) -> str:
 
 
 __all__ = [
+    "ADAPTIVE_RESEARCH_PATTERN_ID",
+    "ADAPTIVE_RESEARCH_ROUTE_ID",
     "FIXED_RESEARCH_PATTERN_ID",
     "FIXED_RESEARCH_ROUTE_ID",
     "WORKFLOW_ROUTE_CATALOG_SCHEMA_VERSION",

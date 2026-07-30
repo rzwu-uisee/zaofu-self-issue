@@ -42,7 +42,16 @@ from zf.runtime.kanban_proposals import (
 from zf.runtime.task_workflow_plans import (
     build_task_workflow_plan_request,
 )
-from zf.runtime.workflow_anchor import mark_workflow_managed_task
+from zf.runtime.workflow_anchor import (
+    bind_workflow_request_to_task,
+    mark_workflow_managed_task,
+    workflow_task_request_binding,
+)
+from zf.runtime.workflow_origin import workflow_origin_digest
+from zf.runtime.workflow_requests import (
+    WorkflowRequestError,
+    require_current_workflow_request,
+)
 
 
 class ProductActionsMixin:
@@ -79,6 +88,56 @@ class ProductActionsMixin:
                 status="conflict",
             )
 
+        execution_mode = str(payload.get("execution_mode") or "").strip()
+        if execution_mode and execution_mode not in {"direct", "workflow"}:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=task_id or None,
+                reason="execution_mode must be direct or workflow",
+                status_code=422,
+                status="invalid_payload",
+            )
+        request_id = _required_text(payload, "request_id")
+        if execution_mode == "direct" and (
+            request_id or payload.get("workflow_plan") is not None
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=task_id or None,
+                reason=(
+                    "execution_mode direct cannot include a workflow Plan "
+                    "or Workflow Request binding"
+                ),
+                status_code=422,
+                status="invalid_payload",
+            )
+        try:
+            request_revision = int(payload.get("request_revision") or 0)
+        except (TypeError, ValueError):
+            request_revision = 0
+        request_projection: dict = {}
+        if request_id:
+            try:
+                request_projection = require_current_workflow_request(
+                    self.state_dir,
+                    request_id,
+                    request_revision,
+                )
+            except WorkflowRequestError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="stale_or_missing_request",
+                )
+
         task = Task(
             id=task_id or Task().id,
             title=title,
@@ -91,9 +150,23 @@ class ProductActionsMixin:
         )
         raw_workflow_plan = payload.get("workflow_plan")
         workflow_plan_warning = ""
-        if raw_workflow_plan is not None:
+        if (
+            execution_mode == "workflow"
+            or raw_workflow_plan is not None
+            or request_id
+        ):
             workflow_candidate = mark_workflow_managed_task(deepcopy(task))
+            if request_id:
+                workflow_candidate = bind_workflow_request_to_task(
+                    workflow_candidate,
+                    request_id=request_id,
+                    request_revision=request_revision,
+                    origin_binding_digest=workflow_origin_digest(
+                        request_projection["origin_binding"]
+                    ),
+                )
             task = workflow_candidate
+        if raw_workflow_plan is not None:
             _workflow_preview, workflow_plan_warning = (
                 build_task_workflow_plan_request(
                     raw_workflow_plan,
@@ -640,12 +713,104 @@ class ProductActionsMixin:
     ) -> dict:
         task_id = _required_text(payload, "task_id")
         pattern_id = _required_text(payload, "pattern_id")
+        request_id = _required_text(payload, "request_id")
+        try:
+            request_revision = int(payload.get("request_revision") or 0)
+        except (TypeError, ValueError):
+            request_revision = 0
+        request_projection: dict = {}
+        if request_id:
+            try:
+                request_projection = require_current_workflow_request(
+                    self.state_dir,
+                    request_id,
+                    request_revision,
+                )
+            except WorkflowRequestError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="stale_or_missing_request",
+                )
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+            task_request = (
+                workflow_task_request_binding(task)
+                if task is not None
+                else {}
+            )
+            if (
+                not task_request
+                or task_request["request_id"] != request_id
+                or int(task_request["request_revision"])
+                != request_revision
+                or task_request.get("origin_binding_digest")
+                != workflow_origin_digest(
+                    request_projection["origin_binding"]
+                )
+            ):
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=(
+                        "workflow Task is not bound to the current "
+                        "Workflow Request"
+                    ),
+                    status_code=409,
+                    status="workflow_task_stale",
+                )
+            payload = dict(payload)
+            payload["request_id"] = request_id
+            payload["request_revision"] = request_revision
+            payload["origin_binding"] = dict(
+                request_projection["origin_binding"]
+            )
+            origin = request_projection["origin_binding"]
+            supplied_channel = _required_text(payload, "channel_id")
+            supplied_thread = _required_text(payload, "thread_id")
+            canonical_channel = str(origin.get("channel_id") or "")
+            canonical_thread = str(origin.get("thread_id") or "")
+            if (
+                supplied_channel and supplied_channel != canonical_channel
+            ) or (
+                supplied_thread and supplied_thread != canonical_thread
+            ):
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=(
+                        "workflow return target does not match the "
+                        "Workflow Request origin"
+                    ),
+                    status_code=409,
+                    status="origin_binding_mismatch",
+                )
+            payload["channel_id"] = canonical_channel
+            payload["thread_id"] = canonical_thread
+        origin_binding = (
+            request_projection.get("origin_binding")
+            if isinstance(request_projection.get("origin_binding"), dict)
+            else {}
+        )
         event = ZfEvent(
             type="workflow.invoke.requested",
             actor=self.actor,
             task_id=task_id,
             causation_id=requested.id,
-            correlation_id=str(payload.get("channel_id") or requested.correlation_id or ""),
+            correlation_id=str(
+                origin_binding.get("channel_id")
+                or origin_binding.get("conversation_id")
+                or payload.get("channel_id")
+                or requested.correlation_id
+                or ""
+            ),
         )
         workflow_run_id = workflow_run_id_for(
             event_id=event.id,
@@ -674,15 +839,28 @@ class ProductActionsMixin:
             "source_refs": source_refs,
             "workflow_run_id": workflow_run_id,
             "workflow_input_manifest_ref": manifest_ref,
+            "flow_kind": str(payload.get("flow_kind") or ""),
+            "request_kind": str(payload.get("request_kind") or ""),
             "artifact_refs": artifact_refs,
-            "channel_id": str(payload.get("channel_id") or ""),
-            "thread_id": str(payload.get("thread_id") or ""),
+            "channel_id": str(
+                origin_binding.get("channel_id")
+                or payload.get("channel_id")
+                or ""
+            ),
+            "thread_id": str(
+                origin_binding.get("thread_id")
+                or payload.get("thread_id")
+                or ""
+            ),
             "scope": _string_list(payload.get("scope")),
             "target_ref": str(payload.get("target_ref") or ""),
             "expected_output": str(payload.get("expected_output") or ""),
             "risk": str(payload.get("risk") or ""),
             "synthesis_event_id": str(payload.get("synthesis_event_id") or ""),
             "open_questions": _string_list(payload.get("open_questions")),
+            "request_id": request_id,
+            "request_revision": request_revision,
+            "origin_binding": dict(origin_binding),
         }
         prompt_kind = infer_workflow_prompt_kind(pattern_id, payload)
         workflow_prompt_ref = ""
@@ -716,7 +894,11 @@ class ProductActionsMixin:
             request_payload=event.payload,
         )
         event = self.writer.append(event)
-        channel_id = str(payload.get("channel_id") or "")
+        channel_id = str(
+            origin_binding.get("channel_id")
+            or payload.get("channel_id")
+            or ""
+        )
         if channel_id:
             self.writer.emit(
                 "channel.state_update.posted",
@@ -726,7 +908,11 @@ class ProductActionsMixin:
                 correlation_id=channel_id,
                 payload={
                     "channel_id": channel_id,
-                    "thread_id": str(payload.get("thread_id") or "main"),
+                    "thread_id": str(
+                        origin_binding.get("thread_id")
+                        or payload.get("thread_id")
+                        or "main"
+                    ),
                     "status": "workflow_requested",
                     "summary": f"workflow {pattern_id} requested for {task_id}",
                     "task_id": task_id,

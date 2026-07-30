@@ -382,6 +382,59 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
     }
     thread.updatedAt = run.updatedAt || thread.updatedAt;
   }
+  const stateUpdates = (detail?.state_updates ?? [])
+    .filter((item): item is Record<string, unknown> => Boolean(recordValue(item)));
+  const resultCards = new Map<string, AgentSessionCard>();
+  for (const update of stateUpdates) {
+    const status = recordString(update, "status");
+    if (
+      status !== "research_result_available"
+      && status !== "research_adopted"
+    ) continue;
+    const refs = recordValue(update.refs) ?? {};
+    const digest = recordString(refs, "artifact_digest");
+    const resultEventId = recordString(
+      refs,
+      "workflow_result_event_id",
+    );
+    const key = resultEventId || digest;
+    if (!key) continue;
+    const threadId = recordString(update, "thread_id", "main");
+    const thread = ensureThread(threads, threadId);
+    const existing = resultCards.get(key);
+    if (status === "research_adopted" && existing) {
+      existing.status = "completed";
+      existing.payload = {
+        ...(existing.payload ?? {}),
+        adopted: true,
+      };
+      thread.updatedAt = recordString(update, "ts") || thread.updatedAt;
+      continue;
+    }
+    const turn = ensureTurn(
+      thread,
+      `workflow-result-${key}`,
+      recordString(update, "ts"),
+    );
+    const card: AgentSessionCard = {
+      id: `workflow-result-${key}`,
+      kind: "workflow-result",
+      title: "Research result",
+      body: recordString(update, "summary"),
+      status: status === "research_adopted"
+        ? "completed"
+        : "waiting_input",
+      threadId,
+      payload: {
+        adopted: status === "research_adopted",
+        adoptPayload: recordValue(refs.adopt_payload) ?? undefined,
+      },
+      refs,
+    };
+    addCard(turn, card);
+    resultCards.set(key, card);
+    thread.updatedAt = recordString(update, "ts") || thread.updatedAt;
+  }
   return { id: `channel:${selectedChannelId}`, surface: "channel_group", activeThreadId, threads: finalizeThreads(threads, activeThreadId) };
 }
 

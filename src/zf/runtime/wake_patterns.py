@@ -127,6 +127,9 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # Completion is also a task/candidate settlement edge and may arrive after
     # an external delivery action or replay.
     "run.goal.completed",
+    # Controlled run-cancel actions emit this outside run_once. Wake
+    # housekeeping immediately so resource reconciliation cannot wait on tick.
+    "run.cancelled",
     "fanout.cancelled",
     "flow.discovery.failed",
     "task.done.blocked",

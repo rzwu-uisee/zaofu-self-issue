@@ -25,6 +25,7 @@ from zf.runtime.goal_terminal_settlement import (
     goal_terminal_matches_current_task,
 )
 from zf.runtime.run_archive import read_task_runs
+from zf.runtime.workflow_anchor import is_workflow_managed_task
 from zf.web.operator_contract import kanban_agent_evidence_model
 from zf.web.operator_contract import kanban_agent_status_model
 import json
@@ -1379,7 +1380,10 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             projection_reconcile_reason = "run_goal_completed"
         elif completed_closeout is not None:
             completed_closeout = None
-        elif legacy_completed_closeout is not None:
+        elif (
+            legacy_completed_closeout is not None
+            and not is_workflow_managed_task(t)
+        ):
             completed_closeout = legacy_completed_closeout
             projection_reconcile_reason = "run_completed"
         display_status = t.status

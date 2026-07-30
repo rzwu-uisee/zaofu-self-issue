@@ -119,8 +119,31 @@ spec:
       name: synthesizer
       instance_id: synthesizer
       skills: [zf-project-suggest]
+    - <<: *research_reader
+      name: research_root
+      instance_id: research_root
+      allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, Agent, "Bash(zf emit *)"]
+      lifecycle:
+        mode: on_demand
+      skills: [zf-research-adaptive-root]
   workflow:
     stages:
+      - id: research-adaptive
+        trigger: workflow.invoke.requested
+        topology: fanout_reader
+        roles:
+          - research_root
+        fanout:
+          children:
+            - role_instance: research_root
+              payload: {child_id: research_root}
+        aggregate:
+          mode: wait_for_all
+          child_success_event: research.child.completed
+          child_failure_event: research.child.failed
+          success_event: research.adaptive.completed
+          failure_event: research.adaptive.failed
+        timeout_seconds: 1800
       - id: research-fanout
         trigger: workflow.invoke.requested
         topology: fanout_reader

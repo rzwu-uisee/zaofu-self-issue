@@ -1145,6 +1145,55 @@ def test_flow_discovery_completed_without_gaps_closes_goal(
     assert {"objective", "planning-result"} <= source_ids
 
 
+def test_flow_discovery_matches_shortened_task_map_generation(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _transport, orch = _flow_discovery_state(
+        tmp_path,
+        flow_kind="issue",
+        discovery_profile="regression_impact",
+    )
+    task_map_ref = ".zf/artifacts/ISSUE-SHORT/task_map.json"
+    generation = "45438b47d5c439da0e614288b7013486b09aad973d868f9e2b75d770d3b924ca"
+    _prime_goal_closure_context(
+        state_dir,
+        log,
+        orch,
+        workflow_run_id="trace-issue-short",
+        goal_id="ISSUE-SHORT",
+        task_map_ref=task_map_ref,
+        generation=generation,
+        candidate_head_commit="c" * 40,
+    )
+
+    orch.run_once(events=[ZfEvent(
+        id="flow-discovery-short-generation",
+        type="flow.discovery.completed",
+        actor="flow-discovery",
+        correlation_id="trace-issue-short",
+        payload={
+            "pdd_id": "ISSUE-SHORT",
+            "feature_id": "ISSUE-SHORT",
+            "flow_kind": "issue",
+            "trace_id": "trace-issue-short",
+            "task_map_ref": task_map_ref,
+            "task_map_generation": f"task-map-{generation[:20]}",
+            "candidate_head_commit": "c" * 40,
+            "open_p0_p1_gap_count": 0,
+            "test_refs": ["pytest"],
+        },
+    )])
+
+    events = log.read_all()
+    assert any(event.type == "flow.goal.closed" for event in events)
+    assert not any(
+        event.type == "goal.closure.identity.invalid"
+        and event.payload.get("reason")
+        == "current task-map generation has no pinned goal claim set"
+        for event in events
+    )
+
+
 def test_goal_closure_accepts_verified_task_ref_integrated_into_candidate(
     tmp_path: Path,
 ) -> None:

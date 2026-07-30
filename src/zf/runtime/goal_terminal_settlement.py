@@ -51,25 +51,61 @@ def select_candidate_terminal_tasks(
         ).strip()
         is_container = task.id in {pdd_id, feature_id}
         bootstrap_container = is_container and is_bootstrap_task(task)
+        managed_workflow_parent = _is_current_workflow_managed_task(
+            task,
+            payload,
+        )
         explicitly_completed = (
             exact_goal_settlement
             and task.id in completed_task_ids
         )
-        if explicitly_completed and not goal_terminal_matches_current_task(
+        if (
+            explicitly_completed or managed_workflow_parent
+        ) and not goal_terminal_matches_current_task(
             task, payload
         ):
             continue
         if exact_goal_settlement and not (
-            explicitly_completed or bootstrap_container
+            explicitly_completed
+            or bootstrap_container
+            or managed_workflow_parent
         ):
             continue
         if task.status == "backlog" and not (
-            explicitly_completed or bootstrap_container
+            explicitly_completed
+            or bootstrap_container
+            or managed_workflow_parent
         ):
             continue
-        if task_feature == feature_id or is_container:
+        if (
+            task_feature == feature_id
+            or is_container
+            or managed_workflow_parent
+        ):
             selected.append(task)
     return selected
+
+
+def _is_current_workflow_managed_task(task: Task, terminal_payload: dict) -> bool:
+    contract = getattr(task, "contract", None)
+    evidence = getattr(contract, "evidence_contract", None)
+    if not isinstance(evidence, dict):
+        return False
+    if str(evidence.get("execution_owner") or "") != "workflow":
+        return False
+    workflow_request_id = str(
+        evidence.get("workflow_request_id") or ""
+    ).strip()
+    terminal_run_id = str(
+        terminal_payload.get("workflow_run_id")
+        or terminal_payload.get("run_id")
+        or ""
+    ).strip()
+    return bool(
+        workflow_request_id
+        and terminal_run_id
+        and workflow_request_id == terminal_run_id
+    )
 
 
 def goal_terminal_matches_current_task(

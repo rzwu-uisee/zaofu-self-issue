@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,18 @@ from zf.core.events.writer import EventWriter
 from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.workflow.request_policy import missing_fields_for_kind
+from zf.runtime.workflow_origin import (
+    WorkflowOriginError,
+    assert_same_workflow_origin,
+    workflow_origin_from_manifest,
+    workflow_origin_from_request,
+)
+from zf.runtime.workflow_request_io import (
+    now_iso as _now_iso,
+    read_json as _read_json,
+    safe_id as _safe_id,
+    strings as _strings,
+)
 
 
 class WorkflowRequestError(ValueError):
@@ -54,6 +65,30 @@ def load_workflow_request(state_dir: Path, request_id: str) -> dict[str, Any]:
     if not path.exists():
         return {}
     return _read_json(path)
+
+
+def require_current_workflow_request(
+    state_dir: Path,
+    request_id: str,
+    request_revision: int,
+) -> dict[str, Any]:
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    current_revision = int(projection.get("revision") or 0)
+    if int(request_revision or 0) != current_revision:
+        raise WorkflowRequestError(
+            "stale workflow request revision: "
+            f"expected {request_revision}, current {current_revision}"
+        )
+    try:
+        projection = dict(projection)
+        projection["origin_binding"] = workflow_origin_from_request(
+            projection
+        )
+    except WorkflowOriginError as exc:
+        raise WorkflowRequestError(str(exc)) from exc
+    return projection
 
 
 def hydrate_workflow_requirement(
@@ -118,8 +153,10 @@ def adopt_workflow_research_result(
     summary: str,
     actor: str,
     source_event_id: str,
-    channel_id: str = "",
-    thread_id: str = "",
+    result_event_id: str,
+    task_id: str,
+    workflow_run_id: str,
+    terminal_event_id: str,
     writer: EventWriter | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Bind verified research to the current request revision.
@@ -127,15 +164,12 @@ def adopt_workflow_research_result(
     Requirement revision is not changed: adoption enriches the request context
     projection and fails if the caller observed an older requirement revision.
     """
-    projection = load_workflow_request(state_dir, request_id)
-    if not projection:
-        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    projection = require_current_workflow_request(
+        state_dir,
+        request_id,
+        expected_revision,
+    )
     current_revision = int(projection.get("revision") or 0)
-    if expected_revision != current_revision:
-        raise WorkflowRequestError(
-            "stale workflow request revision: "
-            f"expected {expected_revision}, current {current_revision}"
-        )
     digest = str(artifact_digest or "").removeprefix("sha256:").strip().lower()
     if not artifact_ref or len(digest) != 64 or not summary:
         raise WorkflowRequestError(
@@ -157,14 +191,30 @@ def adopt_workflow_research_result(
     )
     if existing is not None:
         return projection, False
+    origin_binding = workflow_origin_from_request(projection)
+    channel_id = (
+        str(origin_binding.get("channel_id") or "")
+        if origin_binding.get("surface") == "channel"
+        else ""
+    )
+    thread_id = (
+        str(origin_binding.get("thread_id") or "main")
+        if channel_id
+        else ""
+    )
     adoption = {
         "artifact_ref": artifact_ref,
         "sha256": digest,
         "summary": summary,
         "request_revision": current_revision,
         "source_event_id": source_event_id,
-        "channel_id": channel_id or str(projection.get("channel_id") or ""),
-        "thread_id": thread_id or str(projection.get("thread_id") or ""),
+        "result_event_id": result_event_id,
+        "task_id": task_id,
+        "workflow_run_id": workflow_run_id,
+        "terminal_event_id": terminal_event_id,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "origin_binding": origin_binding,
         "adopted_by": actor,
         "adopted_at": _now_iso(),
     }
@@ -176,8 +226,13 @@ def adopt_workflow_research_result(
         writer.emit(
             "workflow.research.adopted",
             actor=actor,
+            task_id=task_id or None,
             causation_id=source_event_id or None,
-            correlation_id=adoption["channel_id"] or None,
+            correlation_id=(
+                adoption["channel_id"]
+                or str(origin_binding.get("conversation_id") or "")
+                or request_id
+            ),
             payload={
                 "request_id": request_id,
                 "request_revision": current_revision,
@@ -186,6 +241,17 @@ def adopt_workflow_research_result(
                 "summary": summary,
                 "channel_id": adoption["channel_id"],
                 "thread_id": adoption["thread_id"],
+                "project_id": str(origin_binding.get("project_id") or ""),
+                "origin_surface": str(origin_binding.get("surface") or ""),
+                "conversation_id": str(
+                    origin_binding.get("conversation_id") or ""
+                ),
+                "thread_key": str(origin_binding.get("thread_key") or ""),
+                "origin_binding": origin_binding,
+                "result_event_id": result_event_id,
+                "task_id": task_id,
+                "workflow_run_id": workflow_run_id,
+                "terminal_event_id": terminal_event_id,
                 "source_event_id": source_event_id,
             },
         )
@@ -206,11 +272,18 @@ def register_workflow_intake(
         raise WorkflowRequestError("workflow input manifest requires request_id")
     existing = load_workflow_request(state_dir, request_id)
     if existing:
+        incoming_origin = _manifest_origin_binding(manifest)
+        try:
+            existing_origin = workflow_origin_from_request(existing)
+            assert_same_workflow_origin(existing_origin, incoming_origin)
+        except WorkflowOriginError as exc:
+            raise WorkflowRequestError(str(exc)) from exc
         current = _read_json(Path(str(existing.get("requirement_spec_ref") or "")))
         if not current:
             raise WorkflowRequestError("current requirement spec is missing")
         spec_ref, digest = _write_requirement_spec(state_dir, current)
         projection = dict(existing)
+        projection["origin_binding"] = existing_origin
         projection["requirement_spec_ref"] = spec_ref
         projection["requirement_spec_digest"] = digest
         _bind_effective_manifest(
@@ -742,6 +815,11 @@ def _projection(
     questions = _strings(spec.get("open_questions"))
     confirmed = bool(spec.get("confirmed"))
     status = "clarifying" if missing or questions else "ready" if confirmed else "draft"
+    origin_binding = (
+        dict(prior.get("origin_binding"))
+        if isinstance(prior.get("origin_binding"), dict)
+        else _manifest_origin_binding(manifest)
+    )
     return {
         "schema_version": "workflow.request.v1",
         "request_id": str(spec.get("request_id") or ""),
@@ -750,6 +828,7 @@ def _projection(
         "source": str(manifest.get("source") or prior.get("source") or ""),
         "channel_id": str(manifest.get("channel_id") or prior.get("channel_id") or ""),
         "thread_id": str(manifest.get("thread_id") or prior.get("thread_id") or ""),
+        "origin_binding": origin_binding,
         "status": status,
         "revision": int(spec.get("revision") or 1),
         "requirement_spec_ref": spec_ref,
@@ -812,6 +891,7 @@ def _bind_effective_manifest(
         "requirement_spec_digest": projection["requirement_spec_digest"],
         "request_status": projection["status"],
         "request_revision": projection["revision"],
+        "origin_binding": dict(projection.get("origin_binding") or {}),
         "source_workflow_input_manifest_ref": str(manifest_path),
         "source_workflow_input_manifest_digest": source_digest,
     })
@@ -877,6 +957,7 @@ def _emit(
         "requirement_spec_digest": str(projection.get("requirement_spec_digest") or ""),
         "missing_required_fields": list(projection.get("missing_required_fields") or []),
         "open_questions": list(projection.get("open_questions") or []),
+        "origin_binding": dict(projection.get("origin_binding") or {}),
         **(extra or {}),
     }
     writer.append(ZfEvent(
@@ -889,30 +970,11 @@ def _emit(
     ))
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    if not str(path) or not path.exists():
-        return {}
+def _manifest_origin_binding(manifest: dict[str, Any]) -> dict[str, str]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _strings(value: object) -> list[str]:
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if not isinstance(value, (list, tuple)):
-        return []
-    return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
-
-
-def _safe_id(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in value) or "request"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+        return workflow_origin_from_manifest(manifest)
+    except WorkflowOriginError as exc:
+        raise WorkflowRequestError(str(exc)) from exc
 
 
 __all__ = [

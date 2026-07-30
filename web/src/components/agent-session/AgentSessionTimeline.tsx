@@ -56,6 +56,7 @@ interface AgentSessionTimelineProps {
   onAnswerQuestion?: (card: AgentSessionCard) => void;
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
+  onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
   providerCapabilities?: AgentProviderCapability[];
   emptyTitle?: string;
   emptyBody?: string;
@@ -86,6 +87,7 @@ export function AgentSessionTimeline({
   onAnswerQuestion,
   onCancelQueued,
   onCancelRun,
+  onAdoptResearchResult,
   providerCapabilities = [],
   emptyTitle = "No messages",
   emptyBody = "Start a conversation to see agent runs, tools, and proposals.",
@@ -169,6 +171,7 @@ export function AgentSessionTimeline({
                   onChatAboutPlan={onChatAboutPlan}
                   onCancelQueued={onCancelQueued}
                   onCancelRun={onCancelRun}
+                  onAdoptResearchResult={onAdoptResearchResult}
                   providerCapabilities={providerCapabilities}
                   channelChatMode={channelChatMode}
                   collapseCompletedRunDetails={collapseCompletedRunDetails}
@@ -213,6 +216,7 @@ function ThreadPane({
   onAnswerQuestion,
   onCancelQueued,
   onCancelRun,
+  onAdoptResearchResult,
   providerCapabilities,
   channelChatMode,
   collapseCompletedRunDetails,
@@ -235,6 +239,7 @@ function ThreadPane({
   onAnswerQuestion?: (card: AgentSessionCard) => void;
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
+  onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
   providerCapabilities: AgentProviderCapability[];
   channelChatMode: boolean;
   collapseCompletedRunDetails: boolean;
@@ -302,6 +307,7 @@ function ThreadPane({
                 onSubmitPlan={onSubmitPlan}
                 onChatAboutPlan={onChatAboutPlan}
                 onCancelQueued={onCancelQueued}
+                onAdoptResearchResult={onAdoptResearchResult}
               />
             ) : null}
           </article>
@@ -324,6 +330,7 @@ function ThreadPane({
           onSubmitPlan={onSubmitPlan}
           onChatAboutPlan={onChatAboutPlan}
           onCancelQueued={onCancelQueued}
+          onAdoptResearchResult={onAdoptResearchResult}
         />
       ) : null}
     </section>
@@ -1039,6 +1046,7 @@ function StackedCards({
   onSubmitPlan,
   onChatAboutPlan,
   onCancelQueued,
+  onAdoptResearchResult,
 }: {
   actionBusyId: string;
   cards: AgentSessionCard[];
@@ -1049,12 +1057,14 @@ function StackedCards({
   onSubmitPlan?: (request: AgentSessionPlanRequest, response: AgentSessionPlanResponse, cardId: string) => void;
   onChatAboutPlan?: (request: AgentSessionPlanRequest, cardId: string) => void;
   onCancelQueued?: (cardId: string) => void;
+  onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
 }) {
   return (
     <div className="agent-stacked-cards">
       {cards.map((card) => {
         const isPlan = card.kind === "plan" || card.kind === "question";
         const isApprove = card.kind === "approve" || card.kind === "proposal";
+        const isResult = card.kind === "workflow-result";
         const planCompleted = Boolean(isPlan && card.planRequest?.response);
         const compatibilityClass = isPlan
           ? "plan question"
@@ -1077,12 +1087,14 @@ function StackedCards({
           {!planCompleted && !(isApprove && card.status === "completed") ? (
             <div className="agent-interaction-copy">
               <span className="agent-card-kind">
-                {isPlan ? "Question" : isApprove ? "Confirmation" : card.kind}
+                {isPlan ? "Question" : isApprove ? "Confirmation" : isResult ? "Result" : card.kind}
               </span>
               <strong>{presentation?.title || card.title}</strong>
               {card.body ? <p>{card.body}</p> : null}
               {isApprove && card.proposal ? (
                 <ActionPreviewBody proposal={card.proposal} refs={card.refs} />
+              ) : isResult ? (
+                <WorkflowResultIdentity refs={card.refs} />
               ) : card.refs ? (
                 <AttachmentChips refs={card.refs} />
               ) : null}
@@ -1148,8 +1160,59 @@ function StackedCards({
               Cancel
             </button>
           ) : null}
+          {isResult ? (
+            card.status === "completed" ? (
+              <div className="agent-action-receipt">
+                <Check aria-hidden="true" size={14} />
+                <span className="agent-plan-receipt-copy">
+                  <small>{card.title}</small>
+                  <strong>Adopted</strong>
+                </span>
+              </div>
+            ) : onAdoptResearchResult ? (
+              <button
+                className="agent-inline-button primary"
+                disabled={actionBusyId === card.id}
+                type="button"
+                onClick={() => onAdoptResearchResult(card, card.id)}
+              >
+                {actionBusyId === card.id
+                  ? <Loader2 className="spin" size={14} />
+                  : <CheckCircle2 size={14} />}
+                Adopt result
+              </button>
+            ) : null
+          ) : null}
         </div>
       )})}
+    </div>
+  );
+}
+
+function WorkflowResultIdentity({
+  refs,
+}: {
+  refs?: Record<string, unknown>;
+}) {
+  const artifactRef = String(refs?.artifact_ref ?? "").trim();
+  const artifactDigest = String(refs?.artifact_digest ?? "").trim();
+  if (!artifactRef && !artifactDigest) return null;
+  return (
+    <div className="agent-action-preview">
+      <dl>
+        {artifactRef ? (
+          <>
+            <dt>artifact</dt>
+            <dd className="mono">{artifactRef}</dd>
+          </>
+        ) : null}
+        {artifactDigest ? (
+          <>
+            <dt>digest</dt>
+            <dd className="mono">{artifactDigest}</dd>
+          </>
+        ) : null}
+      </dl>
     </div>
   );
 }

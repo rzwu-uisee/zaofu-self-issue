@@ -22,6 +22,13 @@ from zf.core.workflow.request_policy import (
     missing_fields_for_kind,
     required_fields_for_kind,
 )
+from zf.runtime.workflow_origin import (
+    WorkflowOriginError,
+    assert_same_workflow_origin,
+    build_workflow_origin_binding,
+    normalize_workflow_origin_binding,
+    workflow_origin_from_request,
+)
 
 def build_flow_intake(
     *,
@@ -44,6 +51,9 @@ def build_flow_intake(
     created_by: str = "zf-cli",
     channel_id: str = "",
     thread_id: str = "",
+    conversation_id: str = "",
+    thread_key: str = "",
+    origin_binding: dict[str, Any] | None = None,
     source_refs: dict[str, str] | None = None,
     output: Path | None = None,
 ) -> dict[str, Any]:
@@ -61,6 +71,35 @@ def build_flow_intake(
     )
     manifest_path = workflow_dir / "workflow-input-manifest.json"
     skill_plan_path = workflow_dir / "skill-adapter-plan.json"
+    normalized_origin_binding = (
+        normalize_workflow_origin_binding(origin_binding)
+        if origin_binding is not None
+        else build_workflow_origin_binding(
+            source=source,
+            project_id=project_id or project_name,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            thread_key=thread_key,
+        )
+    )
+    config = _load_project_config(project_root)
+    if config is not None:
+        from zf.runtime.workflow_requests import (
+            WorkflowRequestError,
+            load_workflow_request,
+        )
+
+        state_dir = _state_dir_for_config(project_root / "zf.yaml", config)
+        existing = load_workflow_request(state_dir, request_id)
+        if existing:
+            try:
+                assert_same_workflow_origin(
+                    workflow_origin_from_request(existing),
+                    normalized_origin_binding,
+                )
+            except WorkflowOriginError as exc:
+                raise WorkflowRequestError(str(exc)) from exc
     output_path.parent.mkdir(parents=True, exist_ok=True)
     intake_json_path.parent.mkdir(parents=True, exist_ok=True)
     intake_markdown_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +153,7 @@ def build_flow_intake(
         "created_by": created_by,
         "channel_id": channel_id,
         "thread_id": thread_id,
+        "origin_binding": normalized_origin_binding,
         "source_refs": normalized_source_refs,
         "created_at": now,
     }
@@ -172,6 +212,7 @@ def build_flow_intake(
         "parity_scope": list(parity_scope),
         "channel_id": channel_id,
         "thread_id": thread_id,
+        "origin_binding": normalized_origin_binding,
         "source_refs": normalized_source_refs,
         "intake_ref": str(output_path),
         "intake_json_ref": str(intake_json_path),
@@ -194,7 +235,6 @@ def build_flow_intake(
     )
     request_projection: dict[str, Any] = {}
     request_projection_ref = ""
-    config = _load_project_config(project_root)
     if config is not None:
         from zf.runtime.workflow_requests import (
             register_workflow_intake,

@@ -13,15 +13,45 @@ from zf.runtime.kanban_plan_requests import (
     PLAN_REQUESTED_EVENT,
     pending_kanban_plan_requests,
 )
+from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.task_workflow_plans import (
     build_task_workflow_plan_request,
     task_workflow_binding_digest,
 )
 from zf.runtime.workflow_anchor import is_workflow_managed_task
+from zf.runtime.workflow_origin import build_workflow_origin_binding
 from zf.runtime.workflow_route_catalog import workflow_route_catalog
+from zf.runtime.wake_patterns import WAKE_PATTERNS
+from zf.runtime.watcher import EventWatcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _RecordingTransport:
+    def __init__(self) -> None:
+        self.sent: list[tuple] = []
+
+    def send_task(
+        self,
+        role_name,
+        briefing_path,
+        prompt,
+        *,
+        context=None,
+    ):  # noqa: ANN001
+        self.sent.append(
+            (role_name, briefing_path, prompt, context)
+        )
+
+    def is_alive(self, role_name):  # noqa: ANN001
+        return True
+
+    def capture_log(self, role_name, lines=200):  # noqa: ANN001
+        return ""
+
+    def poll_events(self):
+        return []
 
 
 def _service(
@@ -614,4 +644,122 @@ def test_create_task_marks_every_requested_workflow_plan_as_workflow_managed(
             "execution_owner"
         ]
         == "workflow"
+    )
+
+
+def test_create_task_pins_workflow_owner_and_request_before_task_event(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    origin = build_workflow_origin_binding(
+        source="kanban-agent",
+        project_id="test",
+        conversation_id="kanban:test",
+        thread_key="main",
+    )
+    request_dir = state_dir / "workflow-requests"
+    request_dir.mkdir()
+    (request_dir / "REQ-TASK.json").write_text(
+        json.dumps({
+            "schema_version": "workflow.request.v1",
+            "request_id": "REQ-TASK",
+            "project_id": "test",
+            "kind": "prd",
+            "status": "ready",
+            "revision": 3,
+            "origin_binding": origin,
+        }),
+        encoding="utf-8",
+    )
+
+    result = _execute(service, writer, "create-task", {
+        "task_id": "TASK-REQUEST-BOUND",
+        "title": "Research before PRD",
+        "execution_mode": "workflow",
+        "request_id": "REQ-TASK",
+        "request_revision": 3,
+    })
+
+    assert result["ok"] is True
+    task = TaskStore(state_dir / "kanban.json").get(
+        "TASK-REQUEST-BOUND"
+    )
+    assert task is not None
+    evidence = task.contract.evidence_contract
+    assert evidence["execution_owner"] == "workflow"
+    assert evidence["workflow_request_id"] == "REQ-TASK"
+    assert evidence["workflow_request_revision"] == 3
+    task_event = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "task.created"
+        and event.task_id == "TASK-REQUEST-BOUND"
+    )
+    task_contract = task_event.payload["task"]["contract"]
+    assert task_contract["evidence_contract"]["execution_owner"] == "workflow"
+    assert not any(
+        event.type == PLAN_REQUESTED_EVENT
+        and event.task_id == "TASK-REQUEST-BOUND"
+        for event in writer.event_log.read_all()
+    )
+
+
+def test_event_watcher_does_not_dispatch_new_workflow_managed_task(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    origin = build_workflow_origin_binding(
+        source="kanban-agent",
+        project_id="test",
+        conversation_id="kanban:test",
+        thread_key="main",
+    )
+    request_dir = state_dir / "workflow-requests"
+    request_dir.mkdir()
+    (request_dir / "REQ-WATCH.json").write_text(
+        json.dumps({
+            "schema_version": "workflow.request.v1",
+            "request_id": "REQ-WATCH",
+            "project_id": "test",
+            "kind": "prd",
+            "status": "ready",
+            "revision": 1,
+            "origin_binding": origin,
+        }),
+        encoding="utf-8",
+    )
+    transport = _RecordingTransport()
+    orchestrator = Orchestrator(
+        state_dir,
+        service.config,
+        transport,  # type: ignore[arg-type]
+    )
+
+    def consume(line: str) -> None:
+        event = writer.event_log.decode_line(line)
+        if event is not None and event.type in WAKE_PATTERNS:
+            orchestrator.run_once(events=[event])
+
+    watcher = EventWatcher(
+        state_dir / "events.jsonl",
+        on_event=consume,
+        event_log=writer.event_log,
+        wake_patterns=list(WAKE_PATTERNS),
+    )
+    created = _execute(service, writer, "create-task", {
+        "task_id": "TASK-WATCH",
+        "title": "Research before delivery",
+        "execution_mode": "workflow",
+        "request_id": "REQ-WATCH",
+        "request_revision": 1,
+    })
+
+    watcher.poll_once()
+
+    assert created["ok"] is True
+    assert transport.sent == []
+    assert not any(
+        event.type == "task.dispatched"
+        and event.task_id == "TASK-WATCH"
+        for event in writer.event_log.read_all()
     )

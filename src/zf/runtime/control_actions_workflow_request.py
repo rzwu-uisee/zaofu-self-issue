@@ -15,10 +15,19 @@ from zf.runtime.workflow_delivery import (
 )
 from zf.runtime.workflow_intake import build_flow_intake
 from zf.runtime.workflow_anchor import (
+    bind_workflow_request_to_task,
     is_workflow_managed_task,
     mark_workflow_managed_task,
+    workflow_task_request_binding,
 )
 from zf.runtime.workflow_start import WorkflowStartService
+from zf.runtime.workflow_origin import (
+    WorkflowOriginError,
+    assert_same_workflow_origin,
+    build_workflow_origin_binding,
+    workflow_origin_digest,
+    workflow_origin_from_request,
+)
 
 
 WORKFLOW_CONTROL_ACTIONS = frozenset({
@@ -133,6 +142,9 @@ class WorkflowRequestActionsMixin:
         for key in (
             "artifact_refs",
             "channel_id",
+            "origin_binding",
+            "request_id",
+            "request_revision",
             "source_refs",
             "thread_id",
         ):
@@ -140,27 +152,24 @@ class WorkflowRequestActionsMixin:
             if value not in (None, "", [], {}):
                 common_payload[key] = value
         adapter = str(route.get("start_adapter") or "")
-        if adapter == "fixed_research":
+        if adapter in {"adaptive_research", "fixed_research"}:
             result = self._research_start(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
                 payload={
                     **common_payload,
+                    "template_id": str(route.get("template_id") or ""),
                     "topic": str(
                         parameters.get("topic")
                         or objective
                     ),
                 },
             )
-        elif adapter == "registered_general":
-            result = self._workflow_invoke(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=common_payload,
-            )
-        elif adapter == "delivery_request_submit":
+        elif adapter in {
+            "delivery_request_submit",
+            "registered_general",
+        }:
             request_result = self._workflow_request(
                 requested=requested,
                 action=action,
@@ -278,40 +287,138 @@ class WorkflowRequestActionsMixin:
             self.state_dir,
             _required_text(payload, "source_ref") or _required_text(payload, "artifact_ref"),
         )
-        intake = build_flow_intake(
-            kind=_required_text(payload, "kind") or "auto",
-            source_ref=source_ref,
-            objective=objective,
-            source_root=_required_text(payload, "source_root"),
-            target_root=_required_text(payload, "target_root") or _required_text(payload, "target"),
-            backend=_required_text(payload, "backend"),
-            lanes=int(payload.get("lanes") or payload.get("requested_lanes") or 0),
-            project_id=_required_text(payload, "project_id") or self.config.project.name,
-            project_name=self.config.project.name,
-            strictness=_required_text(payload, "strictness") or "standard",
-            acceptance=tuple(_string_list(payload.get("acceptance"))),
-            constraints=tuple(_string_list(payload.get("constraints"))),
-            open_questions=tuple(_string_list(payload.get("open_questions"))),
-            request_id=request_id,
-            source=self.surface,
-            created_by=self.actor,
-            channel_id=_required_text(payload, "channel_id"),
-            thread_id=_required_text(payload, "thread_id"),
-            source_refs=(
-                {
-                    str(key): str(value)
-                    for key, value in payload.get("source_refs", {}).items()
-                    if str(key).strip() and str(value).strip()
-                }
-                if isinstance(payload.get("source_refs"), dict)
-                else {}
-            ),
-            output=self.project_root / "docs" / "intake" / f"{request_id}.md",
-        )
         from zf.runtime.workflow_requests import (
+            WorkflowRequestError,
             load_workflow_request,
             revise_workflow_request,
         )
+        existing_projection = load_workflow_request(
+            self.state_dir,
+            request_id,
+        )
+        if existing_projection:
+            try:
+                origin_binding = workflow_origin_from_request(
+                    existing_projection
+                )
+                supplied_origin = payload.get("origin_binding")
+                if isinstance(supplied_origin, dict):
+                    assert_same_workflow_origin(
+                        origin_binding,
+                        supplied_origin,
+                    )
+                for key in (
+                    "project_id",
+                    "channel_id",
+                    "thread_id",
+                    "conversation_id",
+                    "thread_key",
+                ):
+                    supplied = _required_text(payload, key)
+                    if supplied and supplied != str(
+                        origin_binding.get(key) or ""
+                    ):
+                        raise WorkflowOriginError(
+                            "workflow origin binding does not match the "
+                            "canonical request origin"
+                        )
+            except WorkflowOriginError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="origin_binding_mismatch",
+                )
+        else:
+            origin_binding = build_workflow_origin_binding(
+                source=self.source,
+                project_id=(
+                    _required_text(payload, "project_id")
+                    or self.config.project.name
+                ),
+                channel_id=_required_text(payload, "channel_id"),
+                thread_id=_required_text(payload, "thread_id"),
+                conversation_id=_required_text(payload, "conversation_id"),
+                thread_key=(
+                    _required_text(payload, "thread_key")
+                    or _required_text(payload, "thread_id")
+                ),
+            )
+        try:
+            intake = build_flow_intake(
+                kind=_required_text(payload, "kind") or "auto",
+                source_ref=source_ref,
+                objective=objective,
+                source_root=_required_text(payload, "source_root"),
+                target_root=(
+                    _required_text(payload, "target_root")
+                    or _required_text(payload, "target")
+                ),
+                backend=_required_text(payload, "backend"),
+                lanes=int(
+                    payload.get("lanes")
+                    or payload.get("requested_lanes")
+                    or 0
+                ),
+                project_id=str(
+                    origin_binding.get("project_id")
+                    or self.config.project.name
+                ),
+                project_name=self.config.project.name,
+                strictness=(
+                    _required_text(payload, "strictness") or "standard"
+                ),
+                acceptance=tuple(
+                    _string_list(payload.get("acceptance"))
+                ),
+                constraints=tuple(
+                    _string_list(payload.get("constraints"))
+                ),
+                open_questions=tuple(
+                    _string_list(payload.get("open_questions"))
+                ),
+                request_id=request_id,
+                source=self.surface,
+                created_by=self.actor,
+                channel_id=str(origin_binding.get("channel_id") or ""),
+                thread_id=str(origin_binding.get("thread_id") or ""),
+                conversation_id=str(
+                    origin_binding.get("conversation_id") or ""
+                ),
+                thread_key=str(origin_binding.get("thread_key") or ""),
+                origin_binding=origin_binding,
+                source_refs=(
+                    {
+                        str(key): str(value)
+                        for key, value in payload.get(
+                            "source_refs",
+                            {},
+                        ).items()
+                        if str(key).strip() and str(value).strip()
+                    }
+                    if isinstance(payload.get("source_refs"), dict)
+                    else {}
+                ),
+                output=(
+                    self.project_root
+                    / "docs"
+                    / "intake"
+                    / f"{request_id}.md"
+                ),
+            )
+        except WorkflowRequestError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=str(exc),
+                status_code=409,
+                status="origin_binding_mismatch",
+            )
 
         request_projection = load_workflow_request(self.state_dir, request_id)
         if not bool(request_projection.get("confirmed")):
@@ -371,6 +478,12 @@ class WorkflowRequestActionsMixin:
                 "action": action,
                 "requested_action": requested_action,
                 "request_id": request_id,
+                "request_revision": int(
+                    request_projection.get("revision") or 0
+                ),
+                "origin_binding": dict(
+                    request_projection.get("origin_binding") or {}
+                ),
                 "intake_ref": str(intake["intake_ref"]),
                 "workflow_input_manifest_ref": str(
                     intake["workflow_input_manifest_ref"]
@@ -411,6 +524,12 @@ class WorkflowRequestActionsMixin:
             "action": action,
             "requested_action": requested_action,
             "request_id": request_id,
+            "request_revision": int(
+                request_projection.get("revision") or 0
+            ),
+            "origin_binding": dict(
+                request_projection.get("origin_binding") or {}
+            ),
             "intake_ref": str(intake["intake_ref"]),
             "workflow_input_manifest_ref": str(intake["workflow_input_manifest_ref"]),
             "request_projection_ref": str(intake.get("request_projection_ref") or ""),
@@ -488,7 +607,7 @@ class WorkflowRequestActionsMixin:
         )
 
         try:
-            _projection, proposal = validate_current_workflow_proposal(
+            request_projection, proposal = validate_current_workflow_proposal(
                 self.state_dir,
                 request_id=request_id,
                 proposal_ref=proposal_ref,
@@ -525,6 +644,67 @@ class WorkflowRequestActionsMixin:
                 status_code=409,
                 status="config_apply_required",
             )
+        task_id = _required_text(payload, "task_id")
+        if task_id:
+            task_store = TaskStore(self.state_dir / "kanban.json")
+            workflow_task = task_store.get(task_id)
+            if workflow_task is not None:
+                canonical_origin = workflow_origin_from_request(
+                    request_projection
+                )
+                request_revision = int(
+                    request_projection.get("revision") or 0
+                )
+                task_request = workflow_task_request_binding(workflow_task)
+                if task_request and (
+                    task_request["request_id"] != request_id
+                    or int(task_request["request_revision"])
+                    != request_revision
+                    or task_request.get("origin_binding_digest")
+                    != workflow_origin_digest(canonical_origin)
+                ):
+                    return self._failed(
+                        requested=requested,
+                        action=action,
+                        requested_action=requested_action,
+                        task_id=task_id,
+                        reason=(
+                            "workflow Task is already bound to another "
+                            "Workflow Request revision"
+                        ),
+                        status_code=409,
+                        status="workflow_task_stale",
+                    )
+                if not task_request:
+                    bind_workflow_request_to_task(
+                        mark_workflow_managed_task(workflow_task),
+                        request_id=request_id,
+                        request_revision=request_revision,
+                        origin_binding_digest=workflow_origin_digest(
+                            canonical_origin
+                        ),
+                    )
+                    task_store.update(
+                        task_id,
+                        contract=workflow_task.contract,
+                    )
+                    self.writer.emit(
+                        "task.contract.update",
+                        actor=self.actor,
+                        task_id=task_id,
+                        causation_id=requested.id,
+                        correlation_id=requested.correlation_id,
+                        payload={
+                            "source": "workflow_submit",
+                            "contract": asdict(workflow_task.contract),
+                            "execution_owner": "workflow",
+                            "request_id": request_id,
+                            "request_revision": request_revision,
+                            "origin_binding_digest": (
+                                workflow_origin_digest(canonical_origin)
+                            ),
+                        },
+                    )
         intake_path = Path(intake_ref).expanduser()
         if not intake_path.is_absolute():
             intake_path = self.project_root / intake_path

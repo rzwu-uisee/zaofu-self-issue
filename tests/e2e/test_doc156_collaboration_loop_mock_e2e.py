@@ -16,12 +16,18 @@ from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_question_dedup import (
     apply_question_dedup_reply,
 )
-from zf.runtime.control_actions import ControlledActionService
-from zf.runtime.orchestrator import Orchestrator
-from zf.runtime.orchestrator_reactor import EventReactorMixin
 from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
     react_channel_cross_review_requested,
+)
+from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.orchestrator_reactor import EventReactorMixin
+from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.workflow_requests import load_workflow_request
+from tests.e2e.scripts import (
+    doc156_fake_kanban_agent,
+    doc156_research_finisher,
 )
 
 
@@ -103,6 +109,62 @@ def _approved_action(
     )
 
 
+def test_doc156_browser_helpers_follow_request_first_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (tmp_path / "zf.yaml").write_text(
+        RESEARCH_CONFIG.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    TaskStore(state_dir / "kanban.json").add(
+        Task(
+            id="TASK-DOC156-HELPER",
+            title="Doc 156 helper contract",
+        )
+    )
+    args = SimpleNamespace(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        task_id="TASK-DOC156-HELPER",
+        channel_id="ch-doc156-helper",
+        request_id="REQ-DOC156-HELPER",
+    )
+
+    assert doc156_research_finisher._prepare_request(args) == 0
+    request = load_workflow_request(
+        state_dir,
+        "REQ-DOC156-HELPER",
+    )
+    task = TaskStore(state_dir / "kanban.json").get(
+        "TASK-DOC156-HELPER"
+    )
+    assert task is not None
+    assert workflow_task_request_binding(task) == {
+        "request_id": "REQ-DOC156-HELPER",
+        "request_revision": int(request["revision"]),
+        "origin_binding_digest": task.contract.evidence_contract[
+            "workflow_origin_binding_digest"
+        ],
+    }
+
+    monkeypatch.setenv("ZF_DOC156_TASK_ID", task.id)
+    monkeypatch.setenv("ZF_DOC156_CHANNEL_ID", "ch-doc156-helper")
+    monkeypatch.setenv("ZF_DOC156_REQUEST_ID", "REQ-DOC156-HELPER")
+    workflow = doc156_fake_kanban_agent._proposal(
+        "DOC156_WORKFLOW_PLAN"
+    )
+    assert workflow["payload"]["request_revision"] == 1
+    adoption = doc156_fake_kanban_agent._proposal(
+        'DOC156_ADOPT {"result_event_id":"evt-result","request_id":'
+        '"REQ-DOC156-HELPER","request_revision":1}'
+    )
+    assert adoption["payload"]["result_event_id"] == "evt-result"
+
+
 def test_doc156_channel_research_adoption_and_workflow_start(
     tmp_path: Path,
 ) -> None:
@@ -125,13 +187,9 @@ def test_doc156_channel_research_adoption_and_workflow_start(
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
-    TaskStore(state_dir / "kanban.json").add(
-        Task(
-            id="TASK-DOC156",
-            title="Doc 156 collaboration loop",
-            status="in_progress",
-            active_dispatch_id="dispatch-doc156",
-        )
+    (tmp_path / "zf.yaml").write_text(
+        RESEARCH_CONFIG.read_text(encoding="utf-8"),
+        encoding="utf-8",
     )
     log = EventLog(state_dir / "events.jsonl")
     writer = EventWriter(log)
@@ -152,7 +210,6 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         {
             "template_id": "quick-change",
             "channel_id": "doc156-review",
-            "task_id": "TASK-DOC156",
             "overrides": {"backend": "fake"},
         },
     )
@@ -165,7 +222,6 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         {
             "channel_id": channel_id,
             "thread_id": "main",
-            "task_id": "TASK-DOC156",
             "objective": "Assess delivery constraints before research.",
         },
     )
@@ -183,15 +239,8 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         time.sleep(0.02)
     assert len(replies) == 3
 
-    advance_discussion(
-        state_dir,
-        writer,
-        channel_id=channel_id,
-        thread_id="main",
-        project_root=tmp_path,
-    )
     synthesis_request = None
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         advance_discussion(
             state_dir,
@@ -232,20 +281,42 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         for event in log.read_all()
     )
 
-    request_dir = state_dir / "workflow-requests"
-    request_dir.mkdir()
-    (request_dir / "REQ-DOC156.json").write_text(
-        json.dumps(
-            {
-                "request_id": "REQ-DOC156",
-                "revision": 1,
-                "status": "ready",
-                "channel_id": channel_id,
-                "thread_id": "main",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+    request = _approved_action(
+        service,
+        writer,
+        "workflow-request",
+        {
+            "request_id": "REQ-DOC156",
+            "kind": "workflow",
+            "objective": "Collect evidence before the delivery decision.",
+            "backend": "mock",
+            "pattern_id": "research-fanout",
+            "allow_missing_env": True,
+            "channel_id": channel_id,
+            "thread_id": "main",
+        },
+    )
+    assert request["ok"] is True
+    request_revision = int(request["request_revision"])
+    origin_binding = dict(request["origin_binding"])
+    created = _approved_action(
+        service,
+        writer,
+        "create-task",
+        {
+            "task_id": "TASK-DOC156",
+            "title": "Doc 156 collaboration loop",
+            "execution_mode": "workflow",
+            "request_id": "REQ-DOC156",
+            "request_revision": request_revision,
+        },
+    )
+    assert created["ok"] is True
+    task = TaskStore(state_dir / "kanban.json").get("TASK-DOC156")
+    assert task is not None
+    assert (
+        task.contract.evidence_contract["execution_owner"]
+        == "workflow"
     )
     research = _approved_action(
         service,
@@ -254,6 +325,8 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         {
             "task_id": "TASK-DOC156",
             "topic": "Collect evidence for the delivery decision.",
+            "request_id": "REQ-DOC156",
+            "request_revision": request_revision,
             "channel_id": channel_id,
             "thread_id": "main",
             "dispatch_id": "dispatch-doc156",
@@ -345,6 +418,23 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         aggregate.payload["research_artifact_digest"]
     )
     assert (state_dir / artifact_ref).is_file()
+    result_event = next(
+        event
+        for event in reversed(log.read_all())
+        if event.type == "workflow.result.available"
+        and event.payload.get("request_id") == "REQ-DOC156"
+    )
+    assert result_event.payload["request_revision"] == request_revision
+    assert result_event.payload["origin_binding"] == origin_binding
+    result_updates = [
+        event
+        for event in log.read_all()
+        if event.type == "channel.state_update.posted"
+        and event.payload.get("status") == "research_result_available"
+    ]
+    assert len(result_updates) == 1
+    assert result_updates[0].payload["channel_id"] == channel_id
+    assert result_updates[0].payload["thread_id"] == "main"
     writer.append(ZfEvent(
         type="run.completed",
         actor="orchestrator",
@@ -365,7 +455,8 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         {
             "task_id": "TASK-DOC156",
             "request_id": "REQ-DOC156",
-            "request_revision": 1,
+            "request_revision": request_revision,
+            "result_event_id": result_event.id,
             "artifact_ref": artifact_ref,
             "artifact_digest": artifact_digest,
             "summary": "Adopt the mock evidence into the workflow request.",
@@ -382,6 +473,8 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         {
             "task_id": "TASK-DOC156",
             "pattern_id": "delivery-smoke",
+            "request_id": "REQ-DOC156",
+            "request_revision": request_revision,
             "dispatch_id": "dispatch-doc156",
             "channel_id": channel_id,
             "thread_id": "main",
@@ -409,7 +502,7 @@ def test_doc156_channel_research_adoption_and_workflow_start(
     assert sum(
         event.type == "operator.action.resolved"
         for event in events
-    ) == 5
+    ) == 6
 
 
 def test_four_lens_discussion_cross_review_and_signoff_closes(

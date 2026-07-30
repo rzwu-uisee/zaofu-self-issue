@@ -1977,6 +1977,8 @@ def test_semantic_submit_briefing_exposes_profile_not_capability(
     assert "profile: `task-verify` revision `1`" in briefing
     assert "ZF_RESULT_SUBMIT_TOKEN" not in briefing
     assert "When finished, emit exactly one result event with this payload" not in briefing
+    assert briefing.count("result submit") == 1
+    assert "Failure command:" not in briefing
     assert path.with_suffix(".md.metrics.json").exists()
 
 
@@ -2052,6 +2054,10 @@ def test_artifact_delivery_briefing_pins_identity_and_admitted_inputs(
     assert "When finished, emit exactly one result event" not in briefing
     assert '"goal_id": "goal-generic"' in briefing
     assert input_result_ref in briefing
+    assert "this artifact-delivery profile has no candidate branch" in briefing
+    assert "Do not enumerate `candidate/*`" in briefing
+    assert "evidence from another `workflow_run_id`" in briefing
+    assert "If a deliverable branch exists" not in briefing
     scratch = json.loads(
         (state_dir / scratch_ref).read_text(encoding="utf-8")
     )

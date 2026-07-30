@@ -7,6 +7,7 @@ from typing import Any
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.security.redaction import redact_obj
+from zf.runtime.workflow_results import emit_research_result_available
 
 
 def emit_fanout_channel_state_update(
@@ -24,6 +25,46 @@ def emit_fanout_channel_state_update(
     """
     terminal_payload = terminal_event.payload if isinstance(terminal_event.payload, dict) else {}
     synth_payload = synth_event.payload if synth_event is not None and isinstance(synth_event.payload, dict) else {}
+    result_event = emit_research_result_available(
+        writer=writer,
+        terminal_event=terminal_event,
+        manifest=manifest,
+        synth_event=synth_event,
+    )
+    if result_event is not None:
+        projected = _emit_research_result_return(
+            writer=writer,
+            result_event=result_event,
+        )
+        if projected is not None:
+            return projected
+        origin = (
+            result_event.payload.get("origin_binding")
+            if isinstance(result_event.payload, dict)
+            and isinstance(
+                result_event.payload.get("origin_binding"),
+                dict,
+            )
+            else {}
+        )
+        origin_surface = str(origin.get("surface") or "")
+        if origin_surface not in {
+            "kanban_agent",
+            "cli",
+        }:
+            return _emit_result_return_diagnostic(
+                writer=writer,
+                result_event=result_event,
+            )
+        if (
+            origin_surface != "cli"
+            or str(result_event.payload.get("request_id") or "")
+        ):
+            return None
+        # Legacy standalone fanouts may carry Channel provenance but no
+        # Workflow Request. Preserve their read-only completion update below;
+        # do not expose an adoption action or treat provenance as a new
+        # canonical return binding.
     context = _channel_context(manifest, terminal_payload, synth_payload)
     channel_id = str(context.get("channel_id") or "").strip()
     if not channel_id:
@@ -78,6 +119,134 @@ def emit_fanout_channel_state_update(
             "task_id": task_id,
             "refs": redact_obj(refs),
             "source": "runtime",
+        },
+    )
+
+
+def _emit_research_result_return(
+    *,
+    writer: EventWriter,
+    result_event: ZfEvent,
+) -> ZfEvent | None:
+    payload = (
+        result_event.payload
+        if isinstance(result_event.payload, dict)
+        else {}
+    )
+    origin = (
+        payload.get("origin_binding")
+        if isinstance(payload.get("origin_binding"), dict)
+        else {}
+    )
+    if str(origin.get("surface") or "") != "channel":
+        return None
+    channel_id = str(origin.get("channel_id") or "").strip()
+    if not channel_id:
+        return None
+    prior = next(
+        (
+            event
+            for event in reversed(writer.event_log.read_all())
+            if event.type == "channel.state_update.posted"
+            and str((event.payload or {}).get("status") or "")
+            == "research_result_available"
+            and str(
+                ((event.payload or {}).get("refs") or {}).get(
+                    "workflow_result_event_id"
+                )
+                or ""
+            )
+            == result_event.id
+        ),
+        None,
+    )
+    if prior is not None:
+        return prior
+    task_id = str(payload.get("task_id") or "")
+    adopt_payload = {
+        "result_event_id": result_event.id,
+        "request_id": str(payload.get("request_id") or ""),
+        "request_revision": int(payload.get("request_revision") or 0),
+        "task_id": task_id,
+        "workflow_run_id": str(payload.get("workflow_run_id") or ""),
+        "terminal_event_id": str(payload.get("terminal_event_id") or ""),
+        "artifact_ref": str(payload.get("artifact_ref") or ""),
+        "artifact_digest": str(payload.get("artifact_digest") or ""),
+        "summary": str(payload.get("summary") or ""),
+    }
+    return writer.emit(
+        "channel.state_update.posted",
+        actor="zf-cli",
+        task_id=task_id or None,
+        causation_id=result_event.id,
+        correlation_id=channel_id,
+        payload={
+            "channel_id": channel_id,
+            "thread_id": str(origin.get("thread_id") or "main"),
+            "status": "research_result_available",
+            "summary": str(payload.get("summary") or ""),
+            "task_id": task_id,
+            "run_id": str(payload.get("workflow_run_id") or ""),
+            "refs": {
+                "workflow_result_event_id": result_event.id,
+                "request_id": str(payload.get("request_id") or ""),
+                "request_revision": int(
+                    payload.get("request_revision") or 0
+                ),
+                "workflow_run_id": str(
+                    payload.get("workflow_run_id") or ""
+                ),
+                "terminal_event_id": str(
+                    payload.get("terminal_event_id") or ""
+                ),
+                "artifact_ref": str(payload.get("artifact_ref") or ""),
+                "artifact_digest": str(
+                    payload.get("artifact_digest") or ""
+                ),
+                "adopt_payload": adopt_payload,
+            },
+            "source": "runtime",
+        },
+    )
+
+
+def _emit_result_return_diagnostic(
+    *,
+    writer: EventWriter,
+    result_event: ZfEvent,
+) -> ZfEvent:
+    prior = next(
+        (
+            event
+            for event in reversed(writer.event_log.read_all())
+            if event.type == "workflow.result.return.skipped"
+            and str((event.payload or {}).get("result_event_id") or "")
+            == result_event.id
+        ),
+        None,
+    )
+    if prior is not None:
+        return prior
+    payload = (
+        result_event.payload
+        if isinstance(result_event.payload, dict)
+        else {}
+    )
+    return writer.emit(
+        "workflow.result.return.skipped",
+        actor="zf-cli",
+        task_id=result_event.task_id,
+        causation_id=result_event.id,
+        correlation_id=result_event.correlation_id,
+        payload={
+            "schema_version": "workflow-result-return.v1",
+            "result_event_id": result_event.id,
+            "reason": "workflow result has no valid canonical return origin",
+            "origin_binding": (
+                dict(payload.get("origin_binding"))
+                if isinstance(payload.get("origin_binding"), dict)
+                else {}
+            ),
         },
     )
 
@@ -185,7 +354,12 @@ def _refs(
         "fanout_terminal_event_id": terminal_event.id,
     }
     if synth_event is not None:
-        refs["fanout_synth_event_id"] = synth_event.id
+        refs["result_source_event_id"] = synth_event.id
+        refs[
+            "fanout_synth_event_id"
+            if synth_event.type == "fanout.synth.completed"
+            else "research_root_result_event_id"
+        ] = synth_event.id
     for key in (
         "workflow_run_id",
         "workflow_input_manifest_ref",

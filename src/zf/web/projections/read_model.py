@@ -100,6 +100,8 @@ KANBAN_AGENT_HISTORY_TYPES = (
     "agent.session.part.delta",
     "agent.session.part.completed",
     "agent.session.part.failed",
+    "workflow.result.available",
+    "workflow.research.adopted",
 )
 KANBAN_AGENT_HISTORY_PREFIXES = (
     "kanban.agent.turn.",
@@ -1383,6 +1385,23 @@ def _kanban_agent_history_event_matches(
             return False
         if str(payload.get("runtime_delivery") or "") != "headless":
             return False
+    elif event_type in {
+        "workflow.result.available",
+        "workflow.research.adopted",
+    }:
+        origin_binding = (
+            payload.get("origin_binding")
+            if isinstance(payload.get("origin_binding"), dict)
+            else {}
+        )
+        if str(
+            payload.get("origin_surface")
+            or origin_binding.get("surface")
+            or ""
+        ) != "kanban_agent":
+            return False
+        if not str(payload.get("conversation_id") or "").strip():
+            return False
     elif event_type == "task.created":
         if not str(payload.get("proposal_event_id") or ""):
             return False
@@ -1583,6 +1602,13 @@ def _payload_slim(payload: dict[str, Any]) -> dict[str, Any]:
         "option_id",
         "answers",
         "action_proposal",
+        "artifact_ref",
+        "artifact_digest",
+        "origin_surface",
+        "request_revision",
+        "result_event_id",
+        "terminal_event_id",
+        "workflow_run_id",
         # kanban.agent.action.proposed carries the proposal object under
         # `proposal` (both Web-panel and Feishu emitters); without it the
         # Triage Accept card cannot reconstruct the action to run.
