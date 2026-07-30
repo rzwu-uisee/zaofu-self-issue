@@ -5,9 +5,10 @@
 > Research, and delivery Workflows.
 >
 > This route was verified against the CLI, Web UI, event ledger, and real
-> browser E2E on 2026-07-29. Each animation is assembled from real Playwright
-> interaction states; the acceptance checks also inspect the API, Stores, and
-> EventLog instead of treating screenshots as runtime proof.
+> browser E2E on 2026-07-30. Each animation and key screenshot is assembled
+> from real Playwright interaction states; the acceptance checks also inspect
+> the API, Stores, and EventLog instead of treating screenshots as runtime
+> proof.
 
 ## Completion Route
 
@@ -174,6 +175,16 @@ Do not preselect lanes or roles while creating a Project. The Kanban Agent
 should classify the concrete request and recommend a registered single-lane,
 multi-lane, Research, or other active route.
 
+The two chat surfaces are identified by their headers:
+
+| Surface | Header identity | Purpose |
+|---|---|---|
+| Kanban Agent | `Kanban Agent`, provider, and `active` status | General Project coding conversation and Plan/Approve interactions |
+| Channel Group | `# Channel name`, Channel ID, and member count | Multi-role discussion inside a created Channel |
+
+The upper-left header continues to say `Kanban Agent` in fullscreen mode.
+A Channel page always starts with `#` and the Channel name.
+
 ## 5. Create a Channel with the Kanban Agent (Recommended)
 
 The canonical model behind the product term Channel Group is a runtime
@@ -188,7 +199,22 @@ The Kanban Agent returns a Channel setup Plan showing template, member roles,
 member count, and discussion rounds. Use `Chat about` to adjust the scope, then
 select an option and click `Create & start`.
 
-![Kanban Agent Channel creation animation](assets/quickstart-channel-create.webp)
+![Channel setup Plan inside the Kanban Agent](assets/quickstart-kanban-channel-plan.png)
+
+The recommended option in the screenshot has this complete configuration:
+
+```text
+Quick Change
+  members: 3
+  roles: tech_leader, dev_reviewer, qa_analyst
+  max_rounds: 4
+```
+
+The displayed `4 rounds` is `overrides.budget.max_rounds`: the upper bound for
+automatic Channel discussion rounds. It does not guarantee four replies from
+each member, and it is not the Kanban Agent provider's `max_turns`. To change
+roles, member count, or `max_rounds`, select `Chat about`, state the new value,
+and apply the revised Plan returned by the Kanban Agent.
 
 One action then:
 
@@ -203,8 +229,37 @@ creates the Channel
 There is no second manual Channel, member invitation, or message-copying step.
 Channel creation does not emit `workflow.invoke.requested`.
 
-Completion signal: the Plan shows `Plan applied`, the new Channel opens, and
-the original request is present.
+After creation, the Kanban Agent collapses the Plan while preserving the final
+template, roles, member count, and round budget:
+
+![Plan applied after Channel creation](assets/quickstart-channel-applied.png)
+
+The current Web UI does not automatically replace the main page with the new
+Channel after `Plan applied`. Open it as follows:
+
+1. Select `Minimize Kanban Agent` (`-`) in the upper-right corner.
+2. Wait for the new row under the left-hand `Channels` section; its trailing
+   number is the member count.
+3. Select the Channel name.
+4. After the header changes to `# Channel name`, select the Members icon and
+   verify the roster.
+
+```text
+[Kanban Agent]  Plan applied
+        |
+        | Minimize
+        v
+left Channels -> API authentication review                         3
+        |
+        v
+[# API authentication review]  Chat | Details              Members 3
+```
+
+![Open the Channel from the rail and verify three members](assets/quickstart-channel-members.png)
+
+Completion signal: the Plan says `Plan applied`; the new Channel row shows the
+expected member count; opening it reveals the original request, member roles,
+and discussion state.
 
 ## 6. Discuss Inside the Channel Group (Recommended)
 
@@ -214,6 +269,12 @@ another registered discussion mode. Role permissions, skills, and the default
 responder come from the materialized template.
 
 ![Multi-role Channel discussion and continuation](assets/quickstart-channel-discussion.webp)
+
+The number beside the Members icon comes from this Channel's canonical
+`members`. It is neither the total Project agent count nor the later Workflow
+role count. Select the icon to inspect each member's role, status, provider,
+and write policy. The example has three members: `tech_leader`,
+`dev_reviewer`, and `qa_analyst`.
 
 After discussion:
 
@@ -228,6 +289,9 @@ When Feishu is enabled, the same Channel, messages, approval intents, and
 results project through events and controlled actions instead of creating a
 second business-state system. See
 [15 Channel Collaboration](15-channel-collaboration.en.md).
+
+To return to the general coding conversation, select `Open Kanban Agent` in the
+lower-right corner. This does not close or discard the Channel thread.
 
 Completion signal: role replies and synthesis remain visible, the composer
 accepts a continuation, and no Task or Workflow appears merely because the

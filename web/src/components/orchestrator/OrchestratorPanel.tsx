@@ -1311,6 +1311,10 @@ export function OrchestratorPanel({
           >
             <Plus size={20} strokeWidth={1.8} />
           </button>
+          <span className="agent-surface-title">
+            <MessageCircle aria-hidden="true" size={16} strokeWidth={1.9} />
+            Kanban Agent
+          </span>
           <div
             className="agent-model-dropdown header-agent-switch"
             onBlur={(event) => {

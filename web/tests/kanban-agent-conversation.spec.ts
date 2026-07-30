@@ -120,6 +120,7 @@ async function openKanbanAgent(page: Page, id: string, withToken = true): Promis
   await expect(
     dialog.getByRole("radiogroup", { name: "Kanban Agent permission profile" }),
   ).toHaveCount(0);
+  await expect(dialog.getByText("Kanban Agent", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: /Agent backend: Claude/ })).toBeVisible();
 }
 
@@ -132,6 +133,14 @@ async function sendMessage(page: Page, message: string): Promise<void> {
 async function captureAgent(page: Page, name: string): Promise<void> {
   if (!evidenceDir) return;
   await page.getByRole("dialog", { name: "Kanban Agent" }).screenshot({
+    path: `${evidenceDir}/${name}.png`,
+  });
+}
+
+async function capturePage(page: Page, name: string): Promise<void> {
+  if (!evidenceDir) return;
+  await page.screenshot({
+    fullPage: true,
     path: `${evidenceDir}/${name}.png`,
   });
 }
@@ -426,16 +435,21 @@ test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", asy
 }) => {
   const id = await projectId(request);
   const cursor = await eventCursor(request, id);
-  const marker = `KBA_CHANNEL_${Date.now().toString(36)}`;
+  const channelRequest = (
+    "Create a focused collaboration Channel for an API authentication review and start it."
+  );
 
+  await page.setViewportSize({ width: 1440, height: 960 });
   await openKanbanAgent(page, id);
+  await page.getByRole("button", { name: "New Kanban Agent chat" }).click();
+  await page.getByRole("button", { name: "Fullscreen Kanban Agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "Kanban Agent" });
+  await expect(dialog.getByText("Kanban Agent", { exact: true })).toBeVisible();
   await sendMessage(
     page,
-    `${marker} create the recommended collaboration Channel and start it`,
+    channelRequest,
   );
-  const plan = page.locator(".agent-stack-card.plan").filter({
-    hasText: marker,
-  }).last();
+  const plan = page.locator(".agent-stack-card.plan").filter({ hasText: "Channel setup" }).last();
   await expect(plan).toBeVisible({ timeout: 30_000 });
   await expect(plan).toContainText("Quick change");
   await expect(plan.locator(".agent-plan-recommended")).toHaveText("Recommended");
@@ -461,9 +475,37 @@ test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", asy
   );
   expect(answered.payload?.applied_action).toBe("channel-create-and-start");
   expect(events.some((event) => event.type === "workflow.invoke.requested")).toBeFalsy();
-  await expect(plan).toContainText("Plan summary");
-  await expect(plan).toContainText("Plan applied");
-  await expect(plan).toContainText("Quick change (Recommended)");
+  const planSummary = page.locator(".agent-stack-card.plan").filter({
+    hasText: "Plan summary",
+  }).last();
+  await expect(planSummary).toContainText("Plan applied");
+  await expect(planSummary).toContainText("Quick change (Recommended)");
+  await captureAgent(page, "04-channel-plan-applied");
+
+  const createdSummary = events.find((event) => event.type === "channel.created");
+  expect(createdSummary).toBeDefined();
+  const created = await hydrateEvent(request, id, createdSummary as EventItem);
+  const channelId = String(created.payload?.channel_id ?? "");
+  expect(channelId).not.toBe("");
+
+  await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
+  const channelButton = page.locator(".channel-nav-button").filter({
+    hasText: "API authentication review",
+  }).last();
+  await expect(channelButton).toContainText("3", { timeout: 30_000 });
+  await channelButton.click();
+  const channelPage = page.locator(".channel-page");
+  await expect(channelPage).toContainText("API authentication review", { timeout: 30_000 });
+  await expect(channelPage).toContainText(channelRequest, { timeout: 30_000 });
+  await expect(channelPage).toContainText(channelId);
+  await page.getByTitle("Members").click();
+  const memberDrawer = page.locator(".channel-drawer");
+  await expect(memberDrawer).toContainText("Members");
+  await expect(memberDrawer).toContainText("3");
+  await expect(memberDrawer).toContainText("tech_leader");
+  await expect(memberDrawer).toContainText("dev_reviewer");
+  await expect(memberDrawer).toContainText("qa_analyst");
+  await capturePage(page, "05-channel-members");
 });
 
 test("KBA-WORKFLOW Create Task leads to Plan, then Approve, then invoke", async ({
@@ -571,6 +613,14 @@ test("KBA-WORKFLOW Create Task leads to Plan, then Approve, then invoke", async 
     element.scrollWidth > element.clientWidth + 1
   ));
   expect(mobileOverflow).toBeFalsy();
+  const mobileHeader = page.getByRole("dialog", { name: "Kanban Agent" }).locator(
+    ".agent-shell-header",
+  );
+  await expect(mobileHeader.getByText("Kanban Agent", { exact: true })).toBeVisible();
+  const mobileHeaderOverflow = await mobileHeader.evaluate((element) => (
+    element.scrollWidth > element.clientWidth + 1
+  ));
+  expect(mobileHeaderOverflow).toBeFalsy();
   await captureAgent(page, "04-task-workflow-plan-mobile");
   await page.setViewportSize({ width: 1440, height: 900 });
 

@@ -113,8 +113,15 @@ try:
 except json.JSONDecodeError:
     payload = {"raw": raw}
 text = json.dumps(payload, ensure_ascii=False)
-match = re.search(r"KBA_[A-Z_]+_[a-z0-9]+", text, re.IGNORECASE)
-marker = match.group(0) if match else "KBA_FAKE_DEFAULT"
+quickstart_channel_request = (
+    "Create a focused collaboration Channel for an API authentication review "
+    "and start it."
+)
+if quickstart_channel_request in text:
+    marker = "KBA_CHANNEL_QUICKSTART"
+else:
+    match = re.search(r"KBA_[A-Z_]+_[a-z0-9]+", text, re.IGNORECASE)
+    marker = match.group(0) if match else "KBA_FAKE_DEFAULT"
 
 emit({"type": "system", "session_id": provider_session_id})
 emit({
@@ -134,7 +141,7 @@ if marker.startswith("KBA_CHANNEL_"):
             "subject_type": "channel_setup",
             "header": "Channel setup",
             "id": "channel-setup",
-            "question": f"Which collaboration setup should handle {marker}?",
+            "question": "Which collaboration setup should review the API authentication change?",
             "submit_action": "channel-create-and-start",
             "submit_label": "Create & start",
             "options": [
@@ -145,7 +152,7 @@ if marker.startswith("KBA_CHANNEL_"):
                     "recommended": True,
                     "submit_payload": {
                         "template_id": "quick-change",
-                        "name": f"Channel {marker}",
+                        "name": "API authentication review",
                         "overrides": {
                             "backend": "fake",
                             "budget": {"max_rounds": 4},
@@ -158,7 +165,7 @@ if marker.startswith("KBA_CHANNEL_"):
                     "description": "Broader architecture and security review.",
                     "submit_payload": {
                         "template_id": "architecture-review",
-                        "name": f"Architecture {marker}",
+                        "name": "API authentication architecture review",
                         "overrides": {
                             "backend": "fake",
                             "budget": {"max_rounds": 6},

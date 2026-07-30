@@ -789,6 +789,31 @@
   gap: 8px;
 }
 
+.agent-surface-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: var(--text-13);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .agent-shell-header {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .agent-title-block {
+    gap: 6px;
+  }
+
+  .agent-shell-header .agent-state-pill {
+    display: none;
+  }
+}
+
 .agent-window-button,
 .agent-lock-button {
   width: 32px;

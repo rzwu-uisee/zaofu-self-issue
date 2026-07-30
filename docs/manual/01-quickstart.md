@@ -3,8 +3,8 @@
 > 适用对象：第一次安装 ZaoFu，并希望从 Web 完成 Bootstrap、创建或打开
 > Project，再通过 Kanban Agent 使用 Channel、Research 和交付 Workflow 的操作者。
 >
-> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-07-29。
-> 本页动态图由 Playwright 的真实交互状态组成；闭环结论同时检查对应 API、
+> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-07-30。
+> 本页动态图和关键截图由 Playwright 的真实交互状态组成；闭环结论同时检查对应 API、
 > Store 和 EventLog，不以截图代替运行态证据。
 
 ## 完成路线
@@ -157,6 +157,16 @@ Kanban Agent 是 Project 内的通用 Coding Agent，不只是创建 Task、查�
 复杂度和验收目标，从 active catalog 推荐单 lane、多 lane、Research 或其他已注册
 route。
 
+两个聊天界面通过顶栏区分：
+
+| 界面 | 顶栏标识 | 用途 |
+|---|---|---|
+| Kanban Agent | `Kanban Agent`、provider 和 `active` 状态 | 与 Project 通用 Coding Agent 对话并处理 Plan/Approve |
+| Channel Group | `# Channel name`、Channel ID 和成员图标计数 | 在已创建 Channel 中进行多角色讨论 |
+
+即使 Kanban Agent 处于全屏，左上角仍会显示 `Kanban Agent`；Channel 页面始终以
+`#` 和 Channel 名称开头。
+
 ## 5. 用 Kanban Agent 创建 Channel（推荐）
 
 产品里常说的 Channel Group，canonical 模型是运行时的 **Channel + Members**，不是
@@ -169,7 +179,21 @@ route。
 Kanban Agent 返回 Channel setup Plan。选项显示模板、成员角色、成员数和讨论轮次；
 `Chat about` 允许先调整范围，选择完成后点击 `Create & start`。
 
-![Kanban Agent 创建 Channel 动态演示](assets/quickstart-channel-create.webp)
+![Kanban Agent 内的 Channel setup Plan](assets/quickstart-kanban-channel-plan.png)
+
+上图中推荐方案的完整配置是：
+
+```text
+Quick Change
+  members: 3
+  roles: tech_leader, dev_reviewer, qa_analyst
+  max_rounds: 4
+```
+
+界面显示的 `4 rounds` 对应 `overrides.budget.max_rounds`，是 Channel 自动讨论的
+轮次预算上限，不表示每位成员一定回复 4 次，也不是 Kanban Agent provider 的
+`max_turns`。需要改变角色、成员数或 `max_rounds` 时，先点击 `Chat about` 说明新值，
+让 Kanban Agent 返回修订后的 Plan，再执行创建。
 
 系统一次完成：
 
@@ -184,7 +208,32 @@ Kanban Agent 返回 Channel setup Plan。选项显示模板、成员角色、成
 不需要再手工创建 Channel、邀请成员或复制第一条消息。创建 Channel 不会产生
 `workflow.invoke.requested`。
 
-完成标志：Plan 显示 `Plan applied`，新 Channel 已打开，并出现原始需求。
+点击后，Kanban Agent 先折叠 Plan，并保留最终模板、角色、成员数和轮次：
+
+![Channel 创建完成后的 Plan applied](assets/quickstart-channel-applied.png)
+
+当前 Web 不会在 `Plan applied` 后自动把主页面切到 Channel。进入新 Channel 的步骤是：
+
+1. 点击 Kanban Agent 右上角的 `Minimize Kanban Agent`（`-`）。
+2. 在左侧 `Channels` 区域等待新 Channel 出现；行尾数字是成员数。
+3. 点击 Channel 名称。
+4. 看到 `# Channel name` 后，点击右上角 Members 图标核对成员。
+
+```text
+[Kanban Agent]  Plan applied
+        |
+        | Minimize
+        v
+左侧 Channels -> API authentication review                         3
+        |
+        v
+[# API authentication review]  Chat | Details              Members 3
+```
+
+![从左侧 Channels 进入并核对 3 名成员](assets/quickstart-channel-members.png)
+
+完成标志：Plan 显示 `Plan applied`；左侧新 Channel 行显示预期成员数；打开后原始需求、
+成员角色和讨论状态均可见。
 
 ## 6. 在 Channel Group 内讨论（推荐）
 
@@ -193,6 +242,11 @@ Channel 以 thread 保存原始需求、角色回复、开放问题和收敛结�
 技能和默认 responder 来自模板物化结果。
 
 ![Channel Group 多角色讨论与继续输入](assets/quickstart-channel-discussion.webp)
+
+Channel 顶栏 Members 图标旁的数字来自当前 Channel 的 canonical `members`，不是
+Project 全部 Agent 数，也不是后续 Workflow roles 数。点击图标可查看每个成员的
+角色、状态、provider 和写权限；上例应为 3 名成员：
+`tech_leader`、`dev_reviewer`、`qa_analyst`。
 
 讨论结束后：
 
@@ -206,6 +260,9 @@ Channel 以 thread 保存原始需求、角色回复、开放问题和收敛结�
 启用飞书时，同一 Channel、消息、审批意图和结果通过事件/受控 action 投影到飞书，
 不建立第二套业务状态。完整模板和飞书用法见
 [15 Channel 协作使用手册](15-channel-collaboration.md)。
+
+需要回到通用 Coding 对话时，点击页面右下角的 `Open Kanban Agent`；Channel thread
+不会因此关闭或丢失。
 
 完成标志：角色回复和 synthesis 可见，composer 仍可继续输入；Task 和 Workflow
 不会因为讨论结束而自动出现。
