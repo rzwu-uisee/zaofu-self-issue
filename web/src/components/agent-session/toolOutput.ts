@@ -6,6 +6,10 @@
 // Tool output preview helpers with line/char caps, hidden-count stats,
 // and duration formatting for ZaoFu's AgentSessionPart model.
 
+import { prettyPrintIfJson } from "./jsonDisplay.js";
+
+export { prettyPrintIfJson };
+
 export const OUTPUT_PREVIEW_LINE_LIMIT = 80;
 export const OUTPUT_PREVIEW_CHAR_LIMIT = 12_000;
 
@@ -32,22 +36,6 @@ export interface RawOutputRef {
   head?: string;
   tail?: string;
   truncated?: boolean;
-}
-
-/**
- * If the string is valid JSON, return its 2-space-indented form;
- * otherwise return it verbatim. A compact one-line JSON payload renders
- * inside a <pre> as one horizontal-scrolling line — pretty-printing keeps
- * it readable.
- */
-export function prettyPrintIfJson(s: string): string {
-  const trimmed = s.trim();
-  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return s;
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    return s;
-  }
 }
 
 /**

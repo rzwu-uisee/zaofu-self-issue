@@ -186,6 +186,7 @@ def archive_run(
     ended_at: str = "",
     provider: dict[str, Any] | None = None,
     summary: dict[str, Any] | None = None,
+    supplemental_files: dict[str, Path] | None = None,
     env: dict[str, str] | None = None,
     allow_existing: bool = True,
 ) -> RunArchiveResult:
@@ -303,6 +304,13 @@ def archive_run(
         default="",
         kind="runtime",
     )
+    _copy_dir_artifact(
+        records,
+        live_state_dir / "events",
+        artifact_dir / "event_archives",
+        artifact_root=artifact_dir,
+        kind="runtime",
+    )
     _copy_file_artifact(
         records,
         live_state_dir / "cost.jsonl",
@@ -410,6 +418,25 @@ def archive_run(
         default=_postmortem_text(metadata),
         kind="summary",
     )
+    for relative_name, source in sorted((supplemental_files or {}).items()):
+        relative = Path(str(relative_name))
+        if (
+            not str(relative_name).strip()
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            raise RunArchiveError(
+                f"unsafe supplemental artifact name: {relative_name!r}"
+            )
+        _copy_file_artifact(
+            records,
+            Path(source),
+            artifact_dir / "supplemental" / relative,
+            artifact_root=artifact_dir,
+            default="",
+            kind="autoresearch",
+            redacted=True,
+        )
 
     manifest = {
         "version": 1,

@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from zf.core.state.atomic_io import atomic_write_text
+
 
 PREPARATION_MANIFEST = "worktree-preparation.json"
 
@@ -18,6 +20,13 @@ def path_sha256(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return ""
+
+
+def write_preparation_journal(path: Path, payload: dict[str, Any]) -> None:
+    atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
 
 
 def cleanup_prepared_worktree(
@@ -44,7 +53,8 @@ def cleanup_prepared_worktree(
     root = Path(worktree).resolve()
     preparation_dir = Path(run_dir).resolve() / "worktree-preparation"
     zf_yaml = root / "zf.yaml"
-    if path_sha256(zf_yaml) == str(manifest.get("generated_zf_sha256") or ""):
+    generated_zf_sha256 = str(manifest.get("generated_zf_sha256") or "")
+    if generated_zf_sha256 and path_sha256(zf_yaml) == generated_zf_sha256:
         original = preparation_dir / "zf.yaml.original"
         if bool(manifest.get("zf_existed")) and original.is_file():
             shutil.copy2(original, zf_yaml)
@@ -56,9 +66,15 @@ def cleanup_prepared_worktree(
         outcome["retained"].append(str(zf_yaml))
 
     seed = root / "autoresearch-seed.txt"
-    if path_sha256(seed) == str(manifest.get("generated_seed_sha256") or ""):
-        seed.unlink(missing_ok=True)
-        outcome["removed"].append(str(seed))
+    generated_seed_sha256 = str(manifest.get("generated_seed_sha256") or "")
+    if generated_seed_sha256 and path_sha256(seed) == generated_seed_sha256:
+        original_seed = preparation_dir / "autoresearch-seed.txt.original"
+        if bool(manifest.get("seed_existed")) and original_seed.is_file():
+            shutil.copy2(original_seed, seed)
+            outcome["restored"].append(str(seed))
+        else:
+            seed.unlink(missing_ok=True)
+            outcome["removed"].append(str(seed))
     elif seed.exists():
         outcome["retained"].append(str(seed))
     _cleanup_web_dependencies(
@@ -117,12 +133,17 @@ def _latest_manifest(root: Path) -> Path | None:
 
 
 def _cleanup_pending(root: Path, manifest: dict[str, Any]) -> bool:
-    if path_sha256(root / "zf.yaml") == str(
-        manifest.get("generated_zf_sha256") or ""
+    generated_zf_sha256 = str(manifest.get("generated_zf_sha256") or "")
+    if (
+        generated_zf_sha256
+        and path_sha256(root / "zf.yaml") == generated_zf_sha256
     ):
         return True
-    if path_sha256(root / "autoresearch-seed.txt") == str(
-        manifest.get("generated_seed_sha256") or ""
+    generated_seed_sha256 = str(manifest.get("generated_seed_sha256") or "")
+    if (
+        generated_seed_sha256
+        and path_sha256(root / "autoresearch-seed.txt")
+        == generated_seed_sha256
     ):
         return True
     web = manifest.get("web_dependencies")
@@ -130,7 +151,7 @@ def _cleanup_pending(root: Path, manifest: dict[str, Any]) -> bool:
         return False
     mode = str(web.get("mode") or "")
     dependencies = root / "web" / "node_modules"
-    return mode in {"linked", "installed"} and (
+    return mode in {"linked", "installed", "preparing"} and (
         dependencies.exists() or dependencies.is_symlink()
     )
 
@@ -162,7 +183,19 @@ def _cleanup_web_dependencies(
         else:
             outcome["retained"].append(str(dependencies))
         return
-    if mode == "installed":
+    if mode == "preparing" and dependencies.is_symlink():
+        expected = str(web.get("symlink_target") or "")
+        try:
+            current = os.readlink(dependencies)
+        except OSError:
+            current = ""
+        if expected and current == expected:
+            dependencies.unlink()
+            outcome["removed"].append(str(dependencies))
+        else:
+            outcome["retained"].append(str(dependencies))
+        return
+    if mode in {"installed", "preparing"}:
         if dependencies.is_symlink() or not dependencies.is_dir():
             outcome["retained"].append(str(dependencies))
             return
@@ -175,4 +208,5 @@ __all__ = [
     "cleanup_interrupted_prepared_worktree",
     "cleanup_prepared_worktree",
     "path_sha256",
+    "write_preparation_journal",
 ]

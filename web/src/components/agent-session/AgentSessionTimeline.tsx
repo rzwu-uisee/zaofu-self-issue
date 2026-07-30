@@ -572,7 +572,7 @@ function PartRenderer({
       {shouldShowTextPartTitle(part) ? <span className="agent-part-title">{part.title}</span> : null}
       {/* Render markdown on BOTH surfaces — kanban-agent replies previously fell
           back to plain <p>, showing raw markdown (**bold**, `code`, lists). */}
-      <MarkdownText content={body} isStreaming={isStreaming} />
+      <MarkdownText content={body} formatStandaloneJson isStreaming={isStreaming} />
       {/* Strip source-event provenance so a prose reply doesn't carry an
           `evt-... text` chip; keep real artifact refs. */}
       <AttachmentChips refs={omitProvenanceRefs(part.refs)} />

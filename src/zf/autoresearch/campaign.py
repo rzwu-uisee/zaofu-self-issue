@@ -359,16 +359,13 @@ def write_campaign_plan(
         if use_tmux:
             cmd.append("--tmux")
             cmd.extend(["--tmux-session", f"zf-ar-{campaign.name}-{item.scenario}"])
-        if item.scenario == "controlled-stuck-recovery":
-            cmd.extend([
-                "--inject-worker-stuck",
-                "--inject-worker-stuck-instance",
-                "dev-1",
-            ])
         scenarios.append({
             **asdict(item),
             "expected_done": scenario.expected_done,
             "timeout_seconds": scenario.timeout_seconds,
+            "requires_worker_stuck_injection": (
+                scenario.requires_worker_stuck_injection
+            ),
             "worktree": str(worktree),
             "review_gate": review_gate_mode,
             "command": " ".join(_quote_command_parts(cmd)),

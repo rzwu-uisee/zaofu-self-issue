@@ -29,6 +29,7 @@ from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.orchestrator_types import OrchestratorDecision
 
 
 class _NoopTransport:
@@ -485,6 +486,73 @@ def test_heartbeat_stuck_skips_worker_that_finished_its_dispatch(
 
     events = (state_dir / "events.jsonl").read_text(encoding="utf-8")
     assert '"type": "worker.stuck"' not in events and '"type":"worker.stuck"' not in events
+
+
+def test_heartbeat_stuck_enters_bounded_recovery_path(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (state_dir / "memory").mkdir()
+    registry = RoleSessionRegistry(
+        state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    _heartbeat(
+        registry,
+        "dev-1",
+        state="busy",
+        age_seconds=400,
+        current_task_id="TASK-1",
+    )
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-1",
+        title="impl",
+        status="in_progress",
+        assigned_to="dev-1",
+        active_dispatch_id="disp-1",
+    ))
+    log = EventLog(state_dir / "events.jsonl")
+    dispatch = ZfEvent(
+        type="task.dispatched",
+        actor="orchestrator",
+        task_id="TASK-1",
+        correlation_id="corr-run",
+        payload={
+            "dispatch_id": "disp-1",
+            "role": "dev",
+            "assignee": "dev-1",
+        },
+    )
+    log.append(dispatch)
+    cfg = ZfConfig(
+        project=ProjectConfig(name="t"),
+        session=SessionConfig(tmux_session="t"),
+        roles=[RoleConfig(
+            name="dev",
+            backend="mock",
+            instance_id="dev-1",
+            stuck_threshold_seconds=300,
+        )],
+    )
+    orch = Orchestrator(state_dir, cfg, _NoopTransport())  # type: ignore[arg-type]
+    orch._respawn_instance = lambda role: OrchestratorDecision(  # type: ignore[method-assign]
+        action="respawn",
+        role=role.instance_id,
+        reason="test respawn",
+    )
+
+    orch._run_heartbeat_sweep()  # type: ignore[attr-defined]
+
+    emitted = log.read_all()
+    stuck = next(event for event in emitted if event.type == "worker.stuck")
+    recovered = next(
+        event for event in emitted if event.type == "worker.stuck.recovered"
+    )
+    assert stuck.task_id == "TASK-1"
+    assert stuck.causation_id == dispatch.id
+    assert stuck.payload["source"] == "heartbeat_sweep"
+    assert stuck.payload["dispatch_id"] == "disp-1"
+    assert recovered.causation_id == stuck.id
 
 
 def test_progress_event_without_dispatch_id_credits_current_dispatch(

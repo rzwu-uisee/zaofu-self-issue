@@ -1,9 +1,11 @@
 import { lazy, memo, Suspense } from "react";
+import { standaloneJsonMarkdown } from "./jsonDisplay.js";
 import { clampPlainText, isPathologicalText } from "./markdownGuard";
 
 export interface MarkdownTextProps {
   className?: string;
   content: string;
+  formatStandaloneJson?: boolean;
   isStreaming?: boolean;
 }
 
@@ -12,6 +14,7 @@ const RichMarkdownText = lazy(() => import("./RichMarkdownText"));
 export const MarkdownText = memo(function MarkdownText({
   className = "",
   content,
+  formatStandaloneJson = false,
   isStreaming = false,
 }: MarkdownTextProps) {
   // Defense-in-depth: a huge or unbroken-token payload (e.g. a base64 data
@@ -20,9 +23,12 @@ export const MarkdownText = memo(function MarkdownText({
   if (isPathologicalText(content)) {
     return <PlainTextGuard className={className} content={content} />;
   }
+  const renderedContent = formatStandaloneJson
+    ? standaloneJsonMarkdown(content)
+    : content;
   return (
-    <Suspense fallback={<MarkdownFallback className={className} content={content} />}>
-      <RichMarkdownText className={className} content={content} isStreaming={isStreaming} />
+    <Suspense fallback={<MarkdownFallback className={className} content={renderedContent} />}>
+      <RichMarkdownText className={className} content={renderedContent} isStreaming={isStreaming} />
     </Suspense>
   );
 });

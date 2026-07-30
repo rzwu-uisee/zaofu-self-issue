@@ -31,7 +31,7 @@ def test_hook_command_detects_r20_shim_class(tmp_path: Path) -> None:
 
 def test_hook_command_missing_binary() -> None:
     result = check_hook_command("/nonexistent/zf-binary")
-    assert result.ok is False and "不可执行" in result.detail
+    assert result.ok is False and "unavailable" in result.detail
 
 
 def test_tmux_probe() -> None:

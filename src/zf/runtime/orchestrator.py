@@ -1489,20 +1489,18 @@ class Orchestrator(
             self._sweep_signal_last_emit_at[key] = _now_mono
             try:
                 age = result.examined.get(instance_id)
-                self.event_writer.append(ZfEvent(
-                    type="worker.stuck",
-                    actor="zf-cli",
-                    payload={
-                        "instance_id": instance_id,
-                        "heartbeat_age_s": round(age, 1) if age else None,
-                        "source": "heartbeat_sweep",
-                        "reason": (
-                            f"no heartbeat in {round(age, 1) if age else '?'}s "
-                            "(α-3 heartbeat-driven, replaces B-NEW-15 "
-                            "4-min wall-clock fallback)"
-                        ),
-                    },
-                ))
+                role = self._find_role_by_instance(instance_id)
+                if role is None:
+                    continue
+                self._report_stuck_worker(
+                    role,
+                    source="heartbeat_sweep",
+                    heartbeat_age_s=age,
+                    reason=(
+                        f"no heartbeat in {round(age, 1) if age else '?'}s "
+                        "(heartbeat-driven stuck recovery)"
+                    ),
+                )
             except Exception:
                 pass
 

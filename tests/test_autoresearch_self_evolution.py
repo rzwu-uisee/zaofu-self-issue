@@ -940,6 +940,102 @@ def test_resident_removes_clean_terminal_worktree_and_branch(
     assert "experiment/clean" not in branches
 
 
+def test_resident_retains_clean_worktree_when_archive_is_missing(
+    tmp_path: Path,
+) -> None:
+    _, worktree = _git_repo_with_worktree(
+        tmp_path,
+        branch="experiment/archive-missing",
+    )
+
+    outcome = _finalize_resident_worktree(
+        worktree=worktree,
+        loop_request_id="loop-archive-missing",
+        archive_required=True,
+        archive_manifest=tmp_path / "missing-manifest.json",
+    )
+
+    assert outcome["status"] == "retained"
+    assert outcome["reason"] == "archive_missing"
+    assert worktree.exists()
+
+
+def test_resident_archives_reports_before_clean_worktree_removal(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    payload = build_loop_request_payload(
+        {"trigger_id": "archive-before-cleanup"},
+        source_event_id="evt-archive-before-cleanup",
+    )
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(type=LOOP_REQUESTED, actor="test", payload=payload))
+    worktree_root = tmp_path / "resident-worktrees"
+    output_root = tmp_path / "resident-output"
+    action = run_resident_once(
+        state_dir=state_dir,
+        worktree_root=worktree_root,
+        output_root=output_root,
+        execute=False,
+    )[0]
+
+    repo = tmp_path / "resident-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "dev")
+    _git(repo, "config", "user.email", "autoresearch-test@example.invalid")
+    _git(repo, "config", "user.name", "Autoresearch Test")
+    (repo / ".gitignore").write_text(".zf/\n", encoding="utf-8")
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore", "tracked.txt")
+    _git(repo, "commit", "-m", "test: seed resident repository")
+    worktree = worktree_root / action.loop_request_id
+    worktree.parent.mkdir(parents=True)
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "-b",
+        f"experiment/{action.loop_request_id}",
+        str(worktree),
+        "HEAD",
+    )
+    EventLog(worktree / ".zf" / "events.jsonl").append(
+        ZfEvent(type="session.started", actor="zf-cli")
+    )
+
+    def _runner(command, **kwargs):
+        output_dir = Path(command[command.index("--output-dir") + 1])
+        inner_dir = output_dir / "runs" / "inner-1"
+        inner_dir.mkdir(parents=True)
+        (output_dir / "report.md").write_text("loop report\n", encoding="utf-8")
+        (output_dir / "journal.jsonl").write_text("{}\n", encoding="utf-8")
+        (inner_dir / "report.md").write_text("inner report\n", encoding="utf-8")
+        (inner_dir / "events-summary.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    run_resident_once(
+        state_dir=state_dir,
+        worktree_root=worktree_root,
+        output_root=output_root,
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_runner,
+    )
+
+    completed = [
+        event for event in log.read_all() if event.type == LOOP_COMPLETED
+    ][-1]
+    archive_refs = completed.payload["archive_refs"]
+    assert Path(archive_refs["manifest"]).is_file()
+    assert Path(archive_refs["loop_report"]).is_file()
+    assert all(Path(path).is_file() for path in archive_refs["inner_reports"])
+    assert completed.payload["worktree_lifecycle"]["status"] == "cleaned"
+    assert not worktree.exists()
+
+
 def test_resident_retains_terminal_worktree_with_candidate_diff(
     tmp_path: Path,
 ) -> None:

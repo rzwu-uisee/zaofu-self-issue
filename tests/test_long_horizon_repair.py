@@ -519,17 +519,20 @@ def test_autoresearch_stuck_injection_uses_recovery_path(tmp_path: Path) -> None
         assigned_to="test-1",
         active_dispatch_id="disp-inject",
     ))
-    log.append(ZfEvent(
+    dispatch = ZfEvent(
+        id="evt-inject-dispatch",
         type="task.dispatched",
         actor="orchestrator",
         task_id="TASK-INJECT",
+        correlation_id="corr-inject",
         payload={
             "role": "test",
             "assignee": "test-1",
             "dispatch_id": "disp-inject",
             "briefing": ".zf/briefings/test-1-TASK-INJECT.md",
         },
-    ))
+    )
+    log.append(dispatch)
 
     def fake_respawn(role):  # noqa: ANN001
         return OrchestratorDecision(
@@ -540,15 +543,22 @@ def test_autoresearch_stuck_injection_uses_recovery_path(tmp_path: Path) -> None
 
     orch._respawn_instance = fake_respawn  # type: ignore[method-assign]
     injection = ZfEvent(
+        id="evt-inject-request",
         type="autoresearch.inject.worker_stuck",
         actor="zf-autoresearch",
+        origin="external",
         task_id="TASK-INJECT",
+        causation_id=dispatch.id,
+        correlation_id=dispatch.correlation_id,
         payload={
             "source": "autoresearch",
             "instance_id": "test-1",
+            "role": "test",
             "dispatch_id": "disp-inject",
+            "trigger_event_id": dispatch.id,
         },
     )
+    log.append(injection)
 
     decisions = orch.run_once([injection])
 
@@ -560,9 +570,165 @@ def test_autoresearch_stuck_injection_uses_recovery_path(tmp_path: Path) -> None
     assert task.active_dispatch_id
     assert task.active_dispatch_id != "disp-inject"
     events = log.read_all()
-    assert any(e.type == "worker.stuck" for e in events)
+    stuck = next(e for e in events if e.type == "worker.stuck")
+    recovered = next(e for e in events if e.type == "worker.stuck.recovered")
+    assert stuck.causation_id == injection.id
+    assert stuck.correlation_id == injection.correlation_id
+    assert stuck.payload["trigger_event_id"] == injection.id
+    assert recovered.causation_id == stuck.id
+    assert recovered.correlation_id == stuck.correlation_id
     assert any(e.type == "task.requeued" for e in events)
-    assert any(e.type == "worker.stuck.recovered" for e in events)
+
+
+def test_autoresearch_stuck_injection_rejects_worker_origin(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    store.add(Task(
+        id="TASK-INJECT",
+        title="inject task",
+        status="in_progress",
+        assigned_to="test-1",
+        active_dispatch_id="disp-inject",
+    ))
+    dispatch = ZfEvent(
+        id="evt-dispatch",
+        type="task.dispatched",
+        task_id="TASK-INJECT",
+        payload={
+            "role": "test",
+            "assignee": "test-1",
+            "dispatch_id": "disp-inject",
+        },
+    )
+    log.append(dispatch)
+    injection = ZfEvent(
+        type="autoresearch.inject.worker_stuck",
+        actor="test-1",
+        origin="worker",
+        task_id="TASK-INJECT",
+        causation_id=dispatch.id,
+        payload={
+            "source": "autoresearch",
+            "instance_id": "test-1",
+            "role": "test",
+            "dispatch_id": "disp-inject",
+            "trigger_event_id": dispatch.id,
+        },
+    )
+    log.append(injection)
+
+    decisions = orch.run_once([injection])
+
+    assert any(
+        decision.action == "block" and "external origin" in decision.reason
+        for decision in decisions
+    )
+    assert not any(e.type == "worker.stuck" for e in log.read_all())
+
+
+def test_autoresearch_stuck_injection_requires_canonical_request(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    store.add(Task(
+        id="TASK-INJECT",
+        title="inject task",
+        status="in_progress",
+        assigned_to="test-1",
+        active_dispatch_id="disp-inject",
+    ))
+    dispatch = ZfEvent(
+        id="evt-dispatch",
+        type="task.dispatched",
+        task_id="TASK-INJECT",
+        payload={
+            "role": "test",
+            "assignee": "test-1",
+            "dispatch_id": "disp-inject",
+        },
+    )
+    log.append(dispatch)
+    injection = ZfEvent(
+        type="autoresearch.inject.worker_stuck",
+        actor="zf-autoresearch",
+        origin="external",
+        task_id="TASK-INJECT",
+        causation_id=dispatch.id,
+        payload={
+            "source": "autoresearch",
+            "instance_id": "test-1",
+            "role": "test",
+            "dispatch_id": "disp-inject",
+            "trigger_event_id": dispatch.id,
+        },
+    )
+
+    decisions = orch.run_once([injection])
+
+    assert any(
+        decision.action == "block" and "canonical event log" in decision.reason
+        for decision in decisions
+    )
+    assert not any(e.type == "worker.stuck" for e in log.read_all())
+
+
+def test_autoresearch_stuck_injection_rejects_stale_dispatch(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    store.add(Task(
+        id="TASK-INJECT",
+        title="inject task",
+        status="in_progress",
+        assigned_to="test-1",
+        active_dispatch_id="disp-current",
+    ))
+    stale_dispatch = ZfEvent(
+        id="evt-stale-dispatch",
+        type="task.dispatched",
+        task_id="TASK-INJECT",
+        payload={
+            "role": "test",
+            "assignee": "test-1",
+            "dispatch_id": "disp-stale",
+        },
+    )
+    current_dispatch = ZfEvent(
+        id="evt-current-dispatch",
+        type="task.dispatched",
+        task_id="TASK-INJECT",
+        payload={
+            "role": "test",
+            "assignee": "test-1",
+            "dispatch_id": "disp-current",
+        },
+    )
+    log.append(stale_dispatch)
+    log.append(current_dispatch)
+    injection = ZfEvent(
+        type="autoresearch.inject.worker_stuck",
+        actor="zf-autoresearch",
+        origin="external",
+        task_id="TASK-INJECT",
+        causation_id=stale_dispatch.id,
+        payload={
+            "source": "autoresearch",
+            "instance_id": "test-1",
+            "role": "test",
+            "dispatch_id": "disp-stale",
+            "trigger_event_id": stale_dispatch.id,
+        },
+    )
+    log.append(injection)
+
+    decisions = orch.run_once([injection])
+
+    assert any(
+        decision.action == "block" and "current dispatch" in decision.reason
+        for decision in decisions
+    )
+    assert not any(e.type == "worker.stuck" for e in log.read_all())
 
 
 def test_pending_handoff_ignores_success_from_requeued_dispatch(

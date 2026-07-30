@@ -64,9 +64,12 @@ def config():
             RoleConfig(
                 name="dev",
                 backend="mock",
+                instance_id=f"dev-{index}",
                 stages=["implement"],
                 publishes=["dev.build.done"],
-            ),
+                stuck_threshold_seconds=180,
+            )
+            for index in range(1, 6)
         ],
     )
 
@@ -94,11 +97,23 @@ def _plant_stuck_heartbeat(
     # (_heartbeat_current_task_still_owned -> False), so the stuck
     # premise needs a real in_progress task assigned to this instance.
     task_id = f"TASK-{instance_id}"
+    dispatch_id = f"disp-{instance_id}"
     store = TaskStore(state_dir / "kanban.json")
     if all(t.id != task_id for t in store.list_all()):
         store.add(Task(
             id=task_id, title="wip", status="in_progress",
             assigned_to=instance_id,
+            active_dispatch_id=dispatch_id,
+        ))
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(
+            type="task.dispatched",
+            actor="orchestrator",
+            task_id=task_id,
+            payload={
+                "role": "dev",
+                "assignee": instance_id,
+                "dispatch_id": dispatch_id,
+            },
         ))
     reg.record_heartbeat(instance_id, {
         "instance_id": instance_id,

@@ -15,7 +15,7 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,13 +27,20 @@ from zf.autoresearch.review_gate import (
     prepare_review_gate_summary,
 )
 from zf.autoresearch.scenarios import AutoresearchScenario, resolve_scenario
+from zf.autoresearch.stuck_incident import (
+    audit_stuck_incident,
+    event_log_for_worktree,
+    read_worktree_events,
+)
 from zf.autoresearch.worktree_preparation import (
     PREPARATION_MANIFEST,
     cleanup_prepared_worktree,
-    path_sha256,
+    write_preparation_journal,
 )
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
+from zf.core.state.atomic_io import atomic_write_text
 from zf.core.package_source import installed_local_source_root
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
@@ -97,6 +104,16 @@ class AutoresearchRunResult:
     @property
     def ok(self) -> bool:
         return self.status == "passed"
+
+
+def effective_run_config(
+    cfg: AutoresearchRunConfig,
+    scenario: AutoresearchScenario,
+) -> AutoresearchRunConfig:
+    """Apply scenario-owned mechanical requirements to one run."""
+    if scenario.requires_worker_stuck_injection and not cfg.inject_worker_stuck:
+        return replace(cfg, inject_worker_stuck=True)
+    return cfg
 
 
 def utc_stamp() -> str:
@@ -177,13 +194,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"yaml root must be a mapping: {path}")
     return data
-
-
-def _write_yaml(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
 
 
 def ensure_web_dependencies(worktree: Path, *, log_path: Path) -> str:
@@ -349,6 +359,11 @@ def prepare_worktree(
     root = repo_root()
     worktree = cfg.worktree.resolve()
     branch = cfg.branch or f"experiment/autoresearch-{run_id}"
+    config_src = cfg.config_template
+    if not config_src.is_absolute():
+        config_src = root / config_src
+    if not config_src.exists():
+        raise FileNotFoundError(f"config template not found: {config_src}")
 
     if worktree.exists():
         if not cfg.reuse_worktree:
@@ -365,68 +380,136 @@ def prepare_worktree(
             detail = (created.stderr or created.stdout or "").strip()
             raise RuntimeError(f"git worktree add failed: {detail}")
 
-    synced_summary = sync_tracked_checkout_changes(
-        worktree,
-        log_path=run_dir / "synced-current-checkout.log",
-        enabled=cfg.sync_dirty,
-    )
-
-    config_src = cfg.config_template
-    if not config_src.is_absolute():
-        config_src = root / config_src
-    if not config_src.exists():
-        raise FileNotFoundError(f"config template not found: {config_src}")
-
     zf_yaml = worktree / "zf.yaml"
+    seed_path = worktree / "autoresearch-seed.txt"
     preparation_dir = run_dir / "worktree-preparation"
     preparation_dir.mkdir(parents=True, exist_ok=True)
+    journal_path = preparation_dir / PREPARATION_MANIFEST
     original_zf = preparation_dir / "zf.yaml.original"
+    original_seed = preparation_dir / "autoresearch-seed.txt.original"
     zf_existed = zf_yaml.is_file()
+    seed_existed = seed_path.is_file()
     if zf_existed:
         shutil.copy2(zf_yaml, original_zf)
-    data = _load_yaml(config_src)
-    data.setdefault("project", {})["name"] = "zaofu-autoresearch"
-    data["project"]["state_dir"] = ".zf"
-    data.setdefault("session", {})["tmux_session"] = f"zf-autoresearch-{run_id}"
-    data["global_budget_usd"] = cfg.budget_usd
-    _write_yaml(zf_yaml, data)
+    if seed_existed:
+        shutil.copy2(seed_path, original_seed)
     target_node_modules = worktree / "web" / "node_modules"
     web_dependencies_preexisting = (
         target_node_modules.exists() or target_node_modules.is_symlink()
     )
-    web_dependency_mode = ensure_web_dependencies(
-        worktree,
-        log_path=run_dir / "prepare-web-deps.log",
-    )
-    web_dependency_link_target = (
-        os.readlink(target_node_modules)
-        if target_node_modules.is_symlink()
-        else ""
-    )
-
-    seed_path = worktree / "autoresearch-seed.txt"
-    seed_path.write_text(scenario.seed_text.strip() + "\n", encoding="utf-8")
     preparation = {
-        "schema_version": "autoresearch-worktree-preparation.v1",
+        "schema_version": "autoresearch-worktree-preparation.v2",
+        "phase": "initialized",
         "worktree": str(worktree),
         "zf_yaml": str(zf_yaml),
         "zf_existed": zf_existed,
         "original_zf": str(original_zf) if zf_existed else "",
-        "generated_zf_sha256": path_sha256(zf_yaml),
+        "generated_zf_sha256": "",
         "seed_file": str(seed_path),
-        "generated_seed_sha256": path_sha256(seed_path),
+        "seed_existed": seed_existed,
+        "original_seed": str(original_seed) if seed_existed else "",
+        "generated_seed_sha256": "",
         "web_dependencies": {
-            "mode": web_dependency_mode,
+            "mode": "pending",
             "path": "web/node_modules",
             "preexisting": web_dependencies_preexisting,
-            "symlink_target": web_dependency_link_target,
+            "symlink_target": "",
         },
     }
-    (preparation_dir / PREPARATION_MANIFEST).write_text(
-        json.dumps(preparation, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
+    write_preparation_journal(journal_path, preparation)
+
+    try:
+        synced_summary = sync_tracked_checkout_changes(
+            worktree,
+            log_path=run_dir / "synced-current-checkout.log",
+            enabled=cfg.sync_dirty,
+        )
+        preparation["candidate_sync"] = synced_summary
+        preparation["phase"] = "candidate_synced"
+        write_preparation_journal(journal_path, preparation)
+
+        data = _load_yaml(config_src)
+        data.setdefault("project", {})["name"] = "zaofu-autoresearch"
+        data["project"]["state_dir"] = ".zf"
+        data.setdefault("session", {})["tmux_session"] = (
+            f"zf-autoresearch-{run_id}"
+        )
+        data["global_budget_usd"] = cfg.budget_usd
+        rendered_zf = yaml.safe_dump(
+            data,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        preparation["generated_zf_sha256"] = hashlib.sha256(
+            rendered_zf.encode("utf-8")
+        ).hexdigest()
+        preparation["phase"] = "zf_write_pending"
+        write_preparation_journal(journal_path, preparation)
+        atomic_write_text(zf_yaml, rendered_zf)
+        preparation["phase"] = "zf_written"
+        write_preparation_journal(journal_path, preparation)
+
+        source_node_modules = root / "web" / "node_modules"
+        source_tsc = source_node_modules / ".bin" / "tsc"
+        web = preparation["web_dependencies"]
+        web["mode"] = "preparing"
+        web["symlink_target"] = (
+            str(source_node_modules) if source_tsc.exists() else ""
+        )
+        preparation["phase"] = "web_preparing"
+        write_preparation_journal(journal_path, preparation)
+        web_dependency_mode = ensure_web_dependencies(
+            worktree,
+            log_path=run_dir / "prepare-web-deps.log",
+        )
+        web_dependency_link_target = (
+            os.readlink(target_node_modules)
+            if target_node_modules.is_symlink()
+            else ""
+        )
+        web["mode"] = web_dependency_mode
+        web["symlink_target"] = web_dependency_link_target
+        preparation["phase"] = "web_prepared"
+        write_preparation_journal(journal_path, preparation)
+
+        seed_text = scenario.seed_text.strip() + "\n"
+        preparation["generated_seed_sha256"] = hashlib.sha256(
+            seed_text.encode("utf-8")
+        ).hexdigest()
+        preparation["phase"] = "seed_write_pending"
+        write_preparation_journal(journal_path, preparation)
+        atomic_write_text(seed_path, seed_text)
+        preparation["phase"] = "prepared"
+        write_preparation_journal(journal_path, preparation)
+    except BaseException as exc:
+        web = preparation.get("web_dependencies")
+        if (
+            isinstance(web, dict)
+            and not web_dependencies_preexisting
+            and (
+                target_node_modules.exists()
+                or target_node_modules.is_symlink()
+            )
+        ):
+            if target_node_modules.is_symlink():
+                web["mode"] = "linked"
+                try:
+                    web["symlink_target"] = os.readlink(target_node_modules)
+                except OSError:
+                    web["symlink_target"] = ""
+            elif target_node_modules.is_dir():
+                web["mode"] = "installed"
+        preparation["phase"] = "failed"
+        preparation["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            write_preparation_journal(journal_path, preparation)
+        except OSError:
+            pass
+        try:
+            cleanup_prepared_worktree(worktree=worktree, run_dir=run_dir)
+        except OSError:
+            pass
+        raise
 
     manifest = {
         "run_id": run_id,
@@ -445,15 +528,31 @@ def prepare_worktree(
         "inject_worker_stuck_timeout_seconds": (
             cfg.inject_worker_stuck_timeout_seconds
         ),
+        "requires_worker_stuck_injection": (
+            scenario.requires_worker_stuck_injection
+        ),
         "web_dependency_mode": web_dependency_mode,
         "synced_current_checkout": synced_summary,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "scenario.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    try:
+        atomic_write_text(
+            run_dir / "scenario.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+        )
+    except BaseException as exc:
+        preparation["phase"] = "failed"
+        preparation["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            write_preparation_journal(journal_path, preparation)
+        except OSError:
+            pass
+        try:
+            cleanup_prepared_worktree(worktree=worktree, run_dir=run_dir)
+        except OSError:
+            pass
+        raise
     return seed_path
 
 
@@ -496,19 +595,10 @@ def build_inner_runner_command(
 
 
 def read_events(events_path: Path) -> list[dict[str, Any]]:
-    if not events_path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for line in events_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            events.append(data)
-    return events
+    return [
+        asdict(event)
+        for event in EventLog(events_path).read_all()
+    ]
 
 
 def _dispatch_for_stuck_injection(
@@ -557,26 +647,28 @@ def _emit_stuck_injection(
         "reason": "controlled autoresearch stuck injection",
     }
     payload_path = run_dir / "worker-stuck-injection.json"
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
     payload_path.write_text(
         json.dumps(injection_payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    result = _run(
-        [
-            "zf",
-            "emit",
-            "autoresearch.inject.worker_stuck",
-            "--actor",
-            "zf-autoresearch",
-            "--task",
-            task_id,
-            "--payload-file",
-            str(payload_path),
-        ],
-        cwd=worktree,
-        log_path=run_dir / "worker-stuck-injection.log",
-    )
-    return result.returncode == 0
+    try:
+        EventWriter(
+            event_log_for_worktree(worktree),
+            default_origin="external",
+        ).append(ZfEvent(
+            type="autoresearch.inject.worker_stuck",
+            actor="zf-autoresearch",
+            task_id=task_id,
+            causation_id=str(dispatch_event.get("id") or "") or None,
+            correlation_id=(
+                str(dispatch_event.get("correlation_id") or "") or None
+            ),
+            payload=injection_payload,
+        ))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _run_inner_runner(
@@ -596,7 +688,9 @@ def _run_inner_runner(
     last_dispatch_count = 0
     last_dispatch_at: float | None = None
     target_wait_seconds = max(1, cfg.inject_worker_stuck_timeout_seconds)
-    events_path = cfg.worktree.resolve() / ".zf" / "events.jsonl"
+    baseline_event_ids = {
+        event.id for event in read_worktree_events(cfg.worktree.resolve())
+    }
     with log_path.open("a", encoding="utf-8") as log:
         log.write("$ " + shlex.join(cmd) + "\n")
         log.flush()
@@ -610,7 +704,26 @@ def _run_inner_runner(
         )
         while proc.poll() is None:
             if not injected:
-                events = read_events(events_path)
+                event_models = read_worktree_events(cfg.worktree.resolve())
+                fresh_events = [
+                    event
+                    for event in event_models
+                    if event.id not in baseline_event_ids
+                ]
+                session_index = next(
+                    (
+                        index
+                        for index, event in enumerate(fresh_events)
+                        if event.type == "session.started"
+                    ),
+                    None,
+                )
+                eligible_models = (
+                    fresh_events[session_index + 1 :]
+                    if session_index is not None
+                    else []
+                )
+                events = [asdict(event) for event in eligible_models]
                 dispatch_count = sum(
                     1 for event in events if event.get("type") == "task.dispatched"
                 )
@@ -658,8 +771,18 @@ def _run_inner_runner(
     return subprocess.CompletedProcess(cmd, rc)
 
 
-def summarize_events(worktree: Path, expected_done: int) -> dict[str, Any]:
-    events = read_events(worktree / ".zf" / "events.jsonl")
+def summarize_events(
+    worktree: Path,
+    expected_done: int,
+    *,
+    stuck_incident_required: bool = False,
+) -> dict[str, Any]:
+    event_models = read_worktree_events(worktree)
+    events = [asdict(event) for event in event_models]
+    stuck_incident_audit = audit_stuck_incident(
+        event_models,
+        required=stuck_incident_required,
+    )
     done = 0
     fatal = None
     fatal_count = 0
@@ -752,10 +875,7 @@ def summarize_events(worktree: Path, expected_done: int) -> dict[str, Any]:
         "test_replicas_used": test_replicas,
     }
     derived_metrics["stuck_injection_satisfied"] = bool(
-        derived_metrics["stuck_injection_requested_count"] >= 1
-        and derived_metrics["worker_stuck_count"] >= 1
-        and derived_metrics["worker_stuck_recovered_count"] >= 1
-        and derived_metrics["worker_stuck_recovery_failed_count"] == 0
+        stuck_incident_required and stuck_incident_audit.status == "passed"
     )
     return {
         "tasks_done": done,
@@ -765,6 +885,7 @@ def summarize_events(worktree: Path, expected_done: int) -> dict[str, Any]:
         "dispatch_by_instance": dict(sorted(dispatch_by_instance.items())),
         "event_counts": dict(sorted(event_counts.items())),
         "derived_metrics": derived_metrics,
+        "stuck_incident_audit": stuck_incident_audit.to_dict(),
     }
 
 
@@ -856,6 +977,17 @@ def write_report(run_dir: Path, row: dict[str, Any]) -> Path:
             "",
         ])
     lines.extend([
+        "## Stuck Incident Audit",
+        "",
+        "```json",
+        json.dumps(
+            summary.get("stuck_incident_audit") or {},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
         "## Dispatch",
         "",
         "```json",
@@ -1032,6 +1164,7 @@ def run_autoresearch(cfg: AutoresearchRunConfig) -> AutoresearchRunResult:
         expected_done=cfg.expected_done,
         timeout_seconds=cfg.timeout_seconds,
     )
+    cfg = effective_run_config(cfg, scenario)
     run_dir = (
         cfg.output_dir
         if cfg.output_dir is not None
@@ -1146,7 +1279,11 @@ def run_autoresearch(cfg: AutoresearchRunConfig) -> AutoresearchRunResult:
         run_dir=run_dir,
     )
     elapsed = time.time() - start
-    summary = summarize_events(cfg.worktree.resolve(), scenario.expected_done)
+    summary = summarize_events(
+        cfg.worktree.resolve(),
+        scenario.expected_done,
+        stuck_incident_required=cfg.inject_worker_stuck,
+    )
     tasks_done = int(summary["tasks_done"])
     fatal = summary.get("fatal_event")
     metrics = summary.get("derived_metrics") or {}

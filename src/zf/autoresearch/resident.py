@@ -33,6 +33,7 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.runtime.repair_dispatch import pending_repair_dispatches
+from zf.runtime.run_archive import archive_run
 
 
 REVIEW_GATE_REQUESTED = "autoresearch.review_gate.requested"
@@ -538,11 +539,32 @@ def run_resident_once(
                     f"(budget_cap={action.budget_cap or {}})"
                 ),
             )
-        event_type = LOOP_COMPLETED if proc.returncode == 0 else LOOP_FAILED
-        worktree_outcome = _finalize_resident_worktree(
-            worktree=Path(worktree_root) / action.loop_request_id,
-            loop_request_id=action.loop_request_id,
+        resident_worktree = Path(worktree_root) / action.loop_request_id
+        archive_outcome = _archive_resident_run(
+            state_dir=Path(state_dir),
+            worktree=resident_worktree,
+            output_dir=Path(output_root) / action.loop_request_id,
+            action=action,
+            proc=proc,
         )
+        archive_ready = archive_outcome.get("status") == "archived"
+        event_type = (
+            LOOP_COMPLETED
+            if proc.returncode == 0
+            and archive_outcome.get("status") in {"archived", "not_required"}
+            else LOOP_FAILED
+        )
+        worktree_outcome = _finalize_resident_worktree(
+            worktree=resident_worktree,
+            loop_request_id=action.loop_request_id,
+            archive_required=resident_worktree.exists(),
+            archive_manifest=(
+                Path(str(archive_outcome["manifest"]))
+                if archive_ready
+                else None
+            ),
+        )
+        worktree_outcome["archive"] = archive_outcome
         writer.append(ZfEvent(
             type=event_type,
             actor="zf-autoresearch-resident",
@@ -554,6 +576,7 @@ def run_resident_once(
                 "stdout_tail": (proc.stdout or "")[-2000:],
                 "stderr_tail": (proc.stderr or "")[-2000:],
                 "worktree_lifecycle": worktree_outcome,
+                "archive_refs": dict(archive_outcome.get("refs") or {}),
             },
         ))
         lifecycle_event = str(worktree_outcome.get("event_type") or "")
@@ -576,6 +599,8 @@ def _finalize_resident_worktree(
     *,
     worktree: Path,
     loop_request_id: str,
+    archive_required: bool = False,
+    archive_manifest: Path | None = None,
 ) -> dict[str, Any]:
     """Remove only clean terminal worktrees; retain every candidate diff."""
 
@@ -586,6 +611,15 @@ def _finalize_resident_worktree(
     }
     if not path.exists():
         return {**base, "status": "missing"}
+    if archive_required and (
+        archive_manifest is None or not Path(archive_manifest).is_file()
+    ):
+        return {
+            **base,
+            "status": "retained",
+            "reason": "archive_missing",
+            "event_type": "autoresearch.worktree.retained",
+        }
     from zf.autoresearch.worktree_preparation import (
         cleanup_interrupted_prepared_worktree,
     )
@@ -674,6 +708,127 @@ def _finalize_resident_worktree(
         "branch_deleted": branch_deleted,
         "event_type": "autoresearch.worktree.cleaned",
     }
+
+
+def _archive_resident_run(
+    *,
+    state_dir: Path,
+    worktree: Path,
+    output_dir: Path,
+    action: ResidentAction,
+    proc: subprocess.CompletedProcess,
+) -> dict[str, Any]:
+    if not worktree.exists():
+        return {
+            "status": "not_required",
+            "reason": "worktree_missing",
+            "refs": {},
+        }
+
+    supplemental = _resident_supplemental_files(output_dir)
+    loop_report = output_dir / "report.md"
+    journal = output_dir / "journal.jsonl"
+    inner_reports = sorted((output_dir / "runs").glob("*/report.md"))
+    evidence_complete = (
+        loop_report.is_file()
+        and journal.is_file()
+        and bool(inner_reports)
+    )
+    archive_id = "arres-" + hashlib.sha1(
+        action.loop_request_id.encode("utf-8")
+    ).hexdigest()[:16]
+    try:
+        from zf.core.config.loader import ConfigError
+        from zf.core.config.project_context import resolve_project_context
+
+        try:
+            project_root = resolve_project_context(
+                explicit_state_dir=state_dir,
+                load_config_with_explicit=True,
+            ).project_root
+        except ConfigError:
+            project_root = state_dir.parent
+        result = archive_run(
+            project_root=project_root,
+            state_dir=state_dir,
+            live_state_dir=worktree / ".zf",
+            run_id=archive_id,
+            status="passed" if proc.returncode == 0 else "failed",
+            scenario_id=",".join(
+                _string_list(
+                    (action.artifact_envelope or {}).get("scenarios")
+                )
+            ),
+            command=" ".join(action.command),
+            exit_code=proc.returncode,
+            summary={
+                "loop_request_id": action.loop_request_id,
+                "research_mode": action.research_mode,
+                "evidence_complete": evidence_complete,
+            },
+            supplemental_files=supplemental,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "refs": {},
+        }
+
+    archived_loop_report = (
+        result.artifact_dir / "supplemental" / "report.md"
+    )
+    archived_journal = (
+        result.artifact_dir / "supplemental" / "journal.jsonl"
+    )
+    archived_inner_reports = [
+        result.artifact_dir
+        / "supplemental"
+        / report.relative_to(output_dir)
+        for report in inner_reports
+    ]
+    evidence_complete = bool(
+        evidence_complete
+        and archived_loop_report.is_file()
+        and archived_journal.is_file()
+        and all(report.is_file() for report in archived_inner_reports)
+    )
+    refs = {
+        "artifact_dir": str(result.artifact_dir),
+        "manifest": str(result.manifest_path),
+        "run_yaml": str(result.run_yaml_path),
+        "loop_report": str(archived_loop_report),
+        "journal": str(archived_journal),
+        "inner_reports": [str(report) for report in archived_inner_reports],
+    }
+    return {
+        "status": "archived" if evidence_complete else "incomplete",
+        "reason": "" if evidence_complete else "required_reports_missing",
+        "manifest": str(result.manifest_path),
+        "refs": refs,
+    }
+
+
+def _resident_supplemental_files(output_dir: Path) -> dict[str, Path]:
+    if not output_dir.is_dir():
+        return {}
+    allowed_suffixes = {
+        ".json",
+        ".jsonl",
+        ".log",
+        ".md",
+        ".tsv",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+    files: dict[str, Path] = {}
+    for source in sorted(output_dir.rglob("*")):
+        if not source.is_file() or source.suffix.lower() not in allowed_suffixes:
+            continue
+        relative = source.relative_to(output_dir)
+        files[relative.as_posix()] = source
+    return files
 
 
 def _action_event_payload(action: ResidentAction) -> dict[str, Any]:

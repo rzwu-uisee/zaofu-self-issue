@@ -69,7 +69,6 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",
     "fanout.aggregate.rebuild.requested",
-    "provider.turn.closed",
     # Tier-2 诊断(task 2026-07-06-0930):requested 唤醒诊断 stage 派发,
     # completed 唤醒结论消费(rework feedback / needs_owner 升级)。
     "diagnosis.requested",
@@ -118,6 +117,9 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "run.manager.action.effect.pending",
     "run.manager.action.effect.passed",
     "run.manager.action.effect.failed",
+    # Run Manager may settle an action effect during its periodic service
+    # transaction before EventWatcher observes that effect.  A completed tick
+    # is the restart-safe level trigger that re-evaluates blocked run claims.
     "run.manager.tick.completed",
     # Completion is also a task/candidate settlement edge and may arrive after
     # an external delivery action or replay.
@@ -129,10 +131,12 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # G-LIFE-3: stuck detector emits when a worker's pane output stops
     # changing for too long. Wakes Layer 1 to process the escalation.
     "worker.stuck",
-    "worker.launch_artifact.written",
     # G-RESUME-4: watchdog-driven respawn events
     "worker.respawned",
     "worker.respawn.failed",
+    # Spawn may complete asynchronously after dispatch. Wake the reader
+    # liveness reconciler so a replacement session cannot strand a child.
+    "worker.launch_artifact.written",
     # G-RECYCLE-7: context-window recycle lifecycle events
     "worker.context.warning",
     "worker.context.critical",
@@ -310,6 +314,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "codex.hook.pre_tool_use",
     "codex.hook.post_tool_use",
     "codex.hook.stop",
+    "provider.turn.closed",
 )
 
 
@@ -322,12 +327,14 @@ LAYER2_NOISE_EVENTS: frozenset[str] = frozenset({
     "codex.hook.pre_tool_use",
     "codex.hook.post_tool_use",
     "codex.hook.stop",
+    "provider.turn.closed",
     "hook.orphan_event",
     "agent.usage",
     "runtime.snapshot.recorded",
     "reconcile.decision.shadow",
     "orchestrator.decision.recorded",
     "task.doc.updated",
+    # Mechanical completion reconciliation only; never spend a Layer 2 turn.
     "run.manager.tick.completed",
 })
 

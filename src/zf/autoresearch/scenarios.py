@@ -18,6 +18,7 @@ class AutoresearchScenario:
     expected_done: int
     timeout_seconds: int
     description: str = ""
+    requires_worker_stuck_injection: bool = False
 
 
 SELF_EVAL_BACKLOG = AutoresearchScenario(
@@ -62,6 +63,7 @@ CONTROLLED_STUCK_RECOVERY = AutoresearchScenario(
     name="controlled-stuck-recovery",
     expected_done=1,
     timeout_seconds=7200,
+    requires_worker_stuck_injection=True,
     description=(
         "Validate worker.stuck observability and recovery under a short "
         "stuck threshold or external stuck injection."
@@ -186,6 +188,7 @@ def resolve_scenario(
 
     seed_text = ""
     description = ""
+    requires_worker_stuck_injection = False
     default_expected = 1
     default_timeout = 3600
     if base is not None:
@@ -193,6 +196,9 @@ def resolve_scenario(
         description = base.description
         default_expected = base.expected_done
         default_timeout = base.timeout_seconds
+        requires_worker_stuck_injection = (
+            base.requires_worker_stuck_injection
+        )
     if seed_file is not None:
         seed_text = seed_file.read_text(encoding="utf-8").strip()
         if not seed_text:
@@ -206,4 +212,5 @@ def resolve_scenario(
         expected_done=expected_done if expected_done is not None else default_expected,
         timeout_seconds=timeout_seconds if timeout_seconds is not None else default_timeout,
         description=description,
+        requires_worker_stuck_injection=requires_worker_stuck_injection,
     )

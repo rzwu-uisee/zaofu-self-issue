@@ -23,6 +23,7 @@ function part(kind: AgentSessionPart["kind"], state: AgentSessionStatus, title: 
 }
 
 const LONG_OUTPUT = Array.from({ length: 140 }, (_, i) => `  ${String(i).padStart(3, "0")}  log line with some detail about step ${i}`).join("\n");
+const JSON_REPLY = '{"status":"healthy","details":{"surface":"shared","items":[1,2]}}';
 
 // Streaming run: 6 tools (older fold into "See N steps", last 3 are the live
 // tail) + a running tool + a thinking part.
@@ -55,6 +56,7 @@ const completedRun: AgentSessionRun = {
     part("code_preview", "completed", "src/throttle.ts", { summary: "new helper", content: "```ts\nexport function throttle(ms: number) {\n  return (fn: () => void) => fn();\n}\n```" }),
     part("diff_preview", "completed", "src/RichMarkdownText.tsx", { summary: "+3 −1", content: "```diff\n- const text = content;\n+ const text = isStreaming ? throttled : content;\n```" }),
     part("text", "completed", "Reply", { content: "Done — the build passed but **2 tests fail** in `tests/test_a.py`.\n\nThe failures look related to the streaming refactor:\n\n- `test_x` — expects the old chunked payload shape\n- `test_y` — timing assertion now races the throttle\n\nWant me to fix them, or just update the assertions?" }),
+    part("text", "completed", "JSON reply", { content: JSON_REPLY }),
   ],
 };
 
@@ -106,19 +108,21 @@ export function AgentSessionFixturePage() {
       {interrupted ? <p data-testid="interrupt-echo" className="muted">{interrupted}</p> : null}
 
       <h3 style={{ marginTop: 24 }}>Timeline — kanban_agent(orchestrator 同款 props)</h3>
-      <AgentSessionTimeline
-        activeThreadId="main"
-        conversation={conversation}
-        compact
-        compactRunHeader
-        collapseCompletedRunDetails
-        minimalRunActivity
-        showRunDetails={false}
-        showRunProvider={false}
-      />
+      <div data-testid="fx-kanban-compact">
+        <AgentSessionTimeline
+          activeThreadId="main"
+          conversation={conversation}
+          compact
+          compactRunHeader
+          collapseCompletedRunDetails
+          minimalRunActivity
+          showRunDetails={false}
+          showRunProvider={false}
+        />
+      </div>
 
       <h3 style={{ marginTop: 24 }}>Timeline — channel_group(折叠 + 居中列)</h3>
-      <div className="channel-page-chat">
+      <div className="channel-page-chat" data-testid="fx-channel-compact">
         <AgentSessionTimeline activeThreadId="main" compact conversation={channelConversation} collapseCompletedRunDetails minimalRunActivity />
       </div>
 

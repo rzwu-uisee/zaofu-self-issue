@@ -8,7 +8,6 @@ from pathlib import Path
 from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter
 from zf.core.events.factory import event_log_from_project
-from zf.core.events.segments import iter_event_records
 from zf.core.state.atomic_io import atomic_write_text
 from zf.web.projections.request_util import reconcile_pending_idempotency_keys
 
@@ -30,7 +29,7 @@ def reconcile_interrupted_headless_turns(
     writer: EventWriter,
 ) -> dict[str, int]:
     """Fail turns that were running before this Web process started."""
-    events = [record.event for record in iter_event_records(state_dir)]
+    events = writer.event_log.read_all()
     terminal_turn_ids = {
         str((event.payload or {}).get("turn_id") or "")
         for event in events

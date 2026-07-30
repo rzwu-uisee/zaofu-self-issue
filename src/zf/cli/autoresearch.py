@@ -56,6 +56,9 @@ from zf.autoresearch.triggers import (
     trigger_policy_from_config,
     write_trigger_decision,
 )
+from zf.autoresearch.worktree_migration import (
+    register_worktree_migration_cli,
+)
 from zf.autoresearch.scenarios import scenario_names
 from zf.autoresearch.resident_cli import run_resident_cli
 from zf.core.config.loader import ConfigError
@@ -317,6 +320,8 @@ def register(subparsers) -> None:
         help="Maximum pending actions consumed per polling tick; 0 means unlimited",
     )
     resident.set_defaults(func=_resident)
+
+    register_worktree_migration_cli(nested)
 
     loop = nested.add_parser(
         "loop",
@@ -775,6 +780,11 @@ def _refresh_health_cache(parent_state_dir: Path) -> None:
 
 def _real_autoresearch_fn(*, scenario: str, run_id: str, cfg: LoopConfig) -> dict:
     """Run one loop iteration in the reusable isolated worktree."""
+    run_output_dir = (
+        cfg.output_dir / "runs" / run_id
+        if cfg.output_dir is not None
+        else None
+    )
     ar_cfg = AutoresearchRunConfig(
         scenario_name=scenario,
         worktree=cfg.worktree,
@@ -786,6 +796,7 @@ def _real_autoresearch_fn(*, scenario: str, run_id: str, cfg: LoopConfig) -> dic
         backlog_state_dir=cfg.parent_state_dir,
         review_gate=cfg.review_gate,
         sync_dirty=False,
+        output_dir=run_output_dir,
     )
     try:
         result = run_autoresearch(ar_cfg)

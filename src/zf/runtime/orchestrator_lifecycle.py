@@ -2097,61 +2097,28 @@ class LifecycleManagerMixin(
         except Exception:
             pass
 
-    def _report_stuck_worker(self, role: "RoleConfig") -> "OrchestratorDecision":
+    def _report_stuck_worker(
+        self,
+        role: "RoleConfig",
+        *,
+        trigger_event: ZfEvent | None = None,
+        source: str = "pane_watchdog",
+        reason: str = "",
+        heartbeat_age_s: float | None = None,
+    ) -> "OrchestratorDecision":
         """Emit worker.stuck and try to recover the active task/worker."""
-        reason = (
-            f"worker {role.instance_id} produced no new output for "
-            f"{role.stuck_threshold_seconds:.0f}s"
+        from zf.runtime.stuck_recovery_signal import emit_stuck_signal
+
+        signal = emit_stuck_signal(
+            self,
+            role,
+            trigger_event=trigger_event,
+            source=source,
+            reason=reason,
+            heartbeat_age_s=heartbeat_age_s,
         )
-        task = self._active_task_for_instance(role.instance_id)
-        dispatch = self._latest_dispatch_event_for_task(task.id) if task else None
-        dispatch_payload = dispatch.payload if dispatch is not None else {}
-        dispatch_id = ""
-        briefing = ""
-        task_dispatch_id = getattr(task, "active_dispatch_id", "") if task else ""
-        if isinstance(dispatch_payload, dict):
-            dispatch_id = str(
-                dispatch_payload.get("dispatch_id")
-                or task_dispatch_id
-                or ""
-            )
-            briefing = str(dispatch_payload.get("briefing") or "")
-        elif task is not None:
-            dispatch_id = task_dispatch_id
-        pane_command = self._pane_current_command(role.instance_id)
-        session_id = ""
-        try:
-            reg = RoleSessionRegistry(
-                self.state_dir / "role_sessions.yaml",
-                project_root=str(self.project_root),
-            )
-            cached = reg.get(role.instance_id)
-            session_id = str(cached) if cached else ""
-        except Exception:
-            session_id = ""
-        stuck_event = ZfEvent(
-            type="worker.stuck",
-            actor=role.instance_id,
-            task_id=task.id if task is not None else None,
-            payload={
-                "role": role.name,
-                "instance_id": role.instance_id,
-                "threshold_seconds": role.stuck_threshold_seconds,
-                "task_id": task.id if task is not None else "",
-                "dispatch_id": dispatch_id,
-                "briefing": briefing,
-                "pane_current_command": pane_command,
-                "role_session_id": session_id,
-            },
-        )
-        try:
-            self.event_writer.append(stuck_event)
-        except Exception:
-            pass
-        self._set_worker_state(
-            role.instance_id, "stuck",
-            reason=f"no output for {role.stuck_threshold_seconds:.0f}s",
-        )
+        reason, task = signal.reason, signal.task
+        dispatch_id, stuck_event = signal.dispatch_id, signal.event
 
         progress_event = (
             self._latest_unrejected_progress_event_for_dispatch(
@@ -2184,6 +2151,8 @@ class LifecycleManagerMixin(
             reason="worker_stuck",
             inject_prompt=True,
             causation_id=stuck_event.id,
+            correlation_id=stuck_event.correlation_id,
+            preserve_correlation=True,
         )
         if manifest_recovery is not None:
             return manifest_recovery
@@ -2201,6 +2170,7 @@ class LifecycleManagerMixin(
             dispatch_id=dispatch_id,
             reason="worker_stuck_no_progress",
             causation_id=stuck_event.id,
+            correlation_id=stuck_event.correlation_id,
         )
         if completion_nudge is not None:
             return completion_nudge
@@ -2285,6 +2255,7 @@ class LifecycleManagerMixin(
                         actor=role.instance_id,
                         task_id=task.id if task is not None else None,
                         causation_id=stuck_event.id,
+                        correlation_id=stuck_event.correlation_id,
                         payload={
                             "role": role.name,
                             "instance_id": role.instance_id,
@@ -2311,6 +2282,7 @@ class LifecycleManagerMixin(
                 actor=role.instance_id,
                 task_id=task.id if task is not None else None,
                 causation_id=stuck_event.id,
+                correlation_id=stuck_event.correlation_id,
                 payload={
                     "role": role.name,
                     "instance_id": role.instance_id,
@@ -2412,7 +2384,7 @@ class LifecycleManagerMixin(
                 actor=role.instance_id,
                 task_id=task.id,
                 causation_id=stuck_event.id,
-                correlation_id=progress_event.correlation_id,
+                correlation_id=stuck_event.correlation_id,
                 payload={
                     "role": role.name,
                     "instance_id": role.instance_id,
@@ -2434,6 +2406,8 @@ class LifecycleManagerMixin(
         reason: str,
         inject_prompt: bool,
         causation_id: str | None = None,
+        correlation_id: str | None = None,
+        preserve_correlation: bool = False,
     ) -> OrchestratorDecision | None:
         """Recover an artifact-first role that published durable refs but
         has not emitted its terminal event yet.
@@ -2509,7 +2483,11 @@ class LifecycleManagerMixin(
                     actor=role.instance_id,
                     task_id=task.id,
                     causation_id=causation_id or manifest_event.id,
-                    correlation_id=manifest_event.correlation_id,
+                    correlation_id=(
+                        correlation_id
+                        if preserve_correlation
+                        else correlation_id or manifest_event.correlation_id
+                    ),
                     payload={
                         "role": role.name,
                         "instance_id": role.instance_id,
@@ -2604,6 +2582,7 @@ class LifecycleManagerMixin(
         dispatch_id: str,
         reason: str,
         causation_id: str | None = None,
+        correlation_id: str | None = None,
     ) -> "OrchestratorDecision | None":
         """DID-9: nudge a worker that did its task but never emitted its terminal
         event (no manifest, no progress event) to run its completion protocol,
@@ -2654,6 +2633,7 @@ class LifecycleManagerMixin(
                 actor=role.instance_id,
                 task_id=task.id,
                 causation_id=causation_id or "",
+                correlation_id=correlation_id,
                 payload={
                     "role": role.name,
                     "instance_id": role.instance_id,

@@ -61,6 +61,27 @@ const messagePart = messageConversation.threads
 assert(messagePart?.kind === "text", `assistant channel message should render as text, got ${messagePart?.kind}`);
 assert(messagePart?.content === "无新增实质 finding。", `assistant channel message should strip Result heading, got ${messagePart?.content}`);
 
+const compactJson = '{"status":"healthy","details":{"surface":"channel_group"}}';
+const jsonMessageConversation = buildChannelConversation({
+  messages: [{
+    message_id: "msg-json",
+    role: "assistant",
+    member_id: "reviewer",
+    source: "claude-headless",
+    text: compactJson,
+    ts: "2026-06-26T12:00:03.000Z",
+  }],
+} as unknown as ChannelDetail, "ch-json", "main");
+const jsonMessagePart = jsonMessageConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.runs)
+  .flatMap((run) => run.parts)
+  .find((item) => item.content === compactJson);
+assert(
+  jsonMessagePart?.kind === "text",
+  "channel projection preserves standalone JSON for the shared reply renderer",
+);
+
 console.log("channelProjection.test.ts OK");
 
 

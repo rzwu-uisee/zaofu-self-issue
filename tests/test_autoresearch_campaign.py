@@ -97,7 +97,8 @@ def test_full_validation_plan_writes_common_and_specific_assertions(
         item for item in payload["scenarios"]
         if item["scenario"] == "controlled-stuck-recovery"
     )
-    assert "--inject-worker-stuck" in stuck["command"]
+    assert stuck["requires_worker_stuck_injection"] is True
+    assert "--inject-worker-stuck" not in stuck["command"]
     assert "--backlog-on-failure" in stuck["command"]
     assert "--tmux" not in stuck["command"]
 

@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from zf.autoresearch import orchestrator as ar_orchestrator
 from zf.autoresearch.campaign import (
     resolve_campaign,
@@ -13,6 +15,7 @@ from zf.autoresearch.orchestrator import (
     AutoresearchRunConfig,
     build_inner_runner_command,
     cleanup_prepared_worktree,
+    effective_run_config,
     ensure_web_dependencies,
     prepare_worktree,
     summarize_events,
@@ -26,6 +29,7 @@ from zf.autoresearch.worktree_preparation import (
 )
 from zf.autoresearch.loop import LoopConfig
 from zf.autoresearch.scenarios import resolve_scenario
+from zf.core.events.log import EventLog
 
 
 def test_default_config_templates_exist() -> None:
@@ -179,6 +183,69 @@ def test_prepared_worktree_preserves_preexisting_web_dependencies(
     assert marker.read_text(encoding="utf-8") == "keep\n"
 
 
+def test_preparation_failure_restores_framework_owned_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    original_zf = "version: '1.0'\nproject: {name: original}\n"
+    original_seed = "operator seed\n"
+    (worktree / "zf.yaml").write_text(original_zf, encoding="utf-8")
+    (worktree / "autoresearch-seed.txt").write_text(
+        original_seed,
+        encoding="utf-8",
+    )
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    dependency_source = tmp_path / "shared-node-modules"
+    dependency_source.mkdir()
+
+    def _fail_after_link(root: Path, *, log_path: Path) -> str:
+        target = root / "web" / "node_modules"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(dependency_source, target_is_directory=True)
+        raise RuntimeError("dependency preparation failed")
+
+    monkeypatch.setattr(
+        ar_orchestrator,
+        "ensure_web_dependencies",
+        _fail_after_link,
+    )
+    run_dir = tmp_path / "run"
+
+    with pytest.raises(RuntimeError, match="dependency preparation failed"):
+        prepare_worktree(
+            AutoresearchRunConfig(
+                worktree=worktree,
+                config_template=template,
+                reuse_worktree=True,
+                sync_dirty=False,
+            ),
+            scenario=resolve_scenario("self-eval-backlog"),
+            run_id="preparation-failure",
+            run_dir=run_dir,
+        )
+
+    journal = json.loads(
+        (
+            run_dir
+            / "worktree-preparation"
+            / "worktree-preparation.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["schema_version"] == "autoresearch-worktree-preparation.v2"
+    assert journal["phase"] == "failed"
+    assert (worktree / "zf.yaml").read_text(encoding="utf-8") == original_zf
+    assert (
+        worktree / "autoresearch-seed.txt"
+    ).read_text(encoding="utf-8") == original_seed
+    assert not (worktree / "web" / "node_modules").is_symlink()
+
+
 def test_prepared_worktree_retains_user_modified_framework_file(
     tmp_path: Path,
 ) -> None:
@@ -249,7 +316,7 @@ def test_write_campaign_plan_outputs_json_markdown_and_script(
     assert "terminal_evidence_coverage" in text
     script = paths.script_path.read_text(encoding="utf-8")
     assert "autoresearch run" in script
-    assert "--inject-worker-stuck" in script
+    assert "--inject-worker-stuck" not in script
     assert "--tmux" not in script
 
 
@@ -379,6 +446,106 @@ def test_summarize_events_detects_done_and_fatal(tmp_path: Path) -> None:
     assert summary["derived_metrics"]["worker_stuck_recovery_failed_count"] == 1
 
 
+def test_controlled_stuck_scenario_enables_required_injection() -> None:
+    cfg = AutoresearchRunConfig(inject_worker_stuck=False)
+
+    effective = effective_run_config(
+        cfg,
+        resolve_scenario("controlled-stuck-recovery"),
+    )
+
+    assert effective.inject_worker_stuck
+
+
+def test_non_stuck_scenario_preserves_explicit_injection_override() -> None:
+    cfg = AutoresearchRunConfig(inject_worker_stuck=True)
+
+    effective = effective_run_config(cfg, resolve_scenario("self-eval-backlog"))
+
+    assert effective.inject_worker_stuck
+
+
+def test_summarize_events_audits_incident_across_event_archives(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    archive_dir = state_dir / "events"
+    archive_dir.mkdir(parents=True)
+    archived = [
+        {
+            "id": "evt-dispatch",
+            "type": "task.dispatched",
+            "task_id": "TASK-1",
+            "correlation_id": "corr-run",
+            "payload": {
+                "assignee": "dev-1",
+                "role": "dev",
+                "dispatch_id": "disp-1",
+            },
+        },
+        {
+            "id": "evt-injection",
+            "type": "autoresearch.inject.worker_stuck",
+            "origin": "external",
+            "task_id": "TASK-1",
+            "causation_id": "evt-dispatch",
+            "correlation_id": "corr-run",
+            "payload": {
+                "instance_id": "dev-1",
+                "role": "dev",
+                "dispatch_id": "disp-1",
+                "trigger_event_id": "evt-dispatch",
+            },
+        },
+    ]
+    active = [
+        {
+            "id": "evt-stuck",
+            "type": "worker.stuck",
+            "origin": "kernel",
+            "task_id": "TASK-1",
+            "causation_id": "evt-injection",
+            "correlation_id": "corr-run",
+            "payload": {
+                "instance_id": "dev-1",
+                "role": "dev",
+                "dispatch_id": "disp-1",
+                "trigger_event_id": "evt-injection",
+            },
+        },
+        {
+            "id": "evt-recovered",
+            "type": "worker.stuck.recovered",
+            "origin": "kernel",
+            "task_id": "TASK-1",
+            "causation_id": "evt-stuck",
+            "correlation_id": "corr-run",
+            "payload": {
+                "instance_id": "dev-1",
+                "role": "dev",
+                "dispatch_id": "disp-1",
+            },
+        },
+    ]
+    (archive_dir / "2026-07-29.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in archived) + "\n",
+        encoding="utf-8",
+    )
+    (state_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in active) + "\n",
+        encoding="utf-8",
+    )
+
+    summary = summarize_events(
+        tmp_path,
+        expected_done=1,
+        stuck_incident_required=True,
+    )
+
+    assert summary["stuck_incident_audit"]["status"] == "passed"
+    assert summary["derived_metrics"]["stuck_injection_satisfied"]
+
+
 def test_stuck_injection_waits_after_non_target_dispatch(
     tmp_path: Path,
     monkeypatch,
@@ -388,6 +555,7 @@ def test_stuck_injection_waits_after_non_target_dispatch(
     events.parent.mkdir(parents=True)
     events.write_text(
         json.dumps({
+            "id": "evt-old-arch",
             "type": "task.dispatched",
             "task_id": "T0",
             "payload": {"assignee": "arch", "role": "arch"},
@@ -406,9 +574,11 @@ def test_stuck_injection_waits_after_non_target_dispatch(
         "import json, pathlib, sys, time;"
         "p=pathlib.Path(sys.argv[1]);"
         "time.sleep(1.2);"
-        "row={'type':'task.dispatched','task_id':'T1',"
-        "'payload':{'assignee':'dev-1','role':'dev','dispatch_id':'disp-1'}};"
-        "p.open('a', encoding='utf-8').write(json.dumps(row)+'\\n');"
+        "rows=[{'id':'evt-session','type':'session.started'},"
+        "{'id':'evt-new-dev','type':'task.dispatched','task_id':'T1',"
+        "'payload':{'assignee':'dev-1','role':'dev','dispatch_id':'disp-1'}}];"
+        "p.open('a', encoding='utf-8').write("
+        "'\\n'.join(json.dumps(row) for row in rows)+'\\n');"
         "time.sleep(1.5)"
     )
 
@@ -430,6 +600,37 @@ def test_stuck_injection_waits_after_non_target_dispatch(
     assert emitted[0]["task_id"] == "T1"
     assert "worker_stuck_injection=emitted" in text
     assert "worker_stuck_injection=not_emitted" not in text
+
+
+def test_emit_stuck_injection_uses_external_event_writer(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    (worktree / ".zf").mkdir(parents=True)
+    dispatch = {
+        "id": "evt-dispatch",
+        "type": "task.dispatched",
+        "task_id": "TASK-1",
+        "correlation_id": "corr-run",
+        "payload": {
+            "assignee": "dev-1",
+            "role": "dev",
+            "dispatch_id": "disp-1",
+        },
+    }
+
+    emitted = ar_orchestrator._emit_stuck_injection(
+        worktree=worktree,
+        run_dir=tmp_path / "run",
+        dispatch_event=dispatch,
+        target_instance="dev-1",
+    )
+
+    assert emitted
+    event = EventLog(worktree / ".zf" / "events.jsonl").read_all()[-1]
+    assert event.type == "autoresearch.inject.worker_stuck"
+    assert event.origin == "external"
+    assert event.causation_id == "evt-dispatch"
+    assert event.correlation_id == "corr-run"
+    assert event.payload["trigger_event_id"] == "evt-dispatch"
 
 
 def test_summarize_events_derives_campaign_metrics(tmp_path: Path) -> None:

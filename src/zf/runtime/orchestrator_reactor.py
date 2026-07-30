@@ -4783,58 +4783,11 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
     ) -> OrchestratorDecision | None:
-        """Deterministically inject stuck recovery for autoresearch runs.
-
-        The outer supervisor uses this audited event to exercise the same
-        recovery path as the watchdog without depending on pane-output timing.
-        """
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        source = str(payload.get("source") or event.actor or "")
-        if source not in {"autoresearch", "zf-autoresearch"}:
-            return OrchestratorDecision(
-                action="block",
-                task_id=event.task_id,
-                reason="autoresearch stuck injection rejected: invalid source",
-            )
-
-        instance_id = str(
-            payload.get("instance_id")
-            or payload.get("target_instance")
-            or event.actor
-            or ""
+        from zf.runtime.autoresearch_stuck_injection import (
+            handle_autoresearch_stuck_injection,
         )
-        role = (
-            self._find_role_by_instance(instance_id)
-            or self._find_role_by_name(instance_id)
-        )
-        if role is None or role.name == "orchestrator":
-            return OrchestratorDecision(
-                action="block",
-                task_id=event.task_id,
-                role=instance_id,
-                reason="autoresearch stuck injection rejected: unknown worker",
-            )
 
-        active_task = self._active_task_for_instance(role.instance_id)
-        if active_task is None:
-            return OrchestratorDecision(
-                action="skip",
-                task_id=event.task_id,
-                role=role.instance_id,
-                reason="autoresearch stuck injection skipped: worker has no active task",
-            )
-        if event.task_id and event.task_id != active_task.id:
-            return OrchestratorDecision(
-                action="block",
-                task_id=event.task_id,
-                role=role.instance_id,
-                reason=(
-                    "autoresearch stuck injection rejected: task does not "
-                    f"match active task {active_task.id}"
-                ),
-            )
-
-        return self._report_stuck_worker(role)
+        return handle_autoresearch_stuck_injection(self, event)
 
     def _recover_provider_stop(
         self,

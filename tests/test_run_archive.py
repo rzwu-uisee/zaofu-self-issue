@@ -139,6 +139,37 @@ def test_archive_run_writes_manifest_and_redacts(tmp_path: Path):
     assert "[REDACTED" in archive_text
 
 
+def test_archive_run_binds_supplemental_autoresearch_evidence(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir = _project(tmp_path)
+    supplemental = tmp_path / "autoresearch-report.md"
+    supplemental.write_text(
+        "token=sk-1234567890abcdef\n",
+        encoding="utf-8",
+    )
+
+    result = archive_run(
+        project_root=project_root,
+        state_dir=state_dir,
+        live_state_dir=_live_state(tmp_path),
+        run_id="RUN-AUTORESEARCH",
+        status="passed",
+        supplemental_files={"runs/inner/report.md": supplemental},
+    )
+
+    archived = result.artifact_dir / "supplemental" / "runs" / "inner" / "report.md"
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    record = next(
+        item
+        for item in manifest["artifacts"]
+        if item["path"] == "supplemental/runs/inner/report.md"
+    )
+    assert archived.is_file()
+    assert "sk-1234567890abcdef" not in archived.read_text(encoding="utf-8")
+    assert record["redacted"] is True
+
+
 @pytest.mark.parametrize("run_id", ["", "../RUN", "a/b", "a\\b", "..", "bad space"])
 def test_archive_rejects_unsafe_run_ids(tmp_path: Path, run_id: str):
     project_root, state_dir = _project(tmp_path)
