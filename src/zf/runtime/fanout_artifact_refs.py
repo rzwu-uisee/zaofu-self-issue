@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, TypedDict
 
 from zf.core.config.schema import RoleConfig, ZfConfig
 from zf.core.safety import PathGuard, PathGuardError
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.workdirs import WorkdirManager
 
 
@@ -17,6 +18,9 @@ _SCALAR_REF_KEYS = (
     "plan_ref",
     "task_map_ref",
     "source_index_ref",
+    "review_artifact_ref",
+    "coverage_matrix_ref",
+    "findings_ref",
     "backlog_ref",
     "prd_ref",
     "spec_ref",
@@ -24,6 +28,11 @@ _SCALAR_REF_KEYS = (
     "scan_quality_audit_ref",
     "inventory_ref",
     "source_inventory_ref",
+    "capability_matrix_ref",
+    "acceptance_matrix_ref",
+    "test_matrix_ref",
+    "regression_test_matrix_ref",
+    "real_e2e_matrix_ref",
     "inventory_coverage_matrix_ref",
     "expected_module_parity_report_paths_ref",
 )
@@ -32,6 +41,36 @@ _LEGACY_SCALAR_REF_ALIASES = {
 }
 _LIST_REF_KEYS = ("artifact_refs", "evidence_refs", "report_refs", "inventory_refs")
 _REF_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+class RefactorPlanWorkdirRefs(TypedDict):
+    plan_artifact_ref: str
+    task_map_ref: str
+    source_index_ref: str
+    scan_quality_audit_ref: str
+    risk_register_ref: str
+    backlog_candidates_ref: str
+    artifact_refs: list[str]
+
+
+def refactor_plan_workdir_refs(fanout_id: str) -> RefactorPlanWorkdirRefs:
+    safe_fanout_id = "".join(
+        ch if ch.isalnum() or ch in "._-" else "-"
+        for ch in str(fanout_id or "")
+    ) or "refactor-plan"
+    artifact_dir = f"artifacts/{safe_fanout_id}"
+    scalar_refs = {
+        "plan_artifact_ref": f"docs/plans/{safe_fanout_id}.md",
+        "task_map_ref": f"{artifact_dir}/task_map.json",
+        "source_index_ref": f"{artifact_dir}/source_index.json",
+        "scan_quality_audit_ref": f"{artifact_dir}/scan-quality-audit.json",
+        "risk_register_ref": f"{artifact_dir}/risk-register.json",
+        "backlog_candidates_ref": f"{artifact_dir}/backlog-candidates.json",
+    }
+    return {
+        **scalar_refs,
+        "artifact_refs": list(scalar_refs.values()),
+    }
 
 
 def relocate_fanout_artifact_refs(
@@ -43,6 +82,7 @@ def relocate_fanout_artifact_refs(
     project_root: Path,
     config: ZfConfig,
     roles: list[RoleConfig],
+    prefer_workdir_sources: bool = False,
 ) -> dict[str, Any]:
     """Copy unreadable workdir-local refs to ``state_dir/artifacts``.
 
@@ -65,6 +105,7 @@ def relocate_fanout_artifact_refs(
             project_root=project_root,
             config=config,
             roles=roles,
+            prefer_workdir_sources=prefer_workdir_sources,
         )
         if relocated and relocated != ref:
             replacements[ref] = relocated
@@ -84,6 +125,55 @@ def relocate_fanout_artifact_refs(
             if str(item)
         ]
     return rewritten
+
+
+def prepare_fanout_synth_reports(
+    *,
+    reports: list[Mapping[str, Any]],
+    manifest: Mapping[str, Any],
+    state_dir: Path,
+    project_root: Path,
+    config: ZfConfig,
+    roles: list[RoleConfig],
+) -> list[dict[str, Any]]:
+    """Bind child-local report refs before a synth call is materialized."""
+
+    prepared: list[dict[str, Any]] = []
+    fanout_id = str(manifest.get("fanout_id") or "fanout")
+    for source_row in reports:
+        row = dict(source_row)
+        report = (
+            dict(row.get("report") or {})
+            if isinstance(row.get("report"), Mapping)
+            else {}
+        )
+        rewritten = relocate_fanout_artifact_refs(
+            payload=report,
+            payload_sources=[{**row, "report": report}],
+            manifest=dict(manifest),
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+            roles=roles,
+            prefer_workdir_sources=True,
+        )
+        row["report"] = rewritten
+        if rewritten != report:
+            descriptor = write_immutable_json_sidecar(
+                state_dir,
+                rewritten,
+                root=(
+                    f"fanouts/{_safe_part(fanout_id)}/"
+                    f"prepared-child-reports/{_safe_part(str(row.get('child_id') or 'child'))}"
+                ),
+                kind="fanout_child_result",
+                schema_version="fanout-child-result.v1",
+                created_by="fanout-artifact-relocator",
+                source_event_id=str(row.get("result_event_id") or ""),
+            )
+            row["report_path"] = str(descriptor.get("ref") or "")
+        prepared.append(row)
+    return prepared
 
 
 def _build_ref_sources(
@@ -135,10 +225,9 @@ def _relocate_ref(
     project_root: Path,
     config: ZfConfig,
     roles: list[RoleConfig],
+    prefer_workdir_sources: bool,
 ) -> str:
     if _is_external_ref(ref):
-        return ref
-    if _resolve_existing(ref, state_dir=state_dir, project_root=project_root) is not None:
         return ref
     source = _find_workdir_source(
         ref=ref,
@@ -148,8 +237,32 @@ def _relocate_ref(
         config=config,
         roles=roles,
     )
+    if prefer_workdir_sources and source is not None:
+        return _copy_relocated_source(
+            ref=ref,
+            source=source,
+            fanout_id=fanout_id,
+            state_dir=state_dir,
+        )
+    if _resolve_existing(ref, state_dir=state_dir, project_root=project_root) is not None:
+        return ref
     if source is None:
         return ref
+    return _copy_relocated_source(
+        ref=ref,
+        source=source,
+        fanout_id=fanout_id,
+        state_dir=state_dir,
+    )
+
+
+def _copy_relocated_source(
+    *,
+    ref: str,
+    source: tuple[Path, Path, str],
+    fanout_id: str,
+    state_dir: Path,
+) -> str:
     source_path, source_root, source_label = source
     dest_rel = _destination_ref(
         ref=ref,

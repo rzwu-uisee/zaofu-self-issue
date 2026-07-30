@@ -15,6 +15,7 @@ from zf.runtime.goal_closure_result import (
 from zf.runtime.goal_claim_set import (
     build_goal_claim_set,
     canonical_task_map_generation,
+    validate_goal_claim_set,
 )
 from zf.runtime.verification_result import (
     VerificationResultError,
@@ -34,37 +35,62 @@ def build_goal_coverage_graph(
     project_id: str,
     feature_id: str,
     task_map_ref: str = "",
+    goal_claim_set: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the current Goal Coverage projection without writing state."""
 
     source = dict(task_map or {})
-    goal_id = str(source.get("goal_id") or source.get("feature_id") or feature_id).strip()
+    pinned_claim_set = (
+        dict(goal_claim_set)
+        if isinstance(goal_claim_set, Mapping)
+        else {}
+    )
+    goal_id = str(
+        source.get("goal_id")
+        or source.get("feature_id")
+        or pinned_claim_set.get("goal_id")
+        or feature_id
+    ).strip()
     closure_candidates = _goal_closure_results(events, goal_id=goal_id)
     latest_closure = closure_candidates[-1] if closure_candidates else {}
     workflow_run_id = _first_nonempty(
         source.get("workflow_run_id"),
         source.get("run_id"),
         latest_closure.get("workflow_run_id"),
+        pinned_claim_set.get("workflow_run_id"),
         _latest_event_value(events, "workflow_run_id", "run_id"),
         f"run:{goal_id or 'unknown'}",
     )
     task_map_generation = canonical_task_map_generation(
-        task_map_generation=source.get("task_map_generation"),
+        task_map_generation=(
+            source.get("task_map_generation")
+            or latest_closure.get("workflow_generation")
+            or pinned_claim_set.get("task_map_generation")
+        ),
         task_map_digest=source.get("task_map_digest"),
         task_map_ref=task_map_ref,
     )
-    target_commit = _first_nonempty(
-        source.get("target_commit"),
-        latest_closure.get("target_commit"),
-        _latest_event_value(events, "target_commit"),
-    )
-    claim_set = build_goal_claim_set(
-        source,
+    target_commit = _current_target_commit(
+        source=source,
+        events=events,
         workflow_run_id=workflow_run_id,
-        goal_id=goal_id,
         task_map_generation=task_map_generation,
-        objective_ref=str(source.get("objective_ref") or ""),
     )
+    if goal_claim_set is None:
+        claim_set = build_goal_claim_set(
+            source,
+            workflow_run_id=workflow_run_id,
+            goal_id=goal_id,
+            task_map_generation=task_map_generation,
+            objective_ref=str(source.get("objective_ref") or ""),
+        )
+    else:
+        claim_set = validate_goal_claim_set(
+            goal_claim_set,
+            workflow_run_id=workflow_run_id,
+            goal_id=goal_id,
+            task_map_generation=task_map_generation,
+        )
     claim_set_ref, claim_set_digest = _goal_claim_set_binding(
         events,
         source=source,
@@ -75,7 +101,7 @@ def build_goal_coverage_graph(
     )
     coverage_mode = (
         "explicit"
-        if isinstance(source.get("goal_claims"), list) and source.get("goal_claims")
+        if "task_map.goal_claims" in str(claim_set.get("source") or "")
         else "legacy_derived"
     )
     diagnostics: list[dict[str, Any]] = []
@@ -196,9 +222,28 @@ def build_goal_coverage_graph(
             "title": str(claim.get("text") or claim_id),
             "mandatory": bool(claim.get("mandatory", True)),
             "source_ref": str(claim.get("source_ref") or ""),
-            "plan_coverage": "covered" if covering else "uncovered",
+            "plan_coverage": (
+                "artifact"
+                if current_closure.get("_artifact_delivery")
+                and str(closure_row.get("status") or "") in {
+                    "closed",
+                    "waived",
+                }
+                else "covered" if covering else "uncovered"
+            ),
             "execution": _claim_execution(covering, task_rows),
-            "task_verification": _claim_verification(covering, verification_by_task),
+            "task_verification": (
+                "passed"
+                if current_closure.get("_artifact_delivery")
+                and str(closure_row.get("status") or "") in {
+                    "closed",
+                    "waived",
+                }
+                else _claim_verification(
+                    covering,
+                    verification_by_task,
+                )
+            ),
             "closure": str(closure_row.get("status") or "unknown"),
             "task_ids": covering,
             "supporting_result_refs": supporting_refs,
@@ -210,7 +255,11 @@ def build_goal_coverage_graph(
             "to": f"claim:{claim_id}",
             "kind": "contains",
         })
-        if node["mandatory"] and not covering:
+        if (
+            node["mandatory"]
+            and not covering
+            and node["plan_coverage"] != "artifact"
+        ):
             diagnostics.append({
                 "code": "mandatory_claim_uncovered",
                 "goal_claim_id": claim_id,
@@ -276,7 +325,7 @@ def build_goal_coverage_graph(
     mandatory_claims = sum(1 for node in claim_nodes if node["mandatory"])
     planned_mandatory_claims = sum(
         1 for node in claim_nodes
-        if node["mandatory"] and node["plan_coverage"] == "covered"
+        if node["mandatory"] and node["plan_coverage"] in {"covered", "artifact"}
     )
     current_result_claims = sum(
         1 for node in claim_nodes
@@ -439,13 +488,30 @@ def _goal_closure_results(events: EventSlice, *, goal_id: str) -> list[dict[str,
     for _seq, event in events:
         payload = event.payload if isinstance(event.payload, Mapping) else {}
         raw = payload.get("goal_closure_result")
+        artifact_delivery = False
         if not isinstance(raw, Mapping):
             report = payload.get("report") if isinstance(payload.get("report"), Mapping) else {}
             raw = report.get("goal_closure_result")
         if not isinstance(raw, Mapping):
+            raw = payload.get("artifact_delivery_result")
+            artifact_delivery = isinstance(raw, Mapping)
+        if not isinstance(raw, Mapping):
+            report = (
+                payload.get("report")
+                if isinstance(payload.get("report"), Mapping)
+                else {}
+            )
+            raw = report.get("artifact_delivery_result")
+            artifact_delivery = isinstance(raw, Mapping)
+        if not isinstance(raw, Mapping):
             continue
         result = dict(raw)
-        if str(result.get("schema_version") or "") != "goal-closure-result.v1":
+        expected_schema = (
+            "artifact-delivery-result.v1"
+            if artifact_delivery
+            else "goal-closure-result.v1"
+        )
+        if str(result.get("schema_version") or "") != expected_schema:
             continue
         result_goal_id = str(result.get("goal_id") or "")
         if goal_id and result_goal_id and result_goal_id != goal_id:
@@ -453,11 +519,79 @@ def _goal_closure_results(events: EventSlice, *, goal_id: str) -> list[dict[str,
         admitted_ref = _admitted_result_ref(
             payload,
             admissions.get(event.id, {}),
-            expected_schema="goal-closure-result.v1",
+            expected_schema=expected_schema,
         )
+        if artifact_delivery:
+            result["_artifact_delivery"] = True
+            result["task_map_generation"] = str(
+                result.get("workflow_generation") or ""
+            )
+            result["goal_coverage"] = [
+                {
+                    **dict(item),
+                    "supporting_result_refs": _strings(
+                        item.get("supporting_artifact_refs")
+                    ),
+                }
+                for item in result.get("goal_coverage") or []
+                if isinstance(item, Mapping)
+            ]
         result["_projection_admitted_ref"] = admitted_ref
         results.append(result)
     return results
+
+
+def _current_target_commit(
+    *,
+    source: Mapping[str, Any],
+    events: EventSlice,
+    workflow_run_id: str,
+    task_map_generation: str,
+) -> str:
+    """Prefer admitted execution truth over the plan's base commit."""
+
+    admissions = _admitted_results_by_source(events)
+    result_fields = (
+        ("goal-closure-result.v1", "goal_closure_result"),
+        ("verification-result.v1", "verification_result"),
+    )
+    for schema_version, field in result_fields:
+        for _seq, event in reversed(events):
+            payload = event.payload if isinstance(event.payload, Mapping) else {}
+            raw = payload.get(field)
+            if not isinstance(raw, Mapping):
+                report = payload.get("report")
+                report = report if isinstance(report, Mapping) else {}
+                raw = report.get(field)
+            if not isinstance(raw, Mapping):
+                continue
+            result = dict(raw)
+            if str(result.get("schema_version") or "") != schema_version:
+                continue
+            if not _admitted_result_ref(
+                payload,
+                admissions.get(event.id, {}),
+                expected_schema=schema_version,
+            ):
+                continue
+            if (
+                workflow_run_id
+                and str(result.get("workflow_run_id") or "") != workflow_run_id
+            ):
+                continue
+            if (
+                task_map_generation
+                and str(result.get("task_map_generation") or "")
+                != task_map_generation
+            ):
+                continue
+            target_commit = str(result.get("target_commit") or "").strip()
+            if target_commit:
+                return target_commit
+    return _first_nonempty(
+        source.get("target_commit"),
+        _latest_event_value(events, "target_commit"),
+    )
 
 
 def _select_goal_closure_result(
@@ -571,10 +705,20 @@ def _goal_closure_stale_reasons(
     reasons: list[str] = []
     if not result.get("_projection_admitted_ref"):
         reasons.append("not_admitted")
-    try:
-        validate_goal_closure_result(result)
-    except GoalClosureResultError as exc:
-        reasons.append(f"schema_invalid:{exc}")
+    if result.get("_artifact_delivery"):
+        try:
+            from zf.runtime.artifact_delivery_result import (
+                validate_artifact_delivery_result,
+            )
+
+            validate_artifact_delivery_result(result)
+        except ValueError as exc:
+            reasons.append(f"schema_invalid:{exc}")
+    else:
+        try:
+            validate_goal_closure_result(result)
+        except GoalClosureResultError as exc:
+            reasons.append(f"schema_invalid:{exc}")
     reasons.extend(_identity_stale_reasons(
         result,
         (

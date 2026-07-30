@@ -104,6 +104,24 @@ def test_stage_retrigger_idempotent_and_generational(tmp_path: Path) -> None:
         payload={"source_event_id": other.id},
     )
     assert r3["ok"] is False
+    candidate = svc.writer.append(ZfEvent(
+        type="candidate.ready",
+        actor="zf-cli",
+        payload={"candidate_ref": "candidate/PDD-1"},
+    ))
+    r4 = svc._stage_retrigger_action(
+        requested=_req({}),
+        action="stage-retrigger",
+        requested_action="stage-retrigger",
+        payload={"source_event_id": candidate.id},
+    )
+    assert r4["ok"] is True
+    redriven = [
+        event for event in log.read_all()
+        if event.type == "candidate.ready"
+        and event.payload.get("redrive_of") == candidate.id
+    ]
+    assert len(redriven) == 1
 
 
 def test_fanout_aggregate_rebuild_requires_terminal_manifest_and_is_idempotent(
@@ -153,6 +171,79 @@ def test_fanout_aggregate_rebuild_requires_terminal_manifest_and_is_idempotent(
     assert requests[0].payload["source_event_id"] == source.id
     assert requests[0].payload["identity_invalid_event_id"] == invalid.id
     assert duplicate["ok"] is False
+
+
+def test_goal_lineage_rebuild_targets_upstream_reader_aggregate(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+    log = svc.writer.event_log
+    verify_fanout_id = "fanout-verify-lineage"
+    verify_manifest = (
+        svc.state_dir / "fanouts" / verify_fanout_id / "manifest.json"
+    )
+    verify_manifest.parent.mkdir(parents=True)
+    verify_manifest.write_text(json.dumps({
+        "fanout_id": verify_fanout_id,
+        "aggregate_config": {"success_event": "test.passed"},
+        "children": [
+            {"child_id": "verify-1", "status": "completed"},
+            {"child_id": "verify-2", "status": "completed"},
+        ],
+    }), encoding="utf-8")
+    verified = svc.writer.append(ZfEvent(
+        type="test.passed",
+        actor="zf-cli",
+        correlation_id="run-lineage",
+        payload={"fanout_id": verify_fanout_id},
+    ))
+
+    discovery_fanout_id = "fanout-discovery-lineage"
+    discovery_manifest = (
+        svc.state_dir / "fanouts" / discovery_fanout_id / "manifest.json"
+    )
+    discovery_manifest.parent.mkdir(parents=True)
+    discovery_manifest.write_text(json.dumps({
+        "fanout_id": discovery_fanout_id,
+        "trigger_payload": {"source_event_id": verified.id},
+        "aggregate_config": {"success_event": "flow.discovery.completed"},
+        "children": [{"child_id": "discovery-1", "status": "completed"}],
+    }), encoding="utf-8")
+    discovered = svc.writer.append(ZfEvent(
+        type="flow.discovery.completed",
+        actor="zf-cli",
+        correlation_id="run-lineage",
+        payload={"fanout_id": discovery_fanout_id},
+    ))
+    invalid = svc.writer.append(ZfEvent(
+        type="goal.closure.identity.invalid",
+        actor="zf-cli",
+        correlation_id="run-lineage",
+        payload={
+            "source_event_id": discovered.id,
+            "reason": "current task-map generation has no pinned goal claim set",
+        },
+    ))
+
+    result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": invalid.id},
+    )
+
+    assert result["ok"] is True
+    assert result["fanout_id"] == verify_fanout_id
+    assert result["source_event_id"] == verified.id
+    assert result["rebuild_scope"] == "upstream_lineage_aggregate"
+    rebuild = next(
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    )
+    assert rebuild.payload["fanout_id"] == verify_fanout_id
+    assert rebuild.payload["source_event_id"] == verified.id
+    assert rebuild.payload["identity_invalid_event_id"] == invalid.id
+    assert rebuild.payload["expected_success_event"] == "test.passed"
 
 
 def test_fanout_aggregate_rebuild_fails_closed_for_invalid_source_state(

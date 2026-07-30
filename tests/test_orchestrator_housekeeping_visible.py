@@ -297,6 +297,39 @@ class TestLoopIntegrity:
 
 
 class TestRunOnceIntegration:
+    def test_pushed_event_defers_periodic_reconciliation(
+        self, orchestrator, monkeypatch
+    ):
+        calls: list[str] = []
+        periodic_steps = {
+            "_recover_writer_fanout_task_bindings": "writer_bindings",
+            "_recover_unrecorded_writer_fanout_results": "writer_results",
+            "_reconcile_reader_fanout_triggers": "reader_triggers",
+            "_recover_unrecorded_reader_fanout_results": "reader_results",
+            "_check_context_thresholds": "context",
+            "_check_pending_recycles": "recycles",
+            "_check_orphaned_tasks": "orphans",
+            "_check_unclaimed_new_tasks": "unclaimed",
+            "_check_fanout_timeouts": "fanout_timeouts",
+            "_check_channel_reply_remediation": "channel_replies",
+            "_check_drift": "drift",
+            "_check_refresh_triggers": "refresh",
+        }
+        for method, label in periodic_steps.items():
+            monkeypatch.setattr(
+                orchestrator,
+                method,
+                lambda label=label: calls.append(label),
+            )
+
+        orchestrator.run_once(events=[
+            ZfEvent(type="diagnostic.probe", actor="test"),
+        ])
+        assert calls == []
+
+        orchestrator.run_once(events=[])
+        assert sorted(calls) == sorted(periodic_steps.values())
+
     def test_run_once_emits_no_housekeeping_failure_on_clean_run(
         self, orchestrator, state_dir
     ):

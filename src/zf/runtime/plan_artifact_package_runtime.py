@@ -65,7 +65,11 @@ def admit_synthesized_plan_package(
     recommendation: str,
     artifact_payload: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
-    if final_status != "completed" or success_event != "task_map.ready":
+    if final_status != "completed" or success_event not in {
+        "task_map.ready",
+        "zaofu.refactor.plan.ready",
+        "refactor.plan.ready",
+    }:
         return final_status, recommendation, artifact_payload
     payload = {**artifact_payload, "stage_id": stage_id}
     try:

@@ -136,6 +136,7 @@ class TickServiceResult:
     control_plane_health: bool = False
     stillness_state: str = ""
     stillness_redriven: int = 0
+    workflow_synthesis_consumed: int = 0
 
 
 def run_autoresearch_trigger_scan(
@@ -194,6 +195,34 @@ def run_standard_tick_services(
     if (state_dir / "shutdown-requested").exists():
         return TickServiceResult()
 
+    workflow_synthesis_consumed = 0
+    try:
+        from zf.runtime.workflow_synthesis import (
+            consume_workflow_synthesis_operations,
+        )
+
+        workflow_synthesis_consumed = consume_workflow_synthesis_operations(
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+            writer=event_writer,
+            limit=1,
+        )
+    except Exception as exc:
+        workflow_synthesis_consumed = 0
+        try:
+            event_writer.append(ZfEvent(
+                type="orchestrator.tick.failed",
+                actor="workflow-synthesis-consumer",
+                payload={
+                    "component": "workflow_synthesis_consumer",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:400],
+                },
+            ))
+        except Exception:
+            pass
+
     goal_dossier_delivery = False
     early_owner_visible_delivery = False
     try:
@@ -239,6 +268,7 @@ def run_standard_tick_services(
             return TickServiceResult(
                 goal_dossier_delivery=goal_dossier_delivery,
                 owner_visible_delivery=early_owner_visible_delivery,
+                workflow_synthesis_consumed=workflow_synthesis_consumed,
             )
     except Exception:
         pass
@@ -524,6 +554,7 @@ def run_standard_tick_services(
         stillness_state=stillness_state_label,
         stillness_redriven=stillness_redriven,
         control_plane_health=control_plane_health,
+        workflow_synthesis_consumed=workflow_synthesis_consumed,
     )
 
 

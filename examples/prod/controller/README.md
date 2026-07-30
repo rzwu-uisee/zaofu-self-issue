@@ -11,7 +11,8 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
 |---|---|---|---|
 | PRD build(fanout) | 从 PRD / idea 构建新功能或产品(多 lane) | `prd-fanout-v3.yaml` | `prod-runtime/v1` + `PrdFlow` 展开(roles/stages/pipeline 由 flowProfile 生成) |
 | PRD build(light) | 塞得进单上下文的小 PRD(单 lane,免 scan/plan 扇出;kernel 入口合成 task_map + 铸 run goal;judge.passed 后自动 ship + goal 终态) | `prd-light-v3.yaml` | `prod-runtime/v1` + `PrdFlow topology: light` 展开 |
-| Issue fix | 从 bug / backlog / failure report 修复问题 | `issue-fanout-v3.yaml` | `prod-runtime/v1` + `IssueFlow` 展开 |
+| Issue fix(default light) | 单一可复现问题；固定 Fix -> Verify -> Judge | `zf flow draft --kind issue` | `IssueFlow` 默认 light，Kernel 合成单 Task Contract |
+| Issue fix(explicit fanout) | 跨模块或根因/范围不确定的问题 | `issue-fanout-v3.yaml` | `prod-runtime/v1` + `IssueFlow topology: fanout` 展开 |
 | Refactor | 从已有系统重构或迁移到新实现 | `refactor-lane-v3.yaml` | `refactor-controller-runtime/v3` + `RefactorFlow v3` 展开 |
 
 注:roles 由 flowProfile 展开生成;`common/profiles.yaml` 里的 RoleSet
@@ -59,6 +60,14 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
   TaskRef、target 或 required-read evidence 时 fail-closed；mode 同时固定在
   Run Contract 与 immutable Plan Artifact Package。升级前没有 mode 字段的
   Package 保持 legacy shadow，配置回退也不会改写既有 Package/EventLog。
+- **Role process lifecycle**:标准 Issue / PRD / Refactor 入口通过 common
+  `roleDefaults.lifecycle.mode: on_demand` 延迟创建普通 scan、plan、impl、
+  verify、judge Provider process，并在机械准入通过后保留 session/worktree
+  休眠；configured orchestrator agent 显式 `resident`。两份 PRD light
+  入口显式覆盖为 `eager`，保留短流程的低启动延迟和旧配置兼容基线。
+  `provider_session` 仍为空即继承 Provider 默认；Codex/Claude 的 effort、
+  agent 与并发上限属于 provider-specific override，不进入跨 Provider common
+  profile。
 - **evidencePolicy 驱动执法**:`evidencePolicy: strict_refs` 由 loader
   派生 `event_schema.mode: blocking` + `report_evidence_gate: fail_closed`
   (单一控制点;显式 `verification.*` 配置优先,是逃生门)。
@@ -77,6 +86,9 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
   pipelines 和 schema;runtime 仍只消费 expanded `ZfConfig`。
 - common profile 放跨 PRD/Issue/Refactor 复用能力;workflow/project 专项事实
   不应混入 common。
+- `roleDefaults` 可结构化声明 `providerSession` / `lifecycle`；lane 可通过
+  `providerSessionByStage` / `lifecycleByStage` 覆盖 impl、verify 等 stage。
+  Provider 私有 argv 不属于该配置面。
 
 ## 验证
 

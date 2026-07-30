@@ -256,6 +256,34 @@ def classify_rework_trigger(
             "dispatch_rework",
             "producer classified candidate failure as product quality failure",
         )
+    semantic_result_refs = payload.get("semantic_result_refs")
+    trusted_dependency_blocker = (
+        explicit_failure_class == "dependency_blocked"
+        and event.origin == "kernel"
+        and isinstance(semantic_result_refs, list)
+        and any(str(ref or "").strip() for ref in semantic_result_refs)
+    )
+    if trusted_dependency_blocker and (
+        str(payload.get("recovery_action") or "") == "replan"
+        and str(payload.get("rework_scope") or "") == "plan_ports"
+    ):
+        return _result(
+            "design_issue",
+            gate or "plan_ports",
+            "planner",
+            "request_replan",
+            "admitted verification result assigned the blocked delta to "
+            "immutable plan ports",
+        )
+    if trusted_dependency_blocker:
+        return _result(
+            "dependency_blocked",
+            gate or "dependency",
+            "dependency_owner",
+            "escalate_dependency",
+            "admitted verification result is blocked on a non-implementation "
+            "dependency",
+        )
 
     # K2: YAML event-type routing has priority over text heuristics, but not
     # over a producer-owned structured root cause.

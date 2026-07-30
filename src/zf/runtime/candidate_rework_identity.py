@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
+
+from zf.core.events.module_parity import is_module_parity_scan_completed_event
 
 
 _AUTHORITATIVE_GENERATION_EVENTS = frozenset({
@@ -11,6 +14,53 @@ _AUTHORITATIVE_GENERATION_EVENTS = frozenset({
     "candidate.ready",
     "fanout.started",
 })
+
+_CANDIDATE_REWORK_IDENTITY_KEYS = (
+    "workflow_run_id",
+    "flow_kind",
+    "request_kind",
+    "request_id",
+    "requirement_spec_ref",
+    "requirement_spec_digest",
+    "workflow_proposal_ref",
+    "workflow_proposal_digest",
+    "effective_config_ref",
+    "effective_config_digest",
+    "run_contract_ref",
+    "run_contract_digest",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+    "artifact_package_mode",
+    "artifact_package_status",
+    "plan_revision",
+    "task_map_generation",
+    "project_adapter_ref",
+    "skill_adapter_plan_ref",
+)
+
+
+@dataclass(frozen=True)
+class _CandidateClosure:
+    index: int
+    event_id: str
+    event_type: str
+    pdd_id: str
+    trace_id: str
+    target_ref: str
+    candidate_ref: str
+
+
+def _candidate_rework_identity_payload(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: payload[key]
+        for key in _CANDIDATE_REWORK_IDENTITY_KEYS
+        if payload.get(key) not in (None, "", [], {})
+    }
 
 
 def _pdd_from_event(
@@ -73,6 +123,125 @@ def _candidate_generation_stale(
         if generation and later_generation and generation != later_generation:
             return True
     return False
+
+
+def _candidate_success_closures(
+    events: list,
+    *,
+    pdd_by_fanout_id: dict[str, str],
+) -> list[_CandidateClosure]:
+    closures: list[_CandidateClosure] = []
+    for idx, event in enumerate(events):
+        event_type = str(getattr(event, "type", "") or "")
+        payload = getattr(event, "payload", {}) or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if not _is_candidate_success_closure(event_type, payload):
+            continue
+        target_ref = _candidate_scope_ref(payload)
+        closures.append(_CandidateClosure(
+            index=idx,
+            event_id=str(getattr(event, "id", "") or ""),
+            event_type=event_type,
+            pdd_id=_pdd_from_event(
+                payload,
+                target_ref,
+                pdd_by_fanout_id=pdd_by_fanout_id,
+            ),
+            trace_id=str(
+                payload.get("trace_id")
+                or getattr(event, "correlation_id", "")
+                or ""
+            ).strip(),
+            target_ref=target_ref,
+            candidate_ref=str(payload.get("candidate_ref") or "").strip(),
+        ))
+    return closures
+
+
+def _candidate_failure_superseded(
+    event: object,
+    payload: dict[str, Any],
+    event_idx: int,
+    *,
+    pdd_by_fanout_id: dict[str, str],
+    success_closures: list[_CandidateClosure],
+) -> bool:
+    if not success_closures:
+        return False
+    target_ref = _candidate_scope_ref(payload)
+    failure_pdd = _pdd_from_event(
+        payload,
+        target_ref,
+        pdd_by_fanout_id=pdd_by_fanout_id,
+    )
+    failure_trace = str(
+        payload.get("trace_id") or getattr(event, "correlation_id", "") or ""
+    ).strip()
+    failure_candidate = str(payload.get("candidate_ref") or "").strip()
+    if not (failure_pdd or failure_trace or target_ref or failure_candidate):
+        return False
+    for closure in success_closures:
+        if closure.index <= event_idx:
+            continue
+        if _candidate_closure_matches_failure(
+            closure,
+            pdd_id=failure_pdd,
+            trace_id=failure_trace,
+            target_ref=target_ref,
+            candidate_ref=failure_candidate,
+        ):
+            return True
+    return False
+
+
+def _is_candidate_success_closure(
+    event_type: str,
+    payload: dict[str, Any],
+) -> bool:
+    if is_module_parity_scan_completed_event(event_type):
+        return (
+            "open_p0_p1_gap_count" in payload
+            and _safe_int(payload.get("open_p0_p1_gap_count")) == 0
+        )
+    if event_type == "module.parity.closed":
+        return True
+    return event_type in {
+        "candidate.ready",
+        "candidate.quality.passed",
+        "verify.passed",
+        "judge.passed",
+    }
+
+
+def _candidate_closure_matches_failure(
+    closure: _CandidateClosure,
+    *,
+    pdd_id: str,
+    trace_id: str,
+    target_ref: str,
+    candidate_ref: str,
+) -> bool:
+    closure_refs = {
+        ref
+        for ref in (closure.target_ref, closure.candidate_ref)
+        if ref
+    }
+    failure_refs = {
+        ref
+        for ref in (target_ref, candidate_ref)
+        if ref
+    }
+    pdd_match = bool(pdd_id and closure.pdd_id and pdd_id == closure.pdd_id)
+    trace_match = bool(trace_id and closure.trace_id and trace_id == closure.trace_id)
+    ref_match = bool(closure_refs and failure_refs and closure_refs & failure_refs)
+    if pdd_id and closure.pdd_id and not pdd_match:
+        return False
+    if pdd_match and (trace_match or ref_match or not trace_id or not closure.trace_id):
+        return True
+    if trace_match and (ref_match or not pdd_id or not closure.pdd_id):
+        return True
+    return ref_match and (pdd_match or trace_match)
 
 
 def _pdd_by_fanout_id(events: list) -> dict[str, str]:

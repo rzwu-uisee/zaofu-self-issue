@@ -51,6 +51,25 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     event_contract.set_defaults(func=_run_event_contract)
 
+    task_attempt = sub.add_parser(
+        "task-attempt",
+        help="Report TaskAttempt shadow-to-enforce readiness",
+    )
+    task_attempt.add_argument("--path", type=str, default=None, help="Path to zf.yaml")
+    task_attempt.add_argument("--json", action="store_true", dest="as_json")
+    task_attempt.add_argument(
+        "--min-comparisons",
+        type=int,
+        default=20,
+        help="Minimum matched shadow comparisons required",
+    )
+    task_attempt.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="Exit non-zero unless promotion is ready or already enforced",
+    )
+    task_attempt.set_defaults(func=_run_task_attempt)
+
     parser.set_defaults(func=_run)
 
 
@@ -194,6 +213,43 @@ def _run_event_contract(args: argparse.Namespace) -> int:
     else:
         _print_event_contract_report(report)
     return 0 if report["ok"] else 1
+
+
+def _run_task_attempt(args: argparse.Namespace) -> int:
+    try:
+        project_root, state_dir, config = _load_runtime_from_path(
+            Path(args.path) if getattr(args, "path", None) else None
+        )
+        events = (
+            event_log_from_project(state_dir, config=config).read_all()
+            if state_dir.exists()
+            else []
+        )
+        from zf.runtime.task_attempt_readiness import (
+            build_task_attempt_readiness,
+        )
+
+        report = build_task_attempt_readiness(
+            state_dir,
+            events,
+            mode=config.workflow.task_attempt.mode,
+            min_comparisons=int(args.min_comparisons),
+        )
+    except (ConfigError, RuntimeError, OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    report["project_root"] = str(project_root)
+    report["state_dir"] = str(state_dir)
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_task_attempt_report(report)
+    if not args.require_ready:
+        return 0
+    return 0 if (
+        report.get("promotion_candidate")
+        or report.get("decision") == "already_enforced"
+    ) else 1
 
 
 def _load_runtime():
@@ -371,6 +427,36 @@ def _print_event_contract_report(report: dict[str, Any]) -> None:
             )
     if not errors and not warnings:
         print("OK: event contracts clean")
+
+
+def _print_task_attempt_report(report: dict[str, Any]) -> None:
+    summary = report.get("summary", {})
+    print("ZF TaskAttempt Readiness")
+    print(f"project_root: {report.get('project_root', '')}")
+    print(f"state_dir: {report.get('state_dir', '')}")
+    print(f"mode: {report.get('mode', '')}")
+    print(f"decision: {report.get('decision', '')}")
+    print(
+        "summary: "
+        f"attempts={summary.get('attempts', 0)} "
+        f"comparisons={summary.get('comparisons', 0)} "
+        f"matched={summary.get('matched_comparisons', 0)} "
+        f"blockers={summary.get('blockers', 0)}"
+    )
+    blockers = report.get("blockers") or []
+    if blockers:
+        print("Blockers:")
+        for item in blockers:
+            print(
+                "  - "
+                f"{item.get('code', 'unknown')} "
+                f"count={item.get('count', 0)}: "
+                f"{item.get('message', '')}"
+            )
+    elif report.get("decision") == "candidate":
+        print("OK: mechanical promotion evidence is complete")
+    elif report.get("decision") == "already_enforced":
+        print("OK: TaskAttempt is already enforced")
 
 
 def _run_probe(argv: list[str], *, timeout_s: float) -> dict[str, Any]:

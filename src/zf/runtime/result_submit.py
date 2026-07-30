@@ -261,6 +261,19 @@ class SemanticResultSubmitService:
         profile = self.registry.profile(profile_id, revision)
         wrapped = semantic.get(profile.semantic_field)
         if isinstance(wrapped, Mapping):
+            sibling_fields = sorted(
+                str(key)
+                for key in semantic
+                if key != profile.semantic_field
+            )
+            if sibling_fields:
+                raise ResultSubmitError(
+                    "ambiguous_semantic_result",
+                    "semantic result must be either the profile body or an exact "
+                    f"{profile.semantic_field!r} wrapper; sibling fields would be "
+                    "discarded: "
+                    + ", ".join(sibling_fields),
+                )
             semantic = dict(wrapped)
         event_type = self._canonical_event_type(request, semantic)
         identity = dict(request.get("result_identity") or {})
@@ -277,7 +290,7 @@ class SemanticResultSubmitService:
         })
         source_event_id = ZfEvent(type=event_type).id
         try:
-            event, _adapted = self.registry.adapt_semantic_result(
+            event, adapted = self.registry.adapt_semantic_result(
                 self.state_dir,
                 profile_id=profile_id,
                 revision=revision,
@@ -291,7 +304,10 @@ class SemanticResultSubmitService:
             )
         except ControlResultAdapterError as exc:
             raise ResultSubmitError("profile_adapter_invalid", str(exc)) from exc
-        event.payload.update(_compatibility_projection(profile.semantic_field, event.payload))
+        event.payload.update(_compatibility_projection(
+            profile.semantic_field,
+            {profile.semantic_field: adapted.payload},
+        ))
         policy = self._input_policy(request)
         outcome = self.admission.report_legacy_result(
             event,
@@ -303,6 +319,8 @@ class SemanticResultSubmitService:
                 "request_hash": str(operation.get("request_hash") or ""),
             },
             input_policy=policy,
+            require_semantic_submit=True,
+            semantic_submit=True,
         )
         if not outcome.admitted:
             codes = ", ".join(str(item.get("code") or "invalid") for item in outcome.issues)
@@ -314,6 +332,7 @@ class SemanticResultSubmitService:
         event.payload.update({
             "control_result_ref": dict(outcome.control_result_ref or {}),
             "call_result_envelope_ref": dict(outcome.envelope_ref or {}),
+            "semantic_submit_admission_event_id": outcome.admitted_event_id,
             "semantic_result_profile": {
                 "profile_id": profile_id,
                 "revision": revision,
@@ -479,16 +498,41 @@ def _compatibility_projection(field: str, payload: Mapping[str, Any]) -> dict[st
     result = result if isinstance(result, Mapping) else {}
     verdict = str(result.get("verdict") or "passed").lower()
     status = "passed" if verdict == "passed" else "failed"
-    return {
-        "status": "completed",
-        "summary": str(result.get("summary") or ""),
-        "report": {
+    report = (
+        dict(result)
+        if field == "report"
+        else {
             "status": status,
             "summary": str(result.get("summary") or ""),
             "findings": list(result.get("findings") or []),
-            "evidence_refs": list(result.get("evidence_refs") or []),
+            "evidence_refs": list(
+                result.get("verification_evidence_refs")
+                or result.get("evidence_refs")
+                or []
+            ),
             "recommendation": "approve" if verdict == "passed" else "reject",
-        },
+        }
+    )
+    artifact_evidence = (
+        [
+            str(item.get("ref") or "")
+            for item in result.get("artifacts") or []
+            if isinstance(item, Mapping)
+            and str(item.get("ref") or "").strip()
+        ]
+        if field == "artifact_delivery_result"
+        else []
+    )
+    evidence_refs = list(
+        result.get("verification_evidence_refs")
+        or result.get("evidence_refs")
+        or []
+    )
+    evidence_refs = list(dict.fromkeys([*evidence_refs, *artifact_evidence]))
+    return {
+        "status": "completed",
+        "summary": str(result.get("summary") or ""),
+        "report": {**report, "evidence_refs": evidence_refs},
         **(
             {
                 "source_commit": str(result.get("target_commit") or ""),

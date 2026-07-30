@@ -21,7 +21,49 @@ from zf.runtime.workflow_anchor import (
 from zf.runtime.workflow_start import WorkflowStartService
 
 
+WORKFLOW_CONTROL_ACTIONS = frozenset({
+    "run-cancel",
+    "run-pause",
+    "run-resume",
+    "task-workflow-start",
+    "workflow-cancel",
+    "workflow-invoke",
+    "workflow-reject",
+    "workflow-request",
+    "workflow-start",
+    "workflow-submit",
+})
+
+
 class WorkflowRequestActionsMixin:
+    def _dispatch_workflow_control_action(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        if action in {"run-pause", "run-resume", "run-cancel"}:
+            handler = self._run_control_action
+        elif action in {"workflow-start", "task-workflow-start"}:
+            handler = self._workflow_start
+            action = "workflow-start"
+        else:
+            handler = {
+                "workflow-cancel": self._workflow_cancel,
+                "workflow-invoke": self._workflow_invoke,
+                "workflow-reject": self._workflow_reject,
+                "workflow-request": self._workflow_request,
+                "workflow-submit": self._workflow_submit,
+            }[action]
+        return handler(
+            requested=requested,
+            action=action,
+            requested_action=requested_action,
+            payload=payload,
+        )
+
     def _workflow_start(
         self,
         *,
@@ -144,6 +186,20 @@ class WorkflowRequestActionsMixin:
                     "intake_ref": str(
                         request_result.get("intake_ref") or ""
                     ),
+                    "request_id": str(
+                        request_result.get("request_id") or ""
+                    ),
+                    "proposal_ref": (
+                        dict(request_result.get("proposal_ref") or {})
+                        if isinstance(
+                            request_result.get("proposal_ref"),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    "proposal_digest": str(
+                        request_result.get("proposal_digest") or ""
+                    ),
                 },
             )
             result["workflow_request"] = {
@@ -153,6 +209,8 @@ class WorkflowRequestActionsMixin:
                     "intake_ref",
                     "workflow_input_manifest_ref",
                     "submit_preview_ref",
+                    "proposal_ref",
+                    "proposal_digest",
                 )
             }
         else:
@@ -250,12 +308,97 @@ class WorkflowRequestActionsMixin:
             ),
             output=self.project_root / "docs" / "intake" / f"{request_id}.md",
         )
+        from zf.runtime.workflow_requests import (
+            load_workflow_request,
+            revise_workflow_request,
+        )
+
+        request_projection = load_workflow_request(self.state_dir, request_id)
+        if not bool(request_projection.get("confirmed")):
+            request_projection = revise_workflow_request(
+                self.state_dir,
+                Path(str(intake["workflow_input_manifest_ref"])),
+                actor=self.actor,
+                confirm=True,
+                writer=self.writer,
+            )
+        synthesis_backend = _required_text(payload, "synthesis_backend")
+        if synthesis_backend:
+            from zf.runtime.workflow_synthesis import (
+                WorkflowSynthesisError,
+                enqueue_workflow_synthesis,
+            )
+
+            try:
+                synthesis = enqueue_workflow_synthesis(
+                    state_dir=self.state_dir,
+                    project_root=self.project_root,
+                    config=self.config,
+                    writer=self.writer,
+                    request_id=request_id,
+                    actor=self.actor,
+                    backend=synthesis_backend,
+                    operation_context={
+                        "config_ref": str(config_ref),
+                        "intake_ref": str(intake["intake_ref"]),
+                        "task_id": _required_text(payload, "task_id"),
+                        "pattern_id": _required_text(payload, "pattern_id"),
+                        "requested_by": self.actor,
+                        "reason": (
+                            _required_text(payload, "reason")
+                            or "workflow request proposal"
+                        ),
+                        "allow_missing_env": bool(
+                            payload.get("allow_missing_env")
+                        ),
+                    },
+                    causation_id=requested.id,
+                )
+            except WorkflowSynthesisError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="synthesis_enqueue_failed",
+                )
+            return {
+                "_status_code": 202,
+                "ok": True,
+                "status": "synthesis_queued",
+                "action": action,
+                "requested_action": requested_action,
+                "request_id": request_id,
+                "intake_ref": str(intake["intake_ref"]),
+                "workflow_input_manifest_ref": str(
+                    intake["workflow_input_manifest_ref"]
+                ),
+                "request_projection_ref": str(
+                    intake.get("request_projection_ref") or ""
+                ),
+                "synthesis_operation_id": synthesis.operation_id,
+                "synthesis_request_hash": synthesis.request_hash,
+                "operation_status": synthesis.status,
+                "operation_ref": (
+                    f"/api/projects/{self.config.project.name}"
+                    f"/workflow-operations/{synthesis.operation_id}"
+                ),
+                "request_ref": (
+                    f"/api/projects/{self.config.project.name}"
+                    f"/workflow-requests/{request_id}"
+                ),
+            }
+        flow_kind = _required_text(payload, "kind")
         preview = build_flow_submit_preview(
             config_path=config_ref,
             intake_path=Path(str(intake["intake_ref"])),
-            flow_kind=_required_text(payload, "kind"),
+            flow_kind=flow_kind,
             task_id=_required_text(payload, "task_id"),
-            pattern_id=_required_text(payload, "pattern_id"),
+            pattern_id=(
+                _required_text(payload, "pattern_id")
+            ),
             requested_by=self.actor,
             reason=_required_text(payload, "reason") or "workflow request proposal",
             allow_missing_env=bool(payload.get("allow_missing_env")),
@@ -272,6 +415,21 @@ class WorkflowRequestActionsMixin:
             "workflow_input_manifest_ref": str(intake["workflow_input_manifest_ref"]),
             "request_projection_ref": str(intake.get("request_projection_ref") or ""),
             "submit_preview_ref": str(preview.get("submit_preview_ref") or ""),
+            "proposal_ref": (
+                dict(preview.get("proposal_ref") or {})
+                if isinstance(preview.get("proposal_ref"), dict)
+                else {}
+            ),
+            "proposal_digest": str(
+                (preview.get("proposal") or {}).get("proposal_digest") or ""
+            ),
+            "proposal": (
+                dict(preview.get("proposal") or {})
+                if isinstance(preview.get("proposal"), dict)
+                else {}
+            ),
+            "synthesis_operation_id": "",
+            "synthesis_ref": {},
             "blockers": list(preview.get("blockers") or []),
         }
 
@@ -304,6 +462,69 @@ class WorkflowRequestActionsMixin:
                 status_code=422,
                 status="invalid_payload",
             )
+        request_id = _required_text(payload, "request_id")
+        proposal_ref = payload.get("proposal_ref")
+        proposal_digest = _required_text(payload, "proposal_digest")
+        if (
+            not request_id
+            or not isinstance(proposal_ref, dict)
+            or not proposal_digest
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=(
+                    "request_id, proposal_ref, and proposal_digest are "
+                    "required for exact Workflow Proposal approval"
+                ),
+                status_code=422,
+                status="invalid_payload",
+            )
+        from zf.runtime.workflow_requests import (
+            WorkflowRequestError,
+            validate_current_workflow_proposal,
+        )
+
+        try:
+            _projection, proposal = validate_current_workflow_proposal(
+                self.state_dir,
+                request_id=request_id,
+                proposal_ref=proposal_ref,
+                proposal_digest=proposal_digest,
+            )
+        except WorkflowRequestError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=str(exc),
+                status_code=409,
+                status="stale_proposal",
+            )
+        if (
+            str(proposal.get("change_mode") or "") == "config_change"
+            and not any(
+                event.type == "workflow.config.change.applied"
+                and str(event.payload.get("proposal_digest") or "")
+                == proposal_digest
+                for event in self.writer.event_log.read_all()
+            )
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=(
+                    "config-changing Workflow Proposal must reach "
+                    "workflow.config.change.applied before submit"
+                ),
+                status_code=409,
+                status="config_apply_required",
+            )
         intake_path = Path(intake_ref).expanduser()
         if not intake_path.is_absolute():
             intake_path = self.project_root / intake_path
@@ -319,7 +540,7 @@ class WorkflowRequestActionsMixin:
             task_id=_required_text(payload, "task_id"),
             pattern_id=_required_text(payload, "pattern_id"),
             requested_by=self.actor,
-            reason=_required_text(payload, "reason") or "approved workflow request",
+            reason=_required_text(payload, "reason") or "workflow request proposal",
             allow_missing_env=bool(payload.get("allow_missing_env")),
         )
         accepted = result.get("status") != "STOP"
@@ -333,6 +554,199 @@ class WorkflowRequestActionsMixin:
             "workflow_invoke_event_id": str(result.get("workflow_invoke_event_id") or ""),
             "event_ids": list(result.get("event_ids") or []),
             "blockers": list(result.get("blockers") or []),
+        }
+
+    def _workflow_cancel(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        request_id = _required_text(payload, "request_id")
+        operation_id = _required_text(payload, "operation_id")
+        request_hash = _required_text(payload, "request_hash")
+        if not request_id or not operation_id or not request_hash:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=(
+                    "request_id, operation_id, and request_hash are required"
+                ),
+                status_code=422,
+                status="invalid_payload",
+            )
+        from zf.runtime.workflow_operation import (
+            TERMINAL_OPERATION_STATUSES,
+            WorkflowOperationService,
+            load_workflow_operation,
+        )
+        from zf.runtime.workflow_requests import load_workflow_request
+
+        request_projection = load_workflow_request(
+            self.state_dir,
+            request_id,
+        )
+        if (
+            str(request_projection.get("synthesis_operation_id") or "")
+            != operation_id
+            or str(request_projection.get("synthesis_request_hash") or "")
+            != request_hash
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason="workflow synthesis cancellation identity is stale",
+                status_code=409,
+                status="stale_operation",
+            )
+        operation = load_workflow_operation(
+            self.writer.event_log,
+            operation_id,
+        ) or {}
+        status = str(operation.get("status") or "")
+        if (
+            str(operation.get("operation_type") or "")
+            != "workflow_synthesis"
+            or str(operation.get("request_hash") or "") != request_hash
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason="workflow synthesis operation is unavailable",
+                status_code=409,
+                status="stale_operation",
+            )
+        if status == "cancelled":
+            return {
+                "ok": True,
+                "status": "cancelled",
+                "action": action,
+                "requested_action": requested_action,
+                "request_id": request_id,
+                "operation_id": operation_id,
+                "replayed": True,
+            }
+        if status in TERMINAL_OPERATION_STATUSES:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=(
+                    "workflow synthesis operation is already terminal: "
+                    f"{status}"
+                ),
+                status_code=409,
+                status="operation_terminal",
+            )
+        reason = (
+            _required_text(payload, "reason")
+            or "cancelled by operator"
+        )
+        WorkflowOperationService(
+            state_dir=self.state_dir,
+            event_log=self.writer.event_log,
+            event_writer=self.writer,
+        ).cancel(
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=str(operation.get("workflow_run_id") or ""),
+            reason=reason,
+            causation_id=requested.id,
+            correlation_id=request_id,
+        )
+        self.writer.append(ZfEvent(
+            type="workflow.synthesis.cancelled",
+            actor=self.actor,
+            causation_id=requested.id,
+            correlation_id=request_id,
+            payload={
+                "request_id": request_id,
+                "operation_id": operation_id,
+                "request_hash": request_hash,
+                "reason": reason,
+            },
+        ))
+        return {
+            "ok": True,
+            "status": "cancelled",
+            "action": action,
+            "requested_action": requested_action,
+            "request_id": request_id,
+            "operation_id": operation_id,
+            "replayed": False,
+        }
+
+    def _workflow_reject(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        request_id = _required_text(payload, "request_id")
+        proposal_ref = payload.get("proposal_ref")
+        proposal_digest = _required_text(payload, "proposal_digest")
+        if (
+            not request_id
+            or not isinstance(proposal_ref, dict)
+            or not proposal_digest
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=(
+                    "request_id, proposal_ref, and proposal_digest are "
+                    "required for Workflow Proposal rejection"
+                ),
+                status_code=422,
+                status="invalid_payload",
+            )
+        from zf.runtime.workflow_requests import (
+            WorkflowRequestError,
+            reject_workflow_proposal,
+        )
+
+        try:
+            projection = reject_workflow_proposal(
+                self.state_dir,
+                request_id=request_id,
+                proposal_ref=proposal_ref,
+                proposal_digest=proposal_digest,
+                reason=_required_text(payload, "reason"),
+                actor=self.actor,
+                writer=self.writer,
+            )
+        except WorkflowRequestError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=None,
+                reason=str(exc),
+                status_code=409,
+                status="stale_proposal",
+            )
+        return {
+            "_status_code": 200,
+            "ok": True,
+            "status": "rejected",
+            "action": action,
+            "requested_action": requested_action,
+            "request_id": request_id,
+            "proposal_digest": proposal_digest,
+            "request": projection,
         }
 
 

@@ -226,6 +226,20 @@ def render_workflow_input_briefing_section(payload: dict[str, Any]) -> str:
     )
 
 
+def compact_workflow_input_payload_for_briefing(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove refs duplicated by Thin Judge's exact controlled-read list."""
+
+    if (
+        str(payload.get("output_profile_id") or "")
+        == "thin-judge-goal-closure"
+        and payload.get("required_reads")
+    ):
+        return {**payload, "artifact_refs": []}
+    return payload
+
+
 def _request_summary(payload: dict[str, Any]) -> dict[str, Any]:
     keep = {
         "channel_id",

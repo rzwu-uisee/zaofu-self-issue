@@ -293,6 +293,7 @@ def _invoke_claude(
     )
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     tool_names: list[str] = []
+    read_paths: list[str] = []
     final: dict[str, Any] | None = None
     reported_session = session_id
     for row in rows:
@@ -301,7 +302,21 @@ def _invoke_claude(
         content = message.get("content") if isinstance(message.get("content"), list) else []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "tool_use":
-                tool_names.append(str(item.get("name") or ""))
+                tool_name = str(item.get("name") or "")
+                tool_names.append(tool_name)
+                tool_input = (
+                    item.get("input")
+                    if isinstance(item.get("input"), dict)
+                    else {}
+                )
+                if tool_name == "Read":
+                    read_path = str(
+                        tool_input.get("file_path")
+                        or tool_input.get("path")
+                        or ""
+                    )
+                    if read_path:
+                        read_paths.append(read_path)
         structured = row.get("structured_output")
         if isinstance(structured, dict):
             final = structured
@@ -315,6 +330,7 @@ def _invoke_claude(
         "backend": "claude-code",
         "provider_session_id": reported_session,
         "tool_names": tool_names,
+        "read_paths": read_paths,
         "result_rows": len(rows),
         "raw_stdout": result.stdout,
         "stderr": result.stderr,
@@ -328,33 +344,54 @@ def _invoke_codex(
     prompt: str,
     schema: dict[str, Any],
     timeout: int,
+    skip_git_repo_check: bool = False,
+    require_read_commands: bool = True,
+    model: str = "",
+    reasoning_effort: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     schema_path = state_dir / "provider-output-schema.json"
     output_path = state_dir / "provider-last-message.json"
     schema_path.write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    command = [
+        "codex",
+        "exec",
+        *(
+            ["--skip-git-repo-check"]
+            if skip_git_repo_check
+            else []
+        ),
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        *(
+            ["--model", model]
+            if model
+            else []
+        ),
+        *(
+            ["--config", f'model_reasoning_effort="{reasoning_effort}"']
+            if reasoning_effort
+            else []
+        ),
+        "--sandbox",
+        "read-only",
+        "--output-schema",
+        str(schema_path),
+        "--output-last-message",
+        str(output_path),
+        "-C",
+        str(project_root),
+        prompt,
+    ]
     result = _run(
-        [
-            "codex",
-            "exec",
-            "--json",
-            "--ephemeral",
-            "--ignore-user-config",
-            "--sandbox",
-            "read-only",
-            "--output-schema",
-            str(schema_path),
-            "--output-last-message",
-            str(output_path),
-            "-C",
-            str(project_root),
-            prompt,
-        ],
+        command,
         cwd=project_root,
         timeout=timeout,
     )
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     thread_id = ""
     commands: list[str] = []
+    file_changes: list[dict[str, Any]] = []
     for row in rows:
         if row.get("type") == "thread.started":
             thread_id = str(row.get("thread_id") or "")
@@ -364,18 +401,27 @@ def _invoke_codex(
             commands.append(command)
             if int(item.get("exit_code") or 0) != 0:
                 raise AssertionError(f"Codex Judge read command failed: {command}")
+        elif item.get("type") in {"file_change", "file_write"}:
+            file_changes.append(dict(item))
     forbidden = re.compile(
         r"(?:pytest|npm|pnpm|yarn|\bmake\b|git\s+(?:add|commit|checkout|merge|reset)|"
         r"sed\s+-i|\brm\b|\bmv\b|\bcp\b|\btee\b|(?:^|\s)>(?:>|\s))"
     )
     unsafe = [command for command in commands if forbidden.search(command)]
-    if not commands or unsafe:
-        raise AssertionError(f"Codex Judge tool audit failed: commands={commands}, unsafe={unsafe}")
+    if (require_read_commands and not commands) or unsafe or file_changes:
+        raise AssertionError(
+            "Codex Judge tool audit failed: "
+            f"commands={commands}, unsafe={unsafe}, "
+            f"file_changes={file_changes}",
+        )
     final = _extract_json(output_path.read_text(encoding="utf-8"))
     return final, {
         "backend": "codex",
         "provider_session_id": thread_id,
+        "requested_model": model,
+        "requested_reasoning_effort": reasoning_effort,
         "commands": commands,
+        "file_changes": file_changes,
         "result_rows": len(rows),
         "raw_stdout": result.stdout,
         "stderr": result.stderr,

@@ -229,6 +229,37 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
     active_task = _active_task_by_instance(state_dir, config=config)
     heartbeat = _last_event_by_actor(state_dir, config=config)
     cost_by_instance = _cost_by_instance(state_dir)
+    activation_by_instance: dict[str, dict] = {}
+    if config is not None:
+        from zf.runtime.flow_role_activation import (
+            flow_role_activation_projection,
+        )
+
+        activation_by_instance = flow_role_activation_projection(
+            config,
+            [
+                event
+                for _, event in _events_with_seq(state_dir, config=config)
+            ],
+            active_instance_ids=set(sessions),
+        )
+
+    def activation(instance_id: str) -> dict:
+        return dict(activation_by_instance.get(instance_id) or {
+            "declared": False,
+            "required": False,
+            "active": instance_id in sessions,
+            "failed": False,
+            "activation_state": (
+                "active" if instance_id in sessions else "declared"
+            ),
+            "activation_reason": "",
+            "activation_id": "",
+            "workflow_operation_id": "",
+            "workflow_run_id": "",
+            "flow_kind": "",
+            "failure_reason": "",
+        })
 
     roles = list(config.roles) if config is not None else []
     if not roles:
@@ -255,6 +286,7 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
                 "spawned_at": m.get("spawned_at", ""),
                 "last_heartbeat": heartbeat.get(instance_id, ""),
                 "cost": cost,
+                "activation": activation(instance_id),
             })
         return out
 
@@ -284,6 +316,7 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             "spawned_at": m.get("spawned_at", ""),
             "last_heartbeat": heartbeat.get(instance_id, ""),
             "cost": cost,
+            "activation": activation(instance_id),
         })
     for instance_id, m in sorted(meta.items()):
         if instance_id in configured_ids:
@@ -311,6 +344,7 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             "spawned_at": m.get("spawned_at", ""),
             "last_heartbeat": heartbeat.get(instance_id, ""),
             "cost": cost,
+            "activation": activation(instance_id),
         })
     return out
 

@@ -149,6 +149,24 @@ export interface WorkflowGraph {
   counts: Record<string, number>;
 }
 
+export interface WorkflowRequestsPage {
+  ok: boolean;
+  count: number;
+  items: Array<Record<string, unknown>>;
+}
+
+export interface WorkflowRequestDetail {
+  ok: boolean;
+  status: string;
+  result: Record<string, unknown>;
+  requirement: Record<string, unknown>;
+  proposal: Record<string, unknown>;
+  artifacts: Record<string, unknown>;
+  lifecycle: Record<string, unknown>;
+  operation: Record<string, unknown>;
+  links: Record<string, unknown>;
+}
+
 export interface Feature {
   id: string;
   title: string;

@@ -65,13 +65,18 @@ def transport():
     return TmuxTransport(TmuxSession(session_name="t", dry_run=True))
 
 
-def _make_usage(ratio: float, window: int = 200_000) -> UsageReport:
+def _make_usage(
+    ratio: float,
+    window: int = 200_000,
+    *,
+    timestamp: str = "2026-04-15T10:00:00Z",
+) -> UsageReport:
     return UsageReport(
         effective_input_tokens=int(ratio * window),
         output_tokens=100,
         model_context_window=window,
         ratio=ratio,
-        timestamp="2026-04-15T10:00:00Z",
+        timestamp=timestamp,
         raw={"input_tokens": int(ratio * window)},
     )
 
@@ -164,6 +169,70 @@ class TestHealthyInstance:
         assert "worker.context.compact.requested" not in types
         assert "worker.recycling" not in types
         assert orch._instance_state.get("dev", "healthy") == "healthy"
+
+    def test_warning_band_dedupes_new_usage_samples_until_rearmed(
+        self, state_dir, transport
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[
+                RoleConfig(
+                    name="dev",
+                    backend="claude-code",
+                    context_warning_threshold=0.6,
+                    context_compact_threshold=0.7,
+                    context_hard_cap=0.9,
+                ),
+            ],
+        )
+        orch = Orchestrator(state_dir, cfg, transport)
+        reader = _FakeReader(_make_usage(0.65))
+        orch._session_readers = {"claude-code": reader}
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).get_or_create("dev")
+        TaskStore(state_dir / "kanban.json").add(
+            Task(id="T1", title="x", status="in_progress", assigned_to="dev"),
+        )
+
+        orch._check_context_thresholds()
+        reader._report = _make_usage(
+            0.65,
+            timestamp="2026-04-15T10:00:01Z",
+        )
+        orch._check_context_thresholds()
+
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert len([
+            event
+            for event in events
+            if event.type == "worker.context.warning"
+        ]) == 1
+        assert len([
+            event
+            for event in events
+            if event.type == "agent.usage"
+        ]) == 2
+
+        reader._report = _make_usage(
+            0.55,
+            timestamp="2026-04-15T10:00:02Z",
+        )
+        orch._check_context_thresholds()
+        reader._report = _make_usage(
+            0.65,
+            timestamp="2026-04-15T10:00:03Z",
+        )
+        orch._check_context_thresholds()
+
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert len([
+            event
+            for event in events
+            if event.type == "worker.context.warning"
+        ]) == 2
 
 
 class TestIdleRecyclingTrigger:
@@ -433,6 +502,45 @@ class TestFanoutChildRecycle:
         assert warning.payload["idle"] is False
         assert warning.payload["active_fanout"]["child_id"] == "scan-runtime"
 
+    def test_active_fanout_synth_blocks_idle_recycle(
+        self, state_dir, claude_config, transport
+    ):
+        orch = Orchestrator(state_dir, claude_config, transport)
+        orch._session_readers = {
+            "claude-code": _FakeReader(_make_usage(0.75)),
+        }
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).get_or_create("dev")
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(
+            type="fanout.synth.dispatched",
+            actor="zf-cli",
+            payload={
+                "fanout_id": "fanout-plan-1",
+                "trace_id": "trace-plan",
+                "stage_id": "plan",
+                "child_id": "synth",
+                "run_id": "run-fanout-plan-1-synth",
+                "role_instance": "dev",
+            },
+            correlation_id="trace-plan",
+        ))
+
+        orch._check_context_thresholds()
+        orch._check_pending_recycles()
+
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert not any(event.type == "worker.recycling" for event in events)
+        assert orch._instance_state["dev"] == "pending_recycle"
+        warning = [
+            event
+            for event in events
+            if event.type == "worker.context.warning"
+        ][-1]
+        assert warning.payload["idle"] is False
+        assert warning.payload["active_fanout"]["child_id"] == "synth"
+
     def test_recycle_reinjects_active_fanout_briefing(
         self, state_dir, claude_config
     ):
@@ -473,6 +581,56 @@ class TestFanoutChildRecycle:
         assert "worker.recovery.injected" in types
         injected = [event for event in events if event.type == "worker.recovery.injected"][-1]
         assert injected.payload["snapshot_ref"] == ".zf/snapshots/fanout-scan-1/run-fanout-scan-1-scan-runtime/runtime-snapshot.json"
+        assert not any(
+            event.type == "worker.recovery.skipped"
+            and event.payload.get("reason") == "idle_after_recycle"
+            for event in events
+        )
+        assert orch._last_worker_state["dev"] == "busy"
+
+    def test_recycle_reinjects_active_fanout_synth_briefing(
+        self, state_dir, claude_config
+    ):
+        transport = _RecordingRecycleTransport()
+        orch = Orchestrator(
+            state_dir,
+            claude_config,
+            transport,
+        )  # type: ignore[arg-type]
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).get_or_create("dev")
+        briefing_dir = state_dir / "briefings"
+        briefing_dir.mkdir()
+        briefing_path = briefing_dir / "dev-fanout-plan-1-synth.md"
+        briefing_path.write_text("fanout synth briefing\n", encoding="utf-8")
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(
+            type="fanout.synth.dispatched",
+            actor="zf-cli",
+            payload={
+                "fanout_id": "fanout-plan-1",
+                "trace_id": "trace-plan",
+                "stage_id": "plan",
+                "child_id": "synth",
+                "run_id": "run-fanout-plan-1-synth",
+                "role_instance": "dev",
+                "briefing_path": str(briefing_path),
+            },
+            correlation_id="trace-plan",
+        ))
+
+        orch._start_recycle(claude_config.roles[0])
+
+        assert transport.terminated == ["dev"]
+        assert transport.sent[-1][1] == briefing_path
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        injected = [
+            event
+            for event in events
+            if event.type == "worker.recovery.injected"
+        ]
+        assert injected[-1].payload["child_id"] == "synth"
         assert not any(
             event.type == "worker.recovery.skipped"
             and event.payload.get("reason") == "idle_after_recycle"

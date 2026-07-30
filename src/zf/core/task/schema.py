@@ -88,6 +88,11 @@ class TaskContract:
     spec_skip_reason: str = ""
     unknowns: list[str] = field(default_factory=list)
     review_profile: str = ""
+    # Provider-neutral Task-local execution strategy. Empty fields preserve
+    # legacy behavior and resolve through the assigned role's direct-v1
+    # default. Provider/session identity remains Attempt/Operation state.
+    execution_profile_id: str = ""
+    execution_profile_digest: str = ""
     # P1-1 (2026-04-20): per-task override for rework routing. When a
     # failure event (review.rejected / test.failed / verify.failed /
     # judge.failed / gate.failed) triggers rework, the orchestrator sends the retry to

@@ -605,6 +605,26 @@ class GoalClosureBridgeMixin:
             or payload.get("pdd_id")
             or ""
         ).strip()
+        if not goal_id:
+            try:
+                from zf.runtime.task_map import (
+                    load_task_map,
+                    resolve_artifact_file,
+                )
+
+                task_map = load_task_map(resolve_artifact_file(
+                    task_map_ref,
+                    project_root=self.project_root,
+                    state_dir=self.state_dir,
+                ))
+                goal_id = str(
+                    task_map.get("goal_id")
+                    or task_map.get("feature_id")
+                    or task_map.get("pdd_id")
+                    or ""
+                ).strip()
+            except Exception:
+                goal_id = ""
         from zf.runtime.goal_claim_set import canonical_task_map_generation
 
         generation = canonical_task_map_generation(
@@ -612,20 +632,31 @@ class GoalClosureBridgeMixin:
             task_map_digest=payload.get("task_map_digest"),
             task_map_ref=task_map_ref,
         )
+        if not workflow_run_id or not goal_id:
+            self.event_writer.append(ZfEvent(
+                type="goal.claim_set.pin.failed",
+                actor="zf-cli",
+                causation_id=event.id,
+                correlation_id=workflow_run_id,
+                payload={
+                    "workflow_run_id": workflow_run_id,
+                    "goal_id": goal_id,
+                    "task_map_ref": task_map_ref,
+                    "task_map_generation": generation,
+                    "source_event_id": event.id,
+                    "reason": "goal claim set identity requires workflow_run_id and goal_id",
+                },
+            ))
+            return False
         if any(
             existing.type == "goal.claim_set.pinned"
             and isinstance(existing.payload, dict)
-            and (
-                str(existing.payload.get("source_event_id") or "") == event.id
-                or (
-                    str(existing.payload.get("workflow_run_id") or "")
-                    == workflow_run_id
-                    and str(existing.payload.get("task_map_generation") or "")
-                    == generation
-                    and str(existing.payload.get("task_map_ref") or "")
-                    == task_map_ref
-                )
-            )
+            and str(existing.payload.get("workflow_run_id") or "")
+            == workflow_run_id
+            and str(existing.payload.get("goal_id") or "") == goal_id
+            and str(existing.payload.get("task_map_generation") or "")
+            == generation
+            and str(existing.payload.get("task_map_ref") or "") == task_map_ref
             for existing in events
         ):
             return True

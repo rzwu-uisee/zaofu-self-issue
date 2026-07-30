@@ -1,13 +1,37 @@
-# ZaoFu Quick Start
+# ZaoFu Quickstart
 
-> Audience: first-time operators installing ZaoFu, creating or opening a
-> Project in Web, and then using Kanban Agent, Channel, Research, or a delivery
-> Workflow.
+> For operators installing ZaoFu for the first time, completing Web Bootstrap,
+> creating or opening a Project, and then using the Kanban Agent with Channels,
+> Research, and delivery Workflows.
 >
-> This path was checked against the CLI, Web, and real browser E2E on
-> 2026-07-29.
+> This route was verified against the CLI, Web UI, event ledger, and real
+> browser E2E on 2026-07-29. Each animation is assembled from real Playwright
+> interaction states; the acceptance checks also inspect the API, Stores, and
+> EventLog instead of treating screenshots as runtime proof.
 
-## 0. Install and start the Dashboard
+## Completion Route
+
+```text
+Install ZaoFu
+  -> Bootstrap (installation settings)
+  -> Add/Open Project (project initialization)
+  -> Kanban Agent
+       |-> code directly
+       |-> create Channel -> multi-role discussion -> confirm Create Task proposal
+       |-> create Research Task -> Plan -> Approve -> Research Workflow
+       `-> create regular Task -> Plan -> Approve -> Delivery Workflow
+```
+
+Keep three boundaries clear:
+
+- Bootstrap does not create a Project. Project initialization does not create a
+  Task or start a Workflow.
+- A Channel is independent from a Workflow. Discussion output does not
+  automatically create a Task or ignite execution.
+- Research and delivery use the same Task-bound start path but select different
+  active routes.
+
+## 1. Install ZaoFu (Required)
 
 Prerequisites:
 
@@ -15,9 +39,13 @@ Prerequisites:
 - at least one installed and authenticated provider CLI: Codex or Claude Code;
 - the `stream-json` extra when using the Claude Code stream-json transport.
 
+Install from a source checkout and verify the CLI:
+
 ```bash
+git clone <zaofu-repository-url> /path/to/zaofu
 cd /path/to/zaofu
 uv sync --extra dev --extra web --extra stream-json
+
 uv run zf --version
 uv run zf doctor provider --backend codex
 ```
@@ -36,170 +64,238 @@ uv run --project "$ZAOFU_ROOT" zf web \
 
 Open `http://127.0.0.1:8001/`. Bind to `0.0.0.0` only on a trusted network.
 
-## 1. Complete installation onboarding
+Completion signal: the Dashboard opens at installation onboarding. This guide
+does not require creating a throwaway Project during installation.
 
-The first-run sequence has four installation-level steps:
+## 2. Bootstrap (Required)
 
-1. **Provider**: choose Codex or Claude Code as primary. When both are
-   available, Mixed team can use the other provider for an independent verify
-   lane.
-2. **Environment**: check host dependencies and provider availability.
-3. **Access**: establish a controlled action session for this browser.
-4. **Ready**: enter the Workspace.
+The first-run flow has four installation-level steps:
 
-Onboarding does not create a Project. An empty Workspace with zero Projects is
-valid.
+1. **Provider**: choose Codex or Claude Code as the primary provider. Enable
+   Mixed team when both are available so the other provider can run an
+   independent verification lane.
+2. **Environment**: verify host dependencies and provider availability.
+3. **Access**: establish a controlled action session for the current browser.
+4. **Ready**: enter the empty Workspace.
 
-## 2. Add or open a Project
+![Four-step Bootstrap animation](assets/quickstart-bootstrap.webp)
 
-Select the `+` beside the Project picker:
+Bootstrap writes Workspace/onboarding settings only; it does not call Project
+init. A Workspace with zero Projects is the expected result.
+
+Completion signal: Ready reports Provider, Team, Environment, and Access as
+available.
+
+## 3. New/Open Project (Required)
+
+In the Workspace, click `+` beside the Project selector:
 
 1. Enter a Project path on the **server host**.
-2. Select `Inspect`.
-3. Review the one admission action and diagnostics returned by the server.
-4. Only for `initialize_project`, provide Project Name, Project Brief, Project
+2. Click `Inspect`.
+3. Review the single admission action and diagnostics returned by the server.
+4. For `initialize_project` only, provide Project Name, Project Brief, Project
    Stack, Primary Provider, and optional Mixed team.
-5. Run the displayed `Open Project`, `Add & Open`, `Initialize & Open`, or
+5. Run the offered `Open Project`, `Add & Open`, `Initialize & Open`, or
    `Create Project` action.
 
-Inspect chooses from disk truth:
+![Add/Open Project animation](assets/quickstart-project.webp)
+
+Inspect chooses an action from disk truth:
 
 | Directory state | Behavior |
 |---|---|
-| Registered and healthy | Open |
+| Registered and healthy | Open directly |
 | Valid `zf.yaml`, not registered | Register and open |
 | Valid config, runtime state missing | Initialize state and open |
 | No `zf.yaml` | Create a default multi-kind Project |
-| Invalid config or partial non-empty state | Block until repaired |
+| Invalid config or partial non-empty state | Return `blocked`; repair it instead of overwriting by guess |
 
-![Add/Open Project form](assets/project-add-open-current.png)
+The Project Brief should contain durable background, goals, and constraints,
+not a one-off Task prompt. Initialization then:
 
-When the target path is missing or empty, `Create Project` creates the minimum
-README/src/tests seed, an independent Git repository, and an initial HEAD so
-the default worktree runtime can start. Web does not run `git init` or commit
-files in an existing non-empty code directory; establish a trusted Git
+- saves `project.description` in `zf.yaml`;
+- writes the managed Project Context block to `AGENTS.md`;
+- writes the stack and detected build/test commands to a managed Profile block;
+- keeps `CLAUDE.md` provider-specific and referencing `AGENTS.md`;
+- registers the Project in the Workspace without creating a Task or starting a
+  Workflow.
+
+For a missing or empty target, `Create Project` generates a minimal
+README/src/tests structure, a dedicated Git repository, and an initial HEAD so
+the default worktree runtime can start. Web does not `git init` or commit an
+existing non-empty code directory; the operator must establish a trusted Git
 baseline first.
 
-Project Brief is durable background, goal, and constraints, not a one-off Task
-Prompt. Initialization:
+Registered Projects do not need re-importing. Refresh the Workspace and open
+them.
 
-- persists `project.description` in `zf.yaml`;
-- writes a managed Project Context section in `AGENTS.md`;
-- writes the Stack and detected build/test commands in a separate managed
-  Profile section;
-- preserves Claude-specific rules in `CLAUDE.md` and points it at `AGENTS.md`;
-- registers the Project without creating a Task or starting a Workflow.
+### Where `zf.yaml` Fits
 
-Projects already registered in the Workspace do not need re-import. Refresh and
-open them directly.
+`zf.yaml` remains the only control plane. Add/Open Project no longer asks the
+operator to select a YAML, preset, Controller, kind, scale, lane, or role:
 
-## 3. `zf.yaml` remains the only control plane
-
-Add/Open Project no longer asks for YAML, preset, Controller, kind, scale, lane,
-or role. This moves configuration choice out of normal admission:
-
-- a valid existing `zf.yaml` is preserved;
-- a new directory receives one default multi-kind `zf.yaml`;
-- Stack controls instruction and command Profile generation, not Workflow
-  selection;
-- Provider controls provider policy. Mixed team retains one primary backend
-  and assigns the other provider to independent verification; there is no
+- a valid existing `zf.yaml` remains unchanged;
+- a new directory receives the default multi-kind `zf.yaml`;
+- Stack controls project instructions and command profiles, not Workflow choice;
+- Provider selection compiles provider policy, while Mixed team never creates
   `backend: mixed`;
-- Kanban Agent may recommend only routes expanded from the current `zf.yaml`.
+- the Kanban Agent recommends only routes expanded from the current active
+  catalog.
 
-Use `zf profile bootstrap` only when explicitly adopting a single Controller,
-migrating the control plane, or materializing a reviewed Bootstrap
-recommendation. Do not create a second `zf.yaml` for each PRD, Issue, or
-Refactor request.
+Use `zf profile bootstrap` only when explicitly selecting a single Controller,
+migrating the control plane, or materializing Bootstrap recommendations.
 
-## 4. Enter requirements after opening the Project
+Completion signal: Project Overview shows the correct name and Brief, and the
+Project appears in the Workspace selector.
 
-Kanban Agent is a general Coding Agent inside the Project, not only a board
-supervisor:
+## 4. Use the Kanban Agent (Required)
 
-| Goal | Task required first | Interaction and result |
+The Kanban Agent is a general coding agent inside the Project, not merely a Task
+creator or board supervisor. It can analyze and modify Project code and run
+tests in the current provider session. Create a Task only when execution needs
+durable tracking.
+
+| Goal | Task first? | Interaction and result |
 |---|---:|---|
-| Analyze, edit code, or run tests normally | No | Work in the current provider session under permission and Git policy |
-| Create only a tracked work item | No | Produce a `Create Task` proposal and create it after confirmation |
-| Clarify or review with multiple roles | No | Show a Channel setup Plan, then create and start the Channel |
-| Run fixed-role deep research | Yes | Show a Research route Plan for an existing Task, then a separate Approve |
-| Deliver PRD, Issue, Refactor, or Planning work | Yes | Recommend an active Workflow route for an existing Task, then a separate Approve |
+| Analyze, modify code, or run tests | No | Work directly under current permission and Git rules |
+| Create a tracked work item only | No | Confirm a `Create Task` proposal |
+| Clarify or review with multiple roles | No | Choose a Channel setup Plan; ZaoFu creates and starts it |
+| Run fixed-role deep research | Yes | Choose a Research route Plan, then Approve |
+| Run PRD/Issue/Refactor/Planning delivery | Yes | Choose an active route Plan, then Approve |
 
-Do not choose lane count or roles during Project creation. For each concrete
-Task, Kanban Agent classifies the work and recommends only active single-lane,
-multi-lane, Research, or other catalog routes.
+There are two core human stops:
 
-## 5. Create a Channel Group
+- **Plan** clarifies routes, templates, members, rounds, and parameters.
+  `Chat about` supports discussion and customization.
+- **Approve** confirms the exact action, Task, route, objective, and parameters
+  before applying side effects.
 
-The product term Channel Group maps to the runtime canonical model
-**Channel + Members**. It is not a static block in `zf.yaml`. Ask Kanban Agent
-for multi-role discussion, for example:
+Do not preselect lanes or roles while creating a Project. The Kanban Agent
+should classify the concrete request and recommend a registered single-lane,
+multi-lane, Research, or other active route.
+
+## 5. Create a Channel with the Kanban Agent (Recommended)
+
+The canonical model behind the product term Channel Group is a runtime
+**Channel + Members**, not a static `zf.yaml` block. Ask explicitly for a
+multi-role discussion:
 
 ```text
-Create a PRD clarification Channel for this requirement. Focus on security
-boundaries, technical feasibility, and acceptance.
+Create a focused review Channel for the API authentication change and start the discussion.
 ```
 
-The Plan shows the exact template, roles, member count, and discussion rounds:
+The Kanban Agent returns a Channel setup Plan showing template, member roles,
+member count, and discussion rounds. Use `Chat about` to adjust the scope, then
+select an option and click `Create & start`.
 
-![Channel setup Plan](assets/kanban-channel-plan.png)
+![Kanban Agent Channel creation animation](assets/quickstart-channel-create.webp)
 
-After selecting an option and `Create & start`, ZaoFu atomically:
+One action then:
 
 ```text
 creates the Channel
--> materializes members, role context, skills, and writer scope
--> posts the original requirement
--> starts fanout_then_synthesis
+-> materializes template members, role context, skills, and write policy
+-> posts the original request
+-> starts the template discussion mode
 -> converges through the default responder/synthesizer
 ```
 
-No manual member creation or first-message copy is needed. `Chat about` keeps
-the Plan pending while the operator adjusts roles, rounds, or scope. After
-synthesis, humans can continue the same requirement or post another request in
-the Channel.
+There is no second manual Channel, member invitation, or message-copying step.
+Channel creation does not emit `workflow.invoke.requested`.
 
-Channel is independent from Workflow. Its output does not automatically create
-a Task or start Research/delivery. To move into delivery, ask Kanban Agent to
-create a Task proposal from the result, confirm the Task, and then select a
-Workflow.
+Completion signal: the Plan shows `Plan applied`, the new Channel opens, and
+the original request is present.
 
-See [15 Channel Collaboration](15-channel-collaboration.en.md) for templates
-and Feishu projection.
+## 6. Discuss Inside the Channel Group (Recommended)
 
-## 6. Start Research or a Task Workflow
+A Channel thread preserves the original request, role replies, open questions,
+and synthesis. Templates can use `manual_mention`, `fanout_then_synthesis`, or
+another registered discussion mode. Role permissions, skills, and the default
+responder come from the materialized template.
 
-Research and delivery share one Task-bound start service:
+![Multi-role Channel discussion and continuation](assets/quickstart-channel-discussion.webp)
+
+After discussion:
+
+- a person can continue the same request or enter a new one in the Channel;
+- the default responder/synthesizer can produce a canonical PRD or summary;
+- the Channel or Kanban Agent can propose `Create Task` from the result;
+- a person must confirm that Task proposal; the Channel cannot auto-create it;
+- PRD decomposition belongs to subsequent Workflow planning, not direct
+  canonical Task mutation by the Channel or Kanban Agent.
+
+When Feishu is enabled, the same Channel, messages, approval intents, and
+results project through events and controlled actions instead of creating a
+second business-state system. See
+[15 Channel Collaboration](15-channel-collaboration.en.md).
+
+Completion signal: role replies and synthesis remain visible, the composer
+accepts a continuation, and no Task or Workflow appears merely because the
+discussion ended.
+
+## 7. Create a Research Workflow (As Needed)
+
+Research is a Task-bound Workflow, not an alias for a Channel template. Create
+or select a tracked Task, then ask the Kanban Agent for the Research route:
+
+```text
+Create a Task for API authentication research, then recommend the fixed Research workflow.
+```
+
+![Research Task, Plan, approval, and ignition](assets/quickstart-research.webp)
+
+The start path is:
 
 ```text
 existing Task
--> Kanban Agent reads zf workflow routes
--> Plan recommends active route, parameters, topology, and roles
--> operator selects an option
--> a separate Approve card is created
--> owner confirms
+-> read active route catalog
+-> Plan selects research:fixed and parameters
+-> independent Approve
+-> workflow.invoke.requested
+-> research-fanout
+```
+
+The default fixed roles are `source_researcher`, `product_analyst`,
+`technical_analyst`, `risk_critic`, and `synthesizer`. Research produces an
+evidence-backed summary, citations, open questions, and PRD/Refactor prompt
+inputs. It does not automatically create a delivery Task.
+
+The `research-review` Channel template performs discussion/review only.
+Research Workflow starts only when a Task exists, the operator explicitly
+chooses Research, and the Project active catalog exposes `research:fixed`.
+
+Completion signal: the Approve card names the exact Task and `research:fixed`;
+after confirmation it shows `Workflow started`, with exactly one
+Task-bound `workflow.invoke.requested` in the ledger.
+
+## 8. Create a Task and Start Delivery Directly (Recommended)
+
+For a concrete requirement that should use a registered delivery route, ask in
+one Kanban Agent conversation:
+
+```text
+Create a Task for authentication policy validation and recommend a focused delivery workflow before starting it.
+```
+
+![Direct Task creation and delivery Workflow start](assets/quickstart-direct-workflow.webp)
+
+The closure order is fixed:
+
+```text
+Create Task proposal
+-> confirm Task creation
+-> Workflow Plan (active route / topology / output / parameters)
+-> select, Chat about, or Customize
+-> independent Approve
 -> workflow.invoke.requested
 ```
 
-Plan clarifies and selects; it does not authorize:
+Plan is not authorization. `Continue` only turns the selection into an exact
+proposal; `Start workflow` performs ignition. Even a simple job must map to a
+registered `zf.yaml` stage rather than inventing a single-agent lane that the
+Kanban board cannot project.
 
-![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
-
-The approval binds the exact Task, route, objective, and parameters:
-
-![Workflow approval](assets/kanban-task-workflow-approve.png)
-
-The default fixed Research route is `research:fixed`, with
-`source_researcher`, `product_analyst`, `technical_analyst`, `risk_critic`,
-and `synthesizer`. It produces a summary, evidence refs, open questions, and
-PRD/Refactor prompt inputs. It does not create a delivery Task or split PRD
-work automatically.
-
-The `research-review` Channel template is a discussion surface, not an implicit
-start of `research:fixed`. Research starts only for an explicit fanout request,
-an existing Task, and an available route in the current Project catalog.
-
-Inspect the same surface-neutral routes from CLI:
+Inspect the same surface-neutral routes from the CLI:
 
 ```bash
 cd /path/to/project
@@ -208,13 +304,13 @@ uv run --project "$ZAOFU_ROOT" zf workflow routes \
   --format json
 ```
 
-See [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
-for proposal and authorization commands.
+Completion signal: the Task exists, Approve changes to `Workflow started`, and
+the invoke event binds the same Task and selected pattern.
 
-## 7. Start runtime and observe
+## 9. Start and Observe the Runtime (When Real Workers Are Needed)
 
-Project creation does not run a Workflow. Start real workers from the Project
-root:
+Creating a Project or starting the Dashboard does not launch workers. From the
+Project root:
 
 ```bash
 cd /path/to/project
@@ -230,18 +326,27 @@ uv run --project "$ZAOFU_ROOT" zf kanban --board
 uv run --project "$ZAOFU_ROOT" zf events --last 30
 ```
 
-`zf start` only starts workers, sidecars, and the watcher. Workers remaining
-idle before an approved `workflow.invoke.requested` is correct.
+`zf start` starts workers, sidecars, and the watcher. Idle workers are correct
+when there is no approved `workflow.invoke.requested`.
 
-## 8. Create a Project from CLI
+Stop with:
 
-Web greenfield creation, `zf project init`, and `tools/init-project.sh` share
-the Python `init_flow_project` contract. Web does not execute the shell script:
+```bash
+uv run --project "$ZAOFU_ROOT" zf stop
+```
+
+Use `zf stop --force` only if graceful shutdown fails. Do not run
+`tmux kill-server` on a shared host.
+
+## Create a Project from the CLI
+
+Web greenfield, `zf project init`, and `tools/init-project.sh` share
+`init_flow_project` semantics:
 
 ```bash
 uv run --project "$ZAOFU_ROOT" zf project init \
   --name account-service \
-  --description "Account and authentication service; unify login policy." \
+  --description "Account and authentication service with staged security-policy migration." \
   --root /path/to/account-service \
   --create \
   --git-init \
@@ -251,31 +356,7 @@ uv run --project "$ZAOFU_ROOT" zf project init \
   --workspace-register
 ```
 
-Use the script when Git readiness, `zf init`, validation, and startup dry-run
-are also required:
-
-```bash
-tools/init-project.sh \
-  --project-dir /path/to/account-service \
-  --name account-service \
-  --description "Account and authentication service" \
-  --backend codex \
-  --verify-backend claude-code \
-  --stack python \
-  --yes
-```
-
-Both paths create only the Project by default. They do not create a Task or
-ignite a Workflow.
-
-## 9. Stop
-
-```bash
-uv run --project "$ZAOFU_ROOT" zf stop
-```
-
-Use `zf stop --force` only after graceful stop fails. Never run
-`tmux kill-server` on a shared host.
+This creates a Project only. It does not create a Task or ignite a Workflow.
 
 ## Next
 

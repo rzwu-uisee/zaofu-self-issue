@@ -43,6 +43,8 @@ import type {
   TaskTimeline,
   TraceDetail,
   WorkflowGraph,
+  WorkflowRequestDetail,
+  WorkflowRequestsPage,
   WorkdirSummary,
   WorkspaceProjectsPage,
 } from "./types";
@@ -810,6 +812,21 @@ export async function postChannelMessage(
 
 export function getWorkflowGraph(projectId?: string): Promise<WorkflowGraph> {
   return requestJson<WorkflowGraph>(`${projectPrefix(projectId)}/workflow/graph`);
+}
+
+export function getWorkflowRequests(projectId?: string): Promise<WorkflowRequestsPage> {
+  return requestJson<WorkflowRequestsPage>(
+    `${projectPrefix(projectId)}/workflow-requests`,
+  );
+}
+
+export function getWorkflowRequestDetail(
+  requestId: string,
+  projectId?: string,
+): Promise<WorkflowRequestDetail> {
+  return requestJson<WorkflowRequestDetail>(
+    `${projectPrefix(projectId)}/workflow-requests/${encodeURIComponent(requestId)}`,
+  );
 }
 
 export async function getWebSession(): Promise<NonNullable<RuntimeSummary["web_session"]>> {

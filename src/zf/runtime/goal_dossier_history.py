@@ -8,10 +8,12 @@ silently replace the terminal run facts.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_obj
+from zf.runtime.goal_claim_set import hydrate_pinned_goal_claim_set
 from zf.runtime.goal_coverage_graph import build_goal_coverage_graph
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import (
@@ -71,11 +73,20 @@ def build_goal_dossier_history(
 
     diagnostics: list[dict[str, Any]] = []
     terminal = _latest_terminal(events)
+    artifact_delivery = _is_artifact_delivery_run(events)
     task_map, task_map_binding, task_map_diagnostics = _hydrate_task_map(
         state_dir,
         package_roadmap=package_roadmap,
         events=events,
+        optional=artifact_delivery,
     )
+    if artifact_delivery and not task_map:
+        task_map = {
+            "schema_version": "artifact-delivery-plan.v1",
+            "workflow_run_id": run_id,
+            "goal_id": goal_id,
+            "tasks": [],
+        }
     diagnostics.extend(task_map_diagnostics)
     contracts, contract_diagnostics = _hydrate_task_contracts(state_dir, events)
     diagnostics.extend(contract_diagnostics)
@@ -93,6 +104,7 @@ def build_goal_dossier_history(
     )
     instruction_context = _instruction_context(events)
     claim_matrix = _claim_matrix(
+        state_dir=state_dir,
         task_map=task_map,
         tasks=historical_tasks,
         events=events,
@@ -109,7 +121,13 @@ def build_goal_dossier_history(
         "task_contracts": contracts,
         "task_map": {
             **task_map_binding,
-            "status": "ready" if task_map else "unavailable",
+            "status": (
+                "not_required"
+                if artifact_delivery and not task_map_binding.get("ref")
+                else "ready"
+                if task_map
+                else "unavailable"
+            ),
         },
         "instruction_context": instruction_context,
         "claim_to_evidence": claim_matrix,
@@ -155,23 +173,45 @@ def _hydrate_task_map(
     *,
     package_roadmap: Mapping[str, Any],
     events: list[ZfEvent],
+    optional: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, Any]]]:
     binding: dict[str, str] = {}
+    for event in reversed(events):
+        if event.type not in {"run.goal.completed", "run.goal.blocked"}:
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        ref = str(
+            payload.get("task_map_snapshot_ref")
+            or payload.get("task_map_ref")
+            or ""
+        )
+        if ref:
+            binding = {
+                "ref": ref,
+                "sha256": str(
+                    payload.get("task_map_snapshot_digest")
+                    or payload.get("task_map_digest")
+                    or ""
+                ),
+                "source": "run_terminal",
+            }
+        break
     current = package_roadmap.get("current_plan_package")
     current = current if isinstance(current, Mapping) else {}
-    for port in current.get("ports") or []:
-        if not isinstance(port, Mapping):
-            continue
-        if str(port.get("logical_name") or "") not in {
-            "task_map", "task-map", "task_map_json",
-        }:
-            continue
-        binding = {
-            "ref": str(port.get("ref") or ""),
-            "sha256": str(port.get("sha256") or ""),
-            "source": "plan_artifact_package",
-        }
-        break
+    if not binding.get("ref"):
+        for port in current.get("ports") or []:
+            if not isinstance(port, Mapping):
+                continue
+            if str(port.get("logical_name") or "") not in {
+                "task_map", "task-map", "task_map_json",
+            }:
+                continue
+            binding = {
+                "ref": str(port.get("ref") or ""),
+                "sha256": str(port.get("sha256") or ""),
+                "source": "plan_artifact_package",
+            }
+            break
     if not binding.get("ref"):
         for event in reversed(events):
             payload = event.payload if isinstance(event.payload, Mapping) else {}
@@ -193,10 +233,13 @@ def _hydrate_task_map(
             }
             break
     if not binding.get("ref"):
+        if optional:
+            return {}, binding, []
         return {}, binding, [{
             "type": "task_map_ref_missing",
             "reason": "run has no admitted task-map ref",
         }]
+    binding["ref"] = _normalize_runtime_sidecar_ref(state_dir, binding["ref"])
     try:
         hydrated = hydrate_sidecar_ref(
             state_dir,
@@ -221,6 +264,36 @@ def _hydrate_task_map(
             "ref": binding["ref"],
             "reason": str(exc),
         }]
+
+
+def _normalize_runtime_sidecar_ref(state_dir: Any, ref: str) -> str:
+    raw = str(ref or "").strip()
+    if raw.startswith(".zf/"):
+        return raw[len(".zf/"):]
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return raw
+    try:
+        return path.resolve().relative_to(Path(state_dir).resolve()).as_posix()
+    except (OSError, ValueError):
+        return raw
+
+
+def _is_artifact_delivery_run(events: Iterable[ZfEvent]) -> bool:
+    for event in events:
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        result = payload.get("artifact_delivery_result")
+        if (
+            str(payload.get("completion_profile") or "")
+            == "artifact_delivery"
+            or (
+                isinstance(result, Mapping)
+                and str(result.get("schema_version") or "")
+                == "artifact-delivery-result.v1"
+            )
+        ):
+            return True
+    return False
 
 
 def _hydrate_task_contracts(
@@ -319,7 +392,11 @@ def _historical_task_rows(
     ordered_ids = list(planned_by_id)
     ordered_ids.extend(task_id for task_id in contracts if task_id not in ordered_ids)
     ordered_ids.extend(task_id for task_id in event_task_ids if task_id not in ordered_ids)
-    ordered_ids.extend(task_id for task_id in current_by_id if task_id not in ordered_ids)
+    ordered_ids.extend(
+        task_id
+        for task_id, current in current_by_id.items()
+        if task_id not in ordered_ids and not current.get("missing")
+    )
     completed_ids = set(_strings(terminal.get("completed_task_ids")))
     excluded_ids = {
         str(task_id).strip()
@@ -435,6 +512,7 @@ def _instruction_context(events: list[ZfEvent]) -> list[dict[str, str]]:
 
 def _claim_matrix(
     *,
+    state_dir: Any,
     task_map: Mapping[str, Any],
     tasks: list[dict[str, Any]],
     events: list[ZfEvent],
@@ -449,6 +527,16 @@ def _claim_matrix(
         # feature alias must not hide an admitted closure for that Goal.
         coverage_task_map["goal_id"] = goal_id
     try:
+        pinned_claim_set = hydrate_pinned_goal_claim_set(
+            state_dir=state_dir,
+            events=events,
+            workflow_run_id=str(
+                coverage_task_map.get("workflow_run_id")
+                or coverage_task_map.get("run_id")
+                or ""
+            ),
+            goal_id=goal_id,
+        )
         graph = build_goal_coverage_graph(
             task_map=coverage_task_map,
             tasks=task_lookup,
@@ -456,6 +544,7 @@ def _claim_matrix(
             project_id=project_id,
             feature_id=goal_id,
             task_map_ref=task_map_ref,
+            goal_claim_set=pinned_claim_set,
         )
     except Exception as exc:
         return {
@@ -489,12 +578,34 @@ def _claim_matrix(
             "task_verification": str(node.get("task_verification") or "unverified"),
             "gap_refs": _strings(node.get("gap_refs")),
         })
+    graph_diagnostics = [
+        dict(item)
+        for item in graph.get("diagnostics") or []
+        if isinstance(item, Mapping)
+    ]
+    closed_with_evidence = {
+        str(row.get("goal_claim_id") or "")
+        for row in rows
+        if str(row.get("verdict") or "") == "closed"
+        and row.get("evidence_refs")
+    }
+    blocking_diagnostics = [
+        item
+        for item in graph_diagnostics
+        if not (
+            str(item.get("code") or "") == "mandatory_claim_uncovered"
+            and str(item.get("goal_claim_id") or "") in closed_with_evidence
+        )
+    ]
     return {
         "schema_version": "claim-task-evidence-matrix.v1",
-        "status": "incomplete" if graph.get("diagnostics") else "ready",
+        "status": "incomplete" if blocking_diagnostics else "ready",
         "summary": dict(graph.get("summary") or {}),
         "rows": rows,
-        "diagnostics": list(graph.get("diagnostics") or []),
+        "diagnostics": blocking_diagnostics,
+        "advisories": [
+            item for item in graph_diagnostics if item not in blocking_diagnostics
+        ],
     }
 
 

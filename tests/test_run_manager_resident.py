@@ -19,6 +19,7 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.state.session import SessionStore
+from zf.runtime.backend import get_adapter
 from zf.runtime.pane_probe import build_runtime_pane_probe
 from zf.runtime.run_manager import (
     RUN_MANAGER_AUTORESEARCH_REQUESTED,
@@ -56,6 +57,9 @@ def _resident_config(
     *,
     session_mode: str = "shared",
     tmux_session: str = "",
+    backend: str = "claude-code",
+    model: str = "",
+    model_reasoning_effort: str = "",
 ) -> ZfConfig:
     return ZfConfig(
         project=ProjectConfig(name="resident-test"),
@@ -63,11 +67,13 @@ def _resident_config(
         roles=[RoleConfig(name="dev", backend="claude-code")],
         runtime=RuntimeConfig(
             run_manager=RuntimeRunManagerConfig(
-                backend="claude-code",
+                backend=backend,
                 resident_agent=RuntimeRunManagerResidentAgentConfig(
                     enabled=True,
                     transport="tmux",
                     instance_id="run-manager",
+                    model=model,
+                    model_reasoning_effort=model_reasoning_effort,
                     session_mode=session_mode,
                     tmux_session=tmux_session,
                 ),
@@ -114,6 +120,19 @@ def test_build_resident_run_manager_role_uses_claude_code_tmux() -> None:
     assert role.role_kind == "reader"
     assert "run.manager.transition" in role.triggers
     assert "run.manager.agent.observation" in role.publishes
+
+
+def test_resident_codex_launch_pins_model_and_reasoning_effort() -> None:
+    role = build_resident_run_manager_role(_resident_config(
+        backend="codex",
+        model="gpt-5.5",
+        model_reasoning_effort="xhigh",
+    ))
+
+    assert role is not None
+    command = get_adapter(role.backend).build_command(role)
+    assert command[command.index("--model") + 1] == "gpt-5.5"
+    assert 'model_reasoning_effort="xhigh"' in command
 
 
 def test_resident_run_manager_briefing_preserves_kernel_boundary(

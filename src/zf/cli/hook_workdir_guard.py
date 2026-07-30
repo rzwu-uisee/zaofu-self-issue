@@ -115,6 +115,30 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def is_authorized_result_scratch_target(
+    state_dir: Path,
+    event_log: EventLog,
+    *,
+    actor: str,
+    target: str | Path,
+    cwd: str | Path = "",
+) -> bool:
+    """Resolve a provider target before checking its exact scratch capability."""
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        if not str(cwd).strip():
+            return False
+        path = Path(cwd) / path
+    from zf.runtime.result_submit import is_authorized_result_scratch_write
+
+    return is_authorized_result_scratch_write(
+        state_dir,
+        event_log,
+        role_instance=actor,
+        target=path,
+    )
+
+
 def evaluate_workdir_write_guard(
     *,
     state_dir: Path,
@@ -147,14 +171,10 @@ def evaluate_workdir_write_guard(
             any(_path_is_within(target, root) for root in project_roots)
             and not _path_is_within(target, assigned_root)
         ):
-            from zf.runtime.result_submit import (
-                is_authorized_result_scratch_write,
-            )
-
-            if is_authorized_result_scratch_write(
+            if is_authorized_result_scratch_target(
                 state_dir,
                 event_log,
-                role_instance=actor,
+                actor=actor,
                 target=target,
             ):
                 continue

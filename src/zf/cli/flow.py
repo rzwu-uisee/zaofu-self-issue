@@ -116,8 +116,16 @@ from zf.runtime.workflow_delivery import (
     build_flow_submit_preview,
 )
 
-_REQUEST_KIND_CHOICES = ["issue", "prd", "refactor", "feat", "auto"]
-_FLOW_KIND_CHOICES = ["issue", "prd", "refactor", "feat"]
+_REQUEST_KIND_CHOICES = [
+    "issue",
+    "prd",
+    "refactor",
+    "feat",
+    "workflow",
+    "auto",
+]
+_CONTROLLER_KIND_CHOICES = ["issue", "prd", "refactor", "feat"]
+_FLOW_KIND_CHOICES = [*_CONTROLLER_KIND_CHOICES, "workflow"]
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -172,7 +180,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     clarify.set_defaults(func=run_clarify)
 
     draft = sub.add_parser("draft", help="Draft a short controller flow YAML")
-    draft.add_argument("--kind", required=True, choices=_FLOW_KIND_CHOICES)
+    draft.add_argument(
+        "--kind",
+        required=True,
+        choices=_CONTROLLER_KIND_CHOICES,
+    )
     draft.add_argument("--from", dest="source_ref", default="")
     draft.add_argument("--source-root", default="")
     draft.add_argument("--target", "--target-root", dest="target_root", default="")
@@ -201,7 +213,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "start",
         help="Build a safe flow-start proposal; use --dry-run for now",
     )
-    start.add_argument("--kind", required=True, choices=_FLOW_KIND_CHOICES)
+    start.add_argument(
+        "--kind",
+        required=True,
+        choices=_CONTROLLER_KIND_CHOICES,
+    )
     start.add_argument("--from", dest="source_ref", default="")
     start.add_argument("--source-root", default="")
     start.add_argument("--target", "--target-root", dest="target_root", default="")
@@ -320,7 +336,12 @@ def build_flow_intent(
     request_id = str(manifest.get("request_id") or _request_id_from_path(intake_path))
     explicit = str(explicit_kind or "auto").strip().lower()
     kind = _normalize_request_kind(explicit) if explicit != "auto" else _infer_request_kind(text)
-    if explicit == "auto" and manifest.get("kind") in {"issue", "prd", "refactor"}:
+    if explicit == "auto" and manifest.get("kind") in {
+        "issue",
+        "prd",
+        "refactor",
+        "workflow",
+    }:
         kind = str(manifest["kind"])
     confidence = "high" if explicit_kind != "auto" or manifest.get("kind") else "medium"
     missing = missing_fields_for_kind(

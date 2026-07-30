@@ -165,6 +165,47 @@ class TestWatchdogThreshold:
 
 
 class TestWatchdogEvents:
+    def test_fanout_cold_start_skips_idle_recovery_prompt(
+        self,
+        state_dir,
+        config,
+        monkeypatch,
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.update("TASK-LIVENESS-DEV", status="done")
+        store.update("TASK-LIVENESS-REVIEW", status="done")
+        transport = _AliveControllableTransport()
+        transport.spawn(RoleConfig(name="dev"), argv=[])
+        transport.alive_flags["dev"] = False
+        orch = Orchestrator(state_dir, config, transport)
+        injected: list[bool] = []
+
+        def _inject(_role, *, inject_idle_prompt=True):
+            injected.append(inject_idle_prompt)
+            return True
+
+        monkeypatch.setattr(orch, "_inject_recovery_briefing", _inject)
+
+        dispatchable = orch._ensure_fanout_role_dispatchable(
+            role=config.roles[0],
+            fanout_id="fanout-cold-start",
+            stage_id="discovery",
+            child_id="discovery",
+            run_id="run-fanout-cold-start-discovery",
+            trace_id="trace-cold-start",
+            causation_id="evt-trigger",
+            prompt_kind="fanout_child",
+        )
+
+        assert dispatchable is False
+        assert injected == [False]
+        deferred = [
+            event
+            for event in EventLog(state_dir / "events.jsonl").read_all()
+            if event.type == "fanout.child.dispatch_deferred"
+        ]
+        assert deferred[-1].payload["respawn_action"] == "respawn"
+
     def test_dead_watchdog_emits_runner_failed_with_lifecycle(
         self,
         state_dir,
@@ -267,6 +308,77 @@ class TestWatchdogEvents:
         for _ in range(3):
             orch.run_once()
         assert transport.spawn_calls.count("dev") == before
+
+    def test_operator_restart_starts_a_new_respawn_success_window(
+        self,
+        state_dir,
+        config,
+    ):
+        transport = _AliveControllableTransport()
+        transport.spawn(RoleConfig(name="dev"), argv=[])
+        transport.spawn(RoleConfig(name="review"), argv=[])
+        orch = Orchestrator(state_dir, config, transport)
+        for _ in range(3):
+            EventLog(state_dir / "events.jsonl").append(ZfEvent(
+                type="worker.respawned",
+                actor="dev",
+                payload={"instance_id": "dev", "reason": "watchdog"},
+            ))
+        orch._respawn_success_circuit_opened.add("dev")
+        orch._set_worker_state(
+            "dev",
+            "blocked_human",
+            reason="respawn success circuit opened; recovery required",
+            force=True,
+        )
+
+        decision = orch.restart_role_instance(config.roles[0])
+
+        assert decision.action == "respawn"
+        assert not orch._respawn_success_circuit_active("dev")
+        assert len(orch._recent_respawn_success_events("dev")) == 1
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        reset = [
+            event
+            for event in events
+            if event.type == "worker.state.changed"
+            and event.actor == "dev"
+            and event.payload.get("respawn_success_circuit_reset") is True
+        ]
+        assert len(reset) == 1
+        assert reset[0].payload["operator_authorized"] is True
+        assert not [
+            event
+            for event in events
+            if event.type == "worker.respawn.circuit_opened"
+        ]
+
+    def test_external_operator_reset_clears_resident_circuit(
+        self,
+        state_dir,
+        config,
+    ):
+        transport = _AliveControllableTransport()
+        transport.spawn(RoleConfig(name="dev"), argv=[])
+        transport.spawn(RoleConfig(name="review"), argv=[])
+        orch = Orchestrator(state_dir, config, transport)
+        orch._respawn_success_circuit_opened.add("dev")
+        orch._dead_counter["dev"] = 3
+
+        orch._on_worker_state_changed_event(ZfEvent(
+            type="worker.state.changed",
+            actor="dev",
+            payload={
+                "instance_id": "dev",
+                "from": "blocked_human",
+                "to": "idle",
+                "operator_authorized": True,
+                "respawn_success_circuit_reset": True,
+            },
+        ))
+
+        assert not orch._respawn_success_circuit_active("dev")
+        assert "dev" not in orch._dead_counter
 
     def test_manifest_pending_terminal_blocks_dead_respawn_loop(
         self,

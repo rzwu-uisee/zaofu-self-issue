@@ -24,6 +24,8 @@ spec:
         permission_mode: bypass
         stuck_threshold_seconds: 900
         spawn_ready_timeout_seconds: 240
+        lifecycle:
+          mode: on_demand
       roleSkillBundles:
         issue-triage: [debugging-triage, source-verification, zf-workflow-adaptation-boundary, zf-project-adapter-matrix-enrichment, zf-issue-plan-synth, zf-yoke-planner-role-context]
         plan-critic: [zf-workflow-adaptation-boundary, zf-yoke-critic-role-context]
@@ -173,6 +175,8 @@ spec:
         permission_mode: bypass
         stuck_threshold_seconds: 900
         spawn_ready_timeout_seconds: 240
+        lifecycle:
+          mode: on_demand
       roleSkillBundles:
         scan-contract: [source-verification, context-hygiene, zf-workflow-adaptation-boundary, zf-project-adapter-matrix-enrichment, zf-refactor-plan-synth, zf-harness-spec-freeze-contract, zf-harness-evidence-collection, zf-yoke-planner-role-context]
         scan-runtime: [source-verification, context-hygiene, zf-harness-evidence-collection]

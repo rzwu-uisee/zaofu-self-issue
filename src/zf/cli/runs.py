@@ -10,6 +10,7 @@ from pathlib import Path
 from zf.core.config.loader import ConfigError
 from zf.core.config.project_context import resolve_project_context
 from zf.core.events.log import EventLog
+from zf.core.events.factory import event_log_from_project
 from zf.core.events.writer import EventWriter
 from zf.runtime.run_archive import (
     RunArchiveError,
@@ -90,6 +91,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Wrap output in zf.cli.result.v1",
     )
     explain_p.set_defaults(func=run_explain)
+
+    for command, handler, help_text in (
+        ("pause", run_pause, "Pause new dispatch for one admitted Run"),
+        ("resume", run_resume, "Resume a paused Run"),
+        ("cancel", run_cancel, "Cancel an active or queued Run"),
+    ):
+        action_p = runs_sub.add_parser(command, help=help_text)
+        action_p.add_argument("run_id")
+        action_p.add_argument("--reason", default="")
+        action_p.set_defaults(func=handler)
     runs_p.set_defaults(func=run_list)
 
 
@@ -325,3 +336,58 @@ def run_for_task(args: argparse.Namespace) -> int:
     )
     print(json.dumps(rows, ensure_ascii=False, indent=2))
     return 0
+
+
+def run_pause(args: argparse.Namespace) -> int:
+    return _run_control(args, "run-pause")
+
+
+def run_resume(args: argparse.Namespace) -> int:
+    return _run_control(args, "run-resume")
+
+
+def run_cancel(args: argparse.Namespace) -> int:
+    return _run_control(args, "run-cancel")
+
+
+def _run_control(args: argparse.Namespace, action: str) -> int:
+    resolved = _context(args)
+    if resolved is None:
+        return 2
+    context, project_root = resolved
+    from zf.runtime.control_actions import ControlledActionService
+
+    writer = EventWriter(
+        event_log_from_project(context.state_dir, config=context.config)
+    )
+    payload = {
+        "run_id": str(args.run_id),
+        "reason": str(args.reason or action),
+    }
+    requested = writer.emit(
+        "control.action.requested",
+        actor="zf-cli",
+        correlation_id=str(args.run_id),
+        payload={
+            "action": action,
+            "requested_action": f"zf runs {action.removeprefix('run-')}",
+            "request": payload,
+        },
+    )
+    result = ControlledActionService(
+        context.state_dir,
+        writer,
+        config=context.config,
+        project_root=project_root,
+        actor="zf-cli",
+        source="cli",
+        surface="cli",
+    ).execute(
+        action=action,
+        requested_action=f"zf runs {action.removeprefix('run-')}",
+        payload=payload,
+        requested=requested,
+    )
+    result.pop("_status_code", None)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 1

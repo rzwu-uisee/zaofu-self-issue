@@ -124,6 +124,11 @@ def run_emit(args: argparse.Namespace) -> int:
     if getattr(args, "dispatch_id", None):
         payload["dispatch_id"] = args.dispatch_id
     if args.task:
+        _autofill_task_attempt_identity(
+            payload,
+            state_dir=state_dir,
+            task_id=args.task,
+        )
         _autofill_completion_revisions(
             payload,
             state_dir=state_dir,
@@ -200,6 +205,43 @@ def run_emit(args: argparse.Namespace) -> int:
         )
         return 2
     return 0
+
+
+def _autofill_task_attempt_identity(
+    payload: dict[str, Any],
+    *,
+    state_dir: Path,
+    task_id: str,
+) -> None:
+    """Bind ordinary ``zf emit --task`` calls to the scheduler lease."""
+
+    try:
+        from zf.core.state.task_attempts import TaskAttemptStore
+
+        supplied_dispatch = str(payload.get("dispatch_id") or "")
+        current = TaskAttemptStore(
+            state_dir / "task_attempts.json"
+        ).current_for_task(task_id, dispatch_id=supplied_dispatch)
+    except Exception:
+        current = None
+    if current is None:
+        return
+    supplied_dispatch = str(payload.get("dispatch_id") or "")
+    current_dispatch = str(current.get("dispatch_id") or "")
+    if supplied_dispatch and supplied_dispatch != current_dispatch:
+        return
+    run_id = str(current.get("run_id") or "")
+    identity = {
+        "workflow_run_id": run_id,
+        "run_id": run_id,
+        "operation_id": str(current.get("operation_id") or ""),
+        "attempt_id": str(current.get("attempt_id") or ""),
+        "lease_id": str(current.get("lease_id") or ""),
+        "dispatch_id": current_dispatch,
+    }
+    for key, value in identity.items():
+        if value and not str(payload.get(key) or ""):
+            payload[key] = value
 
 
 def _terminal_run_quiesces_emit(event_type: str, event_log: Any) -> bool:

@@ -1,0 +1,136 @@
+"""TaskAttempt settlement from an admitted durable operation result."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from zf.core.events.model import ZfEvent
+
+
+def settle_admitted_operation_attempt(
+    runtime: Any,
+    event: ZfEvent,
+    *,
+    events_by_id: Mapping[str, ZfEvent] | None = None,
+    attempt_rows: list[dict[str, Any]] | None = None,
+    store: Any = None,
+) -> bool:
+    from zf.runtime import task_attempt_runtime as support
+
+    payload = support._payload(event)
+    task_id = str(event.task_id or payload.get("task_id") or "").strip()
+    operation_id = str(payload.get("operation_id") or "").strip()
+    run_id = str(payload.get("workflow_run_id") or "").strip()
+    admitted_ref = payload.get("admitted_call_result_ref")
+    source_event_id = (
+        str(admitted_ref.get("source_event_id") or "").strip()
+        if isinstance(admitted_ref, Mapping)
+        else ""
+    )
+    if not task_id or not operation_id or not source_event_id:
+        return False
+    if events_by_id is None:
+        events_by_id = {
+            row.id: row
+            for row in runtime.event_log.read_all()
+            if row.id
+        }
+    source_event = events_by_id.get(source_event_id)
+    if source_event is None:
+        return False
+    terminal = support._result_status(source_event.type)
+    if not terminal:
+        return False
+    source_payload = support._payload(source_event)
+    dispatch_candidates = {
+        str(source_payload.get(key) or "").strip()
+        for key in ("dispatch_id", "attempt_id", "run_id")
+        if str(source_payload.get(key) or "").strip()
+    }
+    attempt_store = store or support.task_attempt_store(runtime)
+    candidates = [
+        row
+        for row in (
+            attempt_rows
+            if attempt_rows is not None
+            else attempt_store.rows()
+        )
+        if str(row.get("task_id") or "") == task_id
+        and str(row.get("operation_id") or "") == operation_id
+        and (not run_id or str(row.get("run_id") or "") == run_id)
+    ]
+    if dispatch_candidates:
+        matched = [
+            row
+            for row in candidates
+            if str(row.get("dispatch_id") or "") in dispatch_candidates
+        ]
+        if matched:
+            candidates = matched
+    if not candidates:
+        return False
+    current = max(
+        candidates,
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            int(row.get("ordinal") or 0),
+        ),
+    )
+    status = str(current.get("status") or "")
+    repair_shadow_expiry = (
+        support._attempt_mode(runtime) == "shadow"
+        and status in {"expired", "failed"}
+        and str(current.get("failure_class") or "") == "lease_expired"
+    )
+    if status not in {"prepared", "delivering", "sent"} and not repair_shadow_expiry:
+        return False
+
+    attempt_id = str(current.get("attempt_id") or "")
+    source_reason = str(
+        source_payload.get("reason")
+        or source_payload.get("summary")
+        or source_payload.get("status")
+        or ""
+    )[:500]
+    row = attempt_store.update(
+        attempt_id,
+        status=terminal,
+        updated_at=support._now(),
+        terminal_event_id=source_event.id,
+        failure_reason=source_reason if terminal == "failed" else "",
+        failure_class=(
+            "semantic_result_failed" if terminal == "failed" else ""
+        ),
+        retryable=False if terminal == "failed" else None,
+        recovery_owner="workflow" if terminal == "failed" else "",
+    )
+    if row is None:
+        return False
+    current.update(row)
+    occurrence_type = (
+        "task.attempt.succeeded"
+        if terminal == "succeeded"
+        else "task.attempt.failed"
+    )
+    support._emit_once(
+        runtime,
+        occurrence_type,
+        attempt_id=attempt_id,
+        task_id=task_id,
+        payload={
+            **support._identity(row),
+            "source_event_id": source_event.id,
+            "source_event_type": source_event.type,
+            "admission_event_id": event.id,
+            "status": terminal,
+            "failure_class": str(row.get("failure_class") or ""),
+            "retryable": row.get("retryable"),
+            "recovery_owner": str(row.get("recovery_owner") or ""),
+            "reconciled_shadow_expiry": repair_shadow_expiry,
+        },
+        correlation_id=str(row.get("run_id") or ""),
+        causation_id=event.id,
+    )
+    support._emit_shadow_comparison(runtime, row)
+    return True

@@ -10,6 +10,7 @@ from zf.cli.main import main
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.security.signing import EventSigner
+from zf.core.state.task_attempts import TaskAttemptStore
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 
@@ -278,6 +279,89 @@ def test_emit_dispatch_id_adds_payload_field(tmp_path: Path, monkeypatch):
     events = EventLog(tmp_path / ".zf" / "events.jsonl").read_all()
     event = next(e for e in events if e.type == "dev.build.done")
     assert event.payload["dispatch_id"] == "disp-123"
+
+
+def test_emit_task_autofills_current_attempt_identity(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _init(tmp_path, monkeypatch)
+    TaskAttemptStore(tmp_path / ".zf" / "task_attempts.json").ensure_for_dispatch(
+        run_id="RUN-1",
+        task_id="T1",
+        dispatch_id="disp-123",
+        role="dev",
+        instance_id="dev",
+        operation_id="op-1",
+        briefing_ref=".zf/briefings/dev-T1.md",
+        created_at="2026-07-26T00:00:00+00:00",
+        lease_expires_at="2026-07-27T00:00:00+00:00",
+        max_attempts=3,
+    )
+
+    result = main([
+        "emit",
+        "dev.build.done",
+        "--task",
+        "T1",
+        "--dispatch-id",
+        "disp-123",
+    ])
+
+    assert result == 0
+    event = next(
+        event
+        for event in EventLog(tmp_path / ".zf" / "events.jsonl").read_all()
+        if event.type == "dev.build.done"
+    )
+    assert event.payload["workflow_run_id"] == "RUN-1"
+    assert event.payload["operation_id"] == "op-1"
+    assert event.payload["attempt_id"].startswith("ta-")
+    assert event.payload["lease_id"].startswith("lease-")
+
+
+def test_emit_dispatch_id_selects_one_of_multiple_current_attempt_lanes(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _init(tmp_path, monkeypatch)
+    store = TaskAttemptStore(tmp_path / ".zf" / "task_attempts.json")
+    for role, operation_id, dispatch_id in (
+        ("reader", "op-reader", "disp-reader"),
+        ("critic", "op-critic", "disp-critic"),
+    ):
+        store.ensure_for_dispatch(
+            run_id="RUN-1",
+            task_id="T1",
+            dispatch_id=dispatch_id,
+            role=role,
+            instance_id=role,
+            operation_id=operation_id,
+            briefing_ref=f".zf/briefings/{role}-T1.md",
+            created_at="2026-07-26T00:00:00+00:00",
+            lease_expires_at="2026-07-27T00:00:00+00:00",
+            max_attempts=3,
+        )
+
+    result = main([
+        "emit",
+        "dev.build.done",
+        "--task",
+        "T1",
+        "--dispatch-id",
+        "disp-critic",
+    ])
+
+    assert result == 0
+    event = next(
+        event
+        for event in EventLog(tmp_path / ".zf" / "events.jsonl").read_all()
+        if event.type == "dev.build.done"
+    )
+    assert event.payload["operation_id"] == "op-critic"
+    assert event.payload["dispatch_id"] == "disp-critic"
+    assert event.payload["attempt_id"].startswith("ta-")
+    assert event.payload["lease_id"].startswith("lease-")
 
 
 def test_emit_quiesces_resident_observation_after_terminal_run(

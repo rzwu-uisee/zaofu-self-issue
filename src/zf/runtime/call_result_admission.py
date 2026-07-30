@@ -28,6 +28,9 @@ from zf.runtime.call_result_envelope import (
 )
 from zf.runtime.call_result_authority import CallResultAuthorityMixin
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.provider_operation_summary import (
+    prepare_provider_operation_summary,
+)
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     load_workflow_operation,
@@ -55,6 +58,7 @@ class CallResultAdmissionOutcome:
     request_hash: str = ""
     envelope_ref: dict[str, Any] | None = None
     control_result_ref: dict[str, Any] | None = None
+    provider_operation_summary_ref: dict[str, Any] | None = None
     issues: tuple[dict[str, str], ...] = ()
     repair_round: int = 0
     correction_ref: dict[str, Any] | None = None
@@ -95,6 +99,8 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
         mode: str = "shadow",
         operation: Mapping[str, Any] | None = None,
         input_policy: Mapping[str, Any] | None = None,
+        require_semantic_submit: bool = False,
+        semantic_submit: bool = False,
     ) -> CallResultAdmissionOutcome:
         mode = str(mode or "shadow").strip().lower()
         if mode not in VALID_PROTOCOL_MODES:
@@ -109,6 +115,19 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                 issues=({"field": "control_result", "code": "adapter_missing", "message": str(exc)},),
             )
         operation_identity = self._operation_identity(event, payload, operation)
+        provider_summary_ref, provider_summary_issues = (
+            prepare_provider_operation_summary(
+                state_dir=self.state_dir,
+                source_payload=payload,
+                workflow_run_id=operation_identity["workflow_run_id"],
+                operation_id=operation_identity["operation_id"],
+                max_parallel_agents=_operation_parallel_ceiling(operation),
+                budget_usd=_operation_budget_ceiling(operation),
+                source_event_id=event.id,
+            )
+        )
+        if provider_summary_ref is not None:
+            payload["provider_operation_summary_ref"] = provider_summary_ref
         policy = self._input_policy(payload, input_policy)
         ledger_descriptor: dict[str, Any] = {}
         if policy:
@@ -138,6 +157,16 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             correlation_id=event.correlation_id or "",
         )
         issues = [dict(item) for item in adapted.issues]
+        issues.extend(provider_summary_issues)
+        if require_semantic_submit and not semantic_submit:
+            issues.append({
+                "field": "result_submit",
+                "code": "semantic_submit_required",
+                "message": (
+                    "the immutable operation requires the controlled semantic "
+                    "result submit path"
+                ),
+            })
         issues.extend(validate_call_result_envelope(
             envelope,
             require_target_snapshot=adapted.schema_version in {
@@ -159,6 +188,25 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
         issues.extend(currentness_issues)
         if adapted.schema_version == "goal-closure-result.v1":
             issues.extend(self._goal_closure_issues(adapted.payload))
+        if adapted.schema_version == "artifact-delivery-result.v1":
+            from zf.runtime.artifact_delivery_result import (
+                artifact_delivery_admission_issues,
+            )
+
+            artifact_issues = artifact_delivery_admission_issues(
+                self.state_dir,
+                adapted.payload,
+                events=self.event_log.read_all(),
+            )
+            issues.extend(artifact_issues)
+            currentness_issues.extend(
+                issue
+                for issue in artifact_issues
+                if str(issue.get("code") or "") in {
+                    "stale_claim_set_identity",
+                    "stale_workflow_generation",
+                }
+            )
         if policy and ledger_descriptor:
             issues.extend(validate_required_reads(
                 self.state_dir,
@@ -172,7 +220,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             })
         key = envelope_identity_key(envelope)
         existing = self._existing_admission(key)
-        if existing is not None and not currentness_issues:
+        if existing is not None and not currentness_issues and not issues:
             body = existing.payload if isinstance(existing.payload, dict) else {}
             existing_envelope = body.get("envelope_ref")
             existing_control = body.get("control_result_ref")
@@ -190,6 +238,14 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                     dict(existing_control)
                     if isinstance(existing_control, Mapping)
                     else adapted.descriptor
+                ),
+                provider_operation_summary_ref=(
+                    dict(body.get("provider_operation_summary_ref"))
+                    if isinstance(
+                        body.get("provider_operation_summary_ref"),
+                        Mapping,
+                    )
+                    else provider_summary_ref
                 ),
                 issues=tuple(issues),
                 admitted_event_id=existing.id,
@@ -215,8 +271,9 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
         )
         if currentness_issues:
             existing_invalid = self._existing_invalid(key)
+            invalid = existing_invalid
             if existing_invalid is None:
-                self.event_writer.append(ZfEvent(
+                invalid = self.event_writer.append(ZfEvent(
                     type="workflow.call.result.invalid",
                     actor="zf-cli",
                     task_id=event.task_id,
@@ -234,6 +291,31 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                     causation_id=reported.id,
                     correlation_id=event.correlation_id,
                 ))
+            current_operation = (
+                load_workflow_operation(self.event_log, key[0])
+                if self.operation_service
+                else None
+            )
+            if (
+                self.operation_service is not None
+                and current_operation is not None
+                and str(current_operation.get("status") or "") == "settled"
+                and invalid is not None
+            ):
+                self.operation_service.supersede(
+                    operation_id=key[0],
+                    request_hash=key[1],
+                    workflow_run_id=operation_identity["workflow_run_id"],
+                    reservation_id=str(
+                        current_operation.get("reservation_id") or ""
+                    ),
+                    task_id=str(
+                        event.task_id or payload.get("task_id") or ""
+                    ),
+                    reason="stale_call_result_superseded",
+                    causation_id=invalid.id,
+                    correlation_id=event.correlation_id or "",
+                )
             return CallResultAdmissionOutcome(
                 status="superseded",
                 mode=mode,
@@ -386,12 +468,27 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                 "control_result_ref": adapted.descriptor,
                 "control_result_schema": adapted.schema_version,
                 "semantic_verdict": _semantic_verdict(adapted.payload),
+                "provider_operation_summary_ref": provider_summary_ref or {},
                 "read_ledger_ref": ledger_descriptor,
                 "source_event_id": event.id,
             },
             causation_id=reported.id,
             correlation_id=event.correlation_id,
         ))
+        if provider_summary_ref is not None:
+            self.event_writer.append(ZfEvent(
+                type="provider.operation.summary.recorded",
+                actor="zf-cli",
+                task_id=event.task_id,
+                payload={
+                    **operation_identity,
+                    "provider_operation_summary_ref": provider_summary_ref,
+                    "semantic_verdict": _semantic_verdict(adapted.payload),
+                    "admitted_call_result_ref": envelope_descriptor,
+                },
+                causation_id=admitted.id,
+                correlation_id=event.correlation_id,
+            ))
         if self.operation_service and load_workflow_operation(
             self.event_log, key[0]
         ) is not None:
@@ -401,6 +498,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                 workflow_run_id=operation_identity["workflow_run_id"],
                 task_id=str(event.task_id or payload.get("task_id") or ""),
                 admitted_call_result_ref=envelope_descriptor,
+                provider_operation_summary_ref=provider_summary_ref,
                 causation_id=admitted.id,
                 correlation_id=event.correlation_id or "",
             )
@@ -411,6 +509,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             request_hash=key[1],
             envelope_ref=envelope_descriptor,
             control_result_ref=adapted.descriptor,
+            provider_operation_summary_ref=provider_summary_ref,
             admitted_event_id=admitted.id,
         )
 
@@ -511,6 +610,11 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             "plan_synth_contract_digest",
             "contract_revision",
             "task_map_generation",
+            "workflow_generation",
+            "request_revision",
+            "generic_workflow_contract_digest",
+            "workflow_template",
+            "completion_profile",
             "plan_artifact_package_id",
             "plan_artifact_package_ref",
             "plan_artifact_package_digest",
@@ -545,6 +649,25 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             )
             for field in required_result_identity:
                 if not str(adapted.payload.get(field) or "").strip():
+                    issues.append({
+                        "field": f"control_result.{field}",
+                        "code": "missing_required",
+                    })
+        if adapted.schema_version == "artifact-delivery-result.v1":
+            required_result_identity = (
+                "workflow_run_id",
+                "workflow_generation",
+                "request_revision",
+                "generic_workflow_contract_digest",
+                "run_contract_ref",
+                "run_contract_digest",
+                "goal_id",
+                "completion_profile",
+                "verifier_stage_id",
+                "verifier_role",
+            )
+            for field in required_result_identity:
+                if adapted.payload.get(field) in (None, "", [], {}):
                     issues.append({
                         "field": f"control_result.{field}",
                         "code": "missing_required",
@@ -836,6 +959,34 @@ def _wait_for_source_turn_stop(
 
 def _semantic_verdict(control_result: Mapping[str, Any]) -> str:
     return str(control_result.get("verdict") or "pending")
+
+
+def _operation_parallel_ceiling(operation: Mapping[str, Any] | None) -> int:
+    operation = operation or {}
+    raw = operation.get("provider_session_max_parallel_agents")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 6
+    return max(1, min(6, value))
+
+
+def _operation_budget_ceiling(
+    operation: Mapping[str, Any] | None,
+) -> float | None:
+    operation = operation or {}
+    snapshot = operation.get("budget_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    for key in ("remaining_usd", "hard_limit_usd", "budget_usd"):
+        raw = snapshot.get(key)
+        if raw is None:
+            continue
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 __all__ = [

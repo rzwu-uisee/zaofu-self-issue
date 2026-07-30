@@ -82,6 +82,12 @@ FATAL_EVENT_TYPES = frozenset({
 })
 
 
+class _RunnerTerminated(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"runner terminated by signal {signum}")
+        self.signum = signum
+
+
 # ---------------- helpers ----------------
 
 
@@ -402,7 +408,9 @@ def start_watcher(worktree: Path) -> int:
         cwd=worktree,
         stdout=open(log_path, "wb"),
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        # Autoresearch resident owns one dedicated process group. Keep the
+        # nested watcher in it so resident shutdown cannot orphan the watcher.
+        start_new_session=False,
         env=_subprocess_env(),
     )
     deadline = time.time() + 90
@@ -666,13 +674,40 @@ def main(argv: list[str] | None = None) -> int:
         reset_state(worktree)
     if start_harness(worktree) != 0:
         return 3
-    start_watcher(worktree)
-    seed_tasks(worktree, seeds)
-    started = time.time()
-    wait_result = wait_for_done(worktree, expected_done, args.timeout)
-    elapsed = time.time() - started
-    if not args.no_stop:
-        stop_harness(worktree, session_name=session_name)
+    launch_attempted = False
+    completed_normally = False
+    interrupted_signal = 0
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _terminate(signum, _frame) -> None:  # noqa: ANN001
+        raise _RunnerTerminated(int(signum))
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        launch_attempted = True
+        start_watcher(worktree)
+        seed_tasks(worktree, seeds)
+        started = time.time()
+        wait_result = wait_for_done(worktree, expected_done, args.timeout)
+        elapsed = time.time() - started
+        completed_normally = True
+    except _RunnerTerminated as exc:
+        interrupted_signal = exc.signum
+    finally:
+        # --no-stop is an operator inspection choice after a normal result,
+        # not permission to leak resources when the owning resident exits.
+        try:
+            if launch_attempted and (not completed_normally or not args.no_stop):
+                stop_harness(worktree, session_name=session_name)
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    if interrupted_signal:
+        print(
+            f"[stop] owner shutdown signal={interrupted_signal}; "
+            "nested harness cleaned",
+            file=sys.stderr,
+        )
+        return 128 + interrupted_signal
     run_phase_report(worktree)
     invariants = run_invariant_guards(worktree)
     summary = collect_summary(

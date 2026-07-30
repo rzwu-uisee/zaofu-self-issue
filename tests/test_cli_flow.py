@@ -19,7 +19,22 @@ from zf.cli.flow import (
     build_flow_submit_preview,
 )
 from zf.cli.main import main
+from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.run_contract import build_run_contract, load_run_contract, write_run_contract
+
+
+class _FlowTestTransport:
+    def send_task(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    def is_alive(self, role_name):  # noqa: ANN001
+        return True
+
+    def capture_log(self, role_name, lines=200):  # noqa: ANN001
+        return ""
+
+    def poll_events(self):
+        return []
 
 
 def test_flow_draft_issue_outputs_short_issue_flow(tmp_path):
@@ -652,7 +667,7 @@ spec:
     report = json.loads(capsys.readouterr().out)
     assert report["schema_version"] == "flow-start-readiness.v1"
     assert report["flow_kind"] == "issue"
-    assert report["summary"]["roles"] == 6
+    assert report["summary"]["roles"] == 3
 
 
 def test_flow_preflight_with_intake_reports_manifest(tmp_path, capsys):
@@ -851,7 +866,7 @@ def test_flow_start_dry_run_writes_safe_unique_proposal(tmp_path, capsys):
     assert proposal["project"]["name"] == "issue-start-demo"
     assert proposal["project"]["state_dir"] == ".zf-issue-start-demo"
     assert proposal["lanes"] == 1
-    assert proposal["summary"]["roles"] == 7
+    assert proposal["summary"]["roles"] == 4
     assert proposal["policies"]["quality_floor"] == "issue-regression"
     assert output.exists()
 
@@ -1265,7 +1280,7 @@ workflow:
 
 
 def test_flow_submit_apply_light_topology_emits_correlated_entry(tmp_path, capsys):
-    """Light submit emits its entry, not the dead-path bootstrap invoke."""
+    """Light submit uses the shared admission edge before publishing entry."""
     source = tmp_path / "prd.md"
     source.write_text("deliver mdtoc CLI\n", encoding="utf-8")
     intake = tmp_path / "docs" / "intake" / "prd.md"
@@ -1308,12 +1323,26 @@ spec:
     assert rc == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "accepted"
-    assert result["workflow_invoke_status"] == "light_entry_requested"
-    events = EventLog(tmp_path / ".zf-light-apply" / "events.jsonl").read_all()
+    assert result["workflow_invoke_status"] == "pending_consumer"
+    state_dir = tmp_path / ".zf-light-apply"
+    events = EventLog(state_dir / "events.jsonl").read_all()
     types = [event.type for event in events]
     assert "workflow.submit.accepted" in types
-    assert "prd.requested" in types
-    assert "workflow.invoke.requested" not in types
+    assert "prd.requested" not in types
+    assert "workflow.invoke.requested" in types
+    invoked = next(
+        event for event in events
+        if event.type == "workflow.invoke.requested"
+    )
+    assert invoked.payload["light_entry_trigger"] == "prd.requested"
+    runtime = Orchestrator(
+        state_dir,
+        load_config(config),
+        _FlowTestTransport(),
+        project_root=tmp_path,
+    )
+    runtime._on_workflow_invoke_requested(invoked)
+    events = EventLog(state_dir / "events.jsonl").read_all()
     entry = next(event for event in events if event.type == "prd.requested")
     assert entry.correlation_id == "wfint-light"
     assert entry.payload["workflow_run_id"] == "wfint-light"
@@ -1329,7 +1358,7 @@ spec:
     assert replay["idempotent_replay"] is True
     assert replay["workflow_invoke_status"] == "already_requested"
     assert replay["workflow_entry_event_id"] == entry.id
-    replay_events = EventLog(tmp_path / ".zf-light-apply" / "events.jsonl").read_all()
+    replay_events = EventLog(state_dir / "events.jsonl").read_all()
     assert sum(event.type == "prd.requested" for event in replay_events) == 1
 
 
@@ -1377,16 +1406,36 @@ spec:
     assert rc == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "accepted"
-    assert result["workflow_invoke_status"] == "light_entry_requested"
-    events = EventLog(tmp_path / ".zf-issue-light-apply" / "events.jsonl").read_all()
+    assert result["workflow_invoke_status"] == "pending_consumer"
+    state_dir = tmp_path / ".zf-issue-light-apply"
+    events = EventLog(state_dir / "events.jsonl").read_all()
     types = [event.type for event in events]
     assert "workflow.submit.accepted" in types
-    assert "issue.requested" in types
+    assert "issue.requested" not in types
     assert "prd.requested" not in types
-    assert "workflow.invoke.requested" not in types
-    entry = next(event for event in events if event.type == "issue.requested")
+    assert "workflow.invoke.requested" in types
+    invoked = next(
+        event for event in events
+        if event.type == "workflow.invoke.requested"
+    )
+    assert invoked.payload["light_entry_trigger"] == "issue.requested"
+    runtime = Orchestrator(
+        state_dir,
+        load_config(config),
+        _FlowTestTransport(),
+        project_root=tmp_path,
+    )
+    runtime._on_workflow_invoke_requested(invoked)
+    entry = next(
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "issue.requested"
+    )
     assert entry.correlation_id == "wfint-issue-light"
-    assert entry.payload["issue_ref"] == str(source)
+    assert entry.payload["requirement_spec_ref"]
+    assert entry.payload["objective_ref"] == entry.payload["requirement_spec_ref"]
+    assert "issue_ref" not in entry.payload
+    assert entry.payload["source_refs"]["source_ref"] == str(source)
 
 
 def test_project_init_creates_flow_project(tmp_path, capsys, monkeypatch):
@@ -1577,7 +1626,7 @@ def test_project_init_clear_request_only_ignites_with_apply(
     events = EventLog(root / ".zf-apply-project" / "events.jsonl").read_all()
     invokes = [event for event in events if event.type == "workflow.invoke.requested"]
     assert len(invokes) == 1
-    assert invokes[0].payload["pattern_id"] == "issue-triage"
+    assert invokes[0].payload["pattern_id"] == "issue-lanes-impl"
 
 
 def test_multi_kind_project_submits_each_kind_without_route_crosstalk(
@@ -1646,7 +1695,7 @@ def test_multi_kind_project_submits_each_kind_without_route_crosstalk(
         "issue", "prd", "refactor",
     ]
     assert [event.payload["pattern_id"] for event in invokes] == [
-        "issue-triage", "prd-scan", "refactor-flow-scan",
+        "issue-lanes-impl", "prd-scan", "refactor-flow-scan",
     ]
 
 

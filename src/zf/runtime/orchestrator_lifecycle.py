@@ -32,6 +32,7 @@ from zf.runtime.injection import (
 )
 from zf.runtime.cli_command import zf_cli_cmd
 from zf.runtime.provider_context import has_provider_context_exhausted
+from zf.runtime.role_lifecycle_runtime import complete_respawn, watchdog_should_skip
 from zf.runtime.recovery import build_recovery_briefing
 from zf.runtime.remediation_cascade import (
     CASCADE_SAFE_HALT,
@@ -40,7 +41,6 @@ from zf.runtime.remediation_cascade import (
     decide_cascade,
 )
 from zf.runtime.recovery_sufficiency import run_recovery_sufficiency_gate
-from zf.runtime.session_mutex import SessionLock, SessionLockBusy
 from zf.runtime.orchestrator_types import OrchestratorDecision
 
 if TYPE_CHECKING:
@@ -140,6 +140,7 @@ class LifecycleManagerMixin(
         housekeeping handler on forward progress) and ``_orphan_warned``
         for per-task dedup of the warning event.
         """
+        self._reconcile_task_attempts()
         now = self._now()
         try:
             latest_dispatched = self._latest_dispatched_per_task()
@@ -277,8 +278,8 @@ class LifecycleManagerMixin(
                 registry=registry,
                 transport=self.transport,
                 project_root=str(self.project_root),
-                event_log=self.event_log,
-                config=self.config,
+                event_log=self.event_log, config=self.config,
+                codex_session_tailer=getattr(self, "_codex_session_tailer", None),
             )
         return self._spawn_coordinator
 
@@ -340,9 +341,8 @@ class LifecycleManagerMixin(
         # 2026-06-10 review P1-3: after a safe-halt the watchdog must stop
         # regenerating respawn attempts; only capture survives for diagnosis.
         safe_halted = self._runtime_safe_halted()
-
-        for role in self.config.roles:
-            if role.name == "orchestrator":
+        for role in self._runtime_active_role_configs():
+            if role.name == "orchestrator" or watchdog_should_skip(self, role):
                 continue
             if self._last_worker_state.get(role.instance_id) == "blocked_human":
                 continue
@@ -402,12 +402,9 @@ class LifecycleManagerMixin(
                             pass
                     stale, stale_basis = self._worker_liveness_stale(role)
                     if stale:
-                        # Pending-obligation recovery first: a dead worker
-                        # whose manifest terminal is still pending gets the
-                        # terminal-completion request regardless of kanban
-                        # status (the reactor may already have advanced the
-                        # task off in_progress when it consumed the
-                        # manifest event).
+                        # Pending manifest recovery precedes normal respawn,
+                        # even if the reactor already advanced the task after
+                        # consuming that manifest event.
                         manifest_recovery = (
                             self._request_manifest_terminal_completion_if_pending(
                                 role=role,
@@ -419,7 +416,10 @@ class LifecycleManagerMixin(
                         if manifest_recovery is not None:
                             decisions.append(manifest_recovery)
                             continue
-                        if active_task is not None:
+                        if active_task is not None or (
+                            self._active_fanout_child_for_instance(role.instance_id)
+                            is not None
+                        ):
                             self._emit_worker_runner_failed(
                                 role=role,
                                 task=active_task,
@@ -959,6 +959,8 @@ class LifecycleManagerMixin(
         must therefore preserve the active task or fanout-child contract
         instead of merely opening a fresh interactive pane.
         """
+        from zf.runtime.respawn_lease import reset_respawn_success_circuit
+        reset_respawn_success_circuit(self, role)
         return self._respawn_instance(role, recovery_reason="manual_restart")
 
     def _respawn_instance(
@@ -966,6 +968,7 @@ class LifecycleManagerMixin(
         role: "RoleConfig",
         *,
         recovery_reason: str = "watchdog",
+        inject_idle_prompt: bool = True,
     ) -> "OrchestratorDecision":
         """Serialize replacement of one provider session across processes.
 
@@ -975,41 +978,20 @@ class LifecycleManagerMixin(
         leave one unbound pane running.  The lease is deliberately per role:
         unrelated lanes remain independently recoverable.
         """
-        active_task = self._active_task_for_instance(role.instance_id)
-        lock_dir = self.state_dir / "locks" / "respawns"
-        try:
-            with SessionLock(lock_dir, role.instance_id):
-                return self._respawn_instance_with_lease(
-                    role,
-                    recovery_reason=recovery_reason,
-                )
-        except SessionLockBusy:
-            try:
-                self.event_writer.append(ZfEvent(
-                    type="worker.respawn.deferred",
-                    actor=role.instance_id,
-                    task_id=active_task.id if active_task is not None else None,
-                    payload={
-                        "role": role.name,
-                        "instance_id": role.instance_id,
-                        "reason": "recovery_lease_held",
-                        "requested_by": recovery_reason,
-                    },
-                ))
-            except Exception:
-                pass
-            return OrchestratorDecision(
-                action="respawn_in_progress",
-                role=role.instance_id,
-                task_id=active_task.id if active_task is not None else "",
-                reason="worker respawn already in progress for this role",
-            )
+        from zf.runtime.respawn_lease import respawn_instance_with_lock
+        return respawn_instance_with_lock(
+            self,
+            role,
+            recovery_reason=recovery_reason,
+            inject_idle_prompt=inject_idle_prompt,
+        )
 
     def _respawn_instance_with_lease(
         self,
         role: "RoleConfig",
         *,
         recovery_reason: str = "watchdog",
+        inject_idle_prompt: bool = True,
     ) -> "OrchestratorDecision":
         """G-RESUME-4/5: watchdog-triggered respawn.
 
@@ -1130,7 +1112,10 @@ class LifecycleManagerMixin(
                     recovery_reason=f"active_fanout_after_{recovery_reason}",
                 )
             else:
-                recovered = self._inject_recovery_briefing(role)
+                recovered = self._inject_recovery_briefing(
+                    role,
+                    inject_idle_prompt=inject_idle_prompt,
+                )
             if not recovered:
                 raise RuntimeError(
                     f"failed to inject recovery briefing for {role.instance_id}"
@@ -1171,7 +1156,7 @@ class LifecycleManagerMixin(
                 task_id=active_task_id,
                 force=active_task is None and active_fanout is None,
             )
-            self._clear_respawn_failure(role.instance_id)
+            complete_respawn(self, role)
             return OrchestratorDecision(
                 action="respawn",
                 role=role.instance_id,
@@ -1286,7 +1271,7 @@ class LifecycleManagerMixin(
              Layer 2 mid-flight) and for mock/python backends.
         """
         self._rescue_orphan_pending_recycles()
-        for role in self.config.roles:
+        for role in self._runtime_active_role_configs():
             reader = self._session_readers.get(role.backend)
             if reader is None:
                 continue  # mock / python backends
@@ -1364,6 +1349,7 @@ class LifecycleManagerMixin(
             if usage.ratio < role.context_compact_threshold:
                 self._context_compact_attempts().discard(role.instance_id)
             if usage.ratio < role.context_warning_threshold:
+                self._context_warning_fingerprint.pop(role.instance_id, None)
                 continue
             # Already tracked? Don't double-trigger pending/recycling.
             # "healthy" (explicit, after previous recycle completed)
@@ -1429,12 +1415,28 @@ class LifecycleManagerMixin(
                     "child_id": str(active_fanout.get("child_id") or ""),
                     "run_id": str(active_fanout.get("run_id") or ""),
                 }
+            execution_fingerprint = str(
+                (active_fanout or {}).get("run_id")
+                or warning_payload.get("dispatch_id")
+                or warning_payload.get("task_id")
+                or warning_payload.get("session_ref")
+                or role.instance_id
+            )
+            if (
+                usage.ratio < role.context_compact_threshold
+                and self._context_warning_fingerprint.get(role.instance_id)
+                == execution_fingerprint
+            ):
+                continue
             self.event_writer.append(ZfEvent(
                 type="worker.context.warning",
                 actor=role.instance_id,
                 task_id=active_task.id if active_task is not None else None,
                 payload=warning_payload,
             ))
+            self._context_warning_fingerprint[role.instance_id] = (
+                execution_fingerprint
+            )
             # Hard cap? Extra critical event.
             if usage.ratio >= role.context_hard_cap:
                 critical_payload = dict(warning_payload)
@@ -1660,7 +1662,7 @@ class LifecycleManagerMixin(
                 reason="pending recycle drain fired",
             )
             self._start_recycle(role)
-
+        self._hibernate_idle_roles()
 
     def _start_recycle(self, role: "RoleConfig") -> None:
         """Rotate session_id, respawn with fresh state, inject compact

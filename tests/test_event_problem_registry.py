@@ -167,6 +167,39 @@ def test_channel_route_blocked_never_unknown_actionable() -> None:
     )
     assert _pending_semantic_event_actions([event]) == []
 
+
+def test_role_lifecycle_suspended_is_normal_observation() -> None:
+    spec = spec_for_event("role.lifecycle.suspended")
+
+    assert spec is not None
+    assert spec.is_projection_only
+    assert spec.problem_class == "worker_lifecycle"
+    assert spec.supervisor_attention == "none"
+    assert spec.autoresearch_eligible is False
+    assert spec.effective_notification_policy == "trace_only"
+    assert spec.effective_recovery_policy == "none"
+
+
+def test_role_lifecycle_suspended_never_enters_repair_paths(tmp_path) -> None:
+    from zf.core.events.model import ZfEvent
+    from zf.runtime.failure_to_eval import materialize_failure_candidates_from_events
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    event = ZfEvent(
+        type="role.lifecycle.suspended",
+        actor="orchestrator",
+        payload={
+            "role": "dev",
+            "instance_id": "dev-lane-0",
+            "from": "suspending",
+            "to": "suspended",
+        },
+    )
+
+    assert _pending_semantic_event_actions([event]) == []
+    assert materialize_failure_candidates_from_events(tmp_path, [event]) == []
+
+
 def test_worker_pane_evidence_is_not_an_autoresearch_source_repair_trigger() -> None:
     pane = spec_for_event("worker.pane.dead_observed")
     runner = spec_for_event("worker.runner.failed")

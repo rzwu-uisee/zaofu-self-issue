@@ -69,6 +69,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",
     "fanout.aggregate.rebuild.requested",
+    "provider.turn.closed",
     # Tier-2 诊断(task 2026-07-06-0930):requested 唤醒诊断 stage 派发,
     # completed 唤醒结论消费(rework feedback / needs_owner 升级)。
     "diagnosis.requested",
@@ -117,6 +118,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "run.manager.action.effect.pending",
     "run.manager.action.effect.passed",
     "run.manager.action.effect.failed",
+    "run.manager.tick.completed",
     # Completion is also a task/candidate settlement edge and may arrive after
     # an external delivery action or replay.
     "run.goal.completed",
@@ -326,6 +328,7 @@ LAYER2_NOISE_EVENTS: frozenset[str] = frozenset({
     "reconcile.decision.shadow",
     "orchestrator.decision.recorded",
     "task.doc.updated",
+    "run.manager.tick.completed",
 })
 
 

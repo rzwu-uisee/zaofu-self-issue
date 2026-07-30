@@ -416,6 +416,59 @@ class TestLaneRoleTemplate:
             role for role in cfg.roles if role.name == "verify-lane-0"
         ).backend == "claude-code"
 
+    def test_provider_session_and_lifecycle_materialize_by_stage(
+        self,
+        tmp_path,
+    ):
+        cfg = self._load(
+            self._raw_with_template(
+                provider_session={"effort": "high"},
+                lifecycle={"mode": "on_demand"},
+                provider_session_by_stage={
+                    "verify": {"effort": "ultra"},
+                },
+                lifecycle_by_stage={
+                    "verify": {"mode": "resident"},
+                },
+            ),
+            tmp_path=tmp_path,
+        )
+
+        dev = next(role for role in cfg.roles if role.name == "dev-lane-0")
+        verify = next(
+            role for role in cfg.roles if role.name == "verify-lane-0"
+        )
+        assert dev.provider_session is not None
+        assert dev.provider_session.effort == "high"
+        assert dev.lifecycle.mode == "on_demand"
+        assert verify.provider_session is not None
+        assert verify.provider_session.effort == "ultra"
+        assert verify.lifecycle.mode == "resident"
+
+    def test_provider_lifecycle_unknown_stage_fails_closed(self, tmp_path):
+        from zf.core.config.loader import ConfigError
+
+        with pytest.raises(ConfigError, match="unknown stage"):
+            self._load(
+                self._raw_with_template(
+                    lifecycle_by_stage={
+                        "missing-stage": {"mode": "on_demand"},
+                    },
+                ),
+                tmp_path=tmp_path,
+            )
+
+    def test_provider_lifecycle_invalid_shape_fails_closed(self, tmp_path):
+        from zf.core.config.loader import ConfigError
+
+        with pytest.raises(ConfigError, match="provider_session.*unknown key"):
+            self._load(
+                self._raw_with_template(
+                    provider_session={"raw_argv": "--unsafe"},
+                ),
+                tmp_path=tmp_path,
+            )
+
     def test_generated_roles_satisfy_compile_role_check(self, tmp_path):
         cfg = self._load(self._raw_with_template(), tmp_path=tmp_path)
         from zf.core.workflow.inspection import build_workflow_inspection_report
@@ -453,6 +506,42 @@ class TestLaneRoleTemplate:
         )
         assert meta.source == "generated+override"
         assert "backend" in meta.overridden_fields
+
+    def test_provider_lifecycle_whitelist_override_applies(self, tmp_path):
+        roles = [
+            {
+                "name": "judge-refactor",
+                "backend": "mock",
+                "instance_id": "judge-refactor",
+                "role_kind": "reader",
+            },
+            {
+                "name": "dev-lane-2",
+                "backend": "codex",
+                "instance_id": "dev-lane-2",
+                "provider_session": {"effort": "ultra"},
+                "lifecycle": {"mode": "resident"},
+            },
+        ]
+        cfg = self._load(
+            self._raw_with_template(
+                provider_session={"effort": "high"},
+                lifecycle={"mode": "on_demand"},
+            ),
+            roles_yaml=roles,
+            tmp_path=tmp_path,
+        )
+        dev2 = next(role for role in cfg.roles if role.name == "dev-lane-2")
+        assert dev2.provider_session is not None
+        assert dev2.provider_session.effort == "ultra"
+        assert dev2.lifecycle.mode == "resident"
+        meta = next(
+            item
+            for item in cfg.workflow.pipelines_role_meta
+            if item.name == "dev-lane-2"
+        )
+        assert "provider_session" in meta.overridden_fields
+        assert "lifecycle" in meta.overridden_fields
 
     def test_topology_override_fails_closed(self, tmp_path):
         from zf.core.config.loader import ConfigError

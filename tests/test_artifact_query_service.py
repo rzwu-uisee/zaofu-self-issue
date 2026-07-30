@@ -165,7 +165,11 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
         purpose="implementation",
     )
 
-    first = service.catalog_list(context=context, task_id="T1")
+    first = service.catalog_list(
+        context=context,
+        task_id="T1",
+        view="occurrences",
+    )
     assert first["projection_state"] == "ready"
     assert len(first["items"]) == 3
     visible = [row for row in first["items"] if row["authorized"]]
@@ -189,6 +193,7 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
             purpose="implementation",
         ),
         task_id="T1",
+        view="occurrences",
     )
     restricted_occurrence = next(
         row["occurrence_id"]
@@ -214,7 +219,11 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
     }
     for path in projection_db_path(state_dir).parent.glob("read_model.sqlite*"):
         path.unlink()
-    rebuilt = service.catalog_list(context=context, task_id="T1")
+    rebuilt = service.catalog_list(
+        context=context,
+        task_id="T1",
+        view="occurrences",
+    )
     rebuilt_restricted = service.catalog_list(
         context=service.context(
             actor="worker-b",
@@ -222,6 +231,7 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
             purpose="implementation",
         ),
         task_id="T1",
+        view="occurrences",
     )
     assert {
         (
@@ -238,9 +248,298 @@ def test_catalog_keeps_occurrence_authorization_separate_and_rebuilds(
     bounded = service.catalog_list(
         context=service.context(limit=1),
         task_id="T1",
+        view="occurrences",
     )
     assert len(bounded["items"]) == 1
     assert bounded["has_more"] is True
+    object_view = service.catalog_list(
+        context=context,
+        task_id="T1",
+    )
+    assert len(object_view["items"]) == 1
+    assert object_view["items"][0]["occurrence_count"] == 2
+    assert object_view["items"][0]["locator_count"] == 2
+    exact_restricted = service.catalog_show(
+        restricted_occurrence,
+        context=context,
+    )
+    assert exact_restricted["item"] == {
+        "authorized": False,
+        "redacted": True,
+        "matched_by": "occurrence",
+    }
+
+
+def test_catalog_defaults_to_typed_content_objects_and_expands_occurrences(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/results/verify.json",
+        {"schema_version": "verification-result.v1", "status": "passed"},
+        kind="call_control_result",
+        schema_version="verification-result.v1",
+        created_by="call-result-admission",
+    )
+    _append(state_dir, event_id="evt-verify-1", descriptor=descriptor)
+    _append(state_dir, event_id="evt-verify-2", descriptor=descriptor)
+
+    objects = service.catalog_list(
+        context=service.context(),
+        semantic_kind="verification_result",
+    )
+
+    assert objects["view"] == "objects"
+    assert len(objects["items"]) == 1
+    item = objects["items"][0]
+    assert item["semantic_kind"] == "verification_result"
+    assert item["storage_kinds"] == ["call_control_result"]
+    assert item["occurrence_count"] == 2
+    assert "event_id" not in item
+
+    occurrences = service.catalog_list(
+        context=service.context(),
+        semantic_kind="verification_result",
+        view="occurrences",
+    )
+    assert occurrences["view"] == "occurrences"
+    assert {row["event_id"] for row in occurrences["items"]} == {
+        "evt-verify-1",
+        "evt-verify-2",
+    }
+
+    shown = service.catalog_show(item["object_id"], context=service.context())
+    assert shown["item"]["object"]["object_id"] == item["object_id"]
+    assert len(shown["item"]["locators"]) == 1
+    assert len(shown["item"]["occurrences"]) == 2
+
+
+def test_catalog_extracts_registered_typed_refs_from_known_envelopes(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    typed_refs = {
+        "run_contract": write_sidecar_json(
+            state_dir,
+            "artifacts/results/run-contract.json",
+            {"schema_version": "run-contract.v1", "goal": "ship"},
+            kind="call_control_result",
+            schema_version="run-contract.v1",
+            created_by="test",
+        ),
+        "verification_result": write_sidecar_json(
+            state_dir,
+            "artifacts/results/verification.json",
+            {"schema_version": "verification-result.v1", "status": "passed"},
+            kind="call_control_result",
+            schema_version="verification-result.v1",
+            created_by="test",
+        ),
+        "goal_closure_result": write_sidecar_json(
+            state_dir,
+            "artifacts/results/closure.json",
+            {"schema_version": "goal-closure-result.v1", "status": "closed"},
+            kind="call_control_result",
+            schema_version="goal-closure-result.v1",
+            created_by="test",
+        ),
+    }
+    receipt = write_sidecar_json(
+        state_dir,
+        "artifacts/results/receipt.json",
+        {
+            "schema_version": "goal-completion-receipt.v1",
+            "verification_ref": typed_refs["verification_result"],
+            "closure_ref": typed_refs["goal_closure_result"],
+        },
+        kind="goal_completion_receipt",
+        schema_version="goal-completion-receipt.v1",
+        created_by="test",
+    )
+    envelope = write_sidecar_json(
+        state_dir,
+        "artifacts/results/envelope.json",
+        {
+            "schema_version": "call-result-envelope.v1",
+            "artifact_refs": [*typed_refs.values(), receipt],
+        },
+        kind="call_result_envelope",
+        schema_version="call-result-envelope.v1",
+        created_by="test",
+    )
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        id="evt-envelope",
+        type="call.result.admitted",
+        actor="kernel",
+        task_id="T-envelope",
+        correlation_id="run-envelope",
+        payload={
+            "workflow_run_id": "run-envelope",
+            "workflow_operation_id": "wop-envelope",
+            "attempt_id": "attempt-envelope",
+            "claim_id": "claim-envelope",
+            "admitted_call_result_ref": envelope,
+        },
+    ))
+
+    expected_storage_kinds = {
+        "run_contract": "call_control_result",
+        "verification_result": "call_control_result",
+        "goal_closure_result": "call_control_result",
+        "goal_completion_receipt": "goal_completion_receipt",
+    }
+    for semantic_kind, storage_kind in expected_storage_kinds.items():
+        result = service.catalog_list(
+            context=service.context(),
+            semantic_kind=semantic_kind,
+        )
+        assert len(result["items"]) == 1
+        item = result["items"][0]
+        assert item["semantic_kind"] == semantic_kind
+        assert item["storage_kinds"] == [storage_kind]
+        assert item["occurrence_count"] == 1
+        assert item["lineage"]["claim_ids"] == ["claim-envelope"]
+        assert item["lineage"]["operation_ids"] == ["wop-envelope"]
+
+
+def test_catalog_extracts_legacy_run_contract_binding_from_plan_package(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    package, descriptor = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-plan-package",
+        task_map_generation="generation-1",
+    )
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        id="evt-plan-package",
+        type="fanout.started",
+        actor="kernel",
+        correlation_id="run-plan-package",
+        payload={
+            "workflow_run_id": "run-plan-package",
+            "input_refs": [{
+                "ref": descriptor["ref"],
+                "sha256": descriptor["sha256"],
+                "kind": "plan_artifact_package",
+            }],
+        },
+    ))
+
+    result = service.catalog_list(
+        context=service.context(),
+        semantic_kind="run_contract",
+    )
+
+    assert len(result["items"]) == 1
+    item = result["items"][0]
+    assert item["semantic_kind"] == "run_contract"
+    assert item["latest_locator"]["ref"] == package["run_contract_ref"]
+    assert item["sha256"] == package["run_contract_sha256"]
+    assert item["lineage"]["run_ids"] == ["run-plan-package"]
+
+
+def test_typed_nested_occurrence_inherits_container_access_scope(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    verification = write_sidecar_json(
+        state_dir,
+        "artifacts/results/restricted-verification.json",
+        {"schema_version": "verification-result.v1", "status": "passed"},
+        kind="verification_result",
+        schema_version="verification-result.v1",
+        created_by="test",
+    )
+    envelope = write_sidecar_json(
+        state_dir,
+        "artifacts/results/restricted-envelope.json",
+        {
+            "schema_version": "call-result-envelope.v1",
+            "verification_ref": verification,
+        },
+        kind="call_result_envelope",
+        schema_version="call-result-envelope.v1",
+        created_by="test",
+        access_scope={
+            "visibility": "project",
+            "actor": "worker-b",
+            "purpose": "verification",
+        },
+    )
+    _append(
+        state_dir,
+        event_id="evt-restricted-envelope",
+        descriptor=envelope,
+    )
+
+    worker_b = service.context(
+        actor="worker-b",
+        purpose="verification",
+    )
+    visible = service.catalog_list(
+        context=worker_b,
+        semantic_kind="verification_result",
+        view="occurrences",
+    )
+    occurrence_id = visible["items"][0]["occurrence_id"]
+
+    worker_a = service.context(
+        actor="worker-a",
+        purpose="verification",
+    )
+    objects = service.catalog_list(
+        context=worker_a,
+        semantic_kind="verification_result",
+    )
+    assert objects["items"] == []
+    assert service.catalog_show(
+        occurrence_id,
+        context=worker_a,
+    )["item"] == {
+        "authorized": False,
+        "redacted": True,
+        "matched_by": "occurrence",
+    }
+
+
+def test_typed_goal_dossier_hydrate_preserves_delivery_readiness(
+    tmp_path: Path,
+) -> None:
+    _, state_dir, service = _service(tmp_path)
+    descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/goals/run-1/dossier.json",
+        {
+            "schema_version": "goal-dossier.v1",
+            "delivery_readiness": {
+                "schema_version": "goal-dossier-delivery-readiness.v1",
+                "status": "ready",
+                "issues": [],
+            },
+        },
+        kind="goal_dossier",
+        schema_version="goal-dossier.v1",
+        created_by="test",
+    )
+    _append(
+        state_dir,
+        event_id="evt-dossier",
+        descriptor=descriptor,
+    )
+
+    occurrences = service.catalog_list(
+        context=service.context(),
+        semantic_kind="goal_dossier",
+        view="occurrences",
+    )
+    body = service.hydrate(
+        occurrences["items"][0]["occurrence_id"],
+        context=service.context(),
+    )
+
+    assert body["delivery_readiness"]["status"] == "ready"
 
 
 def test_catalog_active_append_catches_up_without_deleting_existing_rows(
@@ -256,7 +555,10 @@ def test_catalog_active_append_catches_up_without_deleting_existing_rows(
         created_by="test",
     )
     _append(state_dir, event_id="evt-first", descriptor=first_descriptor)
-    initial = service.catalog_list(context=service.context())
+    initial = service.catalog_list(
+        context=service.context(),
+        view="occurrences",
+    )
     first_occurrence = initial["items"][0]["occurrence_id"]
     artifact_query_store.set_reducer_projection(
         state_dir,
@@ -284,7 +586,10 @@ def test_catalog_active_append_catches_up_without_deleting_existing_rows(
 
     assert result["records_projected"] == 1
     assert result["occurrences_inserted"] == 1
-    rows = service.catalog_list(context=service.context())["items"]
+    rows = service.catalog_list(
+        context=service.context(),
+        view="occurrences",
+    )["items"]
     assert {row["event_id"] for row in rows} == {"evt-first", "evt-second"}
     assert first_occurrence in {row["occurrence_id"] for row in rows}
     assert artifact_query_store.get_reducer_projection(
@@ -401,7 +706,10 @@ def test_catalog_concurrent_queries_share_one_incremental_catch_up(
 
     def query() -> None:
         barrier.wait()
-        results.append(service.catalog_list(context=service.context()))
+        results.append(service.catalog_list(
+            context=service.context(),
+            view="occurrences",
+        ))
 
     threads = [
         threading.Thread(target=query, name=f"catalog-query-{index}")
@@ -667,7 +975,10 @@ def test_catalog_corruption_uses_canonical_fallback_without_semantic_state(
 
     db_path = projection_db_path(state_dir)
     db_path.write_bytes(b"not a sqlite database")
-    result = service.catalog_list(context=context)
+    result = service.catalog_list(
+        context=context,
+        view="occurrences",
+    )
 
     assert result["fallback"] == {
         "used": True,

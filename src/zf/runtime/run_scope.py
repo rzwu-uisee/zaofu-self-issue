@@ -29,12 +29,34 @@ _CORRELATION_RUN_ANCHOR_EVENTS = frozenset({
     "workflow.invoke.requested",
 })
 
+_CANONICAL_RUN_ANCHOR_EVENTS = frozenset({
+    "run.started",
+    "run.goal.started",
+    "workflow.invoke.requested",
+})
+
 
 def run_aliases(events: Iterable[ZfEvent]) -> dict[str, str]:
     """Return every known run/workflow alias mapped to its canonical run id."""
 
+    rows = list(events)
+    canonical_roots: dict[str, int] = {}
+    for event in rows:
+        if event.type not in _CANONICAL_RUN_ANCHOR_EVENTS:
+            continue
+        payload = _payload(event)
+        root = str(
+            payload.get("run_id")
+            or payload.get("workflow_run_id")
+            or getattr(event, "correlation_id", "")
+            or ""
+        ).strip()
+        if not root:
+            continue
+        priority = 0 if event.type in {"run.started", "run.goal.started"} else 1
+        canonical_roots[root] = min(priority, canonical_roots.get(root, priority))
     aliases: dict[str, str] = {}
-    for event in events:
+    for event in rows:
         payload = _payload(event)
         explicit = tuple(
             str(value or "").strip()
@@ -59,14 +81,49 @@ def run_aliases(events: Iterable[ZfEvent]) -> dict[str, str]:
         )
         if not identities:
             continue
-        # Prefer an already-known alias so later events may enrich a run with
-        # trace/correlation aliases without splitting it into another run.
-        # Do not fall back to event ids: an unscoped legacy terminal must not
-        # manufacture a second run in a shared state directory.
-        canonical = next(
-            (aliases[identity] for identity in identities if identity in aliases),
-            identities[0],
-        )
+        # An approved run anchor outranks a pre-run operation namespace. This
+        # keeps request synthesis operations scoped to the eventual run without
+        # letting an identity such as ``workflow-request:<id>:r<n>`` replace
+        # the public run id merely because its event was appended first.
+        root_candidates = [
+            (canonical_roots[identity], index, identity)
+            for index, identity in enumerate(identities)
+            if identity in canonical_roots
+        ]
+        canonical = min(root_candidates, default=(0, 0, ""))[2]
+        if not canonical:
+            canonical = next(
+                (
+                    aliases[identity]
+                    for identity in identities
+                    if identity in aliases
+                    and aliases[identity] in canonical_roots
+                ),
+                "",
+            )
+        if not canonical:
+            # Prefer an already-known alias so later events may enrich a run
+            # with trace/correlation aliases without splitting it into another
+            # run. Do not fall back to event ids: an unscoped legacy terminal
+            # must not manufacture a second run in a shared state directory.
+            canonical = next(
+                (
+                    aliases[identity]
+                    for identity in identities
+                    if identity in aliases
+                ),
+                identities[0],
+            )
+        replaced = {
+            aliases[identity]
+            for identity in identities
+            if identity in aliases and aliases[identity] != canonical
+        }
+        if replaced:
+            aliases = {
+                alias: canonical if target in replaced else target
+                for alias, target in aliases.items()
+            }
         for alias in identities:
             if alias:
                 aliases[alias] = canonical

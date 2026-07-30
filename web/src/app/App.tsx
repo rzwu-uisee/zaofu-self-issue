@@ -68,6 +68,7 @@ import {
   getRecentEvents,
   getRecentEventsPage,
   getProjectHealth,
+  getRoles,
   getRunDetail,
   getSnapshot,
   getSnapshotLight,
@@ -603,6 +604,7 @@ export function App() {
   );
   const projectRequestScope = useProjectRequestScope(activeProjectId);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [channelWorkflowRoles, setChannelWorkflowRoles] = useState<RoleSummary[]>([]);
   const [deliveryFeaturesPage, setDeliveryFeaturesPage] = useState<DeliveryFeaturesPage | null>(null);
   const [events, setEvents] = useState<RecentEvent[]>([]);
   const [eventsPage, setEventsPage] = useState<EventsPage | null>(null);
@@ -630,6 +632,28 @@ export function App() {
   useEffect(() => {
     if (page === "runtime" || page === "control-room") setPage("observability");
   }, [page]);
+
+  // Channel skips the bundled snapshot, so its Details workspace reads the
+  // existing role projection independently.
+  useEffect(() => {
+    if (page !== "channels" || !activeProjectId) {
+      setChannelWorkflowRoles([]);
+      return;
+    }
+    let cancelled = false;
+    setChannelWorkflowRoles([]);
+    void getRoles(activeProjectId)
+      .then((roles) => {
+        if (!cancelled) setChannelWorkflowRoles(roles);
+      })
+      .catch(() => {
+        if (!cancelled) setChannelWorkflowRoles([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectId, page]);
+
   const [viewMode, setViewMode] = useState<ViewMode>(initial.view);
   const [statusFilter, setStatusFilter] = useState(initial.status);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -2003,7 +2027,7 @@ export function App() {
                 onSetMemberPermission={(memberId, permissionProfile) => setChannelMemberPermission(memberId, permissionProfile)}
                 onWorkflowRequest={channelActions.submitWorkflowRequest}
                 selectedChannelId={selectedChannelId}
-                workflowRoles={snapshot?.roles ?? []}
+                workflowRoles={channelWorkflowRoles}
               />
           ) : page === "triage" ? (
             <TriagePage

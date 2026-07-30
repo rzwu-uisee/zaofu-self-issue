@@ -74,8 +74,9 @@ def _on_tick_mechanisms() -> list[str]:
 
 
 def _run_once_calls() -> tuple[list[str], list[str]]:
-    tree = ast.parse(
-        (_REPO / "src/zf/runtime/orchestrator.py").read_text()
+    tree = ast.parse((_REPO / "src/zf/runtime/orchestrator.py").read_text())
+    periodic_tree = ast.parse(
+        (_REPO / "src/zf/runtime/orchestrator_periodic_sweep.py").read_text()
     )
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "run_once":
@@ -100,6 +101,23 @@ def _run_once_calls() -> tuple[list[str], list[str]]:
                         and inner.value.id == "self"
                     ):
                         sweeps.append(inner.attr)
+            for periodic_node in ast.walk(periodic_tree):
+                if not isinstance(periodic_node, ast.Call):
+                    continue
+                function = periodic_node.func
+                attribute = (
+                    function.attr
+                    if isinstance(function, ast.Attribute)
+                    else None
+                )
+                if (
+                    attribute == "_safe_housekeeping"
+                    and periodic_node.args
+                    and isinstance(periodic_node.args[0], ast.Constant)
+                ):
+                    housekeeping.append(
+                        str(periodic_node.args[0].value)
+                    )
             return housekeeping, sweeps
     raise AssertionError("Orchestrator.run_once not found")
 

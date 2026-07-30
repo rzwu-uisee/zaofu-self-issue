@@ -43,6 +43,7 @@ from zf.cli.hook_workdir_guard import (
     actor_from_workdir_cwd as _actor_from_workdir_cwd,
     bash_command_looks_mutating as _bash_command_looks_mutating,
     evaluate_workdir_write_guard as _evaluate_workdir_write_guard,
+    is_authorized_result_scratch_target as _is_authorized_result_scratch_target,
     tool_input_digest as _tool_input_digest,
     write_target_paths as _write_target_paths,
 )
@@ -716,6 +717,13 @@ def _evaluate_allowed_paths_guard(
         target
         for target in targets
         if not _path_allowed_by_scope(_to_scope_frame(target), scope)
+        and not _is_authorized_result_scratch_target(
+            state_dir,
+            event_log=event_log,
+            actor=actor,
+            target=target,
+            cwd=str(event_payload.get("cwd") or ""),
+        )
     })
     if not offending:
         return 0

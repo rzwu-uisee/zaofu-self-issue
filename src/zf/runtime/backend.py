@@ -59,6 +59,62 @@ class BackendCapabilities:
     native_compact: bool = False
     compact_command: str = ""
     compact_requires_idle: bool = False
+    provider_session_efforts: tuple[str, ...] = ()
+    provider_session_agent: bool = False
+    provider_session_parallelism: bool = False
+    max_provider_session_parallel_agents: int = 0
+    # E0 execution-profile capability baseline. These stay conservative
+    # until a concrete headless/CLI probe proves the provider route.
+    native_goal: bool = False
+    native_multi_agent: bool = False
+    child_lineage: str = "none"  # "none" | "summary" | "full"
+    child_permission_isolation: str = "none"  # "none" | "prompt" | "enforced"
+    compound_resume: str = "none"  # "none" | "root" | "tree"
+    root_only_result_channel: bool = False
+
+
+def validate_provider_session_config(
+    role: RoleConfig,
+    *,
+    capabilities: BackendCapabilities | None = None,
+) -> None:
+    """Fail before spawn when explicit provider-session intent is unsupported."""
+
+    session = getattr(role, "provider_session", None)
+    if session is None:
+        return
+    caps = capabilities or get_adapter(role.backend).capabilities
+    if session.effort and session.effort not in caps.provider_session_efforts:
+        allowed = ", ".join(caps.provider_session_efforts) or "none"
+        raise ValueError(
+            f"role {role.name!r} backend={role.backend!r} does not support "
+            f"provider_session.effort={session.effort!r}; supported: {allowed}"
+        )
+    if session.agent and not caps.provider_session_agent:
+        raise ValueError(
+            f"role {role.name!r} backend={role.backend!r} does not support "
+            "provider_session.agent"
+        )
+    role_agent = str(getattr(role, "agent", "") or "")
+    if role_agent and session.agent and role_agent != session.agent:
+        raise ValueError(
+            f"role {role.name!r}: role.agent and provider_session.agent conflict"
+        )
+    if session.max_parallel_agents is not None:
+        if not caps.provider_session_parallelism:
+            raise ValueError(
+                f"role {role.name!r} backend={role.backend!r} does not support "
+                "provider_session.max_parallel_agents"
+            )
+        ceiling = min(
+            6,
+            caps.max_provider_session_parallel_agents or 6,
+        )
+        if session.max_parallel_agents > ceiling:
+            raise ValueError(
+                f"role {role.name!r}: provider_session.max_parallel_agents="
+                f"{session.max_parallel_agents} exceeds ceiling {ceiling}"
+            )
 
 
 class BackendAdapter(ABC):
@@ -153,6 +209,7 @@ class ClaudeCodeAdapter(BackendAdapter):
         is_resume: bool = False,
         prompt: str | None = None,
     ) -> list[str]:
+        validate_provider_session_config(role, capabilities=self.capabilities)
         cmd = ["claude"]
         if role.permission_mode == "bypass":
             cmd.append("--dangerously-skip-permissions")
@@ -176,8 +233,16 @@ class ClaudeCodeAdapter(BackendAdapter):
         # keep them after the core flags for log readability.
         for plugin_dir in role.plugins:
             cmd.extend(["--plugin-dir", plugin_dir])
-        if role.agent:
-            cmd.extend(["--agent", role.agent])
+        provider_session = role.provider_session
+        if provider_session is not None and provider_session.effort:
+            cmd.extend(["--effort", provider_session.effort])
+        agent = (
+            provider_session.agent
+            if provider_session is not None and provider_session.agent
+            else role.agent
+        )
+        if agent:
+            cmd.extend(["--agent", agent])
         cmd.append("--verbose")
         return cmd
 
@@ -201,6 +266,8 @@ class ClaudeCodeAdapter(BackendAdapter):
             nested_agent_disable="full",
             native_compact=True,
             compact_command="/compact",
+            provider_session_efforts=("low", "medium", "high", "max"),
+            provider_session_agent=True,
         )
 
 
@@ -236,6 +303,7 @@ class CodexAdapter(BackendAdapter):
         is_resume: bool = False,
         prompt: str | None = None,
     ) -> list[str]:
+        validate_provider_session_config(role, capabilities=self.capabilities)
         # 1202-T1 / 2026-05 Codex CLI migration: enable Codex hooks with
         # the current feature name. Older Codex builds used
         # `features.codex_hooks`; current builds warn and require
@@ -294,6 +362,26 @@ class CodexAdapter(BackendAdapter):
 
         if role.model and role.model != "placeholder":
             cmd.extend(["--model", role.model])
+        provider_session = role.provider_session
+        session_effort = (
+            provider_session.effort
+            if provider_session is not None and provider_session.effort
+            else role.model_reasoning_effort
+        )
+        if session_effort:
+            cmd.extend([
+                "--config",
+                f'model_reasoning_effort="{session_effort}"',
+            ])
+        if (
+            provider_session is not None
+            and provider_session.max_parallel_agents is not None
+        ):
+            cmd.extend([
+                "-c",
+                "agents.max_concurrent_threads_per_session="
+                f"{provider_session.max_parallel_agents}",
+            ])
         if is_resume and session_id:
             cmd.extend(["resume", session_id])
         # is_resume=True with session_id=None falls through to a fresh
@@ -341,6 +429,16 @@ class CodexAdapter(BackendAdapter):
             native_compact=True,
             compact_command="/compact",
             compact_requires_idle=True,
+            provider_session_efforts=(
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "ultra",
+            ),
+            provider_session_parallelism=True,
+            max_provider_session_parallel_agents=6,
         )
 
 
@@ -355,6 +453,7 @@ class MockAdapter(BackendAdapter):
         is_resume: bool = False,
         prompt: str | None = None,
     ) -> list[str]:
+        validate_provider_session_config(role, capabilities=self.capabilities)
         return ["cat"]
 
     @property

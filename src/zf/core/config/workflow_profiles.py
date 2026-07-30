@@ -85,7 +85,7 @@ _COMMON_PRODUCT_FLOW_KEYS = frozenset({
     "artifactPackageMode", "artifact_package_mode",
 })
 _KNOWN_ISSUE_FLOW_KEYS = _COMMON_PRODUCT_FLOW_KEYS | frozenset({
-    "topology",  # fanout(default) | light(single lane goal loop)
+    "topology",  # light(default single lane goal loop) | fanout
     "issueRef", "issue_ref",
     "targetRef", "target_ref",
     "triageRole", "triage_role",
@@ -128,6 +128,7 @@ _TASK_MAP_CONTRACT_INSTRUCTIONS = [
     "Task-map hard contract: when `allowed_paths` is non-empty, include `allowed_paths_reason` or `scope_reason` explaining the ownership boundary.",
     "Task-map hard contract: dependencies in `blocked_by` must reference existing task ids and must not point to a later wave.",
     "Task-map hard contract: new plans use `validation.commands[]`; each command has stable `id`, executable `command`, `acceptance_ids`, `owner`, `tier`, `deterministic`, `reusable`, and `timeout_seconds`. Keep commands independent; do not join them with `&&`. Legacy `verification` remains accepted only as an adapter.",
+    "Task-map hard contract: downstream gates execute each canonical `command` exactly as stored. Never validate a rewritten or equivalent command; put escape-sensitive assertions in repository test/script files instead of nested `node -e` or `python -c` payloads.",
     "Task-map hard contract: acceptance entries use stable `id`, observable `statement`, `mandatory`, `verification_owner`, `verification_tier`, and `verification_command_ids`. An AC is a product outcome, not a test command or implementation step.",
     "Task-map hard contract: verification may use `cd <target_root>`, but referenced files must still be represented by repo-relative `allowed_paths` such as `app/tests/...`, not bare `tests/...`.",
     "Task-map hard contract: scaffold owners must list package metadata files they create, including `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`, `tsconfig.json`, or lockfiles.",
@@ -230,6 +231,10 @@ def _semantic_submit_profiles_param(params: dict[str, Any]) -> dict[str, str]:
 
 
 _ROLE_DEFAULT_ALIASES = {
+    "modelReasoningEffort": "model_reasoning_effort",
+    "providerSession": "provider_session",
+    "providerSessionByStage": "provider_session_by_stage",
+    "lifecycleByStage": "lifecycle_by_stage",
     "permissionMode": "permission_mode",
     "stuckThresholdSeconds": "stuck_threshold_seconds",
     "spawnReadyTimeoutSeconds": "spawn_ready_timeout_seconds",
@@ -241,6 +246,8 @@ _ROLE_DEFAULT_ALIASES = {
 }
 
 _ROLE_DEFAULT_FIELDS = (
+    "model",
+    "model_reasoning_effort",
     "transport",
     "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds",
@@ -249,12 +256,20 @@ _ROLE_DEFAULT_FIELDS = (
     "context_hard_cap",
     "drain_hold_seconds",
     "budget_usd",
+    "provider_session",
+    "lifecycle",
 )
 
 _LANE_ROLE_DEFAULT_FIELDS = (
+    "model",
+    "model_reasoning_effort",
     "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds",
     "budget_usd",
+    "provider_session",
+    "lifecycle",
+    "provider_session_by_stage",
+    "lifecycle_by_stage",
 )
 
 
@@ -831,6 +846,10 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
         "pipelines": [pipeline],
         "external_triggers": [entry, "task_map.ready"],
         "schema_profile": "refactor-flow/v5",
+        "admission_replan": {
+            "enabled": True,
+            "resynth_trigger": "zaofu.refactor.review.ready",
+        },
         "metadata": metadata,
     }
 
@@ -1015,9 +1034,10 @@ def _post_verify_discovery_stage(
 def expand_issue_flow(params: dict) -> dict[str, Any]:
     """IssueFlow → minimal issue bugfix controller.
 
-    The controller is intentionally small: triage creates/accepts the task map,
-    writer lanes implement, verify lanes produce regression evidence, then a
-    judge closes the issue. Runtime still consumes canonical stages only.
+    The default is a fixed single-lane Fix -> Verify -> Judge flow. Kernel
+    deterministically synthesizes the one-task map at intake. Complex issues
+    must opt into ``topology: fanout`` before the Run starts; runtime never
+    redraws an admitted Issue graph.
     """
     unknown = sorted(str(k) for k in params if str(k) not in _KNOWN_ISSUE_FLOW_KEYS)
     if unknown:
@@ -1032,7 +1052,7 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
         "verify_backend",
         default="",
     ))
-    topology = str(_pick(params, "topology", default="fanout")).strip() or "fanout"
+    topology = str(_pick(params, "topology", default="light")).strip() or "light"
     if topology not in {"fanout", "light"}:
         raise WorkflowProfileError(
             f"IssueFlow: unknown topology {topology!r} (fanout|light)"
@@ -1213,8 +1233,8 @@ def _expand_prd_flow_light(
     的任务"用全拓扑是净负资产。light = 单 lane goal 环 + 候选级
     verify + judge 三件套;scan/plan fanout 整段跳过,task_map 由
     kernel 在入口触发时机械合成单任务(runtime/light_flow.py),
-    机械验收门(admission/F7/树哈希/judge)一个不拆。错判可免费
-    升级全拓扑(topology: fanout)。
+    机械验收门(admission/F7/树哈希/judge)一个不拆。复杂任务须在
+    Run 启动前显式选择全拓扑(topology: fanout)。
     """
     return _expand_product_flow_light(
         params,
@@ -1319,6 +1339,7 @@ def _expand_product_flow_light(
         "roles": roles,
         "stages": [],
         "pipelines": [pipeline],
+        "entry_stage_id": f"{pipeline_id}-impl",
         "external_triggers": [entry, "task_map.ready"],
         "schema_profile": "canonical-dag/v8",
         "metadata": metadata,
@@ -1569,7 +1590,7 @@ def merge_expansion_into_body(body: dict, expansion: dict) -> None:
             str(stage.get("trigger") or ""),
             str(stage.get("flow_kind") or "").strip().lower(),
         )
-        if stage_key in hand_triggers:
+        if stage_key in hand_triggers or (stage_key[0], "") in hand_triggers:
             print(
                 f"Warning: flowProfile stage {stage['id']!r} skipped — "
                 f"hand-written stage already covers trigger "
@@ -1581,6 +1602,9 @@ def merge_expansion_into_body(body: dict, expansion: dict) -> None:
         hand_triggers.add(stage_key)
 
     workflow.setdefault("pipelines", []).extend(expansion["pipelines"])
+    admission_replan = expansion.get("admission_replan")
+    if isinstance(admission_replan, dict):
+        workflow.setdefault("admission_replan", dict(admission_replan))
     dag = workflow.setdefault("dag", {})
     if isinstance(dag, dict):
         if not dag.get("schema_profile"):

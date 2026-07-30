@@ -27,6 +27,14 @@ from zf.core.verification.validation import coerce_validation_spec
 from zf.core.workflow.topology import WorkflowEventSets
 
 
+_CANONICAL_TASK_CONTRACT_SOURCES = frozenset({
+    "task_map_materialization",
+    "workflow_task_map_adoption",
+    "refactor_replan_adoption",
+    "task_map_contract_refresh",
+})
+
+
 def apply_agent_usage_event(
     tracker: CostTracker,
     event: ZfEvent,
@@ -591,17 +599,17 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         return
     contract_data = event.payload.get("contract") or {}
     existing = task.contract or TaskContract()
-    if (
-        event.actor == "zf-cli"
-        and event.payload.get("source") == "task_map_materialization"
-    ):
-        # The materializer publishes a complete canonical TaskContract after
-        # its atomic store write. Re-running that body through the legacy
-        # partial-update adapter is lossy: coerce_validation_spec() drops
-        # validation.commands[], and structured acceptance/claim fields can
-        # also be flattened. Project the complete internal body byte-for-byte
-        # at the schema level so its semantic revision remains stable between
-        # dispatch and result admission.
+    if event.actor == "zf-cli" and event.payload.get(
+        "source"
+    ) in _CANONICAL_TASK_CONTRACT_SOURCES:
+        # Task-map materialization and adoption publish complete canonical
+        # TaskContracts. Re-running them through the legacy partial-update
+        # adapter is lossy: it drops validation.commands[] and structured
+        # acceptance/claim fields. Old metadata-only events are audit records;
+        # treating them as contract bodies would degrade current TaskStore
+        # state, so leave them as a no-op.
+        if not contract_data:
+            return
         try:
             materialized = TaskContract(**dict(contract_data))
         except (TypeError, ValueError):
@@ -698,6 +706,14 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         review_profile=contract_data.get(
             "review_profile",
             existing.review_profile,
+        ),
+        execution_profile_id=contract_data.get(
+            "execution_profile_id",
+            existing.execution_profile_id,
+        ),
+        execution_profile_digest=contract_data.get(
+            "execution_profile_digest",
+            existing.execution_profile_digest,
         ),
         behavior=str(behavior or ""),
         verification=verification,

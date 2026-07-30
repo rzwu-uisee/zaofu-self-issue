@@ -327,6 +327,18 @@ def test_doc156_channel_research_adoption_and_workflow_start(
         aggregate.payload["research_artifact_digest"]
     )
     assert (state_dir / artifact_ref).is_file()
+    writer.append(ZfEvent(
+        type="run.completed",
+        actor="orchestrator",
+        task_id="TASK-DOC156",
+        correlation_id=str(invoke.payload["workflow_run_id"]),
+        payload={
+            "workflow_run_id": str(invoke.payload["workflow_run_id"]),
+            "status": "completed",
+            "source_event_id": aggregate.id,
+        },
+        causation_id=aggregate.id,
+    ))
 
     adoption = _approved_action(
         service,

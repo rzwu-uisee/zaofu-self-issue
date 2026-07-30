@@ -437,6 +437,10 @@ def renderable_config_to_primitive(config: ZfConfig) -> dict[str, Any]:
     if isinstance(flow_metadata_by_kind, dict) and flow_metadata_by_kind:
         workflow["_flow_metadata_by_kind"] = flow_metadata_by_kind
 
+    generic_workflows = workflow.pop("generic_workflows", None)
+    if isinstance(generic_workflows, list) and generic_workflows:
+        workflow["_generic_workflows"] = generic_workflows
+
     pipelines = workflow.get("pipelines")
     if isinstance(pipelines, list):
         workflow["pipelines"] = [
@@ -523,6 +527,9 @@ def _renderable_lane_pipeline(item: dict[str, Any]) -> dict[str, Any]:
         ),
         "stages": [],
     }
+    flow_kind = str(item.get("flow_kind") or "")
+    if flow_kind:
+        pipeline["flow_kind"] = flow_kind
     task_map_ref = str(item.get("task_map_ref") or "")
     if task_map_ref:
         pipeline["task_source"] = {"task_map_ref": task_map_ref}

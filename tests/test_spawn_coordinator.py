@@ -35,6 +35,7 @@ from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.spawn_coordinator import SpawnCoordinator
 from zf.runtime.spawn_coordinator import _write_codex_runtime_hook_trust
 from zf.runtime.spawn_coordinator import _uuid_used_by_live_process
+from zf.runtime.session_tailer import CodexSessionTailer
 from zf.runtime.transport import TransportAdapter, AttachHandle
 
 
@@ -745,6 +746,75 @@ class TestNotifyFirstDispatch:
         assert captured["instance_id"] == "dev"
         assert captured["since_ts"] == 123.0
         assert captured["sessions_root"] == coordinator._codex_sessions_root(role)
+
+    def test_observed_role_local_rollout_is_tailed_from_first_turn(
+        self,
+        state_dir,
+        registry,
+        transport,
+    ):
+        import time as _time
+
+        log = EventLog(state_dir / "events.jsonl")
+        tailer = CodexSessionTailer(log)
+        coordinator = SpawnCoordinator(
+            state_dir=state_dir,
+            registry=registry,
+            transport=transport,
+            project_root="/tmp/zf",
+            event_log=log,
+            codex_session_tailer=tailer,
+        )
+        role = RoleConfig(name="dev", backend="codex")
+        coordinator.spawn(role)
+        session_id = "77777777-7777-7777-7777-777777777777"
+        folder = coordinator._codex_sessions_root(role) / "2026" / "07" / "28"
+        folder.mkdir(parents=True, exist_ok=True)
+        rollout = (
+            folder
+            / f"rollout-2026-07-28T00-00-00-{session_id}.jsonl"
+        )
+        rollout.write_text(
+            "\n".join((
+                json.dumps({
+                    "type": "session_meta",
+                    "payload": {"id": session_id, "cwd": "/tmp/zf"},
+                }),
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": "turn-first",
+                    },
+                }),
+            )) + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            coordinator._observe_codex_in_background(
+                role,
+                coordinator._spawn_ts[role.instance_id],
+            )
+            for _ in range(30):
+                if any(
+                    event.type == "provider.turn.closed"
+                    and event.actor == role.instance_id
+                    and event.payload.get("turn_id") == "turn-first"
+                    for event in log.read_all()
+                ):
+                    break
+                _time.sleep(0.1)
+        finally:
+            tailer.stop()
+
+        assert registry.get_path(role.instance_id) == rollout
+        assert any(
+            event.type == "provider.turn.closed"
+            and event.actor == role.instance_id
+            and event.payload.get("turn_id") == "turn-first"
+            for event in log.read_all()
+        )
 
 
 class TestMarkSpawnedSemantics:

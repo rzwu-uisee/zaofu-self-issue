@@ -341,8 +341,25 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     }
     run_contract["contract_digest"] = stable_json_sha256(run_contract)
     write_run_contract(state_dir, run_contract)
-    judge_credential = provision_role_submit_credential(state_dir, "judge-prd")
+    submit_credentials = {
+        role_instance: provision_role_submit_credential(
+            state_dir,
+            role_instance,
+        ).read_text(encoding="utf-8").strip()
+        for role_instance in (
+            "dev-lane-0",
+            "dev-lane-1",
+            "verify-lane-0",
+            "verify-lane-1",
+            "judge-prd",
+        )
+    }
     log = EventLog(state_dir / "events.jsonl")
+    submitter = SemanticResultSubmitService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    )
     orchestrator = Orchestrator(state_dir, config, _Transport())  # type: ignore[arg-type]
     log.append(ZfEvent(
         type="run.goal.started",
@@ -508,13 +525,33 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     _git(r2_workdir, "add", "result.txt")
     _git(r2_workdir, "commit", "-q", "-m", "feat: deliver R2 sentinel")
     r2_commit = _git(r2_workdir, "rev-parse", "HEAD")
-    valid_r2_impl = _impl_completion(
+    legacy_r2_impl = _impl_completion(
         r2_child,
         contract=r2_contract,
         source_commit=r2_commit,
         evidence_prefix="r2-current",
     )
-    log.append(valid_r2_impl)
+    submitted_r2_impl = submitter.submit(
+        operation_id=str(r2_payload["operation_id"]),
+        semantic_result={
+            "schema_version": "implementation-result.v1",
+            "execution_status": "completed",
+            "verdict": "passed",
+            "summary": "current R2 implementation",
+            "target_commit": r2_commit,
+            "changed_files": ["result.txt"],
+            "evidence_refs": ["mock://r2-current/impl"],
+            "known_gaps": [],
+            "self_check": legacy_r2_impl.payload["impl_self_check"],
+        },
+        role_instance=str(r2_child["role_instance"]),
+        credential=submit_credentials[str(r2_child["role_instance"])],
+    )
+    valid_r2_impl = next(
+        event
+        for event in log.read_all()
+        if event.id == submitted_r2_impl.canonical_event_id
+    )
     orchestrator.run_once(events=[valid_r2_impl])
 
     candidate = _latest(log, "candidate.ready")
@@ -732,20 +769,20 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     ]
 
     _record_required_reads(state_dir, verify_payload)
-    valid_verify = ZfEvent(
-        type="verify.child.completed",
-        actor=verify_child["role_instance"],
-        task_id=TASK_ID,
-        correlation_id="run-stale-contract",
-        payload={
-            **unread_verify.payload,
-            "report": {
-                **unread_verify.payload["report"],
-                "summary": "current R2 verify after required reads",
-            },
+    submitted_verify = submitter.submit(
+        operation_id=str(verify_payload["operation_id"]),
+        semantic_result={
+            **current_verification,
+            "summary": "current R2 verify after required reads",
         },
+        role_instance=str(verify_child["role_instance"]),
+        credential=submit_credentials[str(verify_child["role_instance"])],
     )
-    log.append(valid_verify)
+    valid_verify = next(
+        event
+        for event in log.read_all()
+        if event.id == submitted_verify.canonical_event_id
+    )
     orchestrator.run_once(events=[valid_verify])
 
     test_passed = _latest(log, "test.passed")
@@ -777,15 +814,11 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
             encoding="utf-8",
         )
     )
-    submitted = SemanticResultSubmitService(
-        state_dir=state_dir,
-        event_log=log,
-        event_writer=EventWriter(log),
-    ).submit(
+    submitted = submitter.submit(
         operation_id=judge_payload["operation_id"],
         semantic_result=semantic_result,
         role_instance="judge-prd",
-        credential=judge_credential.read_text().strip(),
+        credential=submit_credentials["judge-prd"],
     )
     judged = next(event for event in log.read_all() if event.id == submitted.canonical_event_id)
     orchestrator.run_once(events=[judged])

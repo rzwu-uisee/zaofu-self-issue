@@ -35,7 +35,9 @@ event or editing truth files.
 Before submitting the completion claim:
 
 1. Compare the assigned scope with the actual diff and produced artifacts.
-2. Run the contract's focused checks plus the relevant build/typecheck command.
+2. Run the contract's focused checks exactly as stored plus the relevant
+   build/typecheck command. A rewritten, re-escaped, or "equivalent" command is
+   a different check and cannot produce a receipt for the declared command id.
 3. For an isolated lane/worktree writer, commit the intended delta and leave
    the assigned worktree clean. Shared-checkout workers commit only when the
    task or operator explicitly requires it.
@@ -67,6 +69,8 @@ copy large logs into the event payload; persist them and cite their refs.
 Do not submit a success claim when:
 
 - required checks failed or were silently skipped;
+- a declared command passed only after changing its command string, quoting, or
+  escaping; report a contract/plan blocker instead;
 - the diff escapes the assigned paths or ownership;
 - a lane worktree is dirty or lacks the required committed source ref;
 - mandatory acceptance criteria have no evidence;

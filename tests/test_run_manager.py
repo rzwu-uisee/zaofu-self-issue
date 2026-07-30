@@ -502,11 +502,28 @@ def _append_candidate_rework_fixture(log: EventLog) -> None:
             "pdd_id": "CJMIN-RM",
             "feature_id": "CJMIN-RM",
             "trace_id": "trace-rm",
+            "workflow_run_id": "workflow-run-rm",
+            "flow_kind": "refactor",
+            "request_kind": "refactor",
+            "request_id": "request-rm",
             "target_ref": "cand/CJMIN-RM",
             "task_map_ref": ".zf/artifacts/CJMIN-RM/task_map.json",
             "source_index_ref": ".zf/artifacts/CJMIN-RM/source_index.json",
             "source_commit": "base123",
             "candidate_base_commit": "base123",
+            "requirement_spec_ref": "artifacts/requirements/rm.json",
+            "requirement_spec_digest": "requirement-digest",
+            "workflow_proposal_ref": {
+                "ref": "artifacts/proposals/rm.json",
+                "sha256": "proposal-ref-digest",
+            },
+            "workflow_proposal_digest": "proposal-digest",
+            "run_contract_ref": "artifacts/run-contracts/rm.json",
+            "run_contract_digest": "run-contract-digest",
+            "plan_artifact_package_id": "planpkg-rm",
+            "plan_artifact_package_ref": "artifacts/plan-packages/rm.json",
+            "plan_artifact_package_digest": "package-digest",
+            "task_map_generation": "generation-rm",
         },
         correlation_id="trace-rm",
     ))
@@ -1202,6 +1219,10 @@ def test_run_manager_executes_candidate_rework_controlled_action(
     assert pending["owner_route"] == "controlled_action"
     assert pending["policy_decision"]["decision"] == "auto_decide"
     assert pending["failed_task_ids"] == ["CJMIN-WEB-001"]
+    assert pending["workflow_run_id"] == "workflow-run-rm"
+    assert pending["flow_kind"] == "refactor"
+    assert pending["plan_artifact_package_id"] == "planpkg-rm"
+    assert pending["workflow_proposal_ref"]["ref"] == "artifacts/proposals/rm.json"
     assert pending["rework_summary"]["gap_tasks"][0]["task_id"] == "CJMIN-WEB-GAP-001"
     assert "task_map.ready" in pending["expected_downstream_events"]
     assert "task_map.amended" in pending["expected_downstream_events"]
@@ -1241,6 +1262,13 @@ def test_run_manager_executes_candidate_rework_controlled_action(
         rework_ready[-1].payload["rework_summary"]["gap_tasks"][0]["task_id"]
         == "CJMIN-WEB-GAP-001"
     )
+    assert rework_ready[-1].payload["workflow_run_id"] == "workflow-run-rm"
+    assert rework_ready[-1].payload["flow_kind"] == "refactor"
+    assert rework_ready[-1].payload["plan_artifact_package_id"] == "planpkg-rm"
+    assert (
+        rework_ready[-1].payload["workflow_proposal_ref"]["ref"]
+        == "artifacts/proposals/rm.json"
+    )
     assert any(
         event.type == "task_map.ready"
         and event.payload.get("source") == "run_manager_gap_task_map_amend"
@@ -1264,6 +1292,115 @@ def test_run_manager_executes_candidate_rework_controlled_action(
         spawn_repairs=False,
     )
     assert second.actions_applied == 0
+
+
+def test_run_manager_replans_contract_blocker_with_flow_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    identity = {
+        "workflow_run_id": "refactor-run-1",
+        "flow_kind": "refactor",
+        "request_kind": "refactor",
+        "request_id": "refactor-run-1",
+        "requirement_spec_ref": "artifacts/requirements/refactor.json",
+        "requirement_spec_digest": "requirement-digest",
+        "run_contract_ref": "artifacts/run-contracts/refactor.json",
+        "run_contract_digest": "run-contract-digest",
+        "plan_artifact_package_id": "planpkg-refactor",
+        "plan_artifact_package_ref": "artifacts/plan-packages/refactor.json",
+        "plan_artifact_package_digest": "package-digest",
+        "task_map_generation": "generation-refactor",
+    }
+    log.append(ZfEvent(
+        type="zaofu.refactor.review.ready",
+        actor="zf-cli",
+        payload={
+            **identity,
+            "pdd_id": "REFACTOR-1",
+            "trace_id": "refactor-run-1",
+        },
+        correlation_id="refactor-run-1",
+    ))
+    log.append(ZfEvent(
+        type="task_map.ready",
+        actor="zf-cli",
+        payload={
+            **identity,
+            "pdd_id": "REFACTOR-1",
+            "feature_id": "REFACTOR-1",
+            "trace_id": "refactor-run-1",
+            "task_map_ref": "artifacts/task-map.json",
+            "source_commit": "base123",
+            "candidate_base_commit": "base123",
+        },
+        correlation_id="refactor-run-1",
+    ))
+    log.append(ZfEvent(
+        id="blocked-refactor-1",
+        type="dev.blocked",
+        actor="dev-lane-0",
+        payload={
+            "pdd_id": "REFACTOR-1",
+            "trace_id": "refactor-run-1",
+            "failure_class": "task_contract_unsatisfiable",
+            "reason": "the declared evidence contract cannot be reproduced",
+            "evidence_refs": ["event:e2e-passed", "event:baseline-provenance"],
+        },
+        correlation_id="refactor-run-1",
+    ))
+    log.append(ZfEvent(
+        id="integration-refactor-1",
+        type="integration.failed",
+        actor="zf-cli",
+        payload={
+            **identity,
+            "pdd_id": "REFACTOR-1",
+            "trace_id": "refactor-run-1",
+            "failure_scope": "candidate",
+            "failure_class": "candidate_integration_failure",
+        },
+        correlation_id="refactor-run-1",
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_admission_replan_config(),
+    )
+    pending = next(
+        item for item in projection["pending_actions"]
+        if item["action"] == "candidate-rework-apply"
+    )
+    assert pending["candidate_rework_action"] == "replan"
+    assert pending["workflow_run_id"] == "refactor-run-1"
+    assert pending["plan_artifact_package_id"] == "planpkg-refactor"
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_admission_replan_config(),
+        event_log=log,
+        action_filter={"candidate-rework-apply"},
+        spawn_repairs=False,
+    )
+
+    assert result.actions_applied == 1
+    events = log.read_all()
+    replan = next(
+        event for event in events
+        if event.type == "orchestrator.replan_requested"
+        and event.payload.get("rework_of") == "integration-refactor-1"
+    )
+    assert replan.payload["workflow_run_id"] == "refactor-run-1"
+    assert replan.payload["plan_artifact_package_id"] == "planpkg-refactor"
+    resynth = [
+        event for event in events
+        if event.type == "zaofu.refactor.review.ready"
+        and event.payload.get("rework_of") == "integration-refactor-1"
+    ][-1]
+    assert resynth.payload["workflow_run_id"] == "refactor-run-1"
+    assert resynth.payload["plan_artifact_package_id"] == "planpkg-refactor"
 
 
 def test_run_manager_recovers_candidate_rework_anchor_from_artifact_and_git_head(
@@ -4570,11 +4707,8 @@ def test_goal_identity_failure_uses_one_aggregate_rebuild_before_autoresearch(
         event for event in events
         if event.type == "run.manager.action.effect.pending"
     )
-    assert effect.payload["required_sequence"] == [
-        ["flow.goal.closed"],
-        ["judge.requested"],
-        ["run.goal.completed", "run.goal.blocked"],
-    ]
+    assert effect.payload["expected_event_types"] == ["flow.goal.closed"]
+    assert effect.payload["required_sequence"] == []
 
     from zf.runtime.run_manager import _settle_pending_action_effects
 
@@ -4583,23 +4717,101 @@ def test_goal_identity_failure_uses_one_aggregate_rebuild_before_autoresearch(
         correlation_id="run-goal-1",
         payload={"workflow_run_id": "run-goal-1"},
     )
-    assert _settle_pending_action_effects(log.read_all(), writer) == 0
-    writer.emit(
-        "judge.requested",
-        correlation_id="run-goal-1",
-        payload={"workflow_run_id": "run-goal-1"},
-    )
-    assert _settle_pending_action_effects(log.read_all(), writer) == 0
-    writer.emit(
-        "run.goal.completed",
-        correlation_id="run-goal-1",
-        payload={"workflow_run_id": "run-goal-1"},
-    )
     assert _settle_pending_action_effects(log.read_all(), writer) == 1
     assert any(
         event.type == "run.manager.action.effect.passed"
         for event in log.read_all()
     )
+
+
+def test_goal_identity_rebuild_is_not_starved_by_diagnostic_noise(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    for index in range(12):
+        log.append(ZfEvent(
+            type="worker.context.warning",
+            actor=f"worker-{index}",
+            payload={
+                "fingerprint": f"context-warning-{index}",
+                "reason": "recycle threshold exceeded",
+            },
+        ))
+    log.append(ZfEvent(
+        id="evt-discovery-missing-lineage",
+        type="flow.discovery.completed",
+        correlation_id="run-goal-lineage",
+        payload={
+            "fanout_id": "fanout-discovery-missing-lineage",
+            "workflow_run_id": "run-goal-lineage",
+            "goal_id": "GOAL-LINEAGE",
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-identity-missing-lineage",
+        type="goal.closure.identity.invalid",
+        correlation_id="run-goal-lineage",
+        payload={
+            "workflow_run_id": "run-goal-lineage",
+            "goal_id": "GOAL-LINEAGE",
+            "source_event_id": "evt-discovery-missing-lineage",
+            "reason": "current task-map generation has no pinned goal claim set",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+
+    rebuild = next(
+        action for action in projection["pending_actions"]
+        if action.get("action") == "fanout-aggregate-rebuild"
+    )
+    assert rebuild["source_event_id"] == "evt-identity-missing-lineage"
+    assert rebuild["policy_decision"]["decision"] == "auto_decide"
+
+
+def test_legacy_goal_rebuild_effect_settles_without_terminal_deadlock(
+    tmp_path: Path,
+) -> None:
+    from zf.runtime.run_manager import _settle_pending_action_effects
+
+    _state_dir, log, writer = _state(tmp_path)
+    writer.emit(
+        "run.manager.action.effect.pending",
+        correlation_id="run-goal-legacy",
+        payload={
+            "schema_version": "run-manager.action.effect.v1",
+            "action": "fanout-aggregate-rebuild",
+            "failure_class": "goal_closure_identity_invalid",
+            "workflow_run_id": "run-goal-legacy",
+            "effect_id": "effect-legacy-rebuild",
+            "expected_event_types": ["run.goal.completed"],
+            "failure_event_types": ["run.goal.blocked"],
+            "required_sequence": [
+                ["flow.goal.closed"],
+                ["judge.requested"],
+                ["run.goal.completed", "run.goal.blocked"],
+            ],
+            "status": "pending",
+        },
+    )
+    goal_closed = writer.emit(
+        "flow.goal.closed",
+        correlation_id="run-goal-legacy",
+        payload={"workflow_run_id": "run-goal-legacy"},
+    )
+
+    assert _settle_pending_action_effects(log.read_all(), writer) == 1
+    passed = next(
+        event for event in log.read_all()
+        if event.type == "run.manager.action.effect.passed"
+    )
+    assert passed.payload["observed_event_id"] == goal_closed.id
+    assert passed.payload["observed_event_type"] == "flow.goal.closed"
 
 
 def test_run_manager_tick_executes_only_continuation_next_operation(

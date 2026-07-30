@@ -766,6 +766,7 @@ def _apply_batch_task_map_ready(
 
 _RESUME_PLAN_IDENTITY_KEYS = (
     "workflow_run_id",
+    "flow_kind",
     "requirement_spec_ref",
     "requirement_spec_digest",
     "objective_ref",

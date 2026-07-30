@@ -19,9 +19,8 @@ from zf.core.events.segments import (
     iter_event_records_from_cursor,
 )
 from zf.core.state.locks import locked_path
-from zf.runtime.sidecar_refs import iter_sidecar_ref_descriptors
-
 from . import store as catalog_store
+from .extractors import iter_catalog_descriptors
 
 
 def catch_up_catalog(
@@ -506,7 +505,7 @@ def _project_record(
         if isinstance(record.event.payload, dict)
         else {}
     )
-    for descriptor in iter_sidecar_ref_descriptors(payload):
+    for descriptor in iter_catalog_descriptors(state_dir, payload):
         inserted = catalog_store._insert_descriptor(
             conn,
             project_root=project_root,

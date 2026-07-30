@@ -18,10 +18,9 @@ from zf.core.config.loader import load_config
 from zf.core.config.render import renderable_config_to_primitive
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
-from zf.core.task.schema import Task, TaskContract
-from zf.core.task.store import TaskStore
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.run_contract import build_run_contract, write_run_contract
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 
@@ -31,13 +30,26 @@ CONTROLLER_DIR = ROOT / "examples" / "prod" / "controller"
 
 class _RecordingTransport:
     def __init__(self) -> None:
+        self.alive: set[str] = set()
+        self.spawned: list[tuple[str, list[str], Path | None]] = []
         self.sent: list[tuple[str, Path, str, object]] = []
 
+    def spawn(self, role, argv, *, cwd=None):  # noqa: ANN001
+        self.alive.add(str(role.instance_id))
+        self.spawned.append((str(role.instance_id), list(argv), cwd))
+
+    def wait_ready(self, role_name, pattern, timeout):  # noqa: ANN001
+        return str(role_name) in self.alive
+
     def send_task(self, role_name, briefing_path, prompt, *, context=None):  # noqa: ANN001
+        assert str(role_name) in self.alive
         self.sent.append((str(role_name), Path(briefing_path), str(prompt), context))
 
     def is_alive(self, role_name):  # noqa: ANN001
-        return True
+        return str(role_name) in self.alive
+
+    def terminate(self, role_name):  # noqa: ANN001
+        self.alive.discard(str(role_name))
 
     def capture_log(self, role_name, lines=200):  # noqa: ANN001
         return ""
@@ -180,30 +192,29 @@ def test_rendered_controller_queue_releases_next_impl_task(
     state_dir = Path(config.project.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    write_run_contract(
+        state_dir,
+        build_run_contract(
+            config,
+            config_path=rendered,
+            project_root=project,
+            state_dir=state_dir,
+        ),
+    )
 
     task_map_ref = f"{state_dir.name}/artifacts/F-SIM/task_map.json"
     task_map = project / task_map_ref
     task_map.parent.mkdir(parents=True, exist_ok=True)
+    objective_ref = f"{state_dir.name}/artifacts/F-SIM/objective.md"
+    (project / objective_ref).write_text(
+        f"Deliver the {kind} queue regression fixture.\n",
+        encoding="utf-8",
+    )
     items = _task_items(kind)
     task_map.write_text(
         json.dumps({"schema_version": "task-map.v1", "tasks": items}),
         encoding="utf-8",
     )
-
-    store = TaskStore(state_dir / "kanban.json")
-    for item in items:
-        store.add(Task(
-            id=item["task_id"],
-            title=item["title"],
-            status="backlog",
-            contract=TaskContract(
-                feature_id="F-SIM",
-                scope=item["allowed_paths"],
-                behavior=item["payload"]["instruction"],
-                verification=item["verification"],
-                evidence_contract={"source_refs": {"task_map_ref": task_map_ref}},
-            ),
-        ))
 
     transport = _RecordingTransport()
     orchestrator = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
@@ -211,7 +222,13 @@ def test_rendered_controller_queue_releases_next_impl_task(
         type="task_map.ready",
         actor="sim",
         correlation_id=f"trace-{kind}",
-        payload={"pdd_id": "F-SIM", "task_map_ref": task_map_ref},
+        payload={
+            "pdd_id": "F-SIM",
+            "flow_kind": kind,
+            "objective_ref": objective_ref,
+            "task_map_ref": task_map_ref,
+            "plan_revision": "sim-r1",
+        },
     )])
 
     log = EventLog(state_dir / "events.jsonl")
@@ -241,10 +258,17 @@ def test_rendered_controller_queue_releases_next_impl_task(
     ]
 
     assert len(started) == 1
+    assert [item[0] for item in transport.spawned] == initial_roles
     assert [item[0] for item in transport.sent] == initial_roles
     assert len(dispatched) == len(initial_roles)
     assert len(queued) == len(items) - len(initial_roles)
     assert not [event for event in events if event.type == "fanout.cancelled"]
+    ready_roles = [
+        event.payload.get("instance_id")
+        for event in events
+        if event.type == "role.lifecycle.ready"
+    ]
+    assert ready_roles == initial_roles
 
     fanout_id = started[0].payload["fanout_id"]
     child = next(

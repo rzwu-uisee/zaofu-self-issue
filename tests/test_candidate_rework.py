@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from zf.core.events.model import ZfEvent
 from zf.runtime.candidate_rework import (
     candidate_quality_failure_message,
     plan_candidate_rework,
+)
+from zf.runtime.replan_resynth import (
+    build_replan_resynth_event,
+    plan_missing_replan_resynth_events,
 )
 
 
@@ -55,6 +60,67 @@ def test_verify_failed_plans_candidate_retrigger_with_feedback():
     assert p.rework_summary["source_event_type"] == "verify.failed"
 
 
+def test_admitted_plan_port_dependency_plans_replan_not_dev_retrigger():
+    event = ZfEvent(
+        id="tf-plan-port",
+        type="test.failed",
+        actor="zf-cli",
+        origin="kernel",
+        correlation_id="trace-plan-port",
+        payload={
+            "pdd_id": "PRD-PLAN-PORT",
+            "target_ref": "candidate/PRD-PLAN-PORT",
+            "trace_id": "trace-plan-port",
+            "failure_class": "dependency_blocked",
+            "recovery_action": "replan",
+            "rework_scope": "plan_ports",
+            "failed_task_ids": ["TASK-1"],
+            "semantic_result_refs": [
+                "artifacts/call-results/control/result.json",
+            ],
+        },
+    )
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            rework_routing={"test.failed": "dev-lane-0"},
+        ),
+    )
+
+    plans = plan_candidate_rework([event], config=config)
+
+    assert len(plans) == 1
+    assert plans[0].action == "replan"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].failed_task_ids == ("TASK-1",)
+
+
+def test_admitted_non_plan_dependency_escalates_without_retry():
+    event = ZfEvent(
+        id="tf-dependency",
+        type="test.failed",
+        actor="zf-cli",
+        origin="kernel",
+        correlation_id="trace-dependency",
+        payload={
+            "pdd_id": "PRD-DEPENDENCY",
+            "target_ref": "candidate/PRD-DEPENDENCY",
+            "trace_id": "trace-dependency",
+            "failure_class": "dependency_blocked",
+            "recovery_action": "escalate",
+            "rework_scope": "dependency",
+            "semantic_result_refs": [
+                "artifacts/call-results/control/result.json",
+            ],
+        },
+    )
+
+    plans = plan_candidate_rework([event])
+
+    assert len(plans) == 1
+    assert plans[0].action == "escalate"
+    assert plans[0].classification == "dependency_blocked"
+
+
 def test_upstream_contract_blocker_plans_task_map_replan() -> None:
     events = [
         _ev(
@@ -83,6 +149,77 @@ def test_upstream_contract_blocker_plans_task_map_replan() -> None:
     assert plan.failed_task_ids == ("SIM-CORE-002", "SIM-SCHED-003")
     assert plan.source_event_id == "blocked-scheduler"
     assert "off-lane bays" in plan.feedback[0]
+
+
+def test_contract_blocker_survives_downstream_integration_aggregate() -> None:
+    events = [
+        _ev(
+            "dev.blocked",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "task_contract_unsatisfiable",
+                "reason": "the pinned runner and legacy screenshot baseline conflict",
+                "evidence_refs": ["event:e2e-passed", "event:pixel-diff"],
+            },
+            task_id="SIM-CONFIG-001",
+            eid="blocked-config",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_scope": "candidate",
+                "failure_class": "candidate_integration_failure",
+                "failed_children": ["dev-lane-0-SIM-CONFIG-001"],
+            },
+            eid="integration-config",
+            corr="trace-sim1",
+        ),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.action == "replan"
+    assert plan.classification == "design_issue"
+    assert plan.source_event_id == "integration-config"
+    assert plan.failed_task_ids == ("SIM-CONFIG-001",)
+    assert "task-contract-blocker SIM-CONFIG-001" in plan.feedback[0]
+
+
+def test_module_parity_closure_supersedes_task_contract_blocker() -> None:
+    events = [
+        _ev(
+            "dev.blocked",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "task_contract_unsatisfiable",
+                "reason": "an earlier candidate failed its screenshot contract",
+            },
+            task_id="SIM-CONFIG-001",
+            eid="blocked-config",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "module.parity.closed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "candidate_ref": "candidate/SIM1-1",
+                "target_commit": "c" * 40,
+                "open_p0_p1_gap_count": 0,
+            },
+            eid="parity-closed",
+            corr="trace-sim1",
+        ),
+    ]
+
+    assert plan_candidate_rework(events, max_attempts=2) == []
 
 
 def test_verify_failed_payload_findings_become_rework_feedback():
@@ -783,6 +920,178 @@ def _replan_config(enabled=True, trigger="zaofu.refactor.review.ready"):
             )
         )
     )
+
+
+def test_multi_flow_replan_uses_the_prd_plan_trigger() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="zaofu.refactor.review.ready",
+            ),
+            stages=[
+                SimpleNamespace(
+                    id="prd-plan",
+                    flow_kind="prd",
+                    topology="fanout_reader",
+                    trigger="prd.scan.completed",
+                    success_event="",
+                    aggregate=SimpleNamespace(success_event="task_map.ready"),
+                ),
+                SimpleNamespace(
+                    id="refactor-plan",
+                    flow_kind="refactor",
+                    topology="fanout_reader",
+                    trigger="zaofu.refactor.review.ready",
+                    success_event="",
+                    aggregate=SimpleNamespace(
+                        success_event="zaofu.refactor.plan.ready",
+                    ),
+                ),
+            ],
+        ),
+    )
+    plan = SimpleNamespace(
+        pdd_id="PRD-1",
+        trace_id="prd-run",
+        target_ref="main",
+        source_event_id="blocked-1",
+        attempt=1,
+        source_event_type="dev.blocked",
+        feedback=("browser wiring is outside the old slice",),
+        failure_categories=(),
+        rework_summary={},
+        classification="design_issue",
+        flow_kind="prd",
+    )
+
+    event = build_replan_resynth_event(plan=plan, events=[], config=config)
+
+    assert event is not None
+    assert event.type == "prd.scan.completed"
+    assert event.payload["flow_kind"] == "prd"
+
+
+def test_single_flow_replan_keeps_configured_resynth_trigger() -> None:
+    config = _replan_config()
+    plan = SimpleNamespace(
+        pdd_id="REFACTOR-1",
+        trace_id="refactor-run",
+        target_ref="main",
+        source_event_id="blocked-1",
+        attempt=1,
+        source_event_type="dev.blocked",
+        feedback=(),
+        failure_categories=(),
+        rework_summary={},
+        classification="design_issue",
+        flow_kind="refactor",
+    )
+
+    event = build_replan_resynth_event(plan=plan, events=[], config=config)
+
+    assert event is not None
+    assert event.type == "zaofu.refactor.review.ready"
+
+
+def test_replan_followthrough_repairs_a_cross_flow_trigger() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="zaofu.refactor.review.ready",
+            ),
+            stages=[
+                SimpleNamespace(
+                    flow_kind="prd",
+                    topology="fanout_reader",
+                    trigger="prd.scan.completed",
+                    success_event="",
+                    aggregate=SimpleNamespace(success_event="task_map.ready"),
+                ),
+            ],
+        ),
+    )
+    marker = _ev(
+        "orchestrator.replan_requested",
+        {
+            "workflow_run_id": "prd-run",
+            "flow_kind": "prd",
+            "pdd_id": "PRD-1",
+            "target_ref": "main",
+            "rework_of": "blocked-1",
+            "rework_attempt": 1,
+            "rework_source": "dev.blocked",
+            "classification": "design_issue",
+        },
+        eid="replan-1",
+        corr="prd-run",
+    )
+    wrong_trigger = _ev(
+        "zaofu.refactor.review.ready",
+        {
+            "workflow_run_id": "prd-run",
+            "flow_kind": "prd",
+            "pdd_id": "PRD-1",
+            "rework_of": "blocked-1",
+        },
+        eid="wrong-1",
+        corr="prd-run",
+    )
+
+    repairs = plan_missing_replan_resynth_events(
+        [marker, wrong_trigger],
+        config=config,
+    )
+
+    assert [event.type for event in repairs] == ["prd.scan.completed"]
+    assert repairs[0].payload["rework_of"] == "blocked-1"
+
+
+def test_replan_followthrough_does_not_repeat_after_task_map_progress() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="zaofu.refactor.review.ready",
+            ),
+            stages=[
+                SimpleNamespace(
+                    flow_kind="prd",
+                    topology="fanout_reader",
+                    trigger="prd.scan.completed",
+                    success_event="",
+                    aggregate=SimpleNamespace(success_event="task_map.ready"),
+                ),
+            ],
+        ),
+    )
+    marker = _ev(
+        "orchestrator.replan_requested",
+        {
+            "workflow_run_id": "prd-run",
+            "flow_kind": "prd",
+            "pdd_id": "PRD-1",
+            "rework_of": "blocked-1",
+        },
+        eid="replan-1",
+        corr="prd-run",
+    )
+    ready = _ev(
+        "task_map.ready",
+        {
+            "workflow_run_id": "prd-run",
+            "flow_kind": "prd",
+            "pdd_id": "PRD-1",
+        },
+        eid="ready-1",
+        corr="prd-run",
+    )
+
+    assert plan_missing_replan_resynth_events(
+        [marker, ready],
+        config=config,
+    ) == []
 
 
 _ADMISSION_REASON = (

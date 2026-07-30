@@ -2620,6 +2620,89 @@ def test_task_ref_repair_waits_when_owner_lane_is_busy(
     ]
 
 
+def test_task_ref_repair_waits_for_newer_active_dispatch(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    orch.config.roles = [
+        role for role in orch.config.roles
+        if role.name not in {"dev", "review", "test", "judge"}
+    ] + [
+        RoleConfig(
+            name="dev-lane-2",
+            backend="mock",
+            role_kind="writer",
+            publishes=["dev.build.done", "dev.failed"],
+            triggers=["task.assigned"],
+        )
+    ]
+    store.add(Task(
+        id="TASK-REPAIR",
+        title="repair task ref",
+        status="in_progress",
+        assigned_to="dev-lane-2",
+        retry_count=1,
+        active_dispatch_id="disp-fresh",
+        contract=TaskContract(
+            behavior="repair writer task ref",
+            owner_role="dev-lane-2",
+            owner_instance="dev-lane-2",
+            rework_to="dev-lane-2",
+        ),
+    ))
+    repair = ZfEvent(
+        id="evt-ref-repair",
+        type="task.ref.repair.requested",
+        actor="zf-cli",
+        task_id="TASK-REPAIR",
+        payload={
+            "source_event_id": "evt-old-completion",
+            "blocking_event_id": "evt-old-rejection",
+            "reason": "repair obsolete task ref handoff",
+            "target_assignee": "dev-lane-2",
+        },
+    )
+    log.append(repair)
+    log.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-REPAIR",
+        payload={
+            "task_id": "TASK-REPAIR",
+            "role_instance": "dev-lane-2",
+            "run_id": "disp-fresh",
+            "dispatch_id": "disp-fresh",
+        },
+    ))
+
+    result = orch._dispatch_rework(  # type: ignore[attr-defined]
+        store.get("TASK-REPAIR"),
+        repair,
+    )
+
+    assert result is None
+    events = _events(log)
+    assert [
+        event for event in events
+        if event.type == "orchestrator.dispatch_skipped"
+        and event.task_id == "TASK-REPAIR"
+        and event.payload.get("reason") == "active_task_attempt_fence"
+    ]
+    assert not [
+        event for event in events
+        if event.type in {"task.rework.requested", "task.dispatched"}
+        and event.task_id == "TASK-REPAIR"
+    ]
+
+    decisions = orch._reconcile_pending_handoffs()  # type: ignore[attr-defined]
+
+    assert not [
+        decision for decision in decisions
+        if decision.task_id == "TASK-REPAIR"
+        and decision.action in {"dispatch", "block"}
+    ]
+
+
 def test_task_ref_repair_ignores_terminal_prior_dispatch_on_same_lane(
     tmp_path: Path,
 ) -> None:

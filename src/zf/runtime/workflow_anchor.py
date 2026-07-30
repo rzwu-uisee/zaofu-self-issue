@@ -6,7 +6,13 @@ through the canonical task store. That root is not an ordinary worker task.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
+
+from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 
 
 WORKFLOW_INVOKE_BOOTSTRAP_SOURCE = "workflow_invoke_bootstrap"
@@ -17,6 +23,7 @@ def mark_workflow_fanout_anchor(
     task: Task,
     *,
     request_id: str = "",
+    workflow_run_id: str = "",
     workflow_input_manifest_ref: str = "",
     pattern_id: str = "",
 ) -> Task:
@@ -25,6 +32,7 @@ def mark_workflow_fanout_anchor(
         "source": WORKFLOW_INVOKE_BOOTSTRAP_SOURCE,
         "workflow_fanout_anchor": True,
         "request_id": request_id,
+        "workflow_run_id": workflow_run_id or request_id,
         "workflow_input_manifest_ref": workflow_input_manifest_ref,
         "pattern_id": pattern_id,
     })
@@ -41,6 +49,85 @@ def is_workflow_fanout_anchor_task(task: Task) -> bool:
         evidence.get("workflow_fanout_anchor") is True
         or str(evidence.get("source") or "") == WORKFLOW_INVOKE_BOOTSTRAP_SOURCE
     )
+
+
+def workflow_anchor_task_ids(
+    state_dir: Path,
+    task_ids: list[str],
+    events: Iterable[ZfEvent],
+) -> list[str]:
+    """Identify control-plane invoke ids that are not delivery tasks."""
+
+    event_list = list(events)
+    store = TaskStore(Path(state_dir) / "kanban.json")
+    anchors = [
+        task_id
+        for task_id in task_ids
+        if (task := store.get(task_id)) is not None
+        and is_workflow_fanout_anchor_task(task)
+    ]
+    for event in event_list:
+        if event.type != "workflow.invoke.requested":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        for candidate in (event.task_id, payload.get("task_id")):
+            task_id = str(candidate or "").strip()
+            if not task_id or task_id not in task_ids or task_id in anchors:
+                continue
+            task = store.get(task_id)
+            if task is not None:
+                continue
+            if _has_workflow_anchor_creation(task_id, event_list):
+                anchors.append(task_id)
+                continue
+            if _has_delivery_task_fact(task_id, event_list):
+                continue
+            anchors.append(task_id)
+    return anchors
+
+
+def _has_workflow_anchor_creation(
+    task_id: str,
+    events: Iterable[ZfEvent],
+) -> bool:
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            event.type == "task.created"
+            and _event_targets_task(event, payload, task_id)
+            and str(payload.get("source") or "")
+            == WORKFLOW_INVOKE_BOOTSTRAP_SOURCE
+        ):
+            return True
+    return False
+
+
+def _has_delivery_task_fact(task_id: str, events: Iterable[ZfEvent]) -> bool:
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type == "task.created" and _event_targets_task(
+            event,
+            payload,
+            task_id,
+        ):
+            return True
+        completed = payload.get("completed_task_ids")
+        if isinstance(completed, list) and task_id in {
+            str(item or "").strip() for item in completed
+        }:
+            return True
+    return False
+
+
+def _event_targets_task(
+    event: ZfEvent,
+    payload: dict[str, Any],
+    task_id: str,
+) -> bool:
+    return task_id in {
+        str(event.task_id or "").strip(),
+        str(payload.get("task_id") or "").strip(),
+    }
 
 
 def mark_workflow_managed_task(task: Task) -> Task:

@@ -15,6 +15,7 @@ from typing import Any
 from zf.core.config.schema import (
     ConstraintsConfig,
     RoleConfig,
+    RoleLifecycleConfig,
     ZfConfig,
 )
 from zf.core.events.model import ZfEvent
@@ -63,11 +64,14 @@ def build_resident_run_manager_role(config: ZfConfig) -> RoleConfig | None:
     return RoleConfig(
         name=RESIDENT_RUN_MANAGER_ROLE_NAME,
         backend=run_manager.backend,
+        model=resident.model,
+        model_reasoning_effort=resident.model_reasoning_effort,
         role_kind="reader",
         permission_mode="bypass",
         transport=resident.transport,
         instance_id=resident.instance_id,
         stuck_threshold_seconds=600.0,
+        lifecycle=RoleLifecycleConfig(mode="resident"),
         constraints=ConstraintsConfig(
             allowed_paths=[
                 "${ZF_PROJECT_ROOT}",

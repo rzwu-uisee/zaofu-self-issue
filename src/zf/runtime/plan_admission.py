@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
+from zf.core.workflow.flow_metadata import normalize_flow_kind
 
 
 def _plan_admission_incident_id(*, stage_id: str, trigger_event_id: str) -> str:
@@ -65,6 +66,11 @@ def emit_upstream_failure_for_bad_task_map(
             "gap_plan.ready": "module.parity.scan.failed",
         }.get(gap_event_type, "")
     stages = getattr(coordinator.config.workflow, "stages", []) or []
+    trigger_flow_kind = normalize_flow_kind(
+        trigger_payload.get("flow_kind")
+        or trigger_payload.get("kind")
+        or trigger_payload.get("request_kind")
+    )
     if failure_event:
         for candidate in stages:
             aggregate = getattr(candidate, "aggregate", None)
@@ -78,6 +84,15 @@ def emit_upstream_failure_for_bad_task_map(
                 break
     else:
         for candidate in stages:
+            candidate_flow_kind = normalize_flow_kind(
+                getattr(candidate, "flow_kind", "")
+            )
+            if (
+                trigger_flow_kind
+                and candidate_flow_kind
+                and candidate_flow_kind != trigger_flow_kind
+            ):
+                continue
             aggregate = getattr(candidate, "aggregate", None)
             success = str(
                 getattr(candidate, "success_event", "")
@@ -219,7 +234,58 @@ def emit_plan_admission_cancel(
         correlation_id=trace_id or None,
     )
     coordinator.event_writer.append(cancelled)
+    if canonical_failure is None:
+        _emit_unroutable_plan_admission_escalation(
+            coordinator,
+            cancelled=cancelled,
+            incident_id=incident_id,
+            trace_id=trace_id,
+            reason=reason,
+        )
     return cancelled
+
+
+def _emit_unroutable_plan_admission_escalation(
+    coordinator: Any,
+    *,
+    cancelled: ZfEvent,
+    incident_id: str,
+    trace_id: str,
+    reason: str,
+) -> None:
+    """Surface a rejected plan when no declared upstream recovery edge exists."""
+
+    events = coordinator.event_log.read_all()
+    if any(
+        event.type == "human.escalate"
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("plan_admission_incident_id") or "")
+        == incident_id
+        for event in events
+    ):
+        return
+    failure_class = (
+        "plan_artifact_package_rejected"
+        if "artifact package" in reason.lower()
+        else "plan_admission_failed"
+    )
+    escalation_reason = (
+        "plan admission rejected and no upstream failure route is declared; "
+        "operator recovery is required"
+    )
+    coordinator.event_writer.append(ZfEvent(
+        type="human.escalate",
+        actor="zf-cli",
+        causation_id=cancelled.id,
+        correlation_id=trace_id or None,
+        payload={
+            "failure_class": failure_class,
+            "failure_scope": "plan_admission",
+            "reason": f"{escalation_reason}: {reason}",
+            "source_event_id": cancelled.id,
+            "plan_admission_incident_id": incident_id,
+        },
+    ))
 
 
 def emit_task_map_admitted(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shlex
 import subprocess
 import time
@@ -206,12 +207,22 @@ def stop_autoresearch_resident_sidecar(
         return
     process = sidecar.process
     if process.poll() is None:
-        process.terminate()
+        pgid = _dedicated_sidecar_process_group(process.pid)
+        if pgid is not None:
+            _signal_process_group(pgid, signal.SIGTERM)
+        else:
+            process.terminate()
         try:
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
+            if pgid is not None:
+                _signal_process_group(pgid, signal.SIGKILL)
+            else:
+                process.kill()
             process.wait(timeout=5.0)
+        if pgid is not None and not _wait_for_process_group_exit(pgid, timeout):
+            _signal_process_group(pgid, signal.SIGKILL)
+            _wait_for_process_group_exit(pgid, 5.0)
     try:
         sidecar.log_handle.close()
     except Exception:
@@ -225,6 +236,58 @@ def stop_autoresearch_resident_sidecar(
         "exit_code": process.returncode,
         "log_path": str(sidecar.log_path),
     })
+
+
+def _dedicated_sidecar_process_group(pid: int) -> int | None:
+    try:
+        pgid = os.getpgid(pid)
+    except (OSError, ProcessLookupError):
+        return None
+    return pgid if pgid == pid else None
+
+
+def _signal_process_group(pgid: int, sig: signal.Signals) -> bool:
+    try:
+        os.killpg(pgid, sig)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _process_group_alive(pgid: int) -> bool:
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (entry / "stat").read_text(encoding="utf-8").rsplit(
+                    ") ",
+                    1,
+                )[1].split()
+                state = fields[0]
+                process_group = int(fields[2])
+            except (IndexError, OSError, ValueError):
+                continue
+            if process_group == pgid and state != "Z":
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while _process_group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 def _pidfile_process_matches(pid: int, expected_command: list[str]) -> bool:
@@ -263,27 +326,33 @@ def stop_autoresearch_resident_sidecar_by_pidfile(
         # clear the file, never signal a stranger.
         pid_path.unlink(missing_ok=True)
         return False
-    import signal
-
-    try:
-        pgid = os.getpgid(pid)
-        os.killpg(pgid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
+    pgid = _dedicated_sidecar_process_group(pid)
+    if pgid is not None:
+        _signal_process_group(pgid, signal.SIGTERM)
+    else:
         try:
             os.kill(pid, signal.SIGTERM)
         except (OSError, ProcessLookupError):
             pid_path.unlink(missing_ok=True)
             return False
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _pidfile_process_matches(pid, command):
-            break
-        time.sleep(0.2)
+    if pgid is not None:
+        exited = _wait_for_process_group_exit(pgid, timeout)
     else:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while time.monotonic() < deadline:
+            if not _pidfile_process_matches(pid, command):
+                break
+            time.sleep(0.05)
+        exited = not _pidfile_process_matches(pid, command)
+    if not exited:
+        if pgid is not None:
+            _signal_process_group(pgid, signal.SIGKILL)
+            _wait_for_process_group_exit(pgid, 5.0)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
     pid_path.unlink(missing_ok=True)
     _append_event(event_log, "autoresearch.resident_sidecar.stopped", {
         "pid": pid,

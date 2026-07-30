@@ -339,6 +339,29 @@ def test_task_map_validation_rejects_lossy_single_quoted_bash_payload() -> None:
     assert any("must not wrap bash -c payload in single quotes" in error for error in result.errors)
 
 
+def test_task_map_validation_rejects_escape_sensitive_inline_eval() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "REFACTOR-NAME-001",
+                "title": "extract helper",
+                "wave": 1,
+                "verification": (
+                    "node -e \"const re=new RegExp("
+                    "'export\\\\s+function'); if(!re) process.exit(1)\""
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is False
+    assert any(
+        "must not embed escape-sensitive code in node -e/python -c" in error
+        for error in result.errors
+    )
+
+
 def test_task_map_validation_rejects_unquoted_pnpm_glob_filter() -> None:
     result = validate_task_map_payload({
         "schema_version": "task-map.v1",
@@ -763,3 +786,52 @@ def test_task_map_validation_rejects_invalid_required_plan_ports(
 
     assert result.passed is False
     assert any("required_plan_ports" in error for error in result.errors)
+
+
+def test_task_map_validation_accepts_contract_verification_owner_alias() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-CONTRACT",
+            "verification": "git diff --check",
+            "acceptance_criteria": [{
+                "id": "AC-SCOPE",
+                "statement": "The change remains within the declared scope.",
+                "verification_owner": "contract",
+                "verification_tier": "manual_evidence",
+            }],
+        }],
+    })
+
+    assert result.passed is True, result.errors
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("verification_owner", "mystery"),
+        ("verification_tier", "mystery"),
+    ],
+)
+def test_task_map_validation_rejects_unroutable_acceptance_contract(
+    field: str,
+    value: str,
+) -> None:
+    criterion = {
+        "id": "AC-SCOPE",
+        "statement": "The change remains within the declared scope.",
+        "verification_owner": "task_verify",
+        "verification_tier": "manual_evidence",
+        field: value,
+    }
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-CONTRACT",
+            "verification": "git diff --check",
+            "acceptance_criteria": [criterion],
+        }],
+    })
+
+    assert result.passed is False
+    assert any(field in error and "unsupported" in error for error in result.errors)

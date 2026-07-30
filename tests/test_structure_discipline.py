@@ -155,7 +155,10 @@ _OVERSIZED_FILE_CAPS = {
     # Reconciliation 2026-07-03: doc-125 web-wizard + R6 GZip/ETag (+29) + prior
     # projection-seam merges pushed to 9052 past the frozen 8100. Freeze at clean
     # dev size; next server route must land in a projections/* sibling.
-    "src/zf/web/server.py": 9308,
+    # Reconciliation 2026-07-26: workflow request identity wiring merged with
+    # dev's Kanban collaboration routes at 9320 lines. Freeze at the merged
+    # branch size; subsequent route behavior still belongs in a sibling.
+    "src/zf/web/server.py": 9320,
     # P3 (2026-06-12): 49 fanout/synth coordination methods moved to
     # FanoutCoordinationMixin (orchestrator_fanout.py); both files
     # frozen at new size +10% — the mixin is born oversized and is
@@ -300,7 +303,10 @@ _OVERSIZED_FILE_CAPS = {
     # 也会被拦。新方法与既有 _schema_education_report_fields 是一对镜像,
     # 紧贴 briefing 组装点(共用 _SCHEMA_EDU_PLACEHOLDERS + self.config
     # registry),拆 sibling 会割裂这对教育逻辑,故 cap 吸收。
-    "src/zf/runtime/orchestrator_fanout.py": 8560,
+    # Reconciliation 2026-07-26: generic artifact-delivery call sites merged
+    # with dev's current fanout identity wiring at 8564 lines. Freeze at that
+    # merged size; new coordination behavior must remain in sibling modules.
+    "src/zf/runtime/orchestrator_fanout.py": 8564,
     # Reconciliation 2026-07-07: terminal child success predicate and
     # judge.failed state guard call sites; predicates live in terminal_events.
     # Reconciliation 2026-07-08: dev 已到 6962(feishu/goal-spine merges),

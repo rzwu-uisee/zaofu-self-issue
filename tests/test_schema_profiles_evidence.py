@@ -185,6 +185,69 @@ def test_v7_run_goal_completed_requires_verification_and_delivery_identity() -> 
     )
 
 
+def test_generic_workflow_terminal_requires_artifacts_not_candidate() -> None:
+    registry = EventSchemaRegistry.from_dict(
+        resolve_schema_profile("generic-workflow/v1"),
+    )
+    payload = {
+        "flow_kind": "workflow",
+        "run_id": "run-workflow",
+        "goal_id": "GOAL-WORKFLOW",
+        "claim_id": "claim-workflow",
+        "workflow_generation": "generation-1",
+        "generic_workflow_contract_digest": "a" * 64,
+        "completion_profile": "artifact_delivery",
+        "run_contract_ref": "artifacts/run-contract.json",
+        "run_contract_digest": "b" * 64,
+        "goal_claim_set_ref": "artifacts/claims.json",
+        "goal_claim_set_digest": "c" * 64,
+        "goal_coverage": [{
+            "goal_claim_id": "CLAIM-1",
+            "status": "closed",
+            "supporting_artifact_refs": ["artifacts/report.json"],
+        }],
+        "required_artifacts": [{
+            "name": "report",
+            "kind": "report/markdown",
+            "producer_stage_id": "synthesize",
+            "ref": "artifacts/report.json",
+            "sha256": "d" * 64,
+        }],
+        "verification_evidence_refs": ["artifacts/verify.json"],
+        "input_result_refs": ["artifacts/input.json"],
+        "verifier_stage_id": "verify",
+        "verifier_role": "workflow-verifier",
+        "verification_event_id": "evt-verify",
+        "verification_admitted_call_result_ref": {
+            "ref": "artifacts/verify-envelope.json",
+            "sha256": "e" * 64,
+        },
+        "admitted_call_result_ref": {
+            "ref": "artifacts/closure-envelope.json",
+            "sha256": "f" * 64,
+        },
+        "delivery_policy": "report_only",
+        "delivery_status": "not_required",
+        "delivery_event_id": "",
+    }
+
+    assert registry.validate(ZfEvent(
+        type="run.goal.completed",
+        payload=payload,
+    )) == []
+
+    invalid = {**payload, "required_artifacts": []}
+    violations = registry.validate(ZfEvent(
+        type="run.goal.completed",
+        payload=invalid,
+    ))
+    assert any(
+        item.field_path == "payload.required_artifacts"
+        and item.code == "empty_required"
+        for item in violations
+    )
+
+
 def test_v3_registry_rejects_empty_evidence_and_matrix():
     registry = EventSchemaRegistry.from_dict(
         resolve_schema_profile("canonical-dag/v3"),

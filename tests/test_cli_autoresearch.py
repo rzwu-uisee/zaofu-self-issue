@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import signal
 from types import SimpleNamespace
 from pathlib import Path
 
 from zf.cli.main import main
-from zf.cli.autoresearch import _real_git_head
+from zf.cli.autoresearch import _real_git_head, _resident
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 
@@ -75,6 +76,44 @@ def test_autoresearch_run_rejects_existing_worktree_without_reuse(
     err = capsys.readouterr().out
     assert rc == 2
     assert "worktree already exists" in err
+
+
+def test_autoresearch_resident_sigterm_finishes_current_tick(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    calls = 0
+
+    def _run_once(**kwargs):
+        nonlocal calls
+        calls += 1
+        signal.raise_signal(signal.SIGTERM)
+        assert kwargs["should_stop"]() is True
+        return []
+
+    monkeypatch.setattr(
+        "zf.cli.autoresearch._resolve_state_dir",
+        lambda _state_dir: state_dir,
+    )
+    monkeypatch.setattr("zf.autoresearch.resident_cli.run_resident_once", _run_once)
+    args = SimpleNamespace(
+        state_dir=state_dir,
+        output_root=None,
+        worktree_root=tmp_path / "worktrees",
+        interval_seconds=60,
+        max_actions_per_tick=1,
+        execute=True,
+        self_repair_consumer=False,
+        self_repair_spawn=False,
+        self_repair_backend="",
+        watch=True,
+    )
+
+    assert _resident(args) == 0
+    assert calls == 1
+    assert capsys.readouterr().out.strip() == "[]"
 
 
 def test_autoresearch_campaign_plan_writes_files(

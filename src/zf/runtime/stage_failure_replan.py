@@ -30,16 +30,20 @@ _CANDIDATE_TERMINAL_EVENTS = frozenset({
     *_CANDIDATE_REPLAN_SOURCE_EVENTS,
     "candidate.ready",
 })
+_RUN_FLOW_MARKER_EVENTS = frozenset({
+    "flow.roles.activation.recovered",
+    "task_map.ready",
+})
 
 
 def _payload_target_ref(payload: dict[str, Any]) -> str:
-    for key in ("target_ref", "issue_ref", "prd_ref", "objective_ref"):
+    for key in ("target_ref", "issue_ref", "prd_ref"):
         value = str(payload.get(key) or "").strip()
         if value:
             return value
     source_refs = payload.get("source_refs")
     if isinstance(source_refs, dict):
-        for key in ("source_ref", "issue_ref", "prd_ref", "objective_ref"):
+        for key in ("target_ref", "issue_ref", "prd_ref"):
             value = str(source_refs.get(key) or "").strip()
             if value:
                 return value
@@ -54,6 +58,52 @@ def rework_source_from_payload(payload: dict[str, Any]) -> str:
     if isinstance(summary, dict):
         return str(summary.get("source_event_type") or "").strip()
     return ""
+
+
+def _event_run_id(event: ZfEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    return str(
+        event.correlation_id
+        or payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or payload.get("trace_id")
+        or ""
+    ).strip()
+
+
+def _stage_flow_kind(stage: Any, trigger_type: str) -> str:
+    stage_id = str(getattr(stage, "id", "") or "").strip().lower()
+    trigger = str(trigger_type or "").strip().lower()
+    for kind in ("issue", "prd", "refactor"):
+        if stage_id.startswith(f"{kind}-"):
+            return kind
+        if trigger.startswith(f"{kind}."):
+            return kind
+    if trigger.startswith("zaofu.refactor."):
+        return "refactor"
+    return ""
+
+
+def _canonical_run_flow_kind(
+    events: list[ZfEvent],
+    failure_event: ZfEvent,
+) -> str:
+    run_id = _event_run_id(failure_event)
+    if not run_id:
+        return ""
+    flow_kind = ""
+    for event in events:
+        if event.id == failure_event.id:
+            break
+        if event.type not in _RUN_FLOW_MARKER_EVENTS:
+            continue
+        if _event_run_id(event) != run_id:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        candidate = str(payload.get("flow_kind") or "").strip().lower()
+        if candidate:
+            flow_kind = candidate
+    return flow_kind
 
 
 def superseding_candidate_ready(
@@ -117,6 +167,41 @@ def reader_stage_failure_events(config: Any) -> dict[str, Any]:
     return out
 
 
+def reader_stage_lineage_payload(
+    events: list[ZfEvent],
+    *,
+    stage_id: str,
+    correlation_id: str = "",
+) -> dict[str, Any]:
+    """Recover the durable parent payload across pattern-bridged replans."""
+
+    by_id = {event.id: event for event in events}
+    lineage: dict[str, Any] = {}
+    for event in events:
+        if event.type != "fanout.started":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("stage_id") or "") != stage_id:
+            continue
+        trace_id = str(
+            event.correlation_id
+            or payload.get("trace_id")
+            or ""
+        )
+        if correlation_id and trace_id != correlation_id:
+            continue
+        trigger = by_id.get(str(payload.get("trigger_event_id") or ""))
+        trigger_payload = (
+            trigger.payload
+            if trigger is not None and isinstance(trigger.payload, dict)
+            else {}
+        )
+        for key, value in trigger_payload.items():
+            if value not in (None, "", [], {}):
+                lineage[key] = value
+    return lineage
+
+
 def plan_reader_stage_replan(
     config: Any,
     events: list[ZfEvent],
@@ -134,10 +219,24 @@ def plan_reader_stage_replan(
     trigger_type = str(getattr(stage, "trigger", "") or "")
     if not trigger_type:
         return None, "stage_has_no_trigger"
+    stage_flow_kind = _stage_flow_kind(stage, trigger_type)
+    canonical_flow_kind = _canonical_run_flow_kind(events, failure_event)
+    if (
+        stage_flow_kind
+        and canonical_flow_kind
+        and stage_flow_kind != canonical_flow_kind
+    ):
+        return None, "cross_flow_failure"
     origin_payload: dict[str, Any] = {}
     for event in events:
         if event.type == trigger_type and isinstance(event.payload, dict):
             origin_payload = dict(event.payload)
+    lineage = reader_stage_lineage_payload(
+        events,
+        stage_id=str(getattr(stage, "id", "") or ""),
+        correlation_id=str(failure_event.correlation_id or ""),
+    )
+    origin_payload = {**lineage, **origin_payload}
     failure_payload = (
         failure_event.payload if isinstance(failure_event.payload, dict) else {}
     )
@@ -206,7 +305,11 @@ def plan_reader_stage_replan(
     if not isinstance(findings, list) or not findings:
         findings = [{
             "severity": "high",
-            "message": str(failure_payload.get("reason") or failure_event.type),
+            "message": str(
+                failure_payload.get("reason")
+                or failure_payload.get("summary")
+                or failure_event.type
+            ),
         }]
     for key in (
         "target_ref",
@@ -252,6 +355,7 @@ def plan_reader_stage_replan(
 __all__ = [
     "STAGE_REPLAN_CAP",
     "plan_reader_stage_replan",
+    "reader_stage_lineage_payload",
     "rework_source_from_payload",
     "reader_stage_failure_events",
     "superseding_candidate_ready",

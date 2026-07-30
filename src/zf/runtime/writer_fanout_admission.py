@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +37,8 @@ class LoadedWriterTaskMap:
     plan_artifact_package_ref: str = ""
     plan_artifact_package_digest: str = ""
     task_map_generation: str = ""
+    flow_kind: str = ""
+    workflow_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,56 @@ class WriterTaskMapPolicyError(ValueError):
         )
         self.errors = list(errors)
         self.task_items = list(task_items)
+
+
+def bind_writer_task_dispatch_owner(
+    *,
+    task: Task,
+    role: Any,
+    config: Any,
+    event_writer: Any,
+) -> object:
+    """Pin a canonical writer task to the Flow-local lane being dispatched."""
+
+    from zf.runtime.flow_roles import role_configs_for_flow
+
+    contract = deepcopy(task.contract)
+    evidence = (
+        dict(contract.evidence_contract)
+        if isinstance(contract.evidence_contract, dict)
+        else {}
+    )
+    flow_kind = str(evidence.get("flow_kind") or "")
+    if flow_kind:
+        allowed = {
+            str(getattr(item, "instance_id", "") or "")
+            for item in role_configs_for_flow(config, flow_kind)
+        }
+        if role.instance_id not in allowed:
+            raise RuntimeError(
+                "flow_owner_cross_flow: dispatch role "
+                f"{role.instance_id!r} is outside Flow {flow_kind!r}"
+            )
+    changed = (
+        contract.owner_role != role.name
+        or contract.owner_instance != role.instance_id
+    )
+    contract.owner_role = role.name
+    contract.owner_instance = role.instance_id
+    contract.evidence_contract = evidence
+    if changed:
+        event_writer.append(ZfEvent(
+            type="task.contract.update",
+            actor="zf-cli",
+            task_id=task.id,
+            payload={
+                "source": "writer_dispatch_owner_binding",
+                "flow_kind": flow_kind,
+                "owner_role": role.name,
+                "owner_instance": role.instance_id,
+            },
+        ))
+    return contract
 
 
 def load_writer_task_map(
@@ -187,6 +240,7 @@ def load_writer_task_map(
             )
     feature_id = str(payload.get("feature_id") or data.get("feature_id") or pdd_id or "").strip()
     source_refs = data.get("source_refs") if isinstance(data.get("source_refs"), dict) else {}
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     return LoadedWriterTaskMap(
         task_items=items,
         task_map_ref=task_map_ref,
@@ -208,6 +262,7 @@ def load_writer_task_map(
         ),
         dispatch_base_commit=str(
             data.get("target_commit")
+            or metadata.get("target_commit")
             or payload.get("dispatch_base_commit")
             or ""
         ).strip(),
@@ -222,6 +277,18 @@ def load_writer_task_map(
         ).strip(),
         task_map_generation=str(
             payload.get("task_map_generation") or ""
+        ).strip(),
+        flow_kind=str(
+            payload.get("flow_kind")
+            or data.get("flow_kind")
+            or getattr(stage, "flow_kind", "")
+            or ""
+        ).strip().lower(),
+        workflow_run_id=str(
+            payload.get("workflow_run_id")
+            or payload.get("run_id")
+            or event.correlation_id
+            or ""
         ).strip(),
     )
 
@@ -305,6 +372,8 @@ def admit_writer_fanout(
             "feature_id": loaded.feature_id,
             "pdd_id": loaded.pdd_id,
             "dispatch_base_commit": loaded.dispatch_base_commit,
+            "flow_kind": loaded.flow_kind,
+            "workflow_run_id": loaded.workflow_run_id,
         })
     if missing or stale or superseded or terminal:
         reason = "writer_fanout_admission_failed"

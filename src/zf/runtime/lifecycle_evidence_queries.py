@@ -18,6 +18,22 @@ from zf.runtime.injection import infer_completion_protocol
 
 
 class LifecycleEvidenceQueriesMixin:
+    def _runtime_active_role_configs(self) -> list[RoleConfig]:
+        roles = list(getattr(self.config, "roles", ()) or ())
+        read_all = getattr(self.event_log, "read_all", None)
+        if not callable(read_all):
+            return roles
+
+        from zf.runtime.flow_role_activation import (
+            active_flow_role_instance_ids,
+        )
+
+        active = active_flow_role_instance_ids(self.config, read_all())
+        return [
+            role for role in roles
+            if role.instance_id in active
+        ]
+
     def _fanout_child_briefing_path(
         self,
         role: "RoleConfig",
@@ -145,18 +161,23 @@ class LifecycleEvidenceQueriesMixin:
         return ""
 
     def _active_fanout_child_for_instance(self, instance_id: str) -> dict | None:
-        """Return the latest non-terminal fanout child for a role instance.
+        """Return the latest non-terminal fanout work unit for a role instance.
 
         Reader fanout children intentionally do not create kanban tasks. For
-        lifecycle decisions they still represent active work and must block
-        idle recycle until a matching child terminal event arrives.
+        lifecycle decisions they and the aggregate synth operation still
+        represent active work and must block idle recycle until a matching
+        terminal event arrives.
         """
         events = self._fanout_lifecycle_events()
         terminal_children: set[tuple[str, str, str]] = set()
         terminal_fanouts: set[str] = set()
         for event in reversed(events):
             payload = event.payload if isinstance(event.payload, dict) else {}
-            if event.type in {"fanout.child.completed", "fanout.child.failed"}:
+            if event.type in {
+                "fanout.child.completed",
+                "fanout.child.failed",
+                "fanout.synth.completed",
+            }:
                 terminal_children.update(self._fanout_child_terminal_keys(payload))
                 continue
             if event.type == "fanout.cancelled":
@@ -174,7 +195,10 @@ class LifecycleEvidenceQueriesMixin:
                     if fanout_id and child_id:
                         terminal_children.add((fanout_id, child_id, ""))
                 continue
-            if event.type != "fanout.child.dispatched":
+            if event.type not in {
+                "fanout.child.dispatched",
+                "fanout.synth.dispatched",
+            }:
                 continue
             if str(payload.get("role_instance") or "") != instance_id:
                 continue
@@ -208,6 +232,8 @@ class LifecycleEvidenceQueriesMixin:
             "fanout.child.completed",
             "fanout.child.failed",
             "fanout.child.dispatch_lost",
+            "fanout.synth.dispatched",
+            "fanout.synth.completed",
             # fanout 级终局:cancelled 使全体 child 失效;timed_out 此前
             # 虽有处理分支但从未被扫描命中(标记过滤先行)——一并补上。
             "fanout.cancelled",

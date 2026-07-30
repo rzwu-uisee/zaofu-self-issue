@@ -80,6 +80,52 @@ def test_fanout_cancelled_task_map_validation_remains_fail_closed(
     assert projection["batch_checkpoints"] == []
 
 
+def test_pre_task_reader_failure_is_owned_by_stage_replan(
+    tmp_path: Path,
+) -> None:
+    projection = _projection(tmp_path, [
+        ZfEvent(
+            type="fanout.started",
+            id="evt-scan-started",
+            actor="zf-cli",
+            correlation_id="refactor-run",
+            payload={
+                "fanout_id": "fanout-flow-scan",
+                "stage_id": "flow-scan",
+                "topology": "fanout_reader",
+            },
+        ),
+        ZfEvent(
+            type="fanout.aggregate.completed",
+            id="evt-scan-aggregate",
+            actor="zf-cli",
+            correlation_id="refactor-run",
+            payload={
+                "fanout_id": "fanout-flow-scan",
+                "stage_id": "flow-scan",
+                "status": "failed",
+                "failure_event": "zaofu.refactor.scan.blocked",
+                "failed_children": ["scan-contract", "scan-runtime"],
+            },
+        ),
+        ZfEvent(
+            type="zaofu.refactor.scan.blocked",
+            id="evt-scan-blocked",
+            actor="zf-cli",
+            correlation_id="refactor-run",
+            payload={
+                "fanout_id": "fanout-flow-scan",
+                "stage_id": "flow-scan",
+                "status": "failed",
+            },
+            causation_id="evt-scan-aggregate",
+        ),
+    ])
+
+    assert projection["summary"]["batch_pending"] == 0
+    assert projection["batch_checkpoints"] == []
+
+
 def test_scheduler_queue_timeout_produces_gap_only_resume_checkpoint(
     tmp_path: Path,
 ) -> None:

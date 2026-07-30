@@ -29,8 +29,12 @@ RECOVERY_ACTIONS = (
 )
 
 _RETRIGGERABLE = frozenset({
-    "task_map.ready", "lane.stage.completed", "flow.goal.closed",
+    "task_map.ready", "candidate.ready", "lane.stage.completed", "flow.goal.closed",
     "flow.discovery.requested", "flow.discovery.completed",
+})
+_UPSTREAM_LINEAGE_REBUILD_REASONS = frozenset({
+    "blocking Goal closure has no current Plan Artifact Package",
+    "current task-map generation has no pinned goal claim set",
 })
 _RESCAN_GRANT_COOLDOWN_S = 1800.0
 
@@ -69,6 +73,20 @@ class RecoveryActionsMixin:
             "event_id": event.id,
             **extra,
         }
+
+    def _recovery_fanout_manifest(self, fanout_id: str) -> dict:
+        try:
+            manifest = json.loads(
+                (
+                    self.state_dir
+                    / "fanouts"
+                    / fanout_id
+                    / "manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        return manifest if isinstance(manifest, dict) else {}
 
     # -- 前置条件所需的账本视图(纯读) --------------------------------
 
@@ -287,24 +305,87 @@ class RecoveryActionsMixin:
                 "source aggregate has no fanout_id",
                 409,
             )
-        try:
-            manifest = json.loads(
-                (
-                    self.state_dir
-                    / "fanouts"
-                    / fanout_id
-                    / "manifest.json"
-                ).read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            manifest = {}
-        if not isinstance(manifest, dict) or not manifest:
+        manifest = self._recovery_fanout_manifest(fanout_id)
+        if not manifest:
             return self._recovery_failed(
                 requested,
                 action,
                 requested_action,
                 f"fanout manifest {fanout_id!r} is missing",
                 404,
+            )
+        rebuild_scope = "source_aggregate"
+        invalid_payload = (
+            invalid_event.payload
+            if invalid_event is not None
+            and isinstance(invalid_event.payload, dict)
+            else {}
+        )
+        if str(invalid_payload.get("reason") or "") in _UPSTREAM_LINEAGE_REBUILD_REASONS:
+            trigger_payload = (
+                manifest.get("trigger_payload")
+                if isinstance(manifest.get("trigger_payload"), dict)
+                else {}
+            )
+            upstream_event_id = str(
+                trigger_payload.get("source_event_id") or ""
+            ).strip()
+            upstream_event = next(
+                (event for event in events if event.id == upstream_event_id),
+                None,
+            )
+            upstream_payload = (
+                upstream_event.payload
+                if upstream_event is not None
+                and isinstance(upstream_event.payload, dict)
+                else {}
+            )
+            upstream_fanout_id = str(
+                upstream_payload.get("fanout_id") or ""
+            ).strip()
+            upstream_manifest = self._recovery_fanout_manifest(
+                upstream_fanout_id
+            )
+            upstream_aggregate_config = (
+                upstream_manifest.get("aggregate_config")
+                if isinstance(upstream_manifest.get("aggregate_config"), dict)
+                else {}
+            )
+            if (
+                upstream_event is None
+                or not upstream_fanout_id
+                or not upstream_manifest
+                or str(upstream_aggregate_config.get("success_event") or "")
+                != upstream_event.type
+            ):
+                return self._recovery_failed(
+                    requested,
+                    action,
+                    requested_action,
+                    "lineage recovery requires a durable upstream reader aggregate",
+                    409,
+                )
+            aggregate_event = upstream_event
+            aggregate_payload = upstream_payload
+            fanout_id = upstream_fanout_id
+            manifest = upstream_manifest
+            rebuild_scope = "upstream_lineage_aggregate"
+        aggregate_config = (
+            manifest.get("aggregate_config")
+            if isinstance(manifest.get("aggregate_config"), dict)
+            else {}
+        )
+        if (
+            aggregate_config
+            and str(aggregate_config.get("success_event") or "")
+            != aggregate_event.type
+        ):
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "source event does not match fanout aggregate success event",
+                409,
             )
         try:
             from zf.runtime.fanout_identity import fanout_current_status
@@ -367,6 +448,7 @@ class RecoveryActionsMixin:
                 "identity_invalid_event_id": (
                     invalid_event.id if invalid_event is not None else ""
                 ),
+                "rebuild_scope": rebuild_scope,
                 "expected_success_event": aggregate_event.type,
                 "reason": str(
                     payload.get("reason")
@@ -379,6 +461,7 @@ class RecoveryActionsMixin:
         return self._recovery_ok(requested, emitted, action, requested_action, {
             "fanout_id": fanout_id,
             "source_event_id": aggregate_event.id,
+            "rebuild_scope": rebuild_scope,
             "rebuild_request_event_id": emitted.id,
         })
 

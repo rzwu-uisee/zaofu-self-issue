@@ -14,6 +14,7 @@ from typing import Any
 
 from zf.core.events import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.workflow.request_policy import missing_fields_for_kind
 
@@ -30,15 +31,17 @@ _REQUEST_STATUSES = {
     "approved",
     "submitted",
     "running",
+    "rejected",
 }
 _REQUEST_TRANSITIONS = {
     "draft": {"proposed"},
     "ready": {"proposed"},
-    "proposed": {"approved"},
+    "proposed": {"approved", "rejected"},
     "approved": {"submitted"},
     "submitted": {"running"},
     "running": set(),
     "clarifying": set(),
+    "rejected": set(),
 }
 
 
@@ -51,6 +54,58 @@ def load_workflow_request(state_dir: Path, request_id: str) -> dict[str, Any]:
     if not path.exists():
         return {}
     return _read_json(path)
+
+
+def hydrate_workflow_requirement(
+    state_dir: Path,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Read one current immutable Requirement and verify its identity."""
+
+    ref = str(request.get("requirement_spec_ref") or "").strip()
+    expected_digest = str(
+        request.get("requirement_spec_digest") or ""
+    ).strip()
+    if not ref or not expected_digest:
+        raise WorkflowRequestError(
+            "workflow request has no immutable requirement identity"
+        )
+    state_root = Path(state_dir).expanduser().resolve()
+    path = Path(ref).expanduser()
+    if not path.is_absolute():
+        path = state_root / path
+    if path.is_symlink():
+        raise WorkflowRequestError("workflow requirement ref is a symlink")
+    try:
+        path = PathGuard.assert_under(
+            path,
+            state_root / "workflow-requests",
+        ).resolve(strict=True)
+    except (OSError, PathGuardError) as exc:
+        raise WorkflowRequestError(
+            "workflow requirement ref is outside canonical request state"
+        ) from exc
+    try:
+        raw = path.read_bytes()
+        requirement = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowRequestError(
+            "workflow requirement body is unreadable"
+        ) from exc
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise WorkflowRequestError("workflow requirement digest mismatch")
+    if not isinstance(requirement, dict):
+        raise WorkflowRequestError("workflow requirement body must be an object")
+    if (
+        str(requirement.get("request_id") or "")
+        != str(request.get("request_id") or "")
+        or int(requirement.get("revision") or 0)
+        != int(request.get("revision") or 0)
+    ):
+        raise WorkflowRequestError(
+            "workflow requirement does not match the request revision"
+        )
+    return requirement
 
 
 def adopt_workflow_research_result(
@@ -225,8 +280,19 @@ def revise_workflow_request(
     constraints: list[str] | None = None,
     open_questions: list[str] | None = None,
     confirm: bool = False,
+    revision_reason: str = "requirement_update",
+    source_event_id: str = "",
     writer: EventWriter | None = None,
 ) -> dict[str, Any]:
+    revision_reason = str(revision_reason or "requirement_update").strip().lower()
+    if revision_reason not in {
+        "clarification",
+        "requirement_update",
+        "semantic_replan",
+    }:
+        raise WorkflowRequestError(
+            f"unsupported workflow request revision reason: {revision_reason}"
+        )
     manifest_path = Path(manifest_path).expanduser().resolve()
     manifest = _read_json(manifest_path)
     request_id = str(manifest.get("request_id") or "").strip()
@@ -284,7 +350,18 @@ def revise_workflow_request(
         "workflow.request.updated",
         projection,
         actor=actor,
-        extra={"previous_revision": int(prior.get("revision") or 0)},
+        extra={
+            "previous_revision": int(prior.get("revision") or 0),
+            "revision_reason": revision_reason,
+            "source_event_id": str(source_event_id or ""),
+            "attempt_domain": (
+                "gap" if revision_reason == "semantic_replan" else "plan"
+            ),
+            "semantic_attempt_incremented": (
+                revision_reason == "semantic_replan"
+            ),
+        },
+        causation_id=source_event_id,
     )
     if projection["status"] == "ready" and prior.get("status") != "ready":
         _emit(writer, "workflow.intake.ready", projection, actor=actor)
@@ -331,6 +408,253 @@ def mark_workflow_request(
     if event_type:
         _emit(writer, event_type, projection, actor=actor)
     return projection
+
+
+def bind_workflow_proposal(
+    state_dir: Path,
+    *,
+    request_id: str,
+    request_revision: int,
+    proposal_ref: dict[str, Any],
+    proposal_digest: str,
+    actor: str,
+    writer: EventWriter | None = None,
+) -> dict[str, Any]:
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    if int(projection.get("revision") or 0) != int(request_revision):
+        raise WorkflowRequestError("workflow proposal targets a stale request revision")
+    current = str(projection.get("status") or "")
+    existing_digest = str(projection.get("proposal_digest") or "")
+    if current in {"proposed", "approved", "submitted", "running"} and existing_digest:
+        if existing_digest != proposal_digest:
+            raise WorkflowRequestError(
+                "current workflow request already has a different proposal"
+            )
+        return projection
+    if current not in {"draft", "ready"}:
+        raise WorkflowRequestError(
+            f"workflow request is not proposal-ready: {current}"
+        )
+    projection = dict(projection)
+    projection.update({
+        "status": "proposed",
+        "proposal_ref": dict(proposal_ref),
+        "proposal_digest": str(proposal_digest),
+        "proposal_revision": int(request_revision),
+        "updated_at": _now_iso(),
+    })
+    _write_projection(state_dir, projection)
+    _emit(
+        writer,
+        "workflow.request.proposed",
+        projection,
+        actor=actor,
+        extra={
+            "proposal_ref": dict(proposal_ref),
+            "proposal_digest": str(proposal_digest),
+            "proposal_revision": int(request_revision),
+        },
+    )
+    return projection
+
+
+def bind_workflow_synthesis_result(
+    state_dir: Path,
+    *,
+    request_id: str,
+    request_revision: int,
+    requirement_digest: str,
+    synthesis_ref: dict[str, Any],
+    synthesis_digest: str,
+    selected_flow_family: str,
+    open_questions: list[str],
+    actor: str,
+    writer: EventWriter | None = None,
+) -> dict[str, Any]:
+    """Bind one admitted synthesis result to the current request revision."""
+
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    if int(projection.get("revision") or 0) != int(request_revision):
+        raise WorkflowRequestError(
+            "workflow synthesis targets a stale request revision"
+        )
+    if str(projection.get("requirement_spec_digest") or "") != str(
+        requirement_digest
+    ):
+        raise WorkflowRequestError(
+            "workflow synthesis requirement digest is stale"
+        )
+    current = str(projection.get("status") or "")
+    if current not in {"ready", "clarifying"}:
+        raise WorkflowRequestError(
+            f"workflow request is not synthesis-ready: {current}"
+        )
+    projection = dict(projection)
+    questions = [str(item).strip() for item in open_questions if str(item).strip()]
+    projection.update({
+        "status": "clarifying" if questions else "ready",
+        "open_questions": questions,
+        "synthesis_ref": dict(synthesis_ref),
+        "synthesis_digest": str(synthesis_digest),
+        "synthesis_revision": int(request_revision),
+        "selected_flow_family": str(selected_flow_family),
+        "updated_at": _now_iso(),
+    })
+    _write_projection(state_dir, projection)
+    _emit(
+        writer,
+        (
+            "workflow.synthesis.clarification.required"
+            if questions
+            else "workflow.synthesis.admitted"
+        ),
+        projection,
+        actor=actor,
+        extra={
+            "synthesis_ref": dict(synthesis_ref),
+            "synthesis_digest": str(synthesis_digest),
+            "synthesis_revision": int(request_revision),
+            "selected_flow_family": str(selected_flow_family),
+        },
+    )
+    return projection
+
+
+def bind_workflow_synthesis_operation(
+    state_dir: Path,
+    *,
+    request_id: str,
+    request_revision: int,
+    operation_id: str,
+    request_hash: str,
+    actor: str,
+    writer: EventWriter | None = None,
+) -> dict[str, Any]:
+    """Expose the durable synthesis owner on the request projection."""
+
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    if int(projection.get("revision") or 0) != int(request_revision):
+        raise WorkflowRequestError(
+            "workflow synthesis operation targets a stale request revision"
+        )
+    existing_id = str(projection.get("synthesis_operation_id") or "")
+    existing_hash = str(projection.get("synthesis_request_hash") or "")
+    if existing_id and (
+        existing_id != operation_id or existing_hash != request_hash
+    ):
+        raise WorkflowRequestError(
+            "workflow request already has a different synthesis operation"
+        )
+    if existing_id == operation_id and existing_hash == request_hash:
+        return projection
+    projection = dict(projection)
+    projection.update({
+        "synthesis_operation_id": str(operation_id),
+        "synthesis_request_hash": str(request_hash),
+        "synthesis_operation_revision": int(request_revision),
+        "updated_at": _now_iso(),
+    })
+    _write_projection(state_dir, projection)
+    _emit(
+        writer,
+        "workflow.synthesis.operation.bound",
+        projection,
+        actor=actor,
+        extra={
+            "operation_id": str(operation_id),
+            "request_hash": str(request_hash),
+            "request_revision": int(request_revision),
+        },
+    )
+    return projection
+
+
+def validate_current_workflow_proposal(
+    state_dir: Path,
+    *,
+    request_id: str,
+    proposal_ref: dict[str, Any],
+    proposal_digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate an operator decision against the exact current Proposal."""
+
+    projection = load_workflow_request(state_dir, request_id)
+    if not projection:
+        raise WorkflowRequestError(f"workflow request not found: {request_id}")
+    if str(projection.get("status") or "") not in {
+        "proposed",
+        "approved",
+        "submitted",
+        "running",
+    }:
+        raise WorkflowRequestError(
+            "workflow request has no current decidable proposal"
+        )
+    current_ref = projection.get("proposal_ref")
+    if not isinstance(current_ref, dict):
+        raise WorkflowRequestError("workflow request proposal ref is missing")
+    if (
+        str(current_ref.get("ref") or "") != str(proposal_ref.get("ref") or "")
+        or str(current_ref.get("sha256") or "")
+        != str(proposal_ref.get("sha256") or "")
+    ):
+        raise WorkflowRequestError("workflow proposal ref is stale")
+    current_digest = str(projection.get("proposal_digest") or "")
+    if not proposal_digest or proposal_digest != current_digest:
+        raise WorkflowRequestError("workflow proposal digest is stale")
+    from zf.runtime.workflow_proposal import load_workflow_proposal
+
+    proposal = load_workflow_proposal(state_dir, proposal_ref)
+    if (
+        str(proposal.get("proposal_digest") or "") != proposal_digest
+        or str(proposal.get("request_id") or "") != request_id
+        or int(proposal.get("request_revision") or 0)
+        != int(projection.get("revision") or 0)
+    ):
+        raise WorkflowRequestError(
+            "workflow proposal does not bind the current request revision"
+        )
+    return projection, proposal
+
+
+def reject_workflow_proposal(
+    state_dir: Path,
+    *,
+    request_id: str,
+    proposal_ref: dict[str, Any],
+    proposal_digest: str,
+    reason: str,
+    actor: str,
+    writer: EventWriter | None = None,
+) -> dict[str, Any]:
+    projection, _proposal = validate_current_workflow_proposal(
+        state_dir,
+        request_id=request_id,
+        proposal_ref=proposal_ref,
+        proposal_digest=proposal_digest,
+    )
+    if str(projection.get("status") or "") != "proposed":
+        raise WorkflowRequestError(
+            "only a proposed workflow request can be rejected"
+        )
+    rejected = mark_workflow_request(
+        state_dir,
+        request_id,
+        status="rejected",
+        actor=actor,
+        writer=writer,
+        event_type="workflow.request.rejected",
+    )
+    rejected = dict(rejected)
+    rejected["rejection_reason"] = str(reason or "operator rejected proposal")
+    _write_projection(state_dir, rejected)
+    return rejected
 
 
 def request_readiness_blockers(projection: dict[str, Any]) -> list[dict[str, Any]]:
@@ -539,6 +863,7 @@ def _emit(
     *,
     actor: str,
     extra: dict[str, Any] | None = None,
+    causation_id: str = "",
 ) -> None:
     if writer is None:
         return
@@ -558,6 +883,7 @@ def _emit(
         type=event_type,
         actor=actor,
         task_id="",
+        causation_id=causation_id or None,
         correlation_id=str(projection.get("request_id") or ""),
         payload=payload,
     ))
@@ -591,6 +917,10 @@ def _now_iso() -> str:
 
 __all__ = [
     "WorkflowRequestError",
+    "adopt_workflow_research_result",
+    "bind_workflow_synthesis_operation",
+    "bind_workflow_synthesis_result",
+    "hydrate_workflow_requirement",
     "load_workflow_request",
     "mark_workflow_request",
     "register_workflow_intake",

@@ -31,6 +31,26 @@ PLAN_SYNTH_HANDOFF_KEYS = (
     "plan_synth_contract_ref",
     "plan_synth_contract_digest",
 )
+PLAN_SYNTH_SEMANTIC_FIELDS = (
+    "artifact_refs",
+    "evidence_refs",
+    "findings",
+    "fix_items",
+    "plan_ports",
+    "review_artifact_ref",
+    "plan_artifact_ref",
+    "task_map_ref",
+    "risk_register_ref",
+    "backlog_candidates_ref",
+    "scan_quality_audit_ref",
+    "refactor_plan_md",
+    "plan_md",
+    "plan_intent",
+    "task_map",
+    "gates",
+    "risk_register",
+    "backlog_candidates",
+)
 
 
 class PlanSynthRuntimeMixin:
@@ -90,6 +110,18 @@ class PlanSynthRuntimeMixin:
             self._checkout_fanout_reader(role, str(manifest.get("target_ref") or ""))
             skill_entries = self._record_skill_provenance(role=role)
             reports = self._fanout_reports(manifest)
+            from zf.runtime.fanout_artifact_refs import (
+                prepare_fanout_synth_reports,
+            )
+
+            reports = prepare_fanout_synth_reports(
+                reports=reports,
+                manifest=manifest,
+                state_dir=self.state_dir,
+                project_root=self.project_root,
+                config=self.config,
+                roles=self.config.roles,
+            )
             aggregate_config = (
                 manifest.get("aggregate_config")
                 if isinstance(manifest.get("aggregate_config"), dict)
@@ -137,6 +169,7 @@ class PlanSynthRuntimeMixin:
                 run_id=run_id,
                 skill_entries=skill_entries,
                 call_payload=call_payload,
+                reports=reports,
             )
             prompt = build_task_prompt(
                 role.instance_id,
@@ -233,8 +266,29 @@ class PlanSynthRuntimeMixin:
                 return
             if not outcome.admitted:
                 return
+            from zf.runtime.call_result_runtime import (
+                hydrate_admitted_control_result,
+            )
+
+            control_result = hydrate_admitted_control_result(
+                self.state_dir,
+                outcome.envelope_ref or {},
+            )
+            semantic_payload = {
+                key: control_result[key]
+                for key in PLAN_SYNTH_SEMANTIC_FIELDS
+                if key in control_result
+            }
+            report = (
+                dict(payload["report"])
+                if isinstance(payload.get("report"), dict)
+                else {}
+            )
+            report.update(semantic_payload)
             payload = {
                 **payload,
+                **semantic_payload,
+                "report": report,
                 "admitted_call_result_ref": dict(outcome.envelope_ref or {}),
                 "control_result_ref": dict(outcome.control_result_ref or {}),
                 "admitted_call_result_digest": str(
@@ -245,4 +299,8 @@ class PlanSynthRuntimeMixin:
         self._finalize_fanout_synth(event)
 
 
-__all__ = ["PLAN_SYNTH_HANDOFF_KEYS", "PlanSynthRuntimeMixin"]
+__all__ = [
+    "PLAN_SYNTH_HANDOFF_KEYS",
+    "PLAN_SYNTH_SEMANTIC_FIELDS",
+    "PlanSynthRuntimeMixin",
+]

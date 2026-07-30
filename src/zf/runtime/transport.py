@@ -66,6 +66,9 @@ class DispatchContext:
     backend: str | None = None
     briefing_path: Path | None = None
     dispatch_id: str | None = None
+    operation_id: str | None = None
+    attempt_id: str | None = None
+    lease_id: str | None = None
 
     def to_payload(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -85,6 +88,12 @@ class DispatchContext:
             payload["briefing"] = str(self.briefing_path)
         if self.dispatch_id:
             payload["dispatch_id"] = self.dispatch_id
+        if self.operation_id:
+            payload["operation_id"] = self.operation_id
+        if self.attempt_id:
+            payload["attempt_id"] = self.attempt_id
+        if self.lease_id:
+            payload["lease_id"] = self.lease_id
         return payload
 
 

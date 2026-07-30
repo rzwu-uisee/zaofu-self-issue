@@ -210,6 +210,75 @@ class RoleSessionRegistry:
             self._save()
             return dict(meta)
 
+    def bind_provider_session_config(
+        self,
+        instance_id: str,
+        *,
+        digest: str,
+        ref: str,
+        explicit: bool,
+    ) -> dict[str, object]:
+        """Bind a frozen provider config and recycle an unprovable session.
+
+        The decision and mutation happen under the registry lock so concurrent
+        activation attempts cannot both resume an old provider session.
+        """
+
+        if not digest or not ref:
+            raise ValueError("provider session config requires digest and ref")
+        with self._locked():
+            if self.path.exists():
+                self._load()
+            meta = self._meta.setdefault(instance_id, {})
+            previous_digest = str(
+                meta.get("provider_session_config_digest") or ""
+            )
+            previous_ref = str(meta.get("provider_session_config_ref") or "")
+            was_spawned = bool(meta.get("spawned_at"))
+            recycle_reason = ""
+            if previous_digest and previous_digest != digest:
+                recycle_reason = "provider_session_config_changed"
+            elif not previous_digest and explicit and was_spawned:
+                recycle_reason = "provider_session_config_currentness_unproven"
+
+            recycled = bool(recycle_reason)
+            if recycled:
+                meta["rotation_counter"] = int(
+                    meta.get("rotation_counter", 0)
+                ) + 1
+                meta["session_path"] = None
+                meta.pop("spawned_at", None)
+                self._entries.pop(instance_id, None)
+                meta["provider_session_config_recycled_at"] = _now_iso()
+                meta["provider_session_config_recycle_reason"] = recycle_reason
+                meta["provider_session_config_previous_digest"] = previous_digest
+                meta["provider_session_config_previous_ref"] = previous_ref
+
+            meta["provider_session_config_digest"] = digest
+            meta["provider_session_config_ref"] = ref
+            meta["provider_session_config_explicit"] = bool(explicit)
+            meta["provider_session_config_bound_at"] = _now_iso()
+            self._save()
+            if recycled:
+                status = "recycled"
+            elif previous_digest == digest:
+                status = "current"
+            elif previous_digest:
+                status = "rebound"
+            elif was_spawned:
+                status = "legacy_bound"
+            else:
+                status = "bound"
+            return {
+                "status": status,
+                "recycled": recycled,
+                "reason": recycle_reason,
+                "previous_digest": previous_digest,
+                "previous_ref": previous_ref,
+                "digest": digest,
+                "ref": ref,
+            }
+
     def instance_meta(self) -> dict[str, dict]:
         return {instance_id: dict(meta) for instance_id, meta in self._meta.items()}
 

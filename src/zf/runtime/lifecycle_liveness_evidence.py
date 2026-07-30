@@ -215,7 +215,14 @@ class LifecycleLivenessEvidenceMixin:
             return []
         now = self._now()
         recent: list[ZfEvent] = []
-        for event in events:
+        for event in reversed(events):
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if (
+                event.type == "worker.state.changed"
+                and event.actor == instance_id
+                and payload.get("respawn_success_circuit_reset") is True
+            ):
+                break
             if event.type != "worker.respawned" or event.actor != instance_id:
                 continue
             try:
@@ -224,4 +231,5 @@ class LifecycleLivenessEvidenceMixin:
                 age = 0.0
             if age <= self._RESPAWN_SUCCESS_WINDOW_SECONDS:
                 recent.append(event)
+        recent.reverse()
         return recent

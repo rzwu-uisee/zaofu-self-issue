@@ -29,14 +29,17 @@ def build_artifact_query_router(
     @router.get("/api/artifacts/catalog")
     def artifact_catalog(
         kind: str = "",
+        semantic_kind: str = "",
         ref: str = "",
         task_id: str = "",
+        claim_id: str = "",
         run_id: str = "",
         attempt_id: str = "",
         operation_id: str = "",
         package_id: str = "",
         limit: int = 200,
         offset: int = 0,
+        view: str = "objects",
     ) -> JSONResponse:
         query = service()
         return JSONResponse(query.catalog_list(
@@ -48,12 +51,15 @@ def build_artifact_query_router(
                 offset=offset,
             ),
             kind=kind,
+            semantic_kind=semantic_kind,
             ref=ref,
             task_id=task_id,
+            claim_id=claim_id,
             run_id=run_id,
             attempt_id=attempt_id,
             operation_id=operation_id,
             package_id=package_id,
+            view=view,
         ))
 
     @router.get("/api/artifacts/catalog/{identity}")

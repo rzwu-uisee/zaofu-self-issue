@@ -15,6 +15,7 @@ Events emitted (actor = instance_id, resolved up-front via registry):
   - assistant / tool_use   → agent.tool.use
   - assistant / text       → agent.text
   - user     / tool_result → agent.tool.result
+  - Codex task_complete    → provider.turn.closed
 
 Messages we skip (CLI-internal bookkeeping):
   permission-mode, file-history-snapshot, attachment, last-prompt,
@@ -55,21 +56,28 @@ class _BaseSessionTailer:
 
     def __init__(self, event_log: EventLog) -> None:
         self._event_log = event_log
-        self._threads: dict[str, threading.Thread] = {}
+        self._threads: dict[tuple[str, str], threading.Thread] = {}
         self._stopping = threading.Event()
 
     def tail(
-        self, instance_id: str, session_path: Path,
+        self,
+        instance_id: str,
+        session_path: Path,
+        *,
+        replay_existing: bool = False,
     ) -> None:
         """Start tailing session_path for the given role instance.
 
-        If already tailing, no-op. If the file doesn't exist yet the
-        thread waits (Claude writes the file only on first turn).
+        If already tailing this exact path, no-op. If the file doesn't exist
+        yet the thread waits (Claude writes the file only on first turn).
+        Newly observed Codex rollouts may set ``replay_existing`` so a fast
+        first turn cannot write ``task_complete`` before the observer attaches.
         """
-        if instance_id in self._threads:
+        key = (instance_id, str(session_path))
+        if key in self._threads:
             return
         initial_offset = 0
-        if session_path.exists():
+        if session_path.exists() and not replay_existing:
             try:
                 initial_offset = session_path.stat().st_size
             except OSError:
@@ -80,7 +88,7 @@ class _BaseSessionTailer:
             name=f"SessionTailer-{instance_id}",
             daemon=True,
         )
-        self._threads[instance_id] = t
+        self._threads[key] = t
         t.start()
 
     def stop(self) -> None:
@@ -228,9 +236,11 @@ class CodexSessionTailer(_BaseSessionTailer):
         payload.type == "function_call_output"  → agent.tool.result
         payload.type == "message" + role=assistant → agent.text
 
-    User messages and event_msg entries (token_count / task_started /
-    task_complete / turn_context) are CLI bookkeeping and get skipped.
-    Cost telemetry is handled by CodexSessionReader.
+    User messages and non-terminal event_msg entries (token_count /
+    task_started / turn_context) are CLI bookkeeping and get skipped.
+    ``task_complete`` closes the provider turn even when Codex omits its
+    Stop hook, so it is projected as ``provider.turn.closed``. Cost
+    telemetry is handled by CodexSessionReader.
     """
 
     def _emit_from_line(self, instance_id: str, raw: str) -> None:
@@ -240,11 +250,32 @@ class CodexSessionTailer(_BaseSessionTailer):
             m = json.loads(raw)
         except json.JSONDecodeError:
             return
-        if m.get("type") != "response_item":
-            return  # skip session_meta / event_msg / turn_context / ...
         payload = m.get("payload")
         if not isinstance(payload, dict):
             return
+        if m.get("type") == "event_msg":
+            provider_event = str(payload.get("type") or "")
+            if provider_event not in {"task_complete", "turn_complete"}:
+                return
+            turn_id = str(payload.get("turn_id") or "").strip()
+            if not turn_id:
+                return
+            self._append(
+                "provider.turn.closed",
+                instance_id,
+                {
+                    "schema_version": "provider.turn.closed.v1",
+                    "backend": "codex",
+                    "provider_event": provider_event,
+                    "provider_status": "completed",
+                    "turn_id": turn_id,
+                    "completed_at": payload.get("completed_at"),
+                    "duration_ms": payload.get("duration_ms"),
+                },
+            )
+            return
+        if m.get("type") != "response_item":
+            return  # skip session_meta / turn_context / ...
         ptype = payload.get("type")
 
         if ptype == "reasoning":
@@ -303,6 +334,22 @@ class CodexSessionTailer(_BaseSessionTailer):
                     "agent.text", instance_id,
                     {"text": text[:2000], "stop_reason": ""},
                 )
+
+
+def attach_codex_session_tailer(
+    tailer: CodexSessionTailer | None,
+    instance_id: str,
+    session_path: Path | None,
+    *,
+    replay_existing: bool,
+) -> None:
+    if tailer is None or session_path is None:
+        return
+    tailer.tail(
+        instance_id,
+        session_path,
+        replay_existing=replay_existing,
+    )
 
 
 def _truncate(obj: object, limit: int) -> str:

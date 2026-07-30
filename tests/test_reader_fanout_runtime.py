@@ -26,6 +26,7 @@ from zf.core.events.writer import EventWriter
 from zf.runtime.fanout import FanoutChild, FanoutContext, validate_fanout_report
 from zf.runtime.fanout_evidence_queries import FanoutEvidenceQueriesMixin
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
+from zf.runtime.call_result_admission import CallResultAdmissionOutcome
 from zf.runtime.call_result_runtime import admit_runtime_call_result
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.run_manager import (
@@ -373,7 +374,22 @@ def test_selected_reader_repair_is_restart_idempotent_and_semantic_rejects(
     )
     assert child_failure.payload["semantic_verdict"] == "rejected"
     assert child_failure.payload["admitted_call_result_ref"]["ref"]
-    assert not any("task.attempt" in event.type for event in events)
+    attempt_starts = [
+        event
+        for event in events
+        if event.type == "task.attempt.started"
+        and event.task_id == "T-VERIFY"
+    ]
+    assert len(attempt_starts) == 1
+    assert attempt_starts[0].payload["attempt_id"]
+    assert attempt_starts[0].payload["lease_id"]
+    assert not any(
+        event.type in {
+            "task.attempt.retry_scheduled",
+            "task.attempt.deadlettered",
+        }
+        for event in events
+    )
 
 
 def test_selected_reader_restart_projects_settled_result_without_provider_call(
@@ -428,6 +444,66 @@ def test_selected_reader_restart_projects_settled_result_without_provider_call(
     )
     assert any(event.type == "review.approved" for event in events)
     assert restarted_transport.sent == []
+
+
+def test_superseded_blocking_reader_result_closes_child_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir, log, _transport, orch, _config, child = _durable_reader_state(
+        tmp_path
+    )
+    terminal = ZfEvent(
+        type="verify.child.completed",
+        actor="verify-1",
+        task_id="T-VERIFY",
+        correlation_id="run-durable",
+        payload=_durable_verification_payload(child, verdict="passed"),
+    )
+    terminal.payload.update({
+        "flow_kind": "workflow",
+        "completion_profile": "artifact_delivery",
+    })
+    outcome = CallResultAdmissionOutcome(
+        status="superseded",
+        mode="blocking",
+        operation_id="operation-stale",
+        request_hash="request-stale",
+        issues=({
+            "field": "control_result.workflow_generation",
+            "code": "stale_workflow_generation",
+            "message": "a newer generation is current",
+        },),
+    )
+    monkeypatch.setattr(
+        "zf.runtime.call_result_runtime.admit_runtime_call_result",
+        lambda *_args, **_kwargs: outcome,
+    )
+
+    orch.run_once(events=[terminal])
+    orch.run_once(events=[terminal])
+
+    events = log.read_all()
+    failed = [
+        event
+        for event in events
+        if event.type == "fanout.child.failed"
+        and event.payload.get("reason") == "stale_call_result_superseded"
+    ]
+    assert len(failed) == 1
+    assert failed[0].payload["failure_class"] == "call_result_currentness"
+    assert failed[0].payload["call_result_issues"][0]["code"] == (
+        "stale_workflow_generation"
+    )
+    aggregate = next(
+        event
+        for event in events
+        if event.type == "fanout.aggregate.completed"
+    )
+    assert aggregate.payload["status"] == "failed"
+    assert any(event.type == "review.rejected" for event in events)
+    manifest = _manifest(state_dir, child["fanout_id"])
+    assert manifest["children"][0]["status"] == "failed"
 
 
 def test_blocking_reader_evidence_gate_uses_admitted_control_result(
@@ -497,6 +573,33 @@ def test_trigger_creates_one_fanout_and_dispatches_children(
     assert '"fanout_id":' in briefing
 
 
+def test_reader_children_inherit_workflow_anchor_task_id(tmp_path: Path) -> None:
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    trigger = ZfEvent(
+        type="candidate.ready",
+        actor="zf-cli",
+        task_id="FLOW-ANCHOR",
+        correlation_id="trace-anchor",
+        payload={
+            "pdd_id": "F-ANCHOR",
+            "task_id": "FLOW-ANCHOR",
+        },
+    )
+
+    orch.run_once(events=[trigger])
+
+    dispatched = [
+        event
+        for event in log.read_all()
+        if event.type == "fanout.child.dispatched"
+    ]
+    assert dispatched
+    assert all(
+        event.payload["payload"]["task_id"] == "FLOW-ANCHOR"
+        for event in dispatched
+    )
+
+
 def test_reader_fanout_briefing_includes_stage_instructions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -516,6 +619,9 @@ def test_reader_fanout_briefing_includes_stage_instructions(
     assert "## Stage Intent" in briefing
     assert "Initial scan is not implementation verification." in briefing
     assert "Missing code belongs in planning input, not scan failure." in briefing
+    assert "`report.recommendation` is an enum" in briefing
+    assert "never append rationale to the enum value" in briefing
+    assert "rationale in `report.summary` or `report.findings`" in briefing
 
 
 def test_flow_discovery_briefing_teaches_canonical_gap_task_shape(
@@ -818,6 +924,67 @@ def test_reader_fanout_stage_success_criteria_can_fail_aggregate(
     assert aggregate.payload["status"] == "failed"
     assert aggregate.payload["stage_success_criteria"]["passed"] is False
     assert "artifact matrix gate failed" in rejected[-1].payload["findings"][0]["message"]
+
+
+def test_failed_aggregate_publishes_typed_recovery_routing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir, log, _transport, orch = _state(tmp_path)
+    _start_fanout(orch)
+    started = next(event for event in log.read_all() if event.type == "fanout.started")
+    manifest = _manifest(state_dir, started.payload["fanout_id"])
+    recovery = {
+        "failure_class": "dependency_blocked",
+        "recovery_action": "replan",
+        "rework_scope": "plan_ports",
+        "recovery_owner": "planner",
+        "failed_task_ids": ["TASK-1"],
+        "rework_item_ids": ["RW-1"],
+        "semantic_result_refs": ["artifacts/call-results/control/result.json"],
+    }
+    monkeypatch.setattr(
+        "zf.runtime.orchestrator_fanout.fanout_failure_context",
+        lambda _owner, _manifest, *, failed: ([], recovery) if failed else ([], {}),
+    )
+
+    for index, child in enumerate(manifest["children"]):
+        orch.run_once(events=[ZfEvent(
+            type="workflow.child.completed",
+            actor=child["role_instance"],
+            correlation_id="trace-1",
+            payload={
+                "fanout_id": started.payload["fanout_id"],
+                "trace_id": "trace-1",
+                "stage_id": "review-candidate",
+                "child_id": child["child_id"],
+                "run_id": child["run_id"],
+                "role_instance": child["role_instance"],
+                "status": "failed" if index == 0 else "completed",
+                "reason": "upstream plan port is incomplete" if index == 0 else "",
+            },
+        )])
+
+    aggregate = [
+        event
+        for event in log.read_all()
+        if event.type == "fanout.aggregate.completed"
+        and event.payload.get("fanout_id") == started.payload["fanout_id"]
+    ][-1]
+    published = [
+        event
+        for event in log.read_all()
+        if event.type == "review.rejected"
+        and event.payload.get("fanout_id") == started.payload["fanout_id"]
+    ][-1]
+    for event in (aggregate, published):
+        assert event.payload["failure_class"] == "dependency_blocked"
+        assert event.payload["recovery_action"] == "replan"
+        assert event.payload["rework_scope"] == "plan_ports"
+        assert event.payload["recovery_owner"] == "planner"
+        assert event.payload["semantic_result_refs"] == recovery[
+            "semantic_result_refs"
+        ]
 
 
 def test_reader_fanout_stage_gate_config_can_live_in_project_root(
@@ -1812,6 +1979,102 @@ def test_semantic_submit_briefing_exposes_profile_not_capability(
     assert "When finished, emit exactly one result event with this payload" not in briefing
     assert path.with_suffix(".md.metrics.json").exists()
 
+
+def test_artifact_delivery_briefing_pins_identity_and_admitted_inputs(
+    tmp_path: Path,
+) -> None:
+    state_dir, _log, _transport, orch = _state(tmp_path)
+    context = FanoutContext(
+        fanout_id="fanout-artifact-delivery",
+        stage_id="verify",
+        topology="fanout_reader",
+        trace_id="run-generic",
+        trigger_event_id="evt-verify",
+        target_ref="",
+    )
+    input_result_ref = (
+        "artifacts/call-results/envelopes/" + "e" * 64 + ".json"
+    )
+    scratch_ref = "tmp/result-submit/operation-verify/attempt-verify/result.json"
+    child_payload = {
+        "workflow_run_id": "run-generic",
+        "goal_id": "goal-generic",
+        "flow_kind": "workflow",
+        "workflow_generation": "a" * 64,
+        "request_revision": 2,
+        "generic_workflow_contract_digest": "b" * 64,
+        "workflow_intent": "research",
+        "workflow_template": "evidence-synthesis-v1",
+        "completion_profile": "artifact_delivery",
+        "run_contract_ref": "artifacts/run-contracts/current.json",
+        "run_contract_digest": "c" * 64,
+        "goal_claim_set_ref": (
+            "artifacts/goal-closure/claim-sets/current.json"
+        ),
+        "goal_claim_set_digest": "d" * 64,
+        "required_delivery_artifacts": [{
+            "name": "report",
+            "kind": "report/markdown",
+            "source_ref": "synthesize.report",
+        }],
+        "input_result_refs": [input_result_ref],
+        "operation_id": "operation-verify",
+        "attempt_id": "attempt-verify",
+        "result_scratch_ref": scratch_ref,
+        "output_profile_id": "artifact-delivery",
+        "output_profile_revision": "1",
+        "semantic_result_submit_mode": "blocking",
+    }
+
+    path = orch._write_fanout_briefing(  # type: ignore[attr-defined]
+        role=RoleConfig(
+            name="workflow-verifier",
+            instance_id="workflow-verifier",
+            backend="codex",
+            role_kind="reader",
+        ),
+        context=context,
+        child_id="workflow-verifier",
+        run_id="attempt-verify",
+        aggregate=FanoutAggregateConfig(
+            mode="wait_for_all",
+            child_success_event="workflow.child.completed",
+            child_failure_event="workflow.child.failed",
+            success_event="workflow.verify.completed",
+            failure_event="workflow.verify.failed",
+        ),
+        child_payload=child_payload,
+    )
+
+    briefing = path.read_text(encoding="utf-8")
+    assert "result submit" in briefing
+    assert "--operation operation-verify" in briefing
+    assert "When finished, emit exactly one result event" not in briefing
+    assert '"goal_id": "goal-generic"' in briefing
+    assert input_result_ref in briefing
+    scratch = json.loads(
+        (state_dir / scratch_ref).read_text(encoding="utf-8")
+    )
+    for key in (
+        "workflow_run_id",
+        "goal_id",
+        "workflow_generation",
+        "request_revision",
+        "generic_workflow_contract_digest",
+        "workflow_intent",
+        "workflow_template",
+        "completion_profile",
+        "run_contract_ref",
+        "run_contract_digest",
+        "goal_claim_set_ref",
+        "goal_claim_set_digest",
+        "input_result_refs",
+    ):
+        assert key not in scratch
+    assert scratch["artifacts"][0]["source_ref"] == "synthesize.report"
+    assert "Kernel. Do not add raw child result files" in briefing
+
+
 def test_goal_closure_success_uses_immutable_payload_file(
     tmp_path: Path,
     monkeypatch,
@@ -1979,6 +2242,42 @@ def test_reader_fanout_briefing_includes_enabled_role_skills(tmp_path: Path):
     assert "`/verify-review`" in briefing
 
 
+def test_busy_reader_defers_before_repeated_skill_materialization(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, transport, orch = _state(
+        tmp_path,
+        review_skills=True,
+    )
+    orch._set_worker_state(  # type: ignore[attr-defined]
+        "review-a",
+        "busy",
+        reason="previous provider turn active",
+        force=True,
+    )
+    orch._set_worker_state(  # type: ignore[attr-defined]
+        "review-b",
+        "busy",
+        reason="previous provider turn active",
+        force=True,
+    )
+
+    _start_fanout(orch)
+    orch.run_once(events=[])
+
+    events = log.read_all()
+    assert transport.sent == []
+    assert not [
+        event for event in events
+        if event.type == "skills.materialized"
+    ]
+    assert {
+        event.payload["role_instance"]
+        for event in events
+        if event.type == "fanout.child.dispatch_deferred"
+    } == {"review-a", "review-b"}
+
+
 def test_wait_for_all_waits_for_all_terminal_children(tmp_path: Path):
     state_dir, log, _transport, orch = _state(tmp_path)
     _start_fanout(orch)
@@ -2119,7 +2418,10 @@ def test_product_reader_aggregate_projects_generic_schema_payload(tmp_path: Path
     assert payload["resume_scope"] == "failed_children_and_downstream"
     assert "docs/product-plan.md" in payload["artifact_refs"]
     assert any(ref.endswith("/report.json") for ref in payload["artifact_refs"])
-    assert payload["evidence_refs"] == ["reports/task-map.json"]
+    assert payload["evidence_refs"] == [
+        "reports/task-map.json",
+        ".zf/task-map.json",
+    ]
 
 
 def test_candidate_ready_cancels_pending_candidate_failure_replan(tmp_path: Path):
@@ -2188,6 +2490,139 @@ def test_candidate_ready_cancels_pending_candidate_failure_replan(tmp_path: Path
     )
     assert cancelled[0].payload["superseded_by"] == ready.id
     assert not any(event.type == "task_map.ready" for event in log.read_all())
+
+
+def test_candidate_ready_triggered_fanout_does_not_cancel_itself(tmp_path: Path):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    transport = _RecordingTransport()
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[
+            RoleConfig(name="verifier", backend="mock", role_kind="reader"),
+        ],
+        workflow=WorkflowConfig(stages=[WorkflowStageConfig(
+            id="candidate-verify",
+            trigger="candidate.ready",
+            topology="fanout_reader",
+            roles=["verifier"],
+            aggregate=FanoutAggregateConfig(
+                success_event="verify.passed",
+                failure_event="verify.failed",
+            ),
+        )]),
+    )
+    orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
+    failure = writer.append(ZfEvent(
+        type="integration.failed",
+        actor="zf-cli",
+        correlation_id="trace-1",
+        payload={"pdd_id": "PDD-1"},
+    ))
+    ready = writer.append(ZfEvent(
+        type="candidate.ready",
+        actor="zf-cli",
+        correlation_id="trace-1",
+        payload={
+            "pdd_id": "PDD-1",
+            "candidate_head_commit": "abc",
+            "rework_of": failure.id,
+            "rework_source": "integration.failed",
+        },
+    ))
+
+    orch.run_once(events=[ready])
+
+    fanout = next(
+        event for event in log.read_all()
+        if event.type == "fanout.started"
+    )
+    assert fanout.payload["trigger_event_id"] == ready.id
+    assert not any(
+        event.type == "fanout.cancelled"
+        and event.payload.get("fanout_id") == fanout.payload["fanout_id"]
+        for event in log.read_all()
+    )
+
+
+def test_verified_generation_suppresses_candidate_reader_redrive(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    transport = _RecordingTransport()
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[
+            RoleConfig(name="verifier", backend="mock", role_kind="reader"),
+        ],
+        workflow=WorkflowConfig(stages=[WorkflowStageConfig(
+            id="candidate-verify",
+            trigger="candidate.ready",
+            topology="fanout_reader",
+            roles=["verifier"],
+            aggregate=FanoutAggregateConfig(
+                success_event="test.passed",
+                failure_event="test.failed",
+            ),
+        )]),
+    )
+    orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
+    generation = "a" * 64
+    original = writer.append(ZfEvent(
+        type="candidate.ready",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "pdd_id": "PDD-1",
+            "candidate_ref": "candidate/PDD-1",
+            "candidate_head_commit": "candidate-head-1",
+            "completed_task_ids": ["TASK-1"],
+            "task_map_generation": generation,
+            "quality_status": "passed",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="test.passed",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "target_ref": "candidate/PDD-1",
+            "task_ids": ["TASK-1"],
+            "task_map_generation": generation,
+        },
+    ))
+    redrive = writer.append(ZfEvent(
+        type="candidate.ready",
+        actor="operator",
+        correlation_id="run-1",
+        payload={
+            **original.payload,
+            "redrive_of": original.id,
+        },
+    ))
+
+    orch.run_once(events=[redrive])
+
+    assert not [
+        event for event in log.read_all()
+        if event.type == "fanout.started"
+    ]
+    suppressed = next(
+        event for event in log.read_all()
+        if event.type == "fanout.retrigger.suppressed"
+    )
+    assert suppressed.payload["stage_id"] == "candidate-verify"
+    assert suppressed.payload["reason"] == "generation_already_verified"
+    assert suppressed.payload["candidate_event_id"] == original.id
 
 
 def _task_map_synth_orchestrator(tmp_path: Path):
@@ -2287,6 +2722,62 @@ def test_task_map_synth_payload_projects_task_map_ref(tmp_path: Path):
                  if event.type == "task_map.ready")
     assert ready.payload["task_map_ref"] == ".zf/artifacts/PDD-1/task_map.json"
     assert ready.payload["source_index_ref"] == ".zf/artifacts/PDD-1/source_index.json"
+
+
+def test_synth_schema_failure_projects_actionable_diagnostics(tmp_path: Path):
+    _state_dir, log, orch, fanout_id = _task_map_synth_orchestrator(tmp_path)
+    synth_event = orch.event_writer.append(ZfEvent(
+        type="fanout.synth.completed",
+        actor="task-map-synth",
+        correlation_id="trace-product",
+        payload={
+            "fanout_id": fanout_id,
+            "stage_id": "product-task-map",
+            "role_instance": "task-map-synth",
+            "run_id": f"run-{fanout_id}-synth",
+            "status": "completed",
+            "recommendation": "approve",
+            "summary": "task map ready",
+            "report": {
+                "child_id": "synth",
+                "status": "passed",
+                "summary": "task map ready",
+                "findings": [{
+                    "severity": "info",
+                    "category": "residual_risk",
+                    "path": "docs/plans/plan.md",
+                    "line": -1,
+                    "message": "Evidence remains required.",
+                }],
+                "recommendation": "approve",
+                "task_map_ref": ".zf/artifacts/PDD-1/task_map.json",
+            },
+        },
+    ))
+
+    orch.run_once(events=[synth_event])
+
+    aggregate = next(
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.completed"
+        and event.payload.get("fanout_id") == fanout_id
+    )
+    assert aggregate.payload["status"] == "failed"
+    assert aggregate.payload["report_diagnostics"] == [
+        "findings[0].line must be a positive integer"
+    ]
+    schema_finding = next(
+        finding for finding in aggregate.payload["findings"]
+        if finding.get("category") == "report-schema"
+    )
+    assert "positive integer" in schema_finding["message"]
+    blocked = next(
+        event for event in log.read_all()
+        if event.type == "task_map.blocked"
+    )
+    assert blocked.payload["report_diagnostics"] == (
+        aggregate.payload["report_diagnostics"]
+    )
 
 
 def test_task_map_synth_relocates_workdir_relative_artifacts(tmp_path: Path):
@@ -2634,6 +3125,9 @@ def test_plan_fanout_child_briefing_requires_durable_plan_artifact(tmp_path: Pat
     briefing = path.read_text(encoding="utf-8")
     assert "Plan stages must produce a durable markdown plan artifact" in briefing
     assert "plan_artifact_ref" in briefing
+    assert "top-level `task_map.target_commit`" in briefing
+    assert "`static`, `runtime`, `e2e`, or `manual_evidence`" in briefing
+    assert "rather than inventing a `setup` tier" in briefing
     assert "docs/plans/product-plan-authoring-product-arch-plan.md" in briefing
 
 
@@ -2674,6 +3168,275 @@ def test_task_map_briefing_uses_workdir_relative_relocatable_ref(tmp_path: Path)
     assert ".zf/artifacts/default/task_map.json" not in briefing
 
 
+def test_issue_triage_briefing_is_a_plan_port_producer(tmp_path: Path):
+    state_dir = tmp_path / ".zf-issue"
+    state_dir.mkdir()
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.state_dir = state_dir
+    orch.project_root = tmp_path
+    role = RoleConfig(
+        name="issue-triage",
+        backend="mock",
+        role_kind="reader",
+    )
+    context = FanoutContext(
+        fanout_id="fanout-issue-triage",
+        stage_id="issue-triage",
+        topology="fanout_reader",
+        trace_id="issue-run",
+        trigger_event_id="evt-issue",
+        target_ref="docs/issues/docker.md",
+    )
+
+    path = orch._write_fanout_briefing(  # type: ignore[attr-defined]
+        role=role,
+        context=context,
+        child_id="issue-triage",
+        run_id="run-issue-triage",
+        aggregate=FanoutAggregateConfig(
+            mode="wait_for_all",
+            child_success_event="issue.triage.child.completed",
+            child_failure_event="issue.triage.child.failed",
+            success_event="task_map.ready",
+            failure_event="issue.triage.failed",
+        ),
+        child_payload={
+            "flow_kind": "issue",
+            "trigger_payload": {"flow_kind": "issue"},
+        },
+    )
+
+    briefing = path.read_text(encoding="utf-8")
+    assert '"task_map_ref": "artifacts/plan/task_map.json"' in briefing
+    assert '"plan_ports": []' in briefing
+    assert "This remains task-map synthesis" not in briefing
+    assert "regression_test_matrix` is a delivery alias" in briefing
+    assert "do not modify product implementation files" in briefing
+    assert str(state_dir / "artifacts" / "task_map.json") not in briefing
+
+
+def test_refactor_plan_briefing_prefills_plan_ports_in_event_and_report(
+    tmp_path: Path,
+):
+    state_dir = tmp_path / ".zf-refactor"
+    state_dir.mkdir()
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.state_dir = state_dir
+    orch.project_root = tmp_path
+    role = RoleConfig(
+        name="refactor-plan-synth",
+        backend="mock",
+        role_kind="reader",
+    )
+    context = FanoutContext(
+        fanout_id="fanout-refactor-plan",
+        stage_id="flow-plan",
+        topology="fanout_reader",
+        trace_id="refactor-run",
+        trigger_event_id="evt-refactor",
+        target_ref="",
+    )
+
+    path = orch._write_fanout_briefing(  # type: ignore[attr-defined]
+        role=role,
+        context=context,
+        child_id="refactor-plan-synth",
+        run_id="run-refactor-plan",
+        aggregate=FanoutAggregateConfig(
+            mode="wait_for_all",
+            child_success_event="workflow.child.completed",
+            child_failure_event="workflow.child.failed",
+            success_event="zaofu.refactor.plan.ready",
+            failure_event="zaofu.refactor.plan.blocked",
+        ),
+        child_payload={
+            "flow_kind": "refactor",
+            "trigger_payload": {
+                "review_artifact_ref": "artifacts/review.md",
+            },
+        },
+    )
+
+    briefing = path.read_text(encoding="utf-8")
+    assert briefing.count('"plan_ports": []') >= 2
+    assert "inline plan_ports required by this briefing" in briefing
+    assert "`plan_ports` MUST be a JSON array of descriptor objects" in briefing
+    assert '"plan_artifact_ref": "docs/plans/fanout-refactor-plan.md"' in briefing
+    assert (
+        '"task_map_ref": "artifacts/fanout-refactor-plan/task_map.json"'
+        in briefing
+    )
+    assert "workdir-relative paths" in briefing
+    assert "Never write the configured state dir or root project directly" in briefing
+    assert "Kernel relocates admitted refs" in briefing
+    assert str(state_dir / "artifacts" / "fanout-refactor-plan") not in briefing
+
+
+def test_refactor_plan_critic_submits_only_verdict_delta(tmp_path: Path):
+    state_dir = tmp_path / ".zf-refactor-critic"
+    state_dir.mkdir()
+    planner = RoleConfig(
+        name="refactor-plan-synth",
+        backend="mock",
+        role_kind="reader",
+    )
+    critic = RoleConfig(
+        name="plan-critic",
+        backend="mock",
+        role_kind="reader",
+    )
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[planner, critic],
+        workflow=WorkflowConfig(stages=[
+            WorkflowStageConfig(
+                id="flow-plan",
+                trigger="zaofu.refactor.review.ready",
+                topology="fanout_reader",
+                roles=["refactor-plan-synth"],
+                aggregate=FanoutAggregateConfig(
+                    mode="wait_for_all",
+                    child_success_event="workflow.child.completed",
+                    child_failure_event="workflow.child.failed",
+                    success_event="zaofu.refactor.plan.ready",
+                    failure_event="zaofu.refactor.plan.blocked",
+                    synth_role="plan-critic",
+                ),
+            ),
+        ]),
+    )
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.state_dir = state_dir
+    orch.project_root = tmp_path
+    orch.config = config
+
+    scratch_ref = "tmp/result-submit/op-plan/synth/result.json"
+    path = orch._write_fanout_synth_briefing(  # type: ignore[attr-defined]
+        role=critic,
+        manifest={
+            "fanout_id": "fanout-refactor-plan",
+            "stage_id": "flow-plan",
+            "target_ref": "",
+            "trigger_payload": {
+                "flow_kind": "refactor",
+                "review_artifact_ref": "artifacts/review.md",
+            },
+            "aggregate_config": {
+                "success_event": "zaofu.refactor.plan.ready",
+                "failure_event": "zaofu.refactor.plan.blocked",
+                "synth_role": "plan-critic",
+            },
+            "children": [],
+        },
+        run_id="run-synth",
+        call_payload={
+            "workflow_run_id": "refactor-run",
+            "operation_id": "op-plan",
+            "request_hash": "hash-plan",
+            "attempt_id": "run-synth",
+            "result_protocol_mode": "blocking",
+            "output_profile_id": "plan-synth",
+            "output_profile_revision": "1",
+            "result_scratch_ref": scratch_ref,
+            "plan_revision": "plan-r1",
+            "plan_synth_contract_ref": "artifacts/plan-contract.json",
+            "plan_synth_contract_digest": "digest-plan",
+        },
+        reports=[{
+            "child_id": "refactor-plan-synth",
+            "report_path": "artifacts/planner-result.json",
+            "report": {
+                "plan_artifact_ref": "artifacts/planner/refactor-plan.md",
+                "task_map_ref": "artifacts/planner/task_map.json",
+                "task_map": {"schema_version": "task-map.v1", "tasks": [{"task_id": "T1"}]},
+                "plan_ports": [{"logical_name": "task_map", "body": {"tasks": []}}],
+            },
+        }],
+    )
+
+    briefing = path.read_text(encoding="utf-8")
+    result = json.loads((state_dir / scratch_ref).read_text(encoding="utf-8"))
+    assert "## Plan Critic Contract" in briefing
+    assert "does not author or rewrite plan artifacts" in briefing
+    assert "Edit only the signed result scratch file" in briefing
+    assert "## Plan Artifact Contract" not in briefing
+    assert result["artifact_refs"] == []
+    assert result["fix_items"] == []
+    assert "task_map" not in result
+    assert str(state_dir / "artifacts" / "fanout-refactor-plan") not in briefing
+
+
+def test_issue_triage_retry_restores_lineage_and_plan_contract(tmp_path: Path):
+    state_dir = tmp_path / ".zf-issue"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    rich_trigger = ZfEvent(
+        id="evt-rich-trigger",
+        type="task.fanout.requested",
+        correlation_id="issue-run",
+        payload={
+            "workflow_run_id": "issue-run",
+            "workflow_input_manifest_ref": "artifacts/workflow/input.json",
+            "source_refs": {
+                "acceptance_matrix_ref": "artifacts/workflow/acceptance.json",
+                "test_matrix_ref": "artifacts/workflow/test.json",
+            },
+            "flow_kind": "issue",
+        },
+    )
+    log.append(rich_trigger)
+    log.append(ZfEvent(
+        type="fanout.started",
+        correlation_id="issue-run",
+        payload={
+            "fanout_id": "fanout-original",
+            "stage_id": "issue-triage",
+            "trace_id": "issue-run",
+            "trigger_event_id": rich_trigger.id,
+        },
+    ))
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.state_dir = state_dir
+    orch.event_log = log
+    role = RoleConfig(
+        name="issue-triage",
+        backend="mock",
+        role_kind="reader",
+    )
+
+    path = orch._write_fanout_retry_briefing(  # type: ignore[attr-defined]
+        role=role,
+        manifest={
+            "fanout_id": "fanout-replan",
+            "stage_id": "issue-triage",
+            "trace_id": "issue-run",
+            "target_ref": "docs/issues/docker.md",
+            "topology": "fanout_reader",
+            "aggregate_config": {
+                "success_event": "task_map.ready",
+                "failure_event": "issue.triage.failed",
+                "child_success_event": "issue.triage.child.completed",
+                "child_failure_event": "issue.triage.child.failed",
+            },
+        },
+        child={
+            "child_id": "issue-triage",
+            "payload": {
+                "flow_kind": "issue",
+                "trigger_payload": {"rework_attempt": 2},
+            },
+        },
+        run_id="run-retry",
+    )
+
+    briefing = path.read_text(encoding="utf-8")
+    assert "artifacts/workflow/input.json" in briefing
+    assert "artifacts/workflow/test.json" in briefing
+    assert '"task_map_ref": "artifacts/plan/task_map.json"' in briefing
+    assert '"plan_ports": []' in briefing
+    assert "This remains task-map synthesis, not findings-only triage" in briefing
+
+
 def test_generic_plan_aggregate_preserves_report_plan_artifact_ref(tmp_path: Path):
     state_dir = tmp_path / ".zf"
     result_dir = state_dir / "fanouts" / "fanout-product-plan" / "children" / "product-arch"
@@ -2684,6 +3447,12 @@ def test_generic_plan_aggregate_preserves_report_plan_artifact_ref(tmp_path: Pat
                 "fanout_id": "fanout-product-plan",
                 "child_id": "product-arch",
                 "status": "completed",
+                "task_map_ref": "artifacts/plans/task-map.json",
+                "plan_artifact_package_id": "planpkg-current",
+                "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+                "plan_artifact_package_digest": "a" * 64,
+                "goal_claim_set_ref": "artifacts/goal-claims/current.json",
+                "goal_claim_set_digest": "b" * 64,
                 "report": {
                     "plan_artifact_ref": "docs/plans/product-plan.md",
                     "artifact_refs": ["docs/plans/product-plan.md"],
@@ -2707,8 +3476,130 @@ def test_generic_plan_aggregate_preserves_report_plan_artifact_ref(tmp_path: Pat
 
     assert payload["plan_artifact_ref"] == "docs/plans/product-plan.md"
     assert payload["source_index_ref"] == "docs/plans/source-index.json"
-    assert payload["artifact_refs"] == ["docs/plans/product-plan.md"]
-    assert payload["evidence_refs"] == ["docs/plans/source-index.json"]
+    assert payload["task_map_ref"] == "artifacts/plans/task-map.json"
+    assert payload["plan_artifact_package_id"] == "planpkg-current"
+    assert (
+        payload["plan_artifact_package_ref"]
+        == "artifacts/plan-packages/current.json"
+    )
+    assert payload["plan_artifact_package_digest"] == "a" * 64
+    assert payload["goal_claim_set_ref"] == "artifacts/goal-claims/current.json"
+    assert payload["goal_claim_set_digest"] == "b" * 64
+    assert payload["artifact_refs"] == [
+        "docs/plans/product-plan.md",
+        "artifacts/plans/task-map.json",
+        "artifacts/plan-packages/current.json",
+        "artifacts/goal-claims/current.json",
+    ]
+    assert payload["evidence_refs"] == [
+        "docs/plans/source-index.json",
+        "artifacts/plans/task-map.json",
+        "artifacts/plan-packages/current.json",
+        "artifacts/goal-claims/current.json",
+    ]
+
+
+def test_generic_aggregate_reads_lineage_from_manifest_child_payload(
+    tmp_path: Path,
+) -> None:
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.state_dir = tmp_path / ".zf"
+
+    payload = orch._generic_fanout_success_payload(  # type: ignore[attr-defined]
+        manifest={
+            "fanout_id": "fanout-verify-lineage",
+            "trigger_payload": {"flow_kind": "workflow"},
+            "children": [
+                {
+                    "child_id": "verify-1",
+                    "admitted_call_result_ref": {
+                        "ref": (
+                            "artifacts/call-results/envelopes/"
+                            + "c" * 64
+                            + ".json"
+                        ),
+                        "sha256": "c" * 64,
+                    },
+                    "payload": {
+                        "task_map_generation": "generation-current",
+                        "plan_artifact_package_id": "planpkg-current",
+                        "plan_artifact_package_ref": (
+                            "artifacts/plan-packages/current.json"
+                        ),
+                        "plan_artifact_package_digest": "a" * 64,
+                        "goal_claim_set_ref": (
+                            "artifacts/goal-claims/current.json"
+                        ),
+                        "goal_claim_set_digest": "b" * 64,
+                        "input_result_refs": [
+                            "fanouts/fanout-verify-lineage/children/"
+                            "verify-1/result.json",
+                            "artifacts/attempt-source-manifests/raw.json",
+                        ],
+                        "trigger_payload": {
+                            "task_map_ref": "artifacts/plans/task-map.json",
+                        },
+                    },
+                },
+                {
+                    "child_id": "verify-2",
+                    "admitted_call_result_ref": {
+                        "ref": (
+                            "artifacts/call-results/envelopes/"
+                            + "d" * 64
+                            + ".json"
+                        ),
+                        "sha256": "d" * 64,
+                    },
+                },
+                {
+                    "child_id": "verify-duplicate",
+                    "admitted_call_result_ref": {
+                        "ref": (
+                            "artifacts/call-results/envelopes/"
+                            + "c" * 64
+                            + ".json"
+                        ),
+                        "sha256": "c" * 64,
+                    },
+                },
+                {
+                    "child_id": "verify-raw-result",
+                    "admitted_call_result_ref": {
+                        "ref": (
+                            "fanouts/fanout-verify-lineage/children/"
+                            "verify-raw-result/result.json"
+                        ),
+                        "sha256": "f" * 64,
+                    },
+                },
+                {
+                    "child_id": "verify-incomplete-descriptor",
+                    "admitted_call_result_ref": {
+                        "ref": (
+                            "artifacts/call-results/envelopes/"
+                            + "f" * 64
+                            + ".json"
+                        ),
+                    },
+                },
+            ],
+        },
+        success_event="test.passed",
+    )
+
+    assert payload["task_map_ref"] == "artifacts/plans/task-map.json"
+    assert payload["plan_artifact_package_id"] == "planpkg-current"
+    assert (
+        payload["plan_artifact_package_ref"]
+        == "artifacts/plan-packages/current.json"
+    )
+    assert payload["goal_claim_set_ref"] == "artifacts/goal-claims/current.json"
+    assert payload["goal_claim_set_digest"] == "b" * 64
+    assert payload["input_result_refs"] == [
+        "artifacts/call-results/envelopes/" + "c" * 64 + ".json",
+        "artifacts/call-results/envelopes/" + "d" * 64 + ".json",
+    ]
 
 
 def test_parity_aggregate_synthesizes_gap_tasks_from_p1_findings(tmp_path: Path):
@@ -2923,6 +3814,8 @@ def test_refactor_plan_synth_briefing_supports_legacy_ready_event(tmp_path: Path
     assert "scan_quality_audit_ref" in briefing
     assert "task_map" in briefing
     assert "gates" in briefing
+    assert "`plan_ports` MUST be a JSON array of descriptor objects" in briefing
+    assert "do not use a `{logical_name: body}` object map" in briefing
     assert "Generate refactor plan." in briefing
 
 
@@ -3216,6 +4109,37 @@ def test_provider_style_finding_fields_are_normalized():
     assert finding["path"] == "src/zf/core/config/loader.py"
     assert finding["line"] == 42
     assert finding["message"] == "Loader crashes on malformed config section."
+
+
+def test_contract_finding_fields_survive_fanout_normalization():
+    result = validate_fanout_report(
+        {
+            "child_id": "plan-critic",
+            "status": "failed",
+            "summary": "Plan contract rejected.",
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "code": "plan_ports_not_descriptor_array",
+                    "field": "plan_ports",
+                    "observed": "plan_ports contains logical-name strings",
+                    "expected": "plan_ports contains descriptor objects",
+                    "evidence_refs": ["plan-synth-contract.json"],
+                },
+            ],
+            "recommendation": "reject",
+        },
+        child_id="plan-critic",
+    )
+
+    assert result.valid is True
+    finding = result.report["findings"][0]
+    assert finding["severity"] == "high"
+    assert finding["category"] == "plan_ports_not_descriptor_array"
+    assert finding["field"] == "plan_ports"
+    assert finding["evidence_refs"] == ["plan-synth-contract.json"]
+    assert "Observed: plan_ports contains logical-name strings" in finding["message"]
+    assert "Expected: plan_ports contains descriptor objects" in finding["message"]
 
 
 def test_fanout_report_preserves_audit_evidence_fields():
@@ -3562,6 +4486,10 @@ def test_run_once_replays_missed_reader_synth_result(tmp_path: Path):
         and event.payload.get("fanout_id") == fanout_id
     ]
     assert len(final) == 1
+    assert final[0].payload["summary"] == "Reject after synthesis."
+    assert final[0].payload["findings"][0]["message"] == (
+        "Gate command is not executable."
+    )
     aggregate_events = [
         event for event in events
         if event.type == "fanout.aggregate.completed"
@@ -3793,6 +4721,9 @@ def test_refactor_review_gate_blocks_missing_coverage(tmp_path: Path):
     assert not any(event.type == "zaofu.refactor.review.ready"
                    and event.actor == "zf-cli" for event in events)
     assert blocked.payload["artifact_gate"] == "failed"
+    assert blocked.payload["failed_children"] == ["review-a"]
+    assert blocked.payload["reason"].startswith("artifact gate failed:")
+    assert "review-a: missing coverage_matrix" in blocked.payload["reason"]
     diagnostics = Path(blocked.payload["diagnostics_ref"])
     assert diagnostics.exists()
     assert blocked.payload["artifact_digests"][str(diagnostics)]
@@ -3815,6 +4746,7 @@ def test_refactor_plan_ready_projects_plan_and_task_map(tmp_path: Path):
                 id="zaofu-refactor-plan-synthesis",
                 trigger="zaofu.refactor.plan.requested",
                 topology="fanout_reader",
+                flow_kind="refactor",
                 roles=[],
                 target_ref="${target_ref}",
                 children=[
@@ -3835,6 +4767,7 @@ def test_refactor_plan_ready_projects_plan_and_task_map(tmp_path: Path):
         correlation_id="trace-plan",
         payload={
             "pdd_id": "PDD-ZF",
+            "flow_kind": "refactor",
             "target_ref": "dev",
             "review_artifact_ref": ".zf/artifacts/fanout-review/review.md",
             "plan_intent": "Conservative P0/P1 refactor plan.",
@@ -3903,6 +4836,232 @@ def test_refactor_plan_ready_projects_plan_and_task_map(tmp_path: Path):
     task_map = json.loads(task_map_path.read_text(encoding="utf-8"))
     assert task_map["tasks"][0]["task_id"] == "P0-runtime-projector"
     assert final.payload["artifact_gate"] == "passed"
+
+
+def test_refactor_plan_synth_ready_bridges_to_task_map(tmp_path: Path):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    transport = _RecordingTransport()
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[
+            RoleConfig(
+                name="refactor-plan-author",
+                backend="mock",
+                role_kind="reader",
+            ),
+            RoleConfig(
+                name="plan-critic",
+                backend="mock",
+                role_kind="reader",
+                publishes=["fanout.synth.completed"],
+            ),
+        ],
+        workflow=WorkflowConfig(stages=[
+            WorkflowStageConfig(
+                id="zaofu-refactor-plan-synthesis",
+                trigger="zaofu.refactor.plan.requested",
+                topology="fanout_reader",
+                flow_kind="refactor",
+                roles=[],
+                children=[
+                    FanoutChildConfig(role_instance="refactor-plan-author"),
+                ],
+                aggregate=FanoutAggregateConfig(
+                    mode="wait_for_all",
+                    success_event="zaofu.refactor.plan.ready",
+                    failure_event="zaofu.refactor.plan.blocked",
+                    synth_role="plan-critic",
+                ),
+            ),
+        ]),
+    )
+    orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
+    review_path = state_dir / "artifacts" / "review" / "review.md"
+    review_path.parent.mkdir(parents=True)
+    review_path.write_text("# Review\n\nScope is complete.\n", encoding="utf-8")
+    audit_path = state_dir / "artifacts" / "review" / "scan-quality-audit.json"
+    audit_path.write_text('{"status":"passed"}\n', encoding="utf-8")
+    requirement_path = state_dir / "artifacts" / "review" / "requirement.json"
+    requirement_path.write_text('{"objective":"Preserve behavior."}\n', encoding="utf-8")
+    adapter_path = state_dir / "artifacts" / "review" / "adapter.json"
+    adapter_path.write_text('{"status":"ready"}\n', encoding="utf-8")
+    source_index_path = (
+        state_dir
+        / "workdirs"
+        / "refactor-plan-author"
+        / "project"
+        / "docs"
+        / "plans"
+        / "source-index.json"
+    )
+    source_index_path.parent.mkdir(parents=True)
+    source_index_path.write_text('{"tasks":[]}\n', encoding="utf-8")
+    trigger = ZfEvent(
+        type="zaofu.refactor.plan.requested",
+        actor="human",
+        correlation_id="trace-plan",
+        payload={
+            "pdd_id": "PDD-ZF",
+            "feature_id": "PDD-ZF",
+            "flow_kind": "refactor",
+            "plan_revision": "revision-1",
+            "task_map_generation": "generation-1",
+            "requirement_spec_ref": str(requirement_path),
+            "review_artifact_ref": str(review_path),
+        },
+    )
+    orch.run_once(events=[trigger])
+    fanout_id = next(
+        event.payload["fanout_id"]
+        for event in log.read_all()
+        if event.type == "fanout.started"
+    )
+    report = {
+        "child_id": "refactor-plan-author",
+        "status": "passed",
+        "summary": "Plan ready.",
+        "findings": [],
+        "recommendation": "approve",
+        "review_artifact_ref": str(review_path),
+        "scan_quality_audit_ref": str(audit_path),
+        "source_index_ref": "docs/plans/source-index.json",
+        "artifact_refs": [str(audit_path), "docs/plans/source-index.json"],
+        "requirement_spec_ref": str(requirement_path),
+        "project_adapter_ref": str(adapter_path),
+        "skill_adapter_plan_ref": str(adapter_path),
+        "plan_revision": "revision-2",
+        "plan_ports": [{
+            "logical_name": "source_inventory",
+            "schema_version": "source-inventory.v1",
+            "body": {
+                "schema_version": "source-inventory.v1",
+                "status": "ready",
+                "items": [],
+            },
+        }],
+        "refactor_plan_md": "## Plan\n\nExtract the configuration module.",
+        "task_map": {
+            "schema_version": "task-map.v1",
+            "feature_id": "PDD-ZF",
+            "task_map_generation": "generation-2",
+            "metadata": {"plan_revision": "revision-2"},
+            "required_plan_ports": ["source_index"],
+            "tasks": [{
+                "task_id": "P0-config",
+                "title": "Extract configuration",
+                "allowed_paths": ["src/config.py"],
+                "allowed_paths_reason": "Own the cohesive config module.",
+                "blocked_by": [],
+                "validation": {
+                    "commands": [{
+                        "id": "test-config",
+                        "command": "pytest -q",
+                        "acceptance_ids": ["AC-CONFIG"],
+                        "owner": "verify",
+                        "tier": "static",
+                        "deterministic": True,
+                        "reusable": True,
+                        "timeout_seconds": 60,
+                    }],
+                },
+                "acceptance_criteria": [{
+                    "id": "AC-CONFIG",
+                    "statement": "Configuration behavior remains stable.",
+                    "mandatory": True,
+                    "verification_owner": "verify",
+                    "verification_tier": "static",
+                    "verification_command_ids": ["test-config"],
+                }],
+            }],
+        },
+        "gates": [{"id": "test-config", "command": "pytest -q"}],
+        "risk_register": [],
+        "backlog_candidates": [],
+    }
+    orch.run_once(events=[ZfEvent(
+        type="zaofu.refactor.plan.ready",
+        actor="refactor-plan-author",
+        correlation_id="trace-plan",
+        payload={
+            "fanout_id": fanout_id,
+            "child_id": "refactor-plan-author",
+            "run_id": f"run-{fanout_id}-refactor-plan-author",
+            "status": "completed",
+            "report": report,
+        },
+    )])
+    synth_event = orch.event_writer.append(ZfEvent(
+        type="fanout.synth.completed",
+        actor="plan-critic",
+        correlation_id="trace-plan",
+        payload={
+            "fanout_id": fanout_id,
+            "stage_id": "zaofu-refactor-plan-synthesis",
+            "child_id": "synth",
+            "role_instance": "plan-critic",
+            "run_id": f"run-{fanout_id}-synth",
+            "status": "completed",
+            "recommendation": "approve",
+            "summary": "Plan approved.",
+            "plan_ports": [],
+            "review_artifact_ref": "",
+            "plan_artifact_ref": "",
+            "task_map_ref": "",
+            "source_index_ref": "",
+            "scan_quality_audit_ref": "",
+            "refactor_plan_md": "",
+            "task_map": {},
+            "gates": [],
+            "risk_register": [],
+            "backlog_candidates": [],
+            "report": {
+                "child_id": "synth",
+                "status": "passed",
+                "findings": [],
+                "recommendation": "approve",
+                "summary": "Plan approved.",
+            },
+        },
+    ))
+
+    orch.run_once(events=[synth_event])
+
+    ready = [
+        event
+        for event in log.read_all()
+        if event.type == "task_map.ready"
+        and event.payload.get("source") == "refactor_plan_bridge"
+    ]
+    assert len(ready) == 1
+    assert ready[0].payload["feature_id"] == "PDD-ZF"
+    assert ready[0].payload["task_map_ref"]
+    assert ready[0].payload["requirement_spec_ref"] == str(requirement_path)
+    assert ready[0].payload["project_adapter_ref"] == str(adapter_path)
+    assert ready[0].payload["plan_revision"] == "revision-2"
+    assert ready[0].payload["task_map_generation"] == "generation-2"
+    published_plan = next(
+        event
+        for event in log.read_all()
+        if event.type == "zaofu.refactor.plan.ready"
+        and event.actor == "zf-cli"
+    )
+    assert published_plan.payload["plan_revision"] == "revision-2"
+    assert published_plan.payload["plan_ports"][0]["logical_name"] == (
+        "source_inventory"
+    )
+    assert published_plan.payload["planning_result_ref"] == (
+        published_plan.payload["plan_artifact_ref"]
+    )
+    assert published_plan.payload["source_index_ref"].startswith(
+        f"artifacts/fanouts/{fanout_id}/refactor-plan-author/"
+    )
+    assert (state_dir / published_plan.payload["source_index_ref"]).exists()
+    assert published_plan.payload["artifact_digests"][
+        published_plan.payload["source_index_ref"]
+    ]
 
 
 def _lane_pipeline_spec(assembly=None):
@@ -4056,6 +5215,36 @@ def test_refactor_plan_compile_blocks_bad_verification_command(tmp_path: Path):
         encoding="utf-8",
     )
     assert "must not wrap bash -c payload in single quotes" in diagnostics
+
+
+def test_refactor_plan_compile_blocks_unknown_verification_owner(tmp_path: Path):
+    events = _run_refactor_plan_with_task_map(
+        tmp_path,
+        {"tasks": [{
+            "task_id": "CJMIN-ASSEMBLY-001",
+            "root_owner_class": "assembly",
+            "allowed_paths": ["package.json"],
+            "verification": "pnpm build",
+            "acceptance_criteria": [{
+                "id": "AC-1",
+                "statement": "The package remains buildable.",
+                "verification_owner": "mystery",
+                "verification_tier": "runtime",
+            }],
+        }]},
+    )
+
+    assert not [
+        event for event in events
+        if event.type == "zaofu.refactor.plan.ready" and event.actor == "zf-cli"
+    ]
+    blocked = next(event for event in events
+                   if event.type == "zaofu.refactor.plan.blocked")
+    assert blocked.payload["plan_compile_gate"] == "failed"
+    diagnostics = Path(blocked.payload["diagnostics_ref"]).read_text(
+        encoding="utf-8",
+    )
+    assert "unsupported verification owner 'mystery'" in diagnostics
 
 
 def test_refactor_plan_compile_accepts_role_assembly_alias(tmp_path: Path):

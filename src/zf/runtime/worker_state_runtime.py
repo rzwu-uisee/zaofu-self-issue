@@ -91,6 +91,7 @@ class WorkerStateRuntimeMixin:
         *,
         task_id: str = "",
         force: bool = False,
+        extra_payload: dict[str, Any] | None = None,
     ) -> None:
         """Record a restart-safe worker state transition.
 
@@ -139,6 +140,9 @@ class WorkerStateRuntimeMixin:
                 payload["task_id"] = task_id
             if force:
                 payload["generation_override"] = True
+            if extra_payload:
+                for key, value in extra_payload.items():
+                    payload.setdefault(key, value)
             emitted = self.event_writer.append(ZfEvent(
                 type="worker.state.changed",
                 actor=instance_id,

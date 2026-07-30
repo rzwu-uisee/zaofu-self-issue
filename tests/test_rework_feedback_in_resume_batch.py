@@ -145,6 +145,7 @@ def test_apply_batch_task_map_ready_preserves_current_package_identity(
             "expected_children": [{
                 "child_id": "child-1",
                 "workflow_run_id": "Run-UPPER",
+                "payload": {"flow_kind": "issue"},
                 "task_map_generation": "generation-1",
                 "plan_artifact_package_id": "planpkg-1",
                 "plan_artifact_package_ref": "plan-packages/current.json",
@@ -180,6 +181,7 @@ def test_apply_batch_task_map_ready_preserves_current_package_identity(
     ready = [event for event in log.read_all() if event.type == "task_map.ready"]
     resumed = ready[-1].payload
     assert resumed["workflow_run_id"] == "Run-UPPER"
+    assert resumed["flow_kind"] == "issue"
     assert resumed["prd_ref"] == "docs/prd/current.md"
     assert resumed["task_map_generation"] == "generation-1"
     assert resumed["plan_artifact_package_id"] == "planpkg-1"

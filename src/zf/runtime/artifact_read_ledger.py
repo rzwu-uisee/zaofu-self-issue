@@ -293,7 +293,15 @@ def canonical_required_reads(
             if source_id.startswith("plan-port-"):
                 required_paths[source_id] = ("$",)
 
-    if profile == "plan-synth":
+    authority_contract = (
+        manifest.get("handoff_authority_contract")
+        if isinstance(manifest.get("handoff_authority_contract"), Mapping)
+        else {}
+    )
+    if (
+        profile == "plan-synth"
+        or str(authority_contract.get("attempt_domain") or "") == "plan"
+    ):
         for source in (
             manifest.get("sources")
             if isinstance(manifest.get("sources"), list)
@@ -302,12 +310,17 @@ def canonical_required_reads(
             if not isinstance(source, Mapping):
                 continue
             source_id = str(source.get("source_id") or "")
-            if source_id == "plan-synth-contract" or source_id.startswith("child-result-"):
+            if (
+                source_id == "plan-synth-contract"
+                or source_id.startswith("child-result-")
+                or source_id.startswith("child-artifact-")
+            ):
                 required_paths[source_id] = ("$",)
             elif source_id in {
                 "goal-objective",
                 "requirement",
                 "review-artifact",
+                "plan-rework-context",
                 "workflow-input",
                 "workflow-prompt",
             }:
@@ -685,19 +698,12 @@ def render_attempt_source_briefing(
         "",
         f"- source_manifest_ref: `{ref}`",
         f"- attempt_id: `{attempt_id}`",
+        f"- List: `{cli_command} artifact list --attempt <attempt-id>`.",
+        "- Read required inputs with the exact commands below.",
         (
-            f"- List inputs with `{cli_command} artifact list --attempt "
-            "<attempt-id>`."
-        ),
-        (
-            f"- Read handoff-critical inputs with `{cli_command} artifact read "
-            "--attempt <attempt-id> --source <source-id> --artifact <artifact-id>`."
-        ),
-        (
-            "- Execute one literal CLI command per tool call. Do not use shell "
-            "variables, aliases, loops, pipes, redirections, command "
-            "substitution, or compound commands; Claude allowlist matching is "
-            "performed before shell expansion."
+            "- Run one literal command per tool call; no variables, aliases, "
+            "loops, pipes, redirections, substitutions, or compound commands "
+            "(Claude allowlist matching is literal)."
         ),
     ]
     if required:
@@ -712,13 +718,9 @@ def render_attempt_source_briefing(
                 or ""
             )
             lines.append(
-                f"  - `{source_id}` / `{artifact_id}` / `{json_path}` "
-                f"(sha256 `{digest[:16]}`)"
-            )
-            lines.append(
-                f"    `{cli_command} artifact read --attempt {attempt_id} "
+                f"  - `{cli_command} artifact read --attempt {attempt_id} "
                 f"--source {source_id} --artifact {artifact_id} "
-                f"--json-path {json_path}`"
+                f"--json-path {json_path}` (sha256 `{digest[:16]}`)"
             )
     return "\n".join(lines) + "\n"
 

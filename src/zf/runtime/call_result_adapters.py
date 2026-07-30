@@ -18,15 +18,24 @@ from zf.runtime.goal_closure_result import (
     SCHEMA_VERSION as GOAL_CLOSURE_RESULT_SCHEMA,
     normalize_goal_closure_result,
 )
+from zf.runtime.artifact_delivery_result import (
+    ArtifactDeliveryResultError,
+    SCHEMA_VERSION as ARTIFACT_DELIVERY_RESULT_SCHEMA,
+    normalize_artifact_delivery_result,
+)
 from zf.runtime.plan_synth_handoff import (
     PLAN_SYNTH_PROFILE_ID,
     PLAN_SYNTH_PROFILE_REVISION,
     PLAN_SYNTH_RESULT_SCHEMA,
 )
+from zf.runtime.plan_artifact_ports import coerce_plan_port_descriptors
 
 
 IMPLEMENTATION_RESULT_SCHEMA = "implementation-result.v1"
 FANOUT_AGGREGATE_RESULT_SCHEMA = "fanout-aggregate-result.v1"
+WORKFLOW_READ_RESULT_SCHEMA = "workflow-read-result.v1"
+WORKFLOW_READ_PROFILE_ID = "workflow-read"
+WORKFLOW_READ_PROFILE_REVISION = "1"
 
 
 class ControlResultAdapterError(ValueError):
@@ -159,6 +168,12 @@ class ControlResultAdapterRegistry:
 def default_control_result_adapters() -> list[ControlResultAdapter]:
     return [
         ControlResultAdapter(
+            adapter_id="artifact-delivery-result-v1",
+            schema_version=ARTIFACT_DELIVERY_RESULT_SCHEMA,
+            accepts=_is_artifact_delivery_event,
+            normalize=_normalize_artifact_delivery,
+        ),
+        ControlResultAdapter(
             adapter_id="goal-closure-result-v1",
             schema_version=GOAL_CLOSURE_RESULT_SCHEMA,
             accepts=_is_goal_closure_event,
@@ -177,6 +192,12 @@ def default_control_result_adapters() -> list[ControlResultAdapter]:
             normalize=_normalize_plan_synth,
         ),
         ControlResultAdapter(
+            adapter_id="workflow-read-result-v1",
+            schema_version=WORKFLOW_READ_RESULT_SCHEMA,
+            accepts=_is_workflow_read_event,
+            normalize=_normalize_workflow_read,
+        ),
+        ControlResultAdapter(
             adapter_id="verification-result-v1-explicit",
             schema_version="verification-result.v1",
             accepts=_is_verification_event,
@@ -193,6 +214,14 @@ def default_control_result_adapters() -> list[ControlResultAdapter]:
 
 def default_call_result_profiles() -> list[CallResultProfile]:
     return [
+        CallResultProfile(
+            profile_id="artifact-delivery",
+            revision="1",
+            schema_version=ARTIFACT_DELIVERY_RESULT_SCHEMA,
+            adapter_id="artifact-delivery-result-v1",
+            semantic_field="artifact_delivery_result",
+            allowed_event_types=(),
+        ),
         CallResultProfile(
             profile_id="thin-judge-goal-closure",
             revision="1",
@@ -228,6 +257,16 @@ def default_call_result_profiles() -> list[CallResultProfile]:
             semantic_field="plan_synthesis_result",
             allowed_event_types=("fanout.synth.completed",),
         ),
+        CallResultProfile(
+            profile_id=WORKFLOW_READ_PROFILE_ID,
+            revision=WORKFLOW_READ_PROFILE_REVISION,
+            schema_version=WORKFLOW_READ_RESULT_SCHEMA,
+            adapter_id="workflow-read-result-v1",
+            semantic_field="report",
+            # The signed operation request pins the stage's canonical child
+            # events. Product flows may use registered stage-specific names.
+            allowed_event_types=(),
+        ),
     ]
 
 
@@ -262,16 +301,17 @@ def call_result_profile_identity(
         return PLAN_SYNTH_PROFILE_ID, PLAN_SYNTH_PROFILE_REVISION
     if "global" in identity or "rescan" in identity:
         return "global-rescan", "1"
-    if (
-        operation_type == "fanout_reader_child"
-        and (
-            str(payload.get("candidate_head_commit") or "").strip()
-            or str(payload.get("candidate_snapshot_ref") or "").strip()
-        )
-    ):
-        return "candidate-verify", "1"
     if "candidate" in identity:
         return "candidate-verify", "1"
+    if operation_type == "fanout_reader_child":
+        if _is_task_verify_reader(stage_id=stage_id, payload=payload):
+            if (
+                str(payload.get("candidate_head_commit") or "").strip()
+                or str(payload.get("candidate_snapshot_ref") or "").strip()
+            ):
+                return "candidate-verify", "1"
+            return "task-verify", "1"
+        return WORKFLOW_READ_PROFILE_ID, WORKFLOW_READ_PROFILE_REVISION
     return "task-verify", "1"
 
 
@@ -322,6 +362,68 @@ def _is_verification_event(event: ZfEvent) -> bool:
     }
 
 
+def _is_workflow_read_event(event: ZfEvent) -> bool:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    report = payload.get("report")
+    canonical_events = {
+        str(payload.get("canonical_success_event") or "").strip(),
+        str(payload.get("canonical_failure_event") or "").strip(),
+    }
+    return (
+        isinstance(report, Mapping)
+        and (
+            event.type
+            in {"workflow.child.completed", "workflow.child.failed"}
+            or str(report.get("schema_version") or "")
+            == WORKFLOW_READ_RESULT_SCHEMA
+            or (
+                str(payload.get("output_profile_id") or "").strip()
+                == WORKFLOW_READ_PROFILE_ID
+                and event.type in canonical_events
+            )
+        )
+    )
+
+
+def _is_task_verify_reader(
+    *,
+    stage_id: str,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Require positive verify identity before binding a reader to a Task."""
+
+    normalized_stage = str(stage_id or "").strip().lower().replace("_", "-")
+    if (
+        normalized_stage == "task-verify"
+        or normalized_stage.startswith("verify-")
+        or normalized_stage.endswith("-verify")
+    ):
+        return True
+    task_id = str(payload.get("task_id") or "").strip()
+    if not task_id:
+        return False
+    success_event = str(payload.get("canonical_success_event") or "").lower()
+    verification_owner = str(payload.get("verification_owner") or "").lower()
+    if (
+        success_event.startswith("verify.")
+        or ".verify." in success_event
+        or "verify" in verification_owner
+    ):
+        return True
+    return any(
+        payload.get(field) not in (None, "", {})
+        for field in (
+            "contract_snapshot_ref",
+            "contract_snapshot_digest",
+            "target_snapshot_ref",
+            "target_snapshot_digest",
+            "contract_revision",
+            "task_map_generation",
+            "task_ref",
+        )
+    )
+
+
 def _is_goal_closure_event(event: ZfEvent) -> bool:
     payload = event.payload if isinstance(event.payload, dict) else {}
     raw = payload.get("goal_closure_result")
@@ -332,6 +434,38 @@ def _is_goal_closure_event(event: ZfEvent) -> bool:
         and str(raw.get("schema_version") or GOAL_CLOSURE_RESULT_SCHEMA)
         == GOAL_CLOSURE_RESULT_SCHEMA
     )
+
+
+def _is_artifact_delivery_event(event: ZfEvent) -> bool:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw = payload.get("artifact_delivery_result")
+    if not isinstance(raw, Mapping) and isinstance(payload.get("report"), Mapping):
+        raw = payload["report"].get("artifact_delivery_result")
+    return (
+        isinstance(raw, Mapping)
+        and str(raw.get("schema_version") or ARTIFACT_DELIVERY_RESULT_SCHEMA)
+        == ARTIFACT_DELIVERY_RESULT_SCHEMA
+    )
+
+
+def _normalize_artifact_delivery(
+    event: ZfEvent,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    try:
+        return normalize_artifact_delivery_result(payload), []
+    except ArtifactDeliveryResultError as exc:
+        raw = payload.get("artifact_delivery_result")
+        if not isinstance(raw, Mapping) and isinstance(payload.get("report"), Mapping):
+            raw = payload["report"].get("artifact_delivery_result")
+        result = dict(raw) if isinstance(raw, Mapping) else {
+            "schema_version": ARTIFACT_DELIVERY_RESULT_SCHEMA,
+        }
+        return result, [{
+            "field": "control_result",
+            "code": "schema_invalid",
+            "message": str(exc),
+        }]
 
 
 def _normalize_goal_closure(
@@ -395,6 +529,21 @@ def _normalize_plan_synth(
         "blocked",
         "needs_rework",
     }
+    task_map = source.get("task_map")
+    if not isinstance(task_map, Mapping):
+        task_map = report.get("task_map")
+    gates = source.get("gates")
+    if not isinstance(gates, list):
+        gates = report.get("gates")
+    risk_register = source.get("risk_register")
+    if not isinstance(risk_register, list):
+        risk_register = report.get("risk_register")
+    backlog_candidates = source.get("backlog_candidates")
+    if not isinstance(backlog_candidates, list):
+        backlog_candidates = report.get("backlog_candidates")
+    plan_ports = coerce_plan_port_descriptors(source.get("plan_ports"))
+    if not plan_ports:
+        plan_ports = coerce_plan_port_descriptors(report.get("plan_ports"))
     result = {
         "schema_version": PLAN_SYNTH_RESULT_SCHEMA,
         "execution_status": "failed" if status in {"failed", "failure"} else "completed",
@@ -408,8 +557,56 @@ def _normalize_plan_synth(
         "summary": str(source.get("summary") or report.get("summary") or ""),
         "artifact_refs": _strings(source.get("artifact_refs") or report.get("artifact_refs")),
         "evidence_refs": _strings(source.get("evidence_refs") or report.get("evidence_refs")),
-        "plan_ports": _objects(source.get("plan_ports") or report.get("plan_ports")),
-        "findings": _objects(source.get("findings") or report.get("findings")),
+        "plan_ports": plan_ports,
+        "findings": _plan_synth_findings(
+            source.get("findings") or report.get("findings")
+        ),
+        "fix_items": _objects(
+            source.get("fix_items") or report.get("fix_items")
+        ),
+        "review_artifact_ref": (
+            _text(source, "review_artifact_ref")
+            or _text(report, "review_artifact_ref")
+        ),
+        "plan_artifact_ref": (
+            _text(source, "plan_artifact_ref")
+            or _text(report, "plan_artifact_ref")
+        ),
+        "task_map_ref": (
+            _text(source, "task_map_ref")
+            or _text(report, "task_map_ref")
+        ),
+        "risk_register_ref": (
+            _text(source, "risk_register_ref")
+            or _text(report, "risk_register_ref")
+        ),
+        "backlog_candidates_ref": (
+            _text(source, "backlog_candidates_ref")
+            or _text(report, "backlog_candidates_ref")
+        ),
+        "scan_quality_audit_ref": (
+            _text(source, "scan_quality_audit_ref")
+            or _text(report, "scan_quality_audit_ref")
+        ),
+        "refactor_plan_md": str(
+            source.get("refactor_plan_md")
+            or report.get("refactor_plan_md")
+            or ""
+        ),
+        "plan_md": str(source.get("plan_md") or report.get("plan_md") or ""),
+        "plan_intent": str(
+            source.get("plan_intent") or report.get("plan_intent") or ""
+        ),
+        "task_map": dict(task_map) if isinstance(task_map, Mapping) else {},
+        "gates": list(gates) if isinstance(gates, list) else [],
+        "risk_register": (
+            list(risk_register) if isinstance(risk_register, list) else []
+        ),
+        "backlog_candidates": (
+            list(backlog_candidates)
+            if isinstance(backlog_candidates, list)
+            else []
+        ),
     }
     issues = [
         {"field": f"control_result.{field}", "code": "missing_required"}
@@ -438,6 +635,68 @@ def _normalize_verification(
     except VerificationResultError as exc:
         issues.append({"field": "control_result", "code": "schema_invalid", "message": str(exc)})
     return result, issues
+
+
+def _normalize_workflow_read(
+    event: ZfEvent,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw = payload.get("report")
+    report = dict(raw) if isinstance(raw, Mapping) else {}
+    status = str(report.get("status") or payload.get("status") or "").lower()
+    recommendation = str(
+        report.get("recommendation")
+        or report.get("verdict")
+        or payload.get("recommendation")
+        or ""
+    ).lower()
+    if event.type.endswith(".failed") and not report:
+        execution_status = "failed"
+        verdict = "abstained"
+        failure_class = "reader_execution_failure"
+    elif recommendation in {"reject", "rejected", "needs_rework"} or status in {
+        "failed",
+        "rejected",
+    }:
+        execution_status = "completed"
+        verdict = "rejected"
+        failure_class = "semantic_rejection"
+    elif recommendation in {"block", "blocked"} or status == "blocked":
+        execution_status = "completed"
+        verdict = "blocked"
+        failure_class = "dependency_blocked"
+    elif recommendation in {"abstain", "abstained"}:
+        execution_status = "completed"
+        verdict = "abstained"
+        failure_class = "reader_abstained"
+    else:
+        execution_status = "completed"
+        verdict = "passed"
+        failure_class = "none"
+    report.setdefault("schema_version", WORKFLOW_READ_RESULT_SCHEMA)
+    report.setdefault("execution_status", execution_status)
+    report.setdefault("verdict", verdict)
+    report.setdefault("failure_class", failure_class)
+    report.setdefault("status", "passed" if verdict == "passed" else "failed")
+    report.setdefault(
+        "recommendation",
+        "approve" if verdict == "passed" else "reject",
+    )
+    report.setdefault("summary", str(payload.get("summary") or payload.get("reason") or ""))
+    report.setdefault("findings", [])
+    issues: list[dict[str, str]] = []
+    if not str(report.get("summary") or "").strip():
+        issues.append({
+            "field": "control_result.summary",
+            "code": "missing_required",
+        })
+    if not isinstance(report.get("findings"), list):
+        issues.append({
+            "field": "control_result.findings",
+            "code": "schema_invalid",
+            "message": "findings must be an array",
+        })
+    return report, issues
 
 
 def _legacy_verification_result(event: ZfEvent) -> dict[str, Any]:
@@ -631,6 +890,14 @@ def _strings(value: Any) -> list[str]:
 
 def _objects(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
+
+
+def _plan_synth_findings(value: Any) -> list[dict[str, Any]]:
+    findings = _objects(value)
+    for finding in findings:
+        if str(finding.get("line", "")).strip() == "0":
+            finding.pop("line", None)
+    return findings
 
 
 __all__ = [

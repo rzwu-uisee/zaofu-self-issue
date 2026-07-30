@@ -11,7 +11,6 @@ from zf.core.config.loader import ConfigError, load_config
 from zf.core.events import ZfEvent
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.writer import EventWriter
-from zf.runtime.run_contract import load_run_contract, write_run_contract
 from zf.runtime.workflow_intake import (
     _normalize_request_kind,
     _state_dir_for_config,
@@ -22,6 +21,12 @@ from zf.runtime.workflow_preflight import (
     _load_json,
     _load_manifest_for_intake,
     build_flow_preflight_report,
+)
+from zf.runtime.workflow_submission_binding import (
+    pin_artifact_delivery_goal_claim_set as _pin_artifact_delivery_goal_claim_set,
+)
+from zf.runtime.workflow_submission_binding import (
+    pin_submitted_run_contract as _pin_submitted_run_contract,
 )
 
 def build_flow_submit_preview(
@@ -35,6 +40,7 @@ def build_flow_submit_preview(
     reason: str = "",
     output: Path | None = None,
     allow_missing_env: bool = False,
+    synthesis_result_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     manifest_path, manifest = _load_manifest_for_intake(intake_path)
     if manifest_path is None:
@@ -66,6 +72,7 @@ def build_flow_submit_preview(
     request_blockers: list[dict[str, Any]] = []
     if manifest_path is not None:
         from zf.runtime.workflow_requests import (
+            load_workflow_request,
             register_workflow_intake,
             request_readiness_blockers,
             workflow_request_path,
@@ -105,6 +112,29 @@ def build_flow_submit_preview(
             and manifest["requirement_spec_ref"] not in manifest["artifact_refs"]
         ):
             manifest["artifact_refs"].append(manifest["requirement_spec_ref"])
+    effective_config_path = config_path.resolve()
+    if request_projection and synthesis_result_ref is not None:
+        from zf.runtime.workflow_proposal import (
+            materialize_synthesized_workflow_candidate,
+        )
+
+        synthesis_kind = _normalize_request_kind(
+            flow_kind or str(manifest.get("kind") or "")
+        )
+        effective_config_path = materialize_synthesized_workflow_candidate(
+            state_dir,
+            request=request_projection,
+            base_config_path=config_path,
+            synthesis_result_ref=synthesis_result_ref,
+            flow_kind=synthesis_kind,
+        )
+        if effective_config_path != config_path.resolve():
+            report = build_flow_preflight_report(
+                effective_config_path,
+                flow_kind=synthesis_kind,
+                intake_path=intake_path,
+                allow_missing_env=allow_missing_env,
+            )
     resolved_kind = _normalize_request_kind(
         flow_kind or str(manifest.get("kind") or report.get("flow_kind") or "")
     )
@@ -122,7 +152,7 @@ def build_flow_submit_preview(
     route_blockers: list[dict[str, Any]] = []
     try:
         resolved_pattern_id = _resolve_submit_pattern_id(
-            config_path=config_path,
+            config_path=effective_config_path,
             pattern_id=pattern_id,
             kind=resolved_kind,
             workflow_tier=workflow_tier,
@@ -222,21 +252,87 @@ def build_flow_submit_preview(
         if source_ref_blockers or route_blockers or request_blockers
         else report["status"]
     )
-    if (
-        status != "STOP"
-        and request_projection
-        and str(request_projection.get("status") or "") in {"draft", "ready", "proposed"}
-    ):
-        from zf.runtime.workflow_requests import mark_workflow_request
-
-        request_projection = mark_workflow_request(
-            state_dir,
-            request_id,
-            status="proposed",
-            actor=requested_by or "zf-cli",
-            writer=request_writer,
-            event_type="workflow.request.proposed",
+    proposal: dict[str, Any] = {}
+    proposal_ref: dict[str, Any] = {}
+    if request_projection:
+        from zf.runtime.workflow_proposal import (
+            build_workflow_proposal,
+            cleanup_synthesized_workflow_candidate,
         )
+
+        try:
+            proposal, proposal_ref = build_workflow_proposal(
+                state_dir,
+                request=request_projection,
+                base_config_path=config_path,
+                candidate_config_path=effective_config_path,
+                synthesis_result_ref=synthesis_result_ref,
+                preflight={
+                    **_public_preflight_report(report),
+                    "blockers": blockers,
+                    "resolved_pattern_id": resolved_pattern_id,
+                },
+                flow_kind=resolved_kind,
+                actor=requested_by or "zf-cli",
+                writer=request_writer,
+            )
+        finally:
+            cleanup_synthesized_workflow_candidate(
+                effective_config_path,
+                base_config_path=config_path,
+            )
+        for blocker in proposal.get("blockers", []):
+            if isinstance(blocker, dict) and blocker not in blockers:
+                blockers.append(blocker)
+        if any(
+            str(item.get("severity") or "").upper() == "STOP"
+            for item in blockers
+            if isinstance(item, dict)
+        ):
+            status = "STOP"
+        request_projection = load_workflow_request(state_dir, request_id)
+        proposal_completion = (
+            proposal.get("completion_profile")
+            if isinstance(proposal.get("completion_profile"), dict)
+            else {}
+        )
+        submit_payload.update({
+            "workflow_proposal_ref": proposal_ref,
+            "workflow_proposal_digest": str(
+                proposal.get("proposal_digest") or ""
+            ),
+            "goal_id": request_id,
+            "workflow_generation": str(
+                proposal.get("proposal_digest") or ""
+            ),
+            "workflow_intent": str(
+                proposal_completion.get("intent") or ""
+            ),
+            "workflow_template": str(
+                proposal_completion.get("template") or ""
+            ),
+            "completion_profile": str(
+                proposal_completion.get("id") or "software_delivery"
+            ),
+            "generic_workflow_contract_digest": str(
+                proposal_completion.get(
+                    "generic_workflow_contract_digest"
+                )
+                or ""
+            ),
+            "required_delivery_artifacts": list(
+                proposal_completion.get("required_delivery_artifacts")
+                or []
+            ),
+            "effective_config_ref": dict(
+                proposal.get("effective_config_ref") or {}
+            ),
+            "effective_config_digest": str(
+                (proposal.get("effective_config_ref") or {}).get("sha256")
+                if isinstance(proposal.get("effective_config_ref"), dict)
+                else ""
+            ),
+        })
     result = {
         "schema_version": "workflow.submit.preview.v1",
         "status": status,
@@ -247,6 +343,8 @@ def build_flow_submit_preview(
         "preflight_ref": str(preflight_path),
         "blockers": blockers,
         "request": request_projection,
+        "proposal": proposal,
+        "proposal_ref": proposal_ref,
         "next": {
             "apply": "run `zf flow submit --apply ...` after operator approval",
         },
@@ -406,18 +504,36 @@ def apply_flow_submit(
             correlation_id=correlation_id,
             task_id=task,
         )
-    if preview["status"] != "STOP" and correlation_id:
-        from zf.runtime.workflow_requests import mark_workflow_request
-
-        mark_workflow_request(
-            state_dir,
-            correlation_id,
-            status="approved",
-            actor=str(payload.get("requested_by") or "zf-cli"),
+        _pin_artifact_delivery_goal_claim_set(
+            state_dir=state_dir,
+            project_root=config_path.resolve().parent,
+            preview=preview,
             writer=writer,
-            run_id=str(payload.get("run_id") or correlation_id),
-            event_type="workflow.request.approved",
+            correlation_id=correlation_id,
+            task_id=task,
         )
+        payload.update(
+            preview.get("payload")
+            if isinstance(preview.get("payload"), dict)
+            else {}
+        )
+    if preview["status"] != "STOP" and correlation_id:
+        from zf.runtime.workflow_requests import (
+            load_workflow_request,
+            mark_workflow_request,
+        )
+
+        current_request = load_workflow_request(state_dir, correlation_id)
+        if str(current_request.get("status") or "") == "proposed":
+            mark_workflow_request(
+                state_dir,
+                correlation_id,
+                status="approved",
+                actor=str(payload.get("requested_by") or "zf-cli"),
+                writer=writer,
+                run_id=str(payload.get("run_id") or correlation_id),
+                event_type="workflow.request.approved",
+            )
     submit_requested = writer.append(ZfEvent(
         type="workflow.submit.requested",
         actor=str(payload.get("requested_by") or "zf-cli"),
@@ -473,6 +589,38 @@ def apply_flow_submit(
             "requirement_spec_ref": payload.get("requirement_spec_ref", ""),
             "requirement_spec_digest": payload.get("requirement_spec_digest", ""),
             "request_revision": int(payload.get("request_revision") or 0),
+            "goal_id": str(payload.get("goal_id") or ""),
+            "workflow_generation": str(
+                payload.get("workflow_generation") or ""
+            ),
+            "workflow_intent": str(
+                payload.get("workflow_intent") or ""
+            ),
+            "workflow_template": str(
+                payload.get("workflow_template") or ""
+            ),
+            "completion_profile": str(
+                payload.get("completion_profile") or ""
+            ),
+            "generic_workflow_contract_digest": str(
+                payload.get("generic_workflow_contract_digest") or ""
+            ),
+            "goal_claim_set_ref": str(
+                payload.get("goal_claim_set_ref") or ""
+            ),
+            "goal_claim_set_digest": str(
+                payload.get("goal_claim_set_digest") or ""
+            ),
+            "workflow_proposal_ref": payload.get("workflow_proposal_ref")
+            if isinstance(payload.get("workflow_proposal_ref"), dict) else {},
+            "workflow_proposal_digest": str(
+                payload.get("workflow_proposal_digest") or ""
+            ),
+            "effective_config_ref": payload.get("effective_config_ref")
+            if isinstance(payload.get("effective_config_ref"), dict) else {},
+            "effective_config_digest": str(
+                payload.get("effective_config_digest") or ""
+            ),
         },
     ))
     event_ids.append(accepted.id)
@@ -507,6 +655,13 @@ def apply_flow_submit(
             payload={
                 "objective": objective,
                 "run_id": correlation_id or accepted.id,
+                "goal_id": str(payload.get("goal_id") or correlation_id),
+                "workflow_generation": str(
+                    payload.get("workflow_generation") or ""
+                ),
+                "completion_profile": str(
+                    payload.get("completion_profile") or ""
+                ),
                 "source_refs": [
                     ref for ref in (
                         payload.get("workflow_input_manifest_ref"),
@@ -517,14 +672,14 @@ def apply_flow_submit(
             },
         ))
         event_ids.append(goal_started.id)
-    # LB-2: light topology is driven by its entry trigger and kernel task-map
-    # synthesis, not by the bootstrap invoke. Submit and entry share one
-    # transaction so their run/correlation identity cannot diverge.
+    # Light and standard flows share the same admission edge. The consumer
+    # publishes the light entry trigger only after this Run is admitted.
     from zf.runtime.light_flow import light_flow_metadata
     light_metadata = light_flow_metadata(
         config,
         flow_kind=str(payload.get("kind") or ""),
     )
+    invoke_payload = _submit_payload_to_workflow_invoke(payload)
     if light_metadata is not None:
         entry_trigger = str(light_metadata.get("light_entry_trigger") or "prd.requested")
         source_refs = (
@@ -533,6 +688,9 @@ def apply_flow_submit(
             else {}
         )
         source_ref = str(source_refs.get("source_ref") or "")
+        requirement_ref = str(
+            payload.get("requirement_spec_ref") or ""
+        ).strip()
         kind = str(payload.get("kind") or "prd")
         entry_payload = {
             **payload,
@@ -541,48 +699,19 @@ def apply_flow_submit(
             "workflow_run_id": correlation_id,
             "trace_id": correlation_id,
             "flow_kind": kind,
-            "objective_ref": source_ref,
+            "objective_ref": requirement_ref or source_ref,
             "target_root": str(source_refs.get("target_root") or ""),
             "source": "workflow-submit-light",
         }
-        if kind == "issue":
-            entry_payload["issue_ref"] = source_ref
-        else:
-            entry_payload["prd_ref"] = source_ref
-        entry = writer.append(ZfEvent(
-            type=entry_trigger,
-            actor=str(payload.get("requested_by") or "zf-cli"),
-            task_id=task,
-            causation_id=(goal_started.id if goal_started is not None else accepted.id),
-            correlation_id=correlation_id,
-            payload=entry_payload,
-        ))
-        event_ids.append(entry.id)
-        if correlation_id:
-            from zf.runtime.workflow_requests import mark_workflow_request
-
-            mark_workflow_request(
-                state_dir,
-                correlation_id,
-                status="running",
-                actor=str(payload.get("requested_by") or "zf-cli"),
-                writer=writer,
-                run_id=str(payload.get("run_id") or correlation_id),
-                event_type="workflow.request.running",
-            )
-        return {
-            **preview,
-            "schema_version": "workflow.submit.apply.v1",
-            "dry_run": False,
-            "status": "accepted",
-            "event_type": "workflow.submit.accepted",
-            "workflow_invoke_status": "light_entry_requested",
-            "workflow_entry_event_id": entry.id,
-            "next_action": "light topology entry accepted; monitor the running request",
-            "event_ids": event_ids,
-            "state_dir": str(state_dir),
-        }
-    invoke_payload = _submit_payload_to_workflow_invoke(payload)
+        if not requirement_ref:
+            if kind == "issue":
+                entry_payload["issue_ref"] = source_ref
+            else:
+                entry_payload["prd_ref"] = source_ref
+        invoke_payload.update({
+            "light_entry_trigger": entry_trigger,
+            "light_entry_payload": entry_payload,
+        })
     invoked = writer.append(ZfEvent(
         type="workflow.invoke.requested",
         actor=str(payload.get("requested_by") or "zf-cli"),
@@ -592,18 +721,6 @@ def apply_flow_submit(
         payload=invoke_payload,
     ))
     event_ids.append(invoked.id)
-    if correlation_id:
-        from zf.runtime.workflow_requests import mark_workflow_request
-
-        mark_workflow_request(
-            state_dir,
-            correlation_id,
-            status="running",
-            actor=str(payload.get("requested_by") or "zf-cli"),
-            writer=writer,
-            run_id=str(payload.get("run_id") or correlation_id),
-            event_type="workflow.request.running",
-        )
     invoke_visibility = _workflow_invoke_visibility(
         writer.event_log.read_all(),
         source_event_id=invoked.id,
@@ -686,50 +803,6 @@ def _submitted_request_replay_result(
         "state_dir": str(state_dir),
         "blockers": [],
     }
-
-def _pin_submitted_run_contract(
-    *,
-    state_dir: Path,
-    preview: dict[str, Any],
-    writer: EventWriter,
-    correlation_id: str,
-    task_id: str,
-) -> None:
-    preflight_ref = str(preview.get("preflight_ref") or "")
-    report = _load_json(Path(preflight_ref)) if preflight_ref else {}
-    run_contract = report.get("run_contract")
-    run_contract = run_contract if isinstance(run_contract, dict) else {}
-    contract = run_contract.get("preview")
-    if not isinstance(contract, dict) or not str(contract.get("contract_digest") or ""):
-        raise RuntimeError("accepted workflow submit is missing its run contract preview")
-    previous = load_run_contract(state_dir)
-    from zf.runtime.run_contract import write_run_contract_snapshot
-
-    snapshot = write_run_contract_snapshot(state_dir, contract)
-    path = write_run_contract(state_dir, contract)
-    if str((previous or {}).get("contract_digest") or "") == str(
-        contract.get("contract_digest") or ""
-    ):
-        return
-    refs = contract.get("refs")
-    refs = refs if isinstance(refs, dict) else {}
-    manifest_refs = refs.get("workflow_input_manifest")
-    manifest_refs = manifest_refs if isinstance(manifest_refs, list) else []
-    writer.append(ZfEvent(
-        type="config.run_contract.request_bound",
-        actor="zf-cli",
-        task_id=task_id,
-        correlation_id=correlation_id,
-        payload={
-            "run_id": correlation_id,
-            "run_contract_ref": str(snapshot.get("ref") or ""),
-            "run_contract_sha256": str(snapshot.get("sha256") or ""),
-            "contract_digest": str(contract.get("contract_digest") or ""),
-            "active_run_contract_ref": str(path),
-            "workflow_input_manifest_ref": str(manifest_refs[0] if manifest_refs else ""),
-            "initial_binding": bool(run_contract.get("initial_binding")),
-        },
-    ))
 
 def _request_id_from_path(path: Path) -> str:
     stem = path.expanduser().name
@@ -825,6 +898,56 @@ def _submit_payload_to_workflow_invoke(payload: dict[str, Any]) -> dict[str, Any
         "requirement_spec_ref": str(payload.get("requirement_spec_ref") or ""),
         "requirement_spec_digest": str(payload.get("requirement_spec_digest") or ""),
         "request_revision": int(payload.get("request_revision") or 0),
+        "goal_id": str(
+            payload.get("goal_id")
+            or payload.get("run_id")
+            or payload.get("request_id")
+            or ""
+        ),
+        "workflow_generation": str(
+            payload.get("workflow_generation")
+            or payload.get("workflow_proposal_digest")
+            or ""
+        ),
+        "workflow_intent": str(payload.get("workflow_intent") or ""),
+        "workflow_template": str(payload.get("workflow_template") or ""),
+        "completion_profile": str(
+            payload.get("completion_profile") or ""
+        ),
+        "generic_workflow_contract_digest": str(
+            payload.get("generic_workflow_contract_digest") or ""
+        ),
+        "required_delivery_artifacts": [
+            dict(item)
+            for item in payload.get("required_delivery_artifacts") or []
+            if isinstance(item, dict)
+        ],
+        "goal_claim_set_ref": str(
+            payload.get("goal_claim_set_ref") or ""
+        ),
+        "goal_claim_set_digest": str(
+            payload.get("goal_claim_set_digest") or ""
+        ),
+        "workflow_proposal_ref": (
+            dict(payload["workflow_proposal_ref"])
+            if isinstance(payload.get("workflow_proposal_ref"), dict)
+            else {}
+        ),
+        "workflow_proposal_digest": str(
+            payload.get("workflow_proposal_digest") or ""
+        ),
+        "effective_config_ref": (
+            dict(payload["effective_config_ref"])
+            if isinstance(payload.get("effective_config_ref"), dict)
+            else {}
+        ),
+        "effective_config_digest": str(
+            payload.get("effective_config_digest") or ""
+        ),
+        "run_contract_ref": str(payload.get("run_contract_ref") or ""),
+        "run_contract_digest": str(
+            payload.get("run_contract_digest") or ""
+        ),
         "prompt_kind": str(payload.get("kind") or ""),
         "artifact_refs": [{"path": str(ref)} for ref in artifact_refs if str(ref).strip()],
         "expected_output": f"execute {payload.get('kind') or 'workflow'} workflow",
@@ -836,7 +959,13 @@ def _workflow_invoke_visibility(
     source_event_id: str,
 ) -> dict[str, str]:
     for event in reversed(events):
-        if event.type not in {"workflow.invoke.accepted", "workflow.invoke.rejected"}:
+        if event.type not in {
+            "workflow.invoke.accepted",
+            "workflow.invoke.rejected",
+            "run.admission.queued",
+            "run.admission.admitted",
+            "run.admission.rejected",
+        }:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         if str(payload.get("source_event_id") or "") != source_event_id:
@@ -845,6 +974,16 @@ def _workflow_invoke_visibility(
             return {
                 "status": "accepted",
                 "next_action": "watch fanout/task events; workflow invoke was consumed by the orchestrator",
+            }
+        if event.type == "run.admission.queued":
+            return {
+                "status": "queued",
+                "next_action": "the request is queued behind the active Project Run",
+            }
+        if event.type == "run.admission.admitted":
+            return {
+                "status": "admitted",
+                "next_action": "the Run is admitted; wait for the invoke consumer outcome",
             }
         return {
             "status": "rejected",

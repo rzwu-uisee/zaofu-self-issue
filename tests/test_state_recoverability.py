@@ -362,6 +362,10 @@ _AUDITED_FIELDS: set[str] = {
     # check; restart starts empty and worst case re-emits one
     # circuit_opened for a still-cascading instance, which is desired.
     "_respawn_success_circuit_opened",
+    # Transient warning debounce keyed by role and current execution. A
+    # restart may emit one fresh warning, while thresholds and active
+    # execution identity are re-derived from canonical runtime state.
+    "_context_warning_fingerprint",
 }
 
 

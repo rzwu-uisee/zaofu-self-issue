@@ -35,10 +35,43 @@ class TaskContractSnapshotError(ValueError):
     """Raised when a snapshot is incomplete, stale, or has been tampered with."""
 
 
+def acceptance_contract_errors(
+    values: Any,
+    *,
+    task_id: str,
+) -> list[str]:
+    """Preflight structured criteria with the snapshot's canonicalizers."""
+
+    if not isinstance(values, list):
+        return []
+    errors: list[str] = []
+    for index, raw in enumerate(values):
+        if not isinstance(raw, Mapping):
+            continue
+        criterion_id = str(
+            raw.get("acceptance_id") or raw.get("id") or index
+        ).strip()
+        prefix = f"{task_id}.acceptance_criteria[{criterion_id}]"
+        owner = str(raw.get("verification_owner") or "").strip()
+        if owner:
+            try:
+                canonical_verification_owner(owner)
+            except TaskContractSnapshotError as exc:
+                errors.append(f"{prefix}.verification_owner {exc}")
+        tier = str(raw.get("verification_tier") or "").strip()
+        if tier:
+            try:
+                canonical_verification_tier(tier)
+            except TaskContractSnapshotError as exc:
+                errors.append(f"{prefix}.verification_tier {exc}")
+    return errors
+
+
 def criterion_text(value: Any) -> str:
     if isinstance(value, Mapping):
         return str(
             value.get("text")
+            or value.get("statement")
             or value.get("criterion")
             or value.get("description")
             or value.get("acceptance")
@@ -61,7 +94,7 @@ def normalize_acceptance_criteria(
     """
 
     raw_values = values if isinstance(values, list) else [values]
-    default_tier = _verification_tier(next(
+    default_tier = canonical_verification_tier(next(
         (str(item).strip() for item in verification_tiers if str(item).strip()),
         "task_non_smoke",
     ))
@@ -84,8 +117,12 @@ def normalize_acceptance_criteria(
             criterion_id = "ac-" + hashlib.sha256(
                 stable_seed.encode("utf-8"),
             ).hexdigest()[:16]
-        owner = _verification_owner(record.get("verification_owner") or "task_verify")
-        tier = _verification_tier(record.get("verification_tier") or default_tier)
+        owner = canonical_verification_owner(
+            record.get("verification_owner") or "task_verify"
+        )
+        tier = canonical_verification_tier(
+            record.get("verification_tier") or default_tier
+        )
         command_ids = _string_list(
             record.get("verification_command_ids")
             or record.get("command_ids")
@@ -546,7 +583,7 @@ def _string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in source if str(item).strip()]
 
 
-def _verification_owner(value: Any) -> str:
+def canonical_verification_owner(value: Any) -> str:
     owner = str(value or "").strip()
     if owner in VERIFICATION_OWNERS:
         return owner
@@ -557,12 +594,15 @@ def _verification_owner(value: Any) -> str:
         return "impl_self_check"
     if "human" in lowered or "owner" in lowered:
         return "human"
-    if any(marker in lowered for marker in ("verify", "test", "review", "qa")):
+    if any(
+        marker in lowered
+        for marker in ("verify", "test", "review", "qa", "contract", "gate")
+    ):
         return "task_verify"
     raise TaskContractSnapshotError(f"unsupported verification owner {owner!r}")
 
 
-def _verification_tier(value: Any) -> str:
+def canonical_verification_tier(value: Any) -> str:
     tier = str(value or "").strip()
     # ZF-TIER-ALIAS-01(07-16 复跑实弹):planner 产出 tier 'unit' 直达
     # 此处,未过 canonical 归一化 → 整张 task_map 被拒 → integration.failed
@@ -589,8 +629,11 @@ __all__ = [
     "VERIFICATION_OWNERS",
     "VERIFICATION_TIERS",
     "TaskContractSnapshotError",
+    "acceptance_contract_errors",
     "build_target_snapshot",
     "build_task_contract_snapshot",
+    "canonical_verification_owner",
+    "canonical_verification_tier",
     "criterion_text",
     "descriptor_from_payload",
     "effective_contract_revision",

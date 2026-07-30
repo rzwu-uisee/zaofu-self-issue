@@ -1193,11 +1193,15 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "requirement_spec_ref",
                 "requirement_spec_digest",
                 "request_revision",
+                "light_entry_trigger",
+                "light_entry_payload",
             ],
         },
         "workflow.invoke.accepted": {
             "required": ["task_id", "pattern_id", "source_event_id"],
             "optional": [
+                "request_id",
+                "run_id",
                 "channel_id",
                 "thread_id",
                 "fanout_request_event_id",
@@ -1211,7 +1215,97 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
         },
         "workflow.invoke.rejected": {
             "required": ["task_id", "pattern_id", "source_event_id", "reason"],
-            "optional": ["channel_id", "thread_id"],
+            "optional": [
+                "request_id",
+                "run_id",
+                "workflow_run_id",
+                "channel_id",
+                "thread_id",
+            ],
+        },
+        "run.admission.requested": {
+            "required": [
+                "schema_version",
+                "run_id",
+                "workflow_run_id",
+                "request_id",
+                "task_id",
+                "source_event_id",
+            ],
+            "optional": [
+                "effective_config_digest",
+                "run_contract_digest",
+            ],
+        },
+        "run.admission.admitted": {
+            "required": [
+                "schema_version",
+                "run_id",
+                "workflow_run_id",
+                "request_id",
+                "task_id",
+                "source_event_id",
+                "policy_mode",
+                "max_active_runs",
+            ],
+            "optional": [
+                "effective_config_digest",
+                "run_contract_digest",
+            ],
+        },
+        "run.admission.queued": {
+            "required": [
+                "schema_version",
+                "run_id",
+                "workflow_run_id",
+                "request_id",
+                "task_id",
+                "source_event_id",
+                "reason",
+                "active_run_ids",
+            ],
+            "optional": [
+                "effective_config_digest",
+                "run_contract_digest",
+            ],
+        },
+        "run.admission.released": {
+            "required": [
+                "schema_version",
+                "run_id",
+                "workflow_run_id",
+                "request_id",
+                "task_id",
+                "source_event_id",
+                "reason",
+            ],
+            "optional": [
+                "effective_config_digest",
+                "run_contract_digest",
+            ],
+        },
+        "run.admission.rejected": {
+            "required": [
+                "schema_version",
+                "run_id",
+                "workflow_run_id",
+                "request_id",
+                "task_id",
+                "source_event_id",
+                "reason",
+            ],
+            "optional": [
+                "effective_config_digest",
+                "run_contract_digest",
+            ],
+        },
+        "run.paused": {
+            "required": ["schema_version", "run_id", "request_id", "reason"],
+            "optional": ["source_event_id"],
+        },
+        "run.resumed": {
+            "required": ["schema_version", "run_id", "request_id", "reason"],
+            "optional": ["source_event_id", "paused_event_id"],
         },
         "workflow.research.adopted": {
             "required": [

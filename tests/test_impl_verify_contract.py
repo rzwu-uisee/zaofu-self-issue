@@ -119,6 +119,15 @@ def test_reordered_criteria_do_not_reuse_snapshot_identity(tmp_path: Path) -> No
     assert first_descriptor["ref"] != second_descriptor["ref"]
 
 
+def test_task_contract_snapshot_normalizes_contract_owner_alias() -> None:
+    task = _task()
+    task.contract.acceptance_criteria[0]["verification_owner"] = "contract"
+
+    snapshot = _snapshot(task)
+
+    assert snapshot["acceptance_criteria"][0]["verification_owner"] == "task_verify"
+
+
 def test_verification_result_separates_execution_failure_from_rejection() -> None:
     contract = _snapshot(_task())
     descriptor = {"ref": "artifacts/contract.json", "sha256": "b" * 64}
@@ -408,18 +417,19 @@ def test_snapshot_tier_accepts_llm_alias_vocabulary():
     """ZF-TIER-ALIAS-01:snapshot 锻造点必须过 canonical 别名表。
 
     07-16 复跑实弹:planner 产出 tier 'unit'(别名表里早有映射)但
-    _verification_tier 不查表 → 整张 task_map 被拒 → integration.failed
+    canonical_verification_tier 不查表 → 整张 task_map 被拒 → integration.failed
     → replan 同因两连败 → task.rework.capped。宽进严出:LLM 词汇先归一,
     再映射内部档位。
     """
-    from zf.runtime.task_contract_snapshot import _verification_tier
+    from zf.runtime.task_contract_snapshot import canonical_verification_tier
 
-    assert _verification_tier("unit") == "task_non_smoke"
-    assert _verification_tier("integration") == "task_non_smoke"
-    assert _verification_tier("lint") == "fast"
-    assert _verification_tier("smoke") == "real_e2e"
-    assert _verification_tier("runtime") == "task_non_smoke"  # 原有直通不回归
+    assert canonical_verification_tier("unit") == "task_non_smoke"
+    assert canonical_verification_tier("integration") == "task_non_smoke"
+    assert canonical_verification_tier("lint") == "fast"
+    assert canonical_verification_tier("setup") == "fast"
+    assert canonical_verification_tier("smoke") == "real_e2e"
+    assert canonical_verification_tier("runtime") == "task_non_smoke"  # 原有直通不回归
     import pytest
     from zf.runtime.task_contract_snapshot import TaskContractSnapshotError
     with pytest.raises(TaskContractSnapshotError):
-        _verification_tier("bogus-tier")
+        canonical_verification_tier("bogus-tier")

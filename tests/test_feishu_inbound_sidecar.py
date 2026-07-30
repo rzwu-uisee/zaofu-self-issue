@@ -106,7 +106,7 @@ def test_feishu_inbound_sidecar_starts_and_stops(
         return FakeProcess()
 
     monkeypatch.setattr(
-        "zf.runtime.feishu_inbound_sidecar.subprocess.Popen",
+        "zf.runtime.feishu_inbound_sidecar._start_bridge_process",
         fake_popen,
     )
     cfg = ZfConfig(
@@ -164,7 +164,7 @@ def test_feishu_inbound_sidecar_starts_one_bridge_per_bot(
         return FakeProcess(pid=4242 + len(started))
 
     monkeypatch.setattr(
-        "zf.runtime.feishu_inbound_sidecar.subprocess.Popen",
+        "zf.runtime.feishu_inbound_sidecar._start_bridge_process",
         fake_popen,
     )
     cfg = ZfConfig(

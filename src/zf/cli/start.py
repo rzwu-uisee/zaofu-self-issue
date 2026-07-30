@@ -44,6 +44,7 @@ from zf.runtime.injection import generate_role_instructions
 from zf.runtime.cli_command import set_default_zf_cli_cmd, zf_cli_cmd
 from zf.runtime.process_guard import SingleOwnerProcessGuard
 from zf.runtime.spawn_coordinator import SpawnCoordinator
+from zf.runtime.flow_roles import initial_role_configs
 
 
 def _run_autoresearch_trigger_scan(
@@ -284,6 +285,86 @@ def _record_ready_worker_state(
     })
 
 
+def _record_dormant_worker_state(
+    *,
+    event_log,
+    registry: RoleSessionRegistry,
+    role,
+) -> None:
+    """Register an on-demand logical role without allocating its process."""
+    now = ZfEvent(
+        type="role.lifecycle.dormant",
+        actor="zf-cli",
+        payload={
+            "schema_version": "role-lifecycle.v1",
+            "role": role.name,
+            "instance_id": role.instance_id,
+            "backend": role.backend,
+            "from": "",
+            "to": "dormant",
+            "preserve_session": role.lifecycle.preserve_session,
+            "preserve_workdir": role.lifecycle.preserve_workdir,
+        },
+    )
+    event_log.append(now)
+    registry.update_instance_meta(
+        role.instance_id,
+        lifecycle_state="dormant",
+        lifecycle_transition_at=now.ts,
+        lifecycle_active_at="",
+        lifecycle_suspended_at="",
+    )
+    registry.record_heartbeat(role.instance_id, {
+        "instance_id": role.instance_id,
+        "state": "dormant",
+        "current_task_id": "",
+        "last_action_ts": now.ts,
+        "source": "role.lifecycle.dormant",
+    })
+    event_log.append(ZfEvent(
+        type="worker.state.changed",
+        actor=role.instance_id,
+        payload={
+            "instance_id": role.instance_id,
+            "from": "",
+            "to": "dormant",
+            "reason": "on-demand role registered without provider process",
+            "generation_override": True,
+        },
+    ))
+
+
+def _role_has_resume_obligation(
+    *,
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+    role,
+) -> bool:
+    """Return True when restart must restore an already-owned role turn."""
+    from zf.core.task.store import TaskStore
+
+    try:
+        tasks = TaskStore(state_dir / "kanban.json").list_all()
+    except Exception:
+        tasks = []
+    if any(
+        task.status == "in_progress"
+        and str(task.assigned_to or "") in {role.instance_id, role.name}
+        for task in tasks
+    ):
+        return True
+    try:
+        _heartbeat_at, heartbeat = registry.get_last_heartbeat(role.instance_id)
+    except Exception:
+        heartbeat = None
+    if not isinstance(heartbeat, dict):
+        return False
+    return bool(
+        str(heartbeat.get("current_task_id") or "")
+        and str(heartbeat.get("state") or "") in {"busy", "in_progress"}
+    )
+
+
 def _run_workflow_start_preflight(
     *,
     config,
@@ -430,6 +511,7 @@ def _write_run_contract_snapshot(
     from zf.runtime.run_contract import (
         build_run_contract,
         load_run_contract,
+        preserve_submitted_run_contract_bindings,
         run_contract_drift_diagnostics,
         strict_run_contract_drift,
         write_run_contract,
@@ -463,6 +545,7 @@ def _write_run_contract_snapshot(
         state_dir=state_dir,
         workflow_input_manifest_ref=previous_manifest_ref,
     )
+    contract = preserve_submitted_run_contract_bindings(previous, contract)
     strict = strict_run_contract_drift(previous, contract, strict=strict)
     diagnostics = run_contract_drift_diagnostics(previous, contract, strict=strict)
     if diagnostics:
@@ -973,6 +1056,7 @@ def run(args: argparse.Namespace) -> int:
         )
         claude_tailer = ClaudeSessionTailer(event_log)
         codex_tailer = CodexSessionTailer(event_log)
+        coordinator.codex_session_tailer = codex_tailer
         workdir_manager = None
         if config.runtime.workdirs.enabled:
             from zf.runtime.workdirs import WorkdirManager
@@ -982,12 +1066,25 @@ def run(args: argparse.Namespace) -> int:
                 config=config,
             )
         instructions_dir = state_dir / "instructions"
-        for role in config.roles:
+        startup_roles = initial_role_configs(config)
+        for role in startup_roles:
             skip_spawn = role.name == "orchestrator" and role.transport == "stream-json"
+            resume_obligation = _role_has_resume_obligation(
+                state_dir=state_dir,
+                registry=registry,
+                role=role,
+            )
+            defer_spawn = (
+                role.lifecycle.mode == "on_demand"
+                and not skip_spawn
+                and not control_plane_only
+                and not resume_obligation
+            )
             spawn_cwd: Path | None = None
             if (
                 workdir_manager is not None
                 and not skip_spawn
+                and not defer_spawn
                 and not control_plane_only
             ):
                 plan = workdir_manager.prepare(role)
@@ -1006,7 +1103,7 @@ def run(args: argparse.Namespace) -> int:
                     spawn_cwd = project_path
 
             skill_entries = []
-            if role.skills and not control_plane_only:
+            if role.skills and not defer_spawn and not control_plane_only:
                 from zf.core.skills import (
                     build_skill_lock_entries,
                     materialize_role_skills,
@@ -1043,10 +1140,18 @@ def run(args: argparse.Namespace) -> int:
             # the workers so send-keys has somewhere to land.
             if skip_spawn:
                 continue
-            if not control_plane_only:
+            if defer_spawn:
+                coordinator.prepare_provider_session(role)
+                _record_dormant_worker_state(
+                    event_log=event_log,
+                    registry=registry,
+                    role=role,
+                )
+                print(f"    {role.instance_id}: dormant (on demand)")
+            elif not control_plane_only:
                 coordinator.spawn(role, cwd=spawn_cwd)
 
-            if not dry_run and not control_plane_only:
+            if not dry_run and not control_plane_only and not defer_spawn:
                 adapter = get_adapter(role.backend)
                 ready = (
                     transport.wait_ready(
@@ -1096,7 +1201,9 @@ def run(args: argparse.Namespace) -> int:
             elif role.backend == "codex":
                 uuid = registry.get(role.instance_id)
                 if uuid is not None:
-                    cpath = codex_session_path(str(uuid))
+                    cpath = registry.get_path(role.instance_id)
+                    if cpath is None:
+                        cpath = codex_session_path(str(uuid))
                     if cpath is not None:
                         codex_tailer.tail(role.instance_id, cpath)
                     # If path not yet discovered (codex creates file on
@@ -1157,7 +1264,9 @@ def run(args: argparse.Namespace) -> int:
         elif resident_role is not None and resident_role.backend == "codex":
             uuid = registry.get(resident_role.instance_id)
             if uuid is not None:
-                cpath = codex_session_path(str(uuid))
+                cpath = registry.get_path(resident_role.instance_id)
+                if cpath is None:
+                    cpath = codex_session_path(str(uuid))
                 if cpath is not None:
                     codex_tailer.tail(resident_role.instance_id, cpath)
 
@@ -1268,6 +1377,15 @@ def run(args: argparse.Namespace) -> int:
         orchestrator = Orchestrator(
             state_dir, config, transport, project_root=project_root,
         )
+        orchestrator._claude_session_tailer = claude_tailer
+        orchestrator._codex_session_tailer = codex_tailer
+        orchestrator._spawn_coordinator = coordinator
+        if not control_plane_only:
+            from zf.runtime.flow_role_activation import (
+                restore_flow_role_activations,
+            )
+
+            restore_flow_role_activations(orchestrator)
         pushed_event_ids: set[str] = set()
 
         def _on_event(line: str) -> None:
@@ -1373,7 +1491,7 @@ def run(args: argparse.Namespace) -> int:
             event_log.append(ZfEvent(type="loop.started", actor="zf-cli"))
             watcher.poll_once()
             print(f"Started harness (dry-run). Session: {session_name}")
-            print(f"  Roles: {[r.name for r in config.roles]}")
+            print(f"  Roles: {[r.name for r in startup_roles]}")
             if isinstance(transport, TmuxTransport):
                 print(f"  Commands recorded: {len(transport.tmux.command_log)}")
             print(f"  Watcher: configured with {len(wake_patterns)} wake patterns")
@@ -1382,8 +1500,8 @@ def run(args: argparse.Namespace) -> int:
 
         # Real mode
         print(f"Started harness. Session: {session_name}")
-        print(f"  Roles: {[r.name for r in config.roles]}")
-        for role in config.roles:
+        print(f"  Roles: {[r.name for r in startup_roles]}")
+        for role in startup_roles:
             print(f"    {role.name}: {get_adapter(role.backend).build_command(role)}")
         print(f"  Instructions: {state_dir / 'instructions'}/")
         print(f"  Attach: tmux attach -t {session_name}")

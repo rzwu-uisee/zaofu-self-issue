@@ -34,9 +34,10 @@ class _Probe(FanoutCoordinationMixin):
         self.config = SimpleNamespace(workflow=SimpleNamespace(stages=stages))
 
 
-def _plan_stage(success: str, failure: str):
+def _plan_stage(success: str, failure: str, *, flow_kind: str = ""):
     return SimpleNamespace(
         id="prd-plan",
+        flow_kind=flow_kind,
         success_event="",
         failure_event="",
         aggregate=SimpleNamespace(success_event=success, failure_event=failure),
@@ -106,6 +107,42 @@ def test_plan_admission_failure_emits_canonical_failure_before_raw_cancel(
     assert cancelled.payload["canonical_failure_event_id"] == failure.id
 
 
+def test_plan_admission_failure_routes_to_trigger_flow_when_events_overlap(
+    tmp_path: Path,
+) -> None:
+    issue = _plan_stage(
+        "task_map.ready",
+        "issue.triage.failed",
+        flow_kind="issue",
+    )
+    issue.id = "issue-plan"
+    prd = _plan_stage(
+        "task_map.ready",
+        "prd.plan.failed",
+        flow_kind="prd",
+    )
+    probe = _Probe(tmp_path, [issue, prd])
+    trigger = ZfEvent(
+        type="task_map.ready",
+        payload={
+            "task_map_ref": "docs/prd-task-map.json",
+            "flow_kind": "prd",
+        },
+    )
+
+    emit_upstream_failure_for_bad_task_map(
+        probe,
+        trigger_event=trigger,
+        trace_id="run-prd",
+        pdd_id="PRD-1",
+        reason="owner instance is outside the selected Flow",
+    )
+
+    failure = probe.event_log.read_all()[0]
+    assert failure.type == "prd.plan.failed"
+    assert failure.payload["stage_id"] == "prd-plan"
+
+
 def test_gap_task_admission_failure_routes_back_to_discovery(
     tmp_path: Path,
 ) -> None:
@@ -150,6 +187,43 @@ def test_no_upstream_stage_no_emit(tmp_path: Path) -> None:
         trace_id="t1", pdd_id="default", reason="x",
     )
     assert probe.event_log.read_all() == []
+
+
+def test_unroutable_plan_admission_escalates_instead_of_dead_ending(
+    tmp_path: Path,
+) -> None:
+    probe = _Probe(tmp_path, [_plan_stage("other.event", "other.failed")])
+    trigger = ZfEvent(
+        type="task_map.ready",
+        payload={"task_map_ref": ".zf/artifacts/issue/task_map.json"},
+    )
+
+    emit_plan_admission_cancel(
+        probe,
+        trigger_event=trigger,
+        stage_id="issue-lanes-impl",
+        trace_id="issue-run",
+        pdd_id="ISSUE-1",
+        feature_id="ISSUE-1",
+        task_map_ref=".zf/artifacts/issue/task_map.json",
+        reason=(
+            "plan artifact package admission failed: "
+            "issue_spec cannot resolve ref 'HEAD'"
+        ),
+    )
+
+    cancelled, escalated = probe.event_log.read_all()
+    assert [cancelled.type, escalated.type] == [
+        "fanout.cancelled",
+        "human.escalate",
+    ]
+    assert escalated.payload["failure_class"] == (
+        "plan_artifact_package_rejected"
+    )
+    assert escalated.payload["failure_scope"] == "plan_admission"
+    assert escalated.payload["plan_admission_incident_id"] == (
+        cancelled.payload["plan_admission_incident_id"]
+    )
 
 
 def test_plan_briefing_contract_lines_exist() -> None:

@@ -47,6 +47,10 @@ def build_feishu_inbound_command(*, debounce_ms: int, state_dir: Path) -> list[s
     ]
 
 
+def _start_bridge_process(command: list[str], **kwargs: Any) -> subprocess.Popen:
+    return subprocess.Popen(command, **kwargs)
+
+
 def start_feishu_inbound_sidecar(
     *,
     config: object,
@@ -133,7 +137,7 @@ def start_feishu_inbound_sidecar(
         env["FEISHU_APP_ID"] = spec.credential.app_id
         env["FEISHU_APP_SECRET"] = spec.credential.app_secret
         try:
-            process = subprocess.Popen(
+            process = _start_bridge_process(
                 command,
                 cwd=str(project_root),
                 env=env,

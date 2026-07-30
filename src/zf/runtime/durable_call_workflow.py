@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.generic_workflow_fanout import GENERIC_WORKFLOW_HANDOFF_KEYS
 from zf.runtime.orchestrator_types import OrchestratorDecision
 from zf.runtime.workstream_scope_guard import check_workstream_scope
 
 
-_WORKFLOW_IDENTITY_KEYS = (
+_WORKFLOW_IDENTITY_KEYS = tuple(dict.fromkeys((
     "request_id",
     "run_id",
     "workflow_run_id",
@@ -19,6 +22,12 @@ _WORKFLOW_IDENTITY_KEYS = (
     "requirement_spec_ref",
     "requirement_spec_digest",
     "request_revision",
+    "workflow_proposal_ref",
+    "workflow_proposal_digest",
+    "effective_config_ref",
+    "effective_config_digest",
+    "run_contract_ref",
+    "run_contract_digest",
     "continuation_key",
     "expected_generation",
     "fragment_id",
@@ -28,7 +37,9 @@ _WORKFLOW_IDENTITY_KEYS = (
     "plan_artifact_package_digest",
     "provider_idempotency_key",
     "reservation_id",
-)
+    *GENERIC_WORKFLOW_HANDOFF_KEYS,
+    "input_result_refs",
+)))
 
 
 def _strings(value: Any) -> list[str]:
@@ -59,6 +70,112 @@ def _target_ref(payload: dict[str, Any], stage_target_ref: str) -> str:
     return str(stage_target_ref or "").strip()
 
 
+def _workflow_proposal_binding_error(
+    state_dir: Path,
+    payload: dict[str, Any],
+) -> str:
+    proposal_ref = payload.get("workflow_proposal_ref")
+    proposal_digest = str(
+        payload.get("workflow_proposal_digest") or ""
+    )
+    if not isinstance(proposal_ref, dict) and not proposal_digest:
+        return ""
+    effective_ref = payload.get("effective_config_ref")
+    effective_digest = str(payload.get("effective_config_digest") or "")
+    run_contract_ref = str(payload.get("run_contract_ref") or "")
+    run_contract_digest = str(payload.get("run_contract_digest") or "")
+    request_id = str(payload.get("request_id") or "")
+    if (
+        not isinstance(proposal_ref, dict)
+        or not proposal_digest
+        or not isinstance(effective_ref, dict)
+        or not effective_digest
+        or not run_contract_ref
+        or not run_contract_digest
+        or not request_id
+    ):
+        return "approved proposal binding is incomplete"
+    try:
+        from zf.runtime.run_contract import load_run_contract_snapshot
+        from zf.runtime.sidecar_refs import sidecar_path
+        from zf.runtime.workflow_proposal import load_workflow_proposal
+        from zf.runtime.workflow_requests import load_workflow_request
+
+        request = load_workflow_request(state_dir, request_id)
+        if (
+            str(request.get("status") or "")
+            not in {"submitted", "running"}
+            or str(request.get("proposal_digest") or "")
+            != proposal_digest
+            or not _same_ref(
+                request.get("proposal_ref"),
+                proposal_ref,
+            )
+        ):
+            return "workflow proposal is not approved for the current request"
+        proposal = load_workflow_proposal(state_dir, proposal_ref)
+        if (
+            str(proposal.get("proposal_digest") or "")
+            != proposal_digest
+            or not _same_ref(
+                proposal.get("effective_config_ref"),
+                effective_ref,
+            )
+            or str(effective_ref.get("sha256") or "")
+            != effective_digest
+        ):
+            return "workflow proposal effective config binding is invalid"
+        snapshot_path = sidecar_path(state_dir, run_contract_ref)
+        if snapshot_path.is_symlink():
+            return "run contract snapshot is unsafe"
+        raw = snapshot_path.read_bytes()
+        snapshot = load_run_contract_snapshot(
+            state_dir,
+            {
+                "ref": run_contract_ref,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "byte_count": len(raw),
+            },
+        )
+        contract = snapshot["contract"]
+        workflow = (
+            contract.get("workflow")
+            if isinstance(contract.get("workflow"), dict)
+            else {}
+        )
+        config = (
+            contract.get("config")
+            if isinstance(contract.get("config"), dict)
+            else {}
+        )
+        if (
+            str(snapshot.get("contract_digest") or "")
+            != run_contract_digest
+            or str(workflow.get("proposal_digest") or "")
+            != proposal_digest
+            or not _same_ref(workflow.get("proposal_ref"), proposal_ref)
+            or str(config.get("effective_snapshot_digest") or "")
+            != effective_digest
+            or not _same_ref(
+                config.get("effective_snapshot_ref"),
+                effective_ref,
+            )
+        ):
+            return "run contract does not pin the approved proposal"
+    except Exception:
+        return "approved proposal binding cannot be verified"
+    return ""
+
+
+def _same_ref(left: Any, right: Any) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (
+        str(left.get("ref") or "") == str(right.get("ref") or "")
+        and str(left.get("sha256") or "") == str(right.get("sha256") or "")
+    )
+
+
 class DurableCallWorkflowMixin:
     """Host methods for stable nested-workflow operations."""
 
@@ -69,6 +186,34 @@ class DurableCallWorkflowMixin:
         payload = event.payload if isinstance(event.payload, dict) else {}
         task_id = event.task_id or str(payload.get("task_id") or "")
         pattern_id = str(payload.get("pattern_id") or payload.get("stage_id") or "")
+        proposal_binding_error = _workflow_proposal_binding_error(
+            self.state_dir,
+            payload,
+        )
+        if proposal_binding_error:
+            self._emit_workflow_invoke_rejected(
+                event,
+                proposal_binding_error,
+                task_id=task_id,
+                pattern_id=pattern_id,
+            )
+            return OrchestratorDecision(
+                action="block",
+                task_id=task_id,
+                reason=(
+                    "workflow invoke rejected: "
+                    f"{proposal_binding_error}"
+                ),
+            )
+        light_entry_trigger = str(payload.get("light_entry_trigger") or "").strip()
+        if light_entry_trigger:
+            return self._admit_light_workflow_invoke(
+                event,
+                payload=payload,
+                task_id=task_id,
+                pattern_id=pattern_id,
+                entry_trigger=light_entry_trigger,
+            )
         task = self.task_store.get(task_id) if task_id else None
         if task is None:
             task = self._bootstrap_invoke_task(event, payload, task_id)
@@ -139,6 +284,41 @@ class DurableCallWorkflowMixin:
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: stale dispatch",
+            )
+        from zf.runtime.run_admission import admit_workflow_invoke
+
+        admission = admit_workflow_invoke(self, event)
+        if admission.status != "admitted":
+            action = "observe" if admission.status in {"queued", "paused"} else "block"
+            return OrchestratorDecision(
+                action=action,
+                task_id=task_id,
+                reason=(
+                    f"workflow invoke {admission.status}: "
+                    f"{admission.reason or admission.run_id}"
+                ),
+            )
+        prior_accept = next(
+            (
+                candidate
+                for candidate in reversed(self.event_log.read_all())
+                if candidate.type == "workflow.invoke.accepted"
+                and str((candidate.payload or {}).get("source_event_id") or "")
+                == event.id
+            ),
+            None,
+        )
+        if (
+            prior_accept is not None
+            and not str(
+                (prior_accept.payload or {}).get("workflow_operation_id")
+                or ""
+            )
+        ):
+            return OrchestratorDecision(
+                action="observe",
+                task_id=task_id,
+                reason="workflow invoke replayed without duplicate dispatch",
             )
         proposed_paths = _strings(payload.get("paths")) + _strings(payload.get("scope"))
         scope_check = check_workstream_scope(
@@ -258,6 +438,28 @@ class DurableCallWorkflowMixin:
                         f"{invoke_operation.operation_id}"
                     ),
                 )
+        from zf.runtime.flow_role_activation import activate_flow_roles
+        from zf.runtime.flow_roles import FlowRoleBindingError
+
+        try:
+            activation = activate_flow_roles(
+                self,
+                payload=payload,
+                source_event_id=event.id,
+                correlation_id=event.correlation_id or "",
+            )
+        except FlowRoleBindingError as exc:
+            self._emit_workflow_invoke_rejected(
+                event,
+                str(exc),
+                task_id=task_id,
+                pattern_id=pattern_id,
+            )
+            return OrchestratorDecision(
+                action="block",
+                task_id=task_id,
+                reason=f"workflow invoke role activation rejected: {exc}",
+            )
         accepted_event = ZfEvent(
             type="workflow.invoke.accepted",
             actor="zf-cli",
@@ -288,6 +490,10 @@ class DurableCallWorkflowMixin:
                 ),
                 "workflow_operation_request_hash": str(
                     payload.get("workflow_operation_request_hash") or ""
+                ),
+                "flow_role_activation_id": activation.activation_id,
+                "flow_role_activation_manifest_ref": (
+                    activation.manifest_ref or {}
                 ),
             },
             causation_id=event.id,
@@ -352,6 +558,10 @@ class DurableCallWorkflowMixin:
         fanout_request.payload["workflow_invoke_admitted"] = True
         accepted_event.payload["fanout_request_event_id"] = fanout_request.id
         self.event_writer.append(accepted_event)
+        self._mark_workflow_request_running(
+            payload,
+            accepted_event=accepted_event,
+        )
         self.event_writer.append(fanout_request)
         if str(getattr(stage, "trigger", "") or "") == event.type:
             self._try_start_declared_workflow_fanout(
@@ -410,14 +620,32 @@ class DurableCallWorkflowMixin:
             or payload.get("request_id")
             or f"legacy-{task_id or pattern_id}"
         )
-        operation_id = str(payload.get("workflow_operation_id") or "") or stable_operation_id(
+        operation_key = task_id or pattern_id
+        workflow_generation = str(
+            payload.get("workflow_generation")
+            or payload.get("workflow_proposal_digest")
+            or ""
+        )
+        if workflow_generation:
+            operation_key = f"{operation_key}:generation:{workflow_generation}"
+        rework_attempt = int(payload.get("rework_attempt") or 0)
+        if rework_attempt > 0:
+            operation_key = f"{operation_key}:rework:{rework_attempt}"
+        supplied_operation_id = (
+            ""
+            if rework_attempt > 0
+            else str(payload.get("workflow_operation_id") or "")
+        )
+        operation_id = supplied_operation_id or stable_operation_id(
             workflow_run_id=workflow_run_id,
             parent_stage_id=pattern_id,
-            operation_key=task_id or pattern_id,
+            operation_key=operation_key,
             operation_type="workflow",
         )
-        supplied_request_hash = str(
-            payload.get("workflow_operation_request_hash") or ""
+        supplied_request_hash = (
+            ""
+            if rework_attempt > 0
+            else str(payload.get("workflow_operation_request_hash") or "")
         )
         existing_operation = (
             load_workflow_operation(self.event_log, operation_id)
@@ -487,9 +715,38 @@ class DurableCallWorkflowMixin:
                     "workflow_input_manifest_ref": str(
                         payload.get("workflow_input_manifest_ref") or ""
                     ),
+                    "workflow_proposal_ref": (
+                        dict(payload["workflow_proposal_ref"])
+                        if isinstance(
+                            payload.get("workflow_proposal_ref"),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    "workflow_proposal_digest": str(
+                        payload.get("workflow_proposal_digest") or ""
+                    ),
+                    "effective_config_ref": (
+                        dict(payload["effective_config_ref"])
+                        if isinstance(
+                            payload.get("effective_config_ref"),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    "effective_config_digest": str(
+                        payload.get("effective_config_digest") or ""
+                    ),
                     "artifact_refs": payload.get("artifact_refs")
                     if isinstance(payload.get("artifact_refs"), list)
                     else [],
+                    "rework_of": str(payload.get("rework_of") or ""),
+                    "rework_attempt": rework_attempt,
+                    "rework_feedback": (
+                        list(payload.get("rework_feedback") or [])
+                        if isinstance(payload.get("rework_feedback"), list)
+                        else []
+                    ),
                 },
                 parent_operation_id=str(payload.get("parent_operation_id") or ""),
                 parent_stage_id=pattern_id,

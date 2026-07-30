@@ -18,6 +18,10 @@ spec:
   completionThreshold: close_p0_p1
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  # Scan/Planner readers submit one signed semantic result file. Their output
+  # refs stay workdir-relative; the Kernel relocates canonical artifacts.
+  semanticSubmitProfiles:
+    workflow-read: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig
@@ -51,6 +55,8 @@ spec:
       backend: codex
       permission_mode: bypass
       transport: tmux
+      lifecycle:
+        mode: resident
       stuck_threshold_seconds: 900
       spawn_ready_timeout_seconds: 240
       triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]

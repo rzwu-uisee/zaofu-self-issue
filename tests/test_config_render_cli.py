@@ -144,6 +144,38 @@ def test_rendered_safety_section_is_nested_and_reloadable(tmp_path):
     assert reloaded.safety.tool_closure_enabled is False
 
 
+def test_run_admission_and_task_attempt_config_round_trip(tmp_path):
+    source = tmp_path / "zf.yaml"
+    source.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: run-policy\n"
+        "workflow:\n"
+        "  run_admission:\n"
+        "    version: v1\n"
+        "    mode: concurrent\n"
+        "    max_active_runs: 2\n"
+        "  task_attempt:\n"
+        "    version: v1\n"
+        "    mode: enforce\n"
+        "    max_attempts: 4\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(source)
+    rendered = renderable_config_to_primitive(config)
+    output = tmp_path / "rendered.yaml"
+    output.write_text(
+        yaml.safe_dump(rendered, sort_keys=False),
+        encoding="utf-8",
+    )
+    reloaded = load_config(output)
+
+    assert reloaded.workflow.run_admission.mode == "concurrent"
+    assert reloaded.workflow.run_admission.max_active_runs == 2
+    assert reloaded.workflow.task_attempt.mode == "enforce"
+    assert reloaded.workflow.task_attempt.max_attempts == 4
+
+
 def test_config_rendered_controller_yaml_uses_single_execution_representation(
     tmp_path,
 ):
@@ -162,17 +194,24 @@ def test_config_rendered_controller_yaml_uses_single_execution_representation(
 
         assert rendered["workflow"]["pipelines"]
         assert rendered["workflow"]["_flow_metadata"]["rendered_pipeline_stages"] is True
+        flow_kind = rendered["workflow"]["_flow_metadata"]["flow_kind"]
+        assert rendered["workflow"]["pipelines"][0]["flow_kind"] == flow_kind
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
             reloaded = load_config(output)
 
         assert "dual representation drifts" not in stderr.getvalue()
         assert reloaded.workflow.stages
-        assert reloaded.workflow.flow_metadata["flow_kind"] in {
+        assert flow_kind in {
             "prd",
             "issue",
             "refactor",
         }
+        assert {
+            role.flow_kind
+            for role in reloaded.roles
+            if role.role_kind == "writer"
+        } == {flow_kind}
 
 
 def test_config_rendered_controller_yaml_preserves_affinity_assignment(

@@ -5,6 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.fanout import validate_fanout_report
+from zf.runtime.fanout_report_failure import project_report_failure
+from zf.runtime.plan_synth_handoff import build_plan_handoff_input_refs
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.stage_failure_replan import (
     STAGE_REPLAN_CAP,
     plan_reader_stage_replan,
@@ -42,6 +46,86 @@ def test_replan_re_emits_trigger_with_feedback() -> None:
     assert replan.causation_id == failure.id
 
 
+def test_contract_critic_finding_reaches_next_plan_rework_context(
+    tmp_path,
+) -> None:
+    validation = validate_fanout_report(
+        {
+            "child_id": "plan-critic",
+            "status": "failed",
+            "summary": "Plan contract rejected.",
+            "findings": [{
+                "severity": "blocker",
+                "code": "plan_ports_not_descriptor_array",
+                "field": "plan_ports",
+                "observed": "plan_ports contains logical-name strings.",
+                "expected": "plan_ports contains descriptor objects.",
+                "evidence_refs": ["plan-synth-contract.json"],
+            }],
+            "fix_items": [{
+                "task_id": "refactor-plan-synth",
+                "acceptance_id": "plan_ports",
+                "observed_gap": "The child returned logical-name strings.",
+                "required_change": "Return ready plan-port descriptors.",
+                "done_when": "Every required logical name is a descriptor.",
+                "evidence_refs": ["plan-synth-contract.json"],
+            }],
+            "recommendation": "reject",
+        },
+        child_id="plan-critic",
+    )
+    artifact_payload = {}
+    findings = project_report_failure(
+        artifact_payload,
+        validation.report,
+        validation.diagnostics,
+    )
+    failure = _failure(findings=findings)
+    origin = ZfEvent(
+        type="issue.requested",
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, failure],
+        failure,
+    )
+
+    assert validation.valid is True
+    assert artifact_payload["fix_items"][0]["acceptance_id"] == "plan_ports"
+    assert "report_diagnostics" not in artifact_payload
+    assert replan is not None
+    refs = build_plan_handoff_input_refs(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        payload=replan.payload,
+        source_event_id=replan.id,
+    )
+    descriptor = next(
+        ref for ref in refs
+        if ref["source_id"] == "plan-rework-context"
+    )
+    context = hydrate_sidecar_ref(tmp_path / ".zf", descriptor).payload
+    critic_finding = next(
+        finding for finding in context["rework_feedback"]
+        if finding.get("code") == "plan_ports_not_descriptor_array"
+    )
+    assert critic_finding["severity"] == "high"
+    assert critic_finding["category"] == "plan_ports_not_descriptor_array"
+    assert critic_finding["field"] == "plan_ports"
+    assert "logical-name strings" in critic_finding["message"]
+    assert "descriptor objects" in critic_finding["message"]
+    fix_finding = next(
+        finding for finding in context["rework_feedback"]
+        if finding.get("source") == "fix_item"
+    )
+    assert fix_finding["category"] == "plan_ports"
+    assert "The child returned logical-name strings." in fix_finding["message"]
+    assert "Return ready plan-port descriptors." in fix_finding["message"]
+    assert "Every required logical name is a descriptor." in fix_finding["message"]
+
+
 def test_replan_preserves_plan_admission_incident_identity() -> None:
     origin = ZfEvent(type="issue.requested", payload={"issue_ref": "docs/issues/TODO.md"})
     failure = _failure(findings=[{"severity": "high", "message": "missing root owner"}])
@@ -70,6 +154,96 @@ def test_replan_preserves_failure_target_ref_without_origin_trigger() -> None:
     assert replan.payload["target_ref"] == "docs/issues/fix-list.md"
     assert replan.payload["issue_ref"] == "docs/issues/fix-list.md"
     assert replan.payload["source_refs"]["source_ref"] == "docs/issues/fix-list.md"
+
+
+def test_refactor_replan_does_not_promote_objective_path_to_git_target() -> None:
+    stage = SimpleNamespace(
+        id="flow-scan",
+        topology="fanout_reader",
+        trigger="refactor.scan.requested",
+        failure_event="",
+        aggregate=SimpleNamespace(
+            failure_event="zaofu.refactor.scan.blocked",
+        ),
+    )
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=[stage]))
+    origin = ZfEvent(
+        type="refactor.scan.requested",
+        payload={
+            "objective_ref": "docs/intake/refactor.md",
+            "source_refs": {"source_ref": "docs/intake/refactor.md"},
+        },
+    )
+    failure = ZfEvent(
+        type="zaofu.refactor.scan.blocked",
+        payload={"reason": "scan child failed"},
+    )
+
+    replan, _ = plan_reader_stage_replan(config, [origin, failure], failure)
+
+    assert replan is not None
+    assert "target_ref" not in replan.payload
+    assert replan.payload["objective_ref"] == "docs/intake/refactor.md"
+    assert replan.payload["source_refs"]["source_ref"] == "docs/intake/refactor.md"
+
+
+def test_replan_recovers_pattern_bridge_input_lineage_and_synth_summary() -> None:
+    rich_trigger = ZfEvent(
+        id="evt-rich-trigger",
+        type="task.fanout.requested",
+        correlation_id="issue-run",
+        payload={
+            "target_ref": "docs/issues/docker.md",
+            "workflow_run_id": "issue-run",
+            "workflow_input_manifest_ref": "artifacts/workflow/input.json",
+            "source_refs": {
+                "acceptance_matrix_ref": "artifacts/workflow/acceptance.json",
+                "test_matrix_ref": "artifacts/workflow/test.json",
+            },
+            "artifact_refs": [{"path": "artifacts/workflow/input.json"}],
+        },
+    )
+    fanout_started = ZfEvent(
+        type="fanout.started",
+        correlation_id="issue-run",
+        payload={
+            "fanout_id": "fanout-issue",
+            "stage_id": "issue-triage",
+            "trace_id": "issue-run",
+            "trigger_event_id": rich_trigger.id,
+        },
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id="issue-run",
+        payload={
+            "fanout_id": "fanout-issue",
+            "target_ref": "docs/issues/docker.md",
+            "summary": "plan ports are missing from the child handoff",
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [rich_trigger, fanout_started, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert (
+        replan.payload["workflow_input_manifest_ref"]
+        == "artifacts/workflow/input.json"
+    )
+    assert replan.payload["source_refs"]["test_matrix_ref"].endswith(
+        "test.json"
+    )
+    assert replan.payload["artifact_refs"] == [
+        {"path": "artifacts/workflow/input.json"}
+    ]
+    assert replan.payload["rework_feedback"] == [{
+        "severity": "high",
+        "message": "plan ports are missing from the child handoff",
+    }]
 
 
 def test_idempotent_per_failure_event() -> None:
@@ -164,6 +338,52 @@ def test_unknown_failure_event_ignored() -> None:
     failure = ZfEvent(type="something.else.failed", payload={})
     replan, note = plan_reader_stage_replan(_config(), [failure], failure)
     assert replan is None and note == "no_reader_stage_for_failure"
+
+
+def test_stage_replan_ignores_failure_from_another_flow_in_same_run() -> None:
+    run_id = "prd-run"
+    flow_marker = ZfEvent(
+        type="task_map.ready",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id, "flow_kind": "prd"},
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        payload={"trace_id": run_id, "reason": "stale issue fanout timed out"},
+    )
+
+    replan, note = plan_reader_stage_replan(
+        _config(),
+        [flow_marker, failure],
+        failure,
+    )
+
+    assert replan is None
+    assert note == "cross_flow_failure"
+
+
+def test_stage_replan_keeps_failure_from_canonical_flow() -> None:
+    run_id = "issue-run"
+    flow_marker = ZfEvent(
+        type="task_map.ready",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id, "flow_kind": "issue"},
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        payload={"trace_id": run_id, "reason": "current issue fanout timed out"},
+    )
+
+    replan, note = plan_reader_stage_replan(
+        _config(),
+        [flow_marker, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert "issue-triage" in note
 
 
 def test_lane_verify_failure_is_not_generic_reader_stage_replan() -> None:

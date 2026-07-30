@@ -11,6 +11,10 @@ spec:
   topology: light
   lanes: 1
   backend: claude-code
+  roleDefaults:
+    # Light flows trade process reuse for low startup latency.
+    lifecycle:
+      mode: eager
   prdRef: docs/prd/TODO.md
   targetRoot: app
   qualityFloor: product-demo
@@ -18,6 +22,7 @@ spec:
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
   semanticSubmitProfiles:
+    implementation: blocking
     thin-judge-goal-closure: blocking
     task-verify: blocking
     candidate-verify: blocking

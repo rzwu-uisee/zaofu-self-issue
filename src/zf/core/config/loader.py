@@ -37,8 +37,19 @@ _VALID_AUTOPILOT_ACTIONS = ("triage",)
 _VALID_OPENCLAW_BINDING_MODES = ("remote_gateway",)
 _VALID_OPENCLAW_WORKSPACE_POLICIES = ("isolated",)
 _VALID_OPENCLAW_TOOL_PROFILES = ("safe", "readonly", "reviewer", "coding")
-_VALID_WORKFLOW_ROUTE_KINDS = ("issue", "prd", "refactor", "feat")
-_VALID_WORKFLOW_ROUTE_ALIAS_TARGETS = ("issue", "prd", "refactor")
+_VALID_WORKFLOW_ROUTE_KINDS = (
+    "issue",
+    "prd",
+    "refactor",
+    "feat",
+    "workflow",
+)
+_VALID_WORKFLOW_ROUTE_ALIAS_TARGETS = (
+    "issue",
+    "prd",
+    "refactor",
+    "workflow",
+)
 _VALID_WORKFLOW_TIERS = ("micro", "light", "standard", "full")
 _DESIGN_ROLE_NAMES = frozenset({"arch", "critic"})
 _DESIGN_STAGE_NAMES = frozenset({"design", "design_critique"})
@@ -74,8 +85,12 @@ from zf.core.config.schema import (  # noqa: E402
     LoopConfig,
     ConstraintsConfig,
     ExecutionConfig,
+    ProviderSessionConfig,
+    ExecutionProfileConfig,
+    ExecutionProfileLimitsConfig,
     RoleConfig,
     RoleAutoscaleConfig,
+    RoleLifecycleConfig,
     WakeExtensionConfig,
     WakeExtensionsConfig,
     WorkflowConfig,
@@ -84,6 +99,8 @@ from zf.core.config.schema import (  # noqa: E402
     WorkflowWorkUnitsConfig,
     WorkflowSplitQualityConfig,
     WorkflowAdmissionReplanConfig,
+    WorkflowRunAdmissionConfig,
+    WorkflowTaskAttemptConfig,
     WorkflowCompletionAuditConfig,
     WorkflowResumePacketConfig,
     WorkflowIntegrationConfig,
@@ -132,6 +149,7 @@ from zf.core.config.schema import (  # noqa: E402
     WorkflowInlineOverrides,
     WorkflowStageBackedgeConfig,
     WorkflowStageConfig,
+    WorkflowPortConfig,
     WorkflowStageCriteriaConfig,
     WorkflowStageOutputConfig,
     WorkflowStageRetryPolicyConfig,
@@ -271,14 +289,18 @@ _KNOWN_WORKFLOW_KEYS = frozenset({
     "inline_overrides", "work_units", "completion_audit", "resume_packet",
     "integration", "strict_triggers", "fast_path", "replan_eval",
     "pipelines", "admission_replan", "plan_approval", "_flow_metadata",
-    "_flow_metadata_by_kind",
+    "run_admission",
+    "task_attempt",
+    "_flow_metadata_by_kind", "_generic_workflows",
     "kind_routes",
+    "execution_profiles",
     "allow_unverified_candidate",  # ⑤c 合并候选树门显式豁免(2026-07-08)
     "candidate_quality_source",
     "impl_self_check_required",
 })
 _KNOWN_ROLE_KEYS = frozenset({
-    "name", "backend", "backends", "role_kind", "model", "allowed_tools",
+    "name", "backend", "backends", "role_kind", "flow_kind", "model",
+    "model_reasoning_effort", "allowed_tools",
     "permission_mode", "transport", "stuck_threshold_seconds", "instance_id",
     "replicas", "context_window_tokens", "context_warning_threshold",
     "context_compact_threshold", "context_hard_cap", "recycle_threshold",
@@ -286,7 +308,14 @@ _KNOWN_ROLE_KEYS = frozenset({
     "orphan_escalate_seconds", "drain_hold_seconds",
     "spawn_ready_timeout_seconds", "budget_usd", "autoscale", "constraints",
     "execution", "stages", "triggers", "publishes", "guardrails", "plugins", "skills",
-    "agent",
+    "agent", "provider_session", "lifecycle",
+})
+_KNOWN_PROVIDER_SESSION_KEYS = frozenset({
+    "effort", "agent", "max_parallel_agents",
+})
+_KNOWN_ROLE_LIFECYCLE_KEYS = frozenset({
+    "mode", "idle_seconds", "cooldown_seconds",
+    "preserve_session", "preserve_workdir",
 })
 
 
@@ -371,6 +400,86 @@ def _build_role_autoscale(data: object, *, role_name: str) -> RoleAutoscaleConfi
         )
     except ValueError as exc:
         raise ConfigError(f"role {role_name!r}: invalid autoscale: {exc}") from exc
+
+
+def _build_provider_session(
+    data: object,
+    *,
+    role_name: str,
+) -> ProviderSessionConfig | None:
+    if data in (None, ""):
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"role {role_name!r}: provider_session must be a mapping")
+    _reject_unknown_keys(
+        data,
+        _KNOWN_PROVIDER_SESSION_KEYS,
+        f"role {role_name!r}.provider_session",
+    )
+    if not data:
+        return None
+    effort = data.get("effort", "")
+    agent = data.get("agent", "")
+    if effort is not None and not isinstance(effort, str):
+        raise ConfigError(
+            f"role {role_name!r}: provider_session.effort must be a string"
+        )
+    if agent is not None and not isinstance(agent, str):
+        raise ConfigError(
+            f"role {role_name!r}: provider_session.agent must be a string"
+        )
+    parallel = data.get("max_parallel_agents")
+    if isinstance(parallel, bool) or (
+        parallel is not None and not isinstance(parallel, int)
+    ):
+        raise ConfigError(
+            f"role {role_name!r}: provider_session.max_parallel_agents "
+            "must be an integer"
+        )
+    try:
+        return ProviderSessionConfig(
+            effort=str(effort or "").strip(),
+            agent=str(agent or "").strip(),
+            max_parallel_agents=parallel,
+        )
+    except ValueError as exc:
+        raise ConfigError(
+            f"role {role_name!r}: invalid provider_session: {exc}"
+        ) from exc
+
+
+def _build_role_lifecycle(
+    data: object,
+    *,
+    role_name: str,
+) -> RoleLifecycleConfig:
+    if data in (None, ""):
+        return RoleLifecycleConfig()
+    if not isinstance(data, dict):
+        raise ConfigError(f"role {role_name!r}: lifecycle must be a mapping")
+    _reject_unknown_keys(
+        data,
+        _KNOWN_ROLE_LIFECYCLE_KEYS,
+        f"role {role_name!r}.lifecycle",
+    )
+    try:
+        return RoleLifecycleConfig(
+            mode=str(data.get("mode", "eager") or "eager").strip(),
+            idle_seconds=float(data.get("idle_seconds", 900.0)),
+            cooldown_seconds=float(data.get("cooldown_seconds", 180.0)),
+            preserve_session=_bool_value(
+                data.get("preserve_session"),
+                default=True,
+            ),
+            preserve_workdir=_bool_value(
+                data.get("preserve_workdir"),
+                default=True,
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"role {role_name!r}: invalid lifecycle: {exc}"
+        ) from exc
 
 
 def _build_session(data: dict | None) -> SessionConfig:
@@ -499,6 +608,64 @@ def _build_admission_replan(data) -> WorkflowAdmissionReplanConfig:
     )
 
 
+def _build_run_admission(data: object) -> WorkflowRunAdmissionConfig:
+    """Parse the versioned Project Run admission policy."""
+
+    if data in (None, ""):
+        return WorkflowRunAdmissionConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("workflow.run_admission must be a mapping")
+    known = {"version", "mode", "max_active_runs"}
+    unknown = sorted(str(key) for key in data if str(key) not in known)
+    if unknown:
+        raise ConfigError(
+            "workflow.run_admission contains unknown key(s): "
+            + ", ".join(unknown)
+        )
+    mode = str(data.get("mode") or "serial").strip().lower()
+    default_limit = 1 if mode == "serial" else 2
+    try:
+        return WorkflowRunAdmissionConfig(
+            version=str(data.get("version") or "v1").strip().lower(),
+            mode=mode,
+            max_active_runs=int(
+                data.get("max_active_runs")
+                if data.get("max_active_runs") is not None
+                else default_limit
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid workflow.run_admission: {exc}") from exc
+
+
+def _build_task_attempt(data: object) -> WorkflowTaskAttemptConfig:
+    """Parse scheduler-owned TaskAttempt rollout policy."""
+
+    if data in (None, ""):
+        return WorkflowTaskAttemptConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("workflow.task_attempt must be a mapping")
+    known = {"version", "mode", "max_attempts"}
+    unknown = sorted(str(key) for key in data if str(key) not in known)
+    if unknown:
+        raise ConfigError(
+            "workflow.task_attempt contains unknown key(s): "
+            + ", ".join(unknown)
+        )
+    try:
+        return WorkflowTaskAttemptConfig(
+            version=str(data.get("version") or "v1").strip().lower(),
+            mode=str(data.get("mode") or "shadow").strip().lower(),
+            max_attempts=int(
+                data.get("max_attempts")
+                if data.get("max_attempts") is not None
+                else 3
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid workflow.task_attempt: {exc}") from exc
+
+
 def _build_workflow_kind_routes(
     data: object,
     *,
@@ -594,10 +761,10 @@ def _build_flow_metadata_by_kind(data: object) -> dict[str, dict]:
     result: dict[str, dict] = {}
     for raw_kind, raw_metadata in data.items():
         kind = str(raw_kind or "").strip().lower()
-        if kind not in {"issue", "prd", "refactor"}:
+        if kind not in {"issue", "prd", "refactor", "workflow"}:
             raise ConfigError(
-                "workflow._flow_metadata_by_kind keys must be issue, prd, or "
-                f"refactor; got {kind!r}"
+                "workflow._flow_metadata_by_kind keys must be issue, prd, "
+                f"refactor, or workflow; got {kind!r}"
             )
         if not isinstance(raw_metadata, dict):
             raise ConfigError(
@@ -847,6 +1014,94 @@ def _affinity_stage_slot_roles(
     return roles
 
 
+def _build_workflow_ports(
+    data: object,
+    *,
+    stage_index: int,
+    field_name: str,
+) -> list[WorkflowPortConfig]:
+    if data in (None, ""):
+        return []
+    if not isinstance(data, list):
+        raise ConfigError(
+            f"workflow.stages[{stage_index}].{field_name} must be a list"
+        )
+    ports: list[WorkflowPortConfig] = []
+    names: set[str] = set()
+    for port_index, raw in enumerate(data):
+        if not isinstance(raw, dict):
+            raise ConfigError(
+                f"workflow.stages[{stage_index}].{field_name}"
+                f"[{port_index}] must be a mapping"
+            )
+        name = str(raw.get("name") or "").strip()
+        kind = str(raw.get("kind") or "").strip()
+        if not name or not kind:
+            raise ConfigError(
+                f"workflow.stages[{stage_index}].{field_name}"
+                f"[{port_index}] requires name and kind"
+            )
+        if name in names:
+            raise ConfigError(
+                f"workflow.stages[{stage_index}].{field_name} has duplicate "
+                f"port {name!r}"
+            )
+        names.add(name)
+        ports.append(WorkflowPortConfig(
+            name=name,
+            kind=kind,
+            source=str(raw.get("source") or "").strip(),
+            required=bool(raw.get("required", True)),
+        ))
+    return ports
+
+
+def _build_workflow_string_list(
+    data: object,
+    *,
+    stage_index: int,
+    field_name: str,
+) -> list[str]:
+    if data in (None, ""):
+        return []
+    if not isinstance(data, list):
+        raise ConfigError(
+            f"workflow.stages[{stage_index}].{field_name} must be a list"
+        )
+    values = [str(item).strip() for item in data]
+    if any(not item for item in values):
+        raise ConfigError(
+            f"workflow.stages[{stage_index}].{field_name} cannot contain "
+            "empty values"
+        )
+    if len(values) != len(set(values)):
+        raise ConfigError(
+            f"workflow.stages[{stage_index}].{field_name} contains duplicates"
+        )
+    return values
+
+
+def _build_generic_workflows(data: object) -> list[dict]:
+    # Internal YAML `_generic_workflows` maps to WorkflowConfig
+    # `"generic_workflows"`; it is compiler output, not a second user DSL.
+    if data in (None, ""):
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("workflow._generic_workflows must be a list")
+    contracts: list[dict] = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"workflow._generic_workflows[{index}] must be a mapping"
+            )
+        contracts.append(dict(item))
+    if len(contracts) > 1:
+        raise ConfigError(
+            "workflow._generic_workflows supports one effective contract"
+        )
+    return contracts
+
+
 def _build_workflow_stages(
     data: object,
     roles: list[RoleConfig],
@@ -869,10 +1124,15 @@ def _build_workflow_stages(
             raise ConfigError(f"workflow.stages[{i}].id is required")
         if not trigger:
             raise ConfigError(f"workflow.stages[{i}].trigger is required")
-        if flow_kind and flow_kind not in {"issue", "prd", "refactor"}:
+        if flow_kind and flow_kind not in {
+            "issue",
+            "prd",
+            "refactor",
+            "workflow",
+        }:
             raise ConfigError(
-                f"workflow.stages[{i}].flow_kind must be issue, prd, or "
-                f"refactor; got {flow_kind!r}"
+                f"workflow.stages[{i}].flow_kind must be issue, prd, "
+                f"refactor, or workflow; got {flow_kind!r}"
             )
         if topology not in _VALID_STAR_TOPOLOGIES:
             raise ConfigError(
@@ -953,6 +1213,38 @@ def _build_workflow_stages(
             trigger=trigger,
             flow_kind=flow_kind,
             topology=topology,
+            operation=str(raw_stage.get("operation") or ""),
+            input_ports=_build_workflow_ports(
+                raw_stage.get("input_ports"),
+                stage_index=i,
+                field_name="input_ports",
+            ),
+            output_ports=_build_workflow_ports(
+                raw_stage.get("output_ports"),
+                stage_index=i,
+                field_name="output_ports",
+            ),
+            dependencies=_build_workflow_string_list(
+                raw_stage.get("dependencies"),
+                stage_index=i,
+                field_name="dependencies",
+            ),
+            dependency_events=_build_workflow_string_list(
+                raw_stage.get("dependency_events"),
+                stage_index=i,
+                field_name="dependency_events",
+            ),
+            dependency_failure_events=_build_workflow_string_list(
+                raw_stage.get("dependency_failure_events"),
+                stage_index=i,
+                field_name="dependency_failure_events",
+            ),
+            dependency_barrier_id=str(
+                raw_stage.get("dependency_barrier_id") or ""
+            ),
+            dependency_barrier_digest=str(
+                raw_stage.get("dependency_barrier_digest") or ""
+            ),
             roles=role_targets,
             target_ref=target_ref,
             task_map=task_map,
@@ -1450,6 +1742,12 @@ def _build_role(data: dict) -> RoleConfig:
             f"Invalid role_kind {role_kind!r} for role {name!r}: "
             f"must be one of {_VALID_ROLE_KINDS}"
         )
+    flow_kind = str(data.get("flow_kind") or "").strip().lower()
+    if flow_kind not in {"", "issue", "prd", "refactor", "workflow"}:
+        raise ConfigError(
+            f"Invalid flow_kind {flow_kind!r} for role {name!r}: "
+            "must be one of '', issue, prd, refactor, workflow"
+        )
     # B-MIXEDBACKEND-01 (2026-04-23): per-replica backends list. Mutually
     # exclusive with singular `backend` when both are set explicitly.
     backends_raw = data.get("backends")
@@ -1494,7 +1792,28 @@ def _build_role(data: dict) -> RoleConfig:
             f"must be one of {_VALID_TRANSPORTS}"
         )
     execution_data = data.get("execution")
-    execution = ExecutionConfig(command=execution_data.get("command", "")) if execution_data else ExecutionConfig()
+    if execution_data is not None and not isinstance(execution_data, dict):
+        raise ConfigError(f"role {name!r}: execution must be a mapping")
+    execution_data = execution_data or {}
+    _reject_unknown_keys(
+        execution_data,
+        frozenset({"command", "default_profile", "profile_allowlist"}),
+        f"role {name!r}.execution",
+    )
+    try:
+        execution = ExecutionConfig(
+            command=str(execution_data.get("command", "") or ""),
+            default_profile=str(
+                execution_data.get("default_profile", "direct-v1")
+                or "direct-v1"
+            ),
+            profile_allowlist=_string_list(
+                execution_data.get("profile_allowlist"),
+                default=["direct-v1"],
+            ),
+        )
+    except ConfigError as exc:
+        raise ConfigError(f"role {name!r}.execution: {exc}") from exc
     replicas = int(data.get("replicas", 1))
     if replicas < 1:
         raise ConfigError(
@@ -1522,6 +1841,29 @@ def _build_role(data: dict) -> RoleConfig:
     plugins = list(data.get("plugins", []) or [])
     skills = list(data.get("skills", []) or [])
     agent = str(data.get("agent", "") or "")
+    provider_session = _build_provider_session(
+        data.get("provider_session"),
+        role_name=name,
+    )
+    lifecycle = _build_role_lifecycle(
+        data.get("lifecycle"),
+        role_name=name,
+    )
+    if name == "orchestrator" and lifecycle.mode == "on_demand":
+        raise ConfigError(
+            "role 'orchestrator': lifecycle.mode=on_demand is invalid; "
+            "control-plane roles must remain resident"
+        )
+    if (
+        provider_session is not None
+        and provider_session.agent
+        and agent
+        and provider_session.agent != agent
+    ):
+        raise ConfigError(
+            f"role {name!r}: role.agent and provider_session.agent conflict; "
+            "declare one agent identity"
+        )
     # P-Y3: codex backend doesn't support plugins / agent (it has no
     # equivalent CLI flag). skills *can* still be referenced in the
     # role's instructions, but plugin/agent fields are silently dropped
@@ -1551,8 +1893,10 @@ def _build_role(data: dict) -> RoleConfig:
         name=name,
         backend=backend,
         role_kind=role_kind,
+        flow_kind=flow_kind,
         backends=backends_list,
         model=data.get("model", ""),
+        model_reasoning_effort=data.get("model_reasoning_effort", ""),
         allowed_tools=data.get("allowed_tools", []),
         permission_mode=permission_mode,
         transport=transport,
@@ -1597,6 +1941,8 @@ def _build_role(data: dict) -> RoleConfig:
         budget_usd=(
             float(data["budget_usd"]) if data.get("budget_usd") is not None else None
         ),
+        provider_session=provider_session,
+        lifecycle=lifecycle,
         autoscale=autoscale,
         constraints=_build_constraints(data.get("constraints")),
         execution=execution,
@@ -1608,6 +1954,141 @@ def _build_role(data: dict) -> RoleConfig:
         skills=skills,
         agent=agent,
     )
+
+
+def _build_execution_profiles(
+    data: object,
+) -> dict[str, ExecutionProfileConfig]:
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError("workflow.execution_profiles must be a mapping")
+    profiles: dict[str, ExecutionProfileConfig] = {}
+    profile_name_re = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+    profile_keys = frozenset({
+        "schema_version",
+        "strategy",
+        "continuation",
+        "collaboration",
+        "access",
+        "capability_policy",
+        "limits",
+    })
+    limit_keys = frozenset({
+        "max_children",
+        "max_depth",
+        "timeout_seconds",
+        "token_budget",
+        "cost_budget_usd",
+    })
+    for raw_name, raw_profile in data.items():
+        name = str(raw_name or "").strip()
+        if not profile_name_re.fullmatch(name):
+            raise ConfigError(
+                "workflow.execution_profiles keys must start with a lowercase "
+                "letter and contain only lowercase letters, digits, _ or -"
+            )
+        if not isinstance(raw_profile, dict):
+            raise ConfigError(
+                f"workflow.execution_profiles.{name} must be a mapping"
+            )
+        _reject_unknown_keys(
+            raw_profile,
+            profile_keys,
+            f"workflow.execution_profiles.{name}",
+        )
+        raw_limits = raw_profile.get("limits") or {}
+        if not isinstance(raw_limits, dict):
+            raise ConfigError(
+                f"workflow.execution_profiles.{name}.limits must be a mapping"
+            )
+        _reject_unknown_keys(
+            raw_limits,
+            limit_keys,
+            f"workflow.execution_profiles.{name}.limits",
+        )
+        try:
+            limits = ExecutionProfileLimitsConfig(
+                max_children=int(raw_limits.get("max_children", 0) or 0),
+                max_depth=int(raw_limits.get("max_depth", 0) or 0),
+                timeout_seconds=float(
+                    raw_limits.get("timeout_seconds", 0.0) or 0.0
+                ),
+                token_budget=int(raw_limits.get("token_budget", 0) or 0),
+                cost_budget_usd=float(
+                    raw_limits.get("cost_budget_usd", 0.0) or 0.0
+                ),
+            )
+            profile = ExecutionProfileConfig(
+                schema_version=str(
+                    raw_profile.get(
+                        "schema_version",
+                        "execution-profile.v1",
+                    )
+                    or "execution-profile.v1"
+                ),
+                strategy=str(raw_profile.get("strategy", "direct") or "direct"),
+                continuation=str(
+                    raw_profile.get("continuation", "turn") or "turn"
+                ),
+                collaboration=str(
+                    raw_profile.get("collaboration", "single") or "single"
+                ),
+                access=str(
+                    raw_profile.get("access", "read_only") or "read_only"
+                ),
+                capability_policy=str(
+                    raw_profile.get("capability_policy", "require")
+                    or "require"
+                ),
+                limits=limits,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"Invalid workflow.execution_profiles.{name}: {exc}"
+            ) from exc
+        if name == "direct-v1" and profile != ExecutionProfileConfig():
+            raise ConfigError(
+                "workflow.execution_profiles.direct-v1 is reserved for the "
+                "canonical direct/turn/single profile"
+            )
+        profiles[name] = profile
+    return profiles
+
+
+def _validate_role_execution_profiles(
+    roles: list[RoleConfig],
+    profiles: dict[str, ExecutionProfileConfig],
+) -> None:
+    available = {"direct-v1", *profiles}
+    for role in roles:
+        execution = role.execution
+        default_profile = str(execution.default_profile or "").strip()
+        allowlist = [
+            str(item or "").strip()
+            for item in execution.profile_allowlist
+            if str(item or "").strip()
+        ]
+        if not default_profile:
+            raise ConfigError(
+                f"role {role.name!r}.execution.default_profile is required"
+            )
+        if default_profile not in available:
+            raise ConfigError(
+                f"role {role.name!r}.execution.default_profile references "
+                f"unknown profile {default_profile!r}"
+            )
+        unknown = sorted(set(allowlist) - available)
+        if unknown:
+            raise ConfigError(
+                f"role {role.name!r}.execution.profile_allowlist references "
+                f"unknown profile(s): {', '.join(unknown)}"
+            )
+        if default_profile not in allowlist:
+            raise ConfigError(
+                f"role {role.name!r}.execution.default_profile must be in "
+                "profile_allowlist"
+            )
 
 
 def _build_workflow_pipelines(data: object) -> list:
@@ -1984,6 +2465,10 @@ def load_config(path: Path) -> ZfConfig:
         workflow_data.get("kind_routes"),
         stage_ids={stage.id for stage in workflow_stages if stage.id},
     )
+    execution_profiles = _build_execution_profiles(
+        workflow_data.get("execution_profiles"),
+    )
+    _validate_role_execution_profiles(roles, execution_profiles)
     _validate_stage_criteria_config_refs(
         config_path=path,
         stages=workflow_stages,
@@ -2049,11 +2534,21 @@ def load_config(path: Path) -> ZfConfig:
             ),
             rework_routing=rework_routing,
             kind_routes=workflow_kind_routes,
+            execution_profiles=execution_profiles,
             # R28 (doc 93 §1/§5): admission/W1 机械拒 → 自动回 synth。缺省关。
             admission_replan=_build_admission_replan(
                 workflow_data.get("admission_replan")
             ),
+            run_admission=_build_run_admission(
+                workflow_data.get("run_admission")
+            ),
+            task_attempt=_build_task_attempt(
+                workflow_data.get("task_attempt")
+            ),
             stages=workflow_stages,
+            generic_workflows=_build_generic_workflows(
+                workflow_data.get("_generic_workflows")
+            ),
             affinity_lanes=affinity_lanes,
             wake_extensions=_build_wake_extensions(
                 workflow_data.get("wake_extensions")
@@ -2234,6 +2729,36 @@ def load_config(path: Path) -> ZfConfig:
                 cfg.workflow.pipelines_schema_sources = sources
         if scoped_schemas:
             cfg.workflow.dag.event_schemas_by_kind = scoped_schemas
+    if cfg.workflow.generic_workflows:
+        from zf.core.config.schema_profiles import (
+            SchemaProfileError,
+            merge_event_schemas,
+        )
+
+        try:
+            effective, sources, schema_diags = merge_event_schemas(
+                profile_name="generic-workflow/v1",
+                spec_overrides=None,
+                local_schemas=declared_event_schemas,
+                harness_profile=cfg.workflow.harness_profile,
+                extra_profiles=_envelope_profiles,
+            )
+        except SchemaProfileError as exc:
+            raise ConfigError(str(exc))
+        errors = [d for d in schema_diags if d["severity"] == "ERROR"]
+        if errors:
+            raise ConfigError("; ".join(d["message"] for d in errors))
+        for diagnostic in schema_diags:
+            if diagnostic["severity"] == "WARN":
+                print(f"Warning: {diagnostic['message']}", file=sys.stderr)
+        if cfg.workflow.pipelines:
+            cfg.workflow.dag.event_schemas_by_kind = {
+                **cfg.workflow.dag.event_schemas_by_kind,
+                "workflow": effective,
+            }
+        else:
+            cfg.workflow.dag.event_schemas = effective
+        cfg.workflow.pipelines_schema_sources.update(sources)
     # W2(2026-06-11):runtime 路径默认从 project.state_dir 派生。
     # schema 默认值硬编码 .zf(v3 sim 实测撞 PathGuard 的根因家族);
     # 默认值即派生,显式非默认配置保留。"显式写 .zf/* 但 state_dir
@@ -2735,6 +3260,10 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
                 enabled=resident_enabled,
                 transport=resident_transport,
                 instance_id=resident_instance_id,
+                model=str(resident_raw.get("model", "") or "").strip(),
+                model_reasoning_effort=str(
+                    resident_raw.get("model_reasoning_effort", "") or ""
+                ).strip(),
                 prompt_on_start=_bool_value(
                     resident_raw.get("prompt_on_start"),
                     default=True,

@@ -481,6 +481,29 @@ def validate_shared_action_payload(
     if action == "workflow-submit":
         if not (_required_text(payload, "intake_ref") or _required_text(payload, "intake")):
             return "intake_ref is required"
+        if not _required_text(payload, "request_id"):
+            return "request_id is required"
+        if not isinstance(payload.get("proposal_ref"), dict):
+            return "proposal_ref is required"
+        if not _required_text(payload, "proposal_digest"):
+            return "proposal_digest is required"
+    if action == "workflow-cancel":
+        for key in ("request_id", "operation_id", "request_hash"):
+            if not _required_text(payload, key):
+                return f"{key} is required"
+    if action in {"run-pause", "run-resume", "run-cancel"}:
+        if not (
+            _required_text(payload, "run_id")
+            or _required_text(payload, "workflow_run_id")
+        ):
+            return "run_id is required"
+    if action == "workflow-reject":
+        if not _required_text(payload, "request_id"):
+            return "request_id is required"
+        if not isinstance(payload.get("proposal_ref"), dict):
+            return "proposal_ref is required"
+        if not _required_text(payload, "proposal_digest"):
+            return "proposal_digest is required"
     if action == "workflow-invoke":
         if not _required_text(payload, "task_id"):
             return "task_id is required"
@@ -622,9 +645,15 @@ def validate_shared_action_payload(
         ):
             return "proposal_id or patch_ref is required"
     if action == "workflow-config-apply":
-        if not _required_text(payload, "patch_ref"):
-            return "patch_ref is required"
-        if not _required_text(payload, "validation_result_ref"):
+        if not (
+            _required_text(payload, "patch_ref")
+            or isinstance(payload.get("proposal_ref"), dict)
+        ):
+            return "patch_ref or proposal_ref is required"
+        if not (
+            _required_text(payload, "validation_result_ref")
+            or isinstance(payload.get("validation_result_ref"), dict)
+        ):
             return "validation_result_ref is required"
         if not _approval_ref(payload):
             return "owner approval is required"

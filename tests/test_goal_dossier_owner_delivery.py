@@ -42,8 +42,63 @@ def _state(tmp_path: Path) -> tuple[Path, EventLog, EventWriter]:
     return state_dir, log, EventWriter(log)
 
 
-def _completion_events() -> list[ZfEvent]:
-    return [
+def _completion_events(
+    state_dir: Path,
+    *,
+    with_sources: bool = True,
+) -> list[ZfEvent]:
+    task_map_ref: dict = {}
+    claim_set_ref: dict = {}
+    if with_sources:
+        task_map = {
+            "schema_version": "task-map.v1",
+            "workflow_run_id": RUN_ID,
+            "goal_id": GOAL_ID,
+            "task_map_generation": "generation-2",
+            "goal_claims": [{
+                "goal_claim_id": "CLAIM-OWNER",
+                "text": "Owner can inspect the completed delivery.",
+                "mandatory": True,
+            }],
+            "tasks": [{
+                "task_id": "TASK-1",
+                "title": "Implement owner delivery",
+                "goal_claim_ids": ["CLAIM-OWNER"],
+            }],
+        }
+        task_map_ref = write_sidecar_json(
+            state_dir,
+            "artifacts/plan/task-map.json",
+            task_map,
+            kind="task_map",
+            schema_version="task-map.v1",
+            created_by="test",
+            required=True,
+        )
+        claim_set = build_goal_claim_set(
+            task_map,
+            workflow_run_id=RUN_ID,
+            goal_id=GOAL_ID,
+            task_map_generation="generation-2",
+        )
+        claim_set_ref = write_sidecar_json(
+            state_dir,
+            "artifacts/claims.json",
+            claim_set,
+            kind="goal_claim_set",
+            schema_version="goal-claim-set.v1",
+            created_by="test",
+            required=True,
+        )
+    task_map_path = str(
+        task_map_ref.get("ref") or "artifacts/plan/task-map.json"
+    )
+    task_map_digest = str(task_map_ref.get("sha256") or "e" * 64)
+    claim_set_path = str(
+        claim_set_ref.get("ref") or "artifacts/claims.json"
+    )
+    claim_set_digest = str(claim_set_ref.get("sha256") or "c" * 64)
+    events = [
         ZfEvent(
             id="evt-start",
             type="run.goal.started",
@@ -62,6 +117,20 @@ def _completion_events() -> list[ZfEvent]:
             payload={
                 "workflow_run_id": RUN_ID,
                 "evidence_refs": ["artifacts/impl/result.json"],
+                "task_map_ref": task_map_path,
+                "task_map_digest": task_map_digest,
+            },
+        ),
+        ZfEvent(
+            id="evt-claim-set",
+            type="goal.claim_set.pinned",
+            correlation_id=RUN_ID,
+            payload={
+                "workflow_run_id": RUN_ID,
+                "goal_id": GOAL_ID,
+                "task_map_generation": "generation-2",
+                "goal_claim_set_ref": claim_set_path,
+                "goal_claim_set_digest": claim_set_digest,
             },
         ),
         ZfEvent(
@@ -74,6 +143,37 @@ def _completion_events() -> list[ZfEvent]:
                 "admitted_call_result_ref": {
                     "ref": "artifacts/closure/result.json",
                     "sha256": "d" * 64,
+                },
+                "task_map_ref": task_map_path,
+                "task_map_digest": task_map_digest,
+                "goal_closure_result": {
+                    "schema_version": "goal-closure-result.v1",
+                    "workflow_run_id": RUN_ID,
+                    "goal_id": GOAL_ID,
+                    "flow_kind": "issue",
+                    "task_map_generation": "generation-2",
+                    "target_commit": TARGET,
+                    "objective_ref": "objective:owner-delivery",
+                    "goal_claim_set_ref": claim_set_path,
+                    "goal_claim_set_digest": claim_set_digest,
+                    "planning_result_ref": task_map_path,
+                    "candidate_ref": f"candidate/{GOAL_ID}",
+                    "closure_fact_ref": "artifacts/closure/fact.json",
+                    "closure_fact_digest": "f" * 64,
+                    "verdict": "passed",
+                    "summary": "all mandatory claims are closed",
+                    "goal_coverage": [{
+                        "goal_claim_id": "CLAIM-OWNER",
+                        "status": "closed",
+                        "supporting_result_refs": [
+                            "artifacts/verify/result.json",
+                        ],
+                    }],
+                    "input_result_refs": [
+                        "artifacts/verify/result.json",
+                    ],
+                    "open_gap_refs": [],
+                    "recommended_action": "complete",
                 },
             },
         ),
@@ -140,11 +240,12 @@ def _completion_events() -> list[ZfEvent]:
                 "candidate_base_commit": "0" * 40,
                 "candidate_head_commit": TARGET,
                 "completed_task_ids": ["TASK-1"],
-                "task_map_ref": "artifacts/plan/task-map.json",
+                "task_map_ref": task_map_path,
+                "task_map_digest": task_map_digest,
                 "source_index_ref": "artifacts/impl/source-index.json",
                 "diff_ref": "artifacts/impl/diff.patch",
-                "goal_claim_set_ref": "artifacts/claims.json",
-                "goal_claim_set_digest": "c" * 64,
+                "goal_claim_set_ref": claim_set_path,
+                "goal_claim_set_digest": claim_set_digest,
                 "admitted_call_result_ref": {
                     "ref": "artifacts/closure/result.json",
                     "sha256": "d" * 64,
@@ -155,13 +256,19 @@ def _completion_events() -> list[ZfEvent]:
             },
         ),
     ]
+    if not with_sources:
+        events = [event for event in events if event.id != "evt-claim-set"]
+        next(
+            event for event in events if event.id == "evt-closure"
+        ).payload.pop("goal_closure_result", None)
+    return events
 
 
 def test_completed_terminal_materializes_receipt_and_owner_request_once(
     tmp_path: Path,
 ) -> None:
     state_dir, log, writer = _state(tmp_path)
-    for event in _completion_events():
+    for event in _completion_events(state_dir):
         log.append(event)
 
     first = materialize_terminal_goal_deliveries(
@@ -204,6 +311,7 @@ def test_completed_terminal_materializes_receipt_and_owner_request_once(
     materialized = json.loads((
         projection_dir / "goal-dossier.v1.json"
     ).read_text(encoding="utf-8"))
+    assert materialized["delivery_readiness"]["status"] == "ready"
     rebuilt = build_goal_dossier(state_dir, RUN_ID)
     assert rebuilt["source_fingerprint"] == materialized["source_fingerprint"]
     assert rebuilt["freshness"]["last_event_id"] == "evt-completed"
@@ -216,7 +324,7 @@ def test_inconsistent_completed_dossier_suppresses_owner_until_rebuilt(
     from zf.runtime import goal_dossier_delivery as delivery
 
     state_dir, log, writer = _state(tmp_path)
-    for event in _completion_events():
+    for event in _completion_events(state_dir):
         log.append(event)
     original = delivery.build_goal_dossier
 
@@ -309,7 +417,7 @@ def test_blocked_then_completed_terminals_are_each_materialized_once(
     tmp_path: Path,
 ) -> None:
     state_dir, log, writer = _state(tmp_path)
-    events = _completion_events()
+    events = _completion_events(state_dir)
     events.insert(-1, ZfEvent(
         id="evt-blocked-before-completion",
         type="run.goal.blocked",
@@ -365,7 +473,7 @@ def test_terminal_dossier_history_is_stable_when_current_task_store_drifts(
     tmp_path: Path,
 ) -> None:
     state_dir, log, _writer = _state(tmp_path)
-    events = _completion_events()
+    events = _completion_events(state_dir)
     for event in events:
         log.append(event)
 
@@ -440,7 +548,7 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
             "source_refs": {},
         },
     )
-    events = _completion_events()
+    events = _completion_events(state_dir, with_sources=False)
     events[1].payload.update({
         "task_map_ref": task_map_ref["ref"],
         "task_map_digest": task_map_ref["sha256"],
@@ -529,10 +637,26 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         required=True,
     )
     claim_set = build_goal_claim_set(
-        task_map,
+        {
+            "tasks": [{
+                "task_id": "TASK-1",
+                "acceptance_criteria": [
+                    "CLAIM-PINNED: Preserve the accepted historical claim.",
+                ],
+            }],
+        },
         workflow_run_id=RUN_ID,
         goal_id=GOAL_ID,
         task_map_generation="generation-2",
+    )
+    claim_set_ref = write_sidecar_json(
+        state_dir,
+        "artifacts/goal-closure/claims.json",
+        claim_set,
+        kind="goal_claim_set",
+        schema_version="goal-claim-set.v1",
+        created_by="test",
+        required=True,
     )
     closure_result = {
         "schema_version": "goal-closure-result.v1",
@@ -542,8 +666,8 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         "task_map_generation": "generation-2",
         "target_commit": TARGET,
         "objective_ref": "objective:owner-delivery",
-        "goal_claim_set_ref": "artifacts/claims.json",
-        "goal_claim_set_digest": claim_set["claim_set_digest"],
+        "goal_claim_set_ref": claim_set_ref["ref"],
+        "goal_claim_set_digest": claim_set_ref["sha256"],
         "planning_result_ref": task_map_ref["ref"],
         "candidate_ref": f"candidate/{GOAL_ID}",
         "closure_fact_ref": "artifacts/closure/fact.json",
@@ -551,7 +675,7 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         "verdict": "passed",
         "summary": "all mandatory claims are closed",
         "goal_coverage": [{
-            "goal_claim_id": "CLAIM-1",
+            "goal_claim_id": "CLAIM-PINNED",
             "status": "closed",
             "supporting_result_refs": ["artifacts/verify/result.json"],
         }],
@@ -559,7 +683,7 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         "open_gap_refs": [],
         "recommended_action": "complete",
     }
-    events = _completion_events()
+    events = _completion_events(state_dir, with_sources=False)
     events[2].payload.update({
         "goal_closure_result": closure_result,
         "task_map_ref": task_map_ref["ref"],
@@ -569,12 +693,27 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         "task_map_ref": task_map_ref["ref"],
         "task_map_digest": task_map_ref["sha256"],
     })
+    events.insert(2, ZfEvent(
+        id="evt-claim-set",
+        type="goal.claim_set.pinned",
+        correlation_id=RUN_ID,
+        payload={
+            "workflow_run_id": RUN_ID,
+            "goal_id": GOAL_ID,
+            "task_map_generation": "generation-2",
+            "goal_claim_set_ref": claim_set_ref["ref"],
+            "goal_claim_set_digest": claim_set_ref["sha256"],
+        },
+    ))
     for event in events:
         log.append(event)
 
     dossier = build_goal_dossier(state_dir, RUN_ID, events=events)
 
     assert dossier["claim_to_evidence"]["summary"]["closed_claims"] == 1
+    assert dossier["claim_to_evidence"]["rows"][0]["goal_claim_id"] == (
+        "CLAIM-PINNED"
+    )
     assert dossier["claim_to_evidence"]["rows"][0]["verdict"] == "closed"
     assert dossier["claim_to_evidence"]["rows"][0]["evidence_refs"] == [
         "artifacts/verify/result.json",
@@ -647,7 +786,7 @@ def test_projection_failure_preserves_terminal_and_retries(
     from zf.runtime import goal_dossier_delivery as delivery
 
     state_dir, log, writer = _state(tmp_path)
-    for event in _completion_events():
+    for event in _completion_events(state_dir):
         log.append(event)
     original = delivery.write_goal_dossier_projection
     monkeypatch.setattr(
@@ -690,7 +829,7 @@ def test_projection_failure_preserves_terminal_and_retries(
 
 def test_inbox_uses_same_dossier_owner_summary(tmp_path: Path) -> None:
     state_dir, log, writer = _state(tmp_path)
-    for event in _completion_events():
+    for event in _completion_events(state_dir):
         log.append(event)
     materialize_terminal_goal_deliveries(
         state_dir=state_dir,

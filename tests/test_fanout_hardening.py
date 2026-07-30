@@ -22,6 +22,10 @@ from zf.runtime.fanout_replay import record_fanout_fixture, replay_fanout_fixtur
 from zf.runtime.fanout_timeout_policy import close_expired_queued_wait
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_operation import (
+    WorkflowOperationService,
+    load_workflow_operation,
+)
 
 
 class _RecordingTransport:
@@ -254,7 +258,7 @@ def test_reader_fanout_defers_dead_worker_dispatch(tmp_path: Path):
     _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
     respawns: list[str] = []
 
-    def _respawn(role):  # noqa: ANN001
+    def _respawn(role, **_kwargs):  # noqa: ANN001
         respawns.append(role.instance_id)
         return OrchestratorDecision(
             action="respawn",
@@ -276,7 +280,7 @@ def test_reader_fanout_defers_dead_worker_dispatch(tmp_path: Path):
 def test_pending_reader_fanout_dispatches_after_worker_recovers(tmp_path: Path):
     transport = _FlakyTransport(alive=False)
     _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
-    orch._respawn_instance = lambda role: OrchestratorDecision(  # type: ignore[method-assign]
+    orch._respawn_instance = lambda role, **_kwargs: OrchestratorDecision(  # type: ignore[method-assign]
         action="respawn",
         role=role.instance_id,
         reason="test respawn",
@@ -359,12 +363,59 @@ def test_timeout_emits_timed_out_and_child_failure(tmp_path: Path):
     )
 
 
+def test_timeout_fails_running_durable_child_operation(tmp_path: Path):
+    state_dir, log, _transport, orch = _state(
+        tmp_path,
+        timeout_seconds=1,
+    )
+    _start(orch)
+    fanout_id = _fanout_id(log)
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    )
+    operation = service.ensure_operation(
+        workflow_run_id="trace-1",
+        operation_id="operation-review-a",
+        operation_type="fanout_reader_child",
+        request={"stage_id": "review-candidate"},
+        parent_stage_id="review-candidate",
+        role_instance="review-a",
+    )
+    service.mark_started(
+        operation_id=operation.operation_id,
+        request_hash=operation.request_hash,
+        workflow_run_id="trace-1",
+        role_instance="review-a",
+        active_attempt_id="attempt-review-a",
+    )
+    manifest_path = state_dir / "fanouts" / fanout_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    child = manifest["children"][0]
+    child["operation_id"] = operation.operation_id
+    child["request_hash"] = operation.request_hash
+    child.setdefault("payload", {}).update({
+        "operation_id": operation.operation_id,
+        "request_hash": operation.request_hash,
+    })
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    orch._now = lambda: time.time() + 10  # type: ignore[method-assign]
+
+    orch.run_once(events=[])
+
+    projected = load_workflow_operation(log, operation.operation_id)
+    assert projected is not None
+    assert projected["status"] == "failed"
+    assert projected["reason"] == "fanout_timeout"
+
+
 def test_pending_superseded_reader_fanout_is_cancelled_before_recovery(
     tmp_path: Path,
 ):
     transport = _FlakyTransport(alive=False)
     _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
-    orch._respawn_instance = lambda role: OrchestratorDecision(  # type: ignore[method-assign]
+    orch._respawn_instance = lambda role, **_kwargs: OrchestratorDecision(  # type: ignore[method-assign]
         action="respawn",
         role=role.instance_id,
         reason="test respawn",
@@ -411,12 +462,55 @@ def test_pending_superseded_reader_fanout_is_cancelled_before_recovery(
     ]
 
 
+def test_admitted_goal_claim_cancels_residual_reader_fanout(
+    tmp_path: Path,
+):
+    transport = _FlakyTransport(alive=False)
+    _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
+    _start(orch)
+    fanout_id = _fanout_id(log)
+    EventWriter(log).append(ZfEvent(
+        id="claim-1",
+        type="run.goal.completion.claimed",
+        actor="zf-cli",
+        correlation_id="trace-1",
+        payload={
+            "run_id": "trace-1",
+            "workflow_run_id": "trace-1",
+            "goal_id": "F-11111111",
+            "pdd_id": "F-11111111",
+            "feature_id": "F-11111111",
+            "claim_id": "goal-claim-1",
+            "claim_type": "admitted_goal_closure_result",
+            "target_commit": "c" * 40,
+        },
+    ))
+
+    orch.run_once(events=[])
+
+    cancelled = [
+        event
+        for event in log.read_all()
+        if event.type == "fanout.cancelled"
+        and event.payload.get("fanout_id") == fanout_id
+    ]
+    assert len(cancelled) == 1
+    assert cancelled[0].payload["reason"] == (
+        "superseded_by_admitted_goal_completion_claim"
+    )
+    assert cancelled[0].payload["superseded_by"] == "goal-claim-1"
+    assert (
+        cancelled[0].payload["source"]
+        == "superseded_reader_fanout_manifest_closeout"
+    )
+
+
 def test_newer_reader_replan_attempt_supersedes_different_target(
     tmp_path: Path,
 ):
     transport = _FlakyTransport(alive=False)
     state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
-    orch._respawn_instance = lambda role: OrchestratorDecision(  # type: ignore[method-assign]
+    orch._respawn_instance = lambda role, **_kwargs: OrchestratorDecision(  # type: ignore[method-assign]
         action="respawn",
         role=role.instance_id,
         reason="test respawn",

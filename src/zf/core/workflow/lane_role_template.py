@@ -26,9 +26,10 @@ class LaneRoleTemplateError(ValueError):
 
 # 手写同名 role 允许覆盖的非拓扑字段(doc 90 §3.1 白名单)。
 OVERRIDABLE_ROLE_FIELDS = (
-    "backend", "model", "backends",
+    "backend", "model", "model_reasoning_effort", "backends",
     "skills", "allowed_tools", "plugins",
     "permission_mode", "budget_usd",
+    "provider_session", "lifecycle",
     "context_window_tokens", "context_warning_threshold",
     "context_compact_threshold", "context_hard_cap",
     "recycle_threshold", "recycle_hard_cap",
@@ -38,13 +39,16 @@ OVERRIDABLE_ROLE_FIELDS = (
     "constraints", "execution", "agent",
 )
 # 生成层锁定的 topology truth。
-LOCKED_TOPOLOGY_FIELDS = ("role_kind", "triggers", "publishes")
+LOCKED_TOPOLOGY_FIELDS = ("role_kind", "flow_kind", "triggers", "publishes")
 
 _KNOWN_TEMPLATE_KEYS = frozenset({
-    "backend", "model", "permission_mode", "stuck_threshold_seconds",
+    "backend", "model", "model_reasoning_effort", "permission_mode",
+    "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds", "budget_usd",
     "skills_by_stage", "allowed_tools", "plugins",
     "role_kind_by_stage", "backend_by_stage",
+    "provider_session", "provider_session_by_stage",
+    "lifecycle", "lifecycle_by_stage",
     # 真实 hermes 文件暴露的两个声明位(topology 仍归生成层,声明式扩展,
     # 不开手写 role 覆盖口):
     "publishes_extra_by_stage",  # e.g. impl 额外发 dev.blocked
@@ -56,6 +60,7 @@ _KNOWN_TEMPLATE_KEYS = frozenset({
 class LaneRoleTemplateSpec:
     backend: str = "claude-code"
     model: str = ""
+    model_reasoning_effort: str = ""
     permission_mode: str = "bypass"
     stuck_threshold_seconds: float = 300.0
     spawn_ready_timeout_seconds: float = 0.0
@@ -65,6 +70,10 @@ class LaneRoleTemplateSpec:
     skills_by_stage: dict[str, tuple[str, ...]] = field(default_factory=dict)
     role_kind_by_stage: dict[str, str] = field(default_factory=dict)
     backend_by_stage: dict[str, str] = field(default_factory=dict)
+    provider_session: Any | None = None
+    provider_session_by_stage: dict[str, Any] = field(default_factory=dict)
+    lifecycle: Any | None = None
+    lifecycle_by_stage: dict[str, Any] = field(default_factory=dict)
     publishes_extra_by_stage: dict[str, tuple[str, ...]] = field(
         default_factory=dict,
     )
@@ -100,9 +109,23 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
         raise LaneRoleTemplateError(
             f"{context}.lane_role_template.backend_by_stage must be a mapping"
         )
+    provider_sessions_raw = raw.get("provider_session_by_stage") or {}
+    if not isinstance(provider_sessions_raw, dict):
+        raise LaneRoleTemplateError(
+            f"{context}.lane_role_template.provider_session_by_stage "
+            "must be a mapping"
+        )
+    lifecycles_raw = raw.get("lifecycle_by_stage") or {}
+    if not isinstance(lifecycles_raw, dict):
+        raise LaneRoleTemplateError(
+            f"{context}.lane_role_template.lifecycle_by_stage must be a mapping"
+        )
     return LaneRoleTemplateSpec(
         backend=str(raw.get("backend") or "claude-code"),
         model=str(raw.get("model") or ""),
+        model_reasoning_effort=str(
+            raw.get("model_reasoning_effort") or ""
+        ),
         permission_mode=str(raw.get("permission_mode") or "bypass"),
         stuck_threshold_seconds=float(raw.get("stuck_threshold_seconds") or 300.0),
         spawn_ready_timeout_seconds=float(
@@ -124,6 +147,31 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
             str(stage): str(backend)
             for stage, backend in backends_raw.items()
             if str(backend).strip()
+        },
+        provider_session=_parse_provider_session(
+            raw.get("provider_session"),
+            context=f"{context}.lane_role_template.provider_session",
+        ),
+        provider_session_by_stage={
+            str(stage): _parse_provider_session(
+                value,
+                context=(
+                    f"{context}.lane_role_template."
+                    f"provider_session_by_stage.{stage}"
+                ),
+            )
+            for stage, value in provider_sessions_raw.items()
+        },
+        lifecycle=_parse_lifecycle(
+            raw.get("lifecycle"),
+            context=f"{context}.lane_role_template.lifecycle",
+        ),
+        lifecycle_by_stage={
+            str(stage): _parse_lifecycle(
+                value,
+                context=f"{context}.lane_role_template.lifecycle_by_stage.{stage}",
+            )
+            for stage, value in lifecycles_raw.items()
         },
         publishes_extra_by_stage={
             str(stage): tuple(str(e) for e in events or [])
@@ -172,6 +220,7 @@ def generate_lane_roles(
     metas: list[GeneratedRoleMeta] = []
     consumed: set[str] = set()
     stage_ids = [s.stage_id for s in spec.stages]
+    _reject_unknown_stage_overrides(template, stage_ids, spec.pipeline_id)
     for stage_idx, stage in enumerate(spec.stages):
         default_kind = "writer" if stage_idx == 0 else "reader"
         role_kind = template.role_kind_by_stage.get(stage.stage_id, default_kind)
@@ -194,24 +243,43 @@ def generate_lane_roles(
                     f"{spec.pipeline_id}.{stage.stage_id}: role_pattern "
                     f"{pattern!r} failed to expand: {exc}"
                 )
-            base = RoleConfig(
-                name=name,
-                instance_id=name,
-                backend=template.backend_by_stage.get(
+            role_kwargs: dict[str, Any] = {
+                "name": name,
+                "instance_id": name,
+                "backend": template.backend_by_stage.get(
                     stage.stage_id,
                     template.backend,
                 ),
-                model=template.model,
-                role_kind=role_kind,
-                permission_mode=template.permission_mode,
-                stuck_threshold_seconds=template.stuck_threshold_seconds,
-                spawn_ready_timeout_seconds=template.spawn_ready_timeout_seconds,
-                budget_usd=template.budget_usd,
-                allowed_tools=list(template.allowed_tools),
-                plugins=list(template.plugins),
-                skills=list(skills),
-                stages=list(role_stages),
-                publishes=list(publishes),
+                "model": template.model,
+                "model_reasoning_effort": template.model_reasoning_effort,
+                "role_kind": role_kind,
+                "flow_kind": str(getattr(spec, "flow_kind", "") or ""),
+                "permission_mode": template.permission_mode,
+                "stuck_threshold_seconds": template.stuck_threshold_seconds,
+                "spawn_ready_timeout_seconds": (
+                    template.spawn_ready_timeout_seconds
+                ),
+                "budget_usd": template.budget_usd,
+                "allowed_tools": list(template.allowed_tools),
+                "plugins": list(template.plugins),
+                "skills": list(skills),
+                "stages": list(role_stages),
+                "publishes": list(publishes),
+            }
+            provider_session = template.provider_session_by_stage.get(
+                stage.stage_id,
+                template.provider_session,
+            )
+            lifecycle = template.lifecycle_by_stage.get(
+                stage.stage_id,
+                template.lifecycle,
+            )
+            if provider_session is not None:
+                role_kwargs["provider_session"] = provider_session
+            if lifecycle is not None:
+                role_kwargs["lifecycle"] = lifecycle
+            base = RoleConfig(
+                **role_kwargs,
             )
             manual = by_name.get(name)
             if manual is None:
@@ -232,6 +300,7 @@ def generate_lane_roles(
                 if _is_explicit(manual_value, field_name):
                     merged = replace(merged, **{field_name: manual_value})
                     overridden.append(field_name)
+            _reject_provider_agent_conflict(merged, name, spec.pipeline_id)
             generated.append(merged)
             metas.append(GeneratedRoleMeta(
                 pipeline_id=spec.pipeline_id,
@@ -279,7 +348,121 @@ def _is_explicit(value: Any, field_name: str) -> bool:
         return False
     if field_name == "drain_hold_seconds" and value == 180.0:
         return False
+    if field_name == "lifecycle":
+        from zf.core.config.schema import RoleLifecycleConfig
+
+        return value != RoleLifecycleConfig()
     return True
+
+
+def _parse_provider_session(raw: Any, *, context: str) -> Any | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LaneRoleTemplateError(f"{context} must be a mapping")
+    allowed = {"effort", "agent", "max_parallel_agents"}
+    unknown = sorted(str(key) for key in raw if str(key) not in allowed)
+    if unknown:
+        raise LaneRoleTemplateError(f"{context}: unknown key(s) {unknown}")
+    if not raw:
+        return None
+    effort = raw.get("effort", "")
+    agent = raw.get("agent", "")
+    parallel = raw.get("max_parallel_agents")
+    if not isinstance(effort, str):
+        raise LaneRoleTemplateError(f"{context}.effort must be a string")
+    if not isinstance(agent, str):
+        raise LaneRoleTemplateError(f"{context}.agent must be a string")
+    if parallel is not None and (
+        isinstance(parallel, bool) or not isinstance(parallel, int)
+    ):
+        raise LaneRoleTemplateError(
+            f"{context}.max_parallel_agents must be an integer"
+        )
+    from zf.core.config.schema import ProviderSessionConfig
+
+    try:
+        return ProviderSessionConfig(
+            effort=effort.strip(),
+            agent=agent.strip(),
+            max_parallel_agents=parallel,
+        )
+    except ValueError as exc:
+        raise LaneRoleTemplateError(f"{context}: {exc}") from exc
+
+
+def _parse_lifecycle(raw: Any, *, context: str) -> Any | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LaneRoleTemplateError(f"{context} must be a mapping")
+    allowed = {
+        "mode",
+        "idle_seconds",
+        "cooldown_seconds",
+        "preserve_session",
+        "preserve_workdir",
+    }
+    unknown = sorted(str(key) for key in raw if str(key) not in allowed)
+    if unknown:
+        raise LaneRoleTemplateError(f"{context}: unknown key(s) {unknown}")
+    from zf.core.config.schema import RoleLifecycleConfig
+
+    try:
+        return RoleLifecycleConfig(
+            mode=str(raw.get("mode") or "eager"),
+            idle_seconds=float(raw.get("idle_seconds", 900.0)),
+            cooldown_seconds=float(raw.get("cooldown_seconds", 180.0)),
+            preserve_session=_strict_bool(
+                raw.get("preserve_session", True),
+                context=f"{context}.preserve_session",
+            ),
+            preserve_workdir=_strict_bool(
+                raw.get("preserve_workdir", True),
+                context=f"{context}.preserve_workdir",
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        raise LaneRoleTemplateError(f"{context}: {exc}") from exc
+
+
+def _strict_bool(value: Any, *, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise LaneRoleTemplateError(f"{context} must be a boolean")
+    return value
+
+
+def _reject_unknown_stage_overrides(
+    template: LaneRoleTemplateSpec,
+    stage_ids: list[str],
+    pipeline_id: str,
+) -> None:
+    known = set(stage_ids)
+    for field_name, values in (
+        ("provider_session_by_stage", template.provider_session_by_stage),
+        ("lifecycle_by_stage", template.lifecycle_by_stage),
+    ):
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise LaneRoleTemplateError(
+                f"{pipeline_id}.lane_role_template.{field_name}: "
+                f"unknown stage(s) {unknown}"
+            )
+
+
+def _reject_provider_agent_conflict(
+    role: Any,
+    name: str,
+    pipeline_id: str,
+) -> None:
+    provider_session = getattr(role, "provider_session", None)
+    provider_agent = str(getattr(provider_session, "agent", "") or "")
+    role_agent = str(getattr(role, "agent", "") or "")
+    if provider_agent and role_agent and provider_agent != role_agent:
+        raise LaneRoleTemplateError(
+            f"{pipeline_id}: role {name!r} has conflicting role.agent and "
+            "provider_session.agent"
+        )
 
 
 def _reject_pool_conflict(manual: Any, name: str, pipeline_id: str) -> None:

@@ -12,6 +12,7 @@ import hashlib
 from typing import Any, Mapping
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.candidate_result_binding import candidate_task_source_commits
 
 
 SCHEMA_VERSION = "attempt-handoff-snapshot.v1"
@@ -26,6 +27,7 @@ _VERIFY_SUCCESS = frozenset({
     "test.passed",
     "review.approved",
     "lane.stage.completed",
+    "module.parity.closed",
 })
 _VERIFY_FAILURE = frozenset({
     "verify.failed",
@@ -62,7 +64,7 @@ def reduce_attempt_handoffs(
     event_by_id: dict[str, ZfEvent] = {}
     seen_ids: set[str] = set()
 
-    for event in events:
+    for event_index, event in enumerate(events):
         if event.id and event.id in seen_ids:
             continue
         if event.id:
@@ -76,23 +78,36 @@ def reduce_attempt_handoffs(
 
         if event.type == "task.rework.requested" and task_id:
             finding_ids = _finding_ids(payload, task_id=task_id)
+            attempt = int(payload.get("attempt") or 0)
+            failure_fingerprint = str(
+                payload.get("failure_fingerprint") or ""
+            ).strip()
+            contract_revision = str(payload.get("contract_revision") or "")
             for prior in handoffs.values():
                 if (
                     prior["task_id"] == task_id
                     and prior["status"] in _HANDOFF_OPEN
-                    and set(prior["finding_ids"]) & set(finding_ids)
+                    and _new_rework_supersedes(
+                        prior,
+                        finding_ids=finding_ids,
+                        failure_fingerprint=failure_fingerprint,
+                        contract_revision=contract_revision,
+                        attempt=attempt,
+                    )
                 ):
                     prior["status"] = "superseded"
                     prior["last_event_id"] = event.id
+                    _set_finding_status(findings, prior, "superseded", event)
             handoff = {
                 "request_event_id": event.id,
                 "task_id": task_id,
-                "attempt": int(payload.get("attempt") or 0),
+                "attempt": attempt,
                 "dispatch_id": str(payload.get("dispatch_id") or ""),
                 "delivery_mode": str(payload.get("delivery_mode") or "fresh_session"),
                 "workflow_run_id": str(payload.get("workflow_run_id") or event.correlation_id or ""),
-                "contract_revision": str(payload.get("contract_revision") or ""),
+                "contract_revision": contract_revision,
                 "task_map_generation": generation,
+                "failure_fingerprint": failure_fingerprint,
                 "feedback_id": str(payload.get("feedback_id") or ""),
                 "feedback_ref": str(payload.get("rework_feedback_ref") or ""),
                 "feedback_digest": str(payload.get("rework_feedback_digest") or ""),
@@ -202,27 +217,76 @@ def reduce_attempt_handoffs(
 
         if (
             event.type in _VERIFY_SUCCESS
-            and task_id
             and _is_independent_verification(event, payload)
             and _verification_passed(event, payload)
         ):
-            handoff = _latest_handoff(handoffs, task_id, {"resolution_claimed"})
-            if handoff is not None:
-                target_commit = _target_commit(payload)
-                if not target_commit or target_commit != handoff["target_commit"]:
-                    _record_stale(stale_claims, event, handoff, "verification_target_mismatch")
-                elif not _identity_matches(handoff, payload):
-                    _record_stale(stale_claims, event, handoff, "verification_identity_mismatch")
-                else:
-                    handoff["status"] = "verified_closed"
-                    handoff["last_event_id"] = event.id
-                    _set_finding_status(
-                        findings,
-                        handoff,
-                        "verified_closed",
-                        event,
-                        target_commit=target_commit,
-                    )
+            event_prefix = events[: event_index + 1]
+            target_commit = _target_commit(payload) or _candidate_head_for_verification(
+                event_prefix,
+                event=event,
+                payload=payload,
+            )
+            verified_task_ids = _verification_task_ids(event, payload)
+            workflow_id = str(
+                payload.get("workflow_run_id")
+                or payload.get("run_id")
+                or event.correlation_id
+                or workflow_run_id
+                or ""
+            ).strip()
+            source_commits = (
+                candidate_task_source_commits(
+                    event_prefix,
+                    workflow_run_id=workflow_id,
+                    candidate_head_commit=target_commit,
+                )
+                if target_commit and workflow_id
+                else {}
+            )
+            verified_task_ids.update(source_commits)
+            for verified_task_id in sorted(verified_task_ids):
+                matching = [
+                    handoff
+                    for handoff in handoffs.values()
+                    if handoff["task_id"] == verified_task_id
+                    and handoff["status"] == "resolution_claimed"
+                ]
+                for handoff in matching:
+                    valid_targets = {
+                        value
+                        for value in (
+                            target_commit,
+                            source_commits.get(verified_task_id, ""),
+                        )
+                        if value
+                    }
+                    if (
+                        not valid_targets
+                        or handoff["target_commit"] not in valid_targets
+                    ):
+                        _record_stale(
+                            stale_claims,
+                            event,
+                            handoff,
+                            "verification_target_mismatch",
+                        )
+                    elif not _identity_matches(handoff, payload):
+                        _record_stale(
+                            stale_claims,
+                            event,
+                            handoff,
+                            "verification_identity_mismatch",
+                        )
+                    else:
+                        handoff["status"] = "verified_closed"
+                        handoff["last_event_id"] = event.id
+                        _set_finding_status(
+                            findings,
+                            handoff,
+                            "verified_closed",
+                            event,
+                            target_commit=target_commit,
+                        )
 
         if (
             event.type in _VERIFY_FAILURE
@@ -246,7 +310,9 @@ def reduce_attempt_handoffs(
 
     handoff_rows = list(handoffs.values())
     finding_rows = list(findings.values())
-    open_findings = [row for row in finding_rows if row["status"] != "verified_closed"]
+    open_findings = [
+        row for row in finding_rows if row["status"] in _HANDOFF_OPEN
+    ]
     pending_handoffs = [row for row in handoff_rows if row["status"] in _HANDOFF_OPEN]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -279,6 +345,88 @@ def _finding_ids(payload: Mapping[str, Any], *, task_id: str) -> list[str]:
         str(payload.get("feedback_id") or payload.get("rework_feedback_ref") or ""),
     ))
     return ["finding-legacy-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]]
+
+
+def _new_rework_supersedes(
+    prior: Mapping[str, Any],
+    *,
+    finding_ids: list[str],
+    failure_fingerprint: str,
+    contract_revision: str,
+    attempt: int,
+) -> bool:
+    if set(prior.get("finding_ids") or []) & set(finding_ids):
+        return True
+    prior_fingerprint = str(prior.get("failure_fingerprint") or "").strip()
+    if (
+        failure_fingerprint
+        and prior_fingerprint
+        and failure_fingerprint == prior_fingerprint
+    ):
+        return True
+    return (
+        contract_revision == "legacy"
+        and str(prior.get("contract_revision") or "") == "legacy"
+        and attempt > int(prior.get("attempt") or 0)
+    )
+
+
+def _verification_task_ids(
+    event: ZfEvent,
+    payload: Mapping[str, Any],
+) -> set[str]:
+    task_ids = set(_strings(payload.get("task_ids")))
+    task_id = _task_id(event, payload)
+    if task_id:
+        task_ids.add(task_id)
+    result = payload.get("verification_result")
+    if isinstance(result, Mapping):
+        result_task_id = str(result.get("task_id") or "").strip()
+        if result_task_id:
+            task_ids.add(result_task_id)
+    return task_ids
+
+
+def _candidate_head_for_verification(
+    events: list[ZfEvent],
+    *,
+    event: ZfEvent,
+    payload: Mapping[str, Any],
+) -> str:
+    target_ref = str(
+        payload.get("target_ref") or payload.get("candidate_ref") or ""
+    ).strip()
+    generation = str(payload.get("task_map_generation") or "").strip()
+    workflow_id = str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or event.correlation_id
+        or ""
+    ).strip()
+    for candidate in reversed(events):
+        if candidate.type != "candidate.ready":
+            continue
+        body = candidate.payload if isinstance(candidate.payload, dict) else {}
+        candidate_run = str(
+            body.get("workflow_run_id")
+            or body.get("run_id")
+            or candidate.correlation_id
+            or ""
+        ).strip()
+        if workflow_id and candidate_run and workflow_id != candidate_run:
+            continue
+        candidate_generation = str(
+            body.get("task_map_generation") or ""
+        ).strip()
+        if generation and candidate_generation and generation != candidate_generation:
+            continue
+        candidate_ref = str(body.get("candidate_ref") or "").strip()
+        if target_ref and candidate_ref and target_ref != candidate_ref:
+            continue
+        head = str(body.get("candidate_head_commit") or "").strip()
+        if head:
+            return head
+    return ""
 
 
 def _request_id(
@@ -405,6 +553,8 @@ def _is_independent_verification(
     event: ZfEvent,
     payload: Mapping[str, Any],
 ) -> bool:
+    if event.type == "module.parity.closed":
+        return True
     if event.type.startswith(("verify.", "test.", "review.")):
         return True
     if not event.type.startswith("lane.stage."):

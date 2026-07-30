@@ -2142,10 +2142,22 @@ def run_goal_completion_claim_event(
     from zf.runtime.run_scope import resolve_run_for_event
 
     payload = cause.payload if isinstance(cause.payload, dict) else {}
-    result = (
+    closure_result = (
         payload.get("goal_closure_result")
         if isinstance(payload.get("goal_closure_result"), dict)
         else {}
+    )
+    artifact_result = (
+        payload.get("artifact_delivery_result")
+        if isinstance(payload.get("artifact_delivery_result"), dict)
+        else {}
+    )
+    result = artifact_result or closure_result
+    artifact_claim = bool(artifact_result)
+    flow_kind = str(
+        result.get("flow_kind")
+        or payload.get("flow_kind")
+        or ("workflow" if artifact_claim else "")
     )
     run_id = str(result.get("workflow_run_id") or payload.get("workflow_run_id") or "")
     run_id = run_id or resolve_run_for_event(events, cause)
@@ -2176,6 +2188,11 @@ def run_goal_completion_claim_event(
         or payload.get("task_map_generation")
         or ""
     )
+    workflow_generation = str(
+        result.get("workflow_generation")
+        or payload.get("workflow_generation")
+        or ""
+    )
     admitted_ref = payload.get("admitted_call_result_ref")
     admitted_ref = dict(admitted_ref) if isinstance(admitted_ref, Mapping) else {}
     control_ref = payload.get("control_result_ref")
@@ -2184,10 +2201,17 @@ def run_goal_completion_claim_event(
         "run_id": run_id,
         "goal_id": goal_id,
         "task_map_generation": task_map_generation,
+        "workflow_generation": workflow_generation,
         "target_commit": target_commit,
         "goal_claim_set_digest": str(result.get("goal_claim_set_digest") or ""),
         "closure_fact_digest": str(result.get("closure_fact_digest") or ""),
         "admitted_call_result_digest": str(admitted_ref.get("sha256") or ""),
+        "generic_workflow_contract_digest": str(
+            result.get("generic_workflow_contract_digest") or ""
+        ),
+        "completion_profile": str(
+            result.get("completion_profile") or ""
+        ),
     }
     claim_id = "goal-claim-" + hashlib.sha256(
         json.dumps(
@@ -2209,6 +2233,7 @@ def run_goal_completion_claim_event(
         causation_id=cause.id,
         correlation_id=cause.correlation_id or run_id,
         payload={
+            **({"flow_kind": flow_kind} if flow_kind else {}),
             "run_id": run_id,
             "workflow_run_id": run_id,
             "goal_id": goal_id,
@@ -2219,6 +2244,9 @@ def run_goal_completion_claim_event(
             "claim_id": claim_id,
             "objective": str(proj.get("objective") or ""),
             "claim_type": (
+                "admitted_artifact_delivery_result"
+                if artifact_claim
+                else
                 "admitted_goal_closure_result"
                 if result else "legacy_semantic_judge_verdict"
             ),
@@ -2227,10 +2255,71 @@ def run_goal_completion_claim_event(
             "source_event_type": cause.type,
             "task_id": str(cause.task_id or payload.get("task_id") or ""),
             "task_map_generation": task_map_generation,
+            "workflow_generation": workflow_generation,
+            "request_revision": int(
+                result.get("request_revision")
+                or payload.get("request_revision")
+                or 0
+            ),
+            "generic_workflow_contract_digest": str(
+                result.get("generic_workflow_contract_digest") or ""
+            ),
+            "completion_profile": str(
+                result.get("completion_profile")
+                or (
+                    "artifact_delivery"
+                    if artifact_claim
+                    else "software_delivery"
+                )
+            ),
+            "run_contract_ref": str(
+                result.get("run_contract_ref")
+                or payload.get("run_contract_ref")
+                or ""
+            ),
+            "run_contract_digest": str(
+                result.get("run_contract_digest")
+                or payload.get("run_contract_digest")
+                or ""
+            ),
             "target_commit": target_commit,
             "candidate_ref": str(result.get("candidate_ref") or payload.get("candidate_ref") or ""),
             "goal_claim_set_ref": str(result.get("goal_claim_set_ref") or ""),
             "goal_claim_set_digest": str(result.get("goal_claim_set_digest") or ""),
+            "goal_coverage": [
+                dict(item)
+                for item in result.get("goal_coverage") or []
+                if isinstance(item, Mapping)
+            ],
+            "required_artifacts": [
+                dict(item)
+                for item in result.get("artifacts") or []
+                if isinstance(item, Mapping)
+            ],
+            "verification_evidence_refs": [
+                str(item)
+                for item in result.get(
+                    "verification_evidence_refs",
+                ) or []
+                if str(item).strip()
+            ],
+            "input_result_refs": [
+                str(item)
+                for item in result.get("input_result_refs") or []
+                if str(item).strip()
+            ],
+            "open_gap_refs": [
+                str(item)
+                for item in result.get("open_gap_refs") or []
+                if str(item).strip()
+            ],
+            "verifier_stage_id": str(
+                result.get("verifier_stage_id") or ""
+            ),
+            "verifier_role": str(result.get("verifier_role") or ""),
+            "artifact_delivery_result": (
+                dict(artifact_result) if artifact_claim else {}
+            ),
             "closure_fact_ref": str(result.get("closure_fact_ref") or ""),
             "closure_fact_digest": str(result.get("closure_fact_digest") or ""),
             "admitted_call_result_ref": admitted_ref,
@@ -2246,6 +2335,7 @@ def run_goal_completion_gate_event(
     claim: ZfEvent,
     required_operation_ids: list[str] | tuple[str, ...] = (),
     delivery_policy: str = "report_only",
+    run_contract: Mapping[str, Any] | None = None,
 ) -> ZfEvent | None:
     """Evaluate one active claim against current mechanical truth.
 
@@ -2327,6 +2417,10 @@ def run_goal_completion_gate_event(
         str(claim_payload.get("claim_type") or "")
         == "admitted_goal_closure_result"
     )
+    artifact_claim = (
+        str(claim_payload.get("claim_type") or "")
+        == "admitted_artifact_delivery_result"
+    )
     verification_event_id = ""
     verification_admitted_ref: dict[str, Any] = {}
     candidate_event_id = ""
@@ -2345,6 +2439,17 @@ def run_goal_completion_gate_event(
         candidate_event_id = verification.candidate_event_id
         candidate_identity = verification.candidate_payload
         verification_reason = verification.invalid_reason
+    elif artifact_claim:
+        verified_target = ""
+        verification_event_id = str(
+            claim_payload.get("source_event_id") or ""
+        )
+        verification_admitted_ref = dict(
+            claim_payload.get("admitted_call_result_ref") or {}
+        ) if isinstance(
+            claim_payload.get("admitted_call_result_ref"),
+            Mapping,
+        ) else {}
     else:
         verified_target = _latest_independent_verify_target(scoped_events)
     from zf.runtime.workflow_operation import reduce_workflow_operations
@@ -2364,6 +2469,7 @@ def run_goal_completion_gate_event(
     invalid_reasons = _completion_claim_invalid_reasons(
         scoped_events,
         claim_payload=claim_payload,
+        run_contract=run_contract,
     )
     if canonical_claim and verification_reason:
         invalid_reasons.append(verification_reason)
@@ -2371,7 +2477,12 @@ def run_goal_completion_gate_event(
         invalid_reasons.append("verification_target_mismatch")
     invalid_reasons = list(dict.fromkeys(invalid_reasons))
 
+    shared_flow_kind = str(
+        claim_payload.get("flow_kind")
+        or ("workflow" if artifact_claim else "")
+    )
     shared = {
+        **({"flow_kind": shared_flow_kind} if shared_flow_kind else {}),
         "run_id": run_id,
         "workflow_run_id": run_id,
         "goal_id": str(claim_payload.get("goal_id") or ""),
@@ -2386,6 +2497,27 @@ def run_goal_completion_gate_event(
         "objective": str((claim.payload or {}).get("objective") or proj.get("objective") or ""),
         "claim_event_id": claim.id,
         "source_event_id": str((claim.payload or {}).get("source_event_id") or ""),
+        "completion_profile": str(
+            claim_payload.get("completion_profile")
+            or "software_delivery"
+        ),
+        "workflow_generation": str(
+            claim_payload.get("workflow_generation") or ""
+        ),
+        "request_revision": int(
+            claim_payload.get("request_revision") or 0
+        ),
+        "generic_workflow_contract_digest": str(
+            claim_payload.get(
+                "generic_workflow_contract_digest"
+            ) or ""
+        ),
+        "run_contract_ref": str(
+            claim_payload.get("run_contract_ref") or ""
+        ),
+        "run_contract_digest": str(
+            claim_payload.get("run_contract_digest") or ""
+        ),
         "target_commit": claim_target,
         "verified_target_commit": verified_target,
         "verification_event_id": verification_event_id,
@@ -2426,6 +2558,39 @@ def run_goal_completion_gate_event(
         "task_map_generation": str(claim_payload.get("task_map_generation") or ""),
         "goal_claim_set_ref": str(claim_payload.get("goal_claim_set_ref") or ""),
         "goal_claim_set_digest": str(claim_payload.get("goal_claim_set_digest") or ""),
+        "goal_coverage": [
+            dict(item)
+            for item in claim_payload.get("goal_coverage") or []
+            if isinstance(item, Mapping)
+        ],
+        "required_artifacts": [
+            dict(item)
+            for item in claim_payload.get("required_artifacts") or []
+            if isinstance(item, Mapping)
+        ],
+        "verification_evidence_refs": [
+            str(item)
+            for item in claim_payload.get(
+                "verification_evidence_refs",
+            ) or []
+            if str(item).strip()
+        ],
+        "input_result_refs": [
+            str(item)
+            for item in claim_payload.get("input_result_refs") or []
+            if str(item).strip()
+        ],
+        "open_gap_refs": [
+            str(item)
+            for item in claim_payload.get("open_gap_refs") or []
+            if str(item).strip()
+        ],
+        "verifier_stage_id": str(
+            claim_payload.get("verifier_stage_id") or ""
+        ),
+        "verifier_role": str(
+            claim_payload.get("verifier_role") or ""
+        ),
         "admitted_call_result_ref": dict(
             claim_payload.get("admitted_call_result_ref") or {}
         ) if isinstance(claim_payload.get("admitted_call_result_ref"), Mapping) else {},
@@ -2691,8 +2856,93 @@ def _completion_claim_invalid_reasons(
     events: list[ZfEvent],
     *,
     claim_payload: Mapping[str, Any],
+    run_contract: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    if str(claim_payload.get("claim_type") or "") != "admitted_goal_closure_result":
+    claim_type = str(claim_payload.get("claim_type") or "")
+    if claim_type == "admitted_artifact_delivery_result":
+        required = (
+            "run_id",
+            "goal_id",
+            "claim_id",
+            "workflow_generation",
+            "request_revision",
+            "generic_workflow_contract_digest",
+            "run_contract_ref",
+            "run_contract_digest",
+            "verifier_stage_id",
+            "verifier_role",
+        )
+        invalid = [
+            f"missing_{field}"
+            for field in required
+            if claim_payload.get(field) in (None, "", [], {})
+        ]
+        admitted_ref = claim_payload.get("admitted_call_result_ref")
+        if (
+            not isinstance(admitted_ref, Mapping)
+            or not str(admitted_ref.get("ref") or "")
+            or not str(admitted_ref.get("sha256") or "")
+        ):
+            invalid.append("missing_admitted_call_result_ref")
+        result = claim_payload.get("artifact_delivery_result")
+        if not isinstance(result, Mapping):
+            invalid.append("artifact_delivery_result_missing")
+            return list(dict.fromkeys(invalid))
+        if str(result.get("verdict") or "") != "passed":
+            invalid.append("artifact_delivery_not_passed")
+        source_id = str(claim_payload.get("source_event_id") or "")
+        source = _event_by_id(events, source_id)
+        if source is None or source.type != "artifact.delivery.verified":
+            invalid.append("artifact_delivery_source_missing")
+        else:
+            source_payload = (
+                source.payload if isinstance(source.payload, Mapping) else {}
+            )
+            source_result = source_payload.get("artifact_delivery_result")
+            if not isinstance(source_result, Mapping) or dict(
+                source_result
+            ) != dict(result):
+                invalid.append("artifact_delivery_source_mismatch")
+            source_admitted = source_payload.get(
+                "admitted_call_result_ref"
+            )
+            if (
+                not isinstance(source_admitted, Mapping)
+                or dict(source_admitted) != dict(admitted_ref or {})
+            ):
+                invalid.append("artifact_delivery_admission_mismatch")
+        current_generation = ""
+        for event in reversed(events):
+            if event.type != "workflow.invoke.requested":
+                continue
+            body = event.payload if isinstance(event.payload, Mapping) else {}
+            current_generation = str(
+                body.get("workflow_generation")
+                or body.get("workflow_proposal_digest")
+                or ""
+            )
+            if current_generation:
+                break
+        if current_generation and current_generation != str(
+            claim_payload.get("workflow_generation") or ""
+        ):
+            invalid.append("stale_workflow_generation")
+        if run_contract is None:
+            invalid.append("run_contract_missing")
+        else:
+            from zf.runtime.artifact_delivery_result import (
+                artifact_delivery_contract_issues,
+            )
+
+            invalid.extend(
+                str(item.get("code") or "artifact_contract_invalid")
+                for item in artifact_delivery_contract_issues(
+                    result,
+                    run_contract,
+                )
+            )
+        return list(dict.fromkeys(invalid))
+    if claim_type != "admitted_goal_closure_result":
         return []
     required = (
         "run_id", "goal_id", "claim_id", "task_map_generation",
@@ -5025,7 +5275,10 @@ def _execute_semantic_replan_request(
     request = writer.emit(
         trigger,
         actor="run-manager",
-        task_id=str(action.get("task_id") or "") or None,
+        # Semantic replan is a workflow control-plane request. Keep the
+        # affected task in the payload so the planner can replace it, but do
+        # not subject the trigger itself to worker task-attempt admission.
+        task_id=None,
         causation_id=planned.id,
         correlation_id=str(action.get("request_id") or "") or None,
         payload={
@@ -5034,14 +5287,53 @@ def _execute_semantic_replan_request(
             "checkpoint_id": str(action.get("checkpoint_id") or ""),
             "pdd_id": pdd_id,
             "feature_id": str(action.get("feature_id") or pdd_id),
+            "flow_kind": str(action.get("flow_kind") or ""),
             "trace_id": str(action.get("trace_id") or action.get("request_id") or ""),
+            "workflow_run_id": str(action.get("workflow_run_id") or ""),
             "task_id": str(action.get("task_id") or ""),
             "task_map_ref": task_map_ref,
             "source_index_ref": str(action.get("source_index_ref") or ""),
             "source_commit": str(action.get("source_commit") or ""),
             "candidate_base_commit": str(action.get("candidate_base_commit") or ""),
             "candidate_ref": str(action.get("candidate_ref") or ""),
+            "candidate_head_commit": str(action.get("candidate_head_commit") or ""),
+            "candidate_event_id": str(action.get("candidate_event_id") or ""),
             "target_ref": str(action.get("target_ref") or action.get("candidate_ref") or ""),
+            "task_ref": str(action.get("task_ref") or ""),
+            "base_commit": str(action.get("base_commit") or ""),
+            "contract_revision": str(action.get("contract_revision") or ""),
+            "task_map_generation": str(action.get("task_map_generation") or ""),
+            "contract_snapshot_ref": str(action.get("contract_snapshot_ref") or ""),
+            "contract_snapshot_digest": str(
+                action.get("contract_snapshot_digest") or ""
+            ),
+            "plan_artifact_package_id": str(
+                action.get("plan_artifact_package_id") or ""
+            ),
+            "plan_artifact_package_ref": str(
+                action.get("plan_artifact_package_ref") or ""
+            ),
+            "plan_artifact_package_digest": str(
+                action.get("plan_artifact_package_digest") or ""
+            ),
+            "workflow_proposal_ref": action.get("workflow_proposal_ref") or "",
+            "workflow_proposal_digest": str(
+                action.get("workflow_proposal_digest") or ""
+            ),
+            "effective_config_ref": action.get("effective_config_ref") or "",
+            "effective_config_digest": str(
+                action.get("effective_config_digest") or ""
+            ),
+            "run_contract_ref": action.get("run_contract_ref") or "",
+            "run_contract_digest": str(action.get("run_contract_digest") or ""),
+            "goal_claim_set_ref": str(action.get("goal_claim_set_ref") or ""),
+            "goal_claim_set_digest": str(
+                action.get("goal_claim_set_digest") or ""
+            ),
+            "rework_of": str(
+                action.get("source_event_id")
+                or next(iter(_string_list(action.get("failure_event_ids"))), "")
+            ),
             "recommended_action": str(action.get("recommended_action") or "replan"),
             "guidance": str(action.get("guidance") or ""),
             "failure_fingerprint": str(action.get("fingerprint") or ""),
@@ -6239,6 +6531,40 @@ def _settle_pending_action_effects(
         effect_id = str(payload.get("effect_id") or "")
         if not effect_id or effect_id in terminal_by_id:
             continue
+        if (
+            str(payload.get("action") or "") == "fanout-aggregate-rebuild"
+            and str(payload.get("failure_class") or "")
+            == "goal_closure_identity_invalid"
+        ):
+            observed = next(
+                (
+                    candidate
+                    for candidate in events[index + 1:]
+                    if candidate.type == "flow.goal.closed"
+                    and _effect_event_matches_scope(candidate, payload)
+                ),
+                None,
+            )
+            if observed is not None:
+                writer.emit(
+                    RUN_MANAGER_ACTION_EFFECT_PASSED,
+                    actor="run-manager",
+                    causation_id=observed.id,
+                    correlation_id=observed.correlation_id or pending.correlation_id,
+                    payload={
+                        "schema_version": "run-manager.action.effect.v1",
+                        **_action_payload(payload),
+                        "effect_id": effect_id,
+                        "effect_pending_event_id": pending.id,
+                        "observed_event_id": observed.id,
+                        "observed_event_type": observed.type,
+                        "status": "passed",
+                        "reason": "Goal closure identity recovery observed",
+                    },
+                )
+                terminal_by_id.add(effect_id)
+                settled += 1
+                continue
         expected = set(_string_list(payload.get("expected_event_types")))
         failures = set(_string_list(payload.get("failure_event_types")))
         required_sequence = payload.get("required_sequence")
@@ -7028,10 +7354,11 @@ def _pending_task_attempt_recovery_actions(
     config: ZfConfig,
     events: list[ZfEvent],
 ) -> list[dict[str, Any]]:
-    """Convert task attempt projection gaps into Run Manager actions.
+    """Convert current TaskAttempt gaps into Run Manager actions.
 
     This is intentionally downstream of workflow_resume: if a task already has
-    a concrete workflow resume checkpoint, that path remains the owner.
+    a concrete workflow resume checkpoint, that path remains the owner. The
+    canonical store wins when present; the projection is a legacy fallback.
     """
 
     workflow = getattr(config, "workflow", None)
@@ -7040,6 +7367,7 @@ def _pending_task_attempt_recovery_actions(
         state_dir / "projections",
         lease_grace_s=lease_grace_s,
         max_retry_attempts=_max_task_attempt_retries(config),
+        canonical_store_path=state_dir / "task_attempts.json",
     )
     out: list[dict[str, Any]] = []
     for action in actions:
@@ -7968,9 +8296,14 @@ def _pending_semantic_event_actions(
             payload=action,
         )
         out.append(action)
-        if len(out) >= 10:
-            break
-    return out
+    # A bounded list must not let older diagnostic noise starve a mechanical
+    # recovery that already passed its deterministic policy/preflight gates.
+    out.sort(
+        key=lambda action: (
+            str(action.get("action") or "") == "diagnose-attention",
+        )
+    )
+    return out[:10]
 
 
 def _is_unknown_actionable_workflow_event(event: ZfEvent) -> bool:
@@ -8165,13 +8498,8 @@ def _semantic_event_diagnostic_action(
             "aggregate_source_event_id": str(
                 payload.get("source_event_id") or ""
             ),
-            "effect_expected_events": ["run.goal.completed"],
-            "effect_failure_events": ["run.goal.blocked"],
-            "effect_required_sequence": [
-                ["flow.goal.closed"],
-                ["judge.requested"],
-                ["run.goal.completed", "run.goal.blocked"],
-            ],
+            "effect_expected_events": ["flow.goal.closed"],
+            "effect_failure_events": ["goal.closure.identity.invalid"],
         })
     return action
 
@@ -8780,10 +9108,12 @@ def _candidate_rework_action_from_plan(
     project_root: Path | None = None,
 ) -> dict[str, Any]:
     pdd_id = str(getattr(plan, "pdd_id", "") or "")
+    trace_id = str(getattr(plan, "trace_id", "") or "")
     anchor = _candidate_rework_anchor(
         state_dir,
         events,
         pdd_id,
+        trace_id=trace_id,
         project_root=project_root,
     )
     rework_action = str(getattr(plan, "action", "") or "")
@@ -8843,7 +9173,7 @@ def _candidate_rework_action_from_plan(
         "candidate_rework_action": rework_action,
         "pdd_id": pdd_id,
         "feature_id": str(anchor.get("feature_id") or ""),
-        "trace_id": str(getattr(plan, "trace_id", "") or ""),
+        "trace_id": trace_id,
         "target_ref": str(anchor.get("target_ref") or getattr(plan, "target_ref", "") or ""),
         "fanout_id": str(anchor.get("fanout_id") or ""),
         "integration_attempt_id": str(anchor.get("integration_attempt_id") or ""),
@@ -8875,6 +9205,11 @@ def _candidate_rework_action_from_plan(
         "verify_condition": "expected_downstream_event:" + ",".join(sorted(expected)),
         "route_registry": "run-manager-router.v1",
     }
+    from zf.runtime.candidate_rework_identity import (
+        _candidate_rework_identity_payload,
+    )
+
+    action.update(_candidate_rework_identity_payload(anchor))
     if candidate_retry_mode == "integration_only":
         action.update({
             "effect_expected_events": ["candidate.ready"],
@@ -8905,8 +9240,13 @@ def _candidate_rework_anchor(
     events: list[ZfEvent],
     pdd_id: str,
     *,
+    trace_id: str = "",
     project_root: Path | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
+    from zf.runtime.candidate_rework_identity import (
+        _candidate_rework_identity_payload,
+    )
+
     anchor_keys = (
         "source_commit",
         "candidate_base_commit",
@@ -8917,10 +9257,13 @@ def _candidate_rework_anchor(
         "fanout_id",
         "integration_attempt_id",
     )
-    anchor: dict[str, str] = {}
+    anchor: dict[str, Any] = {}
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         event_pdd = str(payload.get("pdd_id") or "")
+        event_trace = str(
+            payload.get("trace_id") or event.correlation_id or ""
+        )
         if event_pdd != pdd_id or event.type not in {
             "task_map.ready",
             "candidate.ready",
@@ -8929,10 +9272,13 @@ def _candidate_rework_anchor(
             "integration.failed",
         }:
             continue
+        if trace_id and event_trace and event_trace != trace_id:
+            continue
         for key in anchor_keys:
             value = str(payload.get(key) or "")
             if value:
                 anchor[key] = value
+        anchor.update(_candidate_rework_identity_payload(payload))
     if not anchor.get("task_map_ref") or not anchor.get("source_commit"):
         try:
             data = json.loads(
@@ -8945,6 +9291,7 @@ def _candidate_rework_anchor(
                     value = str(data.get(key) or "")
                     if value:
                         anchor[key] = value
+                anchor.update(_candidate_rework_identity_payload(data))
         except Exception:
             pass
     if pdd_id and not anchor.get("task_map_ref"):

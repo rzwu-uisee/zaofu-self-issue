@@ -191,6 +191,13 @@ class CallResultAuthorityMixin:
         self,
         envelope: Mapping[str, Any],
     ) -> list[dict[str, str]]:
+        control_result = (
+            envelope.get("control_result")
+            if isinstance(envelope.get("control_result"), Mapping)
+            else {}
+        )
+        if str(control_result.get("schema_version") or "") == "plan-synthesis-result.v1":
+            return []
         identity = (
             envelope.get("identity")
             if isinstance(envelope.get("identity"), Mapping)
@@ -241,6 +248,15 @@ class CallResultAuthorityMixin:
             if isinstance(envelope.get("identity"), Mapping)
             else {}
         )
+        control_result = (
+            envelope.get("control_result")
+            if isinstance(envelope.get("control_result"), Mapping)
+            else {}
+        )
+        plan_synthesis_result = (
+            str(control_result.get("schema_version") or "")
+            == "plan-synthesis-result.v1"
+        )
         fields = (
             ("workflow_run_id", "workflow_run_id", "stale_operation_identity"),
             ("task_id", "task_id", "stale_operation_identity"),
@@ -288,6 +304,12 @@ class CallResultAuthorityMixin:
         )
         issues: list[dict[str, str]] = []
         for request_field, envelope_field, code in fields:
+            if plan_synthesis_result and request_field in {
+                "plan_artifact_package_id",
+                "plan_artifact_package_ref",
+                "plan_artifact_package_digest",
+            }:
+                continue
             expected_value = str(expected.get(request_field) or "")
             if not expected_value:
                 continue

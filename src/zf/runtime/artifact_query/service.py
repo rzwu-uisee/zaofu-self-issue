@@ -13,17 +13,19 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
 from zf.core.events.segments import build_event_manifest
-from zf.runtime.artifact_access import artifact_access_allowed
 from zf.runtime.artifact_query.models import (
     QueryContext,
     QueryResult,
     SourceSnapshot,
 )
+from zf.runtime.artifact_query.object_view import ArtifactObjectViewMixin
+from zf.runtime.artifact_query.extractors import iter_catalog_descriptors
 from zf.runtime.artifact_query.store import (
     EXTRACTOR_VERSION,
     catch_up_catalog,
+    catalog_matching_rows,
     catalog_rows,
-    catalog_show,
+    catalog_show_rows,
     catalog_status,
     descriptor_record,
     get_reducer_projection,
@@ -42,14 +44,13 @@ from zf.runtime.plan_artifact_package import (
 from zf.runtime.sidecar_refs import (
     SidecarRefError,
     hydrate_sidecar_ref,
-    iter_sidecar_ref_descriptors,
 )
 
 
 QUERY_SCHEMA_VERSION = "artifact-query-result.v1"
 ATTEMPT_INSPECT_SCHEMA = "attempt-artifact-view.v1"
 PACKAGE_PROJECTION_VERSION = f"{PLAN_PACKAGE_SCHEMA}:reducer.v1"
-GOAL_DOSSIER_CACHE_VERSION = "goal-dossier-cache.v2"
+GOAL_DOSSIER_CACHE_VERSION = "goal-dossier-cache.v6"
 CATALOG_CATCH_UP_WAIT_SECONDS = 2.5
 
 _CATALOG_CATCH_UPS: dict[str, threading.Event] = {}
@@ -60,7 +61,7 @@ class ArtifactQueryError(ValueError):
     """A query cannot be answered without violating its requested mode."""
 
 
-class ArtifactQueryService:
+class ArtifactQueryService(ArtifactObjectViewMixin):
     def __init__(
         self,
         *,
@@ -99,30 +100,47 @@ class ArtifactQueryService:
         *,
         context: QueryContext,
         kind: str = "",
+        semantic_kind: str = "",
         ref: str = "",
         task_id: str = "",
+        claim_id: str = "",
         run_id: str = "",
         attempt_id: str = "",
         operation_id: str = "",
         package_id: str = "",
+        view: str = "objects",
     ) -> dict[str, Any]:
-        status, fallback = self._ensure_catalog(context)
-        if fallback:
-            rows = self._canonical_catalog_rows(
-                kind=kind,
-                ref=ref,
-                task_id=task_id,
-                run_id=run_id,
-                attempt_id=attempt_id,
-                operation_id=operation_id,
-                package_id=package_id,
+        normalized_view = str(view or "objects").strip().lower()
+        if normalized_view not in {"objects", "occurrences"}:
+            raise ArtifactQueryError(
+                "artifact catalog view must be objects or occurrences"
             )
+        status, fallback = self._ensure_catalog(context)
+        filters = {
+            "kind": kind,
+            "semantic_kind": semantic_kind,
+            "ref": ref,
+            "task_id": task_id,
+            "claim_id": claim_id,
+            "run_id": run_id,
+            "attempt_id": attempt_id,
+            "operation_id": operation_id,
+            "package_id": package_id,
+        }
+        if fallback:
+            rows = self._canonical_catalog_rows(**filters)
+            if normalized_view == "objects":
+                items = self._catalog_object_items(rows, context)
+            else:
+                items = [
+                    self._catalog_visibility(row, context)
+                    for row in rows
+                ]
             start = context.bounded_offset()
             end = start + context.bounded_limit()
-            page = rows[start:end]
-            return QueryResult(
+            result = QueryResult(
                 schema_version=QUERY_SCHEMA_VERSION,
-                items=[self._catalog_visibility(row, context) for row in page],
+                items=items[start:end],
                 source_snapshot=self.source_snapshot(
                     projected_seq=len(self._events())
                 ),
@@ -133,24 +151,35 @@ class ArtifactQueryService:
                 fallback_source="event-log-descriptor-scan",
                 limit=context.bounded_limit(),
                 offset=start,
-                has_more=len(rows) > end,
+                has_more=len(items) > end,
                 diagnostics=self._status_diagnostics(status),
             ).to_dict()
-        rows, has_more = catalog_rows(
-            self.state_dir,
-            kind=kind,
-            ref=ref,
-            task_id=task_id,
-            run_id=run_id,
-            attempt_id=attempt_id,
-            operation_id=operation_id,
-            package_id=package_id,
-            limit=context.bounded_limit(),
-            offset=context.bounded_offset(),
-        )
-        return QueryResult(
+            result["view"] = normalized_view
+            return result
+        if normalized_view == "occurrences":
+            rows, has_more = catalog_rows(
+                self.state_dir,
+                **filters,
+                limit=context.bounded_limit(),
+                offset=context.bounded_offset(),
+            )
+            items = [
+                self._catalog_visibility(row, context)
+                for row in rows
+            ]
+        else:
+            rows, truncated = catalog_matching_rows(
+                self.state_dir,
+                **filters,
+            )
+            objects = self._catalog_object_items(rows, context)
+            start = context.bounded_offset()
+            end = start + context.bounded_limit()
+            items = objects[start:end]
+            has_more = len(objects) > end or truncated
+        result = QueryResult(
             schema_version=QUERY_SCHEMA_VERSION,
-            items=[self._catalog_visibility(row, context) for row in rows],
+            items=items,
             source_snapshot=self.source_snapshot(
                 projected_seq=int(status.get("projected_seq") or 0)
             ),
@@ -160,6 +189,13 @@ class ArtifactQueryService:
             offset=context.bounded_offset(),
             has_more=has_more,
         ).to_dict()
+        result["view"] = normalized_view
+        if normalized_view == "objects" and truncated:
+            result["diagnostics"] = [{
+                "code": "catalog_object_scan_truncated",
+                "message": "object aggregation reached its occurrence scan bound",
+            }]
+        return result
 
     def catalog_show(
         self,
@@ -168,32 +204,24 @@ class ArtifactQueryService:
         context: QueryContext,
     ) -> dict[str, Any]:
         status, fallback = self._ensure_catalog(context)
-        item: dict[str, Any] | None = None
+        rows: list[dict[str, Any]] = []
+        matched_by = ""
         if not fallback:
-            item = catalog_show(self.state_dir, identity)
-        if fallback or item is None:
-            item = next(
-                (
-                    row
-                    for row in self._canonical_catalog_rows()
-                    if identity in {
-                        row.get("occurrence_id"),
-                        row.get("locator_id"),
-                        row.get("object_id"),
-                        row.get("sha256"),
-                        row.get("ref"),
-                    }
-                ),
-                None,
+            rows, matched_by = catalog_show_rows(self.state_dir, identity)
+        if fallback or not rows:
+            rows, matched_by = self._matching_canonical_rows(
+                identity,
+                self._canonical_catalog_rows(),
             )
             fallback = True
+        item = self._catalog_detail(
+            rows,
+            matched_by=matched_by,
+            context=context,
+        )
         return QueryResult(
             schema_version=QUERY_SCHEMA_VERSION,
-            item=(
-                self._catalog_visibility(item, context)
-                if item is not None
-                else None
-            ),
+            item=item,
             source_snapshot=self.source_snapshot(
                 projected_seq=int(status.get("projected_seq") or 0)
             ),
@@ -272,7 +300,11 @@ class ArtifactQueryService:
         *,
         context: QueryContext,
     ) -> dict[str, Any]:
-        result = self.catalog_list(context=context, task_id=task_id)
+        result = self.catalog_list(
+            context=context,
+            task_id=task_id,
+            view="occurrences",
+        )
         result["schema_version"] = "task-artifact-view.v1"
         result["task_id"] = task_id
         return result
@@ -318,6 +350,7 @@ class ArtifactQueryService:
         result = self.catalog_list(
             context=context,
             attempt_id=attempt_id,
+            view="occurrences",
         )
         result.update({
             "schema_version": ATTEMPT_INSPECT_SCHEMA,
@@ -455,17 +488,42 @@ class ArtifactQueryService:
             raise ArtifactQueryError(f"artifact not found: {identity}")
         if not item.get("authorized"):
             raise ArtifactQueryError("artifact hydrate is not authorized")
+        occurrences = item.get("occurrences")
+        locators = item.get("locators")
+        if (
+            not isinstance(occurrences, list)
+            or len(occurrences) != 1
+            or not isinstance(occurrences[0], dict)
+            or not isinstance(locators, list)
+        ):
+            raise ArtifactQueryError(
+                "artifact hydrate requires one authorized occurrence"
+            )
+        occurrence = occurrences[0]
+        locator = next(
+            (
+                row for row in locators
+                if isinstance(row, dict)
+                and row.get("locator_id") == occurrence.get("locator_id")
+            ),
+            None,
+        )
+        if not isinstance(locator, dict):
+            raise ArtifactQueryError("artifact locator is unavailable")
+        object_metadata = item.get("object")
+        if not isinstance(object_metadata, dict):
+            raise ArtifactQueryError("artifact object metadata is unavailable")
         descriptor = {
-            "kind": item["kind"],
-            "ref": item["ref"],
-            "sha256": item["sha256"],
-            "byte_count": item["byte_count"],
-            "content_type": item["content_type"],
-            "schema_version": item["schema_version"],
-            "encoding": item["encoding"],
-            "required": item["required"],
-            "access_scope": item["access_scope"],
-            "retention": item["retention"],
+            "kind": locator["storage_kind"],
+            "ref": locator["ref"],
+            "sha256": object_metadata["sha256"],
+            "byte_count": object_metadata["byte_count"],
+            "content_type": locator["content_type"],
+            "schema_version": locator["schema_version"],
+            "encoding": locator["encoding"],
+            "required": occurrence["required"],
+            "access_scope": occurrence["access_scope"],
+            "retention": occurrence["retention"],
         }
         return hydrate_sidecar_ref(
             self.state_dir,
@@ -556,7 +614,10 @@ class ArtifactQueryService:
         rows: list[dict[str, Any]] = []
         for seq, event in enumerate(self._events(), start=1):
             payload = event.payload if isinstance(event.payload, dict) else {}
-            for descriptor in iter_sidecar_ref_descriptors(payload):
+            for descriptor in iter_catalog_descriptors(
+                self.state_dir,
+                payload,
+            ):
                 row = descriptor_record(
                     project_root=self.project_root,
                     state_dir=self.state_dir,
@@ -580,37 +641,6 @@ class ArtifactQueryService:
             ),
             reverse=True,
         )
-
-    def _catalog_visibility(
-        self,
-        row: Mapping[str, Any],
-        context: QueryContext,
-    ) -> dict[str, Any]:
-        item = dict(row)
-        authorized = artifact_access_allowed(
-            item.get("access_scope"),
-            actor=context.actor,
-            role=context.role,
-            purpose=context.purpose,
-        )
-        if authorized:
-            item["authorized"] = True
-            return item
-        return {"authorized": False, "redacted": True}
-
-    @staticmethod
-    def _lineage_visibility(
-        row: Mapping[str, Any],
-        context: QueryContext,
-    ) -> dict[str, Any]:
-        if artifact_access_allowed(
-            row.get("access_scope"),
-            actor=context.actor,
-            role=context.role,
-            purpose=context.purpose,
-        ):
-            return {**dict(row), "authorized": True}
-        return {"authorized": False, "redacted": True}
 
     def _events(self) -> list[ZfEvent]:
         return event_log_from_project(

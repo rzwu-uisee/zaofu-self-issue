@@ -101,5 +101,78 @@ def normalize_plan_ports(
     return sorted(normalized, key=lambda item: str(item.get("logical_name") or ""))
 
 
+def coerce_plan_port_descriptors(value: Any) -> list[dict[str, Any]]:
+    """Accept the canonical descriptor list or the name-to-body shorthand."""
+
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+    if not isinstance(value, Mapping):
+        return []
+
+    descriptors: list[dict[str, Any]] = []
+    for raw_name, raw_body in value.items():
+        logical_name = str(raw_name or "").strip()
+        if not logical_name or not isinstance(raw_body, Mapping):
+            continue
+        body = dict(raw_body)
+        descriptors.append({
+            "logical_name": logical_name,
+            "schema_version": str(body.get("schema_version") or ""),
+            "body": body,
+        })
+    return descriptors
+
+
 def is_known_plan_port(name: str) -> bool:
     return canonical_plan_port_name(name) in _CANONICAL_PORTS
+
+
+def extract_inline_plan_ports(
+    payload: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    ports = coerce_plan_port_descriptors(payload.get("plan_ports"))
+    synthesis_result = payload.get("plan_synthesis_result")
+    if not ports and isinstance(synthesis_result, Mapping):
+        ports = coerce_plan_port_descriptors(
+            synthesis_result.get("plan_ports")
+        )
+    names = {
+        canonical_plan_port_name(str(
+            item.get("logical_name")
+            or item.get("artifact_kind")
+            or item.get("kind")
+            or ""
+        ))
+        for item in ports
+        if isinstance(item, Mapping)
+    }
+    return ports, names
+
+
+def adapt_issue_requirement_port(
+    ports: dict[str, dict[str, Any]],
+    *,
+    flow_kind: str,
+) -> None:
+    if str(flow_kind or "").strip().lower() != "issue":
+        return
+    requirement = ports.get("requirement_spec")
+    issue = ports.get("issue_spec")
+    if not requirement or (
+        issue
+        and (
+            issue.get("ref"),
+            issue.get("sha256"),
+        ) != (
+            requirement.get("ref"),
+            requirement.get("sha256"),
+        )
+    ):
+        return
+    ports["issue_spec"] = {
+        **requirement,
+        "logical_name": "issue_spec",
+        "artifact_kind": "issue_spec",
+        "source_logical_name": "requirement_spec",
+        "adapter_version": "issue-spec-requirement-adapter.v1",
+    }

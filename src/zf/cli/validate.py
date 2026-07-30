@@ -591,7 +591,14 @@ def _print_backend_capability_matrix(config) -> list[str]:
             f"context_usage_reader={caps.context_usage_reader} "
             f"stream_json={caps.stream_json} "
             f"hook_review_required={caps.hook_review_required} "
-            f"nested_agent_disable={caps.nested_agent_disable!r}"
+            f"nested_agent_disable={caps.nested_agent_disable!r} "
+            f"native_goal={caps.native_goal} "
+            f"native_multi_agent={caps.native_multi_agent} "
+            f"child_lineage={caps.child_lineage!r} "
+            f"child_permission_isolation="
+            f"{caps.child_permission_isolation!r} "
+            f"compound_resume={caps.compound_resume!r} "
+            f"root_only_result_channel={caps.root_only_result_channel}"
         )
     return errors
 

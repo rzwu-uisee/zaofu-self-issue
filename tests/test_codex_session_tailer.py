@@ -153,6 +153,36 @@ class TestCodexResponseItemParsing:
 
 
 class TestCodexEventMsgIgnored:
+    def test_task_complete_emits_provider_turn_closed(
+        self, tmp_path, event_log,
+    ):
+        f = tmp_path / "rollout.jsonl"
+        tailer = CodexSessionTailer(event_log)
+        tailer.tail("dev-1", f)
+        try:
+            _lines(f, [{
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-123",
+                    "completed_at": 1785210165,
+                    "duration_ms": 225000,
+                    "last_agent_message": "large provider-owned body",
+                },
+            }])
+            assert _wait_for(
+                lambda: any(
+                    e.type == "provider.turn.closed"
+                    and e.actor == "dev-1"
+                    and e.payload.get("turn_id") == "turn-123"
+                    and e.payload.get("backend") == "codex"
+                    and "last_agent_message" not in e.payload
+                    for e in event_log.read_all()
+                )
+            )
+        finally:
+            tailer.stop()
+
     def test_token_count_not_emitted_as_agent_event(
         self, tmp_path, event_log,
     ):

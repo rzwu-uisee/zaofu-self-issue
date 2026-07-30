@@ -261,6 +261,158 @@ def test_goal_coverage_graph_uses_closure_rows_without_rejudging() -> None:
     assert first == second
 
 
+def test_goal_coverage_graph_prefers_admitted_candidate_over_plan_base() -> None:
+    task_map = _task_map()
+    task_map["target_commit"] = "base123"
+    verify = ZfEvent(
+        id="verify-candidate",
+        type="verify.passed",
+        task_id="TASK-A",
+        payload={
+            "verification_result": _verification_result(
+                target_commit="candidate123",
+            ),
+        },
+    )
+    closure = ZfEvent(
+        id="closure-candidate",
+        type="goal.closure.rejected",
+        payload={
+            "goal_closure_result": _closure_result(
+                target_commit="candidate123",
+            ),
+        },
+    )
+    events = [
+        (1, verify),
+        (2, _admission_event(verify.id)),
+        (3, closure),
+        (4, _admission_event(
+            closure.id,
+            schema="goal-closure-result.v1",
+            task_id=None,
+        )),
+    ]
+
+    graph = build_goal_coverage_graph(
+        task_map=task_map,
+        tasks=_tasks(),
+        events=events,
+        project_id="zaofu",
+        feature_id="F-GOAL",
+        task_map_ref="task-map.json",
+    )
+
+    claim = next(
+        node for node in graph["nodes"]
+        if node.get("goal_claim_id") == "CLAIM-A"
+    )
+    assert graph["identity"]["target_commit"] == "candidate123"
+    assert claim["task_verification"] == "passed"
+    assert claim["closure"] == "closed"
+    assert not any(
+        "mismatch:target_commit" in item.get("stale_reasons", [])
+        for item in graph["diagnostics"]
+    )
+
+
+def test_goal_coverage_graph_uses_pinned_claim_set_body() -> None:
+    task_map = _task_map()
+    pinned = build_goal_claim_set(
+        {
+            "tasks": [{
+                "task_id": "TASK-A",
+                "acceptance_criteria": [
+                    "CLAIM-PINNED: Preserve the accepted historical claim.",
+                ],
+            }],
+        },
+        workflow_run_id="RUN-1",
+        goal_id="F-GOAL",
+        task_map_generation="GEN-2",
+    )
+    pinned_ref_digest = "d" * 64
+    closure = ZfEvent(
+        id="closure-pinned",
+        type="goal.closure.synthesized",
+        payload={
+            "goal_closure_result": _closure_result(
+                goal_claim_set_digest=pinned_ref_digest,
+                goal_coverage=[{
+                    "goal_claim_id": "CLAIM-PINNED",
+                    "status": "closed",
+                    "supporting_result_refs": ["artifact://verify-a"],
+                }],
+                open_gap_refs=[],
+                verdict="passed",
+                recommended_action="complete",
+            ),
+        },
+    )
+    events = [
+        (1, ZfEvent(
+            type="goal.claim_set.pinned",
+            payload={
+                "workflow_run_id": "RUN-1",
+                "goal_id": "F-GOAL",
+                "task_map_generation": "GEN-2",
+                "goal_claim_set_ref": "artifact://claims-pinned",
+                "goal_claim_set_digest": pinned_ref_digest,
+            },
+        )),
+        (2, closure),
+        (3, _admission_event(
+            closure.id,
+            schema="goal-closure-result.v1",
+            task_id=None,
+        )),
+    ]
+
+    graph = build_goal_coverage_graph(
+        task_map=task_map,
+        tasks=_tasks(),
+        events=events,
+        project_id="zaofu",
+        feature_id="F-GOAL",
+        goal_claim_set=pinned,
+    )
+
+    claim = next(
+        node for node in graph["nodes"]
+        if node.get("kind") == "goal_claim"
+    )
+    assert graph["coverage_mode"] == "legacy_derived"
+    assert graph["summary"]["closed_claims"] == 1
+    assert claim["goal_claim_id"] == "CLAIM-PINNED"
+    assert claim["plan_coverage"] == "covered"
+    assert claim["closure"] == "closed"
+
+
+def test_pinned_claim_set_supplies_generation_missing_from_task_map() -> None:
+    task_map = _task_map()
+    task_map.pop("task_map_generation")
+    pinned = build_goal_claim_set(
+        task_map,
+        workflow_run_id="RUN-1",
+        goal_id="F-GOAL",
+        task_map_generation="GEN-PINNED",
+    )
+
+    graph = build_goal_coverage_graph(
+        task_map=task_map,
+        tasks=_tasks(),
+        events=[],
+        project_id="zaofu",
+        feature_id="F-GOAL",
+        task_map_ref="artifacts/task-map.json",
+        goal_claim_set=pinned,
+    )
+
+    assert graph["identity"]["workflow_run_id"] == "RUN-1"
+    assert graph["identity"]["task_map_generation"] == "GEN-PINNED"
+    assert graph["summary"]["mandatory_claims"] > 0
+
+
 def test_goal_coverage_graph_rejects_incomplete_typed_result_from_current_summary() -> None:
     event = ZfEvent(
         id="verify-incomplete",

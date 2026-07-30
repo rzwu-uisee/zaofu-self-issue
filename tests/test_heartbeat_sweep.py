@@ -689,6 +689,62 @@ def test_orchestrator_sweep_allows_stuck_after_codex_stop(
     assert "worker.stuck" in events
 
 
+def test_orchestrator_sweep_allows_stuck_after_provider_native_close(
+    tmp_path: Path,
+) -> None:
+    """Codex task_complete closes a turn when the Stop hook is absent."""
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (state_dir / "memory").mkdir()
+    registry = RoleSessionRegistry(
+        state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    _heartbeat(
+        registry,
+        "arch",
+        state="busy",
+        age_seconds=400,
+        current_task_id="TASK-1",
+    )
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-1",
+        title="handoff",
+        status="in_progress",
+        assigned_to="arch",
+    ))
+    cfg = ZfConfig(
+        project=ProjectConfig(name="t"),
+        session=SessionConfig(tmux_session="t"),
+        roles=[
+            RoleConfig(
+                name="arch",
+                backend="codex",
+                instance_id="arch",
+                stuck_threshold_seconds=300.0,
+            )
+        ],
+    )
+    orch = Orchestrator(state_dir, cfg, _NoopTransport())  # type: ignore[arg-type]
+    orch.event_writer.append(ZfEvent(
+        type="codex.hook.user_prompt_submit",
+        actor="arch",
+        payload={"session_id": "s1", "turn_id": "t1"},
+    ))
+    orch.event_writer.append(ZfEvent(
+        type="provider.turn.closed",
+        actor="arch",
+        payload={"backend": "codex", "turn_id": "t1"},
+    ))
+
+    orch._run_heartbeat_sweep()  # type: ignore[attr-defined]
+
+    events = (state_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert "worker.stuck" in events
+
+
 def test_orchestrator_sweep_suppresses_stuck_during_open_claude_dispatch(
     tmp_path: Path,
 ) -> None:

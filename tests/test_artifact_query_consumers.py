@@ -54,6 +54,8 @@ def test_cli_and_web_share_catalog_task_attempt_and_lineage_queries(
         "list",
         "--task-id",
         "T-consumer",
+        "--semantic-kind",
+        "verification_result",
         "--state-dir",
         str(state_dir),
     ]) == 0
@@ -93,7 +95,10 @@ def test_cli_and_web_share_catalog_task_attempt_and_lineage_queries(
     ))
     web_catalog = client.get(
         "/api/artifacts/catalog",
-        params={"task_id": "T-consumer"},
+        params={
+            "task_id": "T-consumer",
+            "semantic_kind": "verification_result",
+        },
     ).json()
     web_task = client.get("/api/tasks/T-consumer/artifacts").json()
     web_attempt = client.get("/api/attempts/attempt-consumer").json()
@@ -101,14 +106,18 @@ def test_cli_and_web_share_catalog_task_attempt_and_lineage_queries(
         "/api/artifacts/lineage/task/T-consumer",
     ).json()
 
-    assert cli_catalog["items"][0]["occurrence_id"] == (
-        web_catalog["items"][0]["occurrence_id"]
+    assert cli_catalog["view"] == web_catalog["view"] == "objects"
+    assert cli_catalog["items"][0]["object_id"] == (
+        web_catalog["items"][0]["object_id"]
     )
+    assert cli_catalog["items"][0]["semantic_kind"] == "verification_result"
+    assert cli_catalog["items"][0]["occurrence_count"] == 1
     assert cli_catalog["items"][0]["sha256"] == (
         web_catalog["items"][0]["sha256"]
     )
     assert cli_catalog["source_snapshot"] == web_catalog["source_snapshot"]
     assert cli_task["items"] == web_task["items"]
+    assert cli_task["view"] == web_task["view"] == "occurrences"
     assert cli_attempt["attempt_domain"] == web_attempt["attempt_domain"]
     assert cli_attempt["handoff"] == web_attempt["handoff"]
     assert cli_lineage["items"] == web_lineage["items"]

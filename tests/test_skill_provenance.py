@@ -494,6 +494,8 @@ def test_dev_codex_example_materializes_each_role_skills_and_dependencies(
         / "tmp"
         / "dev-codex-backends.yaml"
     )
+    if not example.exists():
+        pytest.skip("examples/tmp/dev-codex-backends.yaml not present")
 
     config = load_config(example)
     missing_sources = [

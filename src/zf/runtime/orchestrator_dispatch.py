@@ -41,6 +41,7 @@ from zf.runtime.pause_lifecycle import is_dispatch_paused
 from zf.runtime.recovery_sufficiency import build_artifact_recovery_refs
 from zf.runtime.rework_triage import REWORK_RETRY_CLASSIFICATIONS
 from zf.runtime.task_refs import runtime_materialized_dirty_files
+from zf.runtime.task_attempt_runtime import dispatch_attempt_payload
 from zf.runtime.transport import transport_error_diagnostics
 from zf.runtime.workflow_anchor import (
     is_workflow_dispatch_managed_task,
@@ -673,6 +674,24 @@ class DispatchMixin(
                 continue
             if is_workflow_dispatch_managed_task(task):
                 continue
+            from zf.runtime.run_admission import (
+                record_run_dispatch_blocked,
+                run_dispatch_block_reason,
+            )
+
+            run_blocker = run_dispatch_block_reason(self, task=task)
+            if run_blocker:
+                record_run_dispatch_blocked(
+                    self,
+                    task=task,
+                    reason=run_blocker,
+                )
+                self._emit_dispatch_skipped(
+                    task=task,
+                    role=None,
+                    reason=run_blocker,
+                )
+                continue
             if _task_quiesced_by_terminal_run(task, terminal_run_keys):
                 continue
             # G2 remains the default: unassigned Layer 2 tasks wait for
@@ -956,11 +975,19 @@ class DispatchMixin(
                 assignee = (
                     event.payload.get("assignee")
                     or event.payload.get("role")
+                    or (
+                        event.payload.get("role_instance")
+                        if event.type == "fanout.child.dispatched"
+                        else ""
+                    )
                     or ""
                 )
                 if assignee and event.type == "task.assigned":
                     latest_assigned[tid] = (idx, assignee)
-                elif assignee and event.type == "task.dispatched":
+                elif assignee and event.type in {
+                    "task.dispatched",
+                    "fanout.child.dispatched",
+                }:
                     latest_dispatched[tid] = (idx, assignee)
                 if event.type == "orchestrator.dispatch_failed":
                     latest_dispatch_failed[tid] = idx
@@ -2333,6 +2360,9 @@ class DispatchMixin(
         if self._split_quality_blocks_dispatch(task, role):
             return False
 
+        if not self._activate_role_for_task_dispatch(task, role):
+            return False
+
         # ω-1.a (2026-05-18): kernel takes ownership of task ref baseline
         # sync. Before any role gets dispatched, fast-forward the task
         # branch onto main HEAD when safe. This is the audit doc 37
@@ -2705,7 +2735,15 @@ class DispatchMixin(
             task_id=task.id,
         )
         try:
-            self._send_transport_task(role.instance_id, briefing_path, prompt, context)
+            context = (
+                self._send_transport_task(
+                    role.instance_id,
+                    briefing_path,
+                    prompt,
+                    context,
+                )
+                or context
+            )
         except Exception as exc:
             self._active_dispatch_ids.pop(task.id, None)
             try:
@@ -2822,6 +2860,7 @@ class DispatchMixin(
                 "base_git_head": base_git_head or "",
                 "dispatch_id": dispatch_id,
                 "snapshot_ref": snapshot_ref,
+                **dispatch_attempt_payload(context),
             },
         ))
         self.event_writer.append(ZfEvent(
@@ -2836,6 +2875,7 @@ class DispatchMixin(
                 "source_doc": str(task_doc.source_path),
                 "progress_doc": str(task_doc.progress_path),
                 "dispatch_id": dispatch_id,
+                **dispatch_attempt_payload(context),
                 "source_revision": task_doc.source_revision,
                 "contract_revision": task_doc.contract_revision,
                 "capsule_revision": task_doc.capsule_revision,
@@ -4272,7 +4312,15 @@ class DispatchMixin(
             task_id=task.id,
             trace_id=trigger_event.correlation_id,
         )
-        self._send_transport_task(role.instance_id, briefing_path, prompt, context)
+        context = (
+            self._send_transport_task(
+                role.instance_id,
+                briefing_path,
+                prompt,
+                context,
+            )
+            or context
+        )
         self._get_spawn_coordinator().notify_first_dispatch(role)
         self._clear_dispatch_failure(task.id)
         self.event_writer.append(ZfEvent(
@@ -4288,6 +4336,7 @@ class DispatchMixin(
                 "rework_request_event_id": rework_request.id,
                 "base_git_head": base_git_head or "",
                 "dispatch_id": dispatch_id,
+                **dispatch_attempt_payload(context),
             },
             causation_id=rework_request.id,
             correlation_id=rework_request.correlation_id,
@@ -4309,50 +4358,16 @@ class DispatchMixin(
         role: RoleConfig,
         trigger_event: ZfEvent | None = None,
     ) -> str:
-        if not self._worker_dispatchable(role.instance_id):
-            if not self._can_repair_task_ref_on_blocked_owner(
-                task,
-                role,
-                trigger_event,
-            ):
-                return "rework_target_not_dispatchable"
-        try:
-            runtime_events = self.event_log.read_all()
-        except Exception:
-            runtime_events = []
-        latest_dispatch_meta = self._latest_dispatch_meta_by_task(runtime_events)
-        active_others: list[str] = []
-        for other in self.task_store.list_all():
-            if other.id == task.id or other.status != "in_progress":
-                continue
-            dispatch_idx, dispatched_to, dispatch_id = latest_dispatch_meta.get(
-                other.id,
-                (-1, "", ""),
-            )
-            if not dispatched_to:
-                continue
-            if self._dispatch_has_terminal_after(
-                events=runtime_events,
-                task_id=other.id,
-                dispatch_idx=dispatch_idx,
-                dispatch_id=dispatch_id,
-            ):
-                continue
-            try:
-                same_worker = self._assignee_equivalent(
-                    dispatched_to,
-                    role.instance_id,
-                )
-            except Exception:
-                same_worker = dispatched_to == role.instance_id
-            if same_worker:
-                active_others.append(other.id)
-        # One role instance maps to one interactive provider turn. Even if a
-        # future global WIP setting exceeds one, a single pane must remain
-        # serial: queue the rework until its current task reaches terminal.
-        if active_others:
-            return "rework_target_busy:" + ",".join(sorted(active_others))
-        return ""
+        from zf.runtime.rework_dispatch_fence import (
+            rework_dispatch_block_reason,
+        )
+
+        return rework_dispatch_block_reason(
+            self,
+            task,
+            role,
+            trigger_event,
+        )
 
     def _latest_dispatch_meta_by_task(
         self,
@@ -4869,7 +4884,15 @@ class DispatchMixin(
             trace_id=trigger_event.correlation_id,
         )
         try:
-            self._send_transport_task(role.instance_id, briefing_path, prompt, context)
+            context = (
+                self._send_transport_task(
+                    role.instance_id,
+                    briefing_path,
+                    prompt,
+                    context,
+                )
+                or context
+            )
         except Exception as exc:
             self._active_dispatch_ids.pop(task.id, None)
             try:
@@ -4909,6 +4932,7 @@ class DispatchMixin(
                 "trigger_event": trigger_event.type,
                 "evidence_reissue_event_id": request_event.id,
                 "dispatch_id": dispatch_id,
+                **dispatch_attempt_payload(context),
             },
             causation_id=request_event.id,
             correlation_id=request_event.correlation_id,
@@ -5062,6 +5086,9 @@ class DispatchMixin(
     _NON_DISPATCHABLE_WORKER_STATES: frozenset[str] = frozenset({
         "stuck",
         "dead",
+        "activating",
+        "resuming",
+        "suspending",
         "respawning",
         "recycling",
         "pending_recycle",

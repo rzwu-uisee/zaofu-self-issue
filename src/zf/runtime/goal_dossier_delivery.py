@@ -25,7 +25,9 @@ from zf.runtime.goal_dossier import (
     render_goal_dossier_markdown,
     write_goal_dossier_projection,
 )
-from zf.runtime.goal_dossier_consistency import terminal_goal_dossier_issues
+from zf.runtime.goal_dossier_consistency import (
+    evaluate_goal_dossier_delivery_readiness,
+)
 from zf.runtime.run_scope import event_run_id, run_aliases
 
 
@@ -105,12 +107,6 @@ def materialize_terminal_goal_deliveries(
                 events=terminal_events,
                 project_id=project_id,
             )
-            dossier_path = write_goal_dossier_projection(state_dir, dossier)
-            markdown_path = dossier_path.parent / "dossier.md"
-            atomic_write_text(
-                markdown_path,
-                render_goal_dossier_markdown(dossier),
-            )
             receipt_path: Path | None = None
             receipt: dict[str, Any] | None = None
             if terminal.type == "run.goal.completed":
@@ -120,6 +116,21 @@ def materialize_terminal_goal_deliveries(
                     generated_at=str(dossier.get("generated_at") or _now()),
                     project_id=project_id,
                 )
+            readiness = evaluate_goal_dossier_delivery_readiness(
+                state_dir=state_dir,
+                dossier=dossier,
+                receipt=receipt,
+                terminal=terminal,
+            )
+            dossier = dict(dossier)
+            dossier["delivery_readiness"] = readiness
+            dossier_path = write_goal_dossier_projection(state_dir, dossier)
+            markdown_path = dossier_path.parent / "dossier.md"
+            atomic_write_text(
+                markdown_path,
+                render_goal_dossier_markdown(dossier),
+            )
+            if receipt is not None:
                 receipt_path = dossier_path.parent / "goal-completion-receipt.v1.json"
                 atomic_write_text(
                     receipt_path,
@@ -127,13 +138,11 @@ def materialize_terminal_goal_deliveries(
                     + "\n",
                 )
             materialized += 1
-            consistency_issues = terminal_goal_dossier_issues(
-                state_dir=state_dir,
-                dossier=dossier,
-                receipt=receipt,
-                terminal=terminal,
-            )
-            if consistency_issues:
+            consistency_issues = list(readiness.get("issues") or [])
+            if (
+                terminal.type == "run.goal.completed"
+                and readiness.get("status") != "ready"
+            ):
                 failed += 1
                 inconsistency_key = (
                     terminal.id,

@@ -140,3 +140,62 @@ def test_workflow_request_lifecycle_rejects_invalid_transition(tmp_path: Path) -
             status="proposed",
             actor="test",
         )
+
+
+def test_workflow_request_semantic_replan_records_attempt_domain(
+    tmp_path: Path,
+) -> None:
+    state_dir, manifest_ref, writer = _request_fixture(tmp_path)
+    initial = register_workflow_intake(
+        state_dir,
+        manifest_ref,
+        actor="test",
+        writer=writer,
+    )
+
+    revised = revise_workflow_request(
+        state_dir,
+        manifest_ref,
+        actor="owner",
+        source_root="/repo/source",
+        target_root="/repo/target",
+        acceptance=["close the mandatory evidence gap"],
+        open_questions=[],
+        revision_reason="semantic_replan",
+        source_event_id="evt-verify-rejected",
+        writer=writer,
+    )
+
+    updated = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "workflow.request.updated"
+    )
+    assert revised["revision"] == initial["revision"] + 1
+    assert updated.causation_id == "evt-verify-rejected"
+    assert updated.payload["previous_revision"] == initial["revision"]
+    assert updated.payload["revision_reason"] == "semantic_replan"
+    assert updated.payload["source_event_id"] == "evt-verify-rejected"
+    assert updated.payload["attempt_domain"] == "gap"
+    assert updated.payload["semantic_attempt_incremented"] is True
+
+
+def test_workflow_request_rejects_unknown_revision_reason(
+    tmp_path: Path,
+) -> None:
+    state_dir, manifest_ref, writer = _request_fixture(tmp_path)
+    register_workflow_intake(
+        state_dir,
+        manifest_ref,
+        actor="test",
+        writer=writer,
+    )
+
+    with pytest.raises(WorkflowRequestError, match="revision reason"):
+        revise_workflow_request(
+            state_dir,
+            manifest_ref,
+            actor="owner",
+            revision_reason="protocol_repair",
+            writer=writer,
+        )

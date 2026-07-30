@@ -22,6 +22,10 @@ class ExecutionPattern:
     roles: list[str] = field(default_factory=list)
     children: list[dict[str, Any]] = field(default_factory=list)
     barrier: dict[str, Any] = field(default_factory=dict)
+    operation: str = ""
+    dependencies: list[str] = field(default_factory=list)
+    input_ports: list[dict[str, Any]] = field(default_factory=list)
+    output_ports: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +37,10 @@ class ExecutionPattern:
             "roles": list(self.roles),
             "children": list(self.children),
             "barrier": dict(self.barrier),
+            "operation": self.operation,
+            "dependencies": list(self.dependencies),
+            "input_ports": list(self.input_ports),
+            "output_ports": list(self.output_ports),
         }
 
 
@@ -103,9 +111,41 @@ def _patterns_from_config(config: ZfConfig | None) -> list[ExecutionPattern]:
                 "synth_role": str(getattr(aggregate, "synth_role", "") or ""),
                 "timeout_seconds": int(getattr(stage, "timeout_seconds", 0) or 0),
                 "max_retries": int(getattr(aggregate, "max_retries", 0) or 0),
+                "dependency_barrier_id": str(
+                    getattr(stage, "dependency_barrier_id", "") or ""
+                ),
+                "dependency_barrier_digest": str(
+                    getattr(stage, "dependency_barrier_digest", "") or ""
+                ),
+                "required_events": list(
+                    getattr(stage, "dependency_events", []) or []
+                ),
+                "failure_events": list(
+                    getattr(stage, "dependency_failure_events", []) or []
+                ),
             },
+            operation=str(getattr(stage, "operation", "") or ""),
+            dependencies=list(getattr(stage, "dependencies", []) or []),
+            input_ports=_stage_ports(
+                getattr(stage, "input_ports", []) or []
+            ),
+            output_ports=_stage_ports(
+                getattr(stage, "output_ports", []) or []
+            ),
         ))
     return patterns
+
+
+def _stage_ports(ports: object) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": str(getattr(port, "name", "") or ""),
+            "kind": str(getattr(port, "kind", "") or ""),
+            "source": str(getattr(port, "source", "") or ""),
+            "required": bool(getattr(port, "required", True)),
+        }
+        for port in list(ports or [])
+    ]
 
 
 def _stage_children(stage: object) -> list[dict[str, Any]]:

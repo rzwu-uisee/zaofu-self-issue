@@ -29,6 +29,28 @@ def light_flow_metadata(config: Any, *, flow_kind: str = "") -> dict[str, Any] |
     return metadata
 
 
+def light_flow_entry_triggers(config: Any) -> tuple[str, ...]:
+    """Return every configured fixed light-flow entry in declaration order."""
+
+    workflow = getattr(config, "workflow", None)
+    candidates: list[Any] = [
+        getattr(workflow, "flow_metadata", {}) or {},
+    ]
+    scoped = getattr(workflow, "flow_metadata_by_kind", {}) or {}
+    if isinstance(scoped, dict):
+        candidates.extend(scoped.values())
+    entries: list[str] = []
+    for metadata in candidates:
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("topology") or "") != "light":
+            continue
+        entry = str(metadata.get("light_entry_trigger") or "").strip()
+        if entry and entry not in entries:
+            entries.append(entry)
+    return tuple(entries)
+
+
 def synthesize_light_task_map(
     *,
     pdd_id: str,
@@ -46,11 +68,35 @@ def synthesize_light_task_map(
     requirement_ref = objective_ref or prd_ref
     objective_text = objective.strip() or f"Deliver the work described by {requirement_ref}"
     refs = dict(workflow_refs or {})
-    matrix_refs = _matrix_refs(refs)
+    ready_ports = _dedupe_strings(ready_plan_ports or [])
+    matrix_refs = _ready_task_contract_matrix_refs(
+        refs,
+        ready_plan_ports=ready_ports,
+    )
     source_refs = refs.get("source_refs") if isinstance(refs.get("source_refs"), dict) else {}
-    artifact_refs = refs.get("artifact_refs") if isinstance(refs.get("artifact_refs"), list) else []
+    artifact_refs = _task_contract_artifact_refs(
+        refs,
+        ready_matrix_refs=matrix_refs,
+    )
     path_prefix = "" if root == "." else f"{root}/"
     flow_label = _flow_label(flow_kind)
+    acceptance_criteria = [
+        f"All acceptance criteria in {requirement_ref} are met on the current tree.",
+        "Slice tests pass; runtime evidence regenerated and committed.",
+    ]
+    if any(
+        key in matrix_refs
+        for key in (
+            "acceptance_matrix_ref",
+            "test_matrix_ref",
+            "real_e2e_matrix_ref",
+        )
+    ):
+        acceptance_criteria.insert(
+            1,
+            "Read and satisfy every ready referenced acceptance/test/real-e2e "
+            "matrix before completion.",
+        )
     task = {
         "task_id": task_id,
         "title": objective_text[:120],
@@ -68,11 +114,7 @@ def synthesize_light_task_map(
         "artifact_refs": artifact_refs,
         **matrix_refs,
         "acceptance": [objective_text],
-        "acceptance_criteria": [
-            f"All acceptance criteria in {requirement_ref} are met on the current tree.",
-            "Read and satisfy every referenced acceptance/test/real-e2e matrix before completion.",
-            "Slice tests pass; runtime evidence regenerated and committed.",
-        ],
+        "acceptance_criteria": acceptance_criteria,
     }
     commands = _dedupe_strings(verification_commands or [])
     if commands:
@@ -101,7 +143,7 @@ def synthesize_light_task_map(
         **matrix_refs,
         "required_plan_ports": _light_required_plan_ports(
             flow_kind=flow_kind,
-            ready_plan_ports=ready_plan_ports or [],
+            ready_plan_ports=ready_ports,
         ),
         "shared_conventions": {
             "test_path_prefix": f"{path_prefix}tests",
@@ -119,14 +161,43 @@ def maybe_synthesize_light_task_map(
     events: list[ZfEvent],
 ) -> ZfEvent | None:
     """入口触发 → 写 task_map + 发 task_map.ready(幂等)。"""
-    metadata = light_flow_metadata(config)
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    from zf.core.workflow.flow_metadata import flow_kind_from_payload
+
+    requested_kind = flow_kind_from_payload(payload)
+    metadata = light_flow_metadata(config, flow_kind=requested_kind)
+    metadata_kind = str((metadata or {}).get("flow_kind") or "").strip().lower()
+    if requested_kind and metadata_kind and requested_kind != metadata_kind:
+        metadata = None
+    if metadata is None or event.type != str(
+        metadata.get("light_entry_trigger") or ""
+    ):
+        if requested_kind:
+            return None
+        matches = []
+        workflow = getattr(config, "workflow", None)
+        scoped = getattr(workflow, "flow_metadata_by_kind", {}) or {}
+        if isinstance(scoped, dict):
+            matches = [
+                dict(candidate)
+                for candidate in scoped.values()
+                if isinstance(candidate, dict)
+                and str(candidate.get("topology") or "") == "light"
+                and event.type == str(
+                    candidate.get("light_entry_trigger") or ""
+                )
+            ]
+        metadata = matches[0] if len(matches) == 1 else None
     if metadata is None:
         return None
     entry = str(metadata.get("light_entry_trigger") or "prd.requested")
     if event.type != entry:
         return None
-    payload = event.payload if isinstance(event.payload, dict) else {}
-    flow_kind = str(payload.get("kind") or metadata.get("flow_kind") or "prd")
+    flow_kind = str(
+        requested_kind
+        or metadata.get("flow_kind")
+        or "prd"
+    )
     pdd_id = str(
         payload.get("pdd_id")
         or payload.get("request_id")
@@ -158,7 +229,8 @@ def maybe_synthesize_light_task_map(
         state_dir=state_dir,
     )
     objective_ref = str(
-        payload.get("objective_ref")
+        payload.get("requirement_spec_ref")
+        or payload.get("objective_ref")
         or payload.get("prd_ref")
         or payload.get("issue_ref")
         or metadata.get("objective_ref")
@@ -227,6 +299,7 @@ def maybe_synthesize_light_task_map(
             **workflow_refs,
             "task_map_ref": f".zf/artifacts/{pdd_id}/task_map.json",
             "pdd_id": pdd_id,
+            "flow_kind": flow_kind,
             "source": "light_flow_kernel",
             "reason": "light topology: kernel-synthesized single-task map",
         },
@@ -246,6 +319,14 @@ _MATRIX_REF_KEYS = (
     "intake_json_ref",
 )
 
+_PLAN_MATRIX_REF_TO_PORT = {
+    "source_inventory_ref": "source_inventory",
+    "capability_matrix_ref": "capability_matrix",
+    "acceptance_matrix_ref": "acceptance_matrix",
+    "test_matrix_ref": "test_matrix",
+    "real_e2e_matrix_ref": "real_e2e_matrix",
+}
+
 
 def _matrix_refs(payload: dict[str, Any]) -> dict[str, str]:
     return {
@@ -253,6 +334,64 @@ def _matrix_refs(payload: dict[str, Any]) -> dict[str, str]:
         for key in _MATRIX_REF_KEYS
         if str(payload.get(key) or "").strip()
     }
+
+
+def _ready_task_contract_matrix_refs(
+    payload: dict[str, Any],
+    *,
+    ready_plan_ports: list[str],
+) -> dict[str, str]:
+    ready = set(ready_plan_ports)
+    return {
+        ref_key: str(payload.get(ref_key) or "")
+        for ref_key, port in _PLAN_MATRIX_REF_TO_PORT.items()
+        if port in ready and str(payload.get(ref_key) or "").strip()
+    }
+
+
+def _task_contract_artifact_refs(
+    payload: dict[str, Any],
+    *,
+    ready_matrix_refs: dict[str, str],
+) -> list[Any]:
+    artifacts = (
+        payload.get("artifact_refs")
+        if isinstance(payload.get("artifact_refs"), list)
+        else []
+    )
+    blocked = {
+        str(payload.get(key) or "").strip()
+        for key in _MATRIX_REF_KEYS
+        if key != "intake_json_ref"
+        and key not in ready_matrix_refs
+        and str(payload.get(key) or "").strip()
+    }
+    return [
+        item
+        for item in artifacts
+        if not any(
+            _artifact_ref_matches(item, ref)
+            for ref in blocked
+        )
+    ]
+
+
+def _artifact_ref_matches(item: Any, ref: str) -> bool:
+    raw = (
+        str(item.get("ref") or item.get("path") or "")
+        if isinstance(item, dict)
+        else str(item or "")
+    ).strip().replace("\\", "/")
+    expected = str(ref or "").strip().replace("\\", "/")
+    return bool(
+        raw
+        and expected
+        and (
+            raw == expected
+            or raw.endswith("/" + expected.lstrip("/"))
+            or expected.endswith("/" + raw.lstrip("/"))
+        )
+    )
 
 
 def _light_required_plan_ports(
@@ -271,28 +410,13 @@ def _ready_matrix_plan_ports(
     *,
     state_dir: Path,
 ) -> list[str]:
-    ref_to_port = {
-        "source_inventory_ref": "source_inventory",
-        "capability_matrix_ref": "capability_matrix",
-        "acceptance_matrix_ref": "acceptance_matrix",
-        "test_matrix_ref": "test_matrix",
-        "real_e2e_matrix_ref": "real_e2e_matrix",
-    }
     ready: list[str] = []
-    for ref_key, logical_name in ref_to_port.items():
+    for ref_key, logical_name in _PLAN_MATRIX_REF_TO_PORT.items():
         body = _load_manifest_ref(
             str(workflow_refs.get(ref_key) or ""),
             state_dir=state_dir,
         )
-        if str(body.get("status") or "").strip().lower() != "ready":
-            continue
-        metadata = body.get("metadata")
-        metadata = metadata if isinstance(metadata, dict) else {}
-        contract = metadata.get("enrichment_contract")
-        if (
-            isinstance(contract, dict)
-            and str(contract.get("status") or "").strip().lower() != "fulfilled"
-        ):
+        if not _matrix_body_ready(body):
             continue
         ready.append(logical_name)
     return ready
@@ -306,6 +430,8 @@ def _light_verification_commands(
 ) -> list[str]:
     matrix_ref = str(workflow_refs.get("test_matrix_ref") or "").strip()
     matrix = _load_manifest_ref(matrix_ref, state_dir=state_dir)
+    if not _matrix_body_ready(matrix):
+        matrix = {}
     commands: list[str] = []
     tests = matrix.get("tests") if isinstance(matrix.get("tests"), list) else []
     for test in tests:
@@ -325,6 +451,18 @@ def _light_verification_commands(
             continue
         commands.extend(getattr(gate, "required_checks", []) or [])
     return _dedupe_strings(commands)
+
+
+def _matrix_body_ready(body: dict[str, Any]) -> bool:
+    if str(body.get("status") or "").strip().lower() != "ready":
+        return False
+    metadata = body.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    contract = metadata.get("enrichment_contract")
+    return (
+        isinstance(contract, dict)
+        and str(contract.get("status") or "").strip().lower() == "fulfilled"
+    )
 
 
 def _dedupe_strings(items: list[Any]) -> list[str]:
@@ -414,6 +552,7 @@ def _dedupe_artifact_refs(items: list[Any]) -> list[Any]:
 
 
 __all__ = [
+    "light_flow_entry_triggers",
     "light_flow_metadata",
     "maybe_synthesize_light_task_map",
     "synthesize_light_task_map",

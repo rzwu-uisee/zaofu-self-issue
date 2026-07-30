@@ -38,6 +38,7 @@ def test_official_flow_profile_failure_events_have_consumer_contracts() -> None:
     })))
     events.update(_failure_events(expand_issue_flow({
         "entryTrigger": "issue.requested",
+        "topology": "fanout",
     })))
     events.update(_failure_events(expand_prd_flow({
         "entryTrigger": "prd.requested",

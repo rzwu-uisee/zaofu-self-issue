@@ -105,17 +105,24 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     catalog_sub = catalog.add_subparsers(dest="artifact_catalog_cmd")
 
-    catalog_list = catalog_sub.add_parser("list", help="List artifact occurrences")
+    catalog_list = catalog_sub.add_parser("list", help="List artifact objects")
     for flag in (
         "kind",
         "ref",
         "task-id",
+        "claim-id",
         "run-id",
         "attempt-id",
         "operation-id",
         "package-id",
+        "semantic-kind",
     ):
         catalog_list.add_argument(f"--{flag}", default="")
+    catalog_list.add_argument(
+        "--view",
+        choices=["objects", "occurrences"],
+        default="objects",
+    )
     catalog_list.add_argument("--limit", type=int, default=200)
     catalog_list.add_argument("--offset", type=int, default=0)
     catalog_list.add_argument("--state-dir", default=None)
@@ -171,8 +178,19 @@ def _run_attempt_read(args: argparse.Namespace) -> int:
             explicit_state_dir=getattr(args, "state_dir", None),
         )
         manifest = _load_attempt_source_manifest(context.state_dir, args.attempt)
+        from zf.runtime.artifact_read_capability import (
+            authorize_artifact_read_from_environment,
+        )
         from zf.runtime.artifact_read_ledger import read_attempt_artifact
 
+        identity = authorize_artifact_read_from_environment(
+            context.state_dir,
+            manifest=manifest,
+            event_log=event_log_from_project(
+                context.state_dir,
+                config=context.config,
+            ),
+        )
         result = read_attempt_artifact(
             context.state_dir,
             manifest=manifest,
@@ -181,10 +199,10 @@ def _run_attempt_read(args: argparse.Namespace) -> int:
             json_path=args.json_path,
             max_items=max(0, int(args.max_items or 0)),
             max_chars=max(0, int(args.max_chars or 0)),
-            actor=os.environ.get("ZF_ROLE_INSTANCE", ""),
-            role=os.environ.get("ZF_ROLE_NAME", ""),
-            provider=os.environ.get("ZF_ROLE_BACKEND", ""),
-            purpose=os.environ.get("ZF_ARTIFACT_PURPOSE", ""),
+            actor=identity["actor"],
+            role=identity["role"],
+            provider=identity["provider"],
+            purpose=identity["purpose"],
         )
     except (ConfigError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -220,12 +238,15 @@ def _run_catalog_list(args: argparse.Namespace) -> int:
         result = service.catalog_list(
             context=query_context,
             kind=args.kind,
+            semantic_kind=args.semantic_kind,
             ref=args.ref,
             task_id=args.task_id,
+            claim_id=args.claim_id,
             run_id=args.run_id,
             attempt_id=args.attempt_id,
             operation_id=args.operation_id,
             package_id=args.package_id,
+            view=args.view,
         )
     except (ConfigError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

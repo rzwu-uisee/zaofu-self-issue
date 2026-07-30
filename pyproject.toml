@@ -41,7 +41,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["tests/e2e/fixtures"]
-addopts = "-m 'not perf and not host and not real_provider'"
+addopts = "--cov=zf --cov-report=term-missing -m 'not perf and not host and not real_provider'"
 asyncio_mode = "auto"
 markers = [
     "host: host capability, local archive, or installed CLI sensor",

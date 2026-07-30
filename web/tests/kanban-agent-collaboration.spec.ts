@@ -267,6 +267,15 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
     timeout: 30_000,
   });
 
+  await page.locator(".channel-tabs").getByRole("button", { name: "Details" }).click();
+  const workflowRoles = page.locator(".channel-workspace-panel").filter({
+    hasText: "Workflow Roles",
+  });
+  await expect(workflowRoles).toContainText("6 configured roles");
+  await expect(workflowRoles).toContainText("source_researcher");
+  await expect(workflowRoles).toContainText("synthesizer");
+  await page.locator(".channel-tabs").getByRole("button", { name: "Chat" }).click();
+
   await page.getByTitle("Members").click();
   const memberDrawer = page.locator(".channel-drawer");
   await expect(memberDrawer).toContainText("tech_leader");

@@ -1057,6 +1057,9 @@ def test_workflow_graph_web_projection_uses_read_model_cache(
         raise AssertionError("workflow graph must not scan EventLog.read_all")
 
     app = create_app(state_dir=tmp_path, config=cfg)
+    from zf.web.projections import read_model
+
+    read_model.rebuild(tmp_path, config=cfg)
     monkeypatch.setattr("zf.core.events.log.EventLog.read_all", fail_read_all)
     client = TestClient(app)
 

@@ -8,6 +8,7 @@ from zf.core.config.schema import (
     ZfConfig,
 )
 from zf.runtime.autoresearch_resident_sidecar import (
+    AutoresearchResidentSidecar,
     build_autoresearch_resident_command,
     start_autoresearch_resident_sidecar,
     stop_autoresearch_resident_sidecar,
@@ -140,6 +141,75 @@ def test_autoresearch_resident_sidecar_starts_authorized_and_stops(
     assert events.events[-1].type == "autoresearch.resident_sidecar.stopped"
 
 
+def test_handle_stop_kills_whole_process_group(tmp_path: Path):
+    import os
+    import subprocess
+    import sys
+    import time
+
+    child_script = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(120)'])\n"
+        "time.sleep(120)\n"
+    )
+    log_path = tmp_path / "resident.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        start_new_session=True,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    pid_path = tmp_path / "autoresearch-resident.pid.json"
+    pid_path.write_text("{}", encoding="utf-8")
+    sidecar = AutoresearchResidentSidecar(
+        process=proc,
+        log_handle=log_handle,
+        pid_path=pid_path,
+        log_path=log_path,
+    )
+    try:
+        deadline = time.time() + 5
+        members: list[str] = []
+        while time.time() < deadline:
+            members = subprocess.run(
+                ["pgrep", "-g", str(proc.pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.split()
+            if len(members) >= 2:
+                break
+            time.sleep(0.1)
+        assert len(members) >= 2, "fixture child did not appear in process group"
+
+        stop_autoresearch_resident_sidecar(sidecar, timeout=0.5)
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            members = subprocess.run(
+                ["pgrep", "-g", str(proc.pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.split()
+            if not members:
+                break
+            time.sleep(0.1)
+        assert members == []
+        assert not pid_path.exists()
+    finally:
+        try:
+            os.killpg(proc.pid, 9)
+        except (OSError, ProcessLookupError):
+            pass
+        if not log_handle.closed:
+            log_handle.close()
+
+
 def test_stop_by_pidfile_kills_whole_process_group(tmp_path: Path):
     """R3/R4/R5: `zf stop` runs in a different process from `zf start`, so the
     handle-based stop never fired and the resident + its loop subprocess +
@@ -158,7 +228,9 @@ def test_stop_by_pidfile_kills_whole_process_group(tmp_path: Path):
     marker = "zf-sidecar-treekill-fixture"
     child_script = (
         f"import subprocess, sys, time  # {marker}\n"
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(120)'])\n"
         "time.sleep(120)\n"
     )
     proc = subprocess.Popen(
@@ -186,7 +258,10 @@ def test_stop_by_pidfile_kills_whole_process_group(tmp_path: Path):
             "log_path": "",
         }), encoding="utf-8")
 
-        assert stop_autoresearch_resident_sidecar_by_pidfile(state_dir) is True
+        assert stop_autoresearch_resident_sidecar_by_pidfile(
+            state_dir,
+            timeout=0.5,
+        ) is True
 
         proc.wait(timeout=5)
         remaining = subprocess.run(

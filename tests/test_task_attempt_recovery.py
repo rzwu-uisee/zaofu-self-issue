@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from zf.core.state.task_attempts import TaskAttemptStore
 from zf.runtime.task_attempt_recovery import pending_task_attempt_recovery_actions
 
 
@@ -18,6 +19,46 @@ def _write_attempts(tmp_path: Path, tasks: dict) -> Path:
         encoding="utf-8",
     )
     return projections
+
+
+def _canonical_attempt(
+    store: TaskAttemptStore,
+    *,
+    run_id: str,
+    task_id: str,
+    dispatch_id: str,
+    status: str,
+    recovery_owner: str = "scheduler",
+    retryable: bool = True,
+) -> dict:
+    row = store.ensure_for_dispatch(
+        run_id=run_id,
+        task_id=task_id,
+        dispatch_id=dispatch_id,
+        role="dev",
+        instance_id=f"dev-{run_id.lower()}",
+        operation_id=f"operation-{run_id.lower()}",
+        briefing_ref=f"{run_id}.md",
+        created_at="2026-07-26T10:00:00+00:00",
+        lease_expires_at="2026-07-26T10:10:00+00:00",
+        max_attempts=3,
+    ).attempt
+    updated = store.update(
+        row["attempt_id"],
+        status=status,
+        updated_at="2026-07-26T10:15:00+00:00",
+        terminal_event_id=f"terminal-{dispatch_id}",
+        failure_reason="failed",
+        failure_class=(
+            "semantic_result_failed"
+            if recovery_owner == "workflow"
+            else "transport_delivery"
+        ),
+        retryable=retryable,
+        recovery_owner=recovery_owner,
+    )
+    assert updated is not None
+    return updated
 
 
 def test_expired_open_attempt_becomes_worker_lifecycle_recover(tmp_path: Path) -> None:
@@ -170,3 +211,110 @@ def test_deadletter_or_exhausted_attempt_routes_to_human(tmp_path: Path) -> None
     assert action["policy_decision"]["decision"] == "human_escalate"
     assert action["policy_decision"]["executable"] is False
     assert action["intervention_class"] == "safe_halt"
+
+
+def test_canonical_store_wins_over_conflicting_projection(
+    tmp_path: Path,
+) -> None:
+    projections = _write_attempts(tmp_path, {
+        "LEGACY": {
+            "latest_state": "failed",
+            "counted_failures": 1,
+            "attempts": [{
+                "attempt_key": "legacy-attempt",
+                "state": "failed",
+                "retryable": True,
+                "terminal": {"event_id": "legacy-failed"},
+            }],
+        },
+    })
+    store = TaskAttemptStore(tmp_path / "task_attempts.json")
+    canonical = _canonical_attempt(
+        store,
+        run_id="RUN-1",
+        task_id="CANONICAL",
+        dispatch_id="dispatch-1",
+        status="failed",
+    )
+
+    actions = pending_task_attempt_recovery_actions(
+        projections,
+        canonical_store_path=store.path,
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["task_id"] == "CANONICAL"
+    assert actions[0]["workflow_run_id"] == "RUN-1"
+    assert actions[0]["attempt_id"] == canonical["attempt_id"]
+    assert actions[0]["source_refs"] == [
+        f"task_attempts.json#attempts.{canonical['attempt_id']}"
+    ]
+
+
+def test_canonical_recovery_keeps_same_task_in_distinct_runs(
+    tmp_path: Path,
+) -> None:
+    store = TaskAttemptStore(tmp_path / "task_attempts.json")
+    first = _canonical_attempt(
+        store,
+        run_id="RUN-1",
+        task_id="SHARED",
+        dispatch_id="dispatch-1",
+        status="failed",
+    )
+    second = _canonical_attempt(
+        store,
+        run_id="RUN-2",
+        task_id="SHARED",
+        dispatch_id="dispatch-2",
+        status="failed",
+    )
+
+    actions = pending_task_attempt_recovery_actions(
+        tmp_path / "projections",
+        canonical_store_path=store.path,
+    )
+
+    assert {item["workflow_run_id"] for item in actions} == {"RUN-1", "RUN-2"}
+    assert {item["attempt_id"] for item in actions} == {
+        first["attempt_id"],
+        second["attempt_id"],
+    }
+    assert len({item["checkpoint_id"] for item in actions}) == 2
+
+
+def test_canonical_semantic_failure_stays_owned_by_workflow(
+    tmp_path: Path,
+) -> None:
+    store = TaskAttemptStore(tmp_path / "task_attempts.json")
+    _canonical_attempt(
+        store,
+        run_id="RUN-1",
+        task_id="TASK-1",
+        dispatch_id="dispatch-1",
+        status="failed",
+        recovery_owner="workflow",
+        retryable=False,
+    )
+
+    assert pending_task_attempt_recovery_actions(
+        tmp_path / "projections",
+        canonical_store_path=store.path,
+    ) == []
+
+
+def test_corrupt_canonical_store_fails_closed_instead_of_projection_fallback(
+    tmp_path: Path,
+) -> None:
+    projections = _write_attempts(tmp_path, {})
+    canonical = tmp_path / "task_attempts.json"
+    canonical.write_text("{broken", encoding="utf-8")
+
+    actions = pending_task_attempt_recovery_actions(
+        projections,
+        canonical_store_path=canonical,
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["failure_class"] == "task_attempt_store_unreadable"
+    assert actions[0]["policy_decision"]["decision"] == "human_escalate"

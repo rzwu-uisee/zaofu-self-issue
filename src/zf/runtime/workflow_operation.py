@@ -34,12 +34,14 @@ OPERATION_EVENT_TYPES = frozenset({
     "workflow.operation.failed",
     "workflow.operation.blocked",
     "workflow.operation.superseded",
+    "workflow.operation.cancelled",
 })
 TERMINAL_OPERATION_STATUSES = frozenset({
     "settled",
     "failed",
     "blocked",
     "superseded",
+    "cancelled",
 })
 
 _VOLATILE_REQUEST_KEYS = frozenset({
@@ -210,6 +212,7 @@ def reduce_workflow_operations(
             "context_delivery_receipt_error": "",
             "child_task_ids": [],
             "admitted_call_result_ref": {},
+            "provider_operation_summary_ref": {},
             "reservation_id": "",
             "reservation_expires_at": "",
             "continuation_key": "",
@@ -237,6 +240,7 @@ def reduce_workflow_operations(
             row["child_task_ids"] = list(dict.fromkeys(
                 [*row["child_task_ids"], *(str(item) for item in children if str(item).strip())]
             ))
+        status_before_event = row["status"]
         if event.type == "workflow.operation.requested":
             row["request_count"] += 1
             row["replay_count"] = max(0, row["request_count"] - 1)
@@ -289,23 +293,58 @@ def reduce_workflow_operations(
                 value = str(payload.get(key) or "")
                 if value:
                     row[key] = value
-        elif event.type == "workflow.operation.settled":
+        elif (
+            event.type == "workflow.operation.settled"
+            and row["status"] != "cancelled"
+        ):
             row["status"] = "settled"
             result_ref = payload.get("admitted_call_result_ref")
             row["admitted_call_result_ref"] = dict(result_ref) if isinstance(result_ref, dict) else {}
+            summary_ref = payload.get("provider_operation_summary_ref")
+            row["provider_operation_summary_ref"] = (
+                dict(summary_ref) if isinstance(summary_ref, dict) else {}
+            )
             row["reason"] = str(payload.get("reason") or "")
-        elif event.type == "workflow.operation.failed":
+        elif (
+            event.type == "workflow.operation.failed"
+            and row["status"] != "cancelled"
+        ):
             row["status"] = "failed"
             row["reason"] = str(payload.get("reason") or "")
-        elif event.type == "workflow.operation.blocked":
+        elif (
+            event.type == "workflow.operation.blocked"
+            and row["status"] != "cancelled"
+        ):
             row["status"] = "blocked"
             row["reason"] = str(payload.get("reason") or "")
-        elif event.type == "workflow.operation.superseded":
+        elif (
+            event.type == "workflow.operation.superseded"
+            and row["status"] != "cancelled"
+        ):
             row["status"] = "superseded"
             row["reason"] = str(payload.get("reason") or "")
-        row["last_event_id"] = event.id
-        row["last_event_type"] = event.type
-        row["last_event_at"] = event.ts
+        elif (
+            event.type == "workflow.operation.cancelled"
+            and row["status"] not in TERMINAL_OPERATION_STATUSES
+        ):
+            row["status"] = "cancelled"
+            row["reason"] = str(payload.get("reason") or "")
+        ignored_terminal_race = (
+            status_before_event == "cancelled"
+            and event.type in {
+                "workflow.operation.settled",
+                "workflow.operation.failed",
+                "workflow.operation.blocked",
+                "workflow.operation.superseded",
+            }
+        ) or (
+            event.type == "workflow.operation.cancelled"
+            and status_before_event in TERMINAL_OPERATION_STATUSES
+        )
+        if not ignored_terminal_race:
+            row["last_event_id"] = event.id
+            row["last_event_type"] = event.type
+            row["last_event_at"] = event.ts
     return operations
 
 
@@ -413,6 +452,7 @@ class WorkflowOperationService:
             self.event_writer.append(ZfEvent(
                 type="workflow.operation.requested",
                 actor="zf-cli",
+                origin="kernel",
                 task_id=task_id or None,
                 payload={
                     "schema_version": WORKFLOW_OPERATION_SCHEMA,
@@ -628,6 +668,7 @@ class WorkflowOperationService:
         request_hash: str,
         workflow_run_id: str,
         admitted_call_result_ref: Mapping[str, Any],
+        provider_operation_summary_ref: Mapping[str, Any] | None = None,
         task_id: str = "",
         causation_id: str = "",
         correlation_id: str = "",
@@ -644,8 +685,33 @@ class WorkflowOperationService:
             task_id=task_id,
             payload={
                 "admitted_call_result_ref": dict(admitted_call_result_ref),
+                "provider_operation_summary_ref": dict(
+                    provider_operation_summary_ref or {}
+                ),
                 "reason": "admitted_call_result",
             },
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def cancel(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        reason: str,
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+    ) -> ZfEvent | None:
+        return self._emit_once(
+            "workflow.operation.cancelled",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            payload={"reason": reason},
             causation_id=causation_id,
             correlation_id=correlation_id,
         )
@@ -696,6 +762,7 @@ class WorkflowOperationService:
         return self.event_writer.append(ZfEvent(
             type=event_type,
             actor="zf-cli",
+            origin="kernel",
             task_id=task_id or None,
             payload={
                 "schema_version": WORKFLOW_OPERATION_SCHEMA,

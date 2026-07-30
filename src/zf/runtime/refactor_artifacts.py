@@ -3,17 +3,34 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.core.security.hash import sha256_file
 from zf.core.state.atomic_io import atomic_write_text
+from zf.runtime.plan_artifact_ports import canonical_plan_port_name
 
 
 REVIEW_READY_EVENT = "zaofu.refactor.review.ready"
 PLAN_READY_EVENTS = {"zaofu.refactor.plan.ready", "refactor.plan.ready"}
+_INHERITED_PLAN_STRUCTURE_FIELDS = frozenset({
+    "artifact_refs",
+    "evidence_refs",
+    "plan_ports",
+    "refactor_plan_md",
+    "plan_md",
+    "plan_intent",
+    "task_map",
+    "gates",
+    "verification_plan",
+    "risk_register",
+    "backlog_candidates",
+    "required_plan_ports",
+    "plan_revision",
+    "task_map_generation",
+})
 
 
 @dataclass(frozen=True)
@@ -102,6 +119,51 @@ def project_refactor_artifacts(
     return None
 
 
+def rebind_refactor_artifact_projection(
+    projection: RefactorArtifactProjection,
+    *,
+    payload: dict[str, Any],
+    state_dir: Path,
+    project_root: Path,
+) -> RefactorArtifactProjection:
+    """Bind relocated refs and their digests back to an immutable projection."""
+
+    artifact_refs = list(dict.fromkeys(
+        str(ref) for ref in payload.get("artifact_refs", []) or [] if str(ref)
+    ))
+    artifact_digests: dict[str, str] = {}
+    for ref in artifact_refs:
+        path = Path(ref)
+        candidates = [path] if path.is_absolute() else [
+            (
+                state_dir.joinpath(*path.parts[1:])
+                if path.parts and path.parts[0] == ".zf"
+                else state_dir / path
+            ),
+            project_root / path,
+        ]
+        resolved = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.exists() and candidate.is_file()
+            ),
+            None,
+        )
+        if resolved is not None:
+            artifact_digests[ref] = sha256_file(resolved)
+    rebound = {
+        **payload,
+        "artifact_refs": artifact_refs,
+        "artifact_digests": artifact_digests,
+    }
+    return replace(
+        projection,
+        artifact_refs=artifact_refs,
+        payload=rebound,
+    )
+
+
 def _project_review_artifacts(
     *,
     state_dir: Path,
@@ -111,6 +173,7 @@ def _project_review_artifacts(
     artifact_dir = _artifact_dir(state_dir, fanout_id)
     child_records = _child_records(state_dir, manifest)
     diagnostics: list[str] = []
+    failed_children: list[str] = []
     if not child_records:
         diagnostics.append("review has no child reports")
 
@@ -122,15 +185,18 @@ def _project_review_artifacts(
         report = _record_report(record)
         if not report:
             diagnostics.append(f"{child_id}: missing report")
+            failed_children.append(child_id)
             continue
         matrix = _coerce_list(_field(record, "coverage_matrix"))
         if not matrix:
             diagnostics.append(f"{child_id}: missing coverage_matrix")
+            failed_children.append(child_id)
         coverage.extend(_tag_items(matrix, child_id=child_id))
 
         evidence_refs = _coerce_str_list(_field(record, "evidence_refs"))
         if not evidence_refs:
             diagnostics.append(f"{child_id}: missing evidence_refs")
+            failed_children.append(child_id)
 
         findings.extend(_tag_items(_coerce_list(report.get("findings")), child_id=child_id))
         uncovered_value = _field(record, "uncovered")
@@ -169,6 +235,16 @@ def _project_review_artifacts(
         "uncovered_count": len(uncovered),
     }
     if diagnostics:
+        if not failed_children:
+            failed_children = [
+                str(child.get("child_id") or "")
+                for child in manifest.get("children", []) or []
+                if isinstance(child, dict) and str(child.get("child_id") or "")
+            ]
+        payload.update(_artifact_gate_failure_payload(
+            diagnostics=diagnostics,
+            failed_children=failed_children,
+        ))
         diagnostics_path = artifact_dir / "artifact-gate-diagnostics.json"
         _write_json(diagnostics_path, diagnostics)
         payload["diagnostics_ref"] = str(diagnostics_path)
@@ -227,6 +303,23 @@ def _project_plan_artifacts(
         diagnostics.append("plan missing gates")
 
     task_map_obj = _normalize_task_map(task_map)
+    task_map_metadata = (
+        task_map_obj.get("metadata")
+        if isinstance(task_map_obj.get("metadata"), dict)
+        else {}
+    )
+    plan_revision = str(
+        task_map_obj.get("plan_revision")
+        or task_map_metadata.get("plan_revision")
+        or _field(source, "plan_revision")
+        or ""
+    ).strip()
+    task_map_generation = str(
+        task_map_obj.get("task_map_generation")
+        or task_map_metadata.get("task_map_generation")
+        or _field(source, "task_map_generation")
+        or ""
+    ).strip()
     paths = {
         "plan_artifact_ref": artifact_dir / "refactor-plan.md",
         "task_map_ref": artifact_dir / "task_map.json",
@@ -260,6 +353,41 @@ def _project_plan_artifacts(
         "plan_intent": plan_intent,
         "task_count": len(task_map_obj.get("tasks", [])),
     }
+    declared_plan_ports = task_map_obj.get("required_plan_ports")
+    if isinstance(declared_plan_ports, list):
+        payload["required_plan_ports"] = list(declared_plan_ports)
+        for raw_name in declared_plan_ports:
+            logical_name = canonical_plan_port_name(str(raw_name or ""))
+            if not logical_name:
+                continue
+            ref_key = f"{logical_name}_ref"
+            if payload.get(ref_key):
+                continue
+            ref_value = str(_field(source, ref_key) or "").strip()
+            if ref_value:
+                payload[ref_key] = ref_value
+                artifact_refs.append(ref_value)
+    plan_ports = _field(source, "plan_ports")
+    if isinstance(plan_ports, list):
+        payload["plan_ports"] = [
+            dict(item) for item in plan_ports if isinstance(item, dict)
+        ]
+    for key in (
+        "requirement_spec_ref",
+        "requirement_spec_digest",
+        "project_adapter_ref",
+        "skill_adapter_plan_ref",
+    ):
+        value = _field(source, key)
+        if value not in (None, "", []):
+            payload[key] = value
+    if plan_revision:
+        payload["plan_revision"] = plan_revision
+    if task_map_generation:
+        payload["task_map_generation"] = task_map_generation
+    # The stable projected plan is the planning result consumed by the
+    # artifact-package gate. Child-worktree plan refs are not durable here.
+    payload["planning_result_ref"] = str(paths["plan_artifact_ref"])
     source_inventory_ref = str(
         _field(source, "source_inventory_ref")
         or _field(source, "hermes_source_inventory_ref")
@@ -302,6 +430,11 @@ def _project_plan_artifacts(
         if value not in (None, "", []):
             payload[key] = value
     if diagnostics:
+        failed_children = _plan_failure_children(source, manifest)
+        payload.update(_artifact_gate_failure_payload(
+            diagnostics=diagnostics,
+            failed_children=failed_children,
+        ))
         diagnostics_path = artifact_dir / "artifact-gate-diagnostics.json"
         _write_json(diagnostics_path, diagnostics)
         payload["diagnostics_ref"] = str(diagnostics_path)
@@ -345,6 +478,35 @@ def _manifest_digest(path: str, provided: dict[str, Any]) -> str:
     return str(provided.get(ref) or "")
 
 
+def _artifact_gate_failure_payload(
+    *,
+    diagnostics: list[str],
+    failed_children: list[str],
+) -> dict[str, Any]:
+    unique_children = list(dict.fromkeys(
+        child_id for child_id in failed_children if child_id
+    ))
+    detail = "; ".join(diagnostics)
+    return {
+        "failed_children": unique_children,
+        "reason": f"artifact gate failed: {detail}"[:1000],
+    }
+
+
+def _plan_failure_children(
+    source: dict[str, Any],
+    manifest: dict[str, Any],
+) -> list[str]:
+    child_id = str(_field(source, "child_id") or "").strip()
+    if child_id:
+        return [child_id]
+    return [
+        str(child.get("child_id") or "")
+        for child in manifest.get("children", []) or []
+        if isinstance(child, dict) and str(child.get("child_id") or "")
+    ]
+
+
 def _child_records(state_dir: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     fanout_id = _manifest_str(manifest, "fanout_id")
@@ -385,14 +547,64 @@ def _plan_source_record(
     manifest: dict[str, Any],
     synth_event: ZfEvent | None,
 ) -> dict[str, Any]:
-    if synth_event is not None and isinstance(synth_event.payload, dict):
-        payload = synth_event.payload
-        return {
-            "payload": payload,
-            "report": payload.get("report") if isinstance(payload.get("report"), dict) else {},
-        }
     records = _child_records(state_dir, manifest)
-    return records[0] if records else {}
+    planner = records[0] if records else {}
+    if synth_event is None or not isinstance(synth_event.payload, dict):
+        return planner
+
+    synth_payload = dict(synth_event.payload)
+    synth_report = (
+        dict(synth_payload.get("report") or {})
+        if isinstance(synth_payload.get("report"), dict)
+        else {}
+    )
+    if not planner:
+        return {"payload": synth_payload, "report": synth_report}
+
+    planner_payload = (
+        dict(planner.get("payload") or {})
+        if isinstance(planner.get("payload"), dict)
+        else {}
+    )
+    planner_report = _record_report(planner)
+    planner_fields = {
+        key: value for key, value in planner_payload.items() if key != "report"
+    }
+    synth_fields = {
+        key: value for key, value in synth_payload.items() if key != "report"
+    }
+    merged_report = _merge_plan_source_fields(planner_report, synth_report)
+    merged_payload = _merge_plan_source_fields(
+        planner_report,
+        planner_fields,
+        synth_report,
+        synth_fields,
+    )
+    merged_payload["report"] = merged_report
+    return {
+        "manifest_child": planner.get("manifest_child"),
+        "payload": merged_payload,
+        "report": merged_report,
+    }
+
+
+def _merge_plan_source_fields(*sources: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for source in sources:
+        for key, value in source.items():
+            inherits_when_empty = (
+                key in _INHERITED_PLAN_STRUCTURE_FIELDS
+                or key.endswith("_ref")
+                or key.endswith("_digest")
+            )
+            if (
+                inherits_when_empty
+                and value in (None, "", [], {})
+                and merged.get(key) not in (None, "", [], {})
+            ):
+                continue
+            merged[key] = value
+    return merged
 
 
 def _record_report(record: dict[str, Any]) -> dict[str, Any]:

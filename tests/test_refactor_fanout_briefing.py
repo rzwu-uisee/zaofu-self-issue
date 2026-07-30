@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from zf.core.config.schema import (
@@ -13,6 +14,7 @@ from zf.core.config.schema import (
 )
 from zf.core.events.model import ZfEvent
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.result_submit import provision_role_submit_credential
 
 
 class _RecordingTransport:
@@ -79,6 +81,73 @@ def test_refactor_review_briefing_treats_high_findings_as_plan_input(tmp_path: P
     assert "coverage_matrix" in briefing
     assert "evidence_refs" in briefing
     assert "Unable to produce a coverage/evidence-backed review report" in briefing
+
+
+def test_refactor_review_profiled_briefing_uses_flat_semantic_result(
+    tmp_path: Path,
+):
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[
+            RoleConfig(
+                name="review-a",
+                backend="codex",
+                role_kind="reader",
+            ),
+        ],
+        workflow=WorkflowConfig(
+            stages=[
+                WorkflowStageConfig(
+                    id="review",
+                    trigger="zaofu.refactor.review.requested",
+                    topology="fanout_reader",
+                    roles=["review-a"],
+                    target_ref="${target_ref}",
+                    aggregate=FanoutAggregateConfig(
+                        mode="wait_for_all",
+                        success_event="zaofu.refactor.review.ready",
+                        failure_event="zaofu.refactor.review.blocked",
+                    ),
+                ),
+            ],
+            flow_metadata={
+                "result_protocol": {
+                    "mode": "blocking",
+                    "semantic_submit_profiles": {
+                        "workflow-read": "blocking",
+                    },
+                },
+            },
+        ),
+    )
+    orch, transport = _orchestrator(tmp_path, config)
+    provision_role_submit_credential(orch.state_dir, "review-a")
+
+    orch.run_once(events=[ZfEvent(
+        type="zaofu.refactor.review.requested",
+        actor="human",
+        payload={"target_ref": "dev"},
+    )])
+
+    briefing = transport.sent[0][1].read_text(encoding="utf-8")
+    dispatched = next(
+        event for event in orch.event_log.read_all()
+        if event.type == "fanout.child.dispatched"
+    )
+    scratch = (
+        orch.state_dir
+        / dispatched.payload["payload"]["result_scratch_ref"]
+    )
+    semantic_template = json.loads(scratch.read_text(encoding="utf-8"))
+
+    assert "Do not wrap it under `report`" in briefing
+    assert "`status` as `passed` and `recommendation` as `approve`" in briefing
+    assert "`report.status`" not in briefing
+    assert "must stay as top-level payload fields" not in briefing
+    assert "report" not in semantic_template
+    assert "fanout_id" not in semantic_template
+    assert "coverage_matrix" in semantic_template
+    assert "evidence_refs" in semantic_template
 
 
 def test_refactor_plan_briefing_includes_required_artifact_fields(tmp_path: Path):

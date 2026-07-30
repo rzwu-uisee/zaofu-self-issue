@@ -15,17 +15,13 @@ from zf.runtime.fanout_projection_metadata import (
     apply_report_payload as _apply_report_payload,
     apply_synth_handoff_metadata as _apply_synth_handoff_metadata,
 )
+from zf.runtime.fanout_identity import fanout_identity_scope_digest
+from zf.runtime.fanout_report_failure import (
+    normalize_finding as _normalize_finding,
+)
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 REPORT_STATUSES = {"passed", "failed", "blocked", "suspended"}
-REPORT_SEVERITIES = {"info", "low", "medium", "high", "critical"}
-REPORT_SEVERITY_ALIASES = {
-    "blocker": "high",
-    "blocking": "high",
-    "error": "high",
-    "warn": "medium",
-    "warning": "medium",
-}
 REPORT_RECOMMENDATIONS = {"approve", "reject", "needs_rework", "abstain"}
 SUCCESS_RECOMMENDATIONS = {"approve"}
 FANOUT_TERMINAL_CHILD_STATUSES = {
@@ -65,9 +61,13 @@ class FanoutContext:
         trigger_event_id: str,
         target_ref: str,
         role_instances: Iterable[str],
+        identity_scope: str = "",
     ) -> "FanoutContext":
         safe_stage = _safe_id(stage_id)
         safe_trigger = _safe_id(trigger_event_id)[:12]
+        if identity_scope:
+            digest = fanout_identity_scope_digest(trigger_event_id, identity_scope)
+            safe_trigger = f"{safe_trigger}-{digest}"
         fanout_id = f"fanout-{safe_stage}-{safe_trigger}"
         seen: dict[str, int] = {}
         children: list[FanoutChild] = []
@@ -917,63 +917,6 @@ def _safe_id(value: str) -> str:
 
 def _safe_choice(value: str, allowed: set[str], fallback: str) -> str:
     return value if value in allowed else fallback
-
-
-def _normalize_finding(
-    raw: dict,
-    index: int,
-    diagnostics: list[str],
-) -> dict:
-    severity = str(raw.get("severity") or "info")
-    severity = REPORT_SEVERITY_ALIASES.get(severity, severity)
-    if severity not in REPORT_SEVERITIES:
-        diagnostics.append(
-            f"findings[{index}].severity must be one of "
-            f"{sorted(REPORT_SEVERITIES)}; got {severity!r}"
-        )
-        severity = "info"
-
-    category = raw.get("category", raw.get("type", ""))
-    if not isinstance(category, str):
-        diagnostics.append(f"findings[{index}].category must be a string")
-        category = str(category)
-
-    path = raw.get("path", raw.get("file", ""))
-    if not isinstance(path, str):
-        diagnostics.append(f"findings[{index}].path must be a string")
-        path = str(path)
-    line = raw.get("line")
-    if line in (None, "") and ":" in path:
-        maybe_path, maybe_line = path.rsplit(":", 1)
-        if maybe_line.isdigit():
-            path = maybe_path
-            line = maybe_line
-
-    message = raw.get(
-        "message",
-        raw.get("summary", raw.get("description", raw.get("reason", ""))),
-    )
-    if not isinstance(message, str) or not message:
-        diagnostics.append(f"findings[{index}].message must be a non-empty string")
-        message = str(message)
-
-    finding = {
-        "severity": severity,
-        "category": category,
-        "path": path,
-        "message": message,
-    }
-    if line not in (None, ""):
-        try:
-            line_int = int(line)
-        except (TypeError, ValueError):
-            diagnostics.append(f"findings[{index}].line must be a positive integer")
-        else:
-            if line_int < 1:
-                diagnostics.append(f"findings[{index}].line must be a positive integer")
-            else:
-                finding["line"] = line_int
-    return finding
 
 
 def _malformed_report(child_id: str, diagnostics: list[str]) -> dict:

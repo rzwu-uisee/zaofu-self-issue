@@ -127,6 +127,12 @@ def _adapter_capability(backend: str, caps: BackendCapabilities) -> dict[str, An
         "session_start_hook": caps.session_start_hook,
         "hook_review_required": caps.hook_review_required,
         "nested_agent_disable": caps.nested_agent_disable,
+        "native_goal": caps.native_goal,
+        "native_multi_agent": caps.native_multi_agent,
+        "child_lineage": caps.child_lineage,
+        "child_permission_isolation": caps.child_permission_isolation,
+        "compound_resume": caps.compound_resume,
+        "root_only_result_channel": caps.root_only_result_channel,
         "adapter_capabilities": asdict(caps),
     }
 

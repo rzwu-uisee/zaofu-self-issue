@@ -72,7 +72,11 @@ from zf.runtime.control_actions_emit import ActionEmitMixin
 from zf.runtime.control_actions_workflow_resume import WorkflowResumeActionsMixin
 from zf.runtime.control_actions_candidate_rework import CandidateReworkActionsMixin
 from zf.runtime.control_actions_research import ResearchActionsMixin
-from zf.runtime.control_actions_workflow_request import WorkflowRequestActionsMixin
+from zf.runtime.control_actions_workflow_request import (
+    WORKFLOW_CONTROL_ACTIONS,
+    WorkflowRequestActionsMixin,
+)
+from zf.runtime.control_actions_run import RunControlActionsMixin
 from zf.runtime.control_actions_helpers import (  # noqa: F401 — re-export moved helpers
     _approval_ref,
     _automation_output_summary,
@@ -116,6 +120,7 @@ class ControlledActionService(
     CandidateReworkActionsMixin,
     ResearchActionsMixin,
     WorkflowRequestActionsMixin,
+    RunControlActionsMixin,
     SurgeryActionsMixin,
     RecoveryActionsMixin,
     ActionEmitMixin,
@@ -320,29 +325,8 @@ class ControlledActionService(
                     else "block"
                 ),
             )
-        if action == "workflow-request":
-            return self._workflow_request(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-            )
-        if action in {"workflow-start", "task-workflow-start"}:
-            return self._workflow_start(
-                requested=requested,
-                action="workflow-start",
-                requested_action=requested_action,
-                payload=payload,
-            )
-        if action == "workflow-submit":
-            return self._workflow_submit(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-            )
-        if action == "workflow-invoke":
-            return self._workflow_invoke(
+        if action in WORKFLOW_CONTROL_ACTIONS:
+            return self._dispatch_workflow_control_action(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,

@@ -12,6 +12,7 @@ Interaction protocol:
 from __future__ import annotations
 
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
@@ -47,6 +48,7 @@ from zf.runtime.transport import (
     transport_error_diagnostics,
 )
 from zf.runtime.orchestrator_lifecycle import LifecycleManagerMixin
+from zf.runtime.role_lifecycle_runtime import RoleLifecycleRuntimeMixin
 from zf.runtime.orchestrator_fanout import FanoutCoordinationMixin
 from zf.runtime.orchestrator_dispatch import DispatchMixin
 from zf.runtime.orchestrator_event_cursor import EventCursorMixin
@@ -54,6 +56,7 @@ from zf.runtime.orchestrator_reactor import EventReactorMixin
 from zf.runtime.orchestrator_module_parity import ModuleParityBridgeMixin
 from zf.runtime.agent_view_runtime import AgentViewRuntimeMixin
 from zf.runtime.fanout_evidence_queries import FanoutEvidenceQueriesMixin
+from zf.runtime.runtime_authority_bridge import RuntimeAuthorityMixin
 from zf.runtime.watcher import StuckDetector
 from zf.runtime.orchestrator_briefing import build_orchestrator_briefing
 from zf.runtime.progress import regenerate_progress
@@ -97,9 +100,8 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     # verification rejects an agent/judge completion claim, Layer 1 turns
     # that blocked state into bounded rework.
     #
-    # Kernel-owned flow-entry: light-topology `prd.requested` synthesizes the
-    # single-task task_map (runtime/light_flow.py). It carries no task_id, so
-    # it must fire its builtin primary regardless of Layer 1/2 mode.
+    # Backward-compatible baseline light entry. Configured light-flow entries
+    # are also resolved dynamically by `_kernel_owns_liveness_event`.
     "prd.requested",
     # ZF-E2E-PRD-P1 (2026-07-11): the unified-intake entry (doc 123,
     # E1 bootstrap in _on_workflow_invoke_requested) is the same kernel-owned
@@ -121,6 +123,7 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     "task.continuation_scheduled",
     "task.retry_scheduled",
     "codex.hook.stop",
+    "provider.turn.closed",
     "autoresearch.trigger.accepted",
     "autoresearch.invocation.requested",
     "autoresearch.inject.worker_stuck",
@@ -180,6 +183,10 @@ def _kernel_owns_liveness_event(config: object, event_type: str) -> bool:
     if event_type in _KERNEL_LIVENESS_EVENTS:
         return True
     try:
+        from zf.runtime.light_flow import light_flow_entry_triggers
+
+        if event_type in light_flow_entry_triggers(config):
+            return True
         from zf.runtime.stage_failure_replan import reader_stage_failure_events
 
         return event_type in reader_stage_failure_events(config)
@@ -306,11 +313,13 @@ class Orchestrator(
     DispatchMixin,
     EventReactorMixin,
     ModuleParityBridgeMixin,
+    RoleLifecycleRuntimeMixin,
     LifecycleManagerMixin,
     AgentViewRuntimeMixin,
     FanoutEvidenceQueriesMixin,
     WriterFanoutDataMixin,
     WorkerStateRuntimeMixin,
+    RuntimeAuthorityMixin,
 ):
     """Deterministic orchestrator — reads state, makes dispatch decisions.
 
@@ -406,6 +415,10 @@ class Orchestrator(
         # (instance_id, timestamp) → True. Prevents double-counting when
         # _check_context_thresholds reads the same session turn twice.
         self._synth_usage_seen: set[tuple[str, str]] = set()
+        # Warning-band samples change after nearly every provider tool call.
+        # Keep one warning per active execution/session until usage recovers
+        # below the warning threshold or the role moves to another execution.
+        self._context_warning_fingerprint: dict[str, str] = {}
         # G-WIRE-2: drift detector + per-(signal, role, dispatch) cooldown.
         # Runs once per run_once cycle on the recent event tail.
         self._drift_detector = DriftDetector()
@@ -819,6 +832,13 @@ class Orchestrator(
         offset stored in session.yaml — never re-react to old events on restart.
         """
         decisions: list[OrchestratorDecision] = []
+        from zf.runtime import orchestrator_periodic_sweep as periodic
+
+        # Pushed events already run their direct handlers in
+        # ``_apply_housekeeping``. Global reconciliation and time-based
+        # recovery belong to the idle cycle; repeating those O(history)
+        # scans for every line in one watcher batch creates an event backlog.
+        periodic_sweep = not events
         # Flush a wake suppressed by coalescing in a prior cycle once its
         # interval has elapsed (driven by either a new event or the idle tick).
         self._flush_pending_layer2_wake()
@@ -827,22 +847,7 @@ class Orchestrator(
             self._react_to_events(events, consumed_offset=consumed_offset)
         )
         decisions.extend(self._reconcile_pending_handoffs())
-        self._safe_housekeeping(
-            "writer_fanout_task_bindings",
-            self._recover_writer_fanout_task_bindings,
-        )
-        self._safe_housekeeping(
-            "writer_fanout_result_replay",
-            self._recover_unrecorded_writer_fanout_results,
-        )
-        self._safe_housekeeping(
-            "reader_fanout_trigger_replay",
-            self._recover_unstarted_reader_fanouts,
-        )
-        self._safe_housekeeping(
-            "reader_fanout_result_replay",
-            self._recover_unrecorded_reader_fanout_results,
-        )
+        periodic.run_replay_sweep(self, events=events)
         if events is None or any(
             event.type in _CANDIDATE_REWORK_TRIGGER_EVENTS
             for event in events
@@ -864,8 +869,8 @@ class Orchestrator(
         # Context recycle must run before dispatch. Otherwise an idle worker
         # already over the recycle threshold can receive a fresh task and only
         # then be marked pending_recycle.
-        self._safe_housekeeping("context_thresholds", self._check_context_thresholds)
-        self._safe_housekeeping("pending_recycles", self._check_pending_recycles)
+        if periodic_sweep:
+            periodic.run_context_sweep(self)
         self._safe_housekeeping("budget_sweep", self._run_budget_sweep)
         decisions.extend(self._dispatch_ready())
         decisions.extend(self._sweep_feature_liveness())
@@ -882,22 +887,11 @@ class Orchestrator(
         # dispatch above. Reactor handlers for `agent.usage` trigger the
         # same housekeeping inline when transport drain produces fresh
         # usage events, so a second blanket sweep here is redundant.
-        # LH-0.T3: orphan-timeout sweep — in_progress tasks that stalled.
-        self._safe_housekeeping("orphaned_tasks", self._check_orphaned_tasks)
-        # B18: 看板直建任务的防死卡 SLA(doc 93 §7.4)
-        self._safe_housekeeping(
-            "unclaimed_new_tasks", self._check_unclaimed_new_tasks,
+        periodic.run_post_dispatch_sweep(
+            self,
+            events=events,
+            periodic_sweep=periodic_sweep,
         )
-        self._safe_housekeeping("fanout_timeouts", self._check_fanout_timeouts)
-        # 2026-07-03 audit B1: channel replies must not dead-end — bounded
-        # redispatch for failed/stuck replies, exhausted event at the cap.
-        self._safe_housekeeping(
-            "channel_reply_remediation", self._check_channel_reply_remediation,
-        )
-        # G-WIRE-2: drift detection observation
-        self._safe_housekeeping("drift", self._check_drift)
-        # G-WIRE-3: refresh policy observation
-        self._safe_housekeeping("refresh", self._check_refresh_triggers)
         # Layer 1 housekeeping: refresh progress.md after any state changes
         # this cycle may have caused. Free for Layer 2 to read on its next wake.
         self._safe_housekeeping(
@@ -914,6 +908,17 @@ class Orchestrator(
             lambda: self._emit_decision_recorded(events, decisions),
         )
         return decisions
+
+    def _reconcile_reader_fanout_triggers(self) -> None:
+        from zf.runtime.event_window import read_runtime_events
+        from zf.runtime.workflow_dependency_barrier import (
+            reconcile_dependency_barriers,
+        )
+
+        events = read_runtime_events(self.event_log, self.state_dir)
+        for decision in reconcile_dependency_barriers(self.config, events):
+            self.event_writer.append(decision.to_event())
+        self._recover_unstarted_reader_fanouts()
 
     def _emit_decision_recorded(
         self,
@@ -1291,6 +1296,13 @@ class Orchestrator(
 
         maybe_complete_run_goal(self, event)
 
+    def _reconcile_run_goal_completion(self) -> None:
+        from zf.runtime.goal_completion_gate import (
+            reconcile_run_goal_completion,
+        )
+
+        reconcile_run_goal_completion(self)
+
     def _run_zaofu_bug_scan(self) -> None:
         """β-1 (2026-05-17): periodic scan for known zaofu kernel failure
         signatures over the recent event tail. On match, emit
@@ -1595,58 +1607,9 @@ class Orchestrator(
         }
 
     def _active_codex_turn(self, instance_id: str) -> dict[str, object] | None:
-        """Return the newest open Codex turn for a worker, if any."""
-        try:
-            from zf.runtime.event_window import read_runtime_events
+        from zf.runtime.provider_turn_liveness import active_codex_turn
 
-            events = read_runtime_events(self.event_log, self.state_dir)
-        except Exception:
-            return None
-
-        active: dict[tuple[str, str], ZfEvent] = {}
-        for event in events:
-            if event.actor != instance_id:
-                continue
-            if event.type not in {
-                "codex.hook.user_prompt_submit",
-                "codex.hook.stop",
-            }:
-                continue
-            payload = event.payload if isinstance(event.payload, dict) else {}
-            session_id = str(payload.get("session_id") or "").strip()
-            turn_id = str(payload.get("turn_id") or "").strip()
-            if not session_id:
-                continue
-            if event.type == "codex.hook.user_prompt_submit":
-                if turn_id:
-                    active[(session_id, turn_id)] = event
-                continue
-            if turn_id:
-                active.pop((session_id, turn_id), None)
-            else:
-                for key in list(active):
-                    if key[0] == session_id:
-                        active.pop(key, None)
-
-        if not active:
-            return None
-
-        latest_key, latest_event = max(
-            active.items(),
-            key=lambda item: _parse_event_ts(item[1].ts) or datetime.min.replace(
-                tzinfo=timezone.utc
-            ),
-        )
-        started_at = _parse_event_ts(latest_event.ts)
-        age_s = None
-        if started_at is not None:
-            age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
-        return {
-            "session_id": latest_key[0],
-            "turn_id": latest_key[1],
-            "started_at": latest_event.ts,
-            "age_s": age_s,
-        }
+        return active_codex_turn(self.event_log, self.state_dir, instance_id)
 
     def _emit_provider_turn_probe(
         self,
@@ -1734,6 +1697,16 @@ class Orchestrator(
                     auto_execute=True,
                     spawn_repairs=False,
                 )
+            events = read_runtime_events(self.event_log, self.state_dir)
+            from zf.runtime.replan_resynth import (
+                plan_missing_replan_resynth_events,
+            )
+
+            for replan_event in plan_missing_replan_resynth_events(
+                events,
+                config=self.config,
+            ):
+                self.event_writer.append(replan_event)
             events = read_runtime_events(self.event_log, self.state_dir)
             self._resume_unstarted_rework_task_maps(events)
             return
@@ -2252,60 +2225,13 @@ class Orchestrator(
             # (inflated cost.jsonl by 2× before this).
             self._processed_event_ids.add(ev.id)
 
-    def _record_skill_provenance(
-        self,
-        *,
-        role: RoleConfig,
-        task_id: str | None = None,
-    ) -> list:
-        if not role.skills:
-            return []
-        try:
-            from zf.core.skills import (
-                build_skill_lock_entries,
-                materialize_role_skills,
-                upsert_skills_lockfile,
-            )
-
-            materialized = materialize_role_skills(
-                config=self.config,
-                project_root=self.project_root,
-                state_dir=self.state_dir,
-                role=role,
-                task_id=task_id,
-            )
-            materialized_paths = (
-                materialized.materialized_paths_under(self.project_root)
-                if materialized is not None else {}
-            )
-            entries = build_skill_lock_entries(
-                project_root=self.project_root,
-                state_dir=self.state_dir,
-                role=role,
-                config=self.config,
-                task_id=task_id,
-                run_id=self._current_run_id(),
-                materialized_paths=materialized_paths,
-            )
-            upsert_skills_lockfile(state_dir=self.state_dir, entries=entries)
-            if materialized is not None:
-                self.event_writer.append(ZfEvent(
-                    type="skills.materialized",
-                    actor="zf-cli",
-                    task_id=task_id,
-                    payload=materialized.to_payload(),
-                ))
-            return entries
-        except Exception:
-            return []
-
     def _send_transport_task(
         self,
         role_name: str,
         briefing_path: Path,
         prompt: str,
         context: DispatchContext | None,
-    ) -> None:
+    ) -> DispatchContext | None:
         if not self._transport_dispatch_enabled():
             reason = "transport dispatch unavailable for mutating dispatch"
             try:
@@ -2329,6 +2255,15 @@ class Orchestrator(
         role = (
             self._find_role_by_instance(role_name)
             or self._find_role_by_name(role_name)
+        )
+        self._assert_run_dispatch_allowed(role_name, context)
+        role_on_demand = (
+            role is not None
+            and getattr(
+                getattr(role, "lifecycle", None),
+                "mode",
+                "eager",
+            ) == "on_demand"
         )
         # P0-1 (2026-07-09): budget gate at the charging primitive. Every paid
         # dispatch funnels through here — the main _dispatch_ready loop AND the
@@ -2354,6 +2289,15 @@ class Orchestrator(
             raise BudgetExceededError(
                 f"dispatch to {role_name} blocked: budget exceeded"
             )
+        if role_on_demand:
+            try:
+                self._ensure_role_active(
+                    role,
+                    task_id=getattr(context, "task_id", None),
+                )
+            except Exception:
+                self._rollback_inflight_dispatch(context)
+                raise
         # DID-7 (2026-06-19 e2e): wait for the worker's agent prompt to be READY
         # before sending the briefing. transport.send_task only checks the pane's
         # process is *alive*, not that claude is at its input prompt — under
@@ -2362,35 +2306,27 @@ class Orchestrator(
         # → worker.drift.detected "not active" → respawn loop (e2e dev-core /
         # prd-author, systemic across flows). _wait_role_ready returns fast when
         # the prompt is already up, so already-ready workers pay nothing.
-        if role is not None and getattr(self, "_wait_role_ready", None) is not None:
+        if (
+            role is not None
+            and not role_on_demand
+            and getattr(self, "_wait_role_ready", None) is not None
+        ):
             try:
                 self._wait_role_ready(role)
             except Exception:
                 pass
-        try:
-            try:
-                self.transport.send_task(
-                    role_name,
-                    briefing_path,
-                    prompt,
-                    context=context,
-                )
-            except TypeError as exc:
-                # Compatibility for older test/custom TransportAdapter
-                # implementations that predate DispatchContext.
-                if "context" not in str(exc):
-                    raise
-                self.transport.send_task(role_name, briefing_path, prompt)
-        except Exception:
-            # ZF-E2E-RACING-P1: send failed — the dispatch never reached the
-            # worker, so the in-flight claim must not survive.
-            self._rollback_inflight_dispatch(context)
-            raise
+        delivery_context = self._deliver_transport_task(
+            role_name,
+            context,
+            briefing_path,
+            prompt,
+        )
         try:
             if role is not None:
                 self._get_spawn_coordinator().notify_first_dispatch(role)
         except Exception:
             pass
+        return delivery_context
 
     def _transport_dispatch_enabled(self) -> bool:
         transport = getattr(self, "transport", None)
@@ -2464,9 +2400,12 @@ class Orchestrator(
                 )
                 if resolved_task_id:
                     event.task_id = resolved_task_id
+                    if self._reject_resolved_task_attempt(event, resolved_task_id, decisions):
+                        continue
 
             # Layer 1 housekeeping: mechanical state writes from emitted events
             self._apply_housekeeping(event)
+            self._settle_task_attempt_result(event)
 
             # ZF-LH-INLINE-001 (doc 26 §3.3): scan user.message for
             # operator inline-override keywords. Emits audit event when
@@ -2713,6 +2652,7 @@ class Orchestrator(
         # _notify_orchestrator_agent.
         if layer2_active:
             self._flush_layer2_batch()
+        self._reconcile_run_admission_for_events(recent)
         if new_offset is not None:
             self._persist_offset(new_offset)
         return decisions
@@ -3030,6 +2970,7 @@ class Orchestrator(
 
     def _apply_housekeeping(self, event: ZfEvent) -> None:
         """Layer 1 mechanical state writes — never decisions."""
+        self._renew_task_attempt_lease(event)
         if event.type in {
             "fanout.child.dispatched",
             "fanout.child.completed",
@@ -3379,6 +3320,7 @@ class Orchestrator(
 
                 process_goal_closure_result(self, event)
             elif event.type in {
+                "artifact.delivery.verified",
                 "run.goal.completion.claimed",
                 "workflow.operation.settled",
                 "workflow.operation.failed",
@@ -3391,6 +3333,10 @@ class Orchestrator(
                 "run.manager.human_decision.applied",
                 "run.manager.action.applied",
                 "run.manager.action.failed",
+                "run.manager.action.effect.pending",
+                "run.manager.action.effect.passed",
+                "run.manager.action.effect.failed",
+                "run.manager.tick.completed",
                 "task.done",
                 "verify.passed",
                 "test.passed",
@@ -3603,13 +3549,11 @@ class Orchestrator(
         )
 
         feature_id = str(loaded.feature_id or loaded.pdd_id or "")
-        default_owner_role = next(
-            (
-                role.name
-                for role in self.config.roles
-                if getattr(role, "role_kind", "") == "writer"
-            ),
-            "dev",
+        from zf.runtime.flow_roles import resolve_writer_owner
+
+        default_owner = resolve_writer_owner(
+            self.config,
+            flow_kind=str(getattr(loaded, "flow_kind", "") or ""),
         )
         pending_new_tasks = []
         for item in loaded.task_items:
@@ -3694,19 +3638,20 @@ class Orchestrator(
             raw_owner_role = self._first_nonempty(
                 raw.get("owner_role"),
                 item.get("owner_role"),
-                default_owner_role,
             )
             raw_owner_instance = self._first_nonempty(
                 raw.get("owner_instance"),
                 item.get("owner_instance"),
             )
-            owner_role = self._task_map_runtime_owner_role(
-                raw_owner_role,
-                default_owner_role,
+            owner_binding = resolve_writer_owner(
+                self.config,
+                flow_kind=str(getattr(loaded, "flow_kind", "") or ""),
+                owner_role=raw_owner_role,
+                owner_instance=raw_owner_instance,
             )
-            owner_instance = self._task_map_runtime_owner_instance(
-                raw_owner_instance,
-                raw_owner_role,
+            owner_role = owner_binding.owner_role or default_owner.owner_role
+            owner_instance = (
+                owner_binding.owner_instance or default_owner.owner_instance
             )
             evidence_contract = dict(raw_evidence_contract)
             evidence_contract.update({
@@ -3716,6 +3661,10 @@ class Orchestrator(
                 "gap_kind": gap_kind,
                 "affinity_tag": affinity_tag,
                 "parent_task_id": parent_task_id,
+                "flow_kind": str(getattr(loaded, "flow_kind", "") or ""),
+                "workflow_run_id": str(
+                    getattr(loaded, "workflow_run_id", "") or ""
+                ),
             })
             if goal_id:
                 evidence_contract["goal_id"] = goal_id
@@ -3733,8 +3682,10 @@ class Orchestrator(
                 value = raw.get(key, raw_evidence_contract.get(key))
                 if value not in (None, "", []):
                     evidence_contract[key] = value
-            if raw_owner_role and raw_owner_role not in {owner_role, owner_instance}:
-                evidence_contract["semantic_owner_role"] = raw_owner_role
+            if owner_binding.semantic_owner_role:
+                evidence_contract["semantic_owner_role"] = (
+                    owner_binding.semantic_owner_role
+                )
             contract = TaskContract(
                 feature_id=feature_id,
                 parent_task_id=parent_task_id,
@@ -3822,40 +3773,11 @@ class Orchestrator(
                         "old_status": old_status,
                         "reopened_from_terminal": reopened,
                         "reset_for_replan": reset_for_replan,
+                        "contract": asdict(contract),
                     },
                 ))
         from zf.runtime.writer_task_materialization import materialize_writer_tasks
         materialize_writer_tasks(self, pending_new_tasks, loaded)
-
-    def _task_map_runtime_owner_role(
-        self,
-        raw_owner_role: str,
-        default_owner_role: str,
-    ) -> str:
-        raw = str(raw_owner_role or "").strip()
-        if not raw:
-            return default_owner_role
-        for role in self.config.roles:
-            if role.name == raw:
-                return role.name
-        for role in self.config.roles:
-            if role.instance_id == raw:
-                return role.name
-        return default_owner_role
-
-    def _task_map_runtime_owner_instance(
-        self,
-        raw_owner_instance: str,
-        raw_owner_role: str,
-    ) -> str:
-        for value in (raw_owner_instance, raw_owner_role):
-            raw = str(value or "").strip()
-            if not raw:
-                continue
-            for role in self.config.roles:
-                if role.instance_id == raw:
-                    return role.instance_id
-        return ""
 
     @staticmethod
     def _task_contract_task_map_ref(contract) -> str:
@@ -3885,9 +3807,22 @@ class Orchestrator(
             ) in {"", "backlog", "todo"}
         if not getattr(loaded, "is_replan", False):
             return False
-        if str(getattr(contract, "feature_id", "") or "") != str(
-            loaded.feature_id or loaded.pdd_id or ""
-        ):
+        current_feature_id = str(getattr(contract, "feature_id", "") or "")
+        next_feature_id = str(loaded.feature_id or loaded.pdd_id or "")
+        current_workflow_run_id = (
+            str(evidence.get("workflow_run_id") or "")
+            if isinstance(evidence, dict)
+            else ""
+        )
+        next_workflow_run_id = str(
+            getattr(loaded, "workflow_run_id", "") or ""
+        )
+        same_workflow_run = bool(
+            current_workflow_run_id
+            and next_workflow_run_id
+            and current_workflow_run_id == next_workflow_run_id
+        )
+        if current_feature_id != next_feature_id and not same_workflow_run:
             return False
         if isinstance(evidence, dict) and str(evidence.get("source") or "") != "refactor_task_map":
             return False
@@ -4099,27 +4034,21 @@ class Orchestrator(
         if not task_map_ref:
             return
 
-        def _pick(key: str) -> str:
-            return str(
-                projection_payload.get(key) or manifest.get(key) or ""
-            ).strip()
+        from zf.runtime.refactor_plan_bridge import (
+            build_refactor_plan_bridge_payload,
+        )
 
+        payload = build_refactor_plan_bridge_payload(
+            manifest=manifest,
+            projection_payload=projection_payload,
+            trace_id=trace_id,
+            task_map_ref=task_map_ref,
+            replan_payload=self._refactor_replan_payload(projection_payload),
+        )
         event = self.event_writer.append(ZfEvent(
             type="task_map.ready",
             actor="zf-cli",
-            payload={
-                "pdd_id": _pick("pdd_id") or _pick("feature_id"),
-                "feature_id": _pick("feature_id") or _pick("pdd_id"),
-                "trace_id": trace_id,
-                "task_map_ref": task_map_ref,
-                "source_index_ref": _pick("source_index_ref"),
-                "source_commit": _pick("source_commit"),
-                "candidate_base_commit": _pick("candidate_base_commit")
-                or _pick("source_commit"),
-                "target_ref": _pick("target_ref"),
-                "source": "refactor_plan_bridge",
-                **self._refactor_replan_payload(projection_payload),
-            },
+            payload=payload,
             correlation_id=trace_id,
         ))
         self._maybe_start_writer_fanout(event)
@@ -4428,7 +4357,10 @@ class Orchestrator(
         success_event: str,
         synth_event: ZfEvent | None = None,
     ):
-        from zf.runtime.refactor_artifacts import project_refactor_artifacts
+        from zf.runtime.refactor_artifacts import (
+            project_refactor_artifacts,
+            rebind_refactor_artifact_projection,
+        )
 
         projection = project_refactor_artifacts(
             state_dir=self.state_dir,
@@ -4437,6 +4369,21 @@ class Orchestrator(
             synth_event=synth_event,
         )
         if success_event in {"zaofu.refactor.plan.ready", "refactor.plan.ready"}:
+            if projection is not None and getattr(projection, "ok", False):
+                payload_sources = self._fanout_child_payloads(manifest)
+                if synth_event is not None and isinstance(synth_event.payload, dict):
+                    payload_sources.append(dict(synth_event.payload))
+                payload = self._relocate_reader_fanout_artifact_refs(
+                    payload=dict(projection.payload),
+                    payload_sources=payload_sources,
+                    manifest=manifest,
+                )
+                projection = rebind_refactor_artifact_projection(
+                    projection,
+                    payload=payload,
+                    state_dir=self.state_dir,
+                    project_root=self.project_root,
+                )
             return self._compile_refactor_plan_projection(projection)
         return projection
 

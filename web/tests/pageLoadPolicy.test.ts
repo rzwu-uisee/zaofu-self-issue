@@ -16,6 +16,13 @@ function testChannelsUseSlimPath(): void {
   assert(!pagePollsOperatorInbox("channels"), "channels should not poll operator inbox");
 }
 
+function testWorkflowProposalsUseScopedProjection(): void {
+  assert(snapshotLoadKindForPage("workflows") === "none", "workflow proposals should not wait for snapshot");
+  assert(!pageLoadsSnapshot("workflows"), "workflow proposals should load the request slice only");
+  assert(!pageLoadsDeliveryFeatures("workflows"), "workflow proposals should not load delivery features");
+  assert(!pagePollsOperatorInbox("workflows"), "workflow proposals should not poll operator inbox");
+}
+
 function testMeasureUsesDeliverySlice(): void {
   assert(snapshotLoadKindForPage("delivery") === "none", "delivery overview should not wait for snapshot");
   assert(snapshotLoadKindForPage("delivery-trace") === "none", "delivery trace should not wait for snapshot");
@@ -41,6 +48,7 @@ function testInboxPollIsPageScoped(): void {
 }
 
 testChannelsUseSlimPath();
+testWorkflowProposalsUseScopedProjection();
 testMeasureUsesDeliverySlice();
 testSnapshotPagesStayExplicit();
 testInboxPollIsPageScoped();

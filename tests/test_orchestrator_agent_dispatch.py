@@ -242,8 +242,11 @@ def test_orchestrator_briefing_renders_fast_path_policy(
 
 
 def test_orchestrator_briefing_uses_machine_readable_task_creation(
-    state_dir: Path, config_with_orchestrator,
+    state_dir: Path,
+    config_with_orchestrator,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    monkeypatch.delenv("ZF_CLI_CMD", raising=False)
     briefing = build_orchestrator_briefing(
         state_dir=state_dir,
         config=config_with_orchestrator,
@@ -688,7 +691,7 @@ def test_same_trigger_streak_enters_exponential_backoff(
     # (2^1=10s 边界不小于间隔),直至窗口翻倍超过到达间隔后被吸收。
     for _ in range(6):
         orch._notify_orchestrator_agent(
-            ZE(type="run.manager.tick.completed", actor="run-manager")
+            ZE(type="dispatch.silent_stall", actor="orchestrator")
         )
         clock[0] += 10.0
     same_type_sends = len(transport.sent)

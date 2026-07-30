@@ -300,6 +300,23 @@ def test_rm_self_events_excluded_and_tallied_to_rm_health(tmp_path):
     assert health2["counts"]["run.manager.action.verify.failed"] == 1
 
 
+def test_projection_only_terminal_fence_is_not_a_failure_candidate(tmp_path):
+    state_dir = tmp_path / ".zf"
+    events = [
+        ZfEvent(
+            id="evt-terminal-fence",
+            type="run.dispatch.blocked",
+            actor="zf-cli",
+            payload={"reason": "run_terminal:completed"},
+        ),
+    ]
+
+    written = materialize_failure_candidates_from_events(state_dir, events)
+
+    assert written == []
+    assert not (state_dir / "failure-candidates").exists()
+
+
 def test_unknown_actionable_event_forces_failure_candidate(tmp_path):
     """131-P1-5:actionable 形状但 registry 无 spec 的事件不许静默消失。"""
     state_dir = tmp_path / ".zf"

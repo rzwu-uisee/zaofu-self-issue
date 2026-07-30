@@ -1282,7 +1282,10 @@ class ProductActionsMixin:
                 status_code=403,
                 status="approval_required",
             )
-        if action == "workflow-config-apply" and not _required_text(payload, "validation_result_ref"):
+        if action == "workflow-config-apply" and not (
+            _required_text(payload, "validation_result_ref")
+            or isinstance(payload.get("validation_result_ref"), dict)
+        ):
             return self._failed(
                 requested=requested,
                 action=action,
@@ -1309,13 +1312,173 @@ class ProductActionsMixin:
                 "proposal_id": proposal_id,
                 "objective": _required_text(payload, "objective") or _required_text(payload, "message"),
                 "patch_ref": _required_text(payload, "patch_ref"),
-                "validation_result_ref": _required_text(payload, "validation_result_ref"),
+                "validation_result_ref": (
+                    payload.get("validation_result_ref")
+                    if isinstance(payload.get("validation_result_ref"), dict)
+                    else _required_text(payload, "validation_result_ref")
+                ),
                 "approval_ref": _approval_ref(payload),
+                "proposal_ref": payload.get("proposal_ref")
+                if isinstance(payload.get("proposal_ref"), dict) else {},
+                "proposal_digest": _required_text(payload, "proposal_digest"),
+                "config_ref": _required_text(payload, "config_ref"),
+                "idempotency_key": _required_text(payload, "idempotency_key"),
                 "source": self.source,
                 "surface": self.surface,
                 "request": payload,
             }),
         )
+        if action == "workflow-config-apply":
+            if self.project_root is None:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason="initialized project context is required",
+                    status_code=409,
+                    status="project_initialization_required",
+                )
+            from zf.runtime.workflow_config_apply import (
+                WorkflowConfigApplyError,
+                WorkflowConfigApplyService,
+            )
+
+            try:
+                outcome = WorkflowConfigApplyService(
+                    state_dir=self.state_dir,
+                    project_root=self.project_root,
+                ).apply(
+                    payload,
+                    source_event_id=event.id,
+                    actor=self.actor,
+                )
+            except WorkflowConfigApplyError as exc:
+                terminal = self.writer.emit(
+                    "workflow.config.change.rejected",
+                    actor=self.actor,
+                    task_id=_task_id_from_payload(payload),
+                    causation_id=event.id,
+                    correlation_id=requested.correlation_id,
+                    payload={
+                        "proposal_id": proposal_id,
+                        "proposal_digest": _required_text(
+                            payload, "proposal_digest"
+                        ),
+                        "reason": str(exc),
+                        "code": exc.code,
+                        "source_event_id": event.id,
+                    },
+                )
+                self._completed(
+                    requested=requested,
+                    event=terminal,
+                    action=action,
+                    requested_action=requested_action,
+                    status="rejected",
+                    task_id=_task_id_from_payload(payload),
+                    extra={
+                        "proposal_id": proposal_id,
+                        "event_type": terminal.type,
+                        "event_id": terminal.id,
+                    },
+                )
+                return {
+                    "_status_code": 409,
+                    "ok": False,
+                    "status": "rejected",
+                    "action": action,
+                    "requested_action": requested_action,
+                    "proposal_id": proposal_id,
+                    "event_type": terminal.type,
+                    "event_id": terminal.id,
+                    "reason": str(exc),
+                    "code": exc.code,
+                }
+            except Exception as exc:
+                terminal = self.writer.emit(
+                    "workflow.config.change.failed",
+                    actor=self.actor,
+                    task_id=_task_id_from_payload(payload),
+                    causation_id=event.id,
+                    correlation_id=requested.correlation_id,
+                    payload={
+                        "proposal_id": proposal_id,
+                        "proposal_digest": _required_text(
+                            payload, "proposal_digest"
+                        ),
+                        "reason": str(exc)[:512],
+                        "code": "config_apply_internal_failure",
+                        "source_event_id": event.id,
+                    },
+                )
+                self._completed(
+                    requested=requested,
+                    event=terminal,
+                    action=action,
+                    requested_action=requested_action,
+                    status="failed",
+                    task_id=_task_id_from_payload(payload),
+                    extra={
+                        "proposal_id": proposal_id,
+                        "event_type": terminal.type,
+                        "event_id": terminal.id,
+                    },
+                )
+                return {
+                    "_status_code": 500,
+                    "ok": False,
+                    "status": "failed",
+                    "action": action,
+                    "requested_action": requested_action,
+                    "proposal_id": proposal_id,
+                    "event_type": terminal.type,
+                    "event_id": terminal.id,
+                    "reason": str(exc),
+                    "code": "config_apply_internal_failure",
+                }
+            terminal = self.writer.emit(
+                "workflow.config.change.applied",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=event.id,
+                correlation_id=requested.correlation_id,
+                payload={
+                    "proposal_id": outcome.proposal_id,
+                    "proposal_digest": outcome.proposal_digest,
+                    "base_config_digest": outcome.base_config_digest,
+                    "target_config_digest": outcome.target_config_digest,
+                    "config_ref": outcome.config_ref,
+                    "receipt_ref": outcome.receipt_ref,
+                    "replayed": outcome.replayed,
+                    "source_event_id": event.id,
+                },
+            )
+            self._completed(
+                requested=requested,
+                event=terminal,
+                action=action,
+                requested_action=requested_action,
+                status="completed",
+                task_id=_task_id_from_payload(payload),
+                extra={
+                    "proposal_id": proposal_id,
+                    "event_type": terminal.type,
+                    "event_id": terminal.id,
+                },
+            )
+            return {
+                "_status_code": 200,
+                "ok": True,
+                "status": "completed",
+                "action": action,
+                "requested_action": requested_action,
+                "proposal_id": proposal_id,
+                "event_type": terminal.type,
+                "event_id": terminal.id,
+                "receipt_ref": outcome.receipt_ref,
+                "replayed": outcome.replayed,
+            }
         status = "requested" if action != "workflow-config-propose" else "proposed"
         self._completed(
             requested=requested,

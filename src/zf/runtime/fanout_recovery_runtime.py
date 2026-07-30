@@ -2,10 +2,151 @@
 
 from __future__ import annotations
 
+import json
+
 from zf.core.events.model import ZfEvent
 
 
+def reader_fanout_superseding_goal_claim(
+    events: list[ZfEvent],
+    *,
+    manifest: dict,
+) -> str:
+    """Return the admitted Goal claim that makes a reader fanout stale."""
+
+    run_id = str(
+        manifest.get("workflow_run_id")
+        or manifest.get("trace_id")
+        or ""
+    ).strip()
+    goal_keys = {
+        str(value).strip()
+        for value in (
+            manifest.get("pdd_id"),
+            manifest.get("feature_id"),
+        )
+        if str(value or "").strip()
+    }
+    rejected_claim_ids = {
+        str((event.payload or {}).get("claim_id") or "").strip()
+        for event in events
+        if event.type == "run.goal.completion.rejected"
+        and isinstance(event.payload, dict)
+    }
+    for event in reversed(events):
+        if event.type != "run.goal.completion.claimed":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("claim_type") or "") != (
+            "admitted_goal_closure_result"
+        ):
+            continue
+        claim_id = str(payload.get("claim_id") or event.id).strip()
+        if not claim_id or claim_id in rejected_claim_ids:
+            continue
+        claim_run_id = str(
+            payload.get("workflow_run_id")
+            or payload.get("run_id")
+            or event.correlation_id
+            or ""
+        ).strip()
+        if run_id and claim_run_id and run_id != claim_run_id:
+            continue
+        claim_goal_keys = {
+            str(value).strip()
+            for value in (
+                payload.get("goal_id"),
+                payload.get("pdd_id"),
+                payload.get("feature_id"),
+            )
+            if str(value or "").strip()
+        }
+        if goal_keys and claim_goal_keys and goal_keys.isdisjoint(
+            claim_goal_keys
+        ):
+            continue
+        if not (
+            (run_id and claim_run_id)
+            or (goal_keys and claim_goal_keys)
+        ):
+            continue
+        return claim_id
+    return ""
+
+
 class FanoutRecoveryRuntimeMixin:
+    def _publish_writer_fanout_task_capsule(
+        self,
+        *,
+        task_id: str,
+        dispatch_id: str,
+    ) -> None:
+        """Keep the task capsule aligned with a canonical writer binding."""
+
+        task = self.task_store.get(task_id)
+        if task is None:
+            return
+        from zf.runtime.task_doc import (
+            task_doc_dir,
+            verify_task_capsule,
+            write_task_doc,
+        )
+
+        preflight_errors = verify_task_capsule(self.state_dir, task)
+        try:
+            manifest = json.loads(
+                (task_doc_dir(self.state_dir, task_id) / "manifest.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        if (
+            not preflight_errors
+            and str(manifest.get("assigned_to") or "") == str(task.assigned_to or "")
+            and str(manifest.get("active_dispatch_id") or "")
+            == str(task.active_dispatch_id or "")
+            and str(manifest.get("dispatch_id") or "") == dispatch_id
+        ):
+            return
+
+        task_doc = write_task_doc(
+            self.state_dir,
+            task,
+            dispatch_id=dispatch_id,
+            project_root=self.project_root,
+        )
+        preflight_errors = verify_task_capsule(self.state_dir, task)
+        if preflight_errors:
+            raise RuntimeError(
+                "writer fanout task capsule preflight failed: "
+                + ", ".join(preflight_errors)
+            )
+        self.task_store.update(task_id, contract=task.contract)
+        self.event_writer.append(ZfEvent(
+            type="task.source.published",
+            actor="orchestrator",
+            task_id=task_id,
+            payload={
+                "dispatch_id": dispatch_id,
+                "source_doc": str(task_doc.source_path),
+                "source_revision": task_doc.source_revision,
+            },
+        ))
+        self.event_writer.append(ZfEvent(
+            type="task.doc.published",
+            actor="orchestrator",
+            task_id=task_id,
+            payload={
+                "dispatch_id": dispatch_id,
+                "task_doc": str(task_doc.path),
+                "manifest": str(task_doc.manifest_path),
+                "source_revision": task_doc.source_revision,
+                "contract_revision": task_doc.contract_revision,
+                "capsule_revision": task_doc.capsule_revision,
+            },
+        ))
+
     def _recover_writer_fanout_task_bindings(self) -> None:
         """Re-project active writer fanout dispatches into canonical tasks."""
         try:
@@ -13,6 +154,11 @@ class FanoutRecoveryRuntimeMixin:
         except Exception:
             events = []
         self._cancel_orphan_active_fanout_manifests(events)
+        events_by_id = {event.id: event for event in events if event.id}
+        from zf.runtime.writer_fanout_generation import (
+            completed_writer_generation,
+        )
+
         fanout_root = self.state_dir / "fanouts"
         if not fanout_root.exists():
             return
@@ -32,6 +178,51 @@ class FanoutRecoveryRuntimeMixin:
                 or str(aggregate.get("status") or "") in terminal_statuses
             ):
                 continue
+            trigger_event = events_by_id.get(
+                str(manifest.get("trigger_event_id") or "")
+            )
+            if trigger_event is not None:
+                trigger_payload = (
+                    trigger_event.payload
+                    if isinstance(trigger_event.payload, dict)
+                    else {}
+                )
+                task_ids = {
+                    str(child.get("task_id") or "").strip()
+                    for child in manifest.get("children", []) or []
+                    if isinstance(child, dict)
+                    and str(child.get("task_id") or "").strip()
+                }
+                task_ids.update(
+                    str(task_id).strip()
+                    for task_id in trigger_payload.get("task_ids") or []
+                    if str(task_id).strip()
+                )
+                completed_generation = completed_writer_generation(
+                    events,
+                    trigger_event=trigger_event,
+                    task_ids=sorted(task_ids),
+                    task_map_generation=str(
+                        trigger_payload.get("task_map_generation") or ""
+                    ),
+                    workflow_run_id=str(
+                        trigger_payload.get("workflow_run_id")
+                        or trigger_payload.get("run_id")
+                        or trigger_event.correlation_id
+                        or ""
+                    ),
+                )
+                if completed_generation is not None:
+                    self._cancel_superseded_fanout_manifest(
+                        fanout_id=fanout_id,
+                        manifest=manifest,
+                        reason="recovery_generation_already_verified",
+                        superseded_by=(
+                            completed_generation.candidate_event_id
+                        ),
+                        source="verified_writer_generation_recovery",
+                    )
+                    continue
             stale_reason, superseded_by = self._fanout_identity_stale_reason(fanout_id)
             if stale_reason:
                 self._cancel_superseded_fanout_manifest(
@@ -60,6 +251,10 @@ class FanoutRecoveryRuntimeMixin:
                     and task.active_dispatch_id == run_id
                     and task.status == "in_progress"
                 ):
+                    self._publish_writer_fanout_task_capsule(
+                        task_id=task_id,
+                        dispatch_id=run_id,
+                    )
                     continue
                 if not self._claim_writer_fanout_task(
                     task_id,
@@ -67,6 +262,10 @@ class FanoutRecoveryRuntimeMixin:
                     run_id=run_id,
                 ):
                     continue
+                self._publish_writer_fanout_task_capsule(
+                    task_id=task_id,
+                    dispatch_id=run_id,
+                )
                 self.event_writer.append(ZfEvent(
                     type="task.dispatch_context.bound",
                     actor="zf-cli",

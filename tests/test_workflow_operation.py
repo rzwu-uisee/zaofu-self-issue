@@ -57,6 +57,11 @@ def test_ensure_operation_dedupes_and_fails_closed_on_drift(tmp_path: Path) -> N
     events = service.event_log.read_all()
     assert sum(event.type == "workflow.operation.requested" for event in events) == 1
     assert sum(event.type == "workflow.operation.blocked" for event in events) == 1
+    assert all(
+        event.origin == "kernel"
+        for event in events
+        if event.type.startswith("workflow.operation.")
+    )
     view = reduce_workflow_operations(events)[operation_id]
     assert view["request_count"] == 1
     assert view["replay_count"] == 0
@@ -88,6 +93,69 @@ def test_operation_settles_even_when_product_verdict_is_rejected(tmp_path: Path)
     view = reduce_workflow_operations(service.event_log.read_all())[operation_id]
     assert view["status"] == "settled"
     assert view["admitted_call_result_ref"]["ref"].endswith("rejected.json")
+
+
+def test_failed_operation_can_settle_after_durable_result_repair(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-repaired",
+        operation_type="agent",
+        request={"prompt": "verify"},
+    )
+    service.fail(
+        operation_id="op-repaired",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        reason="result publication interrupted",
+    )
+    service.settle(
+        operation_id="op-repaired",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        admitted_call_result_ref={
+            "ref": "artifacts/call-results/repaired.json",
+            "sha256": "b" * 64,
+        },
+    )
+
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-repaired"
+    ]
+    assert view["status"] == "settled"
+
+
+def test_cancelled_operation_ignores_late_settlement(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-cancelled",
+        operation_type="agent",
+        request={"prompt": "verify"},
+    )
+    service.cancel(
+        operation_id="op-cancelled",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        reason="operator cancelled",
+    )
+    service.settle(
+        operation_id="op-cancelled",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        admitted_call_result_ref={
+            "ref": "artifacts/call-results/late.json",
+            "sha256": "c" * 64,
+        },
+    )
+
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-cancelled"
+    ]
+    assert view["status"] == "cancelled"
+    assert view["last_event_type"] == "workflow.operation.cancelled"
 
 
 def test_continuation_reservation_is_replay_safe_and_supersedable(

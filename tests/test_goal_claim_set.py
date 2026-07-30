@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from zf.core.events import ZfEvent
 from zf.runtime.goal_claim_set import (
     GoalClaimSetError,
     build_goal_claim_set,
     canonical_task_map_generation,
+    hydrate_pinned_goal_claim_set,
     pin_goal_claim_set_from_task_map,
 )
 
@@ -81,6 +83,37 @@ def test_explicit_goal_claims_take_precedence_over_task_fallback() -> None:
     }]
 
 
+def test_explicit_goal_claims_accept_planner_statement_field() -> None:
+    claim_set = build_goal_claim_set(
+        {
+            "goal_claims": [{
+                "goal_claim_id": "GOAL-FORMATTER",
+                "statement": "Product callers can import the formatter.",
+                "mandatory": True,
+            }],
+            "tasks": [{
+                "task_id": "TASK-FORMATTER",
+                "goal_claim_ids": ["GOAL-FORMATTER"],
+                "acceptance_criteria": [{
+                    "acceptance_id": "AC-FORMATTER",
+                    "text": "fallback must not replace the explicit claim",
+                }],
+            }],
+        },
+        workflow_run_id="run-1",
+        goal_id="GOAL-1",
+        task_map_generation="generation-1",
+    )
+
+    assert claim_set["source"] == "task_map.goal_claims"
+    assert claim_set["claims"] == [{
+        "goal_claim_id": "GOAL-FORMATTER",
+        "text": "Product callers can import the formatter.",
+        "mandatory": True,
+        "source_ref": "",
+    }]
+
+
 def test_duplicate_explicit_goal_claim_ids_fail_closed() -> None:
     with pytest.raises(GoalClaimSetError, match="duplicate goal claim id"):
         build_goal_claim_set(
@@ -129,4 +162,42 @@ def test_pin_goal_claim_set_keeps_confirmed_objective_acceptance(
         "workflow reaches delivery",
         "unit tests pass",
     ]
+
+
+def test_hydrate_pinned_goal_claim_set_preserves_immutable_body(tmp_path) -> None:
+    task_map = tmp_path / "artifacts" / "task-map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"tasks":[{"task_id":"TASK-1","acceptance_criteria":'
+        '["AC-PINNED: pinned acceptance"]}]}',
+        encoding="utf-8",
+    )
+    claim_set, descriptor = pin_goal_claim_set_from_task_map(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        task_map_ref="artifacts/task-map.json",
+        workflow_run_id="run-1",
+        goal_id="GOAL-1",
+        task_map_generation="generation-1",
+    )
+    event = ZfEvent(
+        type="goal.claim_set.pinned",
+        payload={
+            "workflow_run_id": "run-1",
+            "goal_id": "GOAL-1",
+            "task_map_generation": "generation-1",
+            "goal_claim_set_ref": descriptor["ref"],
+            "goal_claim_set_digest": descriptor["sha256"],
+        },
+    )
+
+    hydrated = hydrate_pinned_goal_claim_set(
+        state_dir=tmp_path / ".zf",
+        events=[event],
+        workflow_run_id="run-1",
+        goal_id="GOAL-1",
+        task_map_generation="generation-1",
+    )
+
+    assert hydrated == claim_set
     assert all(claim["mandatory"] for claim in claim_set["claims"])

@@ -21,6 +21,9 @@ from zf.autoresearch.orchestrator import (
     upsert_failure_backlog,
     write_report,
 )
+from zf.autoresearch.worktree_preparation import (
+    cleanup_interrupted_prepared_worktree,
+)
 from zf.autoresearch.loop import LoopConfig
 from zf.autoresearch.scenarios import resolve_scenario
 
@@ -88,6 +91,92 @@ def test_prepared_worktree_restores_only_unchanged_framework_files(
     assert outcome["status"] == "cleaned"
     assert (worktree / "zf.yaml").read_text(encoding="utf-8") == original
     assert not seed.exists()
+
+
+def test_prepared_worktree_removes_only_framework_created_web_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    dependency_source = tmp_path / "shared-node-modules"
+    dependency_source.mkdir()
+
+    def _link_dependencies(root: Path, *, log_path: Path) -> str:
+        target = root / "web" / "node_modules"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(dependency_source, target_is_directory=True)
+        return "linked"
+
+    monkeypatch.setattr(
+        ar_orchestrator,
+        "ensure_web_dependencies",
+        _link_dependencies,
+    )
+    run_dir = worktree / ".zf" / "autoresearch" / "runs" / "linked-deps"
+    prepare_worktree(
+        AutoresearchRunConfig(
+            worktree=worktree,
+            config_template=template,
+            reuse_worktree=True,
+            sync_dirty=False,
+        ),
+        scenario=resolve_scenario("self-eval-backlog"),
+        run_id="linked-deps",
+        run_dir=run_dir,
+    )
+
+    dependencies = worktree / "web" / "node_modules"
+    assert dependencies.is_symlink()
+
+    outcome = cleanup_interrupted_prepared_worktree(worktree=worktree)
+
+    assert outcome["status"] == "cleaned"
+    assert str(dependencies) in outcome["removed"]
+    assert not dependencies.is_symlink()
+
+
+def test_prepared_worktree_preserves_preexisting_web_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    dependencies = worktree / "web" / "node_modules"
+    dependencies.mkdir(parents=True)
+    marker = dependencies / "candidate.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ar_orchestrator,
+        "ensure_web_dependencies",
+        lambda *_args, **_kwargs: "present",
+    )
+    run_dir = worktree / ".zf" / "autoresearch" / "runs" / "present-deps"
+    prepare_worktree(
+        AutoresearchRunConfig(
+            worktree=worktree,
+            config_template=template,
+            reuse_worktree=True,
+            sync_dirty=False,
+        ),
+        scenario=resolve_scenario("self-eval-backlog"),
+        run_id="present-deps",
+        run_dir=run_dir,
+    )
+
+    outcome = cleanup_prepared_worktree(worktree=worktree, run_dir=run_dir)
+
+    assert outcome["status"] == "cleaned"
+    assert marker.read_text(encoding="utf-8") == "keep\n"
 
 
 def test_prepared_worktree_retains_user_modified_framework_file(

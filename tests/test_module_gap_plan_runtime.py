@@ -22,6 +22,7 @@ from zf.runtime.call_result_envelope import (
     write_immutable_json_sidecar,
 )
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 
 class _RecordingTransport:
@@ -184,14 +185,33 @@ def _flow_discovery_config(
     )
 
 
-def _parity_scan_state(tmp_path: Path) -> tuple[Path, EventLog, _RecordingTransport, Orchestrator]:
+def _parity_scan_state(
+    tmp_path: Path,
+    *,
+    with_layer2_orchestrator: bool = False,
+    with_scoped_parity_stage: bool = False,
+) -> tuple[Path, EventLog, _RecordingTransport, Orchestrator]:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
     (state_dir / "feature_list.json").write_text("[]\n", encoding="utf-8")
     log = EventLog(state_dir / "events.jsonl")
     transport = _RecordingTransport()
-    orch = Orchestrator(state_dir, _parity_scan_config(state_dir), transport)  # type: ignore[arg-type]
+    config = _parity_scan_config(state_dir)
+    if with_scoped_parity_stage:
+        next(
+            stage
+            for stage in config.workflow.stages
+            if stage.trigger == "verify.parity_scan.requested"
+        ).flow_kind = "refactor"
+    if with_layer2_orchestrator:
+        config.roles.append(RoleConfig(
+            name="orchestrator",
+            backend="mock",
+            role_kind="reader",
+            triggers=["dispatch.silent_stall"],
+        ))
+    orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
     return state_dir, log, transport, orch
 
 
@@ -439,6 +459,56 @@ def test_prd_verify_passed_flow_discovery_can_start_reader_fanout(tmp_path: Path
     assert [sent[0] for sent in transport.sent] == ["flow-discovery"]
 
 
+def test_issue_flow_discovery_blocking_call_stays_candidate_scoped(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, transport, orch = _flow_discovery_state(
+        tmp_path,
+        flow_kind="issue",
+        discovery_profile="regression_impact",
+        with_discovery_stage=True,
+        extra_flow_metadata={
+            "result_protocol": {"mode": "blocking"},
+            "artifact_package": {"mode": "blocking"},
+        },
+    )
+
+    orch.run_once(events=[ZfEvent(
+        id="issue-verify-passed-blocking",
+        type="verify.passed",
+        actor="zf-cli",
+        correlation_id="run-issue-blocking",
+        payload={
+            "workflow_run_id": "run-issue-blocking",
+            "pdd_id": "ISSUE-BLOCKING",
+            "feature_id": "ISSUE-BLOCKING",
+            "trace_id": "run-issue-blocking",
+            "task_map_ref": "artifacts/ISSUE-BLOCKING/task_map.json",
+            "task_map_generation": "generation-issue-blocking",
+            "candidate_ref": "candidate/ISSUE-BLOCKING",
+            "candidate_head_commit": "candidate-issue-blocking",
+        },
+    )])
+
+    events = log.read_all()
+    dispatched = next(
+        event for event in events
+        if event.type == "fanout.child.dispatched"
+    )
+    child_payload = dispatched.payload["payload"]
+    assert child_payload["output_profile_id"] == "workflow-read"
+    assert child_payload.get("task_id", "") == ""
+    assert any(
+        event.type == "workflow.operation.started"
+        for event in events
+    )
+    assert not any(
+        event.type == "fanout.child.failed"
+        for event in events
+    )
+    assert [sent[0] for sent in transport.sent] == ["flow-discovery"]
+
+
 def test_prd_test_passed_flow_discovery_can_start_reader_fanout(tmp_path: Path) -> None:
     _state_dir, log, transport, orch = _flow_discovery_state(
         tmp_path,
@@ -453,10 +523,17 @@ def test_prd_test_passed_flow_discovery_can_start_reader_fanout(tmp_path: Path) 
         actor="zf-cli",
         correlation_id="trace-prd",
         payload={
+            "workflow_run_id": "run-prd-1",
             "pdd_id": "PRD-1",
             "feature_id": "PRD-1",
             "trace_id": "trace-prd",
             "task_map_ref": ".zf/artifacts/PRD-1/task_map.json",
+            "task_map_generation": "generation-prd-1",
+            "plan_artifact_package_id": "plan-package-prd-1",
+            "plan_artifact_package_ref": "artifacts/plan-packages/prd-1.json",
+            "plan_artifact_package_digest": "plan-package-digest-prd-1",
+            "goal_claim_set_ref": "artifacts/goal-claims/prd-1.json",
+            "goal_claim_set_digest": "goal-claim-digest-prd-1",
             "candidate_ref": "cand/PRD-1",
             "candidate_head_commit": "candidate-prd-1",
         },
@@ -471,6 +548,16 @@ def test_prd_test_passed_flow_discovery_can_start_reader_fanout(tmp_path: Path) 
     assert requested[0].payload["discovery_profile"] == "product_completeness"
     assert requested[0].payload["source_event_id"] == "prd-test-passed-1"
     assert requested[0].payload["source"] == "post_verify_flow_discovery_bridge"
+    assert requested[0].payload["workflow_run_id"] == "run-prd-1"
+    assert requested[0].payload["task_map_generation"] == "generation-prd-1"
+    assert (
+        requested[0].payload["plan_artifact_package_ref"]
+        == "artifacts/plan-packages/prd-1.json"
+    )
+    assert (
+        requested[0].payload["goal_claim_set_ref"]
+        == "artifacts/goal-claims/prd-1.json"
+    )
     assert [event.payload["stage_id"] for event in started] == [
         "prd-post-verify-discovery",
     ]
@@ -567,6 +654,20 @@ def test_prd_discovery_uses_candidate_materialized_before_test_passed(
         },
     )
     log.append(ready)
+    log.append(ZfEvent(
+        type="task_map.ready",
+        actor="zf-cli",
+        correlation_id="trace-prd",
+        payload={
+            "workflow_run_id": "run-prd-1",
+            "pdd_id": "PRD-1",
+            "feature_id": "PRD-1",
+            "trace_id": "trace-prd",
+            "task_map_ref": ".zf/artifacts/PRD-1/task_map.json",
+            "candidate_ref": "candidate/PRD-1",
+            "candidate_head_commit": "unverified-planning-head",
+        },
+    ))
     verified = ZfEvent(
         id="prd-test-passed-after-candidate",
         type="test.passed",
@@ -1231,6 +1332,125 @@ def test_verify_parity_scan_request_starts_reader_fanout(tmp_path: Path) -> None
     assert all(sent[3].trace_id == "trace-parity-scan" for sent in transport.sent)
 
 
+def test_verify_bridge_preserves_scope_and_plan_package_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _parity_scan_state(
+        tmp_path,
+        with_layer2_orchestrator=True,
+        with_scoped_parity_stage=True,
+    )
+    orch.config.workflow.flow_metadata["result_protocol"] = {"mode": "blocking"}
+    generation = "generation-current"
+    candidate_head_commit = "c" * 40
+    package = {
+        "plan_artifact_package_id": "planpkg-current",
+        "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+        "plan_artifact_package_digest": "package-digest",
+    }
+    log.append(ZfEvent(
+        id="plan-package-current",
+        type="plan.artifact_package.admitted",
+        actor="zf-cli",
+        correlation_id="trace-parity-scan-layer2",
+        payload={
+            "workflow_run_id": "trace-parity-scan-layer2",
+            "package_id": package["plan_artifact_package_id"],
+            "package_ref": package["plan_artifact_package_ref"],
+            "package_digest": package["plan_artifact_package_digest"],
+            "task_map_generation": generation,
+            "mode": "blocking",
+            "status": "admitted",
+        },
+    ))
+    log.append(ZfEvent(
+        id="candidate-current",
+        type="candidate.ready",
+        actor="zf-cli",
+        correlation_id="trace-parity-scan-layer2",
+        payload={
+            "workflow_run_id": "trace-parity-scan-layer2",
+            "pdd_id": "CANGJIE",
+            "feature_id": "CANGJIE",
+            "candidate_ref": "cand/CANGJIE",
+            "candidate_head_commit": candidate_head_commit,
+        },
+    ))
+
+    orch.run_once(events=[ZfEvent(
+        id="verify-passed-with-layer2",
+        type="verify.passed",
+        actor="zf-cli",
+        correlation_id="trace-parity-scan-layer2",
+        payload={
+            "pdd_id": "CANGJIE",
+            "feature_id": "CANGJIE",
+            "trace_id": "trace-parity-scan-layer2",
+            "task_map_ref": str(
+                tmp_path / ".zf" / "artifacts" / "CANGJIE" / "task_map.json"
+            ),
+            "task_map_generation": generation,
+            "candidate_ref": "cand/CANGJIE",
+            **package,
+        },
+    )])
+
+    events = log.read_all()
+    requested = [
+        event for event in events
+        if event.type == "verify.parity_scan.requested"
+    ]
+    started = [event for event in events if event.type == "fanout.started"]
+    assert len(requested) == 1
+    assert requested[0].payload["flow_kind"] == "refactor"
+    assert {
+        key: requested[0].payload[key]
+        for key in package
+    } == package
+    assert requested[0].payload["task_map_generation"] == generation
+    assert requested[0].payload["candidate_head_commit"] == candidate_head_commit
+    assert requested[0].payload["target_commit"] == candidate_head_commit
+    assert len(started) == 1
+    assert started[0].payload["stage_id"] == "cangjie-module-parity-scan"
+    dispatched = [
+        event for event in events
+        if event.type == "fanout.child.dispatched"
+    ]
+    assert len(dispatched) == 3
+    for child in dispatched:
+        assert {
+            key: child.payload["payload"][key]
+            for key in package
+        } == package
+        assert child.payload["payload"]["task_map_generation"] == generation
+        assert (
+            child.payload["payload"]["candidate_head_commit"]
+            == candidate_head_commit
+        )
+        assert child.payload["payload"]["target_commit"] == candidate_head_commit
+    operations = [
+        event for event in events
+        if event.type == "workflow.operation.requested"
+    ]
+    assert len(operations) == 3
+    for operation in operations:
+        request = hydrate_sidecar_ref(
+            state_dir,
+            operation.payload["request_ref"],
+        ).payload["request"]
+        assert {
+            key: request["result_identity"][key]
+            for key in package
+        } == package
+        assert request["result_identity"]["task_map_generation"] == generation
+        assert request["result_identity"]["target_commit"] == candidate_head_commit
+    assert [sent[0] for sent in transport.sent] == [
+        "scan-contract",
+        "scan-runtime",
+        "scan-verification",
+    ]
+
+
 def test_verify_passed_requests_module_parity_scan(tmp_path: Path) -> None:
     _state_dir, log, transport, orch = _parity_scan_state(tmp_path)
 
@@ -1549,6 +1769,74 @@ def test_module_parity_scan_completed_without_gaps_closes_and_starts_judge(
     assert len(closed) == 1
     assert closed[0].payload["source_event_id"] == "parity-scan-completed-clean"
     assert [event.payload["stage_id"] for event in started] == ["cangjie-final-judge"]
+    assert [sent[0] for sent in transport.sent] == ["judge-refactor"]
+
+
+def test_module_parity_closure_uses_current_plan_and_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _parity_scan_state(tmp_path)
+    task_map_ref = ".zf/artifacts/CANGJIE/task_map.json"
+    generation = "generation-current"
+    candidate_head_commit = "c" * 40
+    _prime_goal_closure_context(
+        state_dir,
+        log,
+        orch,
+        workflow_run_id="trace-parity-current",
+        goal_id="CANGJIE",
+        task_map_ref=task_map_ref,
+        generation=generation,
+        candidate_head_commit=candidate_head_commit,
+        recorded_task_source_commit="b" * 40,
+    )
+    log.append(ZfEvent(
+        id="parity-scan-requested-with-current-identity",
+        type="verify.parity_scan.requested",
+        actor="zf-cli",
+        correlation_id="trace-parity-current",
+        payload={
+            "workflow_run_id": "trace-parity-current",
+            "pdd_id": "CANGJIE",
+            "feature_id": "CANGJIE",
+            "goal_id": "CANGJIE",
+            "task_map_ref": task_map_ref,
+            "task_map_generation": generation,
+            "candidate_ref": "cand/CANGJIE",
+            "candidate_head_commit": candidate_head_commit,
+            "target_commit": candidate_head_commit,
+        },
+    ))
+
+    decisions = orch.run_once(events=[ZfEvent(
+        id="parity-scan-completed-with-thin-handoff",
+        type="module.parity.scan.completed",
+        actor="zf-cli",
+        correlation_id="trace-parity-current",
+        payload={
+            "workflow_run_id": "trace-parity-current",
+            "pdd_id": "CANGJIE",
+            "feature_id": "CANGJIE",
+            "goal_id": "CANGJIE",
+            "trace_id": "trace-parity-current",
+            "task_map_ref": "artifacts/plan-ports/parity-task-map.json",
+            "source_commit": "b" * 40,
+            "candidate_ref": "cand/CANGJIE",
+            "open_p0_p1_gap_count": 0,
+        },
+    )])
+
+    events = log.read_all()
+    closed = [event for event in events if event.type == "module.parity.closed"]
+    assert any(decision.action == "bridge" for decision in decisions)
+    assert len(closed) == 1
+    assert closed[0].payload["task_map_generation"] == generation
+    assert closed[0].payload["candidate_head_commit"] == candidate_head_commit
+    assert closed[0].payload["target_commit"] == candidate_head_commit
+    assert not [
+        event for event in events
+        if event.type == "goal.closure.identity.invalid"
+    ]
     assert [sent[0] for sent in transport.sent] == ["judge-refactor"]
 
 

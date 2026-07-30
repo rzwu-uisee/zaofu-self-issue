@@ -217,6 +217,11 @@ def test_dispatch_waits_for_ready_before_sending_briefing():
 
     calls: list[str] = []
     role = SimpleNamespace(instance_id="dev-core", name="dev-core")
+
+    def _deliver(role_name, context, briefing_path, prompt):
+        calls.append("send_task")
+        return context
+
     stub = SimpleNamespace(
         transport=SimpleNamespace(
             send_task=lambda *a, **k: calls.append("send_task")
@@ -230,6 +235,10 @@ def test_dispatch_waits_for_ready_before_sending_briefing():
         # P0-1: the primitive now consults the budget gate after role resolution;
         # under budget (False) it proceeds, preserving the wait→send→notify order.
         _budget_exceeded=lambda r: False,
+        # Run admission is checked at the same charging primitive. This legacy
+        # ordering probe carries no DispatchContext, so the guard is a no-op.
+        _assert_run_dispatch_allowed=lambda *a: None,
+        _deliver_transport_task=_deliver,
         _get_spawn_coordinator=lambda: SimpleNamespace(
             notify_first_dispatch=lambda r: calls.append("notify")
         ),
@@ -311,6 +320,11 @@ def test_refactor_plan_ready_bridges_to_task_map_and_starts_impl():
             "task_map_ref": ".zf/artifacts/plan/task_map.json",
             "source_index_ref": ".zf/artifacts/plan/source_index.json",
             "source_commit": "abc123",
+            "plan_artifact_package_id": "planpkg-1",
+            "plan_artifact_package_ref": "artifacts/plan-package.json",
+            "plan_artifact_package_digest": "package-sha",
+            "run_contract_ref": "artifacts/run-contract.json",
+            "run_contract_digest": "contract-sha",
         },
         trace_id="tr-1",
     )
@@ -320,6 +334,11 @@ def test_refactor_plan_ready_bridges_to_task_map_and_starts_impl():
     assert ev.type == "task_map.ready"
     assert ev.payload["task_map_ref"] == ".zf/artifacts/plan/task_map.json"
     assert ev.payload["feature_id"] == "F-1"
+    assert ev.payload["workflow_run_id"] == "tr-1"
+    assert ev.payload["flow_kind"] == "refactor"
+    assert ev.payload["plan_artifact_package_id"] == "planpkg-1"
+    assert ev.payload["plan_artifact_package_digest"] == "package-sha"
+    assert ev.payload["run_contract_digest"] == "contract-sha"
     assert ev.payload["source"] == "refactor_plan_bridge"
     # impl fanout started off the bridged event
     assert started == [ev]

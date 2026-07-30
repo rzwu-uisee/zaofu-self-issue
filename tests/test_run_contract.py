@@ -5,8 +5,10 @@ import json
 from zf.core.config.loader import load_config
 from zf.runtime.run_contract import (
     active_run_contract_path,
+    bind_run_contract_workflow_artifacts,
     build_run_contract,
     evaluate_run_contract_resume_policy,
+    hydrate_run_effective_config,
     evaluate_run_contract_submit_binding,
     load_run_contract,
     load_run_contract_snapshot,
@@ -14,6 +16,7 @@ from zf.runtime.run_contract import (
     write_run_contract,
     write_run_contract_snapshot,
 )
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 
 
 def test_run_contract_records_config_and_detects_drift(tmp_path):
@@ -234,6 +237,66 @@ workflow: {}
     assert policy["current_digest"] == original["contract_digest"]
 
 
+def test_run_contract_resume_preserves_submitted_workflow_bindings(tmp_path):
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text("""\
+version: "1.0"
+project: {name: demo, state_dir: .zf-demo}
+roles: []
+workflow: {}
+""", encoding="utf-8")
+    manifest = tmp_path / "workflow-input-manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": "workflow.input_manifest.v1",
+        "kind": "issue",
+        "strictness": "strict",
+    }), encoding="utf-8")
+    config = load_config(config_path)
+    state_dir = tmp_path / ".zf-demo"
+    proposal_ref = write_immutable_json_sidecar(
+        state_dir,
+        {"schema_version": "workflow.proposal.v1", "revision": 2},
+        root="workflow/proposals/issue",
+        kind="workflow_proposal",
+        schema_version="workflow.proposal.v1",
+        created_by="test",
+    )
+    effective_ref = write_immutable_json_sidecar(
+        state_dir,
+        {
+            "schema_version": "effective-config-snapshot.v1",
+            "config": {"project": {"name": "demo"}},
+        },
+        root="workflow/proposals/issue/effective-configs",
+        kind="effective_config_snapshot",
+        schema_version="effective-config-snapshot.v1",
+        created_by="test",
+    )
+    original = bind_run_contract_workflow_artifacts(
+        build_run_contract(
+            config,
+            config_path=config_path,
+            project_root=tmp_path,
+            state_dir=state_dir,
+            workflow_input_manifest_ref=str(manifest),
+        ),
+        proposal_ref=proposal_ref,
+        proposal_digest=str(proposal_ref["sha256"]),
+        effective_config_ref=effective_ref,
+    )
+    write_run_contract(state_dir, original)
+
+    policy = evaluate_run_contract_resume_policy(
+        config,
+        config_path=config_path,
+        project_root=tmp_path,
+        state_dir=state_dir,
+    )
+
+    assert policy["status"] == "PASS"
+    assert policy["current_digest"] == original["contract_digest"]
+
+
 def test_run_contract_resume_blocks_changed_bound_workflow_manifest(tmp_path):
     config_path = tmp_path / "zf.yaml"
     config_path.write_text("""\
@@ -313,3 +376,119 @@ workflow:
         "policy_ref": "artifacts/attempts/read-policies/policy.json",
         "policy_digest": "a" * 64,
     }
+
+
+def test_strict_resume_stops_on_config_drift_and_keeps_pinned_effective_config(
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text(
+        'version: "1.0"\n'
+        "project: {name: pinned, state_dir: .zf-demo}\n"
+        "roles: []\n"
+        "workflow: {}\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "workflow-input-manifest.json"
+    manifest.write_text(
+        json.dumps({
+            "schema_version": "workflow.input_manifest.v1",
+            "kind": "prd",
+            "strictness": "strict",
+        }),
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / ".zf-demo"
+    effective_ref = write_immutable_json_sidecar(
+        state_dir,
+        {
+            "schema_version": "effective-config-snapshot.v1",
+            "config": {"project": {"name": "pinned"}},
+        },
+        root="workflow/proposals/run-freeze/effective-configs",
+        kind="effective_config_snapshot",
+        schema_version="effective-config-snapshot.v1",
+        created_by="test",
+    )
+    original = bind_run_contract_workflow_artifacts(
+        build_run_contract(
+            load_config(config_path),
+            config_path=config_path,
+            project_root=tmp_path,
+            state_dir=state_dir,
+            workflow_input_manifest_ref=str(manifest),
+        ),
+        effective_config_ref=effective_ref,
+    )
+    write_run_contract(state_dir, original)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "name: pinned",
+            "name: drifted",
+        ),
+        encoding="utf-8",
+    )
+
+    policy = evaluate_run_contract_resume_policy(
+        load_config(config_path),
+        config_path=config_path,
+        project_root=tmp_path,
+        state_dir=state_dir,
+    )
+
+    assert policy["status"] == "STOP"
+    assert policy["strict"] is True
+    assert hydrate_run_effective_config(
+        state_dir,
+        original,
+    )["project"]["name"] == "pinned"
+
+
+def test_effective_config_snapshots_are_isolated_across_runs(tmp_path) -> None:
+    state_dir = tmp_path / ".zf"
+
+    def effective(name: str) -> dict:
+        return write_immutable_json_sidecar(
+            state_dir,
+            {
+                "schema_version": "effective-config-snapshot.v1",
+                "config": {"project": {"name": name}},
+            },
+            root="workflow/proposals/multi-run/effective-configs",
+            kind="effective_config_snapshot",
+            schema_version="effective-config-snapshot.v1",
+            created_by="test",
+        )
+
+    first = bind_run_contract_workflow_artifacts(
+        {
+            "schema_version": "run-contract.v1",
+            "workflow": {"strictness": "strict"},
+            "config": {},
+            "contract_digest": "",
+        },
+        proposal_digest="a" * 64,
+        effective_config_ref=effective("revision-n"),
+    )
+    second = bind_run_contract_workflow_artifacts(
+        {
+            "schema_version": "run-contract.v1",
+            "workflow": {"strictness": "strict"},
+            "config": {},
+            "contract_digest": "",
+        },
+        proposal_digest="b" * 64,
+        effective_config_ref=effective("revision-n-plus-1"),
+    )
+    first_snapshot = write_run_contract_snapshot(state_dir, first)
+    second_snapshot = write_run_contract_snapshot(state_dir, second)
+
+    assert first_snapshot["ref"] != second_snapshot["ref"]
+    assert hydrate_run_effective_config(
+        state_dir,
+        first,
+    )["project"]["name"] == "revision-n"
+    assert hydrate_run_effective_config(
+        state_dir,
+        second,
+    )["project"]["name"] == "revision-n-plus-1"

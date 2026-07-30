@@ -27,6 +27,11 @@ from zf.autoresearch.review_gate import (
     prepare_review_gate_summary,
 )
 from zf.autoresearch.scenarios import AutoresearchScenario, resolve_scenario
+from zf.autoresearch.worktree_preparation import (
+    PREPARATION_MANIFEST,
+    cleanup_prepared_worktree,
+    path_sha256,
+)
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.package_source import installed_local_source_root
@@ -45,7 +50,6 @@ FATAL_EVENT_TYPES = frozenset({
     "worker.recycle.failed",
     "worker.stuck.recovery_failed",
 })
-_PREPARATION_MANIFEST = "worktree-preparation.json"
 
 
 @dataclass(frozen=True)
@@ -386,9 +390,18 @@ def prepare_worktree(
     data.setdefault("session", {})["tmux_session"] = f"zf-autoresearch-{run_id}"
     data["global_budget_usd"] = cfg.budget_usd
     _write_yaml(zf_yaml, data)
+    target_node_modules = worktree / "web" / "node_modules"
+    web_dependencies_preexisting = (
+        target_node_modules.exists() or target_node_modules.is_symlink()
+    )
     web_dependency_mode = ensure_web_dependencies(
         worktree,
         log_path=run_dir / "prepare-web-deps.log",
+    )
+    web_dependency_link_target = (
+        os.readlink(target_node_modules)
+        if target_node_modules.is_symlink()
+        else ""
     )
 
     seed_path = worktree / "autoresearch-seed.txt"
@@ -399,11 +412,17 @@ def prepare_worktree(
         "zf_yaml": str(zf_yaml),
         "zf_existed": zf_existed,
         "original_zf": str(original_zf) if zf_existed else "",
-        "generated_zf_sha256": _path_sha256(zf_yaml),
+        "generated_zf_sha256": path_sha256(zf_yaml),
         "seed_file": str(seed_path),
-        "generated_seed_sha256": _path_sha256(seed_path),
+        "generated_seed_sha256": path_sha256(seed_path),
+        "web_dependencies": {
+            "mode": web_dependency_mode,
+            "path": "web/node_modules",
+            "preexisting": web_dependencies_preexisting,
+            "symlink_target": web_dependency_link_target,
+        },
     }
-    (preparation_dir / _PREPARATION_MANIFEST).write_text(
+    (preparation_dir / PREPARATION_MANIFEST).write_text(
         json.dumps(preparation, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n",
         encoding="utf-8",
@@ -438,51 +457,6 @@ def prepare_worktree(
     return seed_path
 
 
-def cleanup_prepared_worktree(
-    *,
-    worktree: Path,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Restore only unchanged framework-owned files after one experiment."""
-
-    manifest_path = run_dir / "worktree-preparation" / _PREPARATION_MANIFEST
-    outcome: dict[str, Any] = {
-        "status": "not_prepared",
-        "restored": [],
-        "removed": [],
-        "retained": [],
-    }
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return outcome
-    if not isinstance(manifest, dict):
-        return outcome
-
-    root = Path(worktree).resolve()
-    preparation_dir = Path(run_dir).resolve() / "worktree-preparation"
-    zf_yaml = root / "zf.yaml"
-    if _path_sha256(zf_yaml) == str(manifest.get("generated_zf_sha256") or ""):
-        original = preparation_dir / "zf.yaml.original"
-        if bool(manifest.get("zf_existed")) and original.is_file():
-            shutil.copy2(original, zf_yaml)
-            outcome["restored"].append(str(zf_yaml))
-        else:
-            zf_yaml.unlink(missing_ok=True)
-            outcome["removed"].append(str(zf_yaml))
-    elif zf_yaml.exists():
-        outcome["retained"].append(str(zf_yaml))
-
-    seed = root / "autoresearch-seed.txt"
-    if _path_sha256(seed) == str(manifest.get("generated_seed_sha256") or ""):
-        seed.unlink(missing_ok=True)
-        outcome["removed"].append(str(seed))
-    elif seed.exists():
-        outcome["retained"].append(str(seed))
-    outcome["status"] = "retained" if outcome["retained"] else "cleaned"
-    return outcome
-
-
 def cleanup_autoresearch_run(
     cfg: AutoresearchRunConfig,
     *,
@@ -494,13 +468,6 @@ def cleanup_autoresearch_run(
         else cfg.worktree.resolve() / ".zf" / "autoresearch" / "runs" / run_id
     )
     return cleanup_prepared_worktree(worktree=cfg.worktree, run_dir=run_dir)
-
-
-def _path_sha256(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return ""
 
 
 def build_inner_runner_command(

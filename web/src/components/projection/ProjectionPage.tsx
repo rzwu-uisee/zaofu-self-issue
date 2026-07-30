@@ -11,6 +11,7 @@ import { ObservabilityPage } from "../observability/ObservabilityPage";
 import { AutomationsPage } from "../automations/AutomationsPage";
 import { getProjectAutomations, getProjectTraces } from "../../api/client";
 import { GoalCoveragePage } from "../goal-coverage/GoalCoveragePage";
+import { WorkflowProposalPage } from "../workflow/WorkflowProposalPage";
 
 export function ProjectionPage({
   actionReady,
@@ -129,6 +130,18 @@ export function ProjectionPage({
   const deliveryTotalUsd = Object.values(
     (usageByRole && typeof usageByRole === "object" ? usageByRole : {}) as Record<string, { usd?: number }>,
   ).reduce((sum, role) => sum + (typeof role?.usd === "number" ? role.usd : 0), 0);
+
+  if (page === "workflows") {
+    return (
+      <WorkflowProposalPage
+        actionReady={actionReady}
+        actionState={actionState}
+        onAction={onAction}
+        onOpenPage={onOpenPage}
+        projectId={activeProjectId}
+      />
+    );
+  }
 
   if (page === "goal-coverage") {
     return (

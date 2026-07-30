@@ -64,6 +64,154 @@ class ConstraintsConfig:
 @dataclass
 class ExecutionConfig:
     command: str = ""
+    default_profile: str = "direct-v1"
+    profile_allowlist: list[str] = field(
+        default_factory=lambda: ["direct-v1"],
+    )
+
+
+@dataclass(frozen=True)
+class ExecutionProfileLimitsConfig:
+    max_children: int = 0
+    max_depth: int = 0
+    timeout_seconds: float = 0.0
+    token_budget: int = 0
+    cost_budget_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.max_children <= 16:
+            raise ValueError(
+                "execution profile max_children must be between 0 and 16"
+            )
+        if not 0 <= self.max_depth <= 1:
+            raise ValueError(
+                "execution profile max_depth must be between 0 and 1"
+            )
+        if not 0 <= self.timeout_seconds <= 86_400:
+            raise ValueError(
+                "execution profile timeout_seconds must be between 0 and 86400"
+            )
+        if not 0 <= self.token_budget <= 10_000_000:
+            raise ValueError(
+                "execution profile token_budget must be between 0 and 10000000"
+            )
+        if not 0 <= self.cost_budget_usd <= 10_000:
+            raise ValueError(
+                "execution profile cost_budget_usd must be between 0 and 10000"
+            )
+
+
+@dataclass(frozen=True)
+class ExecutionProfileConfig:
+    schema_version: str = "execution-profile.v1"
+    strategy: str = "direct"
+    continuation: str = "turn"
+    collaboration: str = "single"
+    access: str = "read_only"
+    capability_policy: str = "require"
+    limits: ExecutionProfileLimitsConfig = field(
+        default_factory=ExecutionProfileLimitsConfig,
+    )
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "execution-profile.v1":
+            raise ValueError(
+                "execution profile schema_version must be execution-profile.v1"
+            )
+        if self.strategy not in {"direct", "provider_native"}:
+            raise ValueError(
+                "execution profile strategy must be direct or provider_native"
+            )
+        if self.continuation not in {"turn", "goal"}:
+            raise ValueError(
+                "execution profile continuation must be turn or goal"
+            )
+        if self.collaboration not in {"single", "adaptive"}:
+            raise ValueError(
+                "execution profile collaboration must be single or adaptive"
+            )
+        if self.access != "read_only":
+            raise ValueError(
+                "execution profile access must be read_only"
+            )
+        if self.capability_policy not in {"require", "fallback_direct"}:
+            raise ValueError(
+                "execution profile capability_policy must be require or "
+                "fallback_direct"
+            )
+        if self.strategy == "direct" and (
+            self.continuation != "turn"
+            or self.collaboration != "single"
+            or self.limits.max_children != 0
+            or self.limits.max_depth != 0
+        ):
+            raise ValueError(
+                "direct execution profiles require turn/single and zero "
+                "child limits"
+            )
+        if self.collaboration == "single" and (
+            self.limits.max_children != 0 or self.limits.max_depth != 0
+        ):
+            raise ValueError(
+                "single execution profiles require zero child limits"
+            )
+        if self.collaboration == "adaptive" and (
+            self.strategy != "provider_native"
+            or self.limits.max_children < 1
+            or self.limits.max_depth != 1
+        ):
+            raise ValueError(
+                "adaptive execution profiles require provider_native, "
+                "max_children >= 1, and max_depth = 1"
+            )
+
+
+@dataclass(frozen=True)
+class ProviderSessionConfig:
+    """Optional provider-native settings frozen for one role session."""
+
+    effort: str = ""
+    agent: str = ""
+    max_parallel_agents: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_parallel_agents is not None:
+            if self.max_parallel_agents < 1:
+                raise ValueError(
+                    "ProviderSessionConfig.max_parallel_agents must be >= 1"
+                )
+            if self.max_parallel_agents > 6:
+                raise ValueError(
+                    "ProviderSessionConfig.max_parallel_agents must be <= 6"
+                )
+
+
+@dataclass(frozen=True)
+class RoleLifecycleConfig:
+    """Physical provider-process lifecycle for one logical role instance."""
+
+    mode: str = "eager"  # eager | resident | on_demand
+    idle_seconds: float = 900.0
+    cooldown_seconds: float = 180.0
+    preserve_session: bool = True
+    preserve_workdir: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"eager", "resident", "on_demand"}:
+            raise ValueError(
+                "RoleLifecycleConfig.mode must be eager, resident, or on_demand"
+            )
+        if self.idle_seconds < 0:
+            raise ValueError("RoleLifecycleConfig.idle_seconds must be >= 0")
+        if self.cooldown_seconds < 0:
+            raise ValueError("RoleLifecycleConfig.cooldown_seconds must be >= 0")
+        if self.mode == "on_demand" and (
+            not self.preserve_session or not self.preserve_workdir
+        ):
+            raise ValueError(
+                "RoleLifecycleConfig on_demand requires preserve_session=true "
+                "and preserve_workdir=true"
+            )
 
 
 @dataclass
@@ -102,11 +250,36 @@ class RoleAutoscaleConfig:
             raise ValueError("RoleAutoscaleConfig.cooldown_seconds must be >= 0")
 
 
+_MODEL_REASONING_EFFORTS = frozenset({
+    "",
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+})
+
+
+def _normalize_model_reasoning_effort(value: object, *, owner: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in _MODEL_REASONING_EFFORTS:
+        allowed = ", ".join(repr(item) for item in sorted(_MODEL_REASONING_EFFORTS))
+        raise ValueError(
+            f"{owner}.model_reasoning_effort must be one of {allowed}"
+        )
+    return normalized
+
+
 @dataclass
 class RoleConfig:
     name: str = ""
     backend: str = "python"
     role_kind: str = "auto"  # auto | writer | reader
+    # Flow-generated roles are bound to their declaring route. Empty keeps
+    # manually declared control-plane and legacy roles resident.
+    flow_kind: str = ""  # "" | issue | prd | refactor | workflow
     # B-MIXEDBACKEND-01 (2026-04-23): optional per-replica backend
     # override. When set, its length must equal `replicas` and each entry
     # is the backend for the corresponding instance (dev-1 gets backends[0],
@@ -119,6 +292,10 @@ class RoleConfig:
     # unless the project specifically needs to — backends evolve faster
     # than configs and a stale pinned model is a silent regression.
     model: str = ""
+    # Optional Codex CLI override. When a workflow pins a model, inheriting
+    # model_reasoning_effort from the operator's global config can make that
+    # model/provider combination invalid. Empty preserves CLI inheritance.
+    model_reasoning_effort: str = ""
     allowed_tools: list[str] = field(default_factory=list)
     # B/C sprint: removed refresh_policy field — 0 runtime references
     # (Orchestrator._refresh_policy is a separate object with its own
@@ -163,6 +340,10 @@ class RoleConfig:
     drain_hold_seconds: float = 180.0
     # G-COST-BLOCK-1: per-role hard cost cap. None = no cap.
     budget_usd: float | None = None
+    # Provider-native controls are optional. None means the YAML omitted the
+    # block and the provider defaults remain authoritative.
+    provider_session: ProviderSessionConfig | None = None
+    lifecycle: RoleLifecycleConfig = field(default_factory=RoleLifecycleConfig)
     # Agent View / autoscale: zf.yaml remains the control plane. Runtime
     # instances may be added up to max_replicas when this block is enabled.
     autoscale: RoleAutoscaleConfig = field(default_factory=RoleAutoscaleConfig)
@@ -188,6 +369,16 @@ class RoleConfig:
     agent: str = ""
 
     def __post_init__(self) -> None:
+        self.model_reasoning_effort = _normalize_model_reasoning_effort(
+            self.model_reasoning_effort,
+            owner=f"RoleConfig(name={self.name!r})",
+        )
+        self.flow_kind = str(self.flow_kind or "").strip().lower()
+        if self.flow_kind not in {"", "issue", "prd", "refactor", "workflow"}:
+            raise ValueError(
+                f"RoleConfig(name={self.name!r}).flow_kind must be one of "
+                "'', issue, prd, refactor, workflow"
+            )
         if self.replicas < 1:
             raise ValueError(
                 f"RoleConfig(name={self.name!r}).replicas must be >= 1, got {self.replicas}"
@@ -422,6 +613,14 @@ class WorkflowStageBackedgeConfig:
 
 
 @dataclass
+class WorkflowPortConfig:
+    name: str = ""
+    kind: str = ""
+    source: str = ""
+    required: bool = True
+
+
+@dataclass
 class WorkflowStageConfig:
     id: str = ""
     trigger: str = ""
@@ -429,6 +628,14 @@ class WorkflowStageConfig:
     # one Flow kind. Empty keeps legacy hand-written stages unscoped.
     flow_kind: str = ""
     topology: str = ""
+    operation: str = ""
+    input_ports: list[WorkflowPortConfig] = field(default_factory=list)
+    output_ports: list[WorkflowPortConfig] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    dependency_events: list[str] = field(default_factory=list)
+    dependency_failure_events: list[str] = field(default_factory=list)
+    dependency_barrier_id: str = ""
+    dependency_barrier_digest: str = ""
     roles: list[str] = field(default_factory=list)
     target_ref: str = ""
     task_map: str = ""
@@ -637,6 +844,71 @@ class WorkflowAdmissionReplanConfig:
 
 
 @dataclass
+class WorkflowRunAdmissionConfig:
+    """Project-level Run admission policy.
+
+    ``serial`` is the compatibility-safe default. ``concurrent`` remains an
+    explicit opt-in and is additionally guarded by runtime isolation
+    preflight; the configured limit is a capacity ceiling, not permission to
+    bypass that preflight.
+    """
+
+    version: str = "v1"
+    mode: str = "serial"  # serial | concurrent
+    max_active_runs: int = 1
+
+    def __post_init__(self) -> None:
+        if self.version != "v1":
+            raise ValueError(
+                "workflow.run_admission.version must be v1; "
+                f"got {self.version!r}"
+            )
+        if self.mode not in {"serial", "concurrent"}:
+            raise ValueError(
+                "workflow.run_admission.mode must be serial or concurrent; "
+                f"got {self.mode!r}"
+            )
+        if not 1 <= self.max_active_runs <= 8:
+            raise ValueError(
+                "workflow.run_admission.max_active_runs must be between 1 and 8"
+            )
+        if self.mode == "serial" and self.max_active_runs != 1:
+            raise ValueError(
+                "workflow.run_admission.max_active_runs must be 1 in serial mode"
+            )
+        if self.mode == "concurrent" and self.max_active_runs < 2:
+            raise ValueError(
+                "workflow.run_admission.max_active_runs must be at least 2 "
+                "in concurrent mode"
+            )
+
+
+@dataclass
+class WorkflowTaskAttemptConfig:
+    """Scheduler-owned TaskAttempt rollout policy."""
+
+    version: str = "v1"
+    mode: str = "shadow"  # shadow | enforce
+    max_attempts: int = 3
+
+    def __post_init__(self) -> None:
+        if self.version != "v1":
+            raise ValueError(
+                "workflow.task_attempt.version must be v1; "
+                f"got {self.version!r}"
+            )
+        if self.mode not in {"shadow", "enforce"}:
+            raise ValueError(
+                "workflow.task_attempt.mode must be shadow or enforce; "
+                f"got {self.mode!r}"
+            )
+        if not 1 <= self.max_attempts <= 10:
+            raise ValueError(
+                "workflow.task_attempt.max_attempts must be between 1 and 10"
+            )
+
+
+@dataclass
 class WorkflowKindRouteConfig:
     pattern_id: str = ""
     alias: str = ""
@@ -722,12 +994,25 @@ class WorkflowConfig:
     # doc133: deterministic request kind -> workflow stage routing. Project
     # semantics stay in skills/prompts; this only selects a declared stage.
     kind_routes: dict[str, WorkflowKindRouteConfig] = field(default_factory=dict)
+    execution_profiles: dict[str, ExecutionProfileConfig] = field(
+        default_factory=dict,
+    )
     # R28 (doc 93 §1/§5): admission/W1 机械拒 → 自动回 synth 重拆。默认
     # 关闭 = no_action 现状(零迁移);见 WorkflowAdmissionReplanConfig。
     admission_replan: WorkflowAdmissionReplanConfig = field(
         default_factory=WorkflowAdmissionReplanConfig,
     )
+    run_admission: WorkflowRunAdmissionConfig = field(
+        default_factory=WorkflowRunAdmissionConfig,
+    )
+    task_attempt: WorkflowTaskAttemptConfig = field(
+        default_factory=WorkflowTaskAttemptConfig,
+    )
     stages: list[WorkflowStageConfig] = field(default_factory=list)
+    # Compiler-side safe Generic Workflow contracts. Runtime scheduling still
+    # consumes only canonical stages; this immutable projection supports
+    # inspect, Run Contract and Proposal currentness.
+    generic_workflows: list[dict] = field(default_factory=list)
     # doc 88 P0 (2026-06-11-0327): high-level lane_pipeline specs, parsed by
     # core/workflow/lane_pipeline.py. Inspect-only at P0 — runtime does not
     # consume them yet.
@@ -1003,12 +1288,20 @@ class RuntimeRunManagerResidentAgentConfig:
     enabled: bool = False
     transport: str = "tmux"
     instance_id: str = "run-manager"
+    model: str = ""
+    model_reasoning_effort: str = ""
     prompt_on_start: bool = True
     # shared: resident pane joins session.tmux_session.
     # dedicated: resident pane uses tmux_session or derives
     # "<session.tmux_session>-run-manager".
     session_mode: str = "shared"
     tmux_session: str = ""
+
+    def __post_init__(self) -> None:
+        self.model_reasoning_effort = _normalize_model_reasoning_effort(
+            self.model_reasoning_effort,
+            owner="RuntimeRunManagerResidentAgentConfig",
+        )
 
 
 @dataclass

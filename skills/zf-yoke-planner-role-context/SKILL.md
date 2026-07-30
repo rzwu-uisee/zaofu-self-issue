@@ -47,7 +47,9 @@ authoritative when it differs from an older Skill example.
 - **命令保持独立身份**:新 task map 把命令写入 `validation.commands[]`,
   每项至少包含 `id`、`command`、`acceptance_ids`、`owner`、`tier`,并按
   实际性质声明 `deterministic`、`reusable`、`timeout_seconds`。不要把多条
-  命令拼成 `cmd1 && cmd2`;`verification` 单字符串只用于旧合同兼容。
+  命令拼成 `cmd1 && cmd2`;`verification` 单字符串只用于旧合同兼容。命令
+  identity 包含完整字符串:必须按最终序列化后的原文可执行,不能用补转义后的
+  “等价命令”代替。含多层引号/反斜杠的断言应落到本 task 拥有的测试或脚本。
 - **两轴自检**:task_map 交付前对照两轴——**落闩**(每片有机械可验的
   完成闸门:命令+退出码,不是"应当工作")与**分母**(所有验收条款都
   映射到某个 task,`requirement_coverage` 无遗漏)。只报分母不落闩 =
@@ -58,10 +60,12 @@ authoritative when it differs from an older Skill example.
 - Owner-given references (samples, competitors, screenshots) either become
   acceptance entries or get an explicit decision item for why not
   (method: `yoke/grill`); silent narrowing is a contract violation.
-- Emit the task_map through the briefing's completion command with the
-  artifact written to the exact absolute path the briefing names; the
-  kernel admission gate — not your prose — decides whether the map is
-  accepted.
+- Emit the task map through the briefing's completion command after writing it
+  to the exact **workdir-relative** output path named by the briefing. Never
+  write the configured state dir or root project directly; the Kernel
+  relocates admitted workdir refs into canonical artifact storage and computes
+  their digests. The Kernel admission gate, not your prose, decides whether the
+  map is accepted.
 - Load `zf-plan-task-map-contract` before emitting the map. On incremental
   replan, also load `zf-gap-task-synth` and preserve unaffected completed tasks.
 - Do not implement, do not verify, do not pre-approve your own plan.

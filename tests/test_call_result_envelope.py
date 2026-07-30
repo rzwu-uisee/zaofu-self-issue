@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from zf.runtime.call_result_envelope import (
+    call_result_envelope_ref,
     canonical_json_sha256,
     normalize_call_result_envelope,
     validate_call_result_envelope,
@@ -15,6 +16,26 @@ def _control_result() -> dict[str, str]:
         "ref": "artifacts/control/result.json",
         "sha256": "a" * 64,
     }
+
+
+def test_call_result_envelope_ref_requires_content_addressed_descriptor() -> None:
+    digest = "a" * 64
+    ref = f"artifacts/call-results/envelopes/{digest}.json"
+
+    assert call_result_envelope_ref(ref) == ref
+    assert call_result_envelope_ref({
+        "ref": ref,
+        "sha256": digest,
+    }) == ref
+    assert call_result_envelope_ref({"ref": ref}) == ""
+    assert call_result_envelope_ref({
+        "ref": "fanouts/fanout-1/children/child-1/result.json",
+        "sha256": digest,
+    }) == ""
+    assert call_result_envelope_ref({
+        "ref": ref,
+        "sha256": "b" * 64,
+    }) == ""
 
 
 def test_call_result_envelope_is_thin_and_deterministic(tmp_path: Path) -> None:

@@ -9,6 +9,48 @@ from zf.core.events.model import ZfEvent
 
 
 class FanoutDispatchLivenessMixin:
+    def _fanout_role_has_active_provider_turn(
+        self,
+        role_instance: str,
+    ) -> bool:
+        try:
+            return self._active_provider_turn(role_instance) is not None
+        except Exception:
+            return False
+
+    @staticmethod
+    def _reader_dispatch_lost_role(event: ZfEvent) -> str:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type == "worker.refresh.triggered":
+            reason = str(payload.get("reason") or "").strip().lower()
+            if reason in {"drift", "context_pressure", "task_complete"}:
+                return ""
+            return str(
+                payload.get("role")
+                or payload.get("instance_id")
+                or event.actor
+                or ""
+            ).strip()
+        if event.type == "cost.usage.capture_miss":
+            reason = str(payload.get("reason") or "")
+            if "session file not found" in reason:
+                return str(
+                    event.actor or payload.get("role") or ""
+                ).strip()
+        if event.type == "worker.launch_artifact.written":
+            try:
+                launch_attempt = int(payload.get("launch_attempt") or 0)
+            except (TypeError, ValueError):
+                launch_attempt = 0
+            if launch_attempt > 1:
+                return str(
+                    payload.get("instance_id")
+                    or payload.get("role")
+                    or event.actor
+                    or ""
+                ).strip()
+        return ""
+
     def _fanout_dispatch_deferred_recently(
         self,
         *,
@@ -50,11 +92,19 @@ class FanoutDispatchLivenessMixin:
         child_id: str,
         run_id: str,
         trace_id: str,
+        task_id: str | None = None,
         causation_id: str | None = None,
         prompt_kind: str = "fanout_child",
         skip_send_window: bool = False,
     ) -> bool:
         """Return whether a fanout role can receive a prompt now."""
+
+        activation_error = ""
+        if self._role_is_on_demand(role):
+            try:
+                self._ensure_role_active(role, task_id=task_id)
+            except Exception as exc:  # noqa: BLE001
+                activation_error = str(exc)
 
         state = getattr(self, "_last_worker_state", {}).get(role.instance_id, "idle")
         if state == "busy":
@@ -97,7 +147,23 @@ class FanoutDispatchLivenessMixin:
         except Exception as exc:  # noqa: BLE001
             alive = False
             alive_error = str(exc)
-        if alive and dispatchable:
+        if alive and dispatchable and not activation_error:
+            if self._fanout_role_has_active_provider_turn(role.instance_id):
+                self._emit_fanout_dispatch_deferred_once(
+                    fanout_id=fanout_id,
+                    trace_id=trace_id,
+                    stage_id=stage_id,
+                    child_id=child_id,
+                    run_id=run_id,
+                    role_instance=role.instance_id,
+                    prompt_kind=prompt_kind,
+                    reason="provider_turn_active",
+                    state=state,
+                    alive=alive,
+                    dispatchable=dispatchable,
+                    causation_id=causation_id,
+                )
+                return False
             last = getattr(self, "_last_prompt_sent_at", {}).get(role.instance_id)
             last_key, last_sent = last or ("", 0.0)
             if (
@@ -150,6 +216,8 @@ class FanoutDispatchLivenessMixin:
         reason_parts: list[str] = []
         if not alive:
             reason_parts.append("worker_transport_not_alive")
+        if activation_error:
+            reason_parts.append(f"role_activation_failed:{activation_error}")
         if alive_error:
             reason_parts.append(alive_error)
         if not dispatchable:
@@ -157,9 +225,12 @@ class FanoutDispatchLivenessMixin:
         reason = "; ".join(reason_parts) or "worker_not_dispatchable"
         respawn_action = ""
         respawn_reason = ""
-        if not alive and state != "respawning":
+        if not alive and state != "respawning" and not activation_error:
             try:
-                decision = self._respawn_instance(role)
+                decision = self._respawn_instance(
+                    role,
+                    inject_idle_prompt=False,
+                )
                 respawn_action = str(getattr(decision, "action", "") or "")
                 respawn_reason = str(getattr(decision, "reason", "") or "")
             except Exception as exc:  # noqa: BLE001

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.schema import GoalConfig, ProjectConfig, ZfConfig
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.wake_patterns import LAYER2_NOISE_EVENTS, WAKE_PATTERNS
 
 
 class _Transport:
@@ -53,6 +56,30 @@ def test_orchestrator_emits_claim_before_unique_completion(tmp_path: Path) -> No
     claim_index = types.index("run.goal.completion.claimed")
     completion_index = types.index("run.goal.completed")
     assert claim_index < completion_index
+    assert types.count("run.goal.completion.claimed") == 1
+    assert types.count("run.goal.completed") == 1
+
+
+def test_periodic_reconcile_recovers_missing_completion_claim(
+    tmp_path: Path,
+) -> None:
+    orchestrator, log = _orchestrator(tmp_path)
+    run_id = "R-RESTART-CLAIM"
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id=run_id,
+        payload={"run_id": run_id, "objective": "recover completion"},
+    ))
+    log.append(ZfEvent(
+        type="judge.passed",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id},
+    ))
+
+    orchestrator._reconcile_run_goal_completion()
+    orchestrator._reconcile_run_goal_completion()
+
+    types = [event.type for event in log.read_all()]
     assert types.count("run.goal.completion.claimed") == 1
     assert types.count("run.goal.completed") == 1
 
@@ -147,3 +174,71 @@ def test_orchestrator_reuses_blocked_claim_after_verify_closes_feedback(
     types = [event.type for event in log.read_all()]
     assert types.count("run.goal.completion.claimed") == 1
     assert types.count("run.goal.completed") == 1
+
+
+@pytest.mark.parametrize(
+    "trigger_type",
+    [
+        "run.manager.action.effect.passed",
+        "run.manager.tick.completed",
+    ],
+)
+def test_run_once_rechecks_blocked_claim_after_action_effect_passes(
+    tmp_path: Path,
+    trigger_type: str,
+) -> None:
+    orchestrator, log = _orchestrator(tmp_path)
+    run_id = "R-EFFECT-RESUME"
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id=run_id,
+        payload={"run_id": run_id},
+    ))
+    log.append(ZfEvent(
+        type="run.manager.action.effect.pending",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "effect_id": "effect-resume",
+        },
+    ))
+    judge = ZfEvent(
+        type="judge.passed",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id},
+    )
+    log.append(judge)
+    orchestrator._maybe_complete_run_goal(judge)
+    assert not any(
+        event.type == "run.goal.completed"
+        for event in log.read_all()
+    )
+
+    effect = ZfEvent(
+        type="run.manager.action.effect.passed",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "effect_id": "effect-resume",
+            "status": "passed",
+        },
+    )
+    log.append(effect)
+    trigger = effect
+    if trigger_type == "run.manager.tick.completed":
+        trigger = ZfEvent(
+            type=trigger_type,
+            correlation_id=run_id,
+            payload={"schema_version": "run-manager.tick.v1"},
+        )
+        log.append(trigger)
+    orchestrator.run_once(events=[trigger])
+
+    types = [event.type for event in log.read_all()]
+    assert types.count("run.goal.completion.claimed") == 1
+    assert types.count("run.goal.completed") == 1
+
+
+def test_run_manager_tick_is_a_mechanical_completion_wake() -> None:
+    assert "run.manager.tick.completed" in WAKE_PATTERNS
+    assert "run.manager.tick.completed" in LAYER2_NOISE_EVENTS

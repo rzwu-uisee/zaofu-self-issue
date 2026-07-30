@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+from zf.core.config.loader import load_config
 from zf.core.config.schema import (
     FanoutAggregateConfig,
     ProjectConfig,
@@ -16,12 +18,23 @@ from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.run_contract import (
+    bind_run_contract_workflow_artifacts,
+    build_run_contract,
+    write_run_contract_snapshot,
+)
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import (
     build_target_snapshot,
     build_task_contract_snapshot,
     task_map_generation,
     write_target_snapshot,
     write_task_contract_snapshot,
+)
+from zf.runtime.workflow_proposal import build_workflow_proposal
+from zf.runtime.workflow_requests import (
+    mark_workflow_request,
+    workflow_request_path,
 )
 
 
@@ -215,8 +228,25 @@ def _durable_review_terminal(
     )
 
 
-def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(tmp_path: Path) -> None:
+def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from zf.runtime import flow_role_activation
+
     _state_dir, log, _transport, orch = _state(tmp_path)
+    activation_calls: list[dict] = []
+    real_activate = flow_role_activation.activate_flow_roles
+
+    def track_activation(orchestrator, **kwargs):
+        activation_calls.append(dict(kwargs))
+        return real_activate(orchestrator, **kwargs)
+
+    monkeypatch.setattr(
+        flow_role_activation,
+        "activate_flow_roles",
+        track_activation,
+    )
 
     orch.run_once(events=[ZfEvent(
         type="workflow.invoke.requested",
@@ -252,6 +282,8 @@ def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(tmp_pa
     assert fanout.payload["requested_specialists"] == ["review-a", "review-b"]
     assert fanout.payload["expected_output"] == "review report"
     assert fanout.payload["artifact_refs"] == [{"path": "channels/ch-zaofu/spec.md"}]
+    assert len(activation_calls) == 1
+    assert activation_calls[0]["source_event_id"]
 
 
 def test_workflow_invoke_starts_declared_fanout_only_after_admission(
@@ -318,6 +350,13 @@ def test_scoped_workflow_invoke_preserves_identity_into_declared_fanout(
         "requirement_spec_ref": "requirements/revision-0002.json",
         "requirement_spec_digest": "a" * 64,
         "request_revision": 2,
+        "effective_config_ref": {
+            "ref": "artifacts/workflow/effective-config.json",
+            "sha256": "d" * 64,
+        },
+        "effective_config_digest": "d" * 64,
+        "run_contract_ref": "run-contracts/run-issue-1.json",
+        "run_contract_digest": "e" * 64,
     }
     orch.run_once(events=[ZfEvent(
         type="workflow.invoke.requested",
@@ -344,6 +383,99 @@ def test_scoped_workflow_invoke_preserves_identity_into_declared_fanout(
     assert not any(event.type == "task.fanout.rejected" for event in events)
 
 
+def test_generic_workflow_invoke_preserves_goal_identity_into_child_briefing(
+    tmp_path: Path,
+) -> None:
+    cfg = _config(target_ref="")
+    cfg.workflow.stages[0].flow_kind = "workflow"
+    state_dir, log, transport, orch = _state(
+        tmp_path,
+        config=cfg,
+        workflow_anchor=True,
+    )
+    identity = {
+        "request_id": "req-generic-1",
+        "run_id": "run-generic-1",
+        "workflow_run_id": "run-generic-1",
+        "flow_kind": "workflow",
+        "request_kind": "workflow",
+        "request_revision": 3,
+        "goal_id": "goal-generic-1",
+        "workflow_generation": "a" * 64,
+        "generic_workflow_contract_digest": "b" * 64,
+        "workflow_intent": "research",
+        "workflow_template": "evidence-synthesis-v1",
+        "completion_profile": "artifact_delivery",
+        "required_delivery_artifacts": [{
+            "name": "report",
+            "kind": "report/markdown",
+            "source_ref": "synthesize.report",
+        }],
+        "goal_claim_set_ref": (
+            "artifacts/goal-closure/claim-sets/current.json"
+        ),
+        "goal_claim_set_digest": "c" * 64,
+        "run_contract_ref": "artifacts/run-contracts/current.json",
+        "run_contract_digest": "d" * 64,
+        "input_result_refs": [
+            "artifacts/call-results/envelopes/" + "e" * 64 + ".json"
+        ],
+    }
+
+    orch.run_once(events=[ZfEvent(
+        type="workflow.invoke.requested",
+        actor="web",
+        task_id="TASK-1",
+        correlation_id="run-generic-1",
+        payload={
+            **identity,
+            "task_id": "TASK-1",
+            "pattern_id": "review-wave",
+            "dispatch_id": "disp-1",
+            "expected_output": "verified report",
+        },
+    )])
+    _run_until_sent(orch, transport, 2)
+
+    events = log.read_all()
+    accepted = next(
+        event for event in events if event.type == "workflow.invoke.accepted"
+    )
+    fanout_request = next(
+        event for event in events if event.type == "task.fanout.requested"
+    )
+    for key, value in identity.items():
+        assert accepted.payload[key] == value
+        assert fanout_request.payload[key] == value
+    manifest_path = next((state_dir / "fanouts").glob("*/manifest.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    child_identity_keys = (
+        "workflow_run_id",
+        "flow_kind",
+        "request_revision",
+        "goal_id",
+        "workflow_generation",
+        "generic_workflow_contract_digest",
+        "workflow_intent",
+        "workflow_template",
+        "completion_profile",
+        "required_delivery_artifacts",
+        "goal_claim_set_ref",
+        "goal_claim_set_digest",
+        "run_contract_ref",
+        "run_contract_digest",
+        "input_result_refs",
+    )
+    for child in manifest["children"]:
+        child_payload = child["payload"]
+        for key in child_identity_keys:
+            assert child_payload[key] == identity[key]
+    briefing = transport.sent[0][1].read_text(encoding="utf-8")
+    assert '"goal_id": "goal-generic-1"' in briefing
+    assert '"workflow_intent": "research"' in briefing
+    assert identity["goal_claim_set_ref"] in briefing
+
+
 def test_durable_workflow_invoke_and_compiled_children_are_restart_deduped(
     tmp_path: Path,
 ) -> None:
@@ -360,6 +492,13 @@ def test_durable_workflow_invoke_and_compiled_children_are_restart_deduped(
         "reason": "durable review",
         "source_refs": {},
         "workflow_run_id": "wf-durable-review",
+        "effective_config_ref": {
+            "ref": "artifacts/workflow/effective-config.json",
+            "sha256": "d" * 64,
+        },
+        "effective_config_digest": "d" * 64,
+        "run_contract_ref": "run-contracts/wf-durable-review.json",
+        "run_contract_digest": "e" * 64,
         "expected_output": "review report",
     }
 
@@ -389,6 +528,14 @@ def test_durable_workflow_invoke_and_compiled_children_are_restart_deduped(
     assert len(parent_requested) == 1
     parent_operation_id = parent_requested[0].payload["operation_id"]
     assert parent_requested[0].payload["operation_type"] == "workflow"
+    parent_request = hydrate_sidecar_ref(
+        _state_dir,
+        parent_requested[0].payload["request_ref"],
+    ).payload["request"]
+    assert parent_request["effective_config_ref"] == payload[
+        "effective_config_ref"
+    ]
+    assert parent_request["effective_config_digest"] == "d" * 64
 
     _run_until_sent(orch, transport, 2)
 
@@ -403,6 +550,15 @@ def test_durable_workflow_invoke_and_compiled_children_are_restart_deduped(
         if event.payload["operation_type"] == "fanout_reader_child"
     ]
     assert len(child_requests) == 2
+    for event in child_requests:
+        child_request = hydrate_sidecar_ref(
+            _state_dir,
+            event.payload["request_ref"],
+        ).payload["request"]
+        assert child_request["effective_config_ref"] == payload[
+            "effective_config_ref"
+        ]
+        assert child_request["effective_config_digest"] == "d" * 64
     assert all(
         event.payload["parent_operation_id"] == parent_operation_id
         for event in child_requests
@@ -466,6 +622,79 @@ def test_durable_workflow_invoke_and_compiled_children_are_restart_deduped(
     assert parent_settled.payload["admitted_call_result_ref"]["ref"] == (
         parent_admitted.payload["envelope_ref"]["ref"]
     )
+
+
+def test_durable_workflow_entry_replan_gets_new_operation_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, _log, _transport, orch = _state(
+        tmp_path,
+        config=_config(durable=True, target_ref=""),
+        workflow_anchor=True,
+    )
+    original_payload = {
+        "task_id": "TASK-1",
+        "pattern_id": "review-wave",
+        "workflow_run_id": "wf-entry-replan",
+        "workflow_generation": "a" * 64,
+        "expected_output": "review report",
+    }
+    original = orch._prepare_workflow_invoke_operation(  # type: ignore[attr-defined]
+        event=ZfEvent(
+            type="workflow.invoke.requested",
+            task_id="TASK-1",
+            correlation_id="wf-entry-replan",
+            payload=original_payload,
+        ),
+        payload=original_payload,
+        task_id="TASK-1",
+        pattern_id="review-wave",
+        topology="fanout_reader",
+        target_ref="",
+        roles=["review-a", "review-b"],
+    )
+    assert original is not None
+
+    replan_payload = {
+        **original_payload,
+        "rework_of": "evt-review-failed",
+        "rework_attempt": 1,
+        "rework_feedback": [{
+            "severity": "high",
+            "message": "Verifier timed out.",
+        }],
+    }
+    replan = orch._prepare_workflow_invoke_operation(  # type: ignore[attr-defined]
+        event=ZfEvent(
+            type="workflow.invoke.requested",
+            task_id="TASK-1",
+            correlation_id="wf-entry-replan",
+            payload=replan_payload,
+        ),
+        payload=replan_payload,
+        task_id="TASK-1",
+        pattern_id="review-wave",
+        topology="fanout_reader",
+        target_ref="",
+        roles=["review-a", "review-b"],
+    )
+
+    assert replan is not None
+    assert replan.created is True
+    assert replan.operation_id != original.operation_id
+    request_event = next(
+        event
+        for event in reversed(orch.event_log.read_all())
+        if event.type == "workflow.operation.requested"
+        and event.payload["operation_id"] == replan.operation_id
+    )
+    request = hydrate_sidecar_ref(
+        state_dir,
+        request_event.payload["request_ref"],
+    ).payload["request"]
+    assert request["rework_of"] == "evt-review-failed"
+    assert request["rework_attempt"] == 1
+    assert request["rework_feedback"][0]["message"] == "Verifier timed out."
 
 
 def test_prd_workflow_invoke_uses_source_ref_as_scan_target(tmp_path: Path) -> None:
@@ -600,6 +829,168 @@ def test_workflow_invoke_rejects_blocking_open_questions(tmp_path: Path) -> None
     rejected = next(event for event in events if event.type == "workflow.invoke.rejected")
     assert rejected.payload["reason"] == "blocking open questions"
     assert not any(event.type == "task.fanout.requested" for event in events)
+
+
+def test_workflow_invoke_rejects_unapproved_proposal_binding(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, _transport, orch = _state(tmp_path)
+
+    decision = orch.run_once(events=[ZfEvent(
+        type="workflow.invoke.requested",
+        actor="web",
+        task_id="TASK-1",
+        correlation_id="req-unapproved",
+        payload={
+            "request_id": "req-unapproved",
+            "task_id": "TASK-1",
+            "pattern_id": "review-wave",
+            "workflow_proposal_ref": {
+                "ref": "artifacts/workflow/proposal.json",
+                "sha256": "a" * 64,
+            },
+            "workflow_proposal_digest": "b" * 64,
+        },
+    )])
+
+    decisions = decision
+    assert decisions
+    assert decisions[0].action == "block"
+    rejected = next(
+        event
+        for event in log.read_all()
+        if event.type == "workflow.invoke.rejected"
+    )
+    assert "binding is incomplete" in rejected.payload["reason"]
+    assert not any(
+        event.type == "task.fanout.requested"
+        for event in log.read_all()
+    )
+
+
+def test_workflow_invoke_accepts_exact_approved_proposal_binding(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _transport, orch = _state(tmp_path)
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text(
+        """\
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata: {name: issue-demo}
+spec:
+  lanes: 1
+  backend: mock
+  issueRef: docs/issue.md
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata: {name: demo}
+spec:
+  version: "1.0"
+  project: {name: demo, state_dir: .zf}
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    requirement_path = (
+        state_dir / "workflow-requests" / "req-approved" / "requirement.json"
+    )
+    requirement_path.parent.mkdir(parents=True)
+    requirement_path.write_text(
+        json.dumps({
+            "schema_version": "requirement-spec.v1",
+            "request_id": "req-approved",
+            "revision": 1,
+        }),
+        encoding="utf-8",
+    )
+    request = {
+        "schema_version": "workflow.request.v1",
+        "request_id": "req-approved",
+        "kind": "issue",
+        "status": "ready",
+        "revision": 1,
+        "requirement_spec_ref": str(requirement_path),
+        "requirement_spec_digest": hashlib.sha256(
+            requirement_path.read_bytes()
+        ).hexdigest(),
+        "open_questions": [],
+    }
+    request_path = workflow_request_path(state_dir, "req-approved")
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    proposal, proposal_ref = build_workflow_proposal(
+        state_dir,
+        request=request,
+        base_config_path=config_path,
+        preflight={"status": "GO", "blockers": []},
+        flow_kind="issue",
+    )
+    mark_workflow_request(
+        state_dir,
+        "req-approved",
+        status="approved",
+        actor="operator",
+    )
+    mark_workflow_request(
+        state_dir,
+        "req-approved",
+        status="submitted",
+        actor="operator",
+        run_id="run-approved",
+    )
+    contract = bind_run_contract_workflow_artifacts(
+        build_run_contract(
+            config,
+            config_path=config_path,
+            project_root=tmp_path,
+            state_dir=state_dir,
+        ),
+        proposal_ref=proposal_ref,
+        proposal_digest=proposal["proposal_digest"],
+        effective_config_ref=proposal["effective_config_ref"],
+    )
+    run_contract_ref = write_run_contract_snapshot(state_dir, contract)
+
+    decisions = orch.run_once(events=[ZfEvent(
+        type="workflow.invoke.requested",
+        actor="web",
+        task_id="TASK-1",
+        correlation_id="run-approved",
+        payload={
+            "request_id": "req-approved",
+            "workflow_run_id": "run-approved",
+            "task_id": "TASK-1",
+            "dispatch_id": "disp-1",
+            "pattern_id": "review-wave",
+            "workflow_proposal_ref": proposal_ref,
+            "workflow_proposal_digest": proposal["proposal_digest"],
+            "effective_config_ref": proposal["effective_config_ref"],
+            "effective_config_digest": proposal[
+                "effective_config_ref"
+            ]["sha256"],
+            "run_contract_ref": run_contract_ref["ref"],
+            "run_contract_digest": run_contract_ref["contract_digest"],
+        },
+    )])
+
+    assert decisions and decisions[0].action == "workflow_invoke"
+    assert not any(
+        event.type == "workflow.invoke.rejected"
+        for event in log.read_all()
+    )
+    requested = next(
+        event
+        for event in log.read_all()
+        if event.type == "task.fanout.requested"
+    )
+    assert requested.payload["effective_config_ref"] == proposal[
+        "effective_config_ref"
+    ]
+    assert requested.payload["run_contract_digest"] == contract[
+        "contract_digest"
+    ]
 
 
 def test_task_fanout_request_rejects_missing_expected_output(tmp_path: Path) -> None:

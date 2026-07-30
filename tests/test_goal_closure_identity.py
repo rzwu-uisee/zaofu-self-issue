@@ -180,6 +180,43 @@ def test_closure_identity_uses_pinned_run_identity_for_trace_alias(
     assert identity["task_map_generation"] == "generation-1"
 
 
+def test_closure_identity_uses_pinned_goal_identity_for_plan_generation(
+    tmp_path,
+) -> None:  # noqa: ANN001
+    task_map_ref = "artifacts/plan/task_map.json"
+    events = [ZfEvent(
+        type="goal.claim_set.pinned",
+        correlation_id="REQ-1",
+        payload={
+            "workflow_run_id": "REQ-1",
+            "goal_id": "PRD-REQ-1",
+            "task_map_generation": "generation-1",
+        },
+    )]
+
+    identity = build_closure_identity(
+        events,
+        source_event=ZfEvent(
+            type="flow.discovery.completed",
+            correlation_id="REQ-1",
+            payload={},
+        ),
+        payload={
+            "workflow_run_id": "REQ-1",
+            "goal_id": "REQ-1",
+            "task_map_ref": task_map_ref,
+            "task_map_generation": "generation-1",
+            "candidate_head_commit": "a" * 40,
+        },
+        state_dir=tmp_path,
+        flow_kind="prd",
+    )
+
+    assert identity["workflow_run_id"] == "REQ-1"
+    assert identity["goal_id"] == "PRD-REQ-1"
+    assert identity["task_map_generation"] == "generation-1"
+
+
 def test_goal_closure_dispatch_snapshots_bind_identity(tmp_path) -> None:  # noqa: ANN001
     contract = write_immutable_json_sidecar(
         tmp_path,
@@ -399,3 +436,74 @@ def test_goal_claim_pin_uses_submitted_requirement_snapshot(tmp_path) -> None:  
         (state_dir / pinned.payload["goal_claim_set_ref"]).read_text(encoding="utf-8")
     )
     assert claim_set["objective_ref"] == str(requirement_ref)
+
+
+def test_goal_claim_pin_repairs_underspecified_identity_from_task_map(
+    tmp_path,
+) -> None:  # noqa: ANN001
+    import json
+    from types import SimpleNamespace
+
+    from zf.core.events.log import EventLog
+    from zf.core.events.writer import EventWriter
+    from zf.runtime.goal_closure_bridge import GoalClosureBridgeMixin
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task_map_ref = tmp_path / "task-map.json"
+    task_map_ref.write_text(json.dumps({
+        "feature_id": "GOAL-1",
+        "tasks": [{
+            "task_id": "TASK-1",
+            "acceptance_criteria": ["AC-1: implementation is verified"],
+        }],
+    }), encoding="utf-8")
+    event_log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(event_log)
+    writer.append(ZfEvent(
+        type="goal.claim_set.pinned",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "goal_id": "",
+            "task_map_generation": "generation-1",
+            "task_map_ref": str(task_map_ref),
+            "goal_claim_set_ref": "artifacts/goal-closure/claims-empty.json",
+            "goal_claim_set_digest": "a" * 64,
+            "source_event_id": "evt-old",
+        },
+    ))
+    task_map_ready = writer.append(ZfEvent(
+        type="task_map.ready",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "task_map_generation": "generation-1",
+            "task_map_ref": str(task_map_ref),
+        },
+    ))
+    bridge = GoalClosureBridgeMixin()
+    bridge.state_dir = state_dir
+    bridge.project_root = tmp_path
+    bridge.event_log = event_log
+    bridge.event_writer = writer
+    bridge.config = SimpleNamespace(workflow=SimpleNamespace(
+        flow_metadata={},
+        flow_metadata_by_kind={},
+    ))
+
+    assert bridge._pin_goal_claim_set(task_map_ready) is True
+
+    pinned = [
+        event
+        for event in event_log.read_all()
+        if event.type == "goal.claim_set.pinned"
+    ]
+    assert len(pinned) == 2
+    assert pinned[-1].payload["goal_id"] == "GOAL-1"
+    claim_set = json.loads(
+        (state_dir / pinned[-1].payload["goal_claim_set_ref"]).read_text(
+            encoding="utf-8",
+        )
+    )
+    assert claim_set["goal_id"] == "GOAL-1"

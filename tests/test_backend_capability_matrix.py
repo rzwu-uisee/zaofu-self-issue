@@ -60,6 +60,8 @@ def test_claude_code_capabilities_locked() -> None:
         nested_agent_disable="full",
         native_compact=True,
         compact_command="/compact",
+        provider_session_efforts=("low", "medium", "high", "max"),
+        provider_session_agent=True,
     )
 
 
@@ -78,6 +80,16 @@ def test_codex_capabilities_locked() -> None:
         native_compact=True,
         compact_command="/compact",
         compact_requires_idle=True,
+        provider_session_efforts=(
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "ultra",
+        ),
+        provider_session_parallelism=True,
+        max_provider_session_parallel_agents=6,
     )
 
 

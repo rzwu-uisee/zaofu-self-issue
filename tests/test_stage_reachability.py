@@ -29,6 +29,7 @@ _RACING_STAGE_ORDER = [
     "test.passed",
     "judge.passed",
 ]
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 
 def _racing_config(*, with_triggers: bool) -> ZfConfig:
@@ -87,7 +88,11 @@ class TestReachabilityCore:
 
 class TestExamplesStayGreen:
     def test_all_examples_have_producible_stage_orders(self):
-        examples = sorted(Path("examples/tmp").glob("*.yaml"))
+        examples = sorted(
+            path
+            for path in EXAMPLES.rglob("*.yaml")
+            if "common" not in path.parts and ".zf" not in path.parts
+        )
         assert examples, "examples/ missing"
         offenders = {}
         for path in examples:

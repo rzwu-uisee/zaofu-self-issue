@@ -13,6 +13,7 @@ from zf.core.config.schema import (
     SessionConfig,
     OrchestratorConfig,
     RoleConfig,
+    RuntimeRunManagerResidentAgentConfig,
     ConstraintsConfig,
     QualityGateConfig,
     AutopilotConfig,
@@ -46,7 +47,27 @@ def test_role_config_minimal():
     r = RoleConfig(name="dev", backend="python")
     assert r.name == "dev"
     assert r.model == ""
+    assert r.model_reasoning_effort == ""
     assert r.stages == []
+
+
+def test_role_config_validates_model_reasoning_effort():
+    role = RoleConfig(name="dev", model_reasoning_effort="XHIGH")
+    assert role.model_reasoning_effort == "xhigh"
+    with pytest.raises(ValueError, match="model_reasoning_effort"):
+        RoleConfig(name="dev", model_reasoning_effort="maximum")
+
+
+def test_run_manager_resident_validates_model_reasoning_effort():
+    resident = RuntimeRunManagerResidentAgentConfig(
+        model="gpt-5.5",
+        model_reasoning_effort="XHIGH",
+    )
+    assert resident.model_reasoning_effort == "xhigh"
+    with pytest.raises(ValueError, match="model_reasoning_effort"):
+        RuntimeRunManagerResidentAgentConfig(
+            model_reasoning_effort="maximum",
+        )
 
 
 def test_role_config_with_constraints():

@@ -60,6 +60,7 @@ def run_preflight_checks(
         _check_dispatch_prompt_signature(),
         _check_dispatch_chain_imports(),
         _check_role_backends(config),
+        _check_provider_session_configs(config),
     ]
     if check_provider_auth:
         results.append(_check_provider_auth_readiness(config))
@@ -125,6 +126,47 @@ def _check_role_backends(config) -> CheckResult:
     if bad:
         return CheckResult(name, False, "unknown backend(s): " + ", ".join(sorted(bad)))
     return CheckResult(name, True, f"all backends resolvable across {len(roles)} roles")
+
+
+def _check_provider_session_configs(config) -> CheckResult:
+    name = "provider_session_configs"
+    try:
+        from zf.runtime.backend import (
+            get_adapter,
+            validate_provider_session_config,
+        )
+    except Exception as exc:
+        return CheckResult(
+            name,
+            False,
+            f"cannot import provider session validator: {exc}",
+        )
+    failures: list[str] = []
+    roles = list(getattr(config, "roles", []) or [])
+    for role in roles:
+        try:
+            validate_provider_session_config(role)
+            if (
+                getattr(getattr(role, "lifecycle", None), "mode", "eager")
+                == "on_demand"
+                and not get_adapter(role.backend).capabilities.native_resume
+            ):
+                raise ValueError(
+                    f"role {role.name!r} backend={role.backend!r} cannot use "
+                    "lifecycle.mode=on_demand without native session resume"
+                )
+        except ValueError as exc:
+            failures.append(str(exc))
+    if failures:
+        return CheckResult(name, False, "; ".join(failures))
+    configured = sum(
+        1 for role in roles if getattr(role, "provider_session", None) is not None
+    )
+    return CheckResult(
+        name,
+        True,
+        f"{configured} explicit provider session config(s) supported",
+    )
 
 
 def _check_provider_auth_readiness(config) -> CheckResult:

@@ -456,12 +456,17 @@ def _should_materialize_event(event_type: str) -> bool:
         return False
     if event_type in FAILURE_TO_EVAL_EVENT_TYPES:
         return True
+    spec = spec_for_event(event_type)
+    if spec is not None and (
+        spec.is_projection_only or spec.action_policy == "informational"
+    ):
+        return False
     if event_type.endswith(".failed") or event_type.endswith(".blocked"):
         return True
     # 131-P1-5 unknown→eval 强制链:actionable 形状但 registry 无 spec 的
     # 事件(典型来源:agent 经 zf emit 的自定义类型)不许静默消失,
     # 一律物化为 failure candidate(classification 落 problem_class=unknown)。
-    return looks_actionable_event(event_type) and spec_for_event(event_type) is None
+    return looks_actionable_event(event_type) and spec is None
 
 
 def _existing_failure_ids(state_dir: Path) -> set[str]:

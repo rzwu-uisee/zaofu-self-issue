@@ -10,15 +10,19 @@ spec:
   topology: light
   lanes: 1
   backend: codex
+  roleDefaults:
+    # Light flows trade process reuse for low startup latency.
+    lifecycle:
+      mode: eager
   prdRef: docs/prd/TODO.md
   targetRoot: app
   qualityFloor: product-demo
   evidencePolicy: strict_refs
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
-  # 149 pilot: Thin Judge uses Kernel-bound semantic result submission.
-  # Verify and Impl remain on the legacy adapter until their parity proof lands.
+  # Light-flow Impl, Verify, and Thin Judge use Kernel-bound result submission.
   semanticSubmitProfiles:
+    implementation: blocking
     thin-judge-goal-closure: blocking
     task-verify: blocking
     candidate-verify: blocking

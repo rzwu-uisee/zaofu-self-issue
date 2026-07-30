@@ -305,6 +305,8 @@ class _WatchdogHarness(_LifecycleHarness):
         )
         self.event_log = NS(read_days=lambda days: list(halt_events))
         self.respawn_calls = []
+        self.active_fanout = None
+        self.liveness_stale = False
 
     def _respawn_instance(self, role):
         self.respawn_calls.append(role.instance_id)
@@ -315,6 +317,12 @@ class _WatchdogHarness(_LifecycleHarness):
 
     def _active_task_for_instance(self, instance_id):
         return None
+
+    def _active_fanout_child_for_instance(self, instance_id):
+        return self.active_fanout
+
+    def _worker_liveness_stale(self, role):
+        return self.liveness_stale, "test"
 
     def _emit_worker_runner_failed(self, **kwargs):
         pass
@@ -340,6 +348,21 @@ def test_watchdog_dead_pane_is_evidence_not_control(tmp_path):
     assert len(observed) == 1
     assert observed[0].payload["instance_id"] == "dev"
     assert "I41" in observed[0].payload["note"]
+
+
+def test_watchdog_recovers_dead_worker_with_active_taskless_synth(tmp_path):
+    h = _WatchdogHarness(halted=False, tmp_path=tmp_path)
+    h.active_fanout = {
+        "fanout_id": "fanout-plan",
+        "child_id": "synth",
+        "run_id": "run-fanout-plan-synth",
+    }
+    h.liveness_stale = True
+
+    decisions = h._capture_logs()
+
+    assert h.respawn_calls == ["dev"]
+    assert [decision.action for decision in decisions] == ["respawn"]
 
 
 def test_watchdog_frozen_after_safe_halt(tmp_path):

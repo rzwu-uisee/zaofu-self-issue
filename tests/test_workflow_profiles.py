@@ -64,6 +64,7 @@ class TestExpansion:
         assert len({role.name for role in cfg.roles}) == len(cfg.roles)
         assert {role.backend for role in cfg.roles} == {"mock"}
         assert set(cfg.workflow.kind_routes) >= {"issue", "prd", "feat", "refactor"}
+        assert cfg.workflow.kind_routes["issue"].pattern_id == "issue-lanes-impl"
         assert set(cfg.workflow.flow_metadata_by_kind) == {"issue", "prd", "refactor"}
         assert cfg.verification.event_schema.mode == "blocking"
         assert cfg.verification.report_evidence_gate == "fail_closed"
@@ -164,6 +165,10 @@ class TestExpansion:
 
         assert any(
             "schema_version` exactly `task-map.v1" in item
+            for item in plan.criteria.instructions
+        )
+        assert any(
+            "execute each canonical `command` exactly as stored" in item
             for item in plan.criteria.instructions
         )
         contract = plan.children[0].payload["refactor_contract"]
@@ -417,6 +422,18 @@ spec:
   assembly: {task: DEMO-ASM-001}
   roleDefaults:
     backend: mock
+    model: gpt-5.5
+    model_reasoning_effort: xhigh
+    providerSession:
+      effort: high
+    lifecycle:
+      mode: on_demand
+    providerSessionByStage:
+      verify:
+        effort: ultra
+    lifecycleByStage:
+      verify:
+        mode: resident
     permission_mode: bypass
     stuck_threshold_seconds: 777
     spawn_ready_timeout_seconds: 88
@@ -442,17 +459,36 @@ spec:
         dev = next(role for role in cfg.roles if role.name == "dev-lane-0")
         verify = next(role for role in cfg.roles if role.name == "verify-lane-0")
         assert scan.backend == "mock"
+        assert scan.model == "gpt-5.5"
+        assert scan.model_reasoning_effort == "xhigh"
         assert scan.stuck_threshold_seconds == 777
         assert scan.spawn_ready_timeout_seconds == 88
         assert scan.skills == ["contract-scan"]
         assert dev.skills == ["impl-skill"]
+        assert dev.model_reasoning_effort == "xhigh"
+        assert dev.provider_session is not None
+        assert dev.provider_session.effort == "high"
+        assert dev.lifecycle.mode == "on_demand"
         assert verify.skills == ["verify-skill"]
+        assert verify.provider_session is not None
+        assert verify.provider_session.effort == "ultra"
+        assert verify.lifecycle.mode == "resident"
         assert cfg.workflow.flow_metadata["flow_kind"] == "refactor"
         assert cfg.workflow.flow_metadata["gap_loop"] == "enabled"
         assert cfg.workflow.flow_metadata["post_verify_discovery"] == "module_parity"
 
     def test_flow_role_defaults_normalize_and_reach_lane_roles(self):
         defaults = {
+            "model": "gpt-5.5",
+            "modelReasoningEffort": "xhigh",
+            "providerSession": {"effort": "high"},
+            "lifecycle": {"mode": "on_demand"},
+            "providerSessionByStage": {
+                "verify": {"effort": "ultra"},
+            },
+            "lifecycleByStage": {
+                "verify": {"mode": "resident"},
+            },
             "permissionMode": "bypass",
             "stuckThresholdSeconds": 901,
             "spawnReadyTimeoutSeconds": 241,
@@ -471,12 +507,28 @@ spec:
             assert all(
                 role["stuck_threshold_seconds"] == 901
                 and role["spawn_ready_timeout_seconds"] == 241
+                and role["model"] == "gpt-5.5"
+                and role["model_reasoning_effort"] == "xhigh"
+                and role["provider_session"]["effort"] == "high"
+                and role["lifecycle"]["mode"] == "on_demand"
                 for role in expansion["roles"]
             )
             template = expansion["pipelines"][0]["lane_role_template"]
             assert template["permission_mode"] == "bypass"
+            assert template["model"] == "gpt-5.5"
+            assert template["model_reasoning_effort"] == "xhigh"
             assert template["stuck_threshold_seconds"] == 901
             assert template["spawn_ready_timeout_seconds"] == 241
+            assert template["provider_session"]["effort"] == "high"
+            assert template["lifecycle"]["mode"] == "on_demand"
+            assert (
+                template["provider_session_by_stage"]["verify"]["effort"]
+                == "ultra"
+            )
+            assert (
+                template["lifecycle_by_stage"]["verify"]["mode"]
+                == "resident"
+            )
 
     def test_flow_role_defaults_reject_unknown_camel_case(self):
         with pytest.raises(WorkflowProfileError, match="unknown camelCase key"):
@@ -551,7 +603,10 @@ spec:
         assert metadata["post_verify_discovery"] == "module_parity"
         assert any(stage.id == "flow-module-parity-scan" for stage in refactor.workflow.stages)
 
-        issue = expand_issue_flow({"entryTrigger": "issue.requested"})
+        issue = expand_issue_flow({
+            "entryTrigger": "issue.requested",
+            "topology": "fanout",
+        })
         prd = expand_prd_flow({"entryTrigger": "prd.requested"})
 
         assert issue["metadata"]["post_verify_discovery"] == "regression_impact"
@@ -565,6 +620,7 @@ apiVersion: zaofu.dev/v1
 kind: IssueFlow
 metadata: {name: issue-demo}
 spec:
+  topology: fanout
   lanes: 2
   backend: mock
   issueRef: backlogs/bug.md
@@ -803,6 +859,41 @@ spec:
         assert verify.skills == ["custom-verify"]
         assert judge.skills == []
 
+    def test_multi_flow_roles_are_bound_to_their_declaring_flow(self, tmp_path):
+        path = tmp_path / "zf.yaml"
+        path.write_text("""\
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata: {name: issue-demo}
+spec: {lanes: 1, backend: mock}
+---
+apiVersion: zaofu.dev/v1
+kind: PrdFlow
+metadata: {name: prd-demo}
+spec: {lanes: 1, backend: mock}
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata: {name: demo}
+spec:
+  version: "1.0"
+  project: {name: demo}
+  roles:
+    - {name: orchestrator, backend: mock, role_kind: reader}
+""")
+
+        cfg = load_config(path)
+
+        assert next(
+            role for role in cfg.roles if role.name == "issue-fix-lane-0"
+        ).flow_kind == "issue"
+        assert next(
+            role for role in cfg.roles if role.name == "prd-dev-lane-0"
+        ).flow_kind == "prd"
+        assert next(
+            role for role in cfg.roles if role.name == "orchestrator"
+        ).flow_kind == ""
+
     # 2026-07-08 agent-skills 退役:controller bundle 只允许仓内
     # skills/(zf-*)与 yoke/ 名。外部基线名回流即红。
     _RETIRED_AGENT_SKILLS = {
@@ -893,6 +984,46 @@ spec:
                 assert "zf-goal-closure-replan-contract" in module.skills
                 assert "zf-verify-gap-producer-contract" not in module.skills
                 assert "zf-provider-contract-parity" not in module.skills
+
+    def test_prod_controller_provider_lifecycle_rollout(self):
+        root = Path(__file__).parent.parent
+        standard = (
+            "issue-fanout-v3.yaml",
+            "issue-fanout-v3-claude.yaml",
+            "prd-fanout-v3.yaml",
+            "prd-fanout-v3-claude.yaml",
+            "refactor-lane-v3.yaml",
+            "refactor-lane-v3-claude.yaml",
+        )
+        light = (
+            "prd-light-v3.yaml",
+            "prd-light-v3-claude.yaml",
+        )
+        controller = root / "examples" / "prod" / "controller"
+
+        for filename in standard:
+            cfg = load_config(controller / filename)
+            orchestrator = next(
+                role for role in cfg.roles if role.name == "orchestrator"
+            )
+            assert orchestrator.lifecycle.mode == "resident", filename
+            assert all(
+                role.lifecycle.mode == "on_demand"
+                for role in cfg.roles
+                if role.name != "orchestrator"
+            ), filename
+            assert all(
+                role.provider_session is None for role in cfg.roles
+            ), filename
+
+        for filename in light:
+            cfg = load_config(controller / filename)
+            assert all(
+                role.lifecycle.mode == "eager" for role in cfg.roles
+            ), filename
+            assert all(
+                role.provider_session is None for role in cfg.roles
+            ), filename
 
     def test_issue_prd_flow_unknown_params_fail_closed(self, tmp_path):
         issue = tmp_path / "issue.yaml"

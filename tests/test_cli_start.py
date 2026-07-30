@@ -553,6 +553,117 @@ workflow:
             / "inspect.json"
         ).exists()
 
+    def test_start_registers_on_demand_role_without_spawning_or_materializing(
+        self,
+        project_dir: Path,
+        capsys,
+    ) -> None:
+        (project_dir / "zf.yaml").write_text(
+            yaml.safe_dump({
+                "version": "1.0",
+                "project": {"name": "test-project", "state_dir": ".zf"},
+                "session": {"tmux_session": "test-zf"},
+                "roles": [{
+                    "name": "dev",
+                    "backend": "claude-code",
+                    "skills": ["zf-cr"],
+                    "lifecycle": {
+                        "mode": "on_demand",
+                        "idle_seconds": 60,
+                        "preserve_session": True,
+                        "preserve_workdir": True,
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        result = main(["start", "--dry-run"])
+
+        assert result == 0
+        assert "dormant (on demand)" in capsys.readouterr().out
+        state_dir = project_dir / ".zf"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        assert any(
+            event["type"] == "role.lifecycle.dormant"
+            and event["payload"]["instance_id"] == "dev"
+            for event in events
+        )
+        assert not any(
+            event["type"] == "worker.launch_artifact.written"
+            and event["payload"].get("instance_id") == "dev"
+            for event in events
+        )
+        assert not (
+            state_dir
+            / "workdirs"
+            / "dev"
+            / "project"
+            / ".claude"
+            / "skills"
+        ).exists()
+
+    def test_start_restores_on_demand_role_with_in_progress_task(
+        self,
+        project_dir: Path,
+        capsys,
+    ) -> None:
+        (project_dir / "zf.yaml").write_text(
+            yaml.safe_dump({
+                "version": "1.0",
+                "project": {"name": "test-project", "state_dir": ".zf"},
+                "session": {"tmux_session": "test-zf"},
+                "roles": [{
+                    "name": "dev",
+                    "backend": "claude-code",
+                    "lifecycle": {
+                        "mode": "on_demand",
+                        "idle_seconds": 60,
+                        "preserve_session": True,
+                        "preserve_workdir": True,
+                    },
+                }],
+            }),
+            encoding="utf-8",
+        )
+        (project_dir / ".zf" / "kanban.json").write_text(
+            json.dumps([{
+                "id": "TASK-RESUME",
+                "title": "resume owned work",
+                "status": "in_progress",
+                "assigned_to": "dev",
+            }]),
+            encoding="utf-8",
+        )
+
+        result = main(["start", "--dry-run"])
+
+        assert result == 0
+        capsys.readouterr()
+        events = [
+            json.loads(line)
+            for line in (
+                project_dir / ".zf" / "events.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(
+            event["type"] == "worker.launch_artifact.written"
+            and event["payload"].get("instance_id") == "dev"
+            for event in events
+        )
+        assert not any(
+            event["type"] == "role.lifecycle.dormant"
+            and event["payload"].get("instance_id") == "dev"
+            for event in events
+        )
+
     def test_start_writes_run_contract_snapshot(self, project_dir: Path):
         result = main(["start", "--dry-run"])
 

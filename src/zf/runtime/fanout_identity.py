@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -38,6 +39,15 @@ _AGGREGATE_EVENT_TYPES = frozenset({
     "fanout.timed_out",
     "fanout.cancelled",
 })
+
+
+def fanout_identity_scope_digest(
+    trigger_event_id: str,
+    identity_scope: str,
+) -> str:
+    return hashlib.sha256(
+        f"{trigger_event_id}\0{identity_scope}".encode("utf-8")
+    ).hexdigest()[:12]
 
 
 @dataclass

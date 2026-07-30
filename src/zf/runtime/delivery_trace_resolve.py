@@ -21,6 +21,7 @@ from zf.runtime.delivery_trace import build_delivery_trace
 from zf.runtime.delivery_run_trace import build_delivery_run_projection
 from zf.runtime.drift_report import build_drift_report
 from zf.runtime.execution_graph import build_execution_graph
+from zf.runtime.goal_claim_set import hydrate_pinned_goal_claim_set
 from zf.runtime.goal_coverage_graph import (
     build_goal_coverage_graph,
     degraded_goal_coverage_graph,
@@ -76,6 +77,22 @@ def resolve_delivery_trace(
         autoresearch_cycles=trace.get("autoresearch_cycles", []),
     ))
     try:
+        task_map = inp["task_map"] or {}
+        pinned_claim_set = hydrate_pinned_goal_claim_set(
+            state_dir=state_dir,
+            events=inp["all_events"],
+            workflow_run_id=str(
+                task_map.get("workflow_run_id")
+                or task_map.get("run_id")
+                or ""
+            ),
+            goal_id=str(
+                task_map.get("goal_id")
+                or task_map.get("feature_id")
+                or inp["feature_id"]
+                or ""
+            ),
+        )
         trace["goal_coverage_graph"] = build_goal_coverage_graph(
             task_map=inp["task_map"],
             tasks=inp["tasks"],
@@ -83,6 +100,7 @@ def resolve_delivery_trace(
             project_id=project_id,
             feature_id=inp["feature_id"],
             task_map_ref=inp["ref"],
+            goal_claim_set=pinned_claim_set,
         )
     except Exception as exc:
         # A read projection may degrade, but must never block Delivery Trace or

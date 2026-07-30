@@ -455,6 +455,8 @@ def build_workflow_batch_resume_checkpoints(
             status = str(payload.get("status") or "completed")
             if status == "completed":
                 continue
+            if _reader_stage_replan_owns_failed_batch(event_list, event):
+                continue
             checkpoint = _batch_checkpoint_from_event(
                 event,
                 source_event_type=event.type,
@@ -533,6 +535,39 @@ def build_workflow_batch_resume_checkpoints(
         if not _batch_checkpoint_recovered(event_list, checkpoint)
         and not _batch_checkpoint_superseded(event_list, checkpoint)
     ]
+
+
+def _reader_stage_replan_owns_failed_batch(
+    events: list[ZfEvent],
+    aggregate_event: ZfEvent,
+) -> bool:
+    """Avoid a task-map resume action for a pre-task reader failure."""
+
+    payload = _payload(aggregate_event)
+    if (
+        str(payload.get("task_map_ref") or "").strip()
+        or _string_list(payload.get("completed_task_ids"))
+        or str(payload.get("candidate_ref") or "").strip()
+        or str(payload.get("candidate_head_commit") or "").strip()
+    ):
+        return False
+    fanout_id = str(payload.get("fanout_id") or "").strip()
+    failure_event_type = str(payload.get("failure_event") or "").strip()
+    if not fanout_id or not failure_event_type:
+        return False
+    reader_started = any(
+        event.type == "fanout.started"
+        and str(_payload(event).get("fanout_id") or "") == fanout_id
+        and str(_payload(event).get("topology") or "") == "fanout_reader"
+        for event in events
+    )
+    if not reader_started:
+        return False
+    return any(
+        event.type == failure_event_type
+        and str(_payload(event).get("fanout_id") or "") == fanout_id
+        for event in events
+    )
 
 
 def _task_ref_repair_checkpoint(

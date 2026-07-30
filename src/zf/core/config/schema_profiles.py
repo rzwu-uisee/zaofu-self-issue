@@ -598,6 +598,96 @@ _REFACTOR_FLOW_V5: dict[str, dict[str, Any]] = {
     **_PLAN_ARTIFACT_PACKAGE_EVENTS,
 }
 
+_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE: dict[str, Any] = {
+    "required": [
+        "flow_kind", "run_id", "goal_id", "claim_id",
+        "workflow_generation", "generic_workflow_contract_digest",
+        "completion_profile", "run_contract_ref", "run_contract_digest",
+        "goal_claim_set_ref", "goal_claim_set_digest", "goal_coverage",
+        "required_artifacts", "verification_evidence_refs",
+        "input_result_refs", "verifier_stage_id", "verifier_role",
+        "admitted_call_result_ref",
+    ],
+    "non_empty": [
+        "flow_kind", "run_id", "goal_id", "claim_id",
+        "workflow_generation", "generic_workflow_contract_digest",
+        "completion_profile", "run_contract_ref", "run_contract_digest",
+        "goal_claim_set_ref", "goal_claim_set_digest", "goal_coverage",
+        "required_artifacts", "verification_evidence_refs",
+        "input_result_refs", "verifier_stage_id", "verifier_role",
+        "admitted_call_result_ref",
+    ],
+    "enum": {
+        "flow_kind": ["workflow"],
+        "completion_profile": ["artifact_delivery"],
+    },
+    "nested": {
+        "admitted_call_result_ref": {
+            "required": ["ref", "sha256"],
+            "non_empty": ["ref", "sha256"],
+        },
+    },
+    "list_item": {
+        "goal_coverage": {
+            "required": [
+                "goal_claim_id", "status", "supporting_artifact_refs",
+            ],
+            "non_empty": [
+                "goal_claim_id", "status", "supporting_artifact_refs",
+            ],
+            "enum": {"status": ["closed"]},
+        },
+        "required_artifacts": {
+            "required": [
+                "name", "kind", "producer_stage_id", "ref", "sha256",
+            ],
+            "non_empty": [
+                "name", "kind", "producer_stage_id", "ref", "sha256",
+            ],
+        },
+    },
+}
+
+_GENERIC_WORKFLOW_COMPLETED_RULE: dict[str, Any] = {
+    **deepcopy(_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE),
+    "required": [
+        *_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE["required"],
+        "verification_event_id",
+        "verification_admitted_call_result_ref",
+        "delivery_policy",
+        "delivery_status",
+        "delivery_event_id",
+    ],
+    "non_empty": [
+        *_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE["non_empty"],
+        "verification_event_id",
+        "verification_admitted_call_result_ref",
+        "delivery_policy",
+        "delivery_status",
+    ],
+    "enum": {
+        **_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE["enum"],
+        "delivery_status": ["not_required", "settled"],
+    },
+    "nested": {
+        **_GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE["nested"],
+        "verification_admitted_call_result_ref": {
+            "required": ["ref", "sha256"],
+            "non_empty": ["ref", "sha256"],
+        },
+    },
+    "when": {
+        "if": {"delivery_status": "settled"},
+        "then": {"non_empty": ["delivery_event_id"]},
+    },
+}
+
+_GENERIC_WORKFLOW_V1: dict[str, dict[str, Any]] = {
+    **_CANONICAL_DAG_V8,
+    "run.goal.completion.claimed": _GENERIC_WORKFLOW_COMPLETION_CLAIM_RULE,
+    "run.goal.completed": _GENERIC_WORKFLOW_COMPLETED_RULE,
+}
+
 SCHEMA_PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     "refactor-flow/v1": _REFACTOR_FLOW_V1,
     "refactor-flow/v2": _REFACTOR_FLOW_V2,
@@ -612,6 +702,7 @@ SCHEMA_PROFILES: dict[str, dict[str, dict[str, Any]]] = {
     "canonical-dag/v6": _CANONICAL_DAG_V6,
     "canonical-dag/v7": _CANONICAL_DAG_V7,
     "canonical-dag/v8": _CANONICAL_DAG_V8,
+    "generic-workflow/v1": _GENERIC_WORKFLOW_V1,
 }
 
 _RULE_KEYS = (

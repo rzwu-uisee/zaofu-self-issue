@@ -35,9 +35,10 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = REPO_ROOT / "src"
+LEGACY_EXAMPLES = REPO_ROOT / "examples" / "tmp"
 
-CODEX_CONFIG = REPO_ROOT / "examples" / "tmp" / "dev-codex-backends.yaml"
-MIXED_CONFIG = REPO_ROOT / "examples" / "tmp" / "dev-mixed-backends.yaml"
+CODEX_CONFIG = LEGACY_EXAMPLES / "dev-codex-backends.yaml"
+MIXED_CONFIG = LEGACY_EXAMPLES / "dev-mixed-backends.yaml"
 
 DEFAULT_CODEX_WORKTREE = Path("/tmp/zaofu-codex-smoke")
 DEFAULT_MIXED_WORKTREE = Path("/tmp/zaofu-mixed-stress")

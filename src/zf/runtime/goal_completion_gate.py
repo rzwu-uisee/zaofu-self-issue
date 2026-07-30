@@ -7,9 +7,14 @@ from typing import Any
 from zf.core.events.model import ZfEvent
 
 
-_CLAIM_CAUSES = frozenset({"goal.closure.synthesized", "judge.passed"})
+_CLAIM_CAUSES = frozenset({
+    "goal.closure.synthesized",
+    "judge.passed",
+    "artifact.delivery.verified",
+})
 _GATE_TRUTH_DELTAS = frozenset({
     "goal.closure.synthesized",
+    "artifact.delivery.verified",
     "run.goal.completion.claimed",
     "workflow.operation.settled",
     "workflow.operation.failed",
@@ -25,6 +30,7 @@ _GATE_TRUTH_DELTAS = frozenset({
     "run.manager.action.effect.pending",
     "run.manager.action.effect.passed",
     "run.manager.action.effect.failed",
+    "run.manager.tick.completed",
     "fanout.started",
     "fanout.aggregate.completed",
     "fanout.cancelled",
@@ -76,6 +82,43 @@ def maybe_complete_run_goal(runtime: Any, event: ZfEvent) -> None:
         return
 
 
+def reconcile_run_goal_completion(runtime: Any) -> None:
+    """Recover a completion claim lost between evidence admission and append."""
+
+    if not getattr(getattr(runtime.config, "goal", None), "enabled", False):
+        return
+    from zf.runtime.event_window import read_runtime_events
+    from zf.runtime.run_manager import run_goal_completion_claim_event
+    from zf.runtime.run_scope import resolve_run_for_event
+
+    events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
+    _evaluate_active_claims(runtime, events)
+    events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
+
+    seen_run_ids: set[str] = set()
+    for cause in reversed(events):
+        if cause.type not in _CLAIM_CAUSES:
+            continue
+        if (
+            cause.type == "judge.passed"
+            and isinstance(cause.payload, dict)
+            and str(cause.payload.get("authority") or "")
+            == "compat_projection"
+        ):
+            continue
+        run_id = resolve_run_for_event(events, cause)
+        if not run_id or run_id in seen_run_ids:
+            continue
+        seen_run_ids.add(run_id)
+        claim = run_goal_completion_claim_event(events, cause=cause)
+        if claim is None:
+            continue
+        appended = runtime.event_writer.append(claim)
+        events.append(appended)
+        _evaluate_active_claims(runtime, events)
+        events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
+
+
 def _evaluate_active_claims(runtime: Any, events: list[ZfEvent]) -> None:
     from zf.runtime.run_contract import load_run_contract
     from zf.runtime.run_manager import (
@@ -121,6 +164,7 @@ def _evaluate_active_claims(runtime: Any, events: list[ZfEvent]) -> None:
             claim=claim,
             required_operation_ids=required_operation_ids,
             delivery_policy=delivery_policy,
+            run_contract=contract,
         )
         if outcome is None:
             continue
@@ -209,4 +253,7 @@ def _apply_delivery_request(runtime: Any, request: ZfEvent) -> None:
         ))
 
 
-__all__ = ["maybe_complete_run_goal"]
+__all__ = [
+    "maybe_complete_run_goal",
+    "reconcile_run_goal_completion",
+]

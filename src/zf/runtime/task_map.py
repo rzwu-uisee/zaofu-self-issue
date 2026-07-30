@@ -15,8 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zf.runtime import verification_command_safety
 from zf.runtime.task_map_goal_coverage import validate_goal_coverage
 from zf.runtime.task_map_required_ports import required_plan_port_errors
+from zf.runtime.task_contract_snapshot import acceptance_contract_errors
 from zf.runtime.verification_commands import (
     VerificationCommandError,
     first_verification_command as normalize_verification_command,
@@ -130,12 +132,8 @@ def validate_task_map_payload(
         )
         if item.strip()
     }
-    # A task's verification COMMAND runs tests (read-only) and may legitimately
-    # reference files owned by sibling tasks in the same plan — e.g. the refactor
-    # flow's characterization-test pattern, where the refactor task verifies
-    # against a test file written by a separate characterization task. Scope the
-    # verification check against the whole plan's paths so cross-task test runs
-    # are allowed while truly out-of-plan references are still caught.
+    # Verification may reference sibling-owned tests, so check commands against
+    # all plan paths while still rejecting truly out-of-plan references.
     plan_scope_paths: list[str] = []
     wave_by_task = _wave_by_task_id(payload)
     for raw in tasks_raw:
@@ -153,6 +151,7 @@ def validate_task_map_payload(
         if task_id in ids:
             errors.append(f"duplicate task_id {task_id!r}")
         ids.append(task_id)
+        errors.extend(acceptance_contract_errors(raw.get("acceptance_criteria"), task_id=task_id))
         wave = _int_value(raw.get("wave") if raw.get("wave") is not None else wave_by_task.get(task_id))
         waves[task_id] = wave
         task_count_by_wave[str(wave)] = task_count_by_wave.get(str(wave), 0) + 1
@@ -254,7 +253,6 @@ def validate_task_map_payload(
         "topological_order": topological_order,
     }
     return TaskMapValidationResult(passed=not errors, errors=errors, summary=summary)
-
 
 def _workspace_root_owner_requirement_values(payload: dict[str, Any]) -> list[tuple[str, Any]]:
     """Return every explicit root-owner requirement for schema validation.
@@ -571,6 +569,7 @@ def _verification_command_errors(command: str) -> list[str]:
         ]
     early_errors = [
         *_single_quoted_bash_c_errors(text),
+        *verification_command_safety.escape_sensitive_inline_eval_errors(text),
         *_unquoted_glob_filter_errors(text),
         *_unquoted_path_glob_errors(text),
     ]

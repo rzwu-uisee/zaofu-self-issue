@@ -39,6 +39,32 @@ def test_production_controllers_pin_blocking_artifact_handoff(name: str) -> None
     assert config.workflow.flow_metadata["artifact_package"]["mode"] == "blocking"
 
 
+def test_codex_refactor_controller_pins_file_based_semantic_submit() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = load_config(
+        root / "examples" / "prod" / "controller" / "refactor-lane-v3.yaml"
+    )
+
+    assert config.workflow.flow_metadata["result_protocol"][
+        "semantic_submit_profiles"
+    ] == {
+        "workflow-read": "blocking",
+    }
+
+
+def test_claude_refactor_critic_does_not_require_unwritable_result_file() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = load_config(
+        root / "examples" / "prod" / "controller"
+        / "refactor-lane-v3-claude.yaml"
+    )
+
+    profiles = config.workflow.flow_metadata["result_protocol"][
+        "semantic_submit_profiles"
+    ]
+    assert "plan-synth" not in profiles
+
+
 def test_run_contract_records_controller_artifact_package_mode(
     tmp_path: Path,
 ) -> None:

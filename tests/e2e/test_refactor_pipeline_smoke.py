@@ -50,8 +50,13 @@ from zf.core.config.schema import (
 )
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
+from zf.runtime.result_submit import (
+    SemanticResultSubmitService,
+    provision_role_submit_credential,
+)
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 PDD = "CJMIN-SMOKE-001"
@@ -230,6 +235,14 @@ def _config(state_dir: Path) -> ZfConfig:
             stages=stages,
             affinity_lanes={"cj-2": lanes},
             strict_triggers=WorkflowStrictTriggersConfig(rework_attempts_gte=2),
+            flow_metadata={
+                "result_protocol": {
+                    "mode": "shadow",
+                    "semantic_submit_profiles": {
+                        "workflow-read": "blocking",
+                    },
+                },
+            },
         ),
         runtime=RuntimeConfig(
             workdirs=WorkdirConfig(enabled=True, mode="worktree"),
@@ -246,6 +259,8 @@ def _state(tmp_path: Path):
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
     log = EventLog(state_dir / "events.jsonl")
     transport = _RecordingTransport()
+    for role_instance in ("scan-1", "scan-2", "plan-worker", "plan-critic"):
+        provision_role_submit_credential(state_dir, role_instance)
     orch = Orchestrator(state_dir, _config(state_dir), transport)  # type: ignore[arg-type]
     return state_dir, log, transport, orch
 
@@ -283,30 +298,75 @@ def _complete_reader_children(
 ) -> None:
     completions = []
     for child in _dispatched_children(log, fanout_id):
-        completions.append(ZfEvent(
-            type=child_event,
-            actor=str(child.payload.get("role_instance") or "mock"),
-            correlation_id=child.correlation_id,
-            payload={
-                "fanout_id": fanout_id,
-                "child_id": child.payload["child_id"],
-                "run_id": child.payload.get("run_id", ""),
-                "status": "completed",
-                "summary": "smoke ok",
-                "evidence_refs": ["smoke://evidence"],
-                "git_refs": {"source_branch": "main"},
-                **(extra or {}),
-            },
-        ))
+        operation_payload = (
+            child.payload.get("payload")
+            if isinstance(child.payload.get("payload"), dict)
+            else {}
+        )
+        payload = {
+            "fanout_id": fanout_id,
+            "child_id": child.payload["child_id"],
+            "run_id": child.payload.get("run_id", ""),
+            "status": "completed",
+            "summary": "smoke ok",
+            "evidence_refs": ["smoke://evidence"],
+            "git_refs": {"source_branch": "main"},
+            **(extra or {}),
+        }
+        if operation_payload.get("semantic_result_submit_mode") == "blocking":
+            scratch = Path(operation_payload["result_scratch_ref"])
+            if not scratch.is_absolute():
+                scratch = orch.state_dir / scratch
+            _consume_required_reads(orch.state_dir, operation_payload)
+            semantic_result = json.loads(scratch.read_text(encoding="utf-8"))
+            nested = payload.get("report", {})
+            if isinstance(nested, dict):
+                semantic_result.update(nested)
+            semantic_result.update({
+                "status": "passed",
+                "summary": payload["summary"],
+                "evidence_refs": payload["evidence_refs"],
+                "git_refs": payload["git_refs"],
+                **{
+                    key: value for key, value in (extra or {}).items()
+                    if key != "report"
+                },
+            })
+            scratch.write_text(json.dumps(semantic_result), encoding="utf-8")
+            submitted = SemanticResultSubmitService(
+                state_dir=orch.state_dir,
+                event_log=log,
+                event_writer=EventWriter(log),
+            ).submit(
+                operation_id=str(operation_payload["operation_id"]),
+                result_file=scratch,
+                role_instance=str(operation_payload["role_instance"]),
+                credential=provision_role_submit_credential(
+                    orch.state_dir,
+                    str(operation_payload["role_instance"]),
+                    rotate=False,
+                ).read_text(encoding="utf-8").strip(),
+            )
+            completions.append(next(
+                event for event in log.read_all()
+                if event.id == submitted.canonical_event_id
+            ))
+        else:
+            completions.append(ZfEvent(
+                type=child_event,
+                actor=str(child.payload.get("role_instance") or "mock"),
+                correlation_id=child.correlation_id,
+                payload=payload,
+            ))
     assert completions, f"no dispatched children for fanout {fanout_id}"
     orch.run_once(events=completions)
 
 
-def _consume_synth_required_reads(state_dir: Path, dispatched: ZfEvent) -> None:
-    descriptor = dispatched.payload["attempt_source_manifest"]
+def _consume_required_reads(state_dir: Path, payload: dict) -> None:
+    descriptor = payload["attempt_source_manifest"]
     manifest = hydrate_sidecar_ref(state_dir, descriptor).payload
     assert isinstance(manifest, dict)
-    for requirement in dispatched.payload["required_reads"]:
+    for requirement in payload.get("required_reads", []):
         read_attempt_artifact(
             state_dir,
             manifest=manifest,
@@ -316,6 +376,10 @@ def _consume_synth_required_reads(state_dir: Path, dispatched: ZfEvent) -> None:
             max_items=int(requirement.get("max_items") or 0),
             max_chars=int(requirement.get("max_chars") or 0),
         )
+
+
+def _consume_synth_required_reads(state_dir: Path, dispatched: ZfEvent) -> None:
+    _consume_required_reads(state_dir, dispatched.payload)
 
 
 def _complete_plan_synth(
@@ -345,48 +409,45 @@ def _complete_plan_synth(
         "the runtime state dir explicitly:\n```bash\n",
         1,
     )[1].split("\n```", 1)[0]
-    command_lines = command.splitlines()
-    command_args = shlex.split(command_lines[0])
-    if "--result-file" in command_args:
-        payload_file_index = command_args.index("--result-file") + 1
-        payload_file = command_args[payload_file_index]
-    elif "--payload-file" in command_args:
-        payload_file_index = command_args.index("--payload-file") + 1
-        payload_file = command_args[payload_file_index]
-    else:
-        payload_file = next(
-            arg.split("=", 1)[1]
-            for arg in command_args
-            if arg.startswith("--payload-file=")
-            or arg.startswith("--result-file=")
-        )
-    if payload_file == "-":
-        delimiter = command_lines[0].rsplit("<<'", 1)[1].removesuffix("'")
-        assert command_lines[-1] == delimiter
-        completion_payload = json.loads("\n".join(command_lines[1:-1]))
-    else:
-        completion_payload = json.loads(Path(payload_file).read_text(encoding="utf-8"))
-    assert completion_payload["child_id"] == "synth"
+    command_argv = shlex.split(command)
+    assert command_argv[1:3] == ["result", "submit"]
+    result_file = Path(
+        command_argv[command_argv.index("--result-file") + 1]
+    )
+    semantic_result = json.loads(result_file.read_text(encoding="utf-8"))
+    assert semantic_result["child_id"] == "synth"
     _consume_synth_required_reads(state_dir, dispatched)
-    completion_payload.update({
+    semantic_result.update({
         "status": "completed",
         "recommendation": "approve",
         "summary": "plan synthesis passed",
     })
-    completion_payload["report"].update({
+    semantic_result["report"].update({
         "child_id": "synth",
         "status": "passed",
         "recommendation": "approve",
         "summary": "plan synthesis passed",
         **report,
     })
-    completed = ZfEvent(
-        type="fanout.synth.completed",
-        actor="plan-critic",
-        correlation_id=dispatched.correlation_id,
-        payload=completion_payload,
+    submitted = SemanticResultSubmitService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    ).submit(
+        operation_id=str(dispatched.payload["operation_id"]),
+        semantic_result=semantic_result,
+        role_instance="plan-critic",
+        credential=provision_role_submit_credential(
+            state_dir,
+            "plan-critic",
+            rotate=False,
+        ).read_text(encoding="utf-8").strip(),
     )
-    log.append(completed)
+    completed = next(
+        event
+        for event in log.read_all()
+        if event.id == submitted.canonical_event_id
+    )
     orch.run_once(events=[completed])
     return completed
 
@@ -520,6 +581,32 @@ def test_full_refactor_chain_reaches_judge_passed(tmp_path: Path):
         if event.type == "workflow.call.result.reported"
         and event.payload.get("adapter_id") == "plan-synthesis-result-v1"
     ]) == 1
+    scan_operation_ids = {
+        str(operation_id)
+        for event in events
+        if event.type == "fanout.child.dispatched"
+        and event.payload.get("stage_id") == "scan"
+        for operation_id in [(
+            event.payload.get("operation_id")
+            or (
+                event.payload.get("payload", {}).get("operation_id")
+                if isinstance(event.payload.get("payload"), dict)
+                else ""
+            )
+        )]
+        if operation_id
+    }
+    assert {
+        event.payload["operation_id"]
+        for event in events
+        if event.type == "workflow.call.result.admitted"
+        and event.payload.get("operation_id") in scan_operation_ids
+    } == scan_operation_ids
+    assert sum(
+        event.type == "workflow.call.result.admitted"
+        and event.payload.get("operation_id") in scan_operation_ids
+        for event in events
+    ) == len(scan_operation_ids)
     # R21 regression gate: zero scope rejections on the live kernel path
     assert not [e for e in events if e.type == "task.ref.rejected"], (
         "writer ref handoff rejected — scope/contract regression"
@@ -557,6 +644,7 @@ def test_full_refactor_chain_reaches_judge_passed(tmp_path: Path):
     assert not [e for e in events if e.type == "fanout.cancelled"]
     assert not [e for e in events if e.type == "integration.failed"]
     assert not [e for e in events if e.type == "task.contract.invalid"]
+    assert not [e for e in events if e.type == "worker.scope_write.rejected"]
     assert len([e for e in events if e.type == "run.goal.completed"]) == 1
 
 

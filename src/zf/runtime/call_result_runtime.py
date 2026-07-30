@@ -136,12 +136,35 @@ def prepare_call_operation(
         payload=payload,
     )
     role_instance = str(payload.get("role_instance") or "")
+    task = (
+        runtime.task_store.get(task_id)
+        if task_id and getattr(runtime, "task_store", None) is not None
+        else None
+    )
+    contract = (
+        payload.get("task_contract")
+        if isinstance(payload.get("task_contract"), Mapping)
+        else getattr(task, "contract", None)
+    )
+    from zf.runtime.execution_profiles import resolve_execution_profile
+
+    resolved_execution_profile = resolve_execution_profile(
+        runtime.config,
+        role_instance=role_instance or str(getattr(task, "assigned_to", "") or ""),
+        contract=contract,
+    )
+    execution_profile_projection = resolved_execution_profile.projection()
     result_scratch_ref = (
         Path("tmp") / "result-submit" / operation_id / (attempt_id or "attempt") / "result.json"
     ).as_posix()
     payload.update({
         "output_profile_id": output_profile_id,
         "output_profile_revision": output_profile_revision,
+        "execution_profile_id": resolved_execution_profile.profile_id,
+        "execution_profile_digest": resolved_execution_profile.profile_digest,
+        "execution_profile_shadow": dict(
+            execution_profile_projection["shadow"]
+        ),
         "result_scratch_ref": result_scratch_ref,
     })
     payload["handoff_authority_contract"] = build_handoff_authority_contract(
@@ -154,6 +177,7 @@ def prepare_call_operation(
         runtime.config,
         profile_id=output_profile_id,
         role_instance=role_instance,
+        payload=payload,
     )
     payload["semantic_result_submit_mode"] = semantic_submit_mode
 
@@ -223,6 +247,14 @@ def prepare_call_operation(
         "target_commit": str(payload.get("target_commit") or ""),
         "contract_snapshot_digest": str(payload.get("contract_snapshot_digest") or ""),
         "target_snapshot_digest": str(payload.get("target_snapshot_digest") or ""),
+        "effective_config_ref": (
+            dict(payload["effective_config_ref"])
+            if isinstance(payload.get("effective_config_ref"), Mapping)
+            else {}
+        ),
+        "effective_config_digest": str(
+            payload.get("effective_config_digest") or ""
+        ),
         "source_manifest_digest": str(source_descriptor.get("sha256") or ""),
         "read_policy_digest": str(payload.get("input_consumption_policy_digest") or ""),
         "input_consumption_policy_ref": (
@@ -238,6 +270,7 @@ def prepare_call_operation(
         "output_profile_id": output_profile_id,
         "output_profile_revision": output_profile_revision,
         "semantic_result_submit_mode": semantic_submit_mode,
+        "execution_profile": execution_profile_projection,
         "canonical_success_event": str(payload.get("canonical_success_event") or ""),
         "canonical_failure_event": str(payload.get("canonical_failure_event") or ""),
         "result_scratch_ref": result_scratch_ref,
@@ -266,11 +299,27 @@ def prepare_call_operation(
                 "base_git_head",
                 "contract_revision",
                 "task_map_generation",
+                "workflow_generation",
+                "request_revision",
+                "generic_workflow_contract_digest",
+                "workflow_intent",
+                "workflow_template",
+                "completion_profile",
+                "required_delivery_artifacts",
+                "input_result_refs",
+                "generic_workflow_operation",
+                "workflow_dependencies",
+                "workflow_input_ports",
+                "workflow_output_ports",
+                "workflow_dependency_barrier_id",
+                "workflow_dependency_barrier_digest",
                 "plan_artifact_package_id",
                 "plan_artifact_package_ref",
                 "plan_artifact_package_digest",
                 "run_contract_ref",
                 "run_contract_digest",
+                "effective_config_ref",
+                "effective_config_digest",
                 "base_commit",
                 "task_ref",
                 "contract_snapshot_ref",
@@ -283,12 +332,24 @@ def prepare_call_operation(
                 "objective_ref",
                 "goal_claim_set_ref",
                 "goal_claim_set_digest",
+                "execution_profile_id",
+                "execution_profile_digest",
                 "planning_result_ref",
                 "candidate_ref",
                 "closure_fact_ref",
                 "closure_fact_digest",
             )
             if payload.get(key) not in (None, "")
+            and not (
+                stage_id == "flow-plan"
+                and key in {
+                    "plan_revision",
+                    "task_map_generation",
+                    "plan_artifact_package_id",
+                    "plan_artifact_package_ref",
+                    "plan_artifact_package_digest",
+                }
+            )
         },
     }
     if context_delivery_enabled:
@@ -325,8 +386,18 @@ def prepare_call_operation(
         payload["admitted_call_result_ref"] = ensured.admitted_call_result_ref
         payload["admitted_call_result_digest"] = ensured.admitted_call_result_digest
     if role_instance:
+        from zf.runtime.artifact_read_capability import (
+            bind_attempt_artifact_read_capability,
+        )
         from zf.runtime.result_submit import bind_operation_submit_capability
 
+        bind_attempt_artifact_read_capability(
+            runtime.state_dir,
+            operation_id=operation_id,
+            attempt_id=attempt_id,
+            role_instance=role_instance,
+            manifest=source_manifest,
+        )
         bind_operation_submit_capability(
             runtime.state_dir,
             operation_id=operation_id,
@@ -437,10 +508,15 @@ def admit_runtime_call_result(
         **(event.payload if isinstance(event.payload, dict) else {}),
         **dict(merged_payload or {}),
     }
-    operation_result_identity = _pinned_operation_result_identity(
+    operation_request = _pinned_operation_request(
         runtime,
         operation_id=str(payload.get("operation_id") or ""),
         request_hash=str(payload.get("request_hash") or ""),
+    )
+    operation_result_identity = (
+        dict(operation_request.get("result_identity") or {})
+        if isinstance(operation_request.get("result_identity"), Mapping)
+        else {}
     )
     # Provider terminals are allowed to omit mechanical dispatch identity.  The
     # immutable operation request is authoritative for omitted fields, while an
@@ -453,7 +529,32 @@ def admit_runtime_call_result(
     from zf.runtime.call_result_adapters import hydrate_profiled_control_result_event
 
     source = hydrate_profiled_control_result_event(runtime.state_dir, source)
-    effective_mode = mode or result_protocol_mode(runtime.config, payload)
+    require_semantic_submit = (
+        str(operation_request.get("semantic_result_submit_mode") or "")
+        == "blocking"
+    )
+    semantic_submit = _has_semantic_submit_provenance(
+        runtime,
+        event,
+        operation_request=operation_request,
+    )
+    effective_mode = (
+        "blocking"
+        if require_semantic_submit
+        else mode or result_protocol_mode(runtime.config, payload)
+    )
+    if require_semantic_submit and semantic_submit:
+        return CallResultAdmissionOutcome(
+            status="admitted",
+            mode=effective_mode,
+            operation_id=str(payload.get("operation_id") or ""),
+            request_hash=str(payload.get("request_hash") or ""),
+            envelope_ref=dict(payload.get("call_result_envelope_ref") or {}),
+            control_result_ref=dict(payload.get("control_result_ref") or {}),
+            admitted_event_id=str(
+                payload.get("semantic_submit_admission_event_id") or ""
+            ),
+        )
     outcome = call_result_admission_service(runtime).report_legacy_result(
         source,
         mode=effective_mode,
@@ -464,6 +565,8 @@ def admit_runtime_call_result(
             "request_hash": str(payload.get("request_hash") or ""),
             "result_identity": operation_result_identity,
         },
+        require_semantic_submit=require_semantic_submit,
+        semantic_submit=semantic_submit,
     )
     if (
         dispatch_correction
@@ -479,6 +582,21 @@ def admit_runtime_call_result(
 
 
 def _pinned_operation_result_identity(
+    runtime: Any,
+    *,
+    operation_id: str,
+    request_hash: str,
+) -> dict[str, Any]:
+    request = _pinned_operation_request(
+        runtime,
+        operation_id=operation_id,
+        request_hash=request_hash,
+    )
+    identity = request.get("result_identity")
+    return dict(identity) if isinstance(identity, Mapping) else {}
+
+
+def _pinned_operation_request(
     runtime: Any,
     *,
     operation_id: str,
@@ -500,8 +618,80 @@ def _pinned_operation_result_identity(
     except Exception:
         return {}
     request = stored.get("request") if isinstance(stored, Mapping) else None
-    identity = request.get("result_identity") if isinstance(request, Mapping) else None
-    return dict(identity) if isinstance(identity, Mapping) else {}
+    return dict(request) if isinstance(request, Mapping) else {}
+
+
+def _has_semantic_submit_provenance(
+    runtime: Any,
+    event: ZfEvent,
+    *,
+    operation_request: Mapping[str, Any],
+) -> bool:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    profile = payload.get("semantic_result_profile")
+    control_ref = payload.get("control_result_ref")
+    envelope_ref = payload.get("call_result_envelope_ref")
+    if not all(
+        isinstance(item, Mapping)
+        for item in (profile, control_ref, envelope_ref)
+    ):
+        return False
+    if (
+        str(profile.get("profile_id") or "")
+        != str(operation_request.get("output_profile_id") or "")
+        or str(profile.get("revision") or "")
+        != str(operation_request.get("output_profile_revision") or "")
+    ):
+        return False
+    operation_id = str(payload.get("operation_id") or "")
+    request_hash = str(payload.get("request_hash") or "")
+    admission_event_id = str(
+        payload.get("semantic_submit_admission_event_id") or ""
+    )
+    if not operation_id or not request_hash or not admission_event_id:
+        return False
+    candidate = _event_by_id(runtime, admission_event_id)
+    if (
+        candidate is None
+        or candidate.type != "workflow.call.result.admitted"
+        or candidate.actor != "zf-cli"
+    ):
+        return False
+    body = candidate.payload if isinstance(candidate.payload, dict) else {}
+    if (
+        str(body.get("source_event_id") or "") != event.id
+        or str(body.get("operation_id") or "") != operation_id
+        or str(body.get("request_hash") or "") != request_hash
+    ):
+        return False
+    return (
+        _descriptor_identity(body.get("control_result_ref"))
+        == _descriptor_identity(control_ref)
+        and _descriptor_identity(body.get("envelope_ref"))
+        == _descriptor_identity(envelope_ref)
+    )
+
+
+def _event_by_id(runtime: Any, event_id: str) -> ZfEvent | None:
+    index = getattr(runtime.event_log, "index", None)
+    if index is not None:
+        cached = index.lookup_event(event_id)
+        if cached is not None:
+            return cached
+    return next(
+        (
+            event
+            for event in reversed(runtime.event_log.read_all())
+            if event.id == event_id
+        ),
+        None,
+    )
+
+
+def _descriptor_identity(value: Any) -> tuple[str, str]:
+    if not isinstance(value, Mapping):
+        return "", ""
+    return str(value.get("ref") or ""), str(value.get("sha256") or "")
 
 
 def hydrate_admitted_control_result(
@@ -614,10 +804,11 @@ def _semantic_submit_mode(
     *,
     profile_id: str,
     role_instance: str,
+    payload: Mapping[str, Any] | None = None,
 ) -> str:
     from zf.core.workflow.flow_metadata import flow_metadata_for
 
-    metadata = flow_metadata_for(config)
+    metadata = flow_metadata_for(config, payload=payload)
     protocol = metadata.get("result_protocol")
     protocol = protocol if isinstance(protocol, Mapping) else {}
     configured = protocol.get("semantic_submit_profiles")

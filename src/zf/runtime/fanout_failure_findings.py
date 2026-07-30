@@ -13,6 +13,117 @@ def fanout_failure_findings(
     *,
     extra_payloads: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    payloads = _fanout_failure_payloads(
+        owner,
+        manifest,
+        extra_payloads=extra_payloads,
+    )
+
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for payload in payloads:
+        for finding in findings_from_payload(payload):
+            key = (
+                str(finding.get("child_id") or ""),
+                str(finding.get("task_id") or ""),
+                str(finding.get("message") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(finding)
+    return findings
+
+
+def fanout_failure_context(
+    owner: Any,
+    manifest: dict[str, Any],
+    *,
+    failed: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not failed:
+        return [], {}
+    return (
+        fanout_failure_findings(owner, manifest),
+        fanout_failure_recovery(owner, manifest),
+    )
+
+
+def fanout_failure_recovery(
+    owner: Any,
+    manifest: dict[str, Any],
+    *,
+    extra_payloads: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Project admitted dependency blockers into bounded routing facts."""
+
+    task_ids: set[str] = set()
+    rework_item_ids: set[str] = set()
+    semantic_result_refs: set[str] = set()
+    dependency_blocked = False
+    plan_port_rework = False
+    for payload in _fanout_failure_payloads(
+        owner,
+        manifest,
+        extra_payloads=extra_payloads,
+    ):
+        result = payload.get("verification_result")
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("schema_version") or "") != "verification-result.v1":
+            continue
+        control_ref = payload.get("control_result_ref")
+        if (
+            str(payload.get("control_result_schema") or "")
+            != "verification-result.v1"
+            or not _complete_sidecar_ref(control_ref)
+        ):
+            continue
+        if str(result.get("failure_class") or "") != "dependency_blocked":
+            continue
+        dependency_blocked = True
+        task_id = str(result.get("task_id") or payload.get("task_id") or "").strip()
+        if task_id:
+            task_ids.add(task_id)
+        semantic_result_refs.add(str(control_ref.get("ref") or ""))
+        admitted_ref = payload.get("admitted_call_result_ref")
+        if _complete_sidecar_ref(admitted_ref):
+            semantic_result_refs.add(str(admitted_ref.get("ref") or ""))
+        for item in result.get("rework_items") or []:
+            if not isinstance(item, dict):
+                continue
+            rework_item_id = str(item.get("rework_item_id") or "").strip()
+            if rework_item_id:
+                rework_item_ids.add(rework_item_id)
+            scopes = item.get("allowed_scope")
+            if not isinstance(scopes, list):
+                continue
+            if any(
+                str(scope or "").strip().startswith("plan_ports:")
+                for scope in scopes
+            ):
+                plan_port_rework = True
+    if not dependency_blocked:
+        return {}
+    return {
+        "failure_class": "dependency_blocked",
+        "recovery_action": "replan" if plan_port_rework else "escalate",
+        "rework_scope": "plan_ports" if plan_port_rework else "dependency",
+        "recovery_owner": "planner" if plan_port_rework else "dependency_owner",
+        "failed_task_ids": sorted(task_ids),
+        "rework_item_ids": sorted(rework_item_ids),
+        "semantic_result_refs": sorted(
+            ref for ref in semantic_result_refs if ref
+        ),
+    }
+
+
+def _fanout_failure_payloads(
+    owner: Any,
+    manifest: dict[str, Any],
+    *,
+    extra_payloads: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     child_payloads = {
         str(payload.get("child_id") or ""): payload
         for payload in owner._fanout_child_payloads(manifest)
@@ -40,21 +151,15 @@ def fanout_failure_findings(
         payload = event.payload if isinstance(event.payload, dict) else {}
         if str(payload.get("fanout_id") or "") == fanout_id:
             payloads.append(payload)
+    return payloads
 
-    findings: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for payload in payloads:
-        for finding in findings_from_payload(payload):
-            key = (
-                str(finding.get("child_id") or ""),
-                str(finding.get("task_id") or ""),
-                str(finding.get("message") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            findings.append(finding)
-    return findings
+
+def _complete_sidecar_ref(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and bool(str(value.get("ref") or "").strip())
+        and bool(str(value.get("sha256") or "").strip())
+    )
 
 
 def findings_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -182,6 +287,8 @@ def candidate_failure_findings(
 
 __all__ = [
     "candidate_failure_findings",
+    "fanout_failure_context",
     "fanout_failure_findings",
+    "fanout_failure_recovery",
     "findings_from_payload",
 ]

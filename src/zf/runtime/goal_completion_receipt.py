@@ -105,25 +105,56 @@ def build_goal_completion_receipt(
     candidate_event_id = str(payload.get("candidate_event_id") or "")
     delivery_event_id = str(payload.get("delivery_event_id") or "")
     source_event_id = str(payload.get("source_event_id") or "")
+    artifact_completion = (
+        str(payload.get("completion_profile") or "")
+        == "artifact_delivery"
+    )
     verification_ref = _artifact_ref(
         payload.get("verification_admitted_call_result_ref")
     )
     closure_ref = _artifact_ref(payload.get("admitted_call_result_ref"))
-    evidence_refs = [
-        {
-            "kind": "goal_claim_set",
-            "ref": str(payload.get("goal_claim_set_ref") or ""),
-            "sha256": str(payload.get("goal_claim_set_digest") or ""),
-        },
-        {"kind": "goal_closure_result", **closure_ref},
-        {"kind": "candidate_verification_result", **verification_ref},
-    ]
+    evidence_refs = [{
+        "kind": "goal_claim_set",
+        "ref": str(payload.get("goal_claim_set_ref") or ""),
+        "sha256": str(payload.get("goal_claim_set_digest") or ""),
+    }]
+    if artifact_completion:
+        evidence_refs.extend([
+            {"kind": "artifact_delivery_result", **closure_ref},
+            *[
+                {
+                    "kind": str(item.get("kind") or "delivery_artifact"),
+                    "name": str(item.get("name") or ""),
+                    "source_ref": str(item.get("source_ref") or ""),
+                    "producer_stage_id": str(
+                        item.get("producer_stage_id") or ""
+                    ),
+                    "ref": str(item.get("ref") or ""),
+                    "sha256": str(item.get("sha256") or ""),
+                }
+                for item in payload.get("required_artifacts") or []
+                if isinstance(item, Mapping)
+            ],
+        ])
+    else:
+        evidence_refs.extend([
+            {"kind": "goal_closure_result", **closure_ref},
+            {"kind": "candidate_verification_result", **verification_ref},
+        ])
     event_refs = {
         "completion": _event_ref(completion),
         "completion_claim": _event_ref(event_by_id[claim_event_id]),
-        "goal_closure": _event_ref(event_by_id.get(source_event_id)),
+        (
+            "artifact_delivery"
+            if artifact_completion
+            else "goal_closure"
+        ): _event_ref(event_by_id.get(source_event_id)),
         "verification": _event_ref(event_by_id[verification_event_id]),
-        "candidate": _event_ref(event_by_id[candidate_event_id]),
+        "candidate": (
+            {}
+            if artifact_completion
+            else _event_ref(event_by_id[candidate_event_id])
+        ),
         "delivery": _event_ref(event_by_id.get(delivery_event_id)),
     }
     last_seq, last_event = scoped_with_seq[-1]
@@ -131,6 +162,9 @@ def build_goal_completion_receipt(
     stable_body = {
         "workflow_run_id": canonical_run_id,
         "goal_id": str(payload.get("goal_id") or ""),
+        "completion_profile": str(
+            payload.get("completion_profile") or "software_delivery"
+        ),
         "completion_event_sha256": completion_event_sha256,
         "event_refs": event_refs,
         "evidence_refs": evidence_refs,
@@ -170,6 +204,9 @@ def build_goal_completion_receipt(
             "task_map_generation": str(
                 payload.get("task_map_generation") or ""
             ),
+            "workflow_generation": str(
+                payload.get("workflow_generation") or ""
+            ),
             "target_commit": str(payload.get("target_commit") or ""),
             "verified_target_commit": str(
                 payload.get("verified_target_commit") or ""
@@ -180,8 +217,12 @@ def build_goal_completion_receipt(
             "admitted_call_result_ref": verification_ref,
         },
         "goal_closure": {
-            "source_event_id": source_event_id,
-            "admitted_call_result_ref": closure_ref,
+            "source_event_id": (
+                "" if artifact_completion else source_event_id
+            ),
+            "admitted_call_result_ref": (
+                {} if artifact_completion else closure_ref
+            ),
             "goal_claim_set_ref": str(
                 payload.get("goal_claim_set_ref") or ""
             ),
@@ -189,9 +230,48 @@ def build_goal_completion_receipt(
                 payload.get("goal_claim_set_digest") or ""
             ),
         },
+        "artifact_delivery": {
+            "source_event_id": (
+                source_event_id if artifact_completion else ""
+            ),
+            "admitted_call_result_ref": (
+                closure_ref if artifact_completion else {}
+            ),
+            "run_contract_ref": str(
+                payload.get("run_contract_ref") or ""
+            ),
+            "run_contract_digest": str(
+                payload.get("run_contract_digest") or ""
+            ),
+            "generic_workflow_contract_digest": str(
+                payload.get(
+                    "generic_workflow_contract_digest"
+                ) or ""
+            ),
+            "verifier_stage_id": str(
+                payload.get("verifier_stage_id") or ""
+            ),
+            "verifier_role": str(payload.get("verifier_role") or ""),
+            "required_artifacts": [
+                dict(item)
+                for item in payload.get("required_artifacts") or []
+                if isinstance(item, Mapping)
+            ],
+            "goal_coverage": [
+                dict(item)
+                for item in payload.get("goal_coverage") or []
+                if isinstance(item, Mapping)
+            ],
+        },
         "candidate": {
-            "event_id": candidate_event_id,
-            "ref": str(payload.get("candidate_ref") or ""),
+            "event_id": (
+                "" if artifact_completion else candidate_event_id
+            ),
+            "ref": (
+                ""
+                if artifact_completion
+                else str(payload.get("candidate_ref") or "")
+            ),
             "base_commit": str(payload.get("candidate_base_commit") or ""),
             "head_commit": str(
                 payload.get("candidate_head_commit")
@@ -240,6 +320,15 @@ def _completion_diagnostics(
     canonical_run_id: str,
 ) -> list[str]:
     payload = completion.payload if isinstance(completion.payload, dict) else {}
+    if str(payload.get("completion_profile") or "") == "artifact_delivery":
+        return _artifact_completion_diagnostics(
+            rows=rows,
+            scoped_events=scoped_events,
+            event_by_id=event_by_id,
+            completion=completion,
+            completion_seq=completion_seq,
+            canonical_run_id=canonical_run_id,
+        )
     diagnostics: list[str] = []
     required_text = (
         "goal_id",
@@ -406,6 +495,140 @@ def _completion_diagnostics(
         elif (
             event.type == "run.goal.updated"
             and str(event_payload.get("status") or "") not in {"", "complete"}
+        ):
+            diagnostics.append("stale:later_run.goal.updated")
+    return diagnostics
+
+
+def _artifact_completion_diagnostics(
+    *,
+    rows: list[ZfEvent],
+    scoped_events: list[ZfEvent],
+    event_by_id: Mapping[str, ZfEvent],
+    completion: ZfEvent,
+    completion_seq: int,
+    canonical_run_id: str,
+) -> list[str]:
+    payload = completion.payload if isinstance(completion.payload, dict) else {}
+    diagnostics: list[str] = []
+    for key in (
+        "goal_id",
+        "claim_id",
+        "workflow_generation",
+        "request_revision",
+        "generic_workflow_contract_digest",
+        "run_contract_ref",
+        "run_contract_digest",
+        "verification_event_id",
+        "verifier_stage_id",
+        "verifier_role",
+        "goal_claim_set_ref",
+        "goal_claim_set_digest",
+        "delivery_policy",
+        "delivery_status",
+    ):
+        if payload.get(key) in (None, "", [], {}):
+            diagnostics.append(f"missing:{key}")
+    if str(payload.get("delivery_status") or "") != "not_required":
+        diagnostics.append("invalid:delivery_status")
+    payload_run_id = str(
+        payload.get("workflow_run_id") or payload.get("run_id") or ""
+    )
+    if resolve_run_id(rows, payload_run_id) != canonical_run_id:
+        diagnostics.append("mismatch:workflow_run_id")
+    for key in (
+        "verification_admitted_call_result_ref",
+        "admitted_call_result_ref",
+    ):
+        ref = _artifact_ref(payload.get(key))
+        if not ref["ref"]:
+            diagnostics.append(f"missing:{key}.ref")
+        if not ref["sha256"]:
+            diagnostics.append(f"missing:{key}.sha256")
+    artifacts = [
+        item
+        for item in payload.get("required_artifacts") or []
+        if isinstance(item, Mapping)
+    ]
+    if not artifacts:
+        diagnostics.append("missing:required_artifacts")
+    for index, item in enumerate(artifacts):
+        for key in ("name", "kind", "source_ref", "ref", "sha256"):
+            if not str(item.get(key) or "").strip():
+                diagnostics.append(
+                    f"missing:required_artifacts[{index}].{key}"
+                )
+
+    claim_event_id = str(
+        payload.get("claim_event_id") or completion.causation_id or ""
+    )
+    _require_event(
+        diagnostics,
+        event_by_id,
+        claim_event_id,
+        field="claim_event_id",
+        event_type="run.goal.completion.claimed",
+    )
+    claim_event = event_by_id.get(claim_event_id)
+    claim_payload = (
+        claim_event.payload
+        if claim_event is not None and isinstance(claim_event.payload, dict)
+        else {}
+    )
+    if str(claim_payload.get("claim_type") or "") != (
+        "admitted_artifact_delivery_result"
+    ):
+        diagnostics.append("mismatch:completion_claim.claim_type")
+    for key in (
+        "claim_id",
+        "workflow_generation",
+        "generic_workflow_contract_digest",
+        "run_contract_digest",
+    ):
+        if str(claim_payload.get(key) or "") != str(payload.get(key) or ""):
+            diagnostics.append(f"mismatch:completion_claim.{key}")
+
+    source_event_id = str(payload.get("source_event_id") or "")
+    _require_event(
+        diagnostics,
+        event_by_id,
+        source_event_id,
+        field="source_event_id",
+        event_type="artifact.delivery.verified",
+    )
+    source = event_by_id.get(source_event_id)
+    source_payload = (
+        source.payload
+        if source is not None and isinstance(source.payload, dict)
+        else {}
+    )
+    if _artifact_ref(
+        source_payload.get("admitted_call_result_ref")
+    ) != _artifact_ref(payload.get("admitted_call_result_ref")):
+        diagnostics.append(
+            "mismatch:artifact_delivery.admitted_call_result_ref"
+        )
+    if str(payload.get("verification_event_id") or "") != source_event_id:
+        diagnostics.append("mismatch:verification_event_id")
+
+    scoped_event_ids = {id(event) for event in scoped_events}
+    for index, event in enumerate(rows):
+        if index <= completion_seq or id(event) not in scoped_event_ids:
+            continue
+        event_payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type in {
+            "run.goal.started",
+            "run.goal.blocked",
+            "run.goal.completion.blocked",
+            "run.goal.completion.rejected",
+        }:
+            diagnostics.append(f"stale:later_{event.type}")
+        elif (
+            event.type == "run.goal.updated"
+            and str(event_payload.get("status") or "") not in {
+                "",
+                "complete",
+            }
         ):
             diagnostics.append("stale:later_run.goal.updated")
     return diagnostics

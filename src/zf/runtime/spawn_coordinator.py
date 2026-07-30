@@ -41,17 +41,20 @@ from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.backend import get_adapter
 from zf.runtime.codex_hooks import codex_hook_trust_states, write_codex_hook_settings
 from zf.runtime.launch_artifact import write_launch_artifact
+from zf.runtime.provider_session_config import ProviderSessionPreparationMixin
+from zf.runtime.session_tailer import attach_codex_session_tailer
 from zf.runtime.transport import TransportAdapter
 
 if TYPE_CHECKING:
     from zf.core.config.schema import ZfConfig
     from zf.core.events.log import EventLog
+    from zf.runtime.session_tailer import CodexSessionTailer
 
 
 _MAX_FRESH_CLAUDE_SESSION_CANDIDATES = 8
 
 
-class SpawnCoordinator:
+class SpawnCoordinator(ProviderSessionPreparationMixin):
     def __init__(
         self,
         *,
@@ -61,6 +64,7 @@ class SpawnCoordinator:
         project_root: str,
         event_log: "EventLog | None" = None,
         config: "ZfConfig | None" = None,
+        codex_session_tailer: "CodexSessionTailer | None" = None,
     ) -> None:
         self.state_dir = state_dir
         self.registry = registry
@@ -68,6 +72,7 @@ class SpawnCoordinator:
         self.project_root = project_root
         self.event_log = event_log
         self.config = config
+        self.codex_session_tailer = codex_session_tailer
         # Codex observation tracking. Codex writes its session file only
         # after the first turn starts, so we observe AFTER the first
         # send_task. _spawn_ts gates the glob to files newer than spawn.
@@ -143,7 +148,7 @@ class SpawnCoordinator:
         For codex: its session JSONL is written lazily (post-first-turn),
         so file-existence can't be trusted. Keep the meta-only rule.
         """
-        role = self._apply_runner_policy(role)
+        role, provider_config, _provider_binding = self.prepare_provider_session(role)
         meta_spawned = bool(
             self.registry._meta.get(role.instance_id, {}).get("spawned_at")
         )
@@ -248,6 +253,8 @@ class SpawnCoordinator:
             f"ZF_ROLE_NAME={role.name}",
             f"ZF_ROLE_INSTANCE={role.instance_id}",
             f"ZF_ROLE_BACKEND={role.backend}",
+            f"ZF_PROVIDER_SESSION_CONFIG_REF={provider_config.ref}",
+            f"ZF_PROVIDER_SESSION_CONFIG_DIGEST={provider_config.digest}",
         ]
         from zf.runtime.result_submit import provision_role_submit_credential
 
@@ -257,6 +264,20 @@ class SpawnCoordinator:
             rotate=True,
         )
         env_prefix.append(f"ZF_RESULT_SUBMIT_TOKEN_FILE={submit_token_file}")
+        from zf.runtime.artifact_read_capability import (
+            provision_role_artifact_read_credential,
+        )
+
+        artifact_read_token_file = provision_role_artifact_read_credential(
+            self.state_dir,
+            role.instance_id,
+            role_name=role.name,
+            provider=role.backend,
+            rotate=True,
+        )
+        env_prefix.append(
+            f"ZF_ARTIFACT_READ_TOKEN_FILE={artifact_read_token_file}"
+        )
         zf_cli_cmd = os.environ.get("ZF_CLI_CMD", "").strip()
         if zf_cli_cmd:
             env_prefix.append(f"ZF_CLI_CMD={zf_cli_cmd}")
@@ -619,7 +640,13 @@ class SpawnCoordinator:
         if role.backend != "codex":
             return
         if self.registry.get(role.instance_id) is not None:
-            return  # uuid already cached
+            attach_codex_session_tailer(
+                self.codex_session_tailer,
+                role.instance_id,
+                self.registry.get_path(role.instance_id),
+                replay_existing=False,
+            )
+            return
         if role.instance_id in self._codex_observe_inflight:
             return  # background thread is already polling
         self._codex_observe_inflight.add(role.instance_id)
@@ -645,6 +672,14 @@ class SpawnCoordinator:
                     role,
                     "codex_observe_timeout",
                     "no session file appeared within 30s after dispatch",
+                )
+            else:
+                _session_id, session_path = result
+                attach_codex_session_tailer(
+                    self.codex_session_tailer,
+                    role.instance_id,
+                    session_path,
+                    replay_existing=True,
                 )
         except Exception as exc:
             self._emit_warning(

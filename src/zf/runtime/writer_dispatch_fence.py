@@ -51,10 +51,11 @@ class WriterDispatchFenceMixin:
                 continue
             payload = event.payload if isinstance(event.payload, dict) else {}
             event_task_id = str(event.task_id or payload.get("task_id") or "")
-            event_dispatch_id = str(
-                payload.get("run_id") or payload.get("dispatch_id") or ""
-            )
-            if event_task_id == task_id and event_dispatch_id == dispatch_id:
+            event_dispatch_ids = {
+                str(payload.get(key) or "")
+                for key in ("dispatch_id", "attempt_id", "run_id")
+            }
+            if event_task_id == task_id and dispatch_id in event_dispatch_ids:
                 start_index = index
         if start_index < 0:
             return False
@@ -62,10 +63,11 @@ class WriterDispatchFenceMixin:
         for event in events[start_index + 1:]:
             payload = event.payload if isinstance(event.payload, dict) else {}
             event_task_id = str(event.task_id or payload.get("task_id") or "")
-            event_dispatch_id = str(
-                payload.get("run_id") or payload.get("dispatch_id") or ""
-            )
-            if event_task_id != task_id or event_dispatch_id != dispatch_id:
+            event_dispatch_ids = {
+                str(payload.get(key) or "")
+                for key in ("dispatch_id", "attempt_id", "run_id")
+            }
+            if event_task_id != task_id or dispatch_id not in event_dispatch_ids:
                 continue
             if (
                 event.type == "fanout.child.dispatch_lost"

@@ -35,6 +35,7 @@ from zf.runtime.semantic_replan import (
     SEMANTIC_REPLAN_ACTION,
     resolve_semantic_replan_route,
 )
+from zf.runtime.task_contract_snapshot import current_task_contract_identity
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
 
@@ -244,6 +245,174 @@ def test_first_unsatisfiable_contract_routes_to_semantic_replan(
         event for event in log.read_all()
         if event.type == "flow.discovery.requested"
     ]) == 1
+
+
+def test_semantic_replan_preserves_current_handoff_and_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    task_map = state_dir / "artifacts" / "RF-PARITY" / "task_map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"schema_version":"task-map.v1","pdd_id":"RF-PARITY","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    generation = "generation-current"
+    package_id = "planpkg-current"
+    package_ref = "artifacts/plan-packages/current.json"
+    package_digest = "a" * 64
+    store.add(Task(
+        id="TASK-PARITY",
+        title="repair browser parity",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            feature_id="RF-PARITY",
+            behavior="repair browser parity",
+            acceptance_criteria=["browser parity is stable"],
+            evidence_contract={
+                "workflow_run_id": "rf-parity-run",
+                "source_refs": {
+                    "task_map_ref": str(task_map),
+                    "task_map_generation": generation,
+                    "plan_artifact_package_id": package_id,
+                    "plan_artifact_package_ref": package_ref,
+                    "plan_artifact_package_digest": package_digest,
+                },
+            },
+        ),
+    ))
+    identity = current_task_contract_identity(
+        store.get("TASK-PARITY"),
+        task_map_ref=str(task_map),
+    )
+    writer.emit(
+        "task_map.ready",
+        actor="zf-cli",
+        correlation_id="rf-parity-run",
+        payload={
+            "workflow_run_id": "rf-parity-run",
+            "pdd_id": "RF-PARITY",
+            "feature_id": "RF-PARITY",
+            "task_map_ref": str(task_map),
+            "source_index_ref": "docs/plans/rf-parity/source-index.json",
+            "source_commit": "base123",
+            "candidate_base_commit": "base123",
+            "target_ref": "base123",
+            "task_map_generation": generation,
+            "plan_artifact_package_id": package_id,
+            "plan_artifact_package_ref": package_ref,
+            "plan_artifact_package_digest": package_digest,
+        },
+    )
+    candidate = writer.emit(
+        "candidate.ready",
+        actor="zf-cli",
+        correlation_id="rf-parity-run",
+        payload={
+            "workflow_run_id": "rf-parity-run",
+            "pdd_id": "RF-PARITY",
+            "feature_id": "RF-PARITY",
+            "task_map_ref": str(task_map),
+            "candidate_ref": "candidate/RF-PARITY",
+            "candidate_head_commit": "candidate123",
+            "candidate_base_commit": "base123",
+            "completed_task_ids": ["TASK-PARITY"],
+            "task_map_generation": generation,
+        },
+    )
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev",
+        task_id="TASK-PARITY",
+        correlation_id="rf-parity-run",
+        payload={
+            "workflow_run_id": "rf-parity-run",
+            "task_id": "TASK-PARITY",
+            "failure_class": "task_contract_unsatisfiable",
+            "reason": "browser evidence is outside the current task allowlist",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": generation,
+            "task_ref": "task/TASK-PARITY",
+            "base_commit": "base123",
+            "contract_snapshot_ref": "artifacts/contracts/current.json",
+            "contract_snapshot_digest": "b" * 64,
+            "plan_artifact_package_id": package_id,
+            "plan_artifact_package_ref": package_ref,
+            "plan_artifact_package_digest": package_digest,
+            "workflow_proposal_ref": {"ref": "artifacts/proposals/current.json"},
+            "workflow_proposal_digest": "c" * 64,
+            "effective_config_ref": {"ref": "artifacts/config/current.json"},
+            "effective_config_digest": "d" * 64,
+            "run_contract_ref": "artifacts/run-contracts/current.json",
+            "run_contract_digest": "e" * 64,
+            "goal_claim_set_ref": "artifacts/claims/current.json",
+            "goal_claim_set_digest": "f" * 64,
+        },
+    )
+    writer.emit(
+        "task.rework.triage.completed",
+        actor="zf-cli",
+        task_id="TASK-PARITY",
+        correlation_id="rf-parity-run",
+        payload={
+            "task_id": "TASK-PARITY",
+            "failed_event_id": blocked.id,
+            "failed_event_type": blocked.type,
+            "classification": "design_issue",
+            "suspected_owner": "planner",
+            "recommended_action": "request_replan",
+            "retryable": False,
+            "is_terminal": False,
+            "notes": "task contract cannot contain the required parity repair",
+        },
+    )
+    config = _config(with_orchestrator=True)
+    config.roles.append(RoleConfig(
+        name="module-parity-scan",
+        backend="mock",
+        skills=["zf-gap-task-synth"],
+    ))
+    config.workflow.stages.append(WorkflowStageConfig(
+        id="flow-module-parity-scan",
+        trigger="verify.parity_scan.requested",
+        topology="fanout_reader",
+        roles=["module-parity-scan"],
+        flow_kind="refactor",
+    ))
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=config,
+        event_log=log,
+        spawn_repairs=False,
+    )
+
+    assert result.actions_applied == 1
+    requests = [
+        event for event in log.read_all()
+        if event.type == "verify.parity_scan.requested"
+    ]
+    assert len(requests) == 1
+    assert requests[0].task_id is None
+    payload = requests[0].payload
+    assert payload["task_id"] == "TASK-PARITY"
+    assert payload["rework_of"] == blocked.id
+    assert payload["flow_kind"] == "refactor"
+    assert payload["workflow_run_id"] == "rf-parity-run"
+    assert payload["contract_revision"] == identity["contract_revision"]
+    assert payload["task_map_generation"] == generation
+    assert payload["contract_snapshot_ref"] == "artifacts/contracts/current.json"
+    assert payload["contract_snapshot_digest"] == "b" * 64
+    assert payload["plan_artifact_package_id"] == package_id
+    assert payload["candidate_event_id"] == candidate.id
+    assert payload["candidate_head_commit"] == "candidate123"
+    assert payload["target_ref"] == "candidate/RF-PARITY"
+    assert payload["workflow_proposal_ref"] == {
+        "ref": "artifacts/proposals/current.json",
+    }
 
 
 def test_immediate_replan_suppression_uses_latest_task_triage() -> None:

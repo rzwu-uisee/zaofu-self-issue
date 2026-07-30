@@ -695,6 +695,7 @@ def sidecar_refs(
         ),
         kind=kind or "",
         ref=ref or "",
+        view="occurrences",
     )
     return {
         "schema_version": "sidecar-ref-index.v1",

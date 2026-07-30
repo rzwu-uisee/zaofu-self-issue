@@ -150,6 +150,48 @@ def test_yaml_routing_overrides_test_failed_when_configured():
     assert result.suspected_owner == "test"
 
 
+def test_admitted_plan_port_dependency_overrides_dev_yaml_route():
+    cfg = _config_with_routing({"test.failed": "dev-lane-0"})
+    event = ZfEvent(
+        type="test.failed",
+        actor="zf-cli",
+        origin="kernel",
+        payload={
+            "failure_class": "dependency_blocked",
+            "recovery_action": "replan",
+            "rework_scope": "plan_ports",
+            "semantic_result_refs": [
+                "artifacts/call-results/control/result.json",
+            ],
+        },
+    )
+
+    result = classify_rework_trigger(event, cfg)
+
+    assert result.classification == "design_issue"
+    assert result.suspected_owner == "planner"
+    assert result.recommended_action == "request_replan"
+
+
+def test_untrusted_dependency_marker_does_not_override_yaml_route():
+    cfg = _config_with_routing({"test.failed": "dev-lane-0"})
+    event = ZfEvent(
+        type="test.failed",
+        actor="worker",
+        payload={
+            "failure_class": "dependency_blocked",
+            "recovery_action": "replan",
+            "rework_scope": "plan_ports",
+            "semantic_result_refs": ["claimed-result.json"],
+        },
+    )
+
+    result = classify_rework_trigger(event, cfg)
+
+    assert result.classification == "yaml_routing"
+    assert result.suspected_owner == "dev-lane-0"
+
+
 def test_no_yaml_routing_falls_through_to_heuristic():
     """When yaml does NOT have an entry, heuristic classifier runs as before."""
     cfg = _config_with_routing({})  # empty

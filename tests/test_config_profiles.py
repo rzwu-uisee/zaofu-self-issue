@@ -337,6 +337,14 @@ def test_prod_controller_profiles_wire_yoke_and_enforcement():
     }
 
     prod = by_name["prod-runtime/v1"]
+    assert (
+        prod["flow_defaults"]["prd"]["roleDefaults"]["lifecycle"]["mode"]
+        == "on_demand"
+    )
+    assert (
+        prod["flow_defaults"]["issue"]["roleDefaults"]["lifecycle"]["mode"]
+        == "on_demand"
+    )
     prd_bundles = prod["flow_defaults"]["prd"]["roleSkillBundles"]
     issue_bundles = prod["flow_defaults"]["issue"]["roleSkillBundles"]
     assert "zf-yoke-dev-worker-role-context" in prd_bundles["impl"]
@@ -351,6 +359,12 @@ def test_prod_controller_profiles_wire_yoke_and_enforcement():
     assert issue_bundles["judge-issue"] == ["zf-goal-closure-judge-contract"]
 
     refactor = by_name["refactor-controller-runtime/v3"]
+    assert (
+        refactor["flow_defaults"]["refactor"]["roleDefaults"]["lifecycle"][
+            "mode"
+        ]
+        == "on_demand"
+    )
     ref_bundles = refactor["flow_defaults"]["refactor"]["roleSkillBundles"]
     assert "zf-yoke-dev-worker-role-context" in ref_bundles["impl"]
     assert "zf-yoke-test-evaluator-role-context" in ref_bundles["verify"]

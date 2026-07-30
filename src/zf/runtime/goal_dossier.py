@@ -18,7 +18,13 @@ from zf.core.state.atomic_io import atomic_write_text
 from zf.core.task.store import TERMINAL_STATES, TaskStore
 from zf.core.workspace.registry import stable_project_id
 from zf.runtime.attempt_handoff_reducer import reduce_attempt_handoffs
+from zf.runtime.artifact_delivery_result import (
+    artifact_delivery_dossier_projection,
+)
 from zf.runtime.goal_closure_projection import build_goal_closure_loop
+from zf.runtime.goal_dossier_consistency import (
+    evaluate_goal_dossier_delivery_readiness,
+)
 from zf.runtime.goal_dossier_history import build_goal_dossier_history
 from zf.runtime.operation_projection import project_task_operations
 from zf.runtime.plan_artifact_package import (
@@ -30,7 +36,10 @@ from zf.runtime.run_archive import RunArchiveError, validate_run_id
 from zf.runtime.run_incident_projection import project_run_failure_incidents
 from zf.runtime.run_manager import build_run_goal_projection
 from zf.runtime.run_scope import events_for_run, resolve_run_id
-from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
+from zf.runtime.workflow_anchor import (
+    is_workflow_fanout_anchor_task,
+    workflow_anchor_task_ids as identify_workflow_anchor_task_ids,
+)
 
 
 SCHEMA_VERSION = "goal-dossier.v1"
@@ -71,10 +80,17 @@ def build_goal_dossier(
     goal_id = _goal_id(scoped_events)
     goal = build_run_goal_projection(all_events, run_id=canonical_run_id)
     discovered_task_ids = _task_ids(scoped_events)
-    workflow_anchor_task_ids = _workflow_anchor_task_ids(
-        state_dir, discovered_task_ids,
+    workflow_anchor_task_ids = identify_workflow_anchor_task_ids(
+        state_dir,
+        discovered_task_ids,
+        scoped_events,
     )
-    current_tasks = _task_rows(state_dir, discovered_task_ids)
+    delivery_task_ids = [
+        task_id
+        for task_id in discovered_task_ids
+        if task_id not in workflow_anchor_task_ids
+    ]
+    current_tasks = _task_rows(state_dir, delivery_task_ids)
     feature = _feature_row(state_dir, goal_id)
     package_roadmap, package_diagnostics = _plan_package_roadmap(
         state_dir,
@@ -207,8 +223,39 @@ def build_goal_dossier(
         "incident_history": incident_history,
         "closure": closure,
         "operations": operations,
+        "artifact_delivery": artifact_delivery_dossier_projection(
+            scoped_events
+        ),
         "source_manifest": source_manifest,
     }
+    terminal_event = next((
+        event
+        for event in reversed(scoped_events)
+        if event.type in {"run.goal.completed", "run.goal.blocked"}
+    ), None)
+    receipt = None
+    if terminal_event is not None and terminal_event.type == "run.goal.completed":
+        try:
+            from zf.runtime.goal_completion_receipt import (
+                build_goal_completion_receipt,
+            )
+
+            receipt = build_goal_completion_receipt(
+                scoped_events,
+                run_id=canonical_run_id,
+                generated_at=generated_at,
+                project_id=project_id,
+            )
+        except Exception:
+            receipt = None
+    dossier["delivery_readiness"] = (
+        evaluate_goal_dossier_delivery_readiness(
+            state_dir=state_dir,
+            dossier=dossier,
+            terminal=terminal_event,
+            receipt=receipt,
+        )
+    )
     return redact_obj(dossier)
 
 
@@ -368,6 +415,7 @@ def goal_dossier_view(
         "generated_at": dossier.get("generated_at"),
         "source_fingerprint": dossier.get("source_fingerprint"),
         "freshness": dossier.get("freshness"),
+        "delivery_readiness": dossier.get("delivery_readiness"),
     }
     if preview:
         goal = dossier.get("goal") if isinstance(dossier.get("goal"), dict) else {}
@@ -410,6 +458,7 @@ def goal_dossier_view(
         "closure",
         "operations",
         "source_manifest",
+        "delivery_readiness",
     }
     if normalized not in allowed:
         raise GoalDossierError(f"unknown dossier section: {normalized!r}")
@@ -459,6 +508,8 @@ def render_goal_dossier_markdown(dossier: dict[str, Any]) -> str:
         f"- Status: `{goal.get('status', 'unknown')}`",
         f"- Completion gate: `{goal.get('completion_gate_status', 'unknown')}`",
         f"- Delivery phase: `{goal.get('delivery_phase', 'unknown')}`",
+        "- Delivery readiness: "
+        f"`{(dossier.get('delivery_readiness') or {}).get('status', 'unknown')}`",
         f"- Source fingerprint: `{dossier.get('source_fingerprint', '')}`",
         f"- Generated at: `{dossier.get('generated_at', '')}`",
         "",
@@ -583,11 +634,16 @@ def _goal_id(events: Iterable[ZfEvent]) -> str:
         payload = event.payload if isinstance(event.payload, dict) else {}
         result = payload.get("goal_closure_result")
         result = result if isinstance(result, dict) else {}
+        artifact_result = payload.get("artifact_delivery_result")
+        artifact_result = (
+            artifact_result if isinstance(artifact_result, dict) else {}
+        )
         for value in (
             payload.get("goal_id"),
             payload.get("feature_id"),
             payload.get("pdd_id"),
             result.get("goal_id"),
+            artifact_result.get("goal_id"),
         ):
             if str(value or "").strip():
                 return str(value).strip()
@@ -624,16 +680,6 @@ def _task_rows(state_dir: Path, task_ids: list[str]) -> list[dict[str, Any]]:
             continue
         rows.append(asdict(task))
     return redact_obj(rows)
-
-
-def _workflow_anchor_task_ids(state_dir: Path, task_ids: list[str]) -> list[str]:
-    store = TaskStore(state_dir / "kanban.json")
-    return [
-        task_id
-        for task_id in task_ids
-        if (task := store.get(task_id)) is not None
-        and is_workflow_fanout_anchor_task(task)
-    ]
 
 
 def _feature_row(state_dir: Path, goal_id: str) -> dict[str, Any]:

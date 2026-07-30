@@ -41,16 +41,43 @@ class FanoutEvidenceQueriesMixin:
         briefing_path: Path,
         task_id: str | None = None,
         trace_id: str | None = None,
+        run_id: str | None = None,
+        operation_id: str | None = None,
+        dispatch_id: str | None = None,
     ) -> DispatchContext:
+        workflow_run_id = str(run_id or "").strip()
+        task = None
+        if not workflow_run_id and task_id:
+            try:
+                from zf.runtime.run_admission import task_workflow_run_id
+
+                task = self.task_store.get(task_id)
+                if task is not None:
+                    workflow_run_id = task_workflow_run_id(task)
+                    if not workflow_run_id:
+                        workflow_run_id = task_workflow_run_id(
+                            task,
+                            events=self.event_log.read_all(),
+                        )
+            except Exception:
+                workflow_run_id = ""
+        active_dispatch_id = str(dispatch_id or "").strip()
+        if not active_dispatch_id:
+            active_dispatch_id = str(
+                getattr(self, "_active_dispatch_ids", {}).get(task_id or "", "")
+                or getattr(task, "active_dispatch_id", "")
+                or ""
+            )
         return DispatchContext(
             trace_id=trace_id or self._trace_id_for_task(task_id),
-            run_id=self._current_run_id(),
+            run_id=workflow_run_id or self._current_run_id(),
             task_id=task_id,
             role_name=role.name,
             instance_id=role.instance_id,
             backend=role.backend,
             briefing_path=briefing_path,
-            dispatch_id=getattr(self, "_active_dispatch_ids", {}).get(task_id or "", ""),
+            dispatch_id=active_dispatch_id,
+            operation_id=operation_id,
         )
 
     def _current_run_id(self) -> str | None:

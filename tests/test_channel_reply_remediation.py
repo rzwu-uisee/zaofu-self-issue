@@ -339,8 +339,12 @@ def test_tick_registration_present_in_run_once() -> None:
     import inspect
 
     from zf.runtime import orchestrator as orchestrator_module
+    from zf.runtime import orchestrator_periodic_sweep
 
-    source = inspect.getsource(orchestrator_module)
+    source = (
+        inspect.getsource(orchestrator_module)
+        + inspect.getsource(orchestrator_periodic_sweep)
+    )
     assert 'channel_reply_remediation' in source, (
         "run_once housekeeping must register _check_channel_reply_remediation"
     )

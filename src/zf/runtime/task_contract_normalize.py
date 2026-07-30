@@ -26,6 +26,7 @@ _TIER_ALIASES = {
     "live_smoke_optional": "e2e",
     "parity": "runtime",
     "review": "manual_evidence",
+    "setup": "static",
     "smoke": "e2e",
     "test": "runtime",
     "tests": "runtime",
@@ -69,8 +70,12 @@ def owner_fields_from_task_map_item(raw: dict[str, Any]) -> tuple[str, str]:
     owner_instance = _first_nonempty(
         raw.get("owner_instance"),
         raw.get("assigned_to"),
-        raw.get("preferred_impl_role"),
     )
+    preferred_impl_role = str(raw.get("preferred_impl_role") or "").strip()
+    if not owner_instance and _looks_like_role_instance(preferred_impl_role):
+        owner_instance = preferred_impl_role
+    elif not owner_role and preferred_impl_role:
+        owner_role = preferred_impl_role
     if not owner_instance and _looks_like_role_instance(owner_role):
         owner_instance = owner_role
         owner_role = ""
@@ -100,4 +105,3 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
-

@@ -15,6 +15,7 @@ escape into a 5-minute live e2e run.
 
 from __future__ import annotations
 
+import signal
 import subprocess
 from pathlib import Path
 
@@ -217,6 +218,58 @@ def test_start_watcher_passes_pinned_env(
         "start_watcher's Popen must pass env explicitly"
     )
     assert captured["kw"]["env"]["PYTHONPATH"] == str(REPO_ROOT / "src")
+    assert captured["kw"].get("start_new_session") is False
+
+
+def test_owner_sigterm_stops_nested_harness_even_with_no_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from tests.e2e.run_mixed import main
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "zf.yaml").write_text("project:\n  name: interrupted\n")
+    seed_file = tmp_path / "seed.txt"
+    seed_file.write_text("small task\n")
+    handlers = {signal.SIGTERM: signal.SIG_DFL}
+    stopped: list[tuple[Path, str | None]] = []
+
+    def fake_signal(signum, handler):  # noqa: ANN001
+        previous = handlers.get(signum, signal.SIG_DFL)
+        handlers[signum] = handler
+        return previous
+
+    def terminate_during_wait(*_args, **_kwargs):
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
+        raise AssertionError("SIGTERM handler must interrupt the wait")
+
+    monkeypatch.setattr("tests.e2e.run_mixed.signal.signal", fake_signal)
+    monkeypatch.setattr("tests.e2e.run_mixed._check_runner_environment", lambda: None)
+    monkeypatch.setattr("tests.e2e.run_mixed._read_session_name", lambda _root: "zf-test")
+    monkeypatch.setattr("tests.e2e.run_mixed._kill_lingering", lambda *_a, **_k: None)
+    monkeypatch.setattr("tests.e2e.run_mixed.reset_state", lambda _root: None)
+    monkeypatch.setattr("tests.e2e.run_mixed.start_harness", lambda _root: 0)
+    monkeypatch.setattr("tests.e2e.run_mixed.start_watcher", lambda _root: 4242)
+    monkeypatch.setattr("tests.e2e.run_mixed.seed_tasks", lambda *_a: None)
+    monkeypatch.setattr("tests.e2e.run_mixed.wait_for_done", terminate_during_wait)
+    monkeypatch.setattr(
+        "tests.e2e.run_mixed.stop_harness",
+        lambda root, session_name=None: stopped.append((root, session_name)),
+    )
+
+    result = main([
+        "--worktree",
+        str(worktree),
+        "--seed-file",
+        str(seed_file),
+        "--no-stop",
+        "--confirm",
+    ])
+
+    assert result == 128 + signal.SIGTERM
+    assert stopped == [(worktree, "zf-test")]
+    assert handlers[signal.SIGTERM] == signal.SIG_DFL
 
 
 # ---------------- _check_runner_environment ----------------

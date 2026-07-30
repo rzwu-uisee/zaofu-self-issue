@@ -127,13 +127,14 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("human.escalate", "_on_human_escalate"),
     # 1202-T3: Codex hook engine bridges into the same reactor as Claude
     # via a dedicated namespace. `stop` is the round-complete cue; the
-    # other four are observational today but registered so they show up
+    # other lifecycle facts are observational but remain explicit in
     # in the handler-coverage invariant.
     ("codex.hook.session_start", "_on_codex_hook_session_start"),
     ("codex.hook.user_prompt_submit", "_on_codex_hook_user_prompt_submit"),
     ("codex.hook.pre_tool_use", "_on_codex_hook_pre_tool_use"),
     ("codex.hook.post_tool_use", "_on_codex_hook_post_tool_use"),
     ("codex.hook.stop", "_on_codex_hook_stop"),
+    ("provider.turn.closed", "_on_codex_hook_session_start"),
     ("worker.completed", "_on_worker_completed"),
     ("agent.api_blocked", "_on_agent_api_blocked"),
     ("agent.timeout", "_on_agent_timeout"),
@@ -388,15 +389,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _register_light_flow_handlers(self, registry) -> None:
         """批D:light 拓扑入口触发 → kernel 合成单任务 task_map。"""
         try:
-            from zf.runtime.light_flow import light_flow_metadata
+            from zf.runtime.light_flow import light_flow_entry_triggers
 
-            metadata = light_flow_metadata(self.config)
-            if metadata is None:
-                return
-            entry = str(metadata.get("light_entry_trigger") or "prd.requested")
-            registry.register(
-                entry, self._on_light_flow_entry, source="builtin",
-            )
+            for entry in light_flow_entry_triggers(self.config):
+                registry.register(
+                    entry, self._on_light_flow_entry, source="builtin",
+                )
         except Exception:
             pass
 
@@ -1044,6 +1042,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if instance and to_state:
             try:
                 self._last_worker_state[instance] = to_state
+            except Exception:
+                pass
+        if instance and payload.get("respawn_success_circuit_reset") is True:
+            try:
+                self._respawn_success_circuit_opened.discard(instance)
+                self._dead_counter.pop(instance, None)
             except Exception:
                 pass
         return None
@@ -2440,12 +2444,21 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         """Reject unbound/stale lifecycle events before they affect truth."""
         if event.type not in self._worker_lifecycle_events():
             return None
+        if rejected := self._run_lifecycle_rejection(event):
+            return rejected
         payload = self._fanout_result_payload(event)
         if payload.get("fanout_id") and (
             payload.get("child_id")
             or event.type == "fanout.synth.completed"
             or event.actor == "zf-cli"
         ):
+            if event.task_id and (
+                rejected := self._task_attempt_rejection_for_id(
+                    event,
+                    event.task_id,
+                )
+            ):
+                return rejected
             return None
         if not event.task_id and self._is_taskless_candidate_terminal_event(event):
             return None
@@ -2477,6 +2490,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 task_id=event.task_id,
                 reason=f"{event.type} rejected: unknown task_id",
             )
+
+        if rejected := self._task_attempt_rejection(event, task):
+            return rejected
 
         if event.type == "artifact.manifest.published":
             return self._reject_stale_artifact_manifest(event, task)
@@ -4676,10 +4692,8 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_codex_hook_session_start(
         self, event: ZfEvent,
     ) -> OrchestratorDecision | None:
-        """Observational: codex session started. No state transition.
-
-        Registered so the handler-coverage invariant stays green and so
-        WAKE_PATTERNS can include it for future use.
+        """Observe provider lifecycle without asserting a task transition.
+        Registered for wake coverage and liveness reconstruction only.
         """
         return None
 
@@ -5712,6 +5726,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             task = mark_workflow_fanout_anchor(
                 task,
                 request_id=str(payload.get("request_id") or ""),
+                workflow_run_id=str(
+                    payload.get("workflow_run_id")
+                    or payload.get("run_id")
+                    or event.correlation_id
+                    or ""
+                ),
                 workflow_input_manifest_ref=str(
                     payload.get("workflow_input_manifest_ref") or ""
                 ),
@@ -5809,31 +5829,6 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 if isinstance(child, dict) and str(child.get("task_id") or "") == task_id:
                     return fanout_id
         return ""
-
-    def _emit_workflow_invoke_rejected(
-        self,
-        event: ZfEvent,
-        reason: str,
-        *,
-        task_id: str,
-        pattern_id: str,
-    ) -> None:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        self.event_writer.append(ZfEvent(
-            type="workflow.invoke.rejected",
-            actor="zf-cli",
-            task_id=task_id or event.task_id,
-            payload={
-                "task_id": task_id,
-                "pattern_id": pattern_id,
-                "source_event_id": event.id,
-                "reason": reason,
-                "channel_id": str(payload.get("channel_id") or ""),
-                "thread_id": str(payload.get("thread_id") or ""),
-            },
-            causation_id=event.id,
-            correlation_id=event.correlation_id,
-        ))
 
     def _emit_task_fanout_rejected(
         self,

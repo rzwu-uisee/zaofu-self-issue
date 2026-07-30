@@ -421,6 +421,7 @@ def run_resident_once(
     max_actions_per_tick: int = 0,
     env: dict[str, str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[ResidentAction]:
     actions = plan_resident_actions(
         state_dir=state_dir,
@@ -465,6 +466,8 @@ def run_resident_once(
     if max_actions_per_tick > 0:
         actions = actions[:max_actions_per_tick]
     for action in actions:
+        if should_stop is not None and should_stop():
+            break
         if action.action == "skip":
             if execute and authorized:
                 writer.append(ZfEvent(
@@ -564,6 +567,8 @@ def run_resident_once(
                     if key != "event_type"
                 },
             ))
+        if should_stop is not None and should_stop():
+            break
     return actions
 
 
@@ -581,6 +586,13 @@ def _finalize_resident_worktree(
     }
     if not path.exists():
         return {**base, "status": "missing"}
+    from zf.autoresearch.worktree_preparation import (
+        cleanup_interrupted_prepared_worktree,
+    )
+
+    preparation_cleanup = cleanup_interrupted_prepared_worktree(worktree=path)
+    if preparation_cleanup.get("status") not in {"not_prepared", "not_needed"}:
+        base["preparation_cleanup"] = preparation_cleanup
 
     status = subprocess.run(
         ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],

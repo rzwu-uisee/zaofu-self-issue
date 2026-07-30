@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from zf.core.events.model import ZfEvent
 from zf.runtime.goal_closure_bridge import GoalClosureBridgeMixin
+from zf.runtime.flow_discovery_context import build_flow_discovery_context
+from zf.runtime.module_parity_identity import module_parity_identity_payload
 from zf.runtime.orchestrator_types import OrchestratorDecision
 
 
@@ -174,19 +176,20 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             self._first_payload_text(payload, context, "trace_id")
             or str(event.correlation_id or event.id)
         )
-        candidate_ref = self._first_payload_text(
-            payload,
-            context,
-            "candidate_ref",
-            "target_ref",
-            "branch",
+        discovery_context = build_flow_discovery_context(
+            self.event_log.read_all(),
+            event=event,
+            payload=payload,
+            fallback=context,
+            metadata=metadata,
+            pdd_id=pdd_id,
+            feature_id=feature_id,
+            trace_id=trace_id,
+            flow_kind=flow_kind,
+            discovery_profile=discovery_profile,
         )
-        candidate_head_commit = self._first_payload_text(
-            payload,
-            context,
-            "candidate_head_commit",
-            "commit",
-        )
+        candidate_ref = discovery_context.candidate_ref
+        candidate_head_commit = discovery_context.candidate_head_commit
         if event.type in {"verify.passed", "test.passed"} and (
             candidate_ref and not candidate_head_commit
         ):
@@ -197,38 +200,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                     f"{discovery_profile} discovery"
                 ),
             )
-        artifact_refs = payload.get("artifact_refs")
-        if not isinstance(artifact_refs, list):
-            artifact_refs = []
-        request_payload = {
-            "schema_version": "flow-discovery-request.v1",
-            "pdd_id": pdd_id,
-            "feature_id": feature_id,
-            "trace_id": trace_id,
-            "flow_kind": flow_kind,
-            "discovery_profile": discovery_profile,
-            "quality_floor": str(metadata.get("quality_floor") or ""),
-            "evidence_policy": str(metadata.get("evidence_policy") or ""),
-            "environment_policy": str(metadata.get("environment_policy") or ""),
-            "projection_policy": str(metadata.get("projection_policy") or ""),
-            "task_map_ref": self._first_payload_text(
-                payload,
-                context,
-                "task_map_ref",
-                "base_task_map_ref",
-                "supersedes_task_map_ref",
-            ),
-            "candidate_ref": candidate_ref,
-            "target_ref": candidate_ref,
-            "candidate_head_commit": candidate_head_commit,
-            "artifact_refs": [str(item) for item in artifact_refs if str(item).strip()],
-            "source_event_id": event.id,
-            "source": (
-                "candidate_ready_flow_discovery_bridge"
-                if event.type == "candidate.ready"
-                else "post_verify_flow_discovery_bridge"
-            ),
-        }
+        request_payload = discovery_context.request_payload
         if verification_event is not None:
             request_payload["verification_event_id"] = verification_event.id
         requested = self.event_writer.append(ZfEvent(
@@ -334,6 +306,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             "base_task_map_ref",
             "supersedes_task_map_ref",
         )
+        parity_identity = module_parity_identity_payload(payload, context)
         active_gap_task_ids = self._active_gap_task_ids(
             pdd_id=pdd_id,
             feature_id=feature_id,
@@ -361,6 +334,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             )
         request_payload = {
             "schema_version": "module-parity-scan-request.v1",
+            "flow_kind": "refactor",
             "pdd_id": pdd_id,
             "feature_id": feature_id,
             "trace_id": trace_id,
@@ -383,6 +357,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             ),
             "candidate_ref": candidate_ref,
             "target_ref": candidate_ref,
+            **parity_identity,
             "source_event_id": event.id,
             "source": "verify_passed_bridge",
         }
@@ -634,6 +609,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
         ):
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
+        context = self._latest_refactor_context(payload)
         pdd_id = str(payload.get("pdd_id") or payload.get("feature_id") or "").strip()
         feature_id = str(payload.get("feature_id") or pdd_id).strip()
         trace_id = str(payload.get("trace_id") or event.correlation_id or event.id).strip()
@@ -643,6 +619,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             or payload.get("supersedes_task_map_ref")
             or ""
         ).strip()
+        parity_identity = module_parity_identity_payload(payload, context)
         gap_tasks = self._parity_gap_tasks(payload)
         open_gap_count = self._payload_int(
             payload,
@@ -733,6 +710,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                         or payload.get("candidate_ref")
                         or ""
                     ),
+                    **parity_identity,
                     "open_p0_p1_gap_count": 0,
                     "source": "module_parity_scan_bridge",
                 },
@@ -800,6 +778,8 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             "feature_id",
             "trace_id",
             "task_map_ref",
+            "task_map_generation",
+            "task_map_digest",
             "source_index_ref",
             "source_commit",
             "candidate_base_commit",
@@ -808,6 +788,13 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             "commit",
             "target_ref",
             "branch",
+            "goal_id",
+            "workflow_run_id",
+            "plan_artifact_package_id",
+            "plan_artifact_package_ref",
+            "plan_artifact_package_digest",
+            "goal_claim_set_ref",
+            "goal_claim_set_digest",
         )
         out: dict = {}
         try:

@@ -133,6 +133,24 @@ class CanonicalHandoffResolver:
                 else []
             )
             mutable["artifact_refs"] = [*artifact_refs, *plan_port_sources]
+        if str(mutable.get("attempt_domain") or "") == "plan":
+            from zf.runtime.plan_synth_handoff import (
+                build_plan_handoff_input_refs,
+            )
+
+            plan_inputs = build_plan_handoff_input_refs(
+                state_dir=self.state_dir,
+                project_root=self.project_root,
+                payload=mutable,
+                source_event_id=source_event_id,
+            )
+            if plan_inputs:
+                input_refs = (
+                    list(mutable.get("input_refs") or [])
+                    if isinstance(mutable.get("input_refs"), list)
+                    else []
+                )
+                mutable["input_refs"] = [*input_refs, *plan_inputs]
         metadata = {
             **currentness,
             "source_snapshot": self._stable_source_snapshot(
@@ -229,7 +247,7 @@ class CanonicalHandoffResolver:
             raise ArtifactReadError(
                 f"{authority_profile} handoff requires a current canonical task"
             )
-        if task is not None:
+        if task is not None and task_bound_profile:
             try:
                 current = current_task_contract_identity(task)
             except TaskContractSnapshotError as exc:

@@ -36,7 +36,9 @@ _BLOCKED_EVENT_IDENTITY_KEYS = (
     "lane_id",
     "stage_id",
     "stage_slot",
+    "operation_id",
     "attempt_id",
+    "lease_id",
     "task_map_generation",
     "contract_revision",
 )

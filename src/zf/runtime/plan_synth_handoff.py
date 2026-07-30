@@ -13,6 +13,49 @@ PLAN_SYNTH_PROFILE_ID = "plan-synth"
 PLAN_SYNTH_PROFILE_REVISION = "1"
 PLAN_SYNTH_RESULT_SCHEMA = "plan-synthesis-result.v1"
 PLAN_SYNTH_CONTRACT_SCHEMA = "plan-synth-contract.v1"
+_CHILD_ARTIFACT_SCALAR_KEYS = (
+    "plan_artifact_ref",
+    "plan_ref",
+    "task_map_ref",
+    "source_index_ref",
+    "backlog_ref",
+    "prd_ref",
+    "spec_ref",
+    "research_ref",
+    "scan_quality_audit_ref",
+    "inventory_ref",
+    "source_inventory_ref",
+    "capability_matrix_ref",
+    "acceptance_matrix_ref",
+    "test_matrix_ref",
+    "regression_test_matrix_ref",
+    "real_e2e_matrix_ref",
+    "inventory_coverage_matrix_ref",
+    "expected_module_parity_report_paths_ref",
+)
+_PLAN_SOURCE_CANDIDATES = (
+    ("goal-objective", "goal_objective", "objective_ref"),
+    ("requirement", "requirement_spec", "requirement_spec_ref"),
+    ("requirement", "requirement_spec", "requirement_ref"),
+    ("requirement", "requirement_spec", "prd_ref"),
+    ("review-artifact", "review_artifact", "review_artifact_ref"),
+    ("workflow-input", "workflow_input_manifest", "workflow_input_manifest_ref"),
+    ("workflow-prompt", "workflow_prompt", "workflow_prompt_ref"),
+)
+_PLAN_REWORK_CONTEXT_KEYS = (
+    "rework_of",
+    "rework_attempt",
+    "rework_source",
+    "rework_feedback",
+    "rework_categories",
+    "rework_summary",
+    "replan_classification",
+    "classification",
+    "failed_task_ids",
+    "task_ids",
+    "downstream_task_ids",
+    "resume_scope",
+)
 
 
 def render_plan_synth_completion_command(
@@ -35,6 +78,68 @@ def render_plan_synth_completion_command(
         semantic_template=dict(payload),
     )
     return command
+
+
+def build_plan_handoff_input_refs(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    payload: Mapping[str, Any],
+    source_event_id: str = "",
+) -> list[dict[str, Any]]:
+    """Materialize canonical requirement and rework inputs for a plan attempt."""
+
+    state_dir = Path(state_dir)
+    project_root = Path(project_root)
+    trigger = (
+        payload.get("trigger_payload")
+        if isinstance(payload.get("trigger_payload"), Mapping)
+        else {}
+    )
+    input_refs: list[dict[str, Any]] = []
+    seen_sources: set[tuple[str, str]] = set()
+    for source_id, kind, key in _PLAN_SOURCE_CANDIDATES:
+        ref = str(payload.get(key) or trigger.get(key) or "").strip()
+        if not ref:
+            continue
+        source = materialize_attempt_source_ref(
+            state_dir=state_dir,
+            project_root=project_root,
+            ref=ref,
+            source_id=source_id,
+            kind=kind,
+        )
+        identity = (source_id, str(source.get("sha256") or ""))
+        if not source or identity in seen_sources:
+            continue
+        source.setdefault("allowed_paths", ["$"])
+        input_refs.append(source)
+        seen_sources.add(identity)
+
+    rework_context = {"schema_version": "plan-rework-context.v1"}
+    for key in _PLAN_REWORK_CONTEXT_KEYS:
+        value = payload.get(key)
+        if value in (None, "", [], {}):
+            value = trigger.get(key)
+        if value not in (None, "", [], {}):
+            rework_context[key] = value
+    if len(rework_context) > 1:
+        source = write_immutable_json_sidecar(
+            state_dir,
+            rework_context,
+            root="plan-synth/rework-contexts",
+            kind="plan_rework_context",
+            schema_version="plan-rework-context.v1",
+            created_by="plan-synth-handoff",
+            source_event_id=source_event_id,
+        )
+        source.update({
+            "source_id": "plan-rework-context",
+            "artifact_id": "plan-rework-context.json",
+            "allowed_paths": ["$"],
+        })
+        input_refs.append(source)
+    return input_refs
 
 
 def build_plan_synth_call_payload(
@@ -105,38 +210,42 @@ def build_plan_synth_call_payload(
             "artifact_id": str(source.get("artifact_id") or ""),
             "sha256": str(source.get("sha256") or ""),
         })
+        body = (
+            report.get("report")
+            if isinstance(report.get("report"), Mapping)
+            else {}
+        )
+        for artifact_index, ref in enumerate(
+            _child_artifact_refs(body),
+            start=1,
+        ):
+            artifact_source = materialize_attempt_source_ref(
+                state_dir=state_dir,
+                project_root=project_root,
+                ref=ref,
+                source_id=f"child-artifact-{child_id}-{artifact_index}",
+                kind="fanout_child_artifact",
+            )
+            if not artifact_source:
+                continue
+            artifact_source.setdefault("allowed_paths", ["$"])
+            input_refs.append(artifact_source)
 
-    trigger = (
-        manifest.get("trigger_payload")
-        if isinstance(manifest.get("trigger_payload"), Mapping)
-        else {}
-    )
-    source_candidates = (
-        ("goal-objective", "goal_objective", "objective_ref"),
-        ("requirement", "requirement_spec", "requirement_ref"),
-        ("requirement", "requirement_spec", "prd_ref"),
-        ("review-artifact", "review_artifact", "review_artifact_ref"),
-        ("workflow-input", "workflow_input_manifest", "workflow_input_manifest_ref"),
-        ("workflow-prompt", "workflow_prompt", "workflow_prompt_ref"),
-    )
     seen_sources = {
         (str(item.get("source_id") or ""), str(item.get("sha256") or ""))
         for item in input_refs
     }
-    for source_id, kind, key in source_candidates:
-        ref = str(trigger.get(key) or manifest.get(key) or "").strip()
-        if not ref:
-            continue
-        source = materialize_attempt_source_ref(
-            state_dir=state_dir,
-            project_root=project_root,
-            ref=ref,
-            source_id=source_id,
-            kind=kind,
+    for source in build_plan_handoff_input_refs(
+        state_dir=state_dir,
+        project_root=project_root,
+        payload=manifest,
+        source_event_id=trigger_event_id,
+    ):
+        identity = (
+            str(source.get("source_id") or ""),
+            str(source.get("sha256") or ""),
         )
-        identity = (source_id, str(source.get("sha256") or ""))
-        if source and identity not in seen_sources:
-            source.setdefault("allowed_paths", ["$"])
+        if identity not in seen_sources:
             input_refs.append(source)
             seen_sources.add(identity)
 
@@ -194,11 +303,23 @@ def build_plan_synth_call_payload(
     }
 
 
+def _child_artifact_refs(report: Mapping[str, Any]) -> list[str]:
+    refs = [
+        str(report.get(key) or "").strip()
+        for key in _CHILD_ARTIFACT_SCALAR_KEYS
+    ]
+    artifact_refs = report.get("artifact_refs")
+    if isinstance(artifact_refs, list):
+        refs.extend(str(item or "").strip() for item in artifact_refs)
+    return list(dict.fromkeys(ref for ref in refs if ref))
+
+
 __all__ = [
     "PLAN_SYNTH_CONTRACT_SCHEMA",
     "PLAN_SYNTH_PROFILE_ID",
     "PLAN_SYNTH_PROFILE_REVISION",
     "PLAN_SYNTH_RESULT_SCHEMA",
+    "build_plan_handoff_input_refs",
     "build_plan_synth_call_payload",
     "render_plan_synth_completion_command",
 ]

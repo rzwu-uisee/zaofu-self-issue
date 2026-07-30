@@ -14,9 +14,10 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
+from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.goal_completion_receipt import build_goal_completion_receipt
 from zf.runtime.orchestrator import Orchestrator
-from zf.runtime.run_contract import stable_json_sha256, write_run_contract
+from zf.runtime.run_contract import hydrate_run_effective_config, load_run_contract
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.simulation_lifecycle import emit_simulation_done
 from zf.runtime.result_submit import (
@@ -104,19 +105,43 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
     tmp_path: Path,
 ) -> None:
     workflow_run_id = "evt-light-entry-148"
+    config_source = (
+        Path(__file__).resolve().parents[2]
+        / "examples"
+        / "prod"
+        / "controller"
+        / "prd-light-v3.yaml"
+    )
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text(
+        config_source.read_text(encoding="utf-8")
+        .replace(
+            "profile_sources: [common/profiles.yaml]",
+            f"profile_sources: [{config_source.parent / 'common' / 'profiles.yaml'}]",
+        )
+        .replace(
+            "  project:\n    name: prd-light-v3\n",
+            "  project:\n    name: prd-light-v3\n    state_dir: .zf-148-mock\n",
+        ),
+        encoding="utf-8",
+    )
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "zf-148@example.com")
     _git(tmp_path, "config", "user.name", "ZF 148 Mock")
     (tmp_path / "README.md").write_text("zf 148 mock\n", encoding="utf-8")
-    (tmp_path / ".gitignore").write_text(".zf-148-mock/\n", encoding="utf-8")
-    _git(tmp_path, "add", "README.md", ".gitignore")
+    (tmp_path / ".gitignore").write_text(
+        ".zf-148-mock/\nartifacts/\ndocs/intake/\nskills\n",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", "README.md", ".gitignore", "zf.yaml")
     _git(tmp_path, "commit", "-q", "-m", "init")
     _git(tmp_path, "branch", "-M", "main")
-
-    config = load_config(
-        Path(__file__).resolve().parents[2]
-        / "examples" / "prod" / "controller" / "prd-light-v3.yaml"
+    (tmp_path / "skills").symlink_to(
+        Path(__file__).resolve().parents[2] / "skills",
+        target_is_directory=True,
     )
+
+    config = load_config(config_path)
     state_dir = tmp_path / ".zf-148-mock"
     config.project.root = str(tmp_path)
     config.project.state_dir = str(state_dir)
@@ -151,21 +176,118 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
     assert config.workflow.candidate_quality_source == "task_contract_required"
     assert config.workflow.flow_metadata["topology"] == "light"
     assert config.workflow.flow_metadata["result_protocol"]["semantic_submit_profiles"] == {
+        "implementation": "blocking",
         "thin-judge-goal-closure": "blocking",
         "task-verify": "blocking",
         "candidate-verify": "blocking",
     }
 
     state_dir.mkdir()
-    run_contract = {
-        "schema_version": "run-contract.v1",
-        "workflow": {"kind": "prd"},
-        "project": {"root": str(tmp_path), "state_dir": str(state_dir)},
-    }
-    run_contract["contract_digest"] = stable_json_sha256(run_contract)
-    write_run_contract(state_dir, run_contract)
-    judge_token_path = provision_role_submit_credential(state_dir, "judge-prd")
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    submitter = SemanticResultSubmitService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=writer,
+    )
+    submit_tokens = {
+        role_instance: provision_role_submit_credential(
+            state_dir,
+            role_instance,
+        ).read_text().strip()
+        for role_instance in (
+            "dev-lane-0",
+            "dev-lane-1",
+            "verify-lane-0",
+            "verify-lane-1",
+            "judge-prd",
+        )
+    }
+    actions = ControlledActionService(
+        state_dir,
+        writer,
+        config=config,
+        project_root=tmp_path,
+        actor="e2e-operator",
+        source="mock-e2e",
+        surface="test",
+    )
+    request_payload = {
+        "request_id": workflow_run_id,
+        "kind": "prd",
+        "objective": "Deliver two independently verified result files.",
+        "source_ref": "README.md",
+        "target_root": "app",
+        "backend": "mock",
+        "acceptance": [
+            "Both result files exist with their expected deterministic content.",
+        ],
+        "constraints": ["Use the direct-v1 execution profile."],
+        "allow_missing_env": True,
+    }
+    request_event = writer.append(ZfEvent(
+        type="control.action.requested",
+        actor="e2e-operator",
+        correlation_id=workflow_run_id,
+        payload={"action": "workflow-request", **request_payload},
+    ))
+    proposed = actions.execute(
+        action="workflow-request",
+        requested_action="workflow-request",
+        payload=request_payload,
+        requested=request_event,
+    )
+    assert proposed["status"] == "proposal_ready", json.dumps(
+        proposed.get("blockers") or [],
+        indent=2,
+    )
+    submit_payload = {
+        "request_id": workflow_run_id,
+        "intake_ref": proposed["intake_ref"],
+        "proposal_ref": proposed["proposal_ref"],
+        "proposal_digest": proposed["proposal_digest"],
+        "kind": "prd",
+        "allow_missing_env": True,
+    }
+    submit_event = writer.append(ZfEvent(
+        type="control.action.requested",
+        actor="e2e-operator",
+        correlation_id=workflow_run_id,
+        payload={"action": "workflow-submit", **submit_payload},
+    ))
+    submitted = actions.execute(
+        action="workflow-submit",
+        requested_action="workflow-submit",
+        payload=submit_payload,
+        requested=submit_event,
+    )
+    assert submitted["status"] == "accepted"
+    entry_event = next(
+        event for event in reversed(log.read_all())
+        if event.type in {"prd.requested", "workflow.invoke.requested"}
+        and event.correlation_id == workflow_run_id
+    )
+    run_contract = load_run_contract(state_dir)
+    assert run_contract is not None
+    assert run_contract["workflow"]["proposal_ref"] == proposed["proposal_ref"]
+    assert run_contract["workflow"]["proposal_digest"] == proposed["proposal_digest"]
+    effective_config = hydrate_run_effective_config(state_dir, run_contract)
+    assert effective_config["project"]["name"] == "prd-light-v3"
+    assert entry_event.payload["effective_config_ref"] == run_contract[
+        "config"
+    ]["effective_snapshot_ref"]
+    assert entry_event.payload["effective_config_digest"] == run_contract[
+        "config"
+    ]["effective_snapshot_digest"]
+    assert entry_event.payload["run_contract_ref"]
+    assert entry_event.payload["run_contract_digest"] == run_contract[
+        "contract_digest"
+    ]
+    assert run_contract["protocols"]["execution_profile"]["roles"][
+        "dev-lane-0"
+    ]["default_profile"] == "direct-v1"
+
     task_map_ref = f"{state_dir.name}/artifacts/LIGHT-148/task_map.json"
     task_map_path = tmp_path / task_map_ref
     task_map_path.parent.mkdir(parents=True)
@@ -203,22 +325,13 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
         )],
     }), encoding="utf-8")
 
-    log = EventLog(state_dir / "events.jsonl")
     transport = _Transport()
     orchestrator = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
-    log.append(ZfEvent(
-        type="run.goal.started",
-        actor="orchestrator",
-        correlation_id=workflow_run_id,
-        payload={
-            "run_id": "run-light-148",
-            "goal_id": "LIGHT-148",
-            "objective": "deliver one verified result",
-        },
-    ))
+    orchestrator.run_once(events=[entry_event])
     trigger = ZfEvent(
         type="task_map.ready",
         actor="orchestrator",
+        causation_id=entry_event.id,
         correlation_id=workflow_run_id,
         payload={
             "pdd_id": "LIGHT-148",
@@ -228,10 +341,25 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
             "source_refs": ["README.md"],
             "task_map_ref": task_map_ref,
             "flow_kind": "prd",
+            **{
+                key: entry_event.payload[key]
+                for key in (
+                    "workflow_proposal_ref",
+                    "workflow_proposal_digest",
+                    "effective_config_ref",
+                    "effective_config_digest",
+                    "run_contract_ref",
+                    "run_contract_digest",
+                )
+            },
         },
     )
     log.append(trigger)
     orchestrator.run_once(events=[trigger])
+    package_event = _latest_event(log, "plan.artifact_package.admitted")
+    assert package_event.payload["run_contract_digest"] == run_contract[
+        "contract_digest"
+    ]
 
     impl_started = next(
         event for event in log.read_all()
@@ -267,56 +395,63 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
         source_commits.add(source_commit)
         receipt_id = f"receipt-{command['command_id']}"
         receipt_ids[task_id] = receipt_id
-        completion = ZfEvent(
-            type="dev.build.done",
-            actor=child["role_instance"],
-            task_id=task_id,
-            correlation_id=workflow_run_id,
-            payload={
-                "fanout_id": impl_manifest["fanout_id"],
-                "child_id": child["child_id"],
-                "run_id": child["run_id"],
-                "attempt_id": child["run_id"],
-                "dispatch_id": child["run_id"],
-                "pdd_id": "LIGHT-148",
-                "source_commit": source_commit,
-                "source_branch": child["source_branch"],
-                "workdir": str(workdir),
-                "impl_self_check": {
-                    "schema_version": "impl-self-check.v1",
-                    "workflow_run_id": contract["workflow_run_id"],
-                    "task_id": task_id,
-                    "attempt_id": child["run_id"],
-                    "contract_revision": contract["contract_revision"],
-                    "task_map_generation": contract["task_map_generation"],
-                    "source_commit": source_commit,
-                    "target_commit": source_commit,
-                    "contract_snapshot_ref": child["contract_snapshot_ref"],
-                    "contract_snapshot_digest": child["contract_snapshot_digest"],
-                    "command_receipts": [{
-                        "receipt_id": receipt_id,
-                        "command_id": command["command_id"],
-                        "command_digest": command["command_digest"],
-                        "target_commit": source_commit,
-                        "status": "passed",
-                        "exit_code": 0,
-                        "evidence_refs": [f"mock://command/{command['command_id']}"],
-                    }],
-                    "acceptance_results": [{
-                        "acceptance_id": criterion["acceptance_id"],
-                        "status": "passed",
-                        "command_receipt_ids": [receipt_id],
-                        "evidence_refs": [
-                            f"mock://acceptance/{criterion['acceptance_id']}"
-                        ],
-                        "residual_risks": [],
-                    }],
-                    "evidence_refs": [f"mock://impl/{task_id}"],
-                    "residual_risks": [],
-                },
+        impl_self_check = {
+            "schema_version": "impl-self-check.v1",
+            "workflow_run_id": contract["workflow_run_id"],
+            "task_id": task_id,
+            "attempt_id": child["run_id"],
+            "contract_revision": contract["contract_revision"],
+            "task_map_generation": contract["task_map_generation"],
+            "source_commit": source_commit,
+            "target_commit": source_commit,
+            "contract_snapshot_ref": child["contract_snapshot_ref"],
+            "contract_snapshot_digest": child["contract_snapshot_digest"],
+            "command_receipts": [{
+                "receipt_id": receipt_id,
+                "command_id": command["command_id"],
+                "command_digest": command["command_digest"],
+                "target_commit": source_commit,
+                "status": "passed",
+                "exit_code": 0,
+                "evidence_refs": [f"mock://command/{command['command_id']}"],
+            }],
+            "acceptance_results": [{
+                "acceptance_id": criterion["acceptance_id"],
+                "status": "passed",
+                "command_receipt_ids": [receipt_id],
+                "evidence_refs": [
+                    f"mock://acceptance/{criterion['acceptance_id']}"
+                ],
+                "residual_risks": [],
+            }],
+            "evidence_refs": [f"mock://impl/{task_id}"],
+            "residual_risks": [],
+        }
+        submitted_impl = submitter.submit(
+            operation_id=child["operation_id"],
+            semantic_result={
+                "schema_version": "implementation-result.v1",
+                "execution_status": "completed",
+                "verdict": "passed",
+                "target_commit": source_commit,
+                "changed_files": [path],
+                "evidence_refs": [f"mock://impl/{task_id}"],
+                "self_check": impl_self_check,
+                "known_gaps": [],
+                "summary": f"implemented {task_id}",
             },
+            role_instance=child["role_instance"],
+            credential=submit_tokens[child["role_instance"]],
         )
-        log.append(completion)
+        completion = next(
+            item for item in log.read_all()
+            if item.id == submitted_impl.canonical_event_id
+        )
+        assert completion.payload["semantic_result_profile"] == {
+            "profile_id": "implementation",
+            "revision": "1",
+        }
+        assert "implementation_result" not in completion.payload
         orchestrator.run_once(events=[completion])
 
     candidate = _latest_event(log, "candidate.ready")
@@ -355,68 +490,45 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
         )
         task_id = verify_payload["task_id"]
         verified_targets.add(verify_payload["target_commit"])
-        verify_result = ZfEvent(
-            type="verify.child.completed",
-            actor=verify_child["role_instance"],
-            task_id=task_id,
-            correlation_id=workflow_run_id,
-            payload={
-                "fanout_id": verify_manifest["fanout_id"],
-                "child_id": verify_child["child_id"],
-                "run_id": verify_child["run_id"],
-                "status": "completed",
+        submitted_verify = submitter.submit(
+            operation_id=verify_payload["operation_id"],
+            semantic_result={
+                "schema_version": "verification-result.v1",
+                "execution_status": "completed",
+                "verdict": "passed",
+                "verification_owner": "task_verify",
+                "verification_tier": "task_non_smoke",
+                "summary": "verified",
                 "evidence_refs": [f"mock://verify/{task_id}"],
-                "report": {
+                "reused_command_receipt_ids": [receipt_ids[task_id]],
+                "probe_receipts": [{
+                    "probe_id": f"probe-{task_id}",
                     "status": "passed",
-                    "summary": "exact target and independent probe passed",
+                    "evidence_refs": [f"mock://verify/{task_id}/probe"],
+                }],
+                "rework_items": [],
+                "requirement_results": [{
+                    "acceptance_id": item["acceptance_id"],
+                    "status": "passed",
+                    "verification_owner": item["verification_owner"],
+                    "verification_tier": item["verification_tier"],
+                    "evidence_refs": [f"mock://verify/{task_id}"],
                     "findings": [],
-                    "recommendation": "approve",
-                    "evidence_refs": [f"mock://verify/{task_id}"],
-                },
-                "verification_result": {
-                    "schema_version": "verification-result.v1",
-                    **{
-                        key: verify_payload[key]
-                        for key in (
-                            "workflow_run_id",
-                            "task_id",
-                            "contract_revision",
-                            "task_map_generation",
-                            "base_commit",
-                            "task_ref",
-                            "contract_snapshot_ref",
-                            "contract_snapshot_digest",
-                            "target_snapshot_ref",
-                            "target_commit",
-                            "target_snapshot_digest",
-                        )
-                    },
-                    "execution_status": "completed",
-                    "verdict": "passed",
-                    "verification_owner": "task_verify",
-                    "verification_tier": "task_non_smoke",
-                    "summary": "verified",
-                    "evidence_refs": [f"mock://verify/{task_id}"],
-                    "reused_command_receipt_ids": [receipt_ids[task_id]],
-                    "probe_receipts": [{
-                        "probe_id": f"probe-{task_id}",
-                        "status": "passed",
-                        "evidence_refs": [f"mock://verify/{task_id}/probe"],
-                    }],
-                    "rework_items": [],
-                    "requirement_results": [{
-                        "acceptance_id": item["acceptance_id"],
-                        "status": "passed",
-                        "verification_owner": item["verification_owner"],
-                        "verification_tier": item["verification_tier"],
-                        "evidence_refs": [f"mock://verify/{task_id}"],
-                        "findings": [],
-                        "reproduction_commands": [],
-                    } for item in verify_contract["acceptance_criteria"]],
-                },
+                    "reproduction_commands": [],
+                } for item in verify_contract["acceptance_criteria"]],
             },
+            role_instance=verify_child["role_instance"],
+            credential=submit_tokens[verify_child["role_instance"]],
         )
-        log.append(verify_result)
+        verify_result = next(
+            item for item in log.read_all()
+            if item.id == submitted_verify.canonical_event_id
+        )
+        assert verify_result.payload["semantic_result_profile"] == {
+            "profile_id": "candidate-verify",
+            "revision": "1",
+        }
+        assert "verification_result" not in verify_result.payload
         orchestrator.run_once(events=[verify_result])
 
     test_passed = _latest_event(log, "test.passed")
@@ -459,15 +571,11 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
             encoding="utf-8",
         )
     )
-    submitted = SemanticResultSubmitService(
-        state_dir=state_dir,
-        event_log=log,
-        event_writer=EventWriter(log),
-    ).submit(
+    submitted = submitter.submit(
         operation_id=judge_child_payload["operation_id"],
         semantic_result=semantic_result,
         role_instance="judge-prd",
-        credential=judge_token_path.read_text().strip(),
+        credential=submit_tokens["judge-prd"],
     )
     judged = next(
         item for item in log.read_all()
@@ -486,6 +594,32 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
     ) is not None
 
     events = log.read_all()
+    direct_requests = []
+    for operation in (
+        item
+        for item in events
+        if item.type == "workflow.operation.requested"
+        and item.payload.get("operation_type")
+        in {"fanout_writer_child", "fanout_reader_child"}
+    ):
+        request = hydrate_sidecar_ref(
+            state_dir,
+            operation.payload["request_ref"],
+        ).payload["request"]
+        direct_requests.append({
+            "operation_type": operation.payload.get("operation_type"),
+            "stage_id": request.get("stage_id"),
+            "effective_config_ref": request.get("effective_config_ref"),
+            "effective_config_digest": request.get("effective_config_digest"),
+        })
+    assert direct_requests
+    assert all(
+        request["effective_config_ref"]
+        == run_contract["config"]["effective_snapshot_ref"]
+        and request["effective_config_digest"]
+        == run_contract["config"]["effective_snapshot_digest"]
+        for request in direct_requests
+    ), json.dumps(direct_requests, indent=2)
     completed = [item for item in events if item.type == "run.goal.completed"]
     assert len(completed) == 1
     assert verified_targets == {candidate.payload["candidate_head_commit"]}

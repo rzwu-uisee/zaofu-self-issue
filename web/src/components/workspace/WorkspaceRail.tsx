@@ -99,6 +99,7 @@ export function WorkspaceRail({
     { id: "project", icon: Home, label: "Overview" },
     { id: "inbox", icon: Inbox, label: "Inbox", badge: inboxPendingCount },
     { id: "board", icon: ListTodo, label: "Tasks" },
+    { id: "workflows", icon: GitFork, label: "Workflows" },
     { id: "agents", icon: Bot, label: "Agents" },
     { id: "automations", icon: CalendarClock, label: "Automations" },
   ];

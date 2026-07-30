@@ -24,7 +24,7 @@ from zf.core.workflow.topology import (
 )
 
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "tmp"
 
 
 def _example(name: str) -> Path:

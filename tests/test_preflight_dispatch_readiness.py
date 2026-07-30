@@ -70,6 +70,7 @@ def test_run_preflight_checks_all_pass_on_minimal_config():
     assert {r.name for r in results} == {
         "dispatch_prompt_signature",
         "dispatch_chain_imports",
+        "provider_session_configs",
         "role_backends_known",
     }
     assert preflight_ok(results)

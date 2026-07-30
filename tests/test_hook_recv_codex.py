@@ -510,6 +510,176 @@ def test_codex_apply_patch_allows_write_inside_allowed_paths(
     assert not [e for e in events if e.type == "worker.scope_write.rejected"]
 
 
+def test_codex_allowed_paths_guard_allows_only_current_result_scratch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    transcript = _seed_scoped_worker_task(state_dir, ["app/server.js"])
+    event_log = EventLog(state_dir / "events.jsonl")
+    runtime = SimpleNamespace(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        event_log=event_log,
+        event_writer=EventWriter(event_log),
+        config=SimpleNamespace(
+            workflow=SimpleNamespace(
+                flow_metadata={"result_protocol": {"mode": "blocking"}}
+            )
+        ),
+    )
+    provision_role_submit_credential(state_dir, "dev-1")
+    prepared = prepare_call_operation(
+        runtime,
+        payload={
+            "workflow_run_id": "run-scratch",
+            "role_instance": "dev-1",
+            "fanout_id": "fanout-1",
+            "stage_id": "impl",
+            "child_id": "child-1",
+            "run_id": "attempt-scratch",
+            "task_id": "T-RESULT",
+            "canonical_success_event": "dev.build.done",
+            "canonical_failure_event": "dev.blocked",
+        },
+        operation_type="fanout_writer_child",
+        operation_key="child-1",
+        stage_id="impl",
+        task_id="T-RESULT",
+        dispatch_id="attempt-scratch",
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="T-RESULT",
+        dispatch_id="attempt-scratch",
+    )
+    scratch = state_dir / prepared.result_scratch_ref
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("{}\n", encoding="utf-8")
+    sibling = scratch.with_name("other.json")
+    sibling.write_text("{}\n", encoding="utf-8")
+
+    def invoke_patch(target: Path, session_id: str) -> int:
+        return _invoke(
+            state_dir,
+            event="codex.hook.pre_tool_use",
+            backend="codex",
+            payload={
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "command": (
+                        "*** Begin Patch\n"
+                        f"*** Update File: {target}\n"
+                        "@@\n"
+                        "-{}\n"
+                        "+{\"verdict\": \"passed\"}\n"
+                        "*** End Patch"
+                    ),
+                },
+            },
+            monkeypatch=monkeypatch,
+        )
+
+    assert invoke_patch(scratch, "uuid-result-scratch-ok") == 0
+    assert invoke_patch(sibling, "uuid-result-scratch-denied") == 2
+    rejected = [
+        event
+        for event in event_log.read_all()
+        if event.type == "worker.scope_write.rejected"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].payload["offending_paths"] == [str(sibling)]
+
+
+def test_codex_refactor_planner_allows_workdir_artifact_and_result_scratch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    role = "refactor-plan-synth"
+    workdir = state_dir / "workdirs" / role / "project"
+    workdir.mkdir(parents=True)
+    transcript = (
+        state_dir / "workdirs" / role / "codex-home"
+        / "sessions" / "2026" / "07" / "29" / "rollout.jsonl"
+    )
+    event_log = EventLog(state_dir / "events.jsonl")
+    runtime = SimpleNamespace(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        event_log=event_log,
+        event_writer=EventWriter(event_log),
+        config=SimpleNamespace(
+            workflow=SimpleNamespace(
+                flow_metadata={"result_protocol": {"mode": "blocking"}}
+            )
+        ),
+    )
+    provision_role_submit_credential(state_dir, role)
+    prepared = prepare_call_operation(
+        runtime,
+        payload={
+            "workflow_run_id": "run-refactor",
+            "role_instance": role,
+            "fanout_id": "fanout-refactor-plan",
+            "stage_id": "flow-plan",
+            "child_id": role,
+            "run_id": "attempt-refactor-plan",
+            "canonical_success_event": "refactor.plan.child.completed",
+            "canonical_failure_event": "refactor.plan.child.failed",
+        },
+        operation_type="fanout_reader_child",
+        operation_key=role,
+        stage_id="flow-plan",
+        task_id="",
+        dispatch_id="attempt-refactor-plan",
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="",
+        dispatch_id="attempt-refactor-plan",
+    )
+    scratch = state_dir / prepared.result_scratch_ref
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("{}\n", encoding="utf-8")
+
+    def invoke_patch(target: Path, session_id: str) -> int:
+        return _invoke(
+            state_dir,
+            event="codex.hook.pre_tool_use",
+            backend="codex",
+            payload={
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "command": (
+                        "*** Begin Patch\n"
+                        f"*** Add File: {target}\n"
+                        "+{}\n"
+                        "*** End Patch"
+                    ),
+                },
+            },
+            monkeypatch=monkeypatch,
+        )
+
+    artifact = workdir / "artifacts" / "fanout-refactor-plan" / "task_map.json"
+    assert invoke_patch(artifact, "uuid-refactor-plan-artifact") == 0
+    assert invoke_patch(scratch, "uuid-refactor-plan-result") == 0
+    assert not [
+        event
+        for event in event_log.read_all()
+        if event.type == "worker.scope_write.rejected"
+    ]
+
+
 def _seed_claude_fanout_workdir(state_dir: Path) -> Path:
     workdir = state_dir / "workdirs" / "dev-1" / "project"
     workdir.mkdir(parents=True)

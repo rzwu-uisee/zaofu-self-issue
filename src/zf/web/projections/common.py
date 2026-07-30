@@ -260,6 +260,10 @@ def _derive_lifecycle_state(
         return "failed"
     if "recycl" in state:
         return "recycling" if state == "recycling" else "pending_recycle"
+    if state in {"dormant", "suspended"}:
+        return state
+    if state in {"activating", "resuming", "suspending"}:
+        return state
     if state in {"starting", "created"}:
         return "starting"
     if state in {"blocked", "waiting", "needs_input", "input_required"}:

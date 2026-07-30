@@ -32,6 +32,12 @@ WORKFLOW_KIND_POLICIES: dict[str, WorkflowKindPolicy] = {
         default_tier="standard",
         required_fields=("objective", "source_root", "target_root"),
     ),
+    "workflow": WorkflowKindPolicy(
+        kind="workflow",
+        default_lanes=1,
+        default_tier="standard",
+        required_fields=("objective",),
+    ),
 }
 
 
@@ -43,7 +49,7 @@ def normalize_workflow_kind(kind: str, *, allow_auto: bool = False) -> str:
         return "auto"
     if value not in WORKFLOW_KIND_POLICIES:
         raise ValueError(
-            "workflow kind must be issue, prd, refactor, feat"
+            "workflow kind must be issue, prd, refactor, feat, workflow"
             + (", or auto" if allow_auto else "")
         )
     return value

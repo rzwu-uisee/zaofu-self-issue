@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from zf.runtime.sidecar_refs import (
@@ -28,6 +28,7 @@ EXECUTION_STATUSES = frozenset({"completed", "failed"})
 
 _IDENTITY_KEYS = (
     "workflow_run_id",
+    "goal_id",
     "parent_operation_id",
     "operation_id",
     "request_hash",
@@ -44,6 +45,14 @@ _IDENTITY_KEYS = (
     "plan_synth_contract_digest",
     "contract_revision",
     "task_map_generation",
+    "workflow_generation",
+    "request_revision",
+    "generic_workflow_contract_digest",
+    "workflow_intent",
+    "workflow_template",
+    "completion_profile",
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
     "plan_artifact_package_id",
     "plan_artifact_package_ref",
     "plan_artifact_package_digest",
@@ -61,6 +70,29 @@ _IDENTITY_KEYS = (
 
 class CallResultEnvelopeError(ValueError):
     """The envelope or one of its immutable refs is not trustworthy."""
+
+
+def call_result_envelope_ref(value: object) -> str:
+    """Return a canonical digest-addressed envelope ref or an empty string."""
+
+    is_descriptor = isinstance(value, Mapping)
+    descriptor = value if is_descriptor else {}
+    ref = str(
+        descriptor.get("ref") if is_descriptor else value or ""
+    ).strip()
+    path = PurePosixPath(ref)
+    digest = str(
+        descriptor.get("sha256") if is_descriptor else path.stem
+    ).strip()
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or len(path.parts) != 4
+        or path.parts[:3] != ("artifacts", "call-results", "envelopes")
+        or path.suffix != ".json"
+        or path.stem != digest
+    ):
+        return ""
+    return ref
 
 
 def canonical_json_bytes(payload: Any) -> bytes:
@@ -165,6 +197,7 @@ def normalize_call_result_envelope(
         "workflow_run_id": workflow_run_id
         or _text(payload, "workflow_run_id", "trace_id", "pdd_id")
         or correlation_id,
+        "goal_id": _text(payload, "goal_id"),
         "parent_operation_id": parent_operation_id
         or _text(payload, "parent_operation_id"),
         "operation_id": operation_id or _text(payload, "operation_id"),
@@ -182,6 +215,20 @@ def normalize_call_result_envelope(
         "plan_synth_contract_digest": _text(payload, "plan_synth_contract_digest"),
         "contract_revision": _text(payload, "contract_revision"),
         "task_map_generation": _text(payload, "task_map_generation"),
+        "workflow_generation": _text(payload, "workflow_generation"),
+        "request_revision": _text(payload, "request_revision"),
+        "generic_workflow_contract_digest": _text(
+            payload,
+            "generic_workflow_contract_digest",
+        ),
+        "workflow_intent": _text(payload, "workflow_intent"),
+        "workflow_template": _text(payload, "workflow_template"),
+        "completion_profile": _text(payload, "completion_profile"),
+        "goal_claim_set_ref": _text(payload, "goal_claim_set_ref"),
+        "goal_claim_set_digest": _text(
+            payload,
+            "goal_claim_set_digest",
+        ),
         "plan_artifact_package_id": _text(
             payload,
             "plan_artifact_package_id",
@@ -221,6 +268,9 @@ def normalize_call_result_envelope(
     repair = payload.get("call_result_repair")
     if not isinstance(repair, Mapping):
         repair = {"rounds": 0, "repair_refs": []}
+    provider_summary = payload.get("provider_operation_summary_ref")
+    if not isinstance(provider_summary, Mapping):
+        provider_summary = {}
     return {
         "schema_version": CALL_RESULT_ENVELOPE_SCHEMA,
         "canonicalization_version": CALL_RESULT_CANONICALIZATION,
@@ -243,6 +293,7 @@ def normalize_call_result_envelope(
         "control_result": dict(control_result),
         "artifact_manifest_ref": _text(payload, "artifact_manifest_ref"),
         "artifact_manifest_digest": _text(payload, "artifact_manifest_digest"),
+        "provider_operation_summary_ref": dict(provider_summary),
         "evidence_refs": _strings(payload.get("evidence_refs")),
         "input_consumption": dict(input_consumption),
         "repair": {
@@ -298,6 +349,20 @@ def validate_call_result_envelope(
         for field in ("schema_version", "ref", "sha256"):
             if not str(control.get(field) or "").strip():
                 issues.append(_issue(f"control_result.{field}", "missing_required"))
+    provider_summary = envelope.get("provider_operation_summary_ref")
+    if provider_summary:
+        if not isinstance(provider_summary, Mapping):
+            issues.append(_issue(
+                "provider_operation_summary_ref",
+                "missing_object",
+            ))
+        else:
+            for field in ("schema_version", "ref", "sha256"):
+                if not str(provider_summary.get(field) or "").strip():
+                    issues.append(_issue(
+                        f"provider_operation_summary_ref.{field}",
+                        "missing_required",
+                    ))
     if require_read_proof:
         consumption = envelope.get("input_consumption")
         if not isinstance(consumption, Mapping):
@@ -376,6 +441,7 @@ __all__ = [
     "CALL_RESULT_CANONICALIZATION",
     "CALL_RESULT_ENVELOPE_SCHEMA",
     "CallResultEnvelopeError",
+    "call_result_envelope_ref",
     "canonical_json_bytes",
     "canonical_json_sha256",
     "envelope_identity_key",

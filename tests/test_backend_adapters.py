@@ -49,6 +49,21 @@ class TestCodexAdapter:
         assert "--model" in cmd
         assert "gpt-4" in cmd
 
+    def test_model_reasoning_effort_overrides_global_codex_config(self):
+        role = RoleConfig(
+            name="dev",
+            model="gpt-5.5",
+            model_reasoning_effort="xhigh",
+        )
+        cmd = CodexAdapter().build_command(role)
+        assert "--config" in cmd
+        assert 'model_reasoning_effort="xhigh"' in cmd
+
+    def test_empty_model_reasoning_effort_preserves_cli_inheritance(self):
+        role = RoleConfig(name="dev", model="gpt-5.5")
+        cmd = CodexAdapter().build_command(role)
+        assert not any("model_reasoning_effort" in item for item in cmd)
+
     def test_ready_pattern_is_unicode_chevron(self):
         # Codex TUI uses U+203A (›), not ASCII >
         assert CodexAdapter().ready_pattern == "›"

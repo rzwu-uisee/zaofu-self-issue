@@ -213,6 +213,116 @@ def test_admitted_rejected_result_settles_call_without_semantic_rework(tmp_path:
     assert admitted.payload["semantic_verdict"] == "rejected"
 
 
+def test_admitted_result_binds_provider_operation_summary(tmp_path: Path) -> None:
+    admission, operations = _runtime(tmp_path)
+    ensured = operations.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-1",
+        operation_type="agent",
+        request={"prompt": "verify"},
+        task_id="T1",
+    )
+    payload = _verification_payload(verdict="passed")
+    payload["provider_operation_summary"] = {
+        "schema_version": "provider-operation-summary.v1",
+        "workflow_run_id": "run-1",
+        "operation_id": "op-1",
+        "provider_session_id": "provider-session-1",
+        "settlement": "settled",
+        "child_count": 2,
+        "child_status_counts": {"completed": 2},
+        "active_child_count": 0,
+        "peak_parallel_agents": 2,
+        "usage": {"input_tokens": 100, "output_tokens": 20},
+        "cost_usd": 0.2,
+    }
+    outcome = admission.report_legacy_result(
+        ZfEvent(
+            type="verify.child.completed",
+            actor="verify-1",
+            task_id="T1",
+            payload=payload,
+        ),
+        mode="blocking",
+        operation={
+            "workflow_run_id": "run-1",
+            "operation_id": "op-1",
+            "request_hash": ensured.request_hash,
+            "provider_session_max_parallel_agents": 4,
+            "budget_snapshot": {"remaining_usd": 1.0},
+        },
+    )
+
+    assert outcome.admitted is True
+    assert outcome.provider_operation_summary_ref
+    events = operations.event_log.read_all()
+    recorded = next(
+        event for event in events
+        if event.type == "provider.operation.summary.recorded"
+    )
+    assert recorded.payload["provider_operation_summary_ref"] == (
+        outcome.provider_operation_summary_ref
+    )
+    assert "child_status_counts" not in recorded.payload
+    operation = load_workflow_operation(operations.event_log, "op-1")
+    assert operation is not None
+    assert operation["provider_operation_summary_ref"] == (
+        outcome.provider_operation_summary_ref
+    )
+
+
+def test_invalid_provider_operation_summary_uses_output_repair(
+    tmp_path: Path,
+) -> None:
+    admission, operations = _runtime(tmp_path)
+    ensured = operations.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-1",
+        operation_type="agent",
+        request={"prompt": "verify"},
+        task_id="T1",
+    )
+    payload = _verification_payload(verdict="passed")
+    payload["provider_operation_summary"] = {
+        "schema_version": "provider-operation-summary.v1",
+        "workflow_run_id": "run-1",
+        "operation_id": "op-1",
+        "provider_session_id": "provider-session-1",
+        "settlement": "settled",
+        "child_count": 1,
+        "child_status_counts": {"completed": 1},
+        "active_child_count": 0,
+        "peak_parallel_agents": 5,
+        "usage": {"input_tokens": 10},
+        "cost_usd": 0.1,
+    }
+    outcome = admission.report_legacy_result(
+        ZfEvent(
+            type="verify.child.completed",
+            actor="verify-1",
+            task_id="T1",
+            payload=payload,
+        ),
+        mode="blocking",
+        operation={
+            "workflow_run_id": "run-1",
+            "operation_id": "op-1",
+            "request_hash": ensured.request_hash,
+            "provider_session_max_parallel_agents": 4,
+        },
+    )
+
+    assert outcome.repair_requested is True
+    assert any(
+        issue["code"] == "concurrency_ceiling_exceeded"
+        for issue in outcome.issues
+    )
+    assert not any(
+        event.type == "provider.operation.summary.recorded"
+        for event in operations.event_log.read_all()
+    )
+
+
 def test_malformed_result_uses_output_repair_without_semantic_attempt(tmp_path: Path) -> None:
     admission, operations = _runtime(tmp_path)
     ensured = operations.ensure_operation(
@@ -844,3 +954,49 @@ def test_invalid_event_replay_is_idempotent(tmp_path: Path) -> None:
     invalids2 = [e for e in operations.event_log.read_all()
                  if e.type == "workflow.call.result.invalid"]
     assert len(invalids2) == 1, "重放不得累积重复 invalid 事件"
+
+
+def test_plan_synthesis_result_is_not_bound_to_previous_plan_package(
+    tmp_path: Path,
+) -> None:
+    admission, operations = _runtime(tmp_path)
+    operations.event_log.append(ZfEvent(
+        type="plan.artifact_package.admitted",
+        correlation_id="run-plan",
+        payload={
+            "workflow_run_id": "run-plan",
+            "package_id": "planpkg-old",
+            "package_ref": "artifacts/plan-packages/old.json",
+            "package_digest": "old-digest",
+            "mode": "blocking",
+            "status": "admitted",
+        },
+    ))
+    envelope = {
+        "control_result": {"schema_version": "plan-synthesis-result.v1"},
+        "identity": {"workflow_run_id": "run-plan"},
+    }
+
+    assert admission._plan_package_currentness_issues(envelope) == []
+    assert admission._operation_result_currentness_issues(
+        envelope,
+        {
+            "result_identity": {
+                "workflow_run_id": "run-plan",
+                "plan_artifact_package_id": "planpkg-old",
+                "plan_artifact_package_ref": "artifacts/plan-packages/old.json",
+                "plan_artifact_package_digest": "old-digest",
+            },
+        },
+    ) == []
+
+    implementation_envelope = {
+        "control_result": {"schema_version": "implementation-result.v1"},
+        "identity": {"workflow_run_id": "run-plan"},
+    }
+    assert {
+        issue["code"]
+        for issue in admission._plan_package_currentness_issues(
+            implementation_envelope,
+        )
+    } == {"stale_plan_artifact_package"}

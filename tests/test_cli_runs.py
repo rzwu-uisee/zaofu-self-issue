@@ -90,3 +90,43 @@ def test_runs_reconcile_cli_archives_stale_run(tmp_path: Path, monkeypatch):
 
     assert result == 0
     assert (state_dir / "runs" / "RUN-STALE" / "artifact_manifest.json").exists()
+
+
+def test_runs_pause_resume_cancel_use_controlled_actions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "repo"
+    state_dir = project / ".zf"
+    state_dir.mkdir(parents=True)
+    (project / "zf.yaml").write_text(
+        'version: "1.0"\nproject:\n  name: cli-test\n',
+        encoding="utf-8",
+    )
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        type="run.admission.admitted",
+        actor="orchestrator",
+        task_id="TASK-1",
+        correlation_id="RUN-1",
+        payload={
+            "run_id": "RUN-1",
+            "workflow_run_id": "RUN-1",
+            "request_id": "REQ-1",
+            "source_event_id": "evt-source",
+            "policy_mode": "serial",
+            "max_active_runs": 1,
+        },
+    ))
+    monkeypatch.chdir(project)
+
+    assert main(["runs", "pause", "RUN-1"]) == 0
+    assert main(["runs", "resume", "RUN-1"]) == 0
+    assert main(["runs", "cancel", "RUN-1"]) == 0
+
+    event_types = [
+        event.type
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+    ]
+    assert event_types.count("run.paused") == 1
+    assert event_types.count("run.resumed") == 1
+    assert event_types.count("run.cancelled") == 1

@@ -7,6 +7,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from zf.runtime.call_result_envelope import call_result_envelope_ref
+from zf.runtime.fanout_payload_data import (
+    collect_payload_list,
+    first_child_mapping,
+    first_child_value,
+    payload_or_report_value,
+    payload_ref_value,
+)
 from zf.runtime.fanout_parent_identity import parent_flow_identity
 from zf.runtime.task_contract_snapshot import criterion_text
 
@@ -32,6 +40,12 @@ _FANOUT_AFFINITY_METADATA_KEYS = (
 )
 
 class WriterFanoutDataMixin:
+    _collect_payload_list = staticmethod(collect_payload_list)
+    _first_child_mapping = staticmethod(first_child_mapping)
+    _first_child_value = staticmethod(first_child_value)
+    _payload_or_report_value = staticmethod(payload_or_report_value)
+    _payload_ref_value = staticmethod(payload_ref_value)
+
     @staticmethod
     def _writer_current_task_ref(
         task_ref: dict,
@@ -76,6 +90,7 @@ class WriterFanoutDataMixin:
             if isinstance(item, dict):
                 text = str(
                     item.get("text")
+                    or item.get("statement")
                     or item.get("criterion")
                     or item.get("description")
                     or item.get("acceptance")
@@ -145,89 +160,50 @@ class WriterFanoutDataMixin:
         return (
             "plan" in haystack
             or "arch.proposal.done" in haystack
-            or "task_map.ready" in haystack and "refactor" in haystack
+            or success_event == "task_map.ready"
         )
 
     @staticmethod
     def _plan_artifact_contract_lines() -> list[str]:
         return [
             "Plan stages must produce a durable markdown plan artifact, not transcript-only prose.",
-            "Write the plan under `docs/plans/` or a stage-specific artifact directory before emitting the success event.",
-            "Include `plan_artifact_ref` or `plan_ref` in the result payload, and include the same path in `artifact_refs`.",
+            "Write plan artifacts inside the assigned project workdir using workdir-relative paths such as `docs/plans/<name>.md` or `artifacts/<stage>/<name>.json`. Never write the configured state dir or root project directly.",
+            "Include the same workdir-relative `plan_artifact_ref` or `plan_ref` in `artifact_refs`; the Kernel relocates admitted refs into canonical runtime artifact storage and computes their digests.",
             "When a task map is produced, include `task_map_ref`; when source coverage is available, include `source_index_ref`.",
+            "When implementation must start from a non-default existing target, put its immutable git commit in top-level `task_map.target_commit`; do not leave the only baseline binding under metadata or prose.",
             "If the plan splits work across more than one parallel bundle (distinct `owner_role` bundles running concurrently), it MUST include one separate task with `root_owner_class: \"assembly\"` that owns the shared entrypoint/wiring and merges the bundles. The writer fanout admission rejects a multi-bundle task_map lacking it and forces a replan — declare the assembly task up front.",
             "Set task_map.workspace_root_owner_required=true only when this delivery must change or validate a root-level scaffold/entrypoint; then assign that root path to one task. Do not infer it from a local leaf patch.",
+            "Each task_map validation.commands[] tier must use the canonical vocabulary `static`, `runtime`, `e2e`, or `manual_evidence`. Common producer aliases are normalized at admission, but unknown tiers fail closed; use `static` for setup/install/build checks rather than inventing a `setup` tier.",
             "For refactor plan handoff, include `scan_quality_audit_ref` and list that audit artifact in `artifact_refs`.",
             "If the workflow asks for a full manifest, emit `artifact.manifest.published` with `kind=implementation_plan` and `kind=task_map` refs before the terminal success event.",
         ]
 
     @staticmethod
-    def _collect_payload_list(payloads: list[dict], key: str) -> list[str]:
-        values: list[str] = []
-        for payload in payloads:
-            raw = WriterFanoutDataMixin._payload_or_report_value(payload, key)
-            if isinstance(raw, list):
-                values.extend(str(item) for item in raw if str(item or ""))
-            elif raw not in (None, ""):
-                values.append(str(raw))
-        return values
-
-    @staticmethod
-    def _first_child_value(
-        manifest: dict,
-        payloads: list[dict],
-        key: str,
-    ) -> str:
-        for payload in payloads:
-            value = WriterFanoutDataMixin._payload_or_report_value(payload, key)
-            if value not in (None, ""):
-                return str(value)
-        value = manifest.get(key)
-        return str(value) if value not in (None, "") else ""
-
-    @staticmethod
-    def _first_child_mapping(
-        manifest: dict,
-        payloads: list[dict],
-        key: str,
-    ) -> dict:
-        for payload in payloads:
-            value = WriterFanoutDataMixin._payload_or_report_value(payload, key)
-            if isinstance(value, dict):
-                return dict(value)
-        value = manifest.get(key)
-        return dict(value) if isinstance(value, dict) else {}
-
-    @staticmethod
-    def _payload_or_report_value(payload: dict, key: str):
-        value = payload.get(key)
-        if value not in (None, ""):
-            return value
-        report = payload.get("report")
-        if isinstance(report, dict):
-            report_value = report.get(key)
-            if report_value not in (None, ""):
-                return report_value
-        # P0-3 (2026-06-19 e2e): the child inherits the upstream stage's
-        # contract fields (prd_ref / artifact_refs / evidence_refs from
-        # prd.ready) via trigger_payload at dispatch, but a reader role does
-        # not necessarily re-emit them in its result. When a required
-        # success-payload field is absent from both the child top level and
-        # its report, fall back to the inherited trigger_payload so the
-        # aggregate satisfies required-schema (e.g. prd.approved requires
-        # prd_ref) instead of failing the contract gate with the data sitting
-        # one level down. Top-level / report still win — this is a last resort.
-        # trigger_payload sits either directly on the value-dict or one level
-        # down on the manifest child record's ``payload`` sub-dict (the shape
-        # _fanout_child_payloads hands the aggregate); check both.
-        trigger = payload.get("trigger_payload")
-        if not isinstance(trigger, dict):
-            inner = payload.get("payload")
-            if isinstance(inner, dict):
-                trigger = inner.get("trigger_payload")
-        if isinstance(trigger, dict):
-            return trigger.get(key)
-        return None
+    def _plan_port_contract_lines(*, flow_kind: str = "") -> list[str]:
+        lines = [
+            "Plan-port contract: when Controlled Artifact Inputs include portable "
+            "matrix drafts, enrich them before success and return each ready body "
+            "through `plan_ports` using canonical logical names such as "
+            "`source_inventory`, `capability_matrix`, `acceptance_matrix`, "
+            "`test_matrix`, `task_map`, and `real_e2e_matrix`.",
+            "`plan_ports` MUST be a JSON array of descriptor objects shaped like "
+            "`{\"logical_name\": \"acceptance_matrix\", \"schema_version\": "
+            "\"acceptance-matrix.v1\", \"body\": {...}}`; do not use a "
+            "`{logical_name: body}` object map.",
+            "Every required matrix body must set top-level `status: ready` and "
+            "`metadata.enrichment_contract.status: fulfilled`; do not overwrite "
+            "kernel state or claim an unadapted draft as ready.",
+            "A pure aggregator may validate and carry child-supplied `plan_ports`, "
+            "but it must reject rather than invent missing project facts or matrix "
+            "bodies.",
+        ]
+        if str(flow_kind or "").strip().lower() == "issue":
+            lines.append(
+                "Issue compatibility: regression coverage belongs in the canonical "
+                "`test_matrix` port; `regression_test_matrix` is a delivery alias, "
+                "not a second logical port or mandatory duplicate file."
+            )
+        return lines
 
     def _generic_fanout_success_payload(
         self,
@@ -261,6 +237,19 @@ class WriterFanoutDataMixin:
             "artifact_refs": artifact_refs,
             "evidence_refs": evidence_refs,
         }
+        if str(payload.get("flow_kind") or "") == "workflow":
+            admitted_input_refs: list[str] = []
+            for child in manifest.get("children", []) or []:
+                if not isinstance(child, dict):
+                    continue
+                ref = call_result_envelope_ref(
+                    child.get("admitted_call_result_ref")
+                )
+                if ref:
+                    admitted_input_refs.append(ref)
+            payload["input_result_refs"] = self._dedupe_strings(
+                admitted_input_refs
+            )
         for source in payloads:
             plan_ports = source.get("plan_ports")
             if not isinstance(plan_ports, list):
@@ -339,12 +328,44 @@ class WriterFanoutDataMixin:
         if source_index_ref:
             payload["source_index_ref"] = source_index_ref
             evidence_refs.append(source_index_ref)
+        for key in (
+            "task_map_ref",
+            "plan_artifact_package_ref",
+            "goal_claim_set_ref",
+        ):
+            value = self._first_child_value(manifest, payloads, key)
+            if not value:
+                continue
+            payload[key] = value
+            artifact_refs.append(value)
+            evidence_refs.append(value)
+        for key in (
+            "plan_artifact_package_id",
+            "plan_artifact_package_digest",
+            "goal_claim_set_digest",
+        ):
+            value = self._first_child_value(manifest, payloads, key)
+            if value:
+                payload[key] = value
         for key, value in inventory_scalar_refs.items():
             if value:
                 payload[key] = value
                 artifact_refs.append(value)
                 evidence_refs.append(value)
-        if plan_artifact_ref or backlog_ref or source_index_ref or any(inventory_scalar_refs.values()):
+        if (
+            plan_artifact_ref
+            or backlog_ref
+            or source_index_ref
+            or any(inventory_scalar_refs.values())
+            or any(
+                payload.get(key)
+                for key in (
+                    "task_map_ref",
+                    "plan_artifact_package_ref",
+                    "goal_claim_set_ref",
+                )
+            )
+        ):
             payload["artifact_refs"] = self._dedupe_strings(artifact_refs)
             payload["evidence_refs"] = self._dedupe_strings(evidence_refs)
 
@@ -636,6 +657,11 @@ class WriterFanoutDataMixin:
             "requirement_spec_ref",
             "requirement_spec_digest",
             "request_revision",
+            "workflow_generation",
+            "task_map_generation",
+            "workflow_template",
+            "completion_profile",
+            "generic_workflow_contract_digest",
         ):
             # Request identity belongs to the parent invocation. A child may
             # echo it, but may not replace the trigger/manifest truth.
@@ -643,8 +669,55 @@ class WriterFanoutDataMixin:
             if value in (None, ""):
                 value = manifest.get(key)
             if value in (None, ""):
+                # Older writer-fanout manifests did not persist the parent
+                # trigger payload. Their kernel-authored child assignment is
+                # the remaining durable copy of request/flow identity.
+                for child in manifest.get("children", []) or []:
+                    if not isinstance(child, dict):
+                        continue
+                    assignment = child.get("payload")
+                    if not isinstance(assignment, dict):
+                        continue
+                    value = assignment.get(key)
+                    if value not in (None, ""):
+                        break
+            if value in (None, ""):
                 value = self._first_child_value(manifest, values, key)
             if value not in (None, ""):
+                result[key] = value
+
+        if str(result.get("flow_kind") or "") == "workflow":
+            from zf.runtime.generic_workflow_fanout import (
+                generic_workflow_goal_identity,
+            )
+
+            result.update(generic_workflow_goal_identity(
+                manifest,
+                payloads=values,
+            ))
+
+        for key in (
+            "workflow_proposal_ref",
+            "workflow_proposal_digest",
+            "effective_config_ref",
+            "effective_config_digest",
+            "run_contract_ref",
+            "run_contract_digest",
+        ):
+            value = trigger.get(key)
+            if value in (None, "", {}):
+                value = manifest.get(key)
+            if value in (None, "", {}):
+                for child in manifest.get("children", []) or []:
+                    if not isinstance(child, dict):
+                        continue
+                    assignment = child.get("payload")
+                    if not isinstance(assignment, dict):
+                        continue
+                    value = assignment.get(key)
+                    if value not in (None, "", {}):
+                        break
+            if value not in (None, "", {}):
                 result[key] = value
 
         # Replan identity and its bounded resume scope belong to the parent

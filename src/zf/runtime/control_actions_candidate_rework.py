@@ -8,6 +8,10 @@ from typing import Any
 
 from zf.core.config.schema import ZfConfig
 from zf.core.events import EventLog, ZfEvent
+from zf.runtime.candidate_rework_identity import (
+    _CANDIDATE_REWORK_IDENTITY_KEYS,
+    _candidate_rework_identity_payload,
+)
 
 
 class CandidateReworkActionsMixin:
@@ -182,6 +186,7 @@ class CandidateReworkActionsMixin:
                 correlation_id=str(payload.get("trace_id") or "") or requested.correlation_id,
                 payload={
                     "schema_version": "task-map-amended.v1",
+                    **_candidate_rework_identity_payload(payload),
                     "pdd_id": str(payload.get("pdd_id") or ""),
                     "feature_id": str(payload.get("feature_id") or ""),
                     "trace_id": str(payload.get("trace_id") or ""),
@@ -195,6 +200,7 @@ class CandidateReworkActionsMixin:
             )
             emitted.append(amended.id)
         event_payload: dict[str, Any] = {
+            **_candidate_rework_identity_payload(payload),
             "pdd_id": str(payload.get("pdd_id") or ""),
             "trace_id": str(payload.get("trace_id") or ""),
             "source_commit": str(payload.get("source_commit") or ""),
@@ -279,6 +285,7 @@ class CandidateReworkActionsMixin:
             project_root=self.project_root,
         )
         event_payload = {
+            **_candidate_rework_identity_payload(payload),
             "pdd_id": str(payload.get("pdd_id") or ""),
             "trace_id": str(payload.get("trace_id") or ""),
             "target_ref": str(payload.get("target_ref") or ""),
@@ -413,6 +420,7 @@ class CandidateReworkActionsMixin:
             correlation_id=str(payload.get("trace_id") or "") or requested.correlation_id,
             payload={
                 "schema_version": "candidate-rework-cap.v1",
+                **_candidate_rework_identity_payload(payload),
                 "pdd_id": str(payload.get("pdd_id") or ""),
                 "feature_id": str(payload.get("feature_id") or ""),
                 "trace_id": str(payload.get("trace_id") or ""),
@@ -455,6 +463,7 @@ def _candidate_triage_context(payload: dict[str, Any]) -> dict[str, Any]:
         "classification",
         "rework_categories",
         "rework_summary",
+        *_CANDIDATE_REWORK_IDENTITY_KEYS,
     )
     return {
         key: payload.get(key)
@@ -492,6 +501,7 @@ def _build_resynth_event(
                 _string_list(payload.get("downstream_task_ids"))
             ),
             resume_scope=str(payload.get("resume_scope") or ""),
+            **_candidate_rework_identity_payload(payload),
         )
         return build_replan_resynth_event(plan=plan, events=events, config=config)
     except Exception:

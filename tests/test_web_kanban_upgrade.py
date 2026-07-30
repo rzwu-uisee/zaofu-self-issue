@@ -10,6 +10,7 @@ pytest.importorskip("httpx")
 
 from fastapi.testclient import TestClient
 
+from zf.core.config.loader import load_config
 from zf.core.config.schema import (
     FanoutChildConfig,
     RoleConfig,
@@ -287,39 +288,61 @@ def test_channel_message_endpoint_uses_token_gated_action_path(
     assert any(m["text"] == "请 QA 看下" for m in detail["messages"])
 
 
-def test_channel_workflow_request_records_workflow_invoke_event(
+def test_channel_workflow_request_prepares_proposal_without_invoking(
     state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
-    config = ZfConfig()
-    config.workflow.stages = [
-        WorkflowStageConfig(
-            id="review-wave",
-            trigger="candidate.ready",
-            topology="fanout_reader",
-            roles=["review"],
+    config_path = state_dir.parent / "zf.yaml"
+    config_path.write_text(
+        """\
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata: {name: issue-demo}
+spec:
+  lanes: 1
+  backend: mock
+  issueRef: docs/intake/channel.md
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata: {name: demo}
+spec:
+  version: "1.0"
+  project: {name: demo, state_dir: .zf}
+""",
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(
+            state_dir,
+            config=load_config(config_path),
+            project_root=state_dir.parent,
         )
-    ]
-    TaskStore(state_dir / "kanban.json").add(Task(id="TASK-1", title="Run review"))
-    client = TestClient(create_app(state_dir, config=config, project_root=state_dir.parent))
+    )
 
     response = client.post(
         "/api/channels/ch-zaofu/workflow-request",
         headers={"x-zf-web-token": "test-token"},
         json={
+            "request_id": "REQ-CHANNEL-UPGRADE",
             "thread_id": "th-plan",
-            "task_id": "TASK-1",
-            "pattern_id": "review-wave",
-            "reason": "release risk",
-            "expected_output": "review report",
+            "kind": "issue",
+            "objective": "Review and fix the release risk",
+            "backend": "mock",
+            "allow_missing_env": True,
         },
     )
 
-    assert response.status_code == 202
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "proposal_ready"
     events = EventLog(state_dir / "events.jsonl").read_all()
-    assert any(event.type == "workflow.invoke.requested" for event in events)
-    assert any(event.type == "channel.state_update.posted" for event in events)
+    assert not any(event.type == "workflow.invoke.requested" for event in events)
+    assert any(
+        event.type == "channel.state_update.posted"
+        and event.payload.get("status") == "workflow_proposal_ready"
+        for event in events
+    )
 
 
 def test_workflow_graph_projects_role_trigger_edges_without_stages(state_dir: Path):

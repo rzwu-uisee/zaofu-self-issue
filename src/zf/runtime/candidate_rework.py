@@ -24,15 +24,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from zf.core.events.module_parity import is_module_parity_scan_completed_event
 from zf.core.events.model import ZfEvent
 from zf.runtime.failure_kind import budget_candidate_failure_ids
 from zf.runtime.candidate_rework_generation import reset_generation_caches, task_ids_from_payload
 from zf.runtime.rework_triage import classify_rework_trigger, is_plan_level_task_contract_blocker
 from zf.runtime.canonical_recovery import classify_recovery_scope
 from zf.runtime.candidate_rework_identity import (
+    _candidate_failure_superseded,
     _candidate_generation_stale,
     _candidate_scope_ref,
+    _candidate_success_closures,
     _pdd_by_fanout_id,
     _pdd_from_event,
     _safe_int,
@@ -132,17 +133,6 @@ class ReworkPlan:
     failure_fingerprint: str = ""
     failure_categories: tuple[str, ...] = field(default_factory=tuple)
     rework_summary: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class _CandidateClosure:
-    index: int
-    event_id: str
-    event_type: str
-    pdd_id: str
-    trace_id: str
-    target_ref: str
-    candidate_ref: str
 
 
 def _is_stale_task_map_candidate_failure(event: object, payload: dict) -> bool:
@@ -299,6 +289,14 @@ def plan_candidate_rework(
                     f"worker-rejection {who}: {reason[:220]}"
                 )
         elif is_plan_level_task_contract_blocker(event):
+            if _candidate_failure_superseded(
+                event,
+                payload,
+                event_idx,
+                pdd_by_fanout_id=pdd_by_fanout_id,
+                success_closures=success_closures,
+            ):
+                continue
             trace = str(
                 payload.get("trace_id")
                 or getattr(event, "correlation_id", "")
@@ -498,6 +496,10 @@ def plan_candidate_rework(
             and attempt >= 1
             and bool(CONTRACT_REPLAN_CATEGORIES & set(failure_categories))
         )
+        task_contract_blocker = any(
+            line.startswith("task-contract-blocker ")
+            for line in feedback
+        )
         if fingerprint_on and ineffective_rejection:
             attempt = 0
             repeated_contract_verify = False
@@ -518,9 +520,18 @@ def plan_candidate_rework(
             # 回 synth 重拆,绝不 retrigger 同一张被拒的 task_map(否则 admission
             # 再拒 → 烧 cap → escalate,等于慢性 stall)。
             action = "replan"
+        elif task_contract_blocker:
+            # A downstream aggregate (usually integration.failed) must not
+            # erase an evidence-backed dev.blocked contract diagnosis from the
+            # same generation. Re-running the same task map cannot satisfy an
+            # unsatisfiable contract, so return it to plan synthesis directly.
+            classification = "design_issue"
+            action = "replan"
         elif repeated_contract_verify:
             classification = "contract_freeze_gap"
             action = "replan"
+        elif classification == "dependency_blocked":
+            action = "escalate"
         elif classification in PLAN_LEVEL_CLASSIFICATIONS:
             action = "replan"
         else:
@@ -552,122 +563,6 @@ def plan_candidate_rework(
             ),
         ))
     return plans
-
-
-def _candidate_success_closures(
-    events: list,
-    *,
-    pdd_by_fanout_id: dict[str, str],
-) -> list[_CandidateClosure]:
-    closures: list[_CandidateClosure] = []
-    for idx, event in enumerate(events):
-        etype = str(getattr(event, "type", "") or "")
-        payload = getattr(event, "payload", {}) or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if not _is_candidate_success_closure(etype, payload):
-            continue
-        target_ref = _candidate_scope_ref(payload)
-        closures.append(_CandidateClosure(
-            index=idx,
-            event_id=str(getattr(event, "id", "") or ""),
-            event_type=etype,
-            pdd_id=_pdd_from_event(
-                payload,
-                target_ref,
-                pdd_by_fanout_id=pdd_by_fanout_id,
-            ),
-            trace_id=str(
-                payload.get("trace_id")
-                or getattr(event, "correlation_id", "")
-                or ""
-            ).strip(),
-            target_ref=target_ref,
-            candidate_ref=str(payload.get("candidate_ref") or "").strip(),
-        ))
-    return closures
-
-
-def _is_candidate_success_closure(etype: str, payload: dict[str, Any]) -> bool:
-    if is_module_parity_scan_completed_event(etype):
-        return (
-            "open_p0_p1_gap_count" in payload
-            and _safe_int(payload.get("open_p0_p1_gap_count")) == 0
-        )
-    if etype == "module.parity.closed":
-        return True
-    return etype in {
-        "candidate.ready",
-        "candidate.quality.passed",
-        "verify.passed",
-        "judge.passed",
-    }
-
-
-def _candidate_failure_superseded(
-    event: object,
-    payload: dict[str, Any],
-    event_idx: int,
-    *,
-    pdd_by_fanout_id: dict[str, str],
-    success_closures: list[_CandidateClosure],
-) -> bool:
-    if not success_closures:
-        return False
-    target_ref = _candidate_scope_ref(payload)
-    failure_pdd = _pdd_from_event(
-        payload,
-        target_ref,
-        pdd_by_fanout_id=pdd_by_fanout_id,
-    )
-    failure_trace = str(
-        payload.get("trace_id") or getattr(event, "correlation_id", "") or ""
-    ).strip()
-    failure_candidate = str(payload.get("candidate_ref") or "").strip()
-    if not (failure_pdd or failure_trace or target_ref or failure_candidate):
-        return False
-    for closure in success_closures:
-        if closure.index <= event_idx:
-            continue
-        if _candidate_closure_matches_failure(
-            closure,
-            pdd_id=failure_pdd,
-            trace_id=failure_trace,
-            target_ref=target_ref,
-            candidate_ref=failure_candidate,
-        ):
-            return True
-    return False
-
-
-def _candidate_closure_matches_failure(
-    closure: _CandidateClosure,
-    *,
-    pdd_id: str,
-    trace_id: str,
-    target_ref: str,
-    candidate_ref: str,
-) -> bool:
-    closure_refs = {
-        ref
-        for ref in (closure.target_ref, closure.candidate_ref)
-        if ref
-    }
-    failure_refs = {
-        ref
-        for ref in (target_ref, candidate_ref)
-        if ref
-    }
-    pdd_match = bool(pdd_id and closure.pdd_id and pdd_id == closure.pdd_id)
-    trace_match = bool(trace_id and closure.trace_id and trace_id == closure.trace_id)
-    ref_match = bool(closure_refs and failure_refs and closure_refs & failure_refs)
-    if pdd_id and closure.pdd_id and not pdd_match:
-        return False
-    if pdd_match and (trace_match or ref_match or not trace_id or not closure.trace_id):
-        return True
-    if trace_match and (ref_match or not pdd_id or not closure.pdd_id):
-        return True
-    return ref_match and (pdd_match or trace_match)
 
 
 def _infra_only_candidate_failure_ids(events: list) -> set[str]:

@@ -91,8 +91,13 @@ def _trigger_targets_stage(
     payload = _payload(event)
     expected_kind = normalize_flow_kind(flow_kind)
     observed_kind = flow_kind_from_payload(payload)
-    if expected_kind and observed_kind and expected_kind != observed_kind:
-        return False
+    if not observed_kind:
+        pipeline_id = str(payload.get("pipeline_id") or "").strip()
+        if pipeline_id:
+            observed_kind = normalize_flow_kind(pipeline_id.split("-", 1)[0])
+    if expected_kind:
+        if not observed_kind or expected_kind != observed_kind:
+            return False
     if trigger == "workflow.invoke.requested":
         requested_pattern = str(
             payload.get("pattern_id") or payload.get("stage_id") or ""
@@ -118,12 +123,42 @@ def _matches_trigger_scope(event, trigger_event, *, stage_id: str) -> bool:
     observed_stage = str(payload.get("stage_id") or "")
     if observed_stage and observed_stage != stage_id:
         return False
-    for key in ("workflow_run_id", "run_id", "trace_id"):
-        expected = str(trigger_payload.get(key) or "")
-        observed = str(payload.get(key) or "")
-        if expected and observed and expected != observed:
-            return False
+    expected_run = str(
+        trigger_payload.get("workflow_run_id")
+        or trigger_payload.get("run_id")
+        or ""
+    )
+    observed_run = str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or ""
+    )
+    if expected_run and observed_run:
+        return expected_run == observed_run
+    expected_trace = str(trigger_payload.get("trace_id") or "")
+    observed_trace = str(payload.get("trace_id") or "")
+    if expected_trace and observed_trace and expected_trace != observed_trace:
+        return False
     return True
+
+
+def _trigger_replays_handled_operation(trigger_event, events) -> bool:
+    payload = _payload(trigger_event)
+    operation_id = str(
+        payload.get("workflow_operation_id")
+        or payload.get("parent_operation_id")
+        or ""
+    ).strip()
+    if not operation_id:
+        return False
+    return any(
+        getattr(event, "type", "") in {
+            "workflow.operation.started",
+            "workflow.operation.settled",
+        }
+        and str(_payload(event).get("operation_id") or "") == operation_id
+        for event in events
+    )
 
 
 def detect_structural_stalls(
@@ -176,7 +211,16 @@ def detect_structural_stalls(
             continue
         assert trigger_event is not None
         # did the kernel handle it after the trigger?
-        handled = terminal_after_event([event for _, event in seq], trigger_event) is not None
+        handled = (
+            terminal_after_event(
+                [event for _, event in seq],
+                trigger_event,
+            ) is not None
+            or _trigger_replays_handled_operation(
+                trigger_event,
+                [event for _, event in seq],
+            )
+        )
         for idx, event in seq:
             if idx <= trigger_idx:
                 continue

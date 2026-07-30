@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,9 @@ from zf.runtime.plan_artifact_package import (
     reduce_plan_artifact_packages,
     required_plan_ports,
     write_plan_artifact_package,
+)
+from zf.runtime.plan_artifact_package_runtime import (
+    admit_synthesized_plan_package,
 )
 from zf.runtime.run_contract import (
     stable_json_sha256,
@@ -111,6 +115,46 @@ def test_task_map_required_ports_extend_profile_defaults_and_normalize_aliases()
         )
 
 
+def test_refactor_plan_synth_admits_package_before_bridge(monkeypatch) -> None:
+    admitted = []
+
+    def _fake_admit(runtime, **kwargs):
+        admitted.append(kwargs)
+        return {
+            "plan_artifact_package_id": "planpkg-refactor",
+            "plan_artifact_package_ref": "artifacts/package.json",
+            "plan_artifact_package_digest": "package-sha",
+        }
+
+    monkeypatch.setattr(
+        "zf.runtime.plan_artifact_package_runtime._admit",
+        _fake_admit,
+    )
+    final_status, recommendation, payload = admit_synthesized_plan_package(
+        SimpleNamespace(config=SimpleNamespace(workflow=SimpleNamespace())),
+        event=ZfEvent(
+            type="fanout.synth.completed",
+            correlation_id="refactor-run",
+        ),
+        manifest={"pdd_id": "REFACTOR-1"},
+        stage_id="flow-plan",
+        trace_id="refactor-run",
+        success_event="zaofu.refactor.plan.ready",
+        final_status="completed",
+        recommendation="approve",
+        artifact_payload={
+            "flow_kind": "refactor",
+            "task_map_ref": "artifacts/task-map.json",
+        },
+    )
+
+    assert final_status == "completed"
+    assert recommendation == "approve"
+    assert payload["plan_artifact_package_id"] == "planpkg-refactor"
+    assert admitted[0]["producer_stage_id"] == "flow-plan"
+    assert admitted[0]["workflow_run_id"] == "refactor-run"
+
+
 def test_package_preparation_consumes_task_map_required_ports(tmp_path) -> None:
     project_root = tmp_path / "project"
     state_dir = project_root / ".zf"
@@ -187,6 +231,7 @@ def test_package_preparation_consumes_task_map_required_ports(tmp_path) -> None:
         events=[],
         payload={
             **base_payload,
+            "acceptance_matrix_ref": "missing/child-worktree/acceptance.json",
             "plan_ports": [{
                 "logical_name": "acceptance_matrix",
                 "schema_version": "acceptance-matrix.v1",
@@ -219,6 +264,132 @@ def test_package_preparation_consumes_task_map_required_ports(tmp_path) -> None:
         if port["logical_name"] == "acceptance_matrix"
     )
     assert acceptance_port["ref"].startswith("artifacts/plan-ports/")
+
+
+def test_package_preparation_materializes_declared_exact_ref_port(tmp_path) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    artifacts = state_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    requirement = artifacts / "requirement.md"
+    requirement.write_text("Preserve behavior.\n", encoding="utf-8")
+    review = artifacts / "review.md"
+    review.write_text("# Review\n\nReady.\n", encoding="utf-8")
+    task_map = artifacts / "task-map.json"
+    task_map.write_text(
+        json.dumps({
+            "schema_version": "task-map.v1",
+            "objective": "Preserve behavior",
+            "required_plan_ports": [
+                "requirement_spec",
+                "goal_claim_set",
+                "task_map",
+                "planning_result",
+                "review_artifact",
+            ],
+            "tasks": [{
+                "task_id": "T1",
+                "acceptance_criteria": ["Behavior is preserved"],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    contract_body = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "refactor"},
+    }
+    write_run_contract(
+        state_dir,
+        {
+            **contract_body,
+            "contract_digest": stable_json_sha256(contract_body),
+        },
+    )
+
+    package, _, _ = prepare_plan_artifact_package(
+        state_dir=state_dir,
+        project_root=project_root,
+        events=[],
+        payload={
+            "task_map_ref": ".zf/artifacts/task-map.json",
+            "requirement_spec_ref": ".zf/artifacts/requirement.md",
+            "review_artifact_ref": ".zf/artifacts/review.md",
+        },
+        workflow_run_id="run-custom-port",
+        flow_kind="refactor",
+        producer_stage_id="refactor-plan",
+        goal_id="GOAL-1",
+        metadata={"artifact_package": {"mode": "blocking"}},
+    )
+
+    review_port = next(
+        port for port in package["produced"]
+        if port["logical_name"] == "review_artifact"
+    )
+    assert review_port["ref"] == "artifacts/review.md"
+    assert review_port["sha256"]
+
+
+def test_issue_requirement_snapshot_adapts_to_issue_spec_port(tmp_path) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    artifacts = state_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    requirement = artifacts / "issue.json"
+    requirement.write_text(
+        json.dumps({"schema_version": "workflow-requirement.v1"}),
+        encoding="utf-8",
+    )
+    task_map = artifacts / "task-map.json"
+    task_map.write_text(
+        json.dumps({
+            "schema_version": "task-map.v1",
+            "objective": "Fix portable E2E",
+            "tasks": [{
+                "task_id": "ISSUE-1",
+                "acceptance_criteria": ["E2E runs in Docker"],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    contract_body = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "issue"},
+    }
+    write_run_contract(
+        state_dir,
+        {
+            **contract_body,
+            "contract_digest": stable_json_sha256(contract_body),
+        },
+    )
+
+    package, _, _ = prepare_plan_artifact_package(
+        state_dir=state_dir,
+        project_root=project_root,
+        events=[],
+        payload={
+            "task_map_ref": ".zf/artifacts/task-map.json",
+            "requirement_spec_ref": ".zf/artifacts/issue.json",
+            "objective_ref": "HEAD",
+            "issue_ref": "HEAD",
+            "source_refs": {"source_ref": "HEAD"},
+        },
+        workflow_run_id="issue-run",
+        flow_kind="issue",
+        producer_stage_id="issue-triage",
+        goal_id="ISSUE-1",
+        metadata={"artifact_package": {"mode": "blocking"}},
+    )
+
+    assert "issue_spec" in package["required_ports"]
+    issue_spec = next(
+        port for port in package["produced"]
+        if port["logical_name"] == "issue_spec"
+    )
+    assert issue_spec["source_logical_name"] == "requirement_spec"
+    assert issue_spec["adapter_version"] == "issue-spec-requirement-adapter.v1"
+    assert not any(port["ref"] == "HEAD" for port in package["produced"])
 
 
 def test_reducer_uses_run_and_slot_not_producer_stage(tmp_path):

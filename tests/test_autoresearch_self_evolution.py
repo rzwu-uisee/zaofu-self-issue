@@ -32,6 +32,10 @@ from zf.autoresearch.loop_requests import (
     build_loop_request_payload,
     project_loop_requests,
 )
+from zf.autoresearch.orchestrator import (
+    AutoresearchRunConfig,
+    prepare_worktree,
+)
 from zf.autoresearch.projection import project_autoresearch_state
 from zf.autoresearch.resident import (
     REVIEW_GATE_ACCEPTED,
@@ -41,6 +45,7 @@ from zf.autoresearch.resident import (
     _finalize_resident_worktree,
     run_resident_once,
 )
+from zf.autoresearch.scenarios import resolve_scenario
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.cli.main import main
@@ -534,6 +539,44 @@ def test_resident_execute_respects_max_actions_per_tick(tmp_path):
     assert event_types.count("autoresearch.loop.requested") == 3
 
 
+def test_resident_finishes_current_action_then_stops_before_next(tmp_path):
+    state_dir = tmp_path / ".zf"
+    log = EventLog(state_dir / "events.jsonl")
+    for index in range(2):
+        log.append(ZfEvent(
+            type=LOOP_REQUESTED,
+            actor="test",
+            payload=build_loop_request_payload(
+                {"trigger_id": f"t-shutdown-{index}"},
+                source_event_id=f"evt-shutdown-{index}",
+            ),
+        ))
+    shutdown_requested = False
+    calls: list[list[str]] = []
+
+    def _fake_runner(command, **kwargs):
+        nonlocal shutdown_requested
+        calls.append(command)
+        shutdown_requested = True
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_fake_runner,
+        should_stop=lambda: shutdown_requested,
+    )
+
+    assert len(calls) == 1
+    event_types = [event.type for event in log.read_all()]
+    assert event_types.count("autoresearch.loop.accepted") == 2
+    assert event_types.count("autoresearch.loop.started") == 1
+    assert event_types.count("autoresearch.loop.completed") == 1
+
+
 def test_resident_dry_run_plans_review_gate_prepare(tmp_path):
     state_dir = tmp_path / ".zf"
     run_dir = tmp_path / "run"
@@ -864,8 +907,12 @@ def _git_repo_with_worktree(
     _git(repo, "init", "-b", "dev")
     _git(repo, "config", "user.email", "autoresearch-test@example.invalid")
     _git(repo, "config", "user.name", "Autoresearch Test")
+    (repo / ".gitignore").write_text(
+        ".zf/\nnode_modules/\n",
+        encoding="utf-8",
+    )
     (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
-    _git(repo, "add", "tracked.txt")
+    _git(repo, "add", ".gitignore", "tracked.txt")
     _git(repo, "commit", "-m", "test: seed repository")
     worktree = tmp_path / f"worktree-{branch.replace('/', '-')}"
     _git(repo, "worktree", "add", "-b", branch, str(worktree), "HEAD")
@@ -911,4 +958,90 @@ def test_resident_retains_terminal_worktree_with_candidate_diff(
     assert outcome["event_type"] == "autoresearch.worktree.retained"
     assert outcome["reason"] == "candidate_diff_present"
     assert any("candidate.txt" in path for path in outcome["dirty_paths"])
+    assert worktree.exists()
+
+
+def _prepare_interrupted_resident_worktree(
+    tmp_path: Path,
+    worktree: Path,
+    monkeypatch,
+) -> tuple[Path, Path]:
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    dependency_source = tmp_path / "shared-node-modules"
+    dependency_source.mkdir(exist_ok=True)
+
+    def _link_dependencies(root: Path, *, log_path: Path) -> str:
+        target = root / "web" / "node_modules"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(dependency_source, target_is_directory=True)
+        return "linked"
+
+    monkeypatch.setattr(
+        "zf.autoresearch.orchestrator.ensure_web_dependencies",
+        _link_dependencies,
+    )
+    run_dir = worktree / ".zf" / "autoresearch" / "runs" / "interrupted"
+    prepare_worktree(
+        AutoresearchRunConfig(
+            worktree=worktree,
+            config_template=template,
+            reuse_worktree=True,
+            sync_dirty=False,
+        ),
+        scenario=resolve_scenario("self-eval-backlog"),
+        run_id="interrupted",
+        run_dir=run_dir,
+    )
+    return worktree / "zf.yaml", worktree / "web" / "node_modules"
+
+
+def test_resident_cleans_interrupted_preparation_before_removing_worktree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, worktree = _git_repo_with_worktree(
+        tmp_path,
+        branch="experiment/interrupted-clean",
+    )
+    zf_yaml, dependencies = _prepare_interrupted_resident_worktree(
+        tmp_path,
+        worktree,
+        monkeypatch,
+    )
+    assert zf_yaml.exists()
+    assert dependencies.is_symlink()
+
+    outcome = _finalize_resident_worktree(
+        worktree=worktree,
+        loop_request_id="loop-interrupted-clean",
+    )
+
+    assert outcome["status"] == "cleaned"
+    assert outcome["preparation_cleanup"]["status"] == "cleaned"
+    assert not worktree.exists()
+
+
+def test_resident_keeps_candidate_after_cleaning_interrupted_preparation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, worktree = _git_repo_with_worktree(
+        tmp_path,
+        branch="experiment/interrupted-dirty",
+    )
+    _prepare_interrupted_resident_worktree(tmp_path, worktree, monkeypatch)
+    (worktree / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+
+    outcome = _finalize_resident_worktree(
+        worktree=worktree,
+        loop_request_id="loop-interrupted-dirty",
+    )
+
+    assert outcome["status"] == "retained"
+    assert outcome["preparation_cleanup"]["status"] == "cleaned"
+    assert outcome["dirty_paths"] == ["?? candidate.txt"]
     assert worktree.exists()

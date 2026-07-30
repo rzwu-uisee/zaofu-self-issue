@@ -43,6 +43,8 @@ spec:
       backend: codex
       permission_mode: bypass
       transport: tmux
+      lifecycle:
+        mode: resident
       stuck_threshold_seconds: 900
       spawn_ready_timeout_seconds: 240
       triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]

@@ -5,6 +5,7 @@ export const NAV_PAGES = [
   "inbox",
   "channels",
   "board",
+  "workflows",
   "triage",
   "observability",
   "events",

@@ -43,6 +43,39 @@ def test_fanout_context_creates_stable_ids():
     assert first == second
 
 
+def test_fanout_context_scopes_colliding_trigger_prefixes():
+    first = FanoutContext.create(
+        stage_id="verify",
+        topology="fanout_reader",
+        trace_id="trace-1",
+        trigger_event_id="evt-synthesize-0de7e420d4fd",
+        target_ref="candidate/F-1",
+        role_instances=["verifier"],
+        identity_scope="workflow|generation-1|1|digest-1",
+    )
+    second = FanoutContext.create(
+        stage_id="verify",
+        topology="fanout_reader",
+        trace_id="trace-1",
+        trigger_event_id="evt-synthesize-e99c405b70cd",
+        target_ref="candidate/F-1",
+        role_instances=["verifier"],
+        identity_scope="workflow|generation-2|2|digest-2",
+    )
+    replay = FanoutContext.create(
+        stage_id="verify",
+        topology="fanout_reader",
+        trace_id="trace-1",
+        trigger_event_id="evt-synthesize-0de7e420d4fd",
+        target_ref="candidate/F-1",
+        role_instances=["verifier"],
+        identity_scope="workflow|generation-1|1|digest-1",
+    )
+
+    assert first.fanout_id != second.fanout_id
+    assert first.fanout_id == replay.fanout_id
+
+
 def test_event_writer_rebuilds_fanout_manifest(tmp_path: Path):
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()

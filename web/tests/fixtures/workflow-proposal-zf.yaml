@@ -1,0 +1,20 @@
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata:
+  name: workflow-proposal-browser-e2e
+spec:
+  lanes: 1
+  backend: mock
+  issueRef: README.md
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata:
+  name: workflow-proposal-browser-e2e
+spec:
+  version: "1.0"
+  project:
+    name: workflow-proposal-browser-e2e
+    state_dir: .zf
+  goal:
+    enabled: true

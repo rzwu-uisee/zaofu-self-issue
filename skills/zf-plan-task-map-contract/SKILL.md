@@ -34,12 +34,15 @@ contract is fixed. Do not rely on markdown-only task lists for dispatch.
 Write durable artifacts before emitting the stage success event:
 
 - `plan_artifact_ref`: markdown plan, normally under `docs/plans/` or the
-  fanout artifact directory.
+  fanout artifact directory inside the assigned workdir.
 - `task_map_ref`: JSON task map consumed by writer fanout.
 - `source_index_ref`: JSON or markdown evidence/source index when source facts
   were inspected.
 
 Include these paths in `artifact_refs` / `evidence_refs` as appropriate.
+All output refs are workdir-relative. Do not write `.zf/` or another absolute
+state path directly; the Kernel relocates admitted refs and computes canonical
+digests.
 
 ## Plan Artifact Ports
 
@@ -117,14 +120,14 @@ contract.
   "pdd_id": "<stable product/work id>",
   "feature_id": "<stable feature id>",
   "plan_artifact_ref": "docs/plans/example-plan.md",
-  "task_map_ref": ".zf/artifacts/example/task_map.json",
-  "source_index_ref": ".zf/artifacts/example/source_index.json",
+  "task_map_ref": "artifacts/plan/task_map.json",
+  "source_index_ref": "artifacts/plan/source_index.json",
   "artifact_refs": [
     "docs/plans/example-plan.md",
-    ".zf/artifacts/example/task_map.json"
+    "artifacts/plan/task_map.json"
   ],
   "evidence_refs": [
-    ".zf/artifacts/example/source_index.json"
+    "artifacts/plan/source_index.json"
   ],
   "report": {
     "child_id": "synth",
@@ -153,7 +156,7 @@ contract.
   },
   "source_refs": {
     "plan_artifact_ref": "docs/plans/example-plan.md",
-    "source_index_ref": ".zf/artifacts/example/source_index.json"
+    "source_index_ref": "artifacts/plan/source_index.json"
   },
   "tasks": [
     {
@@ -179,6 +182,12 @@ contract.
 }
 ```
 
+When the workflow changes an existing non-default target, resolve that ref and
+write its immutable commit at top-level `target_commit`. This is the writer
+checkout baseline. Do not leave the only baseline binding under `metadata`,
+inside a source ref, or in markdown prose. Omit `target_commit` only when the
+configured default candidate base is intentionally the implementation base.
+
 Every task must be small enough for one focused worker, have explicit ownership,
 list dispatch-safe paths, and include verification evidence. If a task touches
 workspace scaffolding such as `package.json`, `pyproject.toml`, `setup.py`,
@@ -202,6 +211,44 @@ contract layer only accepts dict values — `contract.update` ignores a non-dict
 `evidence_contract`, the minting path replaces a non-dict with `{}`, and the
 discriminator consumes dict keys such as `expected_red` — so a list here is
 silently dropped.
+
+When using structured `validation.commands[]`, every command needs a stable
+`id`, executable `command`, linked `acceptance_ids`, `owner`, `tier`,
+`deterministic`, `reusable`, and `timeout_seconds`. Use only the canonical
+task-map tier vocabulary:
+
+- `static` for setup, dependency install, lint, typecheck, and build checks;
+- `runtime` for unit, contract, integration, and non-browser behavior checks;
+- `e2e` for browser/application end-to-end checks;
+- `manual_evidence` only when an acceptance clause genuinely requires a human
+  evidence verdict.
+
+Do not invent a `setup`, `browser`, or `real-e2e` tier. Runtime normalizes a
+small compatibility alias set, but unknown tiers fail closed before writer
+dispatch.
+
+**Canonical command identity rule (Refactor R2, 2026-07-29):** downstream
+Impl, Candidate, and Verify execute the stored `command` as-is. A Planner must
+not prove a rewritten, re-escaped, or merely "equivalent" command and then
+attach that result to the canonical command id. Avoid escape-sensitive inline
+programs such as nested regular expressions in `node -e` / `python -c`;
+put the assertion in a repository test or script owned by the same vertical
+slice, then declare the stable test/script command. Before emitting, inspect
+the final serialized command string, not an unescaped source-language draft.
+
+Structured `acceptance_criteria[]` must use one of the four canonical
+`verification_owner` values consumed by Task Contract snapshots:
+
+- `impl_self_check` for evidence produced by the implementation attempt;
+- `task_verify` for independent task-level test, review, scope, and contract
+  checks;
+- `candidate_verify` for integrated candidate, assembly, or final judge checks;
+- `human` only for an explicitly owner-held decision.
+
+Do not use role labels such as `dev`, `verify`, `review`, `contract`, or
+`judge` as `verification_owner`. Runtime retains bounded compatibility aliases
+for older plans, but new task maps must emit the canonical values so plan
+admission and durable operation preregistration consume the same contract.
 
 Give every acceptance entry a stable id by prefixing the string (e.g.
 `PDD-CORE-001-AC1: ...`; the kernel accepts `acceptance_criteria` as an

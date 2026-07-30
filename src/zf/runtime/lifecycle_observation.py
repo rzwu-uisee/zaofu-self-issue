@@ -328,7 +328,12 @@ class LifecycleObservationMixin:
             "cache_read_input_tokens": raw.get("cache_read_input_tokens", 0),
             "cache_creation_input_tokens": raw.get("cache_creation_input_tokens", 0),
         }
-        task_id = self._active_task_id_for_usage_role(role)
+        attempt_identity, attempt_lookup_complete = (
+            self._active_task_attempt_identity_for_usage_role(role)
+        )
+        task_id = str(attempt_identity.get("task_id") or "")
+        if not task_id and attempt_lookup_complete:
+            task_id = self._active_task_id_for_usage_role(role)
         sample_id = _disk_usage_sample_id(
             actor=role.instance_id,
             backend=role.backend,
@@ -342,6 +347,7 @@ class LifecycleObservationMixin:
             actor=role.instance_id,
             task_id=task_id or None,
             payload={
+                **attempt_identity,
                 "task_id": task_id,
                 "usage": normalised,
                 "source": "disk_reader",
@@ -357,6 +363,9 @@ class LifecycleObservationMixin:
                 "usage_timestamp": usage.timestamp,
                 "usage_sample_id": sample_id,
             },
+            correlation_id=(
+                str(attempt_identity.get("workflow_run_id") or "") or None
+            ),
         )
         try:
             self.event_writer.append(event)
@@ -372,6 +381,34 @@ class LifecycleObservationMixin:
         except Exception:
             pass
         return True
+
+    def _active_task_attempt_identity_for_usage_role(
+        self,
+        role: "RoleConfig",
+    ) -> tuple[dict[str, str], bool]:
+        """Resolve one scheduler-owned lane; ambiguity remains unattributed."""
+
+        try:
+            from zf.runtime.task_attempt_runtime import (
+                active_task_attempt_identities_for_role,
+            )
+
+            if not getattr(self, "state_dir", None):
+                return {}, True
+            identities = active_task_attempt_identities_for_role(
+                self,
+                role_name=str(getattr(role, "name", "") or ""),
+                instance_id=str(getattr(role, "instance_id", "") or ""),
+            )
+        except Exception:
+            # A broken attempt store must not fall back to a potentially stale
+            # TaskStore assignment and renew the wrong lease.
+            return {}, False
+        if len(identities) == 1:
+            return identities[0], True
+        if identities:
+            return {}, False
+        return {}, True
 
     def _note_usage_capture_miss(
         self, role: "RoleConfig", usage_cwd: str, session_id: str

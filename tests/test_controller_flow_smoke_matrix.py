@@ -185,3 +185,8 @@ def test_refactor_flow_controller_smoke_matrix() -> None:
         if stage.id == "flow-final-judge"
     )
     assert final.trigger == "module.parity.closed"
+    assert config.workflow.admission_replan.enabled is True
+    assert (
+        config.workflow.admission_replan.resynth_trigger
+        == "zaofu.refactor.review.ready"
+    )

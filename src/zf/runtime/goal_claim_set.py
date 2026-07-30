@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Mapping
 
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_map import load_task_map, resolve_artifact_file
 
 
@@ -134,6 +136,149 @@ def pin_goal_claim_set_from_task_map(
     return claim_set, descriptor
 
 
+def pin_goal_claim_set_from_requirement(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    requirement_ref: str,
+    requirement_digest: str,
+    workflow_run_id: str,
+    goal_id: str,
+    workflow_generation: str,
+    source_event_id: str = "",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pin artifact-only Goal claims directly from a confirmed Requirement."""
+
+    requirement_path = resolve_artifact_file(
+        requirement_ref,
+        project_root=project_root,
+        state_dir=state_dir,
+    )
+    try:
+        raw = requirement_path.read_bytes()
+        decoded = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GoalClaimSetError(
+            f"requirement_ref is not a readable JSON object: {requirement_ref}"
+        ) from exc
+    if not isinstance(decoded, Mapping):
+        raise GoalClaimSetError(
+            f"requirement_ref must contain a JSON object: {requirement_ref}"
+        )
+    actual_digest = hashlib.sha256(raw).hexdigest()
+    if requirement_digest and actual_digest != requirement_digest:
+        raise GoalClaimSetError("requirement spec digest mismatch")
+    claim_set = build_goal_claim_set(
+        {},
+        workflow_run_id=workflow_run_id,
+        goal_id=goal_id,
+        task_map_generation=workflow_generation,
+        objective_ref=requirement_ref,
+        objective=decoded,
+    )
+    descriptor = write_immutable_json_sidecar(
+        state_dir,
+        claim_set,
+        root="goal-closure/claim-sets",
+        kind="goal_claim_set",
+        schema_version=SCHEMA_VERSION,
+        created_by="goal-claim-set-projector",
+        source_event_id=source_event_id,
+    )
+    return claim_set, descriptor
+
+
+def hydrate_pinned_goal_claim_set(
+    *,
+    state_dir: Path,
+    events: Iterable[Any],
+    workflow_run_id: str = "",
+    goal_id: str = "",
+    task_map_generation: str = "",
+) -> dict[str, Any] | None:
+    """Load the latest matching immutable Claim Set from its pinned ref."""
+
+    for event in reversed(list(events)):
+        if str(getattr(event, "type", "") or "") != "goal.claim_set.pinned":
+            continue
+        payload = getattr(event, "payload", {})
+        if not isinstance(payload, Mapping):
+            continue
+        expected = (
+            ("workflow_run_id", workflow_run_id),
+            ("goal_id", goal_id),
+            ("task_map_generation", task_map_generation),
+        )
+        mismatched = False
+        for field, wanted in expected:
+            actual = str(payload.get(field) or "").strip()
+            if actual and wanted and actual != wanted:
+                mismatched = True
+                break
+        if mismatched:
+            continue
+        ref = str(payload.get("goal_claim_set_ref") or "").strip()
+        digest = str(payload.get("goal_claim_set_digest") or "").strip()
+        if not ref or not digest:
+            raise GoalClaimSetError("pinned goal claim set ref/digest missing")
+        hydrated = hydrate_sidecar_ref(
+            state_dir,
+            {
+                "ref": ref,
+                "sha256": digest,
+                "kind": "goal_claim_set",
+                "schema_version": SCHEMA_VERSION,
+                "content_type": "application/json",
+                "required": True,
+            },
+            purpose="goal_claim_set_projection",
+            actor="goal-claim-set-projector",
+        )
+        if not isinstance(hydrated.payload, Mapping):
+            raise GoalClaimSetError("pinned goal claim set payload is not an object")
+        return validate_goal_claim_set(
+            hydrated.payload,
+            workflow_run_id=workflow_run_id,
+            goal_id=goal_id,
+            task_map_generation=task_map_generation,
+        )
+    return None
+
+
+def validate_goal_claim_set(
+    payload: Mapping[str, Any],
+    *,
+    workflow_run_id: str = "",
+    goal_id: str = "",
+    task_map_generation: str = "",
+) -> dict[str, Any]:
+    """Validate Claim Set schema, identity and content digest."""
+
+    body = dict(payload)
+    if str(body.get("schema_version") or "") != SCHEMA_VERSION:
+        raise GoalClaimSetError("unsupported goal claim set schema")
+    claims = body.get("claims")
+    if not isinstance(claims, list) or not claims:
+        raise GoalClaimSetError("goal claim set claims missing")
+    expected = (
+        ("workflow_run_id", workflow_run_id),
+        ("goal_id", goal_id),
+        ("task_map_generation", task_map_generation),
+    )
+    for field, wanted in expected:
+        if wanted and str(body.get(field) or "").strip() != wanted:
+            raise GoalClaimSetError(f"goal claim set identity mismatch: {field}")
+    claimed_digest = str(body.get("claim_set_digest") or "").strip()
+    actual_digest = _digest({
+        key: value
+        for key, value in body.items()
+        if key != "claim_set_digest"
+    })
+    if not claimed_digest or claimed_digest != actual_digest:
+        raise GoalClaimSetError("goal claim set content digest mismatch")
+    return body
+
+
 def _explicit_goal_claims(task_map: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = task_map.get("goal_claims")
     if not isinstance(raw, list):
@@ -142,7 +287,13 @@ def _explicit_goal_claims(task_map: Mapping[str, Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(raw):
         if isinstance(item, Mapping):
             claim_id = str(item.get("goal_claim_id") or item.get("id") or "").strip()
-            text = str(item.get("text") or item.get("claim") or item.get("title") or "").strip()
+            text = str(
+                item.get("text")
+                or item.get("statement")
+                or item.get("claim")
+                or item.get("title")
+                or ""
+            ).strip()
             mandatory = bool(item.get("mandatory", True))
             source_ref = str(item.get("source_ref") or "").strip()
         else:
@@ -170,7 +321,13 @@ def _task_acceptance_claims(task_map: Mapping[str, Any]) -> list[dict[str, Any]]
         criteria = task.get("acceptance_criteria") or task.get("acceptance")
         for index, item in enumerate(criteria if isinstance(criteria, list) else []):
             if isinstance(item, Mapping):
-                text = str(item.get("text") or item.get("criterion") or item.get("title") or "").strip()
+                text = str(
+                    item.get("text")
+                    or item.get("statement")
+                    or item.get("criterion")
+                    or item.get("title")
+                    or ""
+                ).strip()
                 claim_id = str(item.get("goal_claim_id") or item.get("acceptance_id") or item.get("id") or "").strip()
             else:
                 claim_id, text = _claim_id_and_text(
@@ -200,6 +357,7 @@ def _objective_acceptance_claims(
         if isinstance(item, Mapping):
             text = str(
                 item.get("text")
+                or item.get("statement")
                 or item.get("criterion")
                 or item.get("title")
                 or ""
@@ -290,5 +448,8 @@ __all__ = [
     "SCHEMA_VERSION",
     "build_goal_claim_set",
     "canonical_task_map_generation",
+    "hydrate_pinned_goal_claim_set",
+    "pin_goal_claim_set_from_requirement",
     "pin_goal_claim_set_from_task_map",
+    "validate_goal_claim_set",
 ]

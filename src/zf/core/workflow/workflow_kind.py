@@ -12,11 +12,19 @@ doc 74 compiler:**不建第二 scheduler,本模块不被 runtime 导入**。
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 
 class WorkflowKindError(ValueError):
     """spec 翻译失败——envelope/loader 包装为 ConfigError。"""
+
+
+@dataclass(frozen=True)
+class WorkflowKindCompilation:
+    stages: list[dict[str, Any]]
+    generic_contract: dict[str, Any] = field(default_factory=dict)
+    flow_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 _KNOWN_TASK_KEYS = frozenset({
@@ -55,7 +63,51 @@ def failure_event_of(task_name: str) -> str:
     return f"{task_name}.failed"
 
 
+def compile_workflow_kind(
+    spec: dict,
+    *,
+    context: str = "Workflow",
+) -> WorkflowKindCompilation:
+    """Compile legacy or safe Generic syntax to canonical stage dictionaries."""
+
+    from zf.core.workflow.generic_workflow import (
+        GenericWorkflowError,
+        is_safe_generic_workflow,
+        prepare_generic_workflow,
+    )
+
+    if not is_safe_generic_workflow(spec):
+        return WorkflowKindCompilation(
+            stages=_translate_legacy_workflow_kind(spec, context=context),
+        )
+    try:
+        prepared = prepare_generic_workflow(spec, context=context)
+    except GenericWorkflowError as exc:
+        raise WorkflowKindError(str(exc)) from exc
+    stages = _translate_legacy_workflow_kind(
+        prepared.legacy_spec,
+        context=context,
+    )
+    for stage in stages:
+        stage.update(
+            prepared.stage_extensions.get(str(stage.get("id") or ""), {})
+        )
+    return WorkflowKindCompilation(
+        stages=stages,
+        generic_contract=prepared.contract,
+        flow_metadata=prepared.flow_metadata,
+    )
+
+
 def translate_workflow_kind(spec: dict, *, context: str = "Workflow") -> list[dict]:
+    return compile_workflow_kind(spec, context=context).stages
+
+
+def _translate_legacy_workflow_kind(
+    spec: dict,
+    *,
+    context: str = "Workflow",
+) -> list[dict]:
     """Workflow spec → canonical stage dict 列表。
 
     约定铸造:task 终态 `{name}.completed/failed`、fanout child 终态
@@ -262,3 +314,13 @@ def translate_workflow_kind(spec: dict, *, context: str = "Workflow") -> list[di
                 stage[dst] = task[src_key]
         stages.append(stage)
     return stages
+
+
+__all__ = [
+    "WorkflowKindCompilation",
+    "WorkflowKindError",
+    "compile_workflow_kind",
+    "failure_event_of",
+    "success_event_of",
+    "translate_workflow_kind",
+]

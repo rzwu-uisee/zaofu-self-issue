@@ -7,8 +7,19 @@ from typing import Any
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
+from zf.runtime.fanout_recovery_runtime import (
+    reader_fanout_superseding_goal_claim,
+)
 from zf.runtime.task_contract_snapshot import snapshot_payload_fields
 from zf.runtime.writer_fanout_data import _FANOUT_AFFINITY_METADATA_KEYS
+
+
+def _fanout_operation_key(*, context: Any, child: Any, payload: dict[str, Any]) -> str:
+    if str(payload.get("flow_kind") or "") == "workflow":
+        return f"{child.child_id}@fanout:{context.fanout_id}"
+    if context.trigger_event_id:
+        return f"{child.child_id}@trig:{context.trigger_event_id[:12]}"
+    return child.child_id
 
 
 class DurableCallFanoutMixin:
@@ -30,6 +41,11 @@ class DurableCallFanoutMixin:
         terminal_statuses = {"completed", "failed", "timed_out", "cancelled"}
         active_children: set[tuple[str, str]] = set()
         events_by_id = {event.id: event for event in events}
+        started_event_ids = {
+            str((event.payload or {}).get("fanout_id") or ""): event.id
+            for event in events
+            if event.type == "fanout.started" and isinstance(event.payload, dict)
+        }
         for event in events:
             if event.type not in {
                 "fanout.child.dispatched",
@@ -147,13 +163,17 @@ class DurableCallFanoutMixin:
                     child for _item, _role, child, _raw in pending
                 ],
             )
+            fanout_causation_id = (
+                started_event_ids.get(fanout_id)
+                or str(manifest.get("trigger_event_id") or "")
+            )
             prepared_dispatches = self._preregister_writer_fanout_operations(
                 context=context,
                 assignments=[
                     (task_item, role, child)
                     for task_item, role, child, _raw_child in pending
                 ],
-                causation_id=str(manifest.get("trigger_event_id") or ""),
+                causation_id=fanout_causation_id,
             )
             for task_item, role, child, raw_child in pending:
                 self._unpark_writer_fanout_deferred_task(
@@ -189,8 +209,7 @@ class DurableCallFanoutMixin:
                         or ""
                     ),
                     wave=self._fanout_child_wave(raw_child),
-                    causation_id=str(raw_child.get("last_event_id") or "")
-                    or str(manifest.get("trigger_event_id") or ""),
+                    causation_id=fanout_causation_id,
                     rework_feedback=rework_feedback,
                     rework_attempt=rework_attempt,
                     rework_summary=rework_summary,
@@ -310,9 +329,10 @@ class DurableCallFanoutMixin:
                 # child 键 → 与已注册 op 撞身份(request_hash_divergence)。
                 # 键掺触发事件 id:同触发重放=同 id(replay 语义保持),
                 # 新触发=天然新代。
-                operation_key=(
-                    f"{child.child_id}@trig:{context.trigger_event_id[:12]}"
-                    if context.trigger_event_id else child.child_id
+                operation_key=_fanout_operation_key(
+                    context=context,
+                    child=child,
+                    payload=child.payload,
                 ),
                 stage_id=context.stage_id,
                 task_id=str(child.payload.get("task_id") or ""),
@@ -342,6 +362,22 @@ class DurableCallFanoutMixin:
             role = roles_by_instance.get(child.role_instance)
             if role is None:
                 continue
+            run_id = f"run-{context.fanout_id}-{child.child_id}"
+            if not self._ensure_fanout_role_dispatchable(
+                role=role,
+                fanout_id=context.fanout_id,
+                stage_id=context.stage_id,
+                child_id=child.child_id,
+                run_id=run_id,
+                trace_id=context.trace_id,
+                task_id=str(
+                    (child.payload or {}).get("task_id") or ""
+                ) or None,
+                causation_id=causation_id,
+                prompt_kind="fanout_child",
+            ):
+                prepared[child.child_id] = {"skip": True, "run_id": run_id}
+                continue
             try:
                 prepared[child.child_id] = self._prepare_reader_fanout_child_operation(
                     context=context,
@@ -351,7 +387,6 @@ class DurableCallFanoutMixin:
                     aggregate=aggregate,
                 )
             except Exception as exc:
-                run_id = f"run-{context.fanout_id}-{child.child_id}"
                 self.event_writer.append(ZfEvent(
                     type="fanout.child.failed",
                     actor="zf-cli",
@@ -464,6 +499,11 @@ class DurableCallFanoutMixin:
             for index, event in enumerate(events)
             if event.type == "fanout.started" and isinstance(event.payload, dict)
         }
+        started_event_ids = {
+            str((event.payload or {}).get("fanout_id") or ""): event.id
+            for event in events
+            if event.type == "fanout.started" and isinstance(event.payload, dict)
+        }
 
         # Close stale generations before attempting any current dispatch. The
         # filesystem does not guarantee glob order; interleaving closeout and
@@ -487,6 +527,7 @@ class DurableCallFanoutMixin:
                 manifest=manifest,
                 manifests=manifests,
                 started_order=started_order,
+                events=events,
             )
             if not stale_reason:
                 continue
@@ -518,6 +559,7 @@ class DurableCallFanoutMixin:
                 manifest=manifest,
                 manifests=manifests,
                 started_order=started_order,
+                events=events,
             )
             if stale_reason:
                 before = len(self.event_log.read_all())
@@ -577,10 +619,14 @@ class DurableCallFanoutMixin:
             roles_by_instance = {
                 role.instance_id: role for _child, role in pending
             }
+            fanout_causation_id = (
+                started_event_ids.get(fanout_id)
+                or str(manifest.get("trigger_event_id") or "")
+            )
             prepared_dispatches = self._preregister_reader_fanout_operations(
                 context=context,
                 roles_by_instance=roles_by_instance,
-                causation_id=str(manifest.get("trigger_event_id") or ""),
+                causation_id=fanout_causation_id,
                 aggregate=stage.aggregate,
             )
             for child, role in pending:
@@ -590,7 +636,7 @@ class DurableCallFanoutMixin:
                     child=child,
                     role=role,
                     aggregate=stage.aggregate,
-                    causation_id=str(manifest.get("trigger_event_id") or ""),
+                    causation_id=fanout_causation_id,
                     prepared_dispatch=prepared_dispatches.get(child.child_id),
                 )
                 recovered = recovered or len(self.event_log.read_all()) > before
@@ -603,7 +649,14 @@ class DurableCallFanoutMixin:
         manifest: dict,
         manifests: list[tuple[str, dict | None]],
         started_order: dict[str, int],
+        events: list[ZfEvent],
     ) -> tuple[str, str]:
+        goal_claim_id = reader_fanout_superseding_goal_claim(
+            events,
+            manifest=manifest,
+        )
+        if goal_claim_id:
+            return "superseded_by_admitted_goal_completion_claim", goal_claim_id
         stale_reason, superseded_by = self._fanout_identity_stale_reason(
             fanout_id,
         )
@@ -728,6 +781,20 @@ class DurableCallFanoutMixin:
         from zf.runtime.workdirs import WorkdirManager
 
         task_id = str(task_item.get("task_id") or "")
+        task = self.task_store.get(task_id) if task_id else None
+        if task is not None:
+            from zf.runtime.writer_fanout_admission import (
+                bind_writer_task_dispatch_owner,
+            )
+            contract = bind_writer_task_dispatch_owner(
+                task=task,
+                role=role,
+                config=self.config,
+                event_writer=self.event_writer,
+            )
+            self.task_store.update(task_id, contract=contract)
+            task_item["owner_role"] = role.name
+            task_item["owner_instance"] = role.instance_id
         run_id = f"run-{context.fanout_id}-{child.child_id}"
         manager = WorkdirManager(
             state_dir=self.state_dir,
@@ -820,9 +887,10 @@ class DurableCallFanoutMixin:
                 payload=operation_payload,
                 operation_type="fanout_writer_child",
                 # ZF-GEN-SCOPE-01:同上,writer 路径(task_map 重触发场景)
-                operation_key=(
-                    f"{child.child_id}@trig:{context.trigger_event_id[:12]}"
-                    if context.trigger_event_id else child.child_id
+                operation_key=_fanout_operation_key(
+                    context=context,
+                    child=child,
+                    payload=operation_payload,
                 ),
                 stage_id=context.stage_id,
                 task_id=task_id,
@@ -876,6 +944,7 @@ class DurableCallFanoutMixin:
                 child_id=child.child_id,
                 run_id=run_id,
                 trace_id=context.trace_id,
+                task_id=str(task_item.get("task_id") or "") or None,
                 causation_id=causation_id,
                 prompt_kind="fanout_child",
             ):

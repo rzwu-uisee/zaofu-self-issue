@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -331,6 +332,14 @@ def _render_intake_markdown(payload: dict[str, Any], *, source_text: str = "") -
 
 def _infer_request_kind(text: str) -> str:
     lowered = str(text or "").lower()
+    workflow_terms = (
+        "research",
+        "evidence synthesis",
+        "literature review",
+        "调研",
+        "研究",
+        "证据综合",
+    )
     refactor_terms = (
         "refactor", "rewrite", "migrate", "parity", "复刻", "重构",
         "迁移", "替代", "对齐旧项目",
@@ -343,6 +352,8 @@ def _infer_request_kind(text: str) -> str:
         "bug", "fix", "issue", "regression", "报错", "修复", "问题",
         "失败", "异常",
     )
+    if any(term in lowered for term in workflow_terms):
+        return "workflow"
     if any(term in lowered for term in refactor_terms):
         return "refactor"
     if any(term in lowered for term in prd_terms):
@@ -360,6 +371,44 @@ def _build_skill_adapter_plan(
     strictness: str = "standard",
     parity_scope: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    if kind == "workflow":
+        catalog = {
+            "kind": "registered-generic-workflow-catalog",
+            "version": "generic-workflow.v1",
+        }
+        return {
+            "schema_version": "skill.adapter.plan.v2",
+            "kind": kind,
+            "project_id": project_id,
+            "project_key": project_id,
+            "strictness": strictness,
+            "parity_scope": [],
+            "status": "PASS",
+            "required_skills": [],
+            "recommended_skills": [],
+            "loaded_skills": [],
+            "missing_required_skills": [],
+            "missing_recommended_skills": [],
+            "missing_skills": [],
+            "discovered_project_skills": [],
+            "roleSkillBundles": {},
+            "role_skill_bundles_patch": {},
+            "diagnostics": [],
+            "policy": {
+                "source_ref": "registered-generic-workflow-catalog",
+                "sha256": hashlib.sha256(
+                    json.dumps(
+                        catalog,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "fallback": "registered_template_only",
+                "strictness_stop_values": [],
+            },
+            "proposed_skill_backlogs": [],
+            "created_at": _now_iso(),
+        }
     config = _load_project_config(project_root)
     return build_project_adapter_skill_plan(AdapterSkillResolverInput(
         kind=kind,
@@ -384,6 +433,8 @@ def _write_delivery_matrix_drafts(
     skill_plan: dict[str, Any],
     created_at: str,
 ) -> dict[str, str]:
+    if kind == "workflow":
+        return {}
     source_text = _read_text_ref(source_ref)
     extracted_acceptance = _extract_acceptance_criteria(source_text)
     extracted_commands = _extract_verification_commands(source_text)

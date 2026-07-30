@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -93,10 +94,36 @@ def build_run_contract(
     from zf.runtime.call_result_admission import CALL_RESULT_ADAPTER_VERSION
     from zf.runtime.call_result_envelope import CALL_RESULT_CANONICALIZATION
     from zf.runtime.workflow_operation import WORKFLOW_OPERATION_CANONICALIZATION
+    from zf.runtime.execution_profiles import (
+        execution_profile_catalog_projection,
+    )
 
     required_operation_ids = _string_list(
         result_protocol.get("required_operation_ids")
         or metadata.get("required_operation_ids")
+    )
+    completion_profile = str(
+        metadata.get("completion_profile") or "software_delivery"
+    )
+    generic_contract = _generic_workflow_contract(
+        config,
+        digest=str(
+            metadata.get("generic_workflow_contract_digest") or ""
+        ),
+    )
+    explicit_delivery_artifacts = metadata.get(
+        "required_delivery_artifacts"
+    )
+    delivery_artifacts = (
+        [
+            dict(item)
+            for item in explicit_delivery_artifacts
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(explicit_delivery_artifacts, list)
+        else required_delivery_artifacts(
+            str(metadata.get("flow_kind") or manifest.get("kind") or "")
+        )
     )
     contract: dict[str, Any] = {
         "schema_version": RUN_CONTRACT_SCHEMA,
@@ -109,6 +136,13 @@ def build_run_contract(
         },
         "workflow": {
             "kind": str(metadata.get("flow_kind") or ""),
+            "intent": str(metadata.get("intent") or ""),
+            "template": str(metadata.get("workflow_template") or ""),
+            "completion_profile": completion_profile,
+            "generic_workflow_contract_digest": str(
+                metadata.get("generic_workflow_contract_digest") or ""
+            ),
+            "generic_workflow_contract": generic_contract,
             "schema_profile": str(getattr(getattr(config, "workflow", None), "schema_profile", "") or ""),
             "quality_floor": str(metadata.get("quality_floor") or ""),
             "strictness": str(manifest.get("strictness") or metadata.get("strictness") or ""),
@@ -122,9 +156,7 @@ def build_run_contract(
         },
         "refs": refs,
         "digests": _ref_digests(refs, project_root=project_root),
-        "required_delivery_artifacts": required_delivery_artifacts(
-            str(metadata.get("flow_kind") or manifest.get("kind") or "")
-        ),
+        "required_delivery_artifacts": delivery_artifacts,
         "protocols": {
             "result_protocol": {
                 "schema_version": "call-result-envelope.v1",
@@ -159,9 +191,15 @@ def build_run_contract(
                 "schema_version": "plan-artifact-package.v1",
                 "mode": artifact_package_mode,
             },
+            "execution_profile": execution_profile_catalog_projection(config),
             "goal_closure": {
                 "schema_version": "goal-closure-protocol.v1",
-                "authority": "admitted_thin_judge",
+                "authority": (
+                    "admitted_artifact_delivery"
+                    if completion_profile == "artifact_delivery"
+                    else "admitted_thin_judge"
+                ),
+                "completion_profile": completion_profile,
                 "delivery_policy": str(metadata.get("delivery_policy") or "report_only"),
                 "approval_policy": str(metadata.get("approval_policy") or ""),
                 "target_ref": str(
@@ -202,6 +240,95 @@ def write_run_contract(
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return path
+
+
+def bind_run_contract_workflow_artifacts(
+    contract: Mapping[str, Any],
+    *,
+    proposal_ref: Mapping[str, Any] | None = None,
+    proposal_digest: str = "",
+    effective_config_ref: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Pin approved Proposal/config artifacts into the immutable Run contract."""
+
+    bound = deepcopy(dict(contract))
+    workflow = (
+        dict(bound.get("workflow") or {})
+        if isinstance(bound.get("workflow"), Mapping)
+        else {}
+    )
+    config = (
+        dict(bound.get("config") or {})
+        if isinstance(bound.get("config"), Mapping)
+        else {}
+    )
+    if proposal_ref:
+        workflow["proposal_ref"] = dict(proposal_ref)
+    if proposal_digest:
+        workflow["proposal_digest"] = str(proposal_digest)
+        workflow["workflow_generation"] = str(proposal_digest)
+    if effective_config_ref:
+        config["effective_snapshot_ref"] = dict(effective_config_ref)
+        config["effective_snapshot_digest"] = str(
+            effective_config_ref.get("sha256") or ""
+        )
+    bound["workflow"] = workflow
+    bound["config"] = config
+    bound["contract_digest"] = stable_json_sha256(_stable_contract_body(bound))
+    return bound
+
+
+def preserve_submitted_run_contract_bindings(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Carry submitted workflow bindings across an unchanged contract rebuild.
+
+    ``zf start`` rebuilds the deterministic config/input portion of a contract.
+    Proposal and effective-config bindings are added later by workflow submit,
+    so an unchanged restart must reapply them before drift comparison. Real
+    config, input, protocol, or manifest drift remains visible because the
+    unbound contract bodies must match exactly.
+    """
+
+    rebuilt = deepcopy(dict(current))
+    if not previous:
+        return rebuilt
+    previous_base = _without_submitted_workflow_bindings(previous)
+    current_base = _without_submitted_workflow_bindings(current)
+    if _stable_contract_body(previous_base) != _stable_contract_body(current_base):
+        return rebuilt
+
+    previous_workflow = (
+        previous.get("workflow")
+        if isinstance(previous.get("workflow"), Mapping)
+        else {}
+    )
+    previous_config = (
+        previous.get("config")
+        if isinstance(previous.get("config"), Mapping)
+        else {}
+    )
+    workflow = (
+        dict(rebuilt.get("workflow") or {})
+        if isinstance(rebuilt.get("workflow"), Mapping)
+        else {}
+    )
+    config = (
+        dict(rebuilt.get("config") or {})
+        if isinstance(rebuilt.get("config"), Mapping)
+        else {}
+    )
+    for key in ("proposal_ref", "proposal_digest", "workflow_generation"):
+        if key in previous_workflow:
+            workflow[key] = deepcopy(previous_workflow[key])
+    for key in ("effective_snapshot_ref", "effective_snapshot_digest"):
+        if key in previous_config:
+            config[key] = deepcopy(previous_config[key])
+    rebuilt["workflow"] = workflow
+    rebuilt["config"] = config
+    rebuilt["contract_digest"] = stable_json_sha256(_stable_contract_body(rebuilt))
+    return rebuilt
 
 
 def active_run_contract_path(state_dir: Path) -> Path:
@@ -288,6 +415,54 @@ def load_run_contract(state_dir: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def hydrate_run_effective_config(
+    state_dir: Path,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Hydrate the complete immutable effective config pinned by a Run."""
+
+    config = (
+        contract.get("config")
+        if isinstance(contract.get("config"), Mapping)
+        else {}
+    )
+    descriptor = config.get("effective_snapshot_ref")
+    if not isinstance(descriptor, Mapping):
+        raise SidecarRefError(
+            "effective_config_snapshot_missing",
+            "run contract has no effective config snapshot",
+        )
+    expected = str(config.get("effective_snapshot_digest") or "")
+    if not expected or expected != str(descriptor.get("sha256") or ""):
+        raise SidecarRefError(
+            "effective_config_snapshot_binding_mismatch",
+            "run contract effective config digest does not match its ref",
+            ref=str(descriptor.get("ref") or ""),
+        )
+    hydrated = hydrate_sidecar_ref(state_dir, dict(descriptor))
+    payload = hydrated.payload
+    if not hydrated.ok or not isinstance(payload, Mapping):
+        raise SidecarRefError(
+            "effective_config_snapshot_invalid",
+            "run effective config snapshot is unreadable",
+            ref=str(descriptor.get("ref") or ""),
+        )
+    if str(payload.get("schema_version") or "") != "effective-config-snapshot.v1":
+        raise SidecarRefError(
+            "effective_config_snapshot_schema_mismatch",
+            "run effective config snapshot schema is invalid",
+            ref=str(descriptor.get("ref") or ""),
+        )
+    effective = payload.get("config")
+    if not isinstance(effective, Mapping):
+        raise SidecarRefError(
+            "effective_config_snapshot_body_missing",
+            "run effective config snapshot has no config body",
+            ref=str(descriptor.get("ref") or ""),
+        )
+    return dict(effective)
 
 
 def run_contract_drift_diagnostics(
@@ -399,6 +574,7 @@ def evaluate_run_contract_resume_policy(
         state_dir=state_dir,
         workflow_input_manifest_ref=_workflow_input_manifest_ref(previous),
     )
+    current = preserve_submitted_run_contract_bindings(previous, current)
     effective_strict = strict_run_contract_drift(previous, current, strict=strict)
     diagnostics = run_contract_drift_diagnostics(
         previous,
@@ -447,6 +623,25 @@ def required_delivery_artifacts(flow_kind: str) -> list[dict[str, str]]:
     return common
 
 
+def _generic_workflow_contract(
+    config: Any,
+    *,
+    digest: str,
+) -> dict[str, Any]:
+    workflow = getattr(config, "workflow", None)
+    contracts = getattr(workflow, "generic_workflows", []) or []
+    matches = [
+        dict(item)
+        for item in contracts
+        if isinstance(item, Mapping)
+        and (
+            not digest
+            or str(item.get("contract_digest") or "") == digest
+        )
+    ]
+    return matches[0] if len(matches) == 1 else {}
+
+
 def stable_json_sha256(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         payload,
@@ -463,6 +658,30 @@ def _stable_contract_body(contract: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in contract.items()
         if key not in {"created_at", "contract_digest"}
     }
+
+
+def _without_submitted_workflow_bindings(
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    base = deepcopy(dict(contract))
+    workflow = (
+        dict(base.get("workflow") or {})
+        if isinstance(base.get("workflow"), Mapping)
+        else {}
+    )
+    config = (
+        dict(base.get("config") or {})
+        if isinstance(base.get("config"), Mapping)
+        else {}
+    )
+    for key in ("proposal_ref", "proposal_digest", "workflow_generation"):
+        workflow.pop(key, None)
+    for key in ("effective_snapshot_ref", "effective_snapshot_digest"):
+        config.pop(key, None)
+    base["workflow"] = workflow
+    base["config"] = config
+    base["contract_digest"] = stable_json_sha256(_stable_contract_body(base))
+    return base
 
 
 def _collect_contract_refs(

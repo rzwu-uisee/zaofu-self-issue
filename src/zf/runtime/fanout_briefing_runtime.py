@@ -6,6 +6,7 @@ from pathlib import Path
 
 from zf.core.config.schema import RoleConfig
 from zf.runtime.cli_command import zf_cli_cmd
+from zf.runtime.fanout_artifact_refs import refactor_plan_workdir_refs
 from zf.runtime.impl_self_check import (
     descriptor_from_payload as self_check_descriptor_from_payload,
     hydrate_impl_self_check,
@@ -17,7 +18,10 @@ from zf.runtime.task_contract_snapshot import (
     hydrate_task_contract_snapshot,
     target_descriptor_from_payload,
 )
-from zf.runtime.workflow_inputs import render_workflow_input_briefing_section
+from zf.runtime.workflow_inputs import (
+    compact_workflow_input_payload_for_briefing,
+    render_workflow_input_briefing_section,
+)
 
 
 _HANDOFF_REF_FIELDS = (
@@ -41,7 +45,6 @@ def _contract_handoff_ref_fields(config, success_event: str) -> list[str]:
     if fields:
         return fields
     return list(_PRD_STAGE_LOOSE_FALLBACK.get(success_event, ()))
-
 
 class FanoutBriefingMixin:
     def _write_fanout_briefing(
@@ -102,7 +105,21 @@ class FanoutBriefingMixin:
             str(child_payload.get("closure_identity") or "").strip()
             and str(child_payload.get("goal_claim_set_ref") or "").strip()
         )
-        if is_goal_closure:
+        is_artifact_delivery = (
+            str(child_payload.get("output_profile_id") or "")
+            == "artifact-delivery"
+        )
+        if is_artifact_delivery:
+            from zf.runtime.artifact_delivery_result import (
+                artifact_delivery_success_payload,
+            )
+
+            success_payload.update(artifact_delivery_success_payload(
+                child_payload,
+                verifier_stage_id=str(context.stage_id or ""),
+                verifier_role=role.instance_id,
+            ))
+        elif is_goal_closure:
             from zf.runtime.goal_closure_identity import (
                 validate_goal_closure_dispatch_snapshots,
             )
@@ -380,10 +397,7 @@ class FanoutBriefingMixin:
                     if value not in (None, ""):
                         verification_result[key] = value
         is_refactor_review = success_event == "zaofu.refactor.review.ready"
-        is_refactor_plan = success_event in {
-            "zaofu.refactor.plan.ready",
-            "refactor.plan.ready",
-        }
+        is_refactor_plan = success_event in {"zaofu.refactor.plan.ready", "refactor.plan.ready"}
         is_plan_artifact_stage = self._is_plan_artifact_stage(
             role=role,
             stage_id=str(context.stage_id),
@@ -422,14 +436,11 @@ class FanoutBriefingMixin:
                 if isinstance(child_payload.get("refactor_contract"), dict)
                 else {}
             )
-            scan_quality_audit_ref = (
-                "Path to scan-quality-audit.json proving scan inputs were "
-                "consumed before task_map synthesis."
-            )
+            workdir_refs = refactor_plan_workdir_refs(context.fanout_id)
             success_payload.update({
-                "scan_quality_audit_ref": scan_quality_audit_ref,
-                "artifact_refs": [scan_quality_audit_ref],
+                **workdir_refs,
                 "artifact_digests": {},
+                "plan_ports": [],
             })
             if refactor_contract:
                 success_payload["refactor_contract"] = dict(refactor_contract)
@@ -437,14 +448,14 @@ class FanoutBriefingMixin:
                 "review_artifact_ref": review_artifact_ref,
                 "plan_intent": plan_intent,
                 "refactor_contract": refactor_contract,
-                "scan_quality_audit_ref": scan_quality_audit_ref,
+                **workdir_refs,
                 "refactor_plan_md": "## Refactor Plan\n\nReplace with the final plan.",
                 "task_map": {"tasks": []},
                 "gates": [],
                 "risk_register": [],
                 "backlog_candidates": [],
-                "artifact_refs": [scan_quality_audit_ref],
                 "evidence_refs": [],
+                "plan_ports": [],
             })
             failure_payload["reason"] = (
                 "Unable to produce a plan artifact from the review artifact."
@@ -590,40 +601,35 @@ class FanoutBriefingMixin:
                 "",
             ])
         workflow_input_section = render_workflow_input_briefing_section(
-            child_payload,
+            compact_workflow_input_payload_for_briefing(child_payload),
         ).strip()
         workflow_input_lines = (
             [*workflow_input_section.splitlines(), ""]
             if workflow_input_section
             else []
         )
+        from zf.runtime.stage_execution_card import (
+            ARTIFACT_DELIVERY_RESULT_GUIDANCE,
+            prepare_fanout_result_guidance,
+        )
 
-        result_guidance = [
-            "Finding schema: use `severity` = info|low|medium|high|critical, `path`, `message`, and optional integer `line`.",
-            "`fanout_id`, `stage_id`, `child_id`, `run_id`, `role_instance`, and `status` must stay as top-level payload fields; do not place them only inside `report`.",
-        ]
-        if contract_snapshot:
-            result_guidance.append(
-                "For `verification_result.requirement_results[].status`, use only "
-                "`passed`, `failed`, `blocked`, `waived`, or `not_applicable`; "
-                "a `rejected` verdict requires at least one `failed` requirement."
+        result_guidance, semantic_submit, result_prefix = (
+            prepare_fanout_result_guidance(
+                child_payload=child_payload,
+                has_contract_snapshot=bool(contract_snapshot),
             )
-            result_guidance.append(
-                "Reuse only `reusable_impl_receipts` listed in this briefing. Record their "
-                "ids in `verification_result.reused_command_receipt_ids`; put every newly "
-                "run independent check in `probe_receipts`."
-            )
-            result_guidance.append(
-                "For a rejected or blocked verdict, replace the sample with exact "
-                "`rework_items`: classify missing/incomplete/incorrect/unverified/blocked "
-                "and state observed gap, required delta, scope, done_when, next gate, and owner."
-            )
+        )
+        if is_artifact_delivery:
+            result_guidance.extend(ARTIFACT_DELIVERY_RESULT_GUIDANCE)
         if (
             success_event == "flow.discovery.completed"
             and failure_event == "flow.discovery.failed"
         ):
             result_guidance.extend([
-                "A blocking product gap is a completed semantic discovery: emit the failure event with bounded `report.gap_tasks`; the kernel will amend the task map instead of rescanning the unchanged candidate.",
+                "A blocking product gap is a completed semantic discovery: emit "
+                f"the failure result with bounded `{result_prefix}gap_tasks`; the "
+                "kernel will amend the task map instead of rescanning the unchanged "
+                "candidate.",
                 "Every gap task MUST use the canonical task-map shape: non-empty `task_id`, `owner_role`, `claim_paths` or `allowed_paths`, `acceptance` or `acceptance_criteria`, `verify_commands` or `verification`, and `source_refs`.",
                 "Use `task_id`, not a bare `id`; `acceptance_refs` and `verification_commands` do not replace the canonical acceptance and verification fields.",
                 "Gap tasks MUST NOT claim overlapping paths. Combine related fixes into one task or give each task disjoint file ownership; ordering does not make duplicate path ownership valid.",
@@ -633,19 +639,24 @@ class FanoutBriefingMixin:
             result_guidance.extend([
                 "For this refactor review workflow, finding severity describes planning risk.",
                 "Emit the success event when the review report is complete, even if findings include `high` or `critical` items.",
-                "For a complete review report, keep `report.status` as `passed` and `report.recommendation` as `approve`; put caveats in findings, risks, refactor_slices, and summary.",
+                f"For a complete review report, keep `{result_prefix}status` as "
+                f"`passed` and `{result_prefix}recommendation` as `approve`; put "
+                "caveats in findings, risks, refactor_slices, and summary.",
                 "Do not invent custom recommendation values; valid values are `approve`, `reject`, `needs_rework`, and `abstain`.",
                 "Emit the failure event only when you cannot inspect the assigned scope or cannot provide `coverage_matrix` / `evidence_refs`.",
-                "Replace placeholder arrays in the success payload with actual coverage, evidence, uncovered areas, findings, and refactor slices.",
+                "Replace placeholder arrays in the success result with actual "
+                "coverage, evidence, uncovered areas, findings, and refactor slices.",
             ])
         elif is_refactor_plan:
             result_guidance.extend([
                 "For this refactor plan workflow, emit the success event only when `refactor_plan_md`, `task_map`, and `gates` are complete.",
-                "For a complete plan artifact, keep `report.status` as `passed` and `report.recommendation` as `approve`.",
+                f"For a complete plan artifact, keep `{result_prefix}status` as "
+                f"`passed` and `{result_prefix}recommendation` as `approve`.",
                 "Do not invent custom recommendation values; valid values are `approve`, `reject`, `needs_rework`, and `abstain`.",
                 "Use the provided `review_artifact_ref` and `plan_intent`; do not invent facts for uncovered review areas.",
                 "Emit the failure event only when the plan artifact cannot be produced.",
                 *self._plan_artifact_contract_lines(),
+                *self._plan_port_contract_lines(flow_kind="refactor"),
             ])
             refactor_contract = (
                 child_payload.get("refactor_contract")
@@ -661,6 +672,11 @@ class FanoutBriefingMixin:
                 ])
         elif is_plan_artifact_stage:
             plan_ref = f"docs/plans/{context.stage_id}-{child_id}-plan.md"
+            flow_kind = str(
+                child_payload.get("flow_kind")
+                or trigger_payload.get("flow_kind")
+                or ""
+            )
             # prod-e2e(2026-07-04 prd 轮实弹,F4 契约分叉 prd 变体):
             # success_event 是 task_map.ready 的 plan 子任务,briefing 曾
             # 预填 task_map_ref="" 且只讲 markdown 合同 → planner 100%
@@ -679,6 +695,7 @@ class FanoutBriefingMixin:
                     if produces_task_map else [plan_ref]
                 ),
                 "evidence_refs": [],
+                "plan_ports": [],
             })
             if produces_task_map:
                 success_payload["task_map_ref"] = task_map_ref_prefill
@@ -689,8 +706,12 @@ class FanoutBriefingMixin:
                 "backlog_ref": "",
                 "source_index_ref": "",
                 "evidence_refs": [],
+                "plan_ports": [],
             })
             result_guidance.extend(self._plan_artifact_contract_lines())
+            result_guidance.extend(
+                self._plan_port_contract_lines(flow_kind=flow_kind)
+            )
             if produces_task_map:
                 result_guidance.extend([
                     "THIS stage's success event is `task_map.ready`: write the JSON "
@@ -823,10 +844,6 @@ class FanoutBriefingMixin:
             stage_id=str(context.stage_id or ""),
             event_type=str(child_success_event or ""),
         )
-        semantic_submit = (
-            str(child_payload.get("semantic_result_submit_mode") or "") == "blocking"
-            and bool(str(child_payload.get("operation_id") or "").strip())
-        )
         success_payload_file = ""
         if is_goal_closure and not semantic_submit:
             from zf.runtime.call_result_envelope import write_immutable_json_sidecar
@@ -904,10 +921,22 @@ class FanoutBriefingMixin:
                     if verification_reader
                     else []
                 ),
-                "Evaluate the target ref as a read-only fanout child."
-                if not candidate_eval_ref and not verification_reader
-                else "Read-only fanout child. Do not modify project source files.",
-                "Do not modify project source files.",
+                (
+                    "This is a planning reader: do not modify product "
+                    "implementation files, but write the plan/task-map artifacts "
+                    "and inline plan_ports required by this briefing."
+                    if is_plan_artifact_stage
+                    else (
+                        "Evaluate the target ref as a read-only fanout child."
+                        if not candidate_eval_ref and not verification_reader
+                        else "Read-only fanout child."
+                    )
+                ),
+                *(
+                    []
+                    if is_plan_artifact_stage
+                    else ["Do not modify project source files."]
+                ),
                 "",
                 *stage_instruction_lines,
                 # B3 (R20): affinity lanes inspect ONLY their slice — not the full

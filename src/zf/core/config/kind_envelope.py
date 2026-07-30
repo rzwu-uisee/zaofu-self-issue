@@ -17,6 +17,8 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from zf.core.config.generic_role_binding import bind_generic_workflow_roles
+
 
 class KindEnvelopeError(ValueError):
     """envelope 层失败——调用方包装为 ConfigError。"""
@@ -217,6 +219,8 @@ def assemble_envelope_stream(
     config_profiles: dict[str, dict] = {}
     role_sets: dict[str, dict] = {}
     kind_stages: list[dict] = []
+    generic_workflows: list[dict[str, Any]] = []
+    generic_flow_metadata: list[dict[str, Any]] = []
     flow_documents: list[tuple[str, dict]] = []
     for i, doc in enumerate(docs):
         if not isinstance(doc, dict):
@@ -265,15 +269,20 @@ def assemble_envelope_stream(
         elif kind == "Workflow":
             from zf.core.workflow.workflow_kind import (
                 WorkflowKindError,
-                translate_workflow_kind,
+                compile_workflow_kind,
             )
             name = str(metadata.get("name") or f"workflow[{i}]")
             try:
-                kind_stages.extend(
-                    translate_workflow_kind(dict(spec), context=name),
+                compilation = compile_workflow_kind(
+                    dict(spec),
+                    context=name,
                 )
             except WorkflowKindError as exc:
                 raise KindEnvelopeError(str(exc))
+            kind_stages.extend(compilation.stages)
+            if compilation.generic_contract:
+                generic_workflows.append(compilation.generic_contract)
+                generic_flow_metadata.append(compilation.flow_metadata)
         elif kind == "RefactorFlow":
             flow_documents.append((kind, dict(spec)))
         elif kind == "IssueFlow":
@@ -328,6 +337,12 @@ def assemble_envelope_stream(
         role_sets,
         profile_source_files=profile_source_files,
     )
+    if generic_workflows:
+        bind_generic_workflow_roles(
+            body,
+            generic_workflows[0],
+            error_type=KindEnvelopeError,
+        )
     flow_defaults = body.pop("flow_defaults", {})
     flow_expansions: list[dict] = []
     for kind, spec in flow_documents:
@@ -340,11 +355,17 @@ def assemble_envelope_stream(
         flow_spec = _apply_flow_defaults(kind, spec, flow_defaults)
         try:
             if kind == "RefactorFlow":
-                flow_expansions.append(expand_workflow_profile(flow_spec))
+                expansion = expand_workflow_profile(flow_spec)
             elif kind == "IssueFlow":
-                flow_expansions.append(expand_issue_flow(flow_spec))
+                expansion = expand_issue_flow(flow_spec)
             elif kind == "PrdFlow":
-                flow_expansions.append(expand_prd_flow(flow_spec))
+                expansion = expand_prd_flow(flow_spec)
+            else:
+                continue
+            flow_expansions.append(_bind_flow_roles(
+                expansion,
+                flow_kind=kind.removesuffix("Flow").lower(),
+            ))
         except WorkflowProfileError as exc:
             raise KindEnvelopeError(str(exc))
     if flow_expansions:
@@ -374,7 +395,103 @@ def assemble_envelope_stream(
                     "ZfConfig spec.workflow.stages must be a list"
                 )
             existing_stages.extend(kind_stages)
+        if generic_workflows:
+            if len(generic_workflows) > 1:
+                raise KindEnvelopeError(
+                    "one effective config may declare only one safe Generic "
+                    "Workflow contract"
+                )
+            goal = body.setdefault("goal", {})
+            if not isinstance(goal, dict):
+                raise KindEnvelopeError(
+                    "ZfConfig spec.goal must be a mapping"
+                )
+            # Generic Workflow completion is admitted through the same
+            # deterministic Goal gate as the standard Flow families.
+            # Preserve an explicit operator opt-out.
+            goal.setdefault("enabled", True)
+            existing_contracts = workflow.setdefault(
+                "_generic_workflows",
+                [],
+            )
+            if not isinstance(existing_contracts, list):
+                raise KindEnvelopeError(
+                    "ZfConfig spec.workflow._generic_workflows must be a list"
+                )
+            existing_contracts.extend(generic_workflows)
+            metadata_by_kind = workflow.setdefault(
+                "_flow_metadata_by_kind",
+                {},
+            )
+            if not isinstance(metadata_by_kind, dict):
+                raise KindEnvelopeError(
+                    "ZfConfig spec.workflow._flow_metadata_by_kind must be a "
+                    "mapping"
+                )
+            metadata_by_kind["workflow"] = generic_flow_metadata[0]
+            if not flow_expansions:
+                workflow["_flow_metadata"] = generic_flow_metadata[0]
+            dag = workflow.setdefault("dag", {})
+            if not isinstance(dag, dict):
+                raise KindEnvelopeError(
+                    "ZfConfig spec.workflow.dag must be a mapping"
+                )
+            external_triggers = dag.setdefault("external_triggers", [])
+            if not isinstance(external_triggers, list):
+                raise KindEnvelopeError(
+                    "ZfConfig spec.workflow.dag.external_triggers must be a "
+                    "list"
+                )
+            from zf.core.workflow.generic_workflow import (
+                GENERIC_WORKFLOW_ENTRY_EVENT,
+            )
+
+            if GENERIC_WORKFLOW_ENTRY_EVENT not in external_triggers:
+                external_triggers.append(GENERIC_WORKFLOW_ENTRY_EVENT)
     return body, profiles
+
+
+def _bind_flow_roles(
+    expansion: dict,
+    *,
+    flow_kind: str,
+) -> dict:
+    """Bind generated roles to the Flow that declared them."""
+
+    out = deepcopy(expansion)
+    metadata = (
+        dict(out.get("metadata"))
+        if isinstance(out.get("metadata"), dict)
+        else {}
+    )
+    declared = str(
+        metadata.get("flow_kind")
+        or out.get("flow_kind")
+        or ""
+    ).strip().lower()
+    kind = str(flow_kind or declared).strip().lower()
+    if kind not in {"issue", "prd", "refactor"}:
+        raise KindEnvelopeError(
+            "Flow expansion requires metadata.flow_kind "
+            "(issue|prd|refactor)"
+        )
+    if declared and declared != kind:
+        raise KindEnvelopeError(
+            f"Flow expansion kind mismatch: {declared!r} != {kind!r}"
+        )
+    metadata["flow_kind"] = kind
+    out["metadata"] = metadata
+    out["flow_kind"] = kind
+    for role in out.get("roles", []) or []:
+        if isinstance(role, dict):
+            role["flow_kind"] = kind
+    for stage in out.get("stages", []) or []:
+        if isinstance(stage, dict):
+            stage.setdefault("flow_kind", kind)
+    for pipeline in out.get("pipelines", []) or []:
+        if isinstance(pipeline, dict):
+            pipeline.setdefault("flow_kind", kind)
+    return out
 
 
 def _scope_multi_kind_flow_expansion(expansion: dict) -> dict:
@@ -414,7 +531,7 @@ def _scope_multi_kind_flow_expansion(expansion: dict) -> dict:
         if str(role.get("instance_id") or "").strip() in {"", old_name}:
             role["instance_id"] = new_name
 
-    first_stage_id = ""
+    first_stage_id = scoped(out.get("entry_stage_id"))
     for stage in out.get("stages", []) or []:
         if not isinstance(stage, dict):
             continue

@@ -12,7 +12,10 @@ from zf.core.config.loader import load_config
 
 
 MIXED_YAML = (
-    Path(__file__).resolve().parents[1] / "examples" / "tmp" / "mixed-team.yaml"
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "tmp"
+    / "mixed-team.yaml"
 )
 
 

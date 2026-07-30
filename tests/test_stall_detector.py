@@ -123,6 +123,60 @@ def test_verify_success_closes_original_trigger_despite_redispatch_tail():
     assert detect_structural_stalls(events, stages=STAGES[:3]) == []
 
 
+def test_workflow_run_identity_allows_semantic_subtrace_to_close_stage():
+    stages = [
+        (
+            "flow-final-judge",
+            "module.parity.closed",
+            "goal.closure.synthesized",
+            "refactor",
+        ),
+    ]
+    events = [
+        _ev("module.parity.closed", {
+            "stage_id": "module-parity",
+            "workflow_run_id": "run-1",
+            "trace_id": "semantic-replan-task-1",
+            "flow_kind": "refactor",
+        }),
+        _ev("goal.closure.synthesized", {
+            "stage_id": "flow-final-judge",
+            "workflow_run_id": "run-1",
+            "trace_id": "run-1",
+            "flow_kind": "refactor",
+        }),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=stages) == []
+
+
+def test_workflow_invoke_replay_of_settled_operation_is_not_a_stall():
+    stages = [
+        (
+            "scope",
+            "workflow.invoke.requested",
+            "scope.completed",
+            "workflow",
+        ),
+    ]
+    events = [
+        _ev("workflow.operation.settled", {
+            "workflow_run_id": "run-1",
+            "operation_id": "wop-scope-1",
+        }),
+        _ev("workflow.invoke.requested", {
+            "workflow_run_id": "run-1",
+            "workflow_operation_id": "wop-scope-1",
+            "pattern_id": "scope",
+            "flow_kind": "workflow",
+        }),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=stages) == []
+
+
 def test_lane_handoff_terminal_is_not_reused_as_its_own_verify_trigger():
     """R15: a final lane handoff must not renew the verify stage's stall clock."""
     stages = [("prd-lanes-verify", "lane.stage.completed", "lane.stage.completed")]
@@ -174,6 +228,25 @@ def test_lane_handoff_only_targets_its_pipeline_in_multi_kind_config():
 
     assert [finding.stage_id for finding in findings] == ["issue-lanes-verify"]
     assert findings[0].flow_kind == "issue"
+
+
+def test_unknown_flow_trigger_does_not_fan_out_to_flow_specific_stages():
+    stages = [
+        ("issue-lanes-impl", "task_map.ready", "candidate.ready", "issue"),
+        ("prd-lanes-impl", "task_map.ready", "candidate.ready", "prd"),
+        (
+            "refactor-lanes-impl",
+            "task_map.ready",
+            "candidate.ready",
+            "refactor",
+        ),
+    ]
+    trigger = _ev("task_map.ready", {
+        "workflow_run_id": "run-legacy",
+        "task_map_ref": "artifacts/task-map.json",
+    })
+
+    assert detect_structural_stalls([trigger, *_pad(8)], stages=stages) == []
 
 
 def test_stages_from_config_keeps_flow_kind_for_shared_triggers():

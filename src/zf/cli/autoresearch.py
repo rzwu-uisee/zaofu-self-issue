@@ -57,7 +57,7 @@ from zf.autoresearch.triggers import (
     write_trigger_decision,
 )
 from zf.autoresearch.scenarios import scenario_names
-from zf.autoresearch.resident import actions_json, run_resident_once
+from zf.autoresearch.resident_cli import run_resident_cli
 from zf.core.config.loader import ConfigError
 from zf.core.config.project_context import resolve_project_context
 from zf.runtime.maintenance import create_checkpoint, enter_maintenance, exit_maintenance
@@ -742,35 +742,10 @@ def _export_eval_result(args) -> int:
 
 
 def _resident(args) -> int:
-    state_dir = _resolve_state_dir(args.state_dir)
-    output_root = (
-        args.output_root
-        if args.output_root is not None
-        else state_dir / "autoresearch" / "resident"
+    return run_resident_cli(
+        args,
+        state_dir=_resolve_state_dir(args.state_dir),
     )
-    interval = max(float(getattr(args, "interval_seconds", 10.0) or 10.0), 0.1)
-    max_actions_per_tick = max(
-        int(getattr(args, "max_actions_per_tick", 0) or 0),
-        0,
-    )
-    while True:
-        actions = run_resident_once(
-            state_dir=state_dir,
-            worktree_root=args.worktree_root,
-            output_root=output_root,
-            execute=args.execute,
-            self_repair_consumer=args.self_repair_consumer,
-            self_repair_spawn=args.self_repair_spawn,
-            self_repair_backend=args.self_repair_backend,
-            max_actions_per_tick=max_actions_per_tick,
-        )
-        print(actions_json(actions), flush=True)
-        if not getattr(args, "watch", False):
-            break
-        import time as _time
-
-        _time.sleep(interval)
-    return 0
 
 
 def _refresh_health_cache(parent_state_dir: Path) -> None:

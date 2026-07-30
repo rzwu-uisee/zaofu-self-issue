@@ -224,11 +224,27 @@ spec:
             json={"intake_ref": intake},
         )
         assert classify_response.status_code == 200
+        preview_response = client.post(
+            "/api/projects/default/workflow-submit",
+            headers={"x-zf-web-token": "test-token"},
+            json={
+                "intake_ref": intake,
+                "apply": False,
+                "task_id": "TASK-WEB",
+                "pattern_id": "issue-triage",
+                "allow_missing_env": True,
+            },
+        )
+        assert preview_response.status_code == 200
+        preview = preview_response.json()["result"]
         submit_response = client.post(
             "/api/projects/default/workflow-submit",
             headers={"x-zf-web-token": "test-token"},
             json={
                 "intake_ref": intake,
+                "request_id": preview["payload"]["request_id"],
+                "proposal_ref": preview["proposal_ref"],
+                "proposal_digest": preview["proposal"]["proposal_digest"],
                 "apply": True,
                 "task_id": "TASK-WEB",
                 "pattern_id": "issue-triage",
@@ -289,13 +305,17 @@ spec:
         proposal = proposed.json()
         assert proposal["status"] == "proposal_ready"
         assert "workflow.invoke.requested" not in [event.type for event in log.read_all()]
-        intake_ref = proposal["result"]["payload"]["workflow_prompt_ref"]
+        preview = proposal["result"]
+        intake_ref = preview["payload"]["workflow_prompt_ref"]
 
         submitted = client.post(
             "/api/projects/default/workflow-submit",
             headers={"x-zf-web-token": "test-token"},
             json={
                 "intake_ref": intake_ref,
+                "request_id": preview["payload"]["request_id"],
+                "proposal_ref": preview["proposal_ref"],
+                "proposal_digest": preview["proposal"]["proposal_digest"],
                 "kind": "issue",
                 "apply": True,
                 "allow_missing_env": True,

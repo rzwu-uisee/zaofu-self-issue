@@ -173,6 +173,19 @@ class WorkflowGraphCompiler:
             trigger = str(getattr(stage, "trigger", "") or "")
             roles = tuple(str(role) for role in list(getattr(stage, "roles", []) or []))
             node_id = f"stage:{stage_id}"
+            dependency_barrier_id = str(
+                getattr(stage, "dependency_barrier_id", "") or ""
+            )
+            dependency_barrier_digest = str(
+                getattr(stage, "dependency_barrier_digest", "") or ""
+            )
+            dependency_events = tuple(
+                str(item)
+                for item in (
+                    getattr(stage, "dependency_events", []) or []
+                )
+                if str(item)
+            )
             nodes.append(WorkflowNode(
                 node_id=node_id,
                 stage_id=stage_id,
@@ -186,12 +199,88 @@ class WorkflowGraphCompiler:
                 action=_default_action_for_stage(stage),
                 metadata={
                     "topology": topology,
+                    "operation": str(getattr(stage, "operation", "") or ""),
                     "target_ref": str(getattr(stage, "target_ref", "") or ""),
                     "task_map": str(getattr(stage, "task_map", "") or ""),
                     "aggregate_mode": str(getattr(aggregate, "mode", "") or ""),
+                    "dependencies": list(
+                        getattr(stage, "dependencies", []) or []
+                    ),
+                    "input_ports": _workflow_ports(
+                        getattr(stage, "input_ports", []) or []
+                    ),
+                    "output_ports": _workflow_ports(
+                        getattr(stage, "output_ports", []) or []
+                    ),
+                    "dependency_barrier_id": dependency_barrier_id,
+                    "dependency_barrier_digest": dependency_barrier_digest,
                 },
             ))
-            if trigger:
+            if dependency_barrier_id and dependency_events:
+                barrier_node_id = f"dependency-barrier:{stage_id}"
+                nodes.append(WorkflowNode(
+                    node_id=barrier_node_id,
+                    stage_id=f"{stage_id}:dependency-barrier",
+                    type="dependency_barrier",
+                    label=f"{stage_id} dependencies",
+                    trigger=",".join(dependency_events),
+                    success_event=trigger,
+                    failure_event="workflow.dependency_barrier.blocked",
+                    conditions=(
+                        "same_workflow_run",
+                        "same_generation",
+                        "all_dependencies_succeeded",
+                    ),
+                    action="reconcile_dependency_barrier",
+                    metadata={
+                        "barrier_id": dependency_barrier_id,
+                        "barrier_digest": dependency_barrier_digest,
+                        "dependencies": list(
+                            getattr(stage, "dependencies", []) or []
+                        ),
+                        "required_events": list(dependency_events),
+                        "failure_events": list(
+                            getattr(
+                                stage,
+                                "dependency_failure_events",
+                                [],
+                            )
+                            or []
+                        ),
+                    },
+                ))
+                dependency_ids = tuple(
+                    str(item)
+                    for item in (
+                        getattr(stage, "dependencies", []) or []
+                    )
+                    if str(item)
+                )
+                for index, dependency_event in enumerate(dependency_events):
+                    producer = (
+                        f"stage:{dependency_ids[index]}"
+                        if index < len(dependency_ids)
+                        else _producer_node_for_event_in_nodes(
+                            dependency_event,
+                            nodes,
+                            event_producers,
+                        )
+                    )
+                    edges.append(WorkflowEdge(
+                        from_node=producer,
+                        to_node=barrier_node_id,
+                        event=dependency_event,
+                        condition="same_run_and_generation",
+                        kind="dependency",
+                    ))
+                edges.append(WorkflowEdge(
+                    from_node=barrier_node_id,
+                    to_node=node_id,
+                    event=trigger,
+                    condition="dependency_barrier_satisfied",
+                    kind="dependency_barrier",
+                ))
+            elif trigger:
                 edges.append(WorkflowEdge(
                     from_node=_producer_node_for_event(trigger, event_producers),
                     to_node=node_id,
@@ -324,6 +413,18 @@ class WorkflowGraphCompiler:
 
 def compile_workflow_graph(config: ZfConfig) -> WorkflowGraph:
     return WorkflowGraphCompiler().compile(config)
+
+
+def _workflow_ports(ports: object) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": str(getattr(port, "name", "") or ""),
+            "kind": str(getattr(port, "kind", "") or ""),
+            "source": str(getattr(port, "source", "") or ""),
+            "required": bool(getattr(port, "required", True)),
+        }
+        for port in list(ports or [])
+    ]
 
 
 def derive_event_sets(

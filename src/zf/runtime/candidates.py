@@ -99,6 +99,7 @@ class CandidateRebuilder:
         event_writer: EventWriter | None = None,
         trigger_event: ZfEvent | None = None,
         task_ids: list[str] | None = None,
+        candidate_base_ref: str | None = None,
     ) -> CandidateResult | None:
         pdd_id = self._validate_id(pdd_id)
         tasks = (
@@ -116,7 +117,10 @@ class CandidateRebuilder:
         tasks = self._with_dependency_task_refs(pdd_id, tasks)
 
         branch = f"{self.config.runtime.git.candidate_branch_prefix}/{pdd_id}"
-        requested_base_ref = self.config.runtime.git.candidate_base_ref
+        requested_base_ref = (
+            str(candidate_base_ref or "").strip()
+            or self.config.runtime.git.candidate_base_ref
+        )
         base_ref = self._resolve_candidate_base_ref(
             requested_base_ref,
             pdd_id=pdd_id,
@@ -168,6 +172,7 @@ class CandidateRebuilder:
                 strategy=strategy,
                 tasks=tasks,
                 requested_tasks=requested_tasks,
+                requested_base_ref=requested_base_ref,
                 manifest_path=manifest_path,
                 event_writer=event_writer,
                 causation_id=integration_started.id if integration_started else (
@@ -565,6 +570,7 @@ class CandidateRebuilder:
         strategy: str,
         tasks: list[CandidateTask],
         requested_tasks: list[CandidateTask] | None = None,
+        requested_base_ref: str = "",
         manifest_path: Path,
         event_writer: EventWriter | None = None,
         causation_id: str | None = None,
@@ -582,7 +588,10 @@ class CandidateRebuilder:
             "pdd_id": pdd_id,
             "branch": branch,
             "base_ref": base_ref,
-            "requested_base_ref": self.config.runtime.git.candidate_base_ref,
+            "requested_base_ref": (
+                requested_base_ref
+                or self.config.runtime.git.candidate_base_ref
+            ),
             "strategy": strategy,
             "requested_tasks": requested_task_payloads,
             "dependency_tasks": dependency_task_payloads,

@@ -9,6 +9,9 @@ from zf.core.config.schema import RoleConfig
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.state.task_attempts import TaskAttemptStore
+from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.call_result_admission import (
     CallResultAdmissionOutcome,
@@ -23,6 +26,8 @@ from zf.runtime.call_result_runtime import (
 from zf.runtime.operation_projection import project_workflow_operation
 from zf.runtime.plan_synth_handoff import build_plan_synth_call_payload
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.task_attempt_runtime import reconcile_task_attempts
+from zf.runtime.workflow_anchor import mark_workflow_fanout_anchor
 
 
 def _runtime(tmp_path: Path) -> SimpleNamespace:
@@ -41,6 +46,107 @@ def _runtime(tmp_path: Path) -> SimpleNamespace:
             )
         ),
     )
+
+
+def test_workflow_read_operation_accepts_bootstrap_task_without_task_map(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.task_store = TaskStore(runtime.state_dir / "kanban.json")
+    runtime.task_store.add(mark_workflow_fanout_anchor(
+        Task(id="FLOW-ANCHOR", title="workflow anchor"),
+        request_id="run-read",
+        workflow_run_id="run-read",
+        pattern_id="issue-triage",
+    ))
+    payload = {
+        "workflow_run_id": "run-read",
+        "fanout_id": "fanout-scan",
+        "child_id": "issue-triage",
+        "stage_id": "issue-triage",
+        "task_id": "FLOW-ANCHOR",
+        "canonical_success_event": "issue.triage.child.completed",
+        "canonical_failure_event": "issue.triage.child.failed",
+    }
+
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="issue-triage",
+        stage_id="issue-triage",
+        task_id="FLOW-ANCHOR",
+        dispatch_id="run-fanout-issue-triage",
+    )
+
+    assert prepared.output_profile_id == "workflow-read"
+    assert payload["attempt_source_manifest_ref"]
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="FLOW-ANCHOR",
+        dispatch_id="run-fanout-issue-triage",
+    )
+    attempt_store = TaskAttemptStore(
+        runtime.state_dir / "task_attempts.json"
+    )
+    attempt_store.ensure_for_dispatch(
+        run_id="run-read",
+        task_id="FLOW-ANCHOR",
+        dispatch_id="run-fanout-issue-triage",
+        role="issue-triage",
+        instance_id="issue-triage",
+        operation_id=prepared.operation_id,
+        briefing_ref="briefings/issue-triage.md",
+        created_at="2026-07-28T00:00:00+00:00",
+        lease_expires_at="2099-07-28T00:00:00+00:00",
+        max_attempts=0,
+    )
+    result = ZfEvent(
+        type="issue.triage.child.completed",
+        actor="issue-triage",
+        payload={
+            "report": {
+                "status": "passed",
+                "summary": "triage complete",
+                "recommendation": "approve",
+                "findings": [],
+            },
+        },
+        correlation_id="run-read",
+    )
+    runtime.event_log.append(result)
+
+    outcome = admit_runtime_call_result(
+        runtime,
+        result,
+        merged_payload=payload,
+        mode="blocking",
+    )
+
+    assert outcome.admitted
+    events = runtime.event_log.read_all()
+    admitted = next(
+        event
+        for event in events
+        if event.type == "workflow.call.result.admitted"
+    )
+    settled = next(
+        event
+        for event in events
+        if event.type == "workflow.operation.settled"
+    )
+    assert admitted.payload["control_result_schema"] == "workflow-read-result.v1"
+    assert settled.task_id == "FLOW-ANCHOR"
+    assert settled.payload["operation_id"] == prepared.operation_id
+    assert reconcile_task_attempts(runtime) >= 1
+    assert reconcile_task_attempts(runtime) == 0
+    attempt = attempt_store.current(
+        run_id="run-read",
+        task_id="FLOW-ANCHOR",
+    )
+    assert attempt is not None
+    assert attempt["status"] == "succeeded"
 
 
 def test_selected_call_result_replays_settled_operation_without_redispatch(
@@ -62,6 +168,11 @@ def test_selected_call_result_replays_settled_operation_without_redispatch(
         "plan_artifact_package_digest": "package-sha",
         "run_contract_ref": "artifacts/run-contracts/current.json",
         "run_contract_digest": "contract-sha",
+        "effective_config_ref": {
+            "ref": "artifacts/effective-config/current.json",
+            "sha256": "effective-sha",
+        },
+        "effective_config_digest": "effective-sha",
         "artifact_refs": [{
             "source_id": "context",
             "artifact_id": "context",
@@ -112,6 +223,16 @@ def test_selected_call_result_replays_settled_operation_without_redispatch(
     ).payload["request"]
     assert request["output_profile_id"] == "implementation"
     assert request["output_profile_revision"] == "1"
+    assert request["execution_profile"]["profile_id"] == "direct-v1"
+    assert request["execution_profile"]["profile_digest"]
+    assert request["execution_profile"]["shadow"] == {
+        "verdict": "supported",
+        "reason": "direct_profile",
+        "dispatch_effect": "none",
+    }
+    assert payload["execution_profile_digest"] == request[
+        "execution_profile"
+    ]["profile_digest"]
     assert request["attempt_domain"] == "task"
     assert request["handoff_authority_contract"] == {
         "schema_version": "handoff-authority-contract.v1",
@@ -125,6 +246,13 @@ def test_selected_call_result_replays_settled_operation_without_redispatch(
     }
     assert request["result_identity"]["plan_artifact_package_id"] == "planpkg-current"
     assert request["result_identity"]["run_contract_digest"] == "contract-sha"
+    assert request["effective_config_ref"] == base_payload[
+        "effective_config_ref"
+    ]
+    assert request["effective_config_digest"] == "effective-sha"
+    assert request["result_identity"]["effective_config_digest"] == (
+        "effective-sha"
+    )
     manifest = hydrate_sidecar_ref(
         runtime.state_dir,
         payload["attempt_source_manifest"],
@@ -331,6 +459,86 @@ def _plan_synth_event(payload: dict, *, plan_revision: str = "") -> ZfEvent:
     )
 
 
+def test_plan_synth_requires_relocated_child_artifacts(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    task_map = (
+        runtime.state_dir
+        / "artifacts"
+        / "fanouts"
+        / "F-PLAN"
+        / "planner"
+        / "task_map.json"
+    )
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        json.dumps({"tasks": [{"task_id": "T-CHILD"}]}),
+        encoding="utf-8",
+    )
+    report_path = (
+        runtime.state_dir
+        / "fanouts"
+        / "F-PLAN"
+        / "children"
+        / "planner"
+        / "report.json"
+    )
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(
+        json.dumps({"status": "passed", "task_map_ref": str(task_map)}),
+        encoding="utf-8",
+    )
+    payload = build_plan_synth_call_payload(
+        state_dir=runtime.state_dir,
+        project_root=runtime.project_root,
+        manifest={
+            "fanout_id": "F-PLAN",
+            "trace_id": "run-plan",
+            "stage_id": "plan",
+            "trigger_event_id": "evt-plan-trigger",
+        },
+        reports=[{
+            "child_id": "planner",
+            "report_path": str(report_path),
+            "report": {
+                "status": "passed",
+                "task_map_ref": str(task_map),
+            },
+        }],
+        run_id="run-F-PLAN-synth",
+        role_instance="plan-critic",
+    )
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_synth",
+        operation_key="synth@trig:evt-plan-tri",
+        stage_id="plan",
+        task_id="",
+        dispatch_id="run-F-PLAN-synth",
+    )
+
+    source_ids = {row["source_id"] for row in payload["required_reads"]}
+    assert "child-artifact-planner-1" in source_ids
+    manifest = hydrate_sidecar_ref(
+        runtime.state_dir,
+        payload["attempt_source_manifest"],
+    ).payload
+    requirement = next(
+        row
+        for row in payload["required_reads"]
+        if row["source_id"] == "child-artifact-planner-1"
+    )
+    read = read_attempt_artifact(
+        runtime.state_dir,
+        manifest=manifest,
+        source_id=requirement["source_id"],
+        artifact_id=requirement["artifact_id"],
+    )
+    assert json.loads(read["content"]) == {
+        "tasks": [{"task_id": "T-CHILD"}]
+    }
+
+
 def test_plan_synth_semantic_result_preserves_ready_plan_ports(
     tmp_path: Path,
 ) -> None:
@@ -339,6 +547,9 @@ def test_plan_synth_semantic_result_preserves_ready_plan_ports(
         "execution_status": "completed",
         "verdict": "passed",
         "summary": "plan ready",
+        "refactor_plan_md": "# Refactor plan",
+        "task_map": {"tasks": [{"task_id": "T-1"}]},
+        "gates": ["pytest -q"],
         "plan_ports": [{
             "logical_name": "acceptance_matrix",
             "schema_version": "acceptance-matrix.v1",
@@ -374,6 +585,9 @@ def test_plan_synth_semantic_result_preserves_ready_plan_ports(
     )
 
     assert adapted.payload["plan_ports"] == semantic_result["plan_ports"]
+    assert adapted.payload["refactor_plan_md"] == "# Refactor plan"
+    assert adapted.payload["task_map"] == {"tasks": [{"task_id": "T-1"}]}
+    assert adapted.payload["gates"] == ["pytest -q"]
 
 
 def test_plan_synth_required_reads_repair_then_admit_and_replay(
@@ -562,6 +776,200 @@ def test_rework_of_scopes_new_operation(tmp_path: Path) -> None:
         task_id="T1", dispatch_id="run-F3",
     )
     assert retrigger.operation_id != first.operation_id
+
+
+def test_flow_plan_does_not_pin_planner_owned_generation(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.event_log.append(ZfEvent(
+        type="plan.artifact_package.admitted",
+        correlation_id="run-replan",
+        payload={
+            "workflow_run_id": "run-replan",
+            "package_id": "planpkg-old",
+            "package_ref": "artifacts/plan-packages/old.json",
+            "package_digest": "old-package-digest",
+            "mode": "blocking",
+            "status": "admitted",
+        },
+    ))
+    payload = {
+        "workflow_run_id": "run-replan",
+        "fanout_id": "fanout-plan",
+        "child_id": "refactor-plan-synth",
+        "stage_id": "flow-plan",
+        "role_instance": "refactor-plan-synth",
+        "plan_revision": "revision-0002",
+        "task_map_generation": "old-generation",
+        "plan_artifact_package_id": "planpkg-old",
+        "plan_artifact_package_ref": "artifacts/plan-packages/old.json",
+        "plan_artifact_package_digest": "old-package-digest",
+        "rework_of": "evt-integration-failed",
+    }
+
+    prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="refactor-plan-synth",
+        stage_id="flow-plan",
+        task_id="",
+        dispatch_id="run-fanout-plan-refactor-plan-synth",
+    )
+
+    requested = next(
+        event for event in runtime.event_log.read_all()
+        if event.type == "workflow.operation.requested"
+    )
+    request = hydrate_sidecar_ref(
+        runtime.state_dir,
+        requested.payload["request_ref"],
+    ).payload["request"]
+    identity = request["result_identity"]
+    assert "plan_revision" not in identity
+    assert "task_map_generation" not in identity
+    assert "plan_artifact_package_id" not in identity
+    assert "plan_artifact_package_ref" not in identity
+    assert "plan_artifact_package_digest" not in identity
+    assert identity["workflow_run_id"] == "run-replan"
+    assert identity["fanout_id"] == "fanout-plan"
+
+
+def test_artifact_delivery_operation_pins_generic_goal_identity(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.config.workflow.flow_metadata_by_kind = {
+        "issue": {
+            "result_protocol": {"mode": "blocking"},
+        },
+        "workflow": {
+            "result_protocol": {
+                "mode": "blocking",
+                "semantic_submit_profiles": {
+                    "artifact-delivery": "blocking",
+                },
+            },
+        },
+    }
+    input_result_ref = (
+        "artifacts/call-results/envelopes/" + "e" * 64 + ".json"
+    )
+    payload = {
+        "workflow_run_id": "run-generic",
+        "fanout_id": "fanout-verify",
+        "child_id": "workflow-verifier",
+        "stage_id": "verify",
+        "role_instance": "workflow-verifier",
+        "flow_kind": "workflow",
+        "goal_id": "goal-generic",
+        "workflow_generation": "a" * 64,
+        "request_revision": 2,
+        "generic_workflow_contract_digest": "b" * 64,
+        "workflow_intent": "research",
+        "workflow_template": "evidence-synthesis-v1",
+        "completion_profile": "artifact_delivery",
+        "required_delivery_artifacts": [{
+            "name": "report",
+            "kind": "report/markdown",
+            "source_ref": "synthesize.report",
+        }],
+        "goal_claim_set_ref": (
+            "artifacts/goal-closure/claim-sets/current.json"
+        ),
+        "goal_claim_set_digest": "c" * 64,
+        "run_contract_ref": "artifacts/run-contracts/current.json",
+        "run_contract_digest": "d" * 64,
+        "input_result_refs": [input_result_ref],
+        "output_profile_id": "artifact-delivery",
+        "output_profile_revision": "1",
+    }
+
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="workflow-verifier",
+        stage_id="verify",
+        task_id="",
+        dispatch_id="run-fanout-verify-workflow-verifier",
+    )
+
+    requested = next(
+        event
+        for event in runtime.event_log.read_all()
+        if event.type == "workflow.operation.requested"
+    )
+    request = hydrate_sidecar_ref(
+        runtime.state_dir,
+        requested.payload["request_ref"],
+    ).payload["request"]
+    identity = request["result_identity"]
+    assert identity["goal_id"] == "goal-generic"
+    assert identity["workflow_generation"] == "a" * 64
+    assert identity["workflow_intent"] == "research"
+    assert identity["goal_claim_set_ref"].endswith("current.json")
+    assert identity["goal_claim_set_digest"] == "c" * 64
+    assert identity["input_result_refs"] == [input_result_ref]
+    assert identity["required_delivery_artifacts"][0]["source_ref"] == (
+        "synthesize.report"
+    )
+    assert request["semantic_result_submit_mode"] == "blocking"
+    assert prepared.output_profile_id == "artifact-delivery"
+
+
+def test_flow_plan_pins_requirement_and_rework_context(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    requirement = (
+        runtime.state_dir
+        / "workflow-requests"
+        / "run-replan"
+        / "requirement.json"
+    )
+    requirement.parent.mkdir(parents=True)
+    requirement.write_text(
+        '{"acceptance":["Keep the canonical claim text."]}',
+        encoding="utf-8",
+    )
+    payload = {
+        "workflow_run_id": "run-replan",
+        "fanout_id": "fanout-plan",
+        "child_id": "refactor-plan-synth",
+        "stage_id": "flow-plan",
+        "role_instance": "refactor-plan-synth",
+        "trigger_payload": {
+            "requirement_spec_ref": str(requirement),
+            "rework_of": "evt-package-rejected",
+            "rework_attempt": 2,
+            "rework_feedback": [
+                "Preserve the canonical goal claim text exactly.",
+            ],
+        },
+    }
+
+    prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="refactor-plan-synth",
+        stage_id="flow-plan",
+        task_id="",
+        dispatch_id="run-fanout-plan-refactor-plan-synth",
+    )
+
+    manifest = hydrate_sidecar_ref(
+        runtime.state_dir,
+        payload["attempt_source_manifest"],
+    ).payload
+    source_ids = {
+        str(source.get("source_id") or "")
+        for source in manifest["sources"]
+    }
+    assert {"requirement", "plan-rework-context"} <= source_ids
+    required_ids = {
+        str(item.get("source_id") or "")
+        for item in payload["required_reads"]
+    }
+    assert {"requirement", "plan-rework-context"} <= required_ids
 
 
 def test_generation_scoped_operation_key_per_trigger() -> None:

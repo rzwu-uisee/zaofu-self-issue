@@ -49,6 +49,9 @@ context for runtime truth, task scope, and completion claims.
 - Before emitting `dev.build.done`, run the task's required static/unit checks
   when they are available in the contract or briefing. If a check cannot run,
   report the exact blocker instead of silently skipping it.
+- Execute each declared command exactly as stored. Do not repair quoting,
+  escaping, paths, or arguments and then claim the rewritten command under the
+  original command id; report a Planner/contract blocker instead.
 - Before editing, inspect the briefing's Controlled Artifact Inputs and execute
   one literal sanctioned `zf artifact read` command for every declared
   `required_reads` row, using its exact attempt id, source id, artifact id, and

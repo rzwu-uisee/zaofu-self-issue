@@ -35,21 +35,36 @@ def build_closure_identity(
         or source_event.correlation_id
         or ""
     ).strip()
-    goal_id = str(
+    raw_goal_id = str(
         payload.get("goal_id")
         or payload.get("feature_id")
         or payload.get("pdd_id")
         or ""
     ).strip()
+    generation = _task_map_generation(
+        events,
+        payload,
+        raw_workflow_run_id,
+        raw_goal_id,
+    )
+    pinned_identity = _pinned_claim_identity(
+        events,
+        workflow_run_id=raw_workflow_run_id,
+        goal_id=raw_goal_id,
+        task_map_generation=generation,
+    )
     workflow_run_id = (
-        _pinned_claim_workflow_run_id(
-            events,
-            workflow_run_id=raw_workflow_run_id,
-            goal_id=goal_id,
-        )
+        str(pinned_identity.get("workflow_run_id") or "")
         or raw_workflow_run_id
     )
-    generation = _task_map_generation(events, payload, workflow_run_id, goal_id)
+    goal_id = str(pinned_identity.get("goal_id") or "") or raw_goal_id
+    if not generation:
+        generation = _task_map_generation(
+            events,
+            payload,
+            workflow_run_id,
+            goal_id,
+        )
     candidate_head = _candidate_head(events, payload, workflow_run_id, goal_id)
     package_identity = _current_plan_package_identity(
         events,
@@ -282,13 +297,16 @@ def _task_map_generation(
     return ""
 
 
-def _pinned_claim_workflow_run_id(
+def _pinned_claim_identity(
     events: list[ZfEvent],
     *,
     workflow_run_id: str,
     goal_id: str,
-) -> str:
-    """Use the current Claim Set identity without rewriting admitted results."""
+    task_map_generation: str,
+) -> dict[str, str]:
+    """Resolve aliases from the Claim Set pinned for this plan generation."""
+
+    from zf.runtime.candidate_result_binding import same_task_map_generation
 
     aliases = run_aliases(events)
     canonical_run_id = aliases.get(workflow_run_id, workflow_run_id)
@@ -296,15 +314,27 @@ def _pinned_claim_workflow_run_id(
         if event.type != "goal.claim_set.pinned" or not isinstance(event.payload, dict):
             continue
         body = event.payload
-        event_goal_id = str(body.get("goal_id") or "").strip()
-        if goal_id and event_goal_id and event_goal_id != goal_id:
-            continue
         event_run_id = str(body.get("workflow_run_id") or "").strip()
         if not event_run_id:
             continue
-        if aliases.get(event_run_id, event_run_id) == canonical_run_id:
-            return event_run_id
-    return ""
+        if aliases.get(event_run_id, event_run_id) != canonical_run_id:
+            continue
+        event_generation = str(body.get("task_map_generation") or "").strip()
+        if task_map_generation and event_generation:
+            if not same_task_map_generation(
+                event_generation,
+                task_map_generation,
+            ):
+                continue
+        else:
+            event_goal_id = str(body.get("goal_id") or "").strip()
+            if goal_id and event_goal_id and event_goal_id != goal_id:
+                continue
+        return {
+            "workflow_run_id": event_run_id,
+            "goal_id": str(body.get("goal_id") or "").strip(),
+        }
+    return {}
 
 
 def _candidate_head(

@@ -108,6 +108,81 @@ def test_legacy_refactor_plan_ready_projects_plan_artifact(tmp_path):
     assert "Split runtime flow" in Path(plan_ref).read_text(encoding="utf-8")
 
 
+def test_refactor_plan_projection_preserves_planner_structure_for_sparse_synth(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    fanout_id = "fanout-plan-sparse-synth"
+    child_id = "refactor-plan-author"
+    result_dir = state_dir / "fanouts" / fanout_id / "children" / child_id
+    result_dir.mkdir(parents=True)
+    (result_dir / "result.json").write_text(json.dumps({
+        "payload": {
+            "source_index_ref": "docs/plans/source-index.json",
+            "scan_quality_audit_ref": "docs/plans/scan-quality-audit.json",
+            "coverage_matrix_ref": "artifacts/review/coverage.json",
+            "findings_ref": "artifacts/review/findings.json",
+            "plan_ports": [{
+                "logical_name": "source_inventory",
+                "schema_version": "source-inventory.v1",
+                "body": {"schema_version": "source-inventory.v1", "items": []},
+            }],
+            "report": {
+                "review_artifact_ref": "artifacts/review/review.md",
+                "plan_intent": "Keep the planner structure.",
+                "refactor_plan_md": "## Plan\n\nExtract one helper.",
+                "task_map": {
+                    "schema_version": "task-map.v1",
+                    "required_plan_ports": [
+                        "source_index",
+                        "scan_quality_audit",
+                        "review_artifact",
+                        "coverage_matrix",
+                        "findings",
+                    ],
+                    "tasks": [],
+                },
+                "gates": [{"command": "pytest"}],
+                "risk_register": [],
+                "backlog_candidates": [],
+            },
+        },
+    }), encoding="utf-8")
+
+    projection = project_refactor_artifacts(
+        state_dir=state_dir,
+        manifest={
+            "fanout_id": fanout_id,
+            "children": [{"child_id": child_id}],
+        },
+        success_event="zaofu.refactor.plan.ready",
+        synth_event=ZfEvent(
+            type="fanout.synth.completed",
+            actor="plan-critic",
+            payload={
+                "status": "completed",
+                "recommendation": "approve",
+                "report": {
+                    "status": "passed",
+                    "recommendation": "approve",
+                    "summary": "The plan is semantically sufficient.",
+                },
+            },
+        ),
+    )
+
+    assert projection is not None and projection.ok is True
+    assert projection.payload["plan_intent"] == "Keep the planner structure."
+    assert projection.payload["plan_ports"][0]["logical_name"] == "source_inventory"
+    assert projection.payload["source_index_ref"] == "docs/plans/source-index.json"
+    assert projection.payload["scan_quality_audit_ref"] == (
+        "docs/plans/scan-quality-audit.json"
+    )
+    assert projection.payload["review_artifact_ref"] == "artifacts/review/review.md"
+    assert projection.payload["coverage_matrix_ref"] == "artifacts/review/coverage.json"
+    assert projection.payload["findings_ref"] == "artifacts/review/findings.json"
+
+
 def test_refactor_plan_projection_preserves_inventory_refs(tmp_path):
     projection = project_refactor_artifacts(
         state_dir=tmp_path / ".zf",
@@ -152,6 +227,39 @@ def test_refactor_plan_projection_preserves_inventory_refs(tmp_path):
     )
     assert "docs/plans/hermes-tool-inventory.json" in projection.payload["artifact_refs"]
     assert "docs/plans/hermes-source-inventory.json" in projection.payload["artifact_refs"]
+
+
+def test_refactor_plan_projection_prefers_task_map_identity(tmp_path):
+    projection = project_refactor_artifacts(
+        state_dir=tmp_path / ".zf",
+        manifest={"fanout_id": "fanout-plan-revision"},
+        success_event="zaofu.refactor.plan.ready",
+        synth_event=ZfEvent(
+            type="fanout.synth.completed",
+            actor="refactor-plan-synth",
+            payload={
+                "plan_revision": "revision-0002",
+                "task_map_generation": "generation-old",
+                "report": {
+                    "review_artifact_ref": "docs/review.md",
+                    "refactor_plan_md": "## Plan\n\nReplace the stale contract.",
+                    "task_map": {
+                        "schema_version": "task-map.v1",
+                        "task_map_generation": "generation-new",
+                        "metadata": {"plan_revision": "revision-0003"},
+                        "tasks": [],
+                    },
+                    "gates": [{"command": "pytest"}],
+                    "risk_register": [],
+                    "backlog_candidates": [],
+                },
+            },
+        ),
+    )
+
+    assert projection is not None and projection.ok is True
+    assert projection.payload["plan_revision"] == "revision-0003"
+    assert projection.payload["task_map_generation"] == "generation-new"
 
 
 def test_refactor_plan_projection_inherits_replan_metadata_from_child_manifest(tmp_path):

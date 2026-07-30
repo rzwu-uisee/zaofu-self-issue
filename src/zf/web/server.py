@@ -561,6 +561,7 @@ _ACTION_ALIASES = {
     "research.adopt",
     "workflow-request",
     "workflow.request",
+    "workflow-cancel", "workflow.cancel",
     "task-workflow-start",
     "task.workflow.start",
     "workflow.route.start",
@@ -607,6 +608,9 @@ _ACTION_ALIASES = {
     "workflow.config.validate",
     "workflow-config-apply",
     "workflow.config.apply",
+    "run-pause", "run.pause",
+    "run-resume", "run.resume",
+    "run-cancel", "run.cancel",
     "runtime-stop",
     "runtime.stop",
     "runtime-restart",
@@ -6643,10 +6647,23 @@ def _validate_action_payload(
         ):
             return "proposal_id or patch_ref is required"
     if action == "workflow-config-apply":
-        if not str(payload.get("patch_ref") or "").strip():
-            return "patch_ref is required"
-        if not str(payload.get("validation_result_ref") or "").strip():
+        if not (
+            str(payload.get("patch_ref") or "").strip()
+            or isinstance(payload.get("proposal_ref"), dict)
+        ):
+            return "patch_ref or proposal_ref is required"
+        if not (
+            str(payload.get("validation_result_ref") or "").strip()
+            or isinstance(payload.get("validation_result_ref"), dict)
+        ):
             return "validation_result_ref is required"
+        if not str(
+            payload.get("approval_ref")
+            or payload.get("approved_by")
+            or payload.get("approver")
+            or ""
+        ).strip():
+            return "owner approval is required"
     if action == "channel-drain-replies":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"

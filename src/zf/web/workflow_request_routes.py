@@ -8,6 +8,7 @@ callbacks from the server so this module does not own Web security policy.
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,11 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 
 from zf.cli.flow import build_flow_intent
+from zf.core.events import ZfEvent
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.writer import EventWriter
+from zf.core.security.redaction import redact_obj
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_delivery import (
     apply_flow_submit,
     build_flow_submit_preview,
@@ -37,6 +41,35 @@ def workflow_request_strings(value: object) -> list[str]:
     return list(
         dict.fromkeys(str(item).strip() for item in value if str(item).strip())
     )
+
+
+def confirm_workflow_intake(
+    *,
+    state_dir: Path,
+    intake_ref: str,
+    actor: str,
+    config: Any,
+) -> dict[str, Any]:
+    """Confirm the current Requirement revision before compiling a Proposal."""
+
+    from zf.cli.flow import _load_manifest_for_intake
+    from zf.runtime.workflow_requests import (
+        load_workflow_request,
+        revise_workflow_request,
+    )
+
+    manifest_path, manifest = _load_manifest_for_intake(Path(intake_ref))
+    request_id = str((manifest or {}).get("request_id") or "")
+    current = load_workflow_request(state_dir, request_id) if request_id else {}
+    if manifest_path is not None and current and not current.get("confirmed"):
+        current = revise_workflow_request(
+            state_dir,
+            manifest_path,
+            actor=actor,
+            confirm=True,
+            writer=EventWriter(event_log_from_project(state_dir, config=config)),
+        )
+    return current
 
 
 def build_workflow_request_router(
@@ -222,9 +255,11 @@ def build_workflow_request_router(
 
     @router.get("/api/projects/{project_id}/workflow-requests/{request_id}")
     def project_workflow_request_detail(project_id: str, request_id: str) -> JSONResponse:
+        from zf.runtime.workflow_proposal import load_workflow_proposal
         from zf.runtime.workflow_requests import load_workflow_request
 
-        result = load_workflow_request(resolve(project_id).state_dir, request_id)
+        context = resolve(project_id)
+        result = load_workflow_request(context.state_dir, request_id)
         if not result:
             return JSONResponse(
                 {
@@ -234,7 +269,180 @@ def build_workflow_request_router(
                 },
                 status_code=404,
             )
-        return JSONResponse({"ok": True, "status": result.get("status"), "result": result})
+        proposal: dict[str, Any] = {}
+        artifacts: dict[str, Any] = {}
+        proposal_ref = result.get("proposal_ref")
+        if isinstance(proposal_ref, dict):
+            try:
+                proposal = load_workflow_proposal(
+                    context.state_dir,
+                    proposal_ref,
+                )
+            except Exception:
+                proposal = {}
+        for key in (
+            "short_flow_spec_ref",
+            "config_diff_ref",
+            "effective_config_ref",
+        ):
+            descriptor = proposal.get(key)
+            if not isinstance(descriptor, dict):
+                continue
+            try:
+                artifacts[key.removesuffix("_ref")] = hydrate_sidecar_ref(
+                    context.state_dir,
+                    descriptor,
+                ).payload
+            except Exception:
+                artifacts[key.removesuffix("_ref")] = {
+                    "status": "unreadable",
+                }
+        requirement = _bounded_json_body(
+            context.state_dir,
+            str(result.get("requirement_spec_ref") or ""),
+        )
+        manifest = _bounded_json_body(
+            context.state_dir,
+            str(result.get("workflow_input_manifest_ref") or ""),
+        )
+        events = event_log_from_project(
+            context.state_dir,
+            config=context.config,
+        ).read_all()
+        lifecycle = _workflow_request_lifecycle(
+            events,
+            request_id=request_id,
+            proposal_digest=str(result.get("proposal_digest") or ""),
+            run_id=str(result.get("run_id") or ""),
+        )
+        admission = (
+            lifecycle.get("admission")
+            if isinstance(lifecycle.get("admission"), dict)
+            else {}
+        )
+        effective_result = {
+            **result,
+            "status": str(admission.get("status") or result.get("status") or ""),
+            "run_id": str(admission.get("run_id") or result.get("run_id") or ""),
+            "queue_position": int(admission.get("queue_position") or 0),
+            "run_admission": admission,
+        }
+        operation = _workflow_synthesis_operation(
+            context.state_dir,
+            str(result.get("synthesis_operation_id") or ""),
+            config=context.config,
+        )
+        return JSONResponse(redact_obj({
+            "ok": True,
+            "status": effective_result.get("status"),
+            "result": effective_result,
+            "requirement": requirement,
+            "proposal": proposal,
+            "artifacts": artifacts,
+            "lifecycle": lifecycle,
+            "operation": operation,
+            "links": {
+                "intake_ref": str(
+                    manifest.get("intake_json_ref")
+                    or manifest.get("intake_ref")
+                    or ""
+                ),
+                "run_id": str(
+                    lifecycle.get("run_id")
+                    or result.get("run_id")
+                    or ""
+                ),
+                "run_contract_ref": str(
+                    lifecycle.get("refs", {}).get("run_contract_ref")
+                    or result.get("run_contract_ref")
+                    or ""
+                ),
+            },
+        }))
+
+    @router.get("/api/projects/{project_id}/workflow-requests")
+    def project_workflow_requests(project_id: str) -> JSONResponse:
+        context = resolve(project_id)
+        root = context.state_dir / "workflow-requests"
+        events = event_log_from_project(
+            context.state_dir,
+            config=context.config,
+        ).read_all()
+        from zf.runtime.run_admission import request_admission_view
+
+        items: list[dict[str, Any]] = []
+        for path in root.glob("*.json") if root.exists() else ():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict) and value.get("request_id"):
+                admission = request_admission_view(
+                    events,
+                    request_id=str(value.get("request_id") or ""),
+                    run_id=str(value.get("run_id") or ""),
+                )
+                requirement = _bounded_json_body(
+                    context.state_dir,
+                    str(value.get("requirement_spec_ref") or ""),
+                )
+                items.append({
+                    **value,
+                    "status": str(
+                        admission.get("status")
+                        or value.get("status")
+                        or ""
+                    ),
+                    "run_id": str(
+                        admission.get("run_id")
+                        or value.get("run_id")
+                        or ""
+                    ),
+                    "queue_position": int(
+                        admission.get("queue_position") or 0
+                    ),
+                    "run_admission": admission,
+                    "operation": _workflow_synthesis_operation(
+                        context.state_dir,
+                        str(value.get("synthesis_operation_id") or ""),
+                        config=context.config,
+                    ),
+                    "objective": str(requirement.get("objective") or ""),
+                    "acceptance_count": len(
+                        requirement.get("acceptance")
+                        if isinstance(requirement.get("acceptance"), list)
+                        else []
+                    ),
+                })
+        items.sort(
+            key=lambda item: str(
+                item.get("updated_at") or item.get("created_at") or ""
+            ),
+            reverse=True,
+        )
+        return JSONResponse(redact_obj({
+            "ok": True,
+            "items": items,
+            "count": len(items),
+        }))
+
+    @router.get(
+        "/api/projects/{project_id}/workflow-operations/{operation_id}"
+    )
+    def project_workflow_operation(
+        project_id: str,
+        operation_id: str,
+    ) -> JSONResponse:
+        context = resolve(project_id)
+        operation = _workflow_synthesis_operation(
+            context.state_dir,
+            operation_id,
+            config=context.config,
+        )
+        return JSONResponse(redact_obj({
+            "ok": bool(operation),
+            **operation,
+        }), status_code=200 if operation else 404)
 
     @router.post("/api/projects/{project_id}/workflow-submit")
     async def project_workflow_submit(
@@ -254,12 +462,72 @@ def build_workflow_request_router(
                 {"ok": False, "status": "invalid_payload", "reason": "intake_ref is required"},
                 status_code=422,
             )
+        apply = bool(payload.get("apply"))
+        if not apply:
+            from zf.cli.flow import _load_manifest_for_intake
+            from zf.runtime.workflow_requests import (
+                load_workflow_request,
+                revise_workflow_request,
+            )
+
+            manifest_path, manifest = _load_manifest_for_intake(
+                Path(intake_ref).expanduser()
+            )
+            request_id = str((manifest or {}).get("request_id") or "")
+            current = (
+                load_workflow_request(context.state_dir, request_id)
+                if request_id
+                else {}
+            )
+            if manifest_path is not None and current and not current.get("confirmed"):
+                revise_workflow_request(
+                    context.state_dir,
+                    manifest_path,
+                    actor=str(payload.get("requested_by") or "web"),
+                    confirm=True,
+                    writer=EventWriter(
+                        event_log_from_project(
+                            context.state_dir,
+                            config=context.config,
+                        )
+                    ),
+                )
         config_ref = Path(
             str(payload.get("config") or payload.get("config_ref") or context.config_path)
         ).expanduser()
-        apply = bool(payload.get("apply"))
-        builder = apply_flow_submit if apply else build_flow_submit_preview
-        result = builder(
+        if apply:
+            from zf.runtime.control_actions import ControlledActionService
+
+            writer = EventWriter(
+                event_log_from_project(context.state_dir, config=context.config)
+            )
+            requested = writer.append(ZfEvent(
+                type="web.action.requested",
+                actor="web",
+                correlation_id=str(payload.get("request_id") or ""),
+                payload={
+                    "action": "workflow-submit",
+                    "requested_action": "workflow-submit",
+                    "request": redact_obj(payload),
+                },
+            ))
+            result = ControlledActionService(
+                context.state_dir,
+                writer,
+                config=context.config,
+                project_root=context.project_root,
+                actor=str(payload.get("requested_by") or "web"),
+                source="workflow-proposal-page",
+                surface="web",
+            ).execute(
+                action="workflow-submit",
+                requested_action="workflow-submit",
+                payload=payload,
+                requested=requested,
+            )
+            status_code = int(result.pop("_status_code", 200))
+            return JSONResponse(result, status_code=status_code)
+        result = build_flow_submit_preview(
             config_path=config_ref,
             intake_path=Path(intake_ref).expanduser(),
             flow_kind=str(payload.get("kind") or ""),
@@ -270,15 +538,154 @@ def build_workflow_request_router(
             allow_missing_env=bool(payload.get("allow_missing_env")),
         )
         status = str(result.get("status") or "")
-        code = 202 if apply and status != "STOP" else 200
-        if status == "STOP":
-            code = 409
+        code = 409 if status == "STOP" else 200
         return JSONResponse(
-            {"ok": status != "STOP", "status": status, "applied": apply, "result": result},
+            {"ok": status != "STOP", "status": status, "applied": False, "result": result},
             status_code=code,
         )
 
     return router
 
 
-__all__ = ["build_workflow_request_router", "workflow_request_strings"]
+def _bounded_json_body(state_dir: Path, raw_ref: str) -> dict[str, Any]:
+    if not raw_ref:
+        return {}
+    try:
+        root = Path(state_dir).resolve()
+        path = Path(raw_ref).expanduser().resolve(strict=True)
+        path.relative_to(root)
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _workflow_request_lifecycle(
+    events: list[Any],
+    *,
+    request_id: str,
+    proposal_digest: str,
+    run_id: str,
+) -> dict[str, Any]:
+    from zf.runtime.run_admission import request_admission_view
+
+    refs: dict[str, Any] = {}
+    matched: list[Any] = []
+    effective_run_id = str(run_id or request_id)
+    ref_keys = (
+        "workflow_proposal_ref",
+        "effective_config_ref",
+        "run_contract_ref",
+        "plan_package_ref",
+        "plan_artifact_package_ref",
+        "task_map_ref",
+        "completion_receipt_ref",
+        "goal_dossier_ref",
+    )
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        event_request_id = str(payload.get("request_id") or "")
+        event_run_id = str(payload.get("run_id") or payload.get("workflow_run_id") or "")
+        event_proposal_digest = str(
+            payload.get("proposal_digest")
+            or payload.get("workflow_proposal_digest")
+            or ""
+        )
+        belongs = (
+            str(event.correlation_id or "") == request_id
+            or event_request_id == request_id
+            or (bool(effective_run_id) and event_run_id == effective_run_id)
+            or (
+                bool(proposal_digest)
+                and event_proposal_digest == proposal_digest
+            )
+        )
+        if not belongs:
+            continue
+        matched.append(event)
+        if event_run_id:
+            effective_run_id = event_run_id
+        for key in ref_keys:
+            value = payload.get(key)
+            if value not in (None, "", [], {}):
+                refs[key] = value
+    types = [event.type for event in matched]
+    terminal = next(
+        (
+            event
+            for event in reversed(matched)
+            if event.type in {
+                "run.goal.completed",
+                "run.goal.blocked",
+                "run.completed",
+                "run.failed",
+                "run.cancelled",
+                "run.abandoned",
+            }
+        ),
+        None,
+    )
+    admission = request_admission_view(
+        events,
+        request_id=request_id,
+        run_id=effective_run_id,
+    )
+    return {
+        "config_applied": "workflow.config.change.applied" in types,
+        "submitted": "workflow.submit.accepted" in types,
+        "run_started": any(
+            event_type in {
+                "workflow.invoke.accepted",
+                "run.admission.admitted",
+            }
+            for event_type in types
+        ),
+        "terminal": terminal.type if terminal is not None else "",
+        "terminal_event_id": str(terminal.id if terminal is not None else ""),
+        "run_id": str(
+            admission.get("run_id")
+            or (effective_run_id if matched else str(run_id or ""))
+        ),
+        "event_count": len(matched),
+        "refs": refs,
+        "admission": admission,
+    }
+
+
+def _workflow_synthesis_operation(
+    state_dir: Path,
+    operation_id: str,
+    *,
+    config: Any,
+) -> dict[str, Any]:
+    if not operation_id:
+        return {}
+    from zf.web.projections.operations import workflow_operation
+
+    projection = workflow_operation(
+        state_dir,
+        operation_id,
+        config=config,
+    )
+    status = str(projection.get("status") or "unknown")
+    return {
+        **projection,
+        "queue_status": {
+            "requested": "queued",
+            "reserved": "queued",
+            "running": "running",
+            "settled": "settled",
+            "failed": "failed",
+            "blocked": "failed",
+            "superseded": "obsolete",
+            "cancelled": "cancelled",
+        }.get(status, status),
+        "query_ref": f"workflow-operations/{operation_id}",
+    }
+
+
+__all__ = [
+    "build_workflow_request_router",
+    "confirm_workflow_intake",
+    "workflow_request_strings",
+]

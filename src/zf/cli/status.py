@@ -168,9 +168,23 @@ def _print_workers(
     last_reason: dict[str, str] = {iid: "-" for iid in instances}
 
     try:
-        events = event_log.read_days(1)
+        events = event_log.read_all()
     except Exception:
         events = []
+    from zf.core.state.role_sessions import RoleSessionRegistry
+    from zf.runtime.flow_role_activation import (
+        flow_role_activation_projection,
+    )
+
+    session_registry = RoleSessionRegistry(
+        state_dir / "role_sessions.yaml",
+        project_root=str(context.project_root) if context is not None else "",
+    )
+    activation_by_instance = flow_role_activation_projection(
+        cfg,
+        events,
+        active_instance_ids=set(session_registry.all()),
+    )
     for event in events:
         if event.type != "worker.state.changed":
             continue
@@ -187,6 +201,7 @@ def _print_workers(
             "state": current_state[iid],
             "last_change": last_ts[iid],
             "reason": last_reason[iid],
+            "activation": activation_by_instance.get(iid, {}),
         }
         for iid in instances
     ]
@@ -197,28 +212,36 @@ def _print_workers(
         return 0
 
     # Print a fixed-width table
-    headers = ("WORKER", "STATE", "LAST CHANGE", "REASON")
-    widths = (18, 18, 24, 60)
+    headers = ("WORKER", "ACTIVATION", "STATE", "LAST CHANGE", "REASON")
+    widths = (18, 12, 18, 24, 60)
     print(
         f"{headers[0]:<{widths[0]}} "
         f"{headers[1]:<{widths[1]}} "
         f"{headers[2]:<{widths[2]}} "
-        f"{headers[3]}"
+        f"{headers[3]:<{widths[3]}} "
+        f"{headers[4]}"
     )
     print("-" * sum(widths))
     for iid in instances:
         state = current_state[iid]
+        activation_state = str(
+            activation_by_instance.get(iid, {}).get(
+                "activation_state",
+                "declared",
+            )
+        )
         ts = last_ts[iid]
         # Keep timestamp short: YYYY-MM-DDTHH:MM:SS
-        if len(ts) > widths[2] - 1:
-            ts = ts[:widths[2] - 1]
+        if len(ts) > widths[3] - 1:
+            ts = ts[:widths[3] - 1]
         reason = last_reason[iid]
-        if len(reason) > widths[3] - 1:
-            reason = reason[: widths[3] - 4] + "..."
+        if len(reason) > widths[4] - 1:
+            reason = reason[: widths[4] - 4] + "..."
         print(
             f"{iid:<{widths[0]}} "
-            f"{state:<{widths[1]}} "
-            f"{ts:<{widths[2]}} "
+            f"{activation_state:<{widths[1]}} "
+            f"{state:<{widths[2]}} "
+            f"{ts:<{widths[3]}} "
             f"{reason}"
         )
     return 0
