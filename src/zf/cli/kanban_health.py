@@ -254,18 +254,18 @@ def _build_recommendations(snap: dict) -> list[str]:
     infra_n = buckets.get("infra", 0)
     if content_n > 0 and content_n >= infra_n * 2 and content_n >= 3:
         recs.append(
-            "Review reviewer/test prompt quality — content failures "
+            "Review reviewer/test prompt quality; content failures "
             f"({content_n}) dominate infra ({infra_n})"
         )
     coordinator = snap.get("coordinator", {}) or {}
     if coordinator.get("health_band") == "over_cautious":
         recs.append(
-            "Orchestrator over-cautious — investigate why no_action "
+            "Orchestrator over-cautious; investigate why no_action "
             "rate is high (check outcome_reason breakdown)"
         )
     if coordinator.get("health_band") == "over_eager":
         recs.append(
-            "Orchestrator over-eager — dispatching without checking "
+            "Orchestrator over-eager; dispatching without checking "
             "preconditions; review run_once preflight"
         )
     roles = snap.get("role_health", {}) or {}
@@ -273,12 +273,12 @@ def _build_recommendations(snap: dict) -> list[str]:
         if info.get("warning"):
             if info.get("idle_seconds") and info["idle_seconds"] > 86400:
                 recs.append(
-                    f"Consider scaling {role_name} replicas — last "
+                    f"Consider scaling {role_name} replicas; last "
                     f"heartbeat {info['idle_seconds'] / 3600:.1f}h ago"
                 )
             elif info.get("completion_count", 0) == 0:
                 recs.append(
-                    f"Role {role_name} has 0 completions in window — "
+                    f"Role {role_name} has 0 completions in window; "
                     "check role dispatch path"
                 )
     diags = snap.get("metric_diagnostics", []) or []
@@ -288,7 +288,7 @@ def _build_recommendations(snap: dict) -> list[str]:
     ]
     if critical_metrics:
         recs.append(
-            f"Metrics critical: {', '.join(critical_metrics[:3])} — "
+            f"Metrics critical: {', '.join(critical_metrics[:3])}; "
             "run `zf metrics diagnose` for details"
         )
     return recs
@@ -367,22 +367,22 @@ def build_health_snapshot(
 
 def render_health_md(snap: dict) -> str:
     lines: list[str] = [
-        f"Kanban Health · {snap['window']} window",
+        f"Kanban Health - {snap['window']} window",
         "",
     ]
-    sep = "═" * 60
+    sep = "=" * 60
 
     # THROUGHPUT
     lines.append(sep)
     lines.append("THROUGHPUT")
-    lines.append("─" * 60)
+    lines.append("-" * 60)
     tp = snap["throughput"]
-    rework_warn = "  ⚠" if tp["rework_looped_count"] else ""
+    rework_warn = "  WARNING" if tp["rework_looped_count"] else ""
     lines.append(f"  Tasks completed:        {tp['tasks_completed']}")
     lines.append(f"  Tasks failed:           {tp['tasks_failed']}")
     lines.append(
         f"  Rework looped "
-        f"(≥{tp['rework_threshold']} retries): {tp['rework_looped_count']}{rework_warn}"
+        f"(at least {tp['rework_threshold']} retries): {tp['rework_looped_count']}{rework_warn}"
     )
     if tp["rework_looped_tasks"]:
         lines.append(f"    samples: {', '.join(tp['rework_looped_tasks'][:5])}")
@@ -390,37 +390,37 @@ def render_health_md(snap: dict) -> str:
 
     # WORKFLOW COVERAGE
     lines.append("WORKFLOW COVERAGE")
-    lines.append("─" * 60)
+    lines.append("-" * 60)
     wc = snap["workflow_coverage"]
-    icon = "✓" if wc["completeness_ratio"] >= 0.9 else "⚠"
+    icon = "OK" if wc["completeness_ratio"] >= 0.9 else "WARNING"
     lines.append(
         f"  {icon} {wc['complete']}/{wc['audited']} tasks completely covered "
         f"({wc['completeness_ratio']*100:.0f}%)"
     )
     if wc["partial"]:
-        lines.append(f"  ⚠ {wc['partial']} task(s) partial coverage")
+        lines.append(f"  WARNING: {wc['partial']} task(s) partial coverage")
     if wc["tasks_missing_acceptance_criteria"]:
         lines.append(
-            f"  ⚠ Missing acceptance_criteria: "
+            f"  WARNING: Missing acceptance_criteria: "
             f"{', '.join(wc['tasks_missing_acceptance_criteria'][:5])}"
         )
     if wc["stage_order_violations"]:
         lines.append(
-            f"  ⚠ Stage order violations: "
+            f"  WARNING: Stage order violations: "
             f"{len(wc['stage_order_violations'])} task(s)"
         )
     lines.append(sep)
 
     # ROLE HEALTH
     lines.append("ROLE HEALTH")
-    lines.append("─" * 60)
+    lines.append("-" * 60)
     rh = snap["role_health"]
     if not rh:
         lines.append("  (no worker roles)")
     else:
         for role_name in sorted(rh.keys()):
             info = rh[role_name]
-            icon = "⚠" if info["warning"] else "✓"
+            icon = "WARNING" if info["warning"] else "OK"
             if info["last_heartbeat_at"]:
                 hb = (
                     f"last heartbeat "
@@ -437,8 +437,8 @@ def render_health_md(snap: dict) -> str:
     lines.append(sep)
 
     # FAILURE TAXONOMY
-    lines.append("FAILURE TAXONOMY (per EVAL-FAILURE-TAXONOMY-001)")
-    lines.append("─" * 60)
+    lines.append("FAILURE TAXONOMY")
+    lines.append("-" * 60)
     ft = snap["failure_taxonomy"]
     if ft["total"] == 0:
         lines.append("  (no task.rework.triage.completed events in window)")
@@ -457,8 +457,8 @@ def render_health_md(snap: dict) -> str:
     lines.append(sep)
 
     # COORDINATOR
-    lines.append("COORDINATOR (per EVAL-COORDINATOR-RATIO-001)")
-    lines.append("─" * 60)
+    lines.append("COORDINATOR")
+    lines.append("-" * 60)
     co = snap["coordinator"]
     if co["total_wakes"] == 0:
         lines.append("  (no orchestrator.decision.recorded events in window)")
@@ -467,10 +467,10 @@ def render_health_md(snap: dict) -> str:
             lines.append(f"  {kind:12s}: {n}")
         if co["dispatch_no_action_ratio"] is not None:
             band_icons = {
-                "healthy": "✓",
-                "over_cautious": "⚠",
-                "over_eager": "⚠",
-                "n/a": "—",
+                "healthy": "OK",
+                "over_cautious": "WARNING",
+                "over_eager": "WARNING",
+                "n/a": "N/A",
             }
             icon = band_icons.get(co["health_band"], "?")
             lines.append(
@@ -480,19 +480,19 @@ def render_health_md(snap: dict) -> str:
     lines.append(sep)
 
     # METRICS SNAPSHOT
-    lines.append("METRICS SNAPSHOT (per EVAL-METRIC-DIAGNOSTICS-001)")
-    lines.append("─" * 60)
+    lines.append("METRICS SNAPSHOT")
+    lines.append("-" * 60)
     diags = snap.get("metric_diagnostics", [])
     crit = [d for d in diags if d["health_band"] == "critical"]
     warn = [d for d in diags if d["health_band"] == "warning"]
     healthy = [d for d in diags if d["health_band"] == "healthy"]
     lines.append(
-        f"  ✓ healthy: {len(healthy)}    "
-        f"⚠ warning: {len(warn)}    "
-        f"✗ critical: {len(crit)}"
+        f"  OK healthy: {len(healthy)}    "
+        f"WARNING: {len(warn)}    "
+        f"FAIL critical: {len(crit)}"
     )
     for d in crit[:5]:
-        lines.append(f"  ✗ {d['metric_name']} = {d['value']}")
+        lines.append(f"  FAIL {d['metric_name']} = {d['value']}")
         for hint in d.get("root_cause_hints", [])[:1]:
             lines.append(f"    hint: {hint}")
     lines.append(sep)
@@ -500,9 +500,9 @@ def render_health_md(snap: dict) -> str:
     # RECOMMENDATIONS
     recs = snap.get("recommendations", [])
     lines.append("RECOMMENDATIONS")
-    lines.append("─" * 60)
+    lines.append("-" * 60)
     if not recs:
-        lines.append("  (no actions needed — system healthy)")
+        lines.append("  (no actions needed; system healthy)")
     else:
         for r in recs:
             lines.append(f"  - {r}")

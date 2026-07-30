@@ -503,7 +503,7 @@ def test_prompt_system_only(tmp_path: Path, capsys):
     rc = spec_cli._run_prompt(_prompt_args(None, system_only=True))
     assert rc == 0
     out = capsys.readouterr().out
-    assert "spec → frontmatter extractor" in out
+    assert "spec-to-frontmatter extractor" in out
     assert "blocked_by" in out
     assert "wave" in out
     assert "shared_files" in out

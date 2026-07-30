@@ -35,7 +35,10 @@ def _expected_next(task) -> list[str]:
     events = list(getattr(contract, "completion_events", []) or [])
     if events:
         return events
-    return ["<role publishes 的 success/failure 事件;见 briefing 完成协议>"]
+    return [
+        "<success/failure events published by the role; "
+        "see the briefing completion protocol>"
+    ]
 
 
 def build_context(state_dir: Path, task_id: str, mode: str = "") -> dict:
@@ -77,13 +80,15 @@ def _render_human(ctx: dict) -> str:
     if ctx.get("error"):
         return f"error: {ctx['error']}"
     lines = [
-        f"# ctx {ctx['task_id']} — {ctx.get('title', '')} [{ctx.get('status', '')}]",
+        f"# ctx {ctx['task_id']} - {ctx.get('title', '')} "
+        f"[{ctx.get('status', '')}]",
         "",
     ]
     if ctx.get("dispatch"):
         d = ctx["dispatch"]
         lines.append(
-            f"dispatch: {d.get('dispatch_id', '-')} → {d.get('assignee', '-')}"
+            f"dispatch: {d.get('dispatch_id', '-')} -> "
+            f"{d.get('assignee', '-')}"
         )
     if ctx.get("capsule"):
         lines.append("capsule:")
@@ -94,7 +99,9 @@ def _render_human(ctx: dict) -> str:
         lines.append(f"{facet}:")
         for e in entries:
             req = "!" if e.get("required") else " "
-            lines.append(f"  [{req}] {e.get('path', '')} — {e.get('reason', '')}")
+            lines.append(
+                f"  [{req}] {e.get('path', '')} - {e.get('reason', '')}"
+            )
     lines.append(
         "expected next: " + ", ".join(ctx.get("expected_next_events", []))
     )
@@ -126,7 +133,7 @@ def register(subparsers) -> None:
     parser.add_argument("--task", required=True, help="Task ID")
     parser.add_argument(
         "--mode", choices=["implement", "check", "research", "closeout"],
-        default="", help="只看某一动作分面",
+        default="", help="Show only one action facet",
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--state-dir", default=None)

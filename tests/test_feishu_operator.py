@@ -128,7 +128,7 @@ def test_build_feishu_operator_system_prompt_guides_cli_readonly() -> None:
     assert "zf" in sp  # the agent reads state via the zf CLI
     # read-only / propose, not direct write of runtime truth
     assert any(token in sp for token in ("只读", "read-only", "不要直接写", "不写"))
-    assert "中文" in sp  # default Chinese replies
+    assert "Chinese" in sp  # default Chinese replies
 
 
 # --- Acceptance 3: run_operate drain -> turn -> reply -> offset ------------

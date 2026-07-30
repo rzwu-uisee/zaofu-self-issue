@@ -29,7 +29,7 @@ _DEFAULT_STATE_DIR = ".zf"
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "bug-fix-cycle",
-        help="β-3 operator helper: drive the zaofu fix cycle after zaofu.bug.detected",
+        help="Drive the ZaoFu operator fix cycle after zaofu.bug.detected",
     )
     parser.add_argument(
         "--state-dir",
@@ -42,7 +42,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         type=str,
         default="",
         help="Filter by signature name (e.g. ship_block_loop). "
-             "Empty → use the most recent zaofu.bug.detected.",
+             "Empty means use the most recent zaofu.bug.detected.",
     )
     parser.add_argument(
         "--json",
@@ -125,7 +125,7 @@ def _render_human(bug_event) -> str:
     for evid in evidence:
         lines.append(f"  - {evid}")
     lines.append("")
-    lines.append("─" * 60)
+    lines.append("-" * 60)
     lines.append(
         "Operator playbook (see skills/zaofu-bug-fix-cycle/SKILL.md):"
     )

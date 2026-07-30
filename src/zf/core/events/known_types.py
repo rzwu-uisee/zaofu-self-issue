@@ -713,6 +713,6 @@ def validate_role_event_names(
             if trigger not in extended_known:
                 warnings.append(
                     f"role {r.name!r}: trigger {trigger!r} is not a known event "
-                    f"type and is not published by any role — possible typo?"
+                    "type and is not published by any role; possible typo?"
                 )
     return warnings

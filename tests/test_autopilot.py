@@ -145,6 +145,6 @@ def test_autopilot_cli_tick_uses_project_state_dir(
 
     assert result == 0
     captured = capsys.readouterr()
-    assert "Autopilot tick 完成" in captured.out
+    assert "Autopilot tick complete" in captured.out
     events = EventLog(state / "events.jsonl").read_all()
     assert any(event.type == AUTOPILOT_PROPOSAL_EVENT for event in events)

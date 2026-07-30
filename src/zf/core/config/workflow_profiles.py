@@ -377,8 +377,7 @@ def expand_refactor_flow_v1(params: dict) -> dict[str, Any]:
     assembly = params.get("assembly")
     if assembly is None:
         raise WorkflowProfileError(
-            "refactor-flow/v1: assembly is required (doc 88 §3.2 R21/R24 "
-            "无主地带教训;显式 {task: <id>} 或 'none')"
+            "refactor-flow/v1: assembly is required; set {task: <id>} or 'none'"
         )
     budgets = params.get("budgets") or {}
     max_rework = int(_pick(
@@ -1592,9 +1591,9 @@ def merge_expansion_into_body(body: dict, expansion: dict) -> None:
         )
         if stage_key in hand_triggers or (stage_key[0], "") in hand_triggers:
             print(
-                f"Warning: flowProfile stage {stage['id']!r} skipped — "
+                f"Warning: flowProfile stage {stage['id']!r} skipped; "
                 f"hand-written stage already covers trigger "
-                f"{stage['trigger']!r} (手写最高;doc 90 V2 三源守门)",
+                f"{stage['trigger']!r} (hand-written stage takes precedence)",
                 file=sys.stderr,
             )
             continue

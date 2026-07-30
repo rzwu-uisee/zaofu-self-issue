@@ -17,7 +17,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--periodic", action="store_true", help="Run full periodic cleanup cycle")
     parser.add_argument(
         "--checkpoints", type=int, default=5,
-        help="(deprecated, kept for backward-compatible CLI args — checkpoints "
+        help="(deprecated, kept for backward-compatible CLI args; checkpoints "
              "were removed 2026-04-20; this flag is now a no-op)",
     )
     parser.add_argument(

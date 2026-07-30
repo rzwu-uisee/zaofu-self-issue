@@ -228,7 +228,7 @@ def test_cli_audit_explicit_task_complete(
     ))
     out = capsys.readouterr().out
     assert rc == 0
-    assert "TASK-A: ✓ complete" in out
+    assert "TASK-A: PASS complete" in out
     assert "100%" in out
 
 
@@ -248,9 +248,9 @@ def test_cli_audit_partial_shows_missing(
     ))
     out = capsys.readouterr().out
     assert rc == 0
-    assert "TASK-B: ⚠ partial" in out
-    assert "static_gate.passed — MISSING" in out
-    assert "judge.passed — MISSING" in out
+    assert "TASK-B: WARNING partial" in out
+    assert "static_gate.passed - MISSING" in out
+    assert "judge.passed - MISSING" in out
 
 
 def test_cli_audit_strict_exits_1_on_partial(
@@ -297,4 +297,4 @@ def test_cli_audit_no_events_no_task_friendly(
     ))
     out = capsys.readouterr().out
     assert rc == 0
-    assert "TASK-NEVER: — no_events" in out
+    assert "TASK-NEVER: NONE no_events" in out

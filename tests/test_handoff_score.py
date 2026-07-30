@@ -172,8 +172,8 @@ def test_render_md_contains_score_line() -> None:
     }
     out = render_score_md(score)
     assert "## Handoff Quality Score: 8/10" in out
-    assert "✓ run_id_present" in out
-    assert "✗ task_id_present" in out
+    assert "PASS run_id_present" in out
+    assert "FAIL task_id_present" in out
     assert "set task" in out
 
 

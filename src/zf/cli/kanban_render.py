@@ -51,8 +51,8 @@ def render_board(tasks: list[Task], *, use_color: bool = True) -> str:
         if use_color:
             label = f"{_BOLD}{_COLORS.get(col, '')}{label}{_RESET}"
         header_parts.append(label.center(col_width))
-    lines.append("│".join(header_parts))
-    lines.append("─" * (col_width * len(_COLUMNS) + len(_COLUMNS) - 1))
+    lines.append("|".join(header_parts))
+    lines.append("-" * (col_width * len(_COLUMNS) + len(_COLUMNS) - 1))
 
     # Find max rows needed
     max_rows = max(len(by_status[col]) for col in _COLUMNS) if tasks else 0
@@ -68,7 +68,7 @@ def render_board(tasks: list[Task], *, use_color: bool = True) -> str:
                 row_parts.append(f" {card} ")
             else:
                 row_parts.append(" " * col_width)
-        lines.append("│".join(row_parts))
+        lines.append("|".join(row_parts))
 
     # WIP summary
     lines.append("")

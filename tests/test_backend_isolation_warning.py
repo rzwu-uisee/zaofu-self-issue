@@ -32,7 +32,7 @@ def test_all_different_backend_clean_pass(capsys) -> None:
     ])
     _print_backend_isolation_check(config)
     out = capsys.readouterr().out
-    assert "⚠ judge and dev/builder use same backend" in out
+    assert "WARNING: judge and dev/builder use the same backend" in out
 
 
 def test_clean_full_isolation(capsys) -> None:
@@ -44,8 +44,8 @@ def test_clean_full_isolation(capsys) -> None:
     ])
     _print_backend_isolation_check(config)
     out = capsys.readouterr().out
-    assert "✓ adversarial roles use different backend" in out
-    assert "⚠" not in out
+    assert "PASS: adversarial roles use different backend" in out
+    assert "WARNING:" not in out
 
 
 def test_all_same_backend_warns_for_each_adversary(capsys) -> None:
@@ -58,7 +58,7 @@ def test_all_same_backend_warns_for_each_adversary(capsys) -> None:
     ])
     _print_backend_isolation_check(config)
     out = capsys.readouterr().out
-    assert out.count("⚠") == 4  # review + test + judge + critic
+    assert out.count("WARNING:") == 4  # review + test + judge + critic
     assert "self-confirmation bias" in out
 
 
@@ -70,7 +70,7 @@ def test_builder_alias_recognized(capsys) -> None:
     ])
     _print_backend_isolation_check(config)
     out = capsys.readouterr().out
-    assert "⚠ review and dev/builder use same backend" in out
+    assert "WARNING: review and dev/builder use the same backend" in out
 
 
 def test_case_insensitive_backend_compare(capsys) -> None:
@@ -81,7 +81,7 @@ def test_case_insensitive_backend_compare(capsys) -> None:
     ])
     _print_backend_isolation_check(config)
     out = capsys.readouterr().out
-    assert "⚠ review and dev/builder use same backend" in out
+    assert "WARNING: review and dev/builder use the same backend" in out
 
 
 def test_warning_only_does_not_set_exit_code() -> None:

@@ -123,7 +123,7 @@ def _translate_legacy_workflow_kind(
     if unknown_top:
         raise WorkflowKindError(
             f"{context}: unsupported spec key(s) {unknown_top} "
-            f"(workflow_kind_unsupported_field; doc 90 §3.5.1)"
+            "(workflow_kind_unsupported_field)"
         )
     tasks = spec.get("tasks")
     if not isinstance(tasks, list) or not tasks:
@@ -158,7 +158,7 @@ def _translate_legacy_workflow_kind(
         if deps:
             if len(deps) > 1:
                 raise WorkflowKindError(
-                    f"{ctx}: multiple dependencies need barrier semantics — "
+                    f"{ctx}: multiple dependencies need barrier semantics; "
                     f"not supported by kind: Workflow yet (fail-closed)"
                 )
             dep = str(deps[0])

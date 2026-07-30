@@ -33,7 +33,7 @@ def test_validate_rejects_root_path_for_non_assembly():
         "allowed_paths": ["package.json"],
         "root_owner_class": "slice",
     }
-    assert any("根级路径" in e for e in _validate(fm))
+    assert any("root path" in e for e in _validate(fm))
     fm["root_owner_class"] = "assembly"
     assert _validate(fm) == []
 

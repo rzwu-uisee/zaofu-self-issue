@@ -41,7 +41,7 @@ class TestCli:
         rc = main(["metrics", "snapshot", "--format", "table"])
         assert rc == 0
         out = capsys.readouterr().out
-        for group in ("A. 持续性", "B. 对齐", "C. 进度", "D. 经济"):
+        for group in ("A. Continuity", "B. Alignment", "C. Progress", "D. Economics"):
             assert group in out
 
     def test_snapshot_diff(self, project, capsys, tmp_path):

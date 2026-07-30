@@ -32,7 +32,7 @@ SCAN_DIRS = ("src/zf/core", "src/zf/runtime", "src/zf/cli")
 _ALLOWED_CODE_HITS = {
     "src/zf/cli/bug_fix_cycle.py": 1,       # legacy cangjie_state_snapshot read
     "src/zf/cli/report.py": 10,             # deprecated `hermes-run` alias cmd
-    "src/zf/core/config/render.py": 2,      # boundary lint baseline + message
+    "src/zf/core/config/render.py": 1,      # boundary lint baseline
     "src/zf/core/events/known_types.py": 2,  # legacy alias registration
     "src/zf/core/events/module_parity.py": 5,  # LEGACY_* alias constants
     "src/zf/runtime/artifact_matrix_gate.py": 2,  # legacy field aliases

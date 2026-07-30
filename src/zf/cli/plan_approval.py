@@ -40,7 +40,7 @@ def _checklist(task_map_path: Path) -> list[str]:
     try:
         data = json.loads(task_map_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return [f"task_map 不可读: {task_map_path}"]
+        return [f"task_map is not readable: {task_map_path}"]
     from zf.runtime.plan_digest import plan_digest_checklist
 
     tasks = data.get("tasks") or []
@@ -53,16 +53,16 @@ def _checklist(task_map_path: Path) -> list[str]:
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
-        "plan", help="人工 plan 审核门(review/approve/reject,doc 93)",
+        "plan", help="Review, approve, or reject a plan",
     )
     parser.add_argument("--state-dir", default=None)
     sub = parser.add_subparsers(dest="plan_cmd", required=True)
-    review = sub.add_parser("review", help="列出待审 plan(digest+checklist)")
+    review = sub.add_parser("review", help="List plans awaiting review with digest and checklist")
     review.set_defaults(func=_run)
-    ap = sub.add_parser("approve", help="批准 plan,解锁 writer fanout")
+    ap = sub.add_parser("approve", help="Approve a plan and unlock writer fanout")
     ap.add_argument("plan_id")
     ap.set_defaults(func=_run)
-    rj = sub.add_parser("reject", help="驳回 plan,回喂 synth 重拆")
+    rj = sub.add_parser("reject", help="Reject a plan and request synthesis replan")
     rj.add_argument("plan_id")
     rj.add_argument("--reason", required=True)
     rj.set_defaults(func=_run)
@@ -89,7 +89,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.plan_cmd == "review":
         pending = _pending(events)
         if not pending:
-            print("无待审 plan。")
+            print("No plans are awaiting review.")
             return 0
         for item in pending:
             plan_id = item.get("plan_id")
@@ -101,14 +101,14 @@ def _run(args: argparse.Namespace) -> int:
                 path = Path(ref)
                 if not path.is_absolute():
                     path = Path.cwd() / ref
-                for line in _checklist(path) or ["[OK] checklist 全绿"]:
+                for line in _checklist(path) or ["[OK] checklist passed"]:
                     print(f"  {line}")
             print(f"  approve: zf plan approve {plan_id}")
         return 0
 
     pending_ids = {str(p.get("plan_id")) for p in _pending(events)}
     if args.plan_id not in pending_ids:
-        print(f"plan {args.plan_id} 不在待审列表(已裁决或不存在)。")
+        print(f"plan {args.plan_id} is not awaiting review; it was decided or does not exist.")
         return 1
     requested = next(
         (item for item in _pending(events) if str(item.get("plan_id")) == args.plan_id),
@@ -134,7 +134,7 @@ def _run(args: argparse.Namespace) -> int:
             payload=decision_payload,
             causation_id=args.plan_id,
         ))
-        print(f"plan {args.plan_id} approved — fanout 将随 kernel wake 孵化。")
+        print(f"plan {args.plan_id} approved - fanout will start on the next kernel wake.")
         return 0
     decision_payload["reason"] = args.reason
     writer.append(ZfEvent(
@@ -143,7 +143,7 @@ def _run(args: argparse.Namespace) -> int:
         payload=decision_payload,
         causation_id=args.plan_id,
     ))
-    print(f"plan {args.plan_id} rejected — synth 将携 reason 重拆(replan)。")
+    print(f"plan {args.plan_id} rejected - synthesis will replan with the supplied reason.")
     return 0
 
 
@@ -157,6 +157,6 @@ def review_advice(task_map_path: Path) -> dict:
     return {
         "advice": "reject" if warnings else "approve",
         "binding": False,
-        "note": "建议非决策 — 签字是 operator 的(doc 93 §7.1 硬规则)",
+        "note": "Advice is non-binding; the operator makes the decision.",
         "checklist_warnings": warnings,
     }

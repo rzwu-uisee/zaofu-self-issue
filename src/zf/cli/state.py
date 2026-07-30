@@ -52,7 +52,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     reconcile = sub.add_parser(
         "reconcile",
-        help="Detect kanban ⇄ tmux pane desync (in_progress without live worker)",
+        help="Detect Kanban and tmux pane desync (in_progress without a live worker)",
     )
     reconcile.add_argument(
         "--reset", action="store_true",
@@ -267,7 +267,7 @@ def _run_reconcile(args: argparse.Namespace) -> int:
     if not getattr(args, "reset", False) or getattr(args, "dry_run", False):
         print()
         print("Run `zf state reconcile --reset` to push these tasks back to `ready`")
-        print("(removes assignee, clears dispatched_at; safe — events are append-only).")
+        print("(removes assignee and clears dispatched_at; events are append-only).")
         return 0 if not orphans else 2  # 2 = state inconsistent, no action taken
 
     # Reset: status → ready, assignee → None, dispatched_at → None

@@ -284,8 +284,8 @@ def run_delivery_report(args: argparse.Namespace) -> int:
     for p in pm["phase_summary"]:
         pr = p["pass_rate"]
         pr_s = f"{int(pr * 100)}%" if pr is not None else "-"
-        print(f"  ▸ {p['phase_id']} [{p['status']}] 完成={int((p['completion_rate'] or 0) * 100)}% "
-              f"达标={pr_s} verdict={p['verdict']} rework={p['rework_count']}")
+        print(f"  > {p['phase_id']} [{p['status']}] completion={int((p['completion_rate'] or 0) * 100)}% "
+              f"pass_rate={pr_s} verdict={p['verdict']} rework={p['rework_count']}")
 
 
 def run_export(args: argparse.Namespace) -> int:
@@ -500,8 +500,8 @@ def _render_delivery(trace, _t) -> None:
             extra.append(f"rework={ph['rework_count']}")
         if ph.get("paused_count"):
             extra.append(f"paused={ph['paused_count']}")
-        print(f"  ▸ phase {ph['phase_id']} [{ph['status']}] "
-              f"完成={int(ph['completion_rate'] * 100)}% 达标={pr_s} "
+        print(f"  > phase {ph['phase_id']} [{ph['status']}] "
+              f"completion={int(ph['completion_rate'] * 100)}% pass_rate={pr_s} "
               f"verdict={ph['eval']['verdict']}"
               + (f" {' '.join(extra)}" if extra else ""))
         for run in ph.get("agent_runs", []):
@@ -817,7 +817,7 @@ def _emit_mermaid_gantt(per_dev: dict) -> str:
         by_dev[dev].sort()
 
     lines = ["```mermaid", "gantt",
-             f"    title Per-dev task timeline — {len(per_dev)} task(s)",
+             f"    title Per-dev task timeline - {len(per_dev)} task(s)",
              "    dateFormat YYYY-MM-DDTHH:mm:ss",
              "    axisFormat %H:%M"]
     for dev in sorted(by_dev.keys()):

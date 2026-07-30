@@ -120,7 +120,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     audit.add_argument(
         "--since", default=None,
-        help="Time window (e.g. 24h, 7d) — only audit tasks active in window",
+        help="Time window (e.g. 24h, 7d); only audit tasks active in the window",
     )
     audit.add_argument(
         "--format", choices=["md", "json"], default="md",
@@ -778,13 +778,13 @@ def _run_audit(args: argparse.Namespace) -> int:
         print(json.dumps(out, indent=2, ensure_ascii=False))
     else:
         window = args.since or "all"
-        print(f"Workflow Audit · {window} window · {len(reports)} task(s)\n")
+        print(f"Workflow Audit - {window} window - {len(reports)} task(s)\n")
         for r in reports:
             status_icon = {
-                "complete": "✓",
-                "partial": "⚠",
-                "no_events": "—",
-                "not_applicable": "·",
+                "complete": "PASS",
+                "partial": "WARNING",
+                "no_events": "NONE",
+                "not_applicable": "N/A",
             }.get(r["status"], "?")
             print(f"{r['task_id']}: {status_icon} {r['status']}")
             if r["status"] in {"no_events", "not_applicable"}:
@@ -796,11 +796,11 @@ def _run_audit(args: argparse.Namespace) -> int:
                   f"{len(r['covered_events']) + len(r['missing_events'])} "
                   f"({r['evidence_completeness']*100:.0f}%)")
             for ev in r["covered_events"]:
-                print(f"    ✓ {ev['type']} ({ev['event_id']})")
+                print(f"    PASS {ev['type']} ({ev['event_id']})")
             for miss in r["missing_events"]:
-                print(f"    ✗ {miss} — MISSING")
+                print(f"    FAIL {miss} - MISSING")
             for viol in r["stage_order_violations"]:
-                print(f"    ⚠ stage_order: {viol}")
+                print(f"    WARNING stage_order: {viol}")
             print()
 
     if args.strict and has_partial:

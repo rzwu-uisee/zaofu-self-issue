@@ -112,7 +112,7 @@ class TestHermesSampleCompiles:
         assert contract["attempt_binding"] == "unique_derivation_or_stale"
         assert contract["trace_budget"] == 6  # 2 attempts × 3 stages(G1 加性封顶)
         assert contract["final_gate"]["blocked_tasks_block_final"] is True
-        assert contract["recovery_owner"] == "doc87-reconciler"
+        assert contract["recovery_owner"] == "reconciler"
 
     def test_same_lane_handoff_binding(self):
         spec = parse_lane_pipeline(_hermes_raw())

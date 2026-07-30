@@ -41,7 +41,7 @@ def check_hook_command(zf_cmd: str) -> EnvCheck:
     if not shutil.which(binary) and not Path(binary).exists():
         return EnvCheck(
             "hook_command", False, True,
-            f"hook 命令首 token 不可执行: {binary!r}(R20 shim 事故类)",
+            f"hook command executable is unavailable: {binary!r}",
         )
     try:
         proc = subprocess.run(
@@ -51,13 +51,13 @@ def check_hook_command(zf_cmd: str) -> EnvCheck:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return EnvCheck(
             "hook_command", False, True,
-            f"hook 命令无法运行: {exc}(hook-recv 防御层在 import 前不可达)",
+            f"hook command could not run: {exc}",
         )
     if proc.returncode != 0:
         tail = (proc.stderr or b"").decode(errors="replace")[-200:]
         return EnvCheck(
             "hook_command", False, True,
-            f"hook 命令 exit {proc.returncode}: {tail}",
+            f"hook command exited with status {proc.returncode}: {tail}",
         )
     return EnvCheck("hook_command", True, True, zf_cmd)
 
@@ -66,7 +66,7 @@ def check_tmux() -> EnvCheck:
     if not shutil.which("tmux"):
         return EnvCheck(
             "tmux", False, True,
-            "tmux 不在 PATH(启动硬依赖;此前缺失只会以 traceback 曝死)",
+            "tmux is not available on PATH; it is required to start this workflow",
         )
     return EnvCheck("tmux", True, True, "")
 
@@ -83,8 +83,8 @@ def check_workdir_ownership(state_dir: Path) -> EnvCheck:
                 if path.lstat().st_uid != uid:
                     return EnvCheck(
                         "workdir_ownership", False, False,
-                        f"非当前 uid 属主文件: {path}(avbs-r5 类:docker "
-                        f"挂载残留会把 evidence 写入永久卡死)",
+                        f"file is not owned by the current uid: {path}; "
+                        "a stale container mount may block evidence writes",
                     )
             except OSError:
                 continue
@@ -102,8 +102,8 @@ def check_browser_deps(project_root: Path) -> EnvCheck:
     if not cache.exists() or not any(cache.iterdir()):
         return EnvCheck(
             "browser_deps", False, False,
-            "项目声明 playwright 但 ~/.cache/ms-playwright 无浏览器"
-            "(e2e 将在启动即失败;系统库缺失另见 runbook pwlibs 套路)",
+            "the project declares Playwright, but no browser is installed in "
+            "~/.cache/ms-playwright; browser E2E will fail at startup",
         )
     return EnvCheck("browser_deps", True, False, "")
 

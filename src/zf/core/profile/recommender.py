@@ -61,14 +61,14 @@ def recommend(
     if lightweight or flow_archetype is None:
         archetype = "minimal"
         catalog_kind = "preset"
-        why = "hobby" if scale == "hobby" else ("低信号" if low_signal else "小型/无测试")
-        rationale.append(f"长尾({why})→ minimal preset 兜底(单 dev)")
+        why = "hobby" if scale == "hobby" else ("low signal" if low_signal else "small/no tests")
+        rationale.append(f"Long-tail project ({why}) -> minimal preset with one dev role")
     else:
         archetype = flow_archetype
         catalog_kind = "flow"
         rationale.append(
-            f"intent={intent} → prod flow {archetype}"
-            f"(validated,{flow_roles(archetype)} 角色,{backend} 后端)"
+            f"intent={intent} -> validated production flow {archetype} "
+            f"({flow_roles(archetype)} roles, {backend} backend)"
         )
 
     if catalog_kind == "preset" and archetype not in presets:  # PB7 safety
@@ -79,24 +79,30 @@ def recommend(
         # survey overrides detect's strictness guess — incl. lowering a fullstack
         # auto-strict down to baseline for a hobby project (§6.1 / user 0623).
         harness_profile = "strict" if scale == "launch" else "baseline"
-        rationale.append(f"scale={scale} → harness_profile={harness_profile}(人定,覆盖 detect 默认)")
+        rationale.append(
+            f"scale={scale} -> harness_profile={harness_profile} "
+            "(explicit selection overrides detection)"
+        )
     elif intent == "refactor" or (fullstack and multi):
         harness_profile = "strict"
-        rationale.append("高复杂度 / 重构 → harness_profile=strict(detect 默认,可用 scale 覆盖)")
+        rationale.append(
+            "High complexity or refactor intent -> harness_profile=strict "
+            "(override with --scale)"
+        )
     else:
         harness_profile = "baseline"
 
     # --- axis ③: stack → required_checks overlay -----------------------------
     required_checks = profile.all_gate_cmds
     if required_checks:
-        rationale.append(f"栈 overlay → required_checks={list(required_checks)}")
+        rationale.append(f"Stack overlay -> required_checks={list(required_checks)}")
 
     # --- misroute detection (§6.6.1) -----------------------------------------
     misroute = ""
     if intent == "build" and not declared and _looks_existing(profile):
         misroute = (
-            "声明 intent=build,但探到存量代码(已有 manifest/源码)。"
-            "若是接手已有项目,考虑 --intent refactor 或 maintain。"
+            "intent=build was requested, but existing manifests or source code "
+            "were detected. Use --intent refactor or maintain for an existing project."
         )
 
     if catalog_kind == "flow":

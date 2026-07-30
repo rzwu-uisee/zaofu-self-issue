@@ -44,8 +44,8 @@ def _normalize_mapping(
         target = rename.get(k, k)
         if _has_upper(k) and k not in rename:
             raise KindEnvelopeError(
-                f"{context}: unknown camelCase key {k!r} — the envelope "
-                f"surface only accepts mapped fields (doc 90 §3.4.1); "
+                f"{context}: unknown camelCase key {k!r}; the envelope "
+                "surface only accepts mapped fields; "
                 f"canonical snake_case is the authority"
             )
         handler = nested.get(k) or nested.get(target)

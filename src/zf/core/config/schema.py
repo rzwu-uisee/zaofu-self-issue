@@ -450,7 +450,7 @@ class RoleConfig:
                 if not b:
                     raise ValueError(
                         f"RoleConfig(name={self.name!r}): backends[{i}] "
-                        f"is empty — every replica must declare a backend"
+                        "is empty; every replica must declare a backend"
                     )
         if self.autoscale.enabled and self.replicas > self.autoscale.max_replicas:
             raise ValueError(

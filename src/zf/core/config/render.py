@@ -170,61 +170,61 @@ _SKILL_SCOPE_ALIASES = {
 }
 _DIAGNOSTIC_FIXITS = {
     "profile_boundary_violation": {
-        "title": "Profile 分层边界不清",
+        "title": "Profile layer boundary violation",
         "why_it_matters": (
-            "common/workflow profile 携带项目路径或项目事实时，复用到其它项目会"
-            "产生隐藏漂移。"
+            "A common or workflow profile containing project paths or facts "
+            "causes hidden drift when reused."
         ),
-        "fix_it": "把项目专属路径、prompt、source/target root 移到 profiles/project/<name>/。",
+        "fix_it": "Move project paths, prompts, and source/target roots to profiles/project/<name>/.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/118-config-composition-workflow-controller-design.md",
     },
     "flow_policy_without_consumer": {
-        "title": "Flow policy 尚未接入确定性消费者",
-        "why_it_matters": "字段写在 YAML 里但不会影响 gate/runtime/Web，用户会误以为声明已生效。",
-        "fix_it": "接入对应 gate/runtime/projection consumer，或删除该 policy 声明。",
+        "title": "Flow policy has no deterministic consumer",
+        "why_it_matters": "The YAML field does not affect gates, runtime, or Web behavior.",
+        "fix_it": "Connect a gate, runtime, or projection consumer, or remove the policy.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/119-refactor-goal-convergence-loop-yaml-design.md",
     },
     "flow_policy_consumer": {
-        "title": "Flow policy 已接入消费者",
-        "why_it_matters": "该 policy 不只是 metadata，render 已能解释由谁消费。",
-        "fix_it": "无需处理。",
+        "title": "Flow policy has a consumer",
+        "why_it_matters": "The policy is enforced rather than stored as metadata only.",
+        "fix_it": "No action required.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/119-refactor-goal-convergence-loop-yaml-design.md",
     },
     "skill_coverage_gap": {
-        "title": "Parity scope 缺少 skill 覆盖",
-        "why_it_matters": "verify/rescan 可能漏掉该模块能力差距。",
-        "fix_it": "给 scan/verify/module-parity/judge owner 增加覆盖该 scope 的 skill bundle。",
+        "title": "Parity scope lacks skill coverage",
+        "why_it_matters": "Verify or rescan may miss a module capability gap.",
+        "fix_it": "Add a matching skill bundle to the scan, verify, parity, or judge owner.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/119-refactor-goal-convergence-loop-yaml-design.md",
     },
     "event_without_consumer": {
-        "title": "事件没有消费者",
-        "why_it_matters": "事件发出后没有下游 stage/runtime bridge 接住，workflow 可能停住。",
-        "fix_it": "增加消费该事件的 stage、runtime bridge，或把它声明为 external/expected sink。",
+        "title": "Event has no consumer",
+        "why_it_matters": "The workflow may stall after publishing the event.",
+        "fix_it": "Add a consuming stage or runtime bridge, or declare an expected sink.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/118-config-composition-workflow-controller-design.md",
     },
     "expected_event_without_consumer": {
-        "title": "事件由已知 runtime bridge 消费",
-        "why_it_matters": "静态 graph 看不到该消费者，但 render 已确认这是已知闭环，不应误报。",
-        "fix_it": "无需处理；若运行中仍卡住，再检查对应 runtime bridge 日志。",
+        "title": "Event is consumed by a known runtime bridge",
+        "why_it_matters": "The static graph cannot see the consumer, but the route is known.",
+        "fix_it": "No action required; inspect the runtime bridge if execution still stalls.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/119-refactor-goal-convergence-loop-yaml-design.md",
     },
     "trigger_without_producer": {
-        "title": "Stage trigger 没有生产者",
-        "why_it_matters": "该 stage 永远不会被触发，除非这是外部入口事件。",
-        "fix_it": "补上上游 success event，或把该 trigger 加入 workflow.dag.external_triggers。",
+        "title": "Stage trigger has no producer",
+        "why_it_matters": "The stage cannot start unless this is an external entry event.",
+        "fix_it": "Add an upstream success event or declare the trigger as external.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/118-config-composition-workflow-controller-design.md",
     },
     "missing_rework_route": {
-        "title": "失败事件没有 rework 路由",
-        "why_it_matters": "失败后无法确定该回到哪个角色/阶段，容易进入 blocked 或人工介入。",
-        "fix_it": "在 stage on_failure/rework_routing 中声明目标，优先回同一 lane 的 impl owner。",
+        "title": "Failure event has no rework route",
+        "why_it_matters": "Recovery cannot determine the target role or stage.",
+        "fix_it": "Declare an on_failure or rework_routing target, preferably the same-lane impl owner.",
         "safe_auto_fix": False,
         "doc_ref": "docs/design/119-refactor-goal-convergence-loop-yaml-design.md",
     },
@@ -684,7 +684,7 @@ def _profile_boundary_diagnostics(
             diagnostics.append(_diag(
                 severity="WARN",
                 kind="profile_source_unreadable",
-                message=f"profile source `{path}` 无法读取或解析: {exc}",
+                message=f"profile source `{path}` cannot be read or parsed: {exc}",
                 source="config_profile_boundary",
                 field=str(path),
             ))
@@ -711,9 +711,10 @@ def _profile_boundary_diagnostics(
                     severity="WARN",
                     kind="profile_boundary_violation",
                     message=(
-                        f"profile `{path}` 位于 `{layer}` 层,但包含 `{offender}`；"
-                        "common/workflow profile 不应携带项目路径、prompt、"
-                        "source/target root 或 Cangjie/Hermes 专属事实"
+                        f"profile `{path}` is in layer `{layer}` but contains "
+                        f"`{offender}`; common and workflow profiles must not "
+                        "contain project paths, prompts, source/target roots, "
+                        "or project-specific facts"
                     ),
                     source="config_profile_boundary",
                     field=str(path),
@@ -910,8 +911,8 @@ def _flow_policy_consumer_diagnostics(config: ZfConfig) -> list[dict[str, Any]]:
             severity="WARN",
             kind="flow_policy_without_consumer",
             message=(
-                f"Flow policy `{key}` 当前仅作为 metadata/briefing "
-                "保留,尚未证明被 deterministic gate/runtime/Web consumer 执行"
+                f"Flow policy `{key}` is retained only as metadata or briefing; "
+                "no deterministic gate, runtime, or Web consumer is proven"
             ),
             source="config_flow_policy",
             field=key,
@@ -928,7 +929,7 @@ def _flow_policy_consumer_diagnostics(config: ZfConfig) -> list[dict[str, Any]]:
                 ),
             },
             fix_it=(
-                f"下一步接入 `{key}` 的 deterministic consumer: {next_step}"
+                f"Connect a deterministic consumer for `{key}`: {next_step}"
             ),
         ))
     return diagnostics
@@ -990,8 +991,8 @@ def _classify_expected_event_sinks(
                 "kind": "expected_trigger_without_producer",
                 "source": "config_expected_source",
                 "message": (
-                    f"trigger `{event}` 没有静态 graph producer，但由 "
-                    f"{expected_source} 生产"
+                    f"trigger `{event}` has no static graph producer but is "
+                    f"produced by {expected_source}"
                 ),
                 "detail": detail,
             })
@@ -1019,8 +1020,8 @@ def _classify_expected_event_sinks(
             "kind": "expected_event_without_consumer",
             "source": "config_expected_sink",
             "message": (
-                f"事件 `{event}` 没有显式 graph consumer，但由 "
-                f"{expected_consumer} 消费/闭合"
+                f"event `{event}` has no explicit graph consumer but is "
+                f"consumed or closed by {expected_consumer}"
             ),
             "detail": detail,
         })
@@ -1082,8 +1083,8 @@ def _skill_coverage_matrix(config: ZfConfig) -> tuple[dict[str, Any], list[dict[
                 severity="WARN",
                 kind="skill_coverage_gap",
                 message=(
-                    f"parity scope `{item}` 没有找到对应 role skill owner；"
-                    "verify/rescan 可能无法稳定发现该模块缺口"
+                    f"parity scope `{item}` has no matching role skill owner; "
+                    "verify or rescan may miss the module gap"
                 ),
                 source="config_skill_coverage",
                 field=item,
@@ -1162,9 +1163,9 @@ def _decorate_diagnostic(item: dict[str, Any]) -> dict[str, Any]:
         out.setdefault("title", kind.replace("_", " ") or "Config diagnostic")
         out.setdefault(
             "why_it_matters",
-            "该诊断可能影响 workflow 可启动性、可恢复性或可解释性。",
+            "This diagnostic may affect workflow startup, recovery, or explainability.",
         )
-        out.setdefault("fix_it", "查看 message/detail 后按字段修正配置。")
+        out.setdefault("fix_it", "Inspect message and detail, then correct the configuration.")
         out.setdefault("safe_auto_fix", False)
         out.setdefault("doc_ref", "docs/design/118-config-composition-workflow-controller-design.md")
     severity = str(out.get("severity") or "INFO").upper()

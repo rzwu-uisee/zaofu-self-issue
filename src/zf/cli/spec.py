@@ -250,7 +250,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
         )
         print(f"created feature {feature_id} (key={feature_key})")
     else:
-        print(f"feature {feature_id} already exists — reusing")
+        print(f"feature {feature_id} already exists; reusing")
 
     created_count = 0
     skipped_count = 0
@@ -637,7 +637,7 @@ def _run_validate(args: argparse.Namespace) -> int:
         return 1
     if frontmatter is None:
         print(
-            "FAIL no-frontmatter: file must start with `---` … `---` block "
+            "FAIL no-frontmatter: file must start with a `---` ... `---` block "
             "(use `zf spec extract --from-md` to auto-generate)",
             file=sys.stderr,
         )
@@ -715,7 +715,7 @@ def _scan_body_for_task_ids(body: str) -> set[str]:
 
 
 _EXTRACT_SYSTEM_PROMPT = """\
-You are a spec → frontmatter extractor for the zaofu harness.
+You are a spec-to-frontmatter extractor for the zaofu harness.
 
 Given a markdown spec describing a feature decomposed into N VS/tasks,
 output a single JSON object (no markdown fences, no extra prose) that
@@ -724,7 +724,7 @@ zaofu's `zf spec ingest` can consume.
 Required schema (omit optional fields when unsure):
 
 {
-  "spec": "<kebab-case slug — derive from filename or first H1>",
+  "spec": "<kebab-case slug; derive from filename or first H1>",
   "feature_key": "<human-readable key, typically same as spec>",
   "phase": "<P0|P1|P2|P3|P4|P5|empty>",
   "title": "<one-line zh-CN title>",
@@ -755,7 +755,7 @@ Rules:
 - owner_role defaults to "dev" when unstated.
 - Only emit blocked_by / wave / shared_files / exclusive_files when the markdown
   explicitly states dependency, ordering, parallelism, or file ownership.
-- Reply with a single JSON object only — no surrounding text, no markdown fences.
+- Reply with a single JSON object only; no surrounding text or markdown fences.
 """
 
 
@@ -775,7 +775,7 @@ def _run_prompt(args: argparse.Namespace) -> int:
     text = spec_path.read_text(encoding="utf-8")
     if text.lstrip().startswith("---"):
         print(
-            f"error: {spec_path} already has frontmatter — nothing to extract",
+            f"error: {spec_path} already has frontmatter; nothing to extract",
             file=sys.stderr,
         )
         return 1
@@ -815,7 +815,7 @@ def _run_merge(args: argparse.Namespace) -> int:
     text = spec_path.read_text(encoding="utf-8")
     if text.lstrip().startswith("---"):
         print(
-            f"error: {spec_path} already has frontmatter — refusing to overwrite",
+            f"error: {spec_path} already has frontmatter; refusing to overwrite",
             file=sys.stderr,
         )
         return 1

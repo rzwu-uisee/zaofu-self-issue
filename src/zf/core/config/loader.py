@@ -1778,7 +1778,7 @@ def _build_role(data: dict) -> RoleConfig:
     ):
         import sys
         print(
-            f"Warning: role {name!r} has implicit permission_mode: bypass — "
+            f"Warning: role {name!r} has implicit permission_mode: bypass; "
             f"agent will run with --dangerously-skip-permissions (full "
             f"system access). Add `permission_mode: bypass` to acknowledge, "
             f"or switch to `permission_mode: allowlist` + "
@@ -1884,7 +1884,7 @@ def _build_role(data: dict) -> RoleConfig:
             unsupported.append("agent")
         print(
             f"Warning: role {name!r} backend=codex does not support "
-            f"{', '.join(unsupported)} — fields will be ignored. "
+            f"{', '.join(unsupported)}; fields will be ignored. "
             f"Use backend=claude-code if you need them.",
             file=sys.stderr,
         )
@@ -2426,9 +2426,8 @@ def load_config(path: Path) -> ZfConfig:
                         f"Warning: lane_pipeline "
                         f"{pipeline_spec.pipeline_id!r} and hand-written "
                         f"stages cover the same trigger "
-                        f"{pipeline_spec.trigger!r} — dual representation "
-                        f"drifts; remove the hand stages once P4 lands "
-                        f"(doc 90 §7)",
+                        f"{pipeline_spec.trigger!r}; dual representation "
+                        "can drift, so remove the hand-written stages",
                         file=sys.stderr,
                     )
                 continue
@@ -3495,8 +3494,8 @@ def _merge_feishu_yaml(raw: dict, zf_yaml_path: Path) -> dict:
             continue
         if key in integrations:
             raise ConfigError(
-                f"integrations.{key} is configured in BOTH zf.yaml and feishu.yaml "
-                "— keep it in exactly one place")
+                f"integrations.{key} is configured in both zf.yaml and feishu.yaml; "
+                "keep it in exactly one place")
         integrations[key] = src[key]
     merged = dict(raw)
     merged["integrations"] = integrations

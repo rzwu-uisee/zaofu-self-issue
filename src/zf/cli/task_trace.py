@@ -158,7 +158,7 @@ def _run_trace(args: argparse.Namespace) -> int:
     # Table / tree output
     title = task.title if task else "(task not in kanban)"
     status = task.status if task else "?"
-    print(f"Task {args.task_id} — {title!r} [{status}]")
+    print(f"Task {args.task_id} - {title!r} [{status}]")
     if not events:
         print("  (no events for this task)")
         return 0
@@ -167,7 +167,7 @@ def _run_trace(args: argparse.Namespace) -> int:
     last_ts = events[-1].ts
     id_to_idx = {e.id: i for i, e in enumerate(events)}
     for i, e in enumerate(events):
-        marker = "└─" if i == len(events) - 1 else "├─"
+        marker = "`-" if i == len(events) - 1 else "|-"
         info = (
             f"{marker} {e.type}"
             f"  actor={e.actor or '?'}"
@@ -177,7 +177,7 @@ def _run_trace(args: argparse.Namespace) -> int:
             parent_type = None
             if e.causation_id in id_to_idx:
                 parent_type = events[id_to_idx[e.causation_id]].type
-            info += f"  ← {e.causation_id[:12]}"
+            info += f"  causation={e.causation_id[:12]}"
             if parent_type:
                 info += f" ({parent_type})"
         print(f"  {info}")
@@ -193,8 +193,8 @@ def _run_trace(args: argparse.Namespace) -> int:
                  if e.type in ("review.rejected", "test.failed",
                                "judge.failed", "gate.failed",
                                "discriminator.failed"))
-    print(f"\nTotal: {len(events)} events · "
-          f"duration {dur_min:.1f}min · rework {rework}")
+    print(f"\nTotal: {len(events)} events | "
+          f"duration {dur_min:.1f}min | rework {rework}")
     return 0
 
 

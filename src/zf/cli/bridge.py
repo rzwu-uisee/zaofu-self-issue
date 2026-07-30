@@ -35,7 +35,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     openclaw_feishu = bridge_sub.add_parser(
         "openclaw-feishu",
-        help="[DEPRECATED] Relay ZaoFu→Feishu via OpenClaw — use direct "
+        help="[DEPRECATED] Relay ZaoFu to Feishu via OpenClaw; use direct "
              "`zf feishu push` / `zf feishu bridge --watch` instead",
     )
     openclaw_feishu.set_defaults(func=_run_openclaw_feishu_root)
@@ -125,10 +125,10 @@ def _run_openclaw_feishu_root(_args: argparse.Namespace) -> int:
 
 
 _DEPRECATION = (
-    "[DEPRECATED] `zf bridge openclaw-feishu` relays ZaoFu→Feishu through the "
+    "[DEPRECATED] `zf bridge openclaw-feishu` relays ZaoFu to Feishu through the "
     "OpenClaw gateway. It is an optional sidecar, NOT on the live alert path "
     "(the orchestrator never calls it). Alerts/cards already deliver DIRECTLY "
-    "via FeishuHttpTransport — use `zf feishu push --watch` (outbound) and "
+    "via FeishuHttpTransport; use `zf feishu push --watch` (outbound) and "
     "`zf feishu bridge --watch` (inbound). This relay will be removed."
 )
 

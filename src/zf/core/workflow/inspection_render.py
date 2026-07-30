@@ -29,7 +29,7 @@ def render_workflow_inspection_markdown(report: dict[str, Any]) -> str:
     ]
     diagnostics = list(report.get("diagnostics", []) or [])
     if not diagnostics:
-        lines.append("- OK: 未发现 workflow preflight 阻断项。")
+        lines.append("- OK: no workflow preflight blockers found.")
     else:
         for item in diagnostics:
             detail = _format_diag_detail(item)
@@ -60,7 +60,7 @@ def render_workflow_inspection_markdown(report: dict[str, Any]) -> str:
                 + " |"
             )
     else:
-        lines.append("- 未配置 `workflow.stages`。")
+        lines.append("- `workflow.stages` is not configured.")
 
     lines.extend(["", "## Roles"])
     roles = list(report.get("roles", []) or [])
@@ -83,7 +83,7 @@ def render_workflow_inspection_markdown(report: dict[str, Any]) -> str:
                 + " |"
             )
     else:
-        lines.append("- 未配置 roles。")
+        lines.append("- No roles are configured.")
 
     lanes = list(report.get("affinity_lanes", []) or [])
     if lanes:

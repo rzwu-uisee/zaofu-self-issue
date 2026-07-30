@@ -592,7 +592,7 @@ spec:
         item for item in report["diagnostics"]
         if item["kind"] == "profile_boundary_violation"
     )
-    assert diag["title"] == "Profile 分层边界不清"
+    assert diag["title"] == "Profile layer boundary violation"
     assert "profiles/project" in diag["fix_it"]
 
 

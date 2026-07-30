@@ -54,7 +54,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "hook-recv",
         help=(
-            "Bridge Claude Code hook → zaofu events.jsonl. "
+            "Bridge a Claude Code hook to zaofu events.jsonl. "
             "Reads hook JSON from stdin."
         ),
     )

@@ -71,18 +71,18 @@ def combined_candidate_gate_gap(config: Any, *, flow_kind: str = "") -> str:
         placeholders = [check for check in checks if "TODO" in check]
         if placeholders:
             return (
-                "quality_gates 含未填的 TODO 占位命令 "
-                f"{placeholders[:2]} — 用项目真实命令替换模板占位后再 start。"
+                "quality_gates contains unresolved TODO commands "
+                f"{placeholders[:2]}; replace them with real project commands "
+                "before start"
             )
         return ""
     return (
-        "multi-lane fanout_writer workflow 未配置 quality_gates — "
-        "candidate 合成树不经任何验证即进 judge(跨 lane 偏斜 per-lane "
-        "verify 原理上不可见,r4 F10 实锚)。修复:配置 "
-        "quality_gates.<name>.required_checks(如 typecheck + 单测),"
-        "或配置 workflow.candidate_quality_source=task_contract_required "
-        "并由 Task Map 为每个 writer task 声明 verification,"
-        "或显式豁免 workflow.allow_unverified_candidate: true(观测型运行)。"
+        "multi-lane fanout_writer workflow has no quality_gates; the integrated "
+        "candidate would reach judge without cross-lane verification. Configure "
+        "quality_gates.<name>.required_checks, set "
+        "workflow.candidate_quality_source=task_contract_required with Task Map "
+        "verification for every writer task, or explicitly set "
+        "workflow.allow_unverified_candidate=true for observation-only runs."
     )
 
 

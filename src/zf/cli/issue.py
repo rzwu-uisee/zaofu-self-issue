@@ -24,12 +24,12 @@ from zf.core.task.store import TaskStore
 
 def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
-        "issue", help="issue/bug 第三入口(候选 ingest,doc 92)",
+        "issue", help="Validate or ingest an issue/bug candidate",
     )
     sub = parser.add_subparsers(dest="issue_cmd", required=True)
     for name, help_text in (
-        ("validate", "只校验候选,不写状态"),
-        ("ingest", "候选 → TaskContract 入 kanban"),
+        ("validate", "Validate a candidate without changing state"),
+        ("ingest", "Ingest a candidate as a Kanban TaskContract"),
     ):
         cmd = sub.add_parser(name, help=help_text)
         cmd.add_argument("path")
@@ -40,13 +40,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def _extract_frontmatter(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
-        raise ValueError("候选缺 YAML frontmatter(issue-candidate.v1)")
+        raise ValueError("candidate is missing YAML frontmatter (issue-candidate.v1)")
     end = text.find("\n---\n", 4)
     if end < 0:
-        raise ValueError("frontmatter 未闭合")
+        raise ValueError("frontmatter is not closed")
     data = yaml.safe_load(text[4:end + 1])
     if not isinstance(data, dict):
-        raise ValueError("frontmatter 不是映射")
+        raise ValueError("frontmatter must be a mapping")
     return data
 
 
@@ -54,21 +54,20 @@ def _validate(fm: dict) -> list[str]:
     """fail-closed 校验(doc 92 §4):返回错误行,空=通过。"""
     errors: list[str] = []
     if str(fm.get("schema") or "") != "issue-candidate.v1":
-        errors.append("schema 必须是 issue-candidate.v1")
+        errors.append("schema must be issue-candidate.v1")
     for key in ("bug_id", "dedupe_key", "title"):
         if not str(fm.get(key) or "").strip():
-            errors.append(f"{key} 必填")
+            errors.append(f"{key} is required")
     if not str(fm.get("repro_command") or "").strip():
-        errors.append("repro_command 必填(prose 复现描述不是验收)")
+        errors.append("repro_command is required; prose reproduction steps are not acceptance evidence")
     allowed = [str(p) for p in fm.get("allowed_paths") or [] if str(p).strip()]
     if not allowed:
-        errors.append("allowed_paths 必填(写权范围,admission 消费)")
+        errors.append("allowed_paths is required for admission write-scope checks")
     owner_class = str(fm.get("root_owner_class") or "none")
     for path in allowed:
         if "/" not in path.strip("/") and owner_class != "assembly":
             errors.append(
-                f"根级路径 {path!r} 只许 root_owner_class=assembly 持有"
-                "(R25 ISSUE-002 语义)"
+                f"root path {path!r} requires root_owner_class=assembly"
             )
     return errors
 
@@ -76,7 +75,7 @@ def _validate(fm: dict) -> list[str]:
 def _run(args: argparse.Namespace) -> int:
     path = Path(args.path)
     if not path.exists():
-        print(f"error: 候选文件不存在: {path}", file=sys.stderr)
+        print(f"error: candidate file does not exist: {path}", file=sys.stderr)
         return 2
     try:
         fm = _extract_frontmatter(path)
@@ -93,7 +92,7 @@ def _run(args: argparse.Namespace) -> int:
     print(f"  repro: {fm['repro_command']}")
     print(f"  scope: {fm['allowed_paths']}")
     if args.issue_cmd == "validate":
-        print("[OK] validate 通过")
+        print("[OK] validation passed")
         return 0
 
     ctx = resolve_project_context(
@@ -101,18 +100,18 @@ def _run(args: argparse.Namespace) -> int:
     )
     state_dir = ctx.state_dir
     if not state_dir.exists():
-        print(f"error: state dir {state_dir} 不存在", file=sys.stderr)
+        print(f"error: state directory does not exist: {state_dir}", file=sys.stderr)
         return 2
     task_store = TaskStore(state_dir / "kanban.json")
     if task_store.get(bug_id) is not None:
-        print(f"[OK] 幂等: task {bug_id} 已存在,不重复 ingest")
+        print(f"[OK] idempotent: task {bug_id} already exists; ingest skipped")
         return 0
     contract = TaskContract(
         behavior=str(fm.get("title") or ""),
         scope=[str(p) for p in fm.get("allowed_paths") or []],
         verification=str(fm.get("repro_command") or ""),
         acceptance=(
-            f"repro 红→绿: {fm.get('repro_command')}; "
+            f"reproduction changes from failing to passing: {fm.get('repro_command')}; "
             f"expected: {fm.get('expected') or 'n/a'}"
         ),
         source_ref=str(path),
@@ -137,5 +136,5 @@ def _run(args: argparse.Namespace) -> int:
             "via": "zf issue ingest",
         },
     ))
-    print(f"[OK] ingested → kanban task {bug_id}(verification=repro)")
+    print(f"[OK] ingested -> Kanban task {bug_id} (verification=repro)")
     return 0

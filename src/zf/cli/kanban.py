@@ -540,9 +540,9 @@ def _run_move(args: argparse.Namespace) -> int:
             },
         ))
         print(
-            f"Error: move {args.task_id} → {args.status} rejected: "
+            f"Error: move {args.task_id} -> {args.status} rejected: "
             f"missing prior event '{missing}'. "
-            f"Rework the pipeline stage (LH-0.T2 gate).",
+            "Rework the preceding pipeline stage.",
             file=sys.stderr,
         )
         return 1
@@ -638,9 +638,9 @@ def _run_assign(args: argparse.Namespace) -> int:
             },
         ))
         print(
-            f"Error: assign {args.task_id} → {args.role} rejected: "
+            f"Error: assign {args.task_id} -> {args.role} rejected: "
             f"missing prior event '{missing}'. "
-            f"Rework the pipeline stage (LH-0.T2 gate).",
+            "Rework the preceding pipeline stage.",
             file=sys.stderr,
         )
         return 1
@@ -712,9 +712,9 @@ def _run_handoff(args: argparse.Namespace) -> int:
             },
         ))
         print(
-            f"Error: handoff {args.task_id} → {args.assign} rejected: "
+            f"Error: handoff {args.task_id} -> {args.assign} rejected: "
             f"missing prior event '{missing}'. "
-            f"Rework the pipeline stage (LH-0.T2 gate).",
+            "Rework the preceding pipeline stage.",
             file=sys.stderr,
         )
         return 1
@@ -1081,7 +1081,7 @@ def _render_kanban_markdown(
     lines: list[str] = []
     header = "# Kanban Snapshot"
     if feature_filter:
-        header += f" — feature {feature_filter}"
+        header += f" - feature {feature_filter}"
     lines.append(header)
     lines.append("")
     lines.append(f"_total: {len(tasks)} task(s)_")
@@ -1107,7 +1107,7 @@ def _render_kanban_markdown(
 
 def _render_task_md(task: Task) -> list[str]:
     contract = task.contract
-    lines: list[str] = [f"### {task.id} — {task.title}"]
+    lines: list[str] = [f"### {task.id} - {task.title}"]
     meta: list[str] = []
     if task.assigned_to:
         meta.append(f"assignee=`{task.assigned_to}`")
@@ -1118,7 +1118,7 @@ def _render_task_md(task: Task) -> list[str]:
     if getattr(contract, "phase", ""):
         meta.append(f"phase=`{contract.phase}`")
     if meta:
-        lines.append("- " + " · ".join(meta))
+        lines.append("- " + " | ".join(meta))
     if getattr(contract, "behavior", ""):
         lines.append(f"- behavior: {contract.behavior.strip().splitlines()[0]}")
     if getattr(contract, "scope", []):

@@ -269,11 +269,11 @@ def list_presets() -> list[str]:
 
 # One-line archetype descriptions (VS-style template blurb, doc 102 §6.2).
 PRESET_DESCRIPTIONS: dict[str, str] = {
-    "safe-team": "全链 7 角色(arch+critic+dev+review+test+judge)+ GAN+判别器 — 多人 / 高风险 / 全栈",
-    "code-assist": "dev+review+test — 单语言、有测试的常规开发",
-    "design-first": "设计 / 评审重的拓扑 — 重构或新架构",
-    "minimal": "单 dev — 脚本 / 玩具 / 快速原型",
-    "safe-local": "单 dev + 本地安全约束 — 个人受控环境",
+    "safe-team": "Full multi-role chain with GAN and discriminator for high-risk full-stack work",
+    "code-assist": "Dev, review, and test for conventional single-language projects",
+    "design-first": "Design-heavy topology for refactors or new architecture",
+    "minimal": "Single dev role for scripts, prototypes, or small projects",
+    "safe-local": "Single dev role with local safety constraints",
 }
 
 
@@ -328,8 +328,8 @@ def resolve_versioned_preset(name: str) -> dict:
     if name not in VERSIONED_PRESETS:
         raise PresetError(
             f"unknown versioned preset {name!r}; shipped: "
-            f"{sorted(VERSIONED_PRESETS)} (裸名 preset 为 init 标记,"
-            f"不参与 load merge)"
+            f"{sorted(VERSIONED_PRESETS)} (bare preset names are init markers "
+            "and are not merged during load)"
         )
     return copy.deepcopy(VERSIONED_PRESETS[name])
 

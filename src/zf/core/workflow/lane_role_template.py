@@ -471,8 +471,7 @@ def _reject_pool_conflict(manual: Any, name: str, pipeline_id: str) -> None:
     if replicas > 1 or bool(getattr(autoscale, "enabled", False)):
         raise LaneRoleTemplateError(
             f"{pipeline_id}: role {name!r} uses replicas/autoscale pool "
-            f"naming — lane template roles are lane-bound; do not mix "
-            f"(doc 90 §3.1)"
+            "naming; lane template roles are lane-bound and cannot use pools"
         )
 
 
@@ -497,7 +496,7 @@ def _reject_topology_override(
     if locked:
         raise LaneRoleTemplateError(
             f"{pipeline_id}: role {name!r} attempts to override locked "
-            f"topology field(s) {locked} — topology truth is owned by the "
-            f"lane template (doc 90 §3.1). Overridable fields: "
-            f"{', '.join(OVERRIDABLE_ROLE_FIELDS[:6])}…"
+            f"topology field(s) {locked}; topology truth is owned by the "
+            "lane template. Overridable fields: "
+            f"{', '.join(OVERRIDABLE_ROLE_FIELDS[:6])}..."
         )

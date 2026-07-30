@@ -25,7 +25,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     pre_p = sub.add_parser(
         "preflight",
-        help="X16 轻量 coding check lane(diff+checks,产 evidence 不裁决)",
+        help="Run a lightweight coding check lane; diff and checks produce "
+        "evidence without a verdict",
     )
     pre_p.add_argument("--workdir", default=".")
     pre_p.add_argument("--checks", nargs="*", default=None)

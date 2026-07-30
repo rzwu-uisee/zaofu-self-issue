@@ -194,7 +194,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
     bridge = feishu_subparsers.add_parser(
         "bridge",
-        help="One-shot turnkey reply: inbound message → channel → real agent reply",
+        help="One-shot turnkey reply: inbound message to channel to real agent reply",
     )
     bridge.add_argument("--event-json", default="-",
                         help="Inbound event JSON (inline object or file path)")
@@ -327,7 +327,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="append",
         default=[],
         metavar="KEY=FEISHU_FIELD",
-        help="Override a Bitable field name, e.g. severity=严重级别",
+        help="Override a Bitable field name, e.g. severity=Severity",
     )
     sync_automation_table.add_argument(
         "--no-create-table",
@@ -372,7 +372,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="append",
         default=[],
         metavar="KEY=FEISHU_FIELD",
-        help="Override a Bitable field name, e.g. task_id=任务ID",
+        help="Override a Bitable field name, e.g. task_id=TaskID",
     )
     sync_kanban.add_argument(
         "--include-archive-days",
@@ -873,18 +873,23 @@ def feishu_operator_requests(events: list[Any]) -> list[FeishuOperatorRequest]:
 def build_feishu_operator_system_prompt() -> str:
     """Operator-agent system prompt: read state via the zf CLI, propose not write."""
     return (
-        "你是 ZaoFu 的飞书 Operator Agent,职责是 operator / triage,不是直接 coding。\n"
-        "读取运行时状态时使用确定性 zf CLI(在当前工作目录执行),例如:\n"
-        "  zf status            # 全局进度\n"
-        "  zf kanban --board    # 看板\n"
-        "  zf events --last 40  # 最近事件\n"
-        "  zf cost              # 成本\n"
+        "You are ZaoFu's Feishu Operator Agent. Your role is operator and "
+        "triage, not direct coding.\n"
+        "Read runtime state with deterministic zf CLI commands in the current "
+        "working directory, for example:\n"
+        "  zf status\n"
+        "  zf kanban --board\n"
+        "  zf events --last 40\n"
+        "  zf cost\n"
         "  zf handoff --format md\n"
-        "约束(read-only 优先):\n"
-        "- 只读查询优先;不要直接写 .zf/kanban.json、events.jsonl 或任何 runtime truth。\n"
-        "- 需要改动时只产出 action_proposal,经 controlled action service / 人工确认后由 orchestrator 执行。\n"
-        "- 不绕过 gate / review / verification,不直接控制 worker pane。\n"
-        "- 默认用简洁中文回复飞书消息:先结论,再给关键证据(任务 id / 事件)。\n"
+        "Constraints; prefer read-only operations:\n"
+        "- Never write .zf/kanban.json, events.jsonl, or runtime truth directly.\n"
+        "- For changes, produce only an action_proposal. The orchestrator "
+        "applies it through the controlled action service after approval.\n"
+        "- Do not bypass gates, review, or verification, and do not control "
+        "worker panes directly.\n"
+        "- Reply in concise Chinese by default. State the conclusion first, "
+        "then cite key evidence such as task IDs and events.\n"
     )
 
 
@@ -2110,7 +2115,7 @@ def _handle_attention_ack_result(
         "action": "attention-ack",
         "attention_id": attention_id,
         "event_id": acked.id,
-        "message": f"已确认 {attention_id}",
+        "message": f"Acknowledged {attention_id}",
     }
 
 
@@ -2992,7 +2997,7 @@ def _initial_document_content(project_id: str, project_name: str) -> str:
         f"# ZaoFu Automation Reports - {project_name}\n\n"
         f"- Project ID: {project_id}\n"
         "- Source: zf feishu sync-automations\n\n"
-        "后续 daily / weekly / project automation 报告会追加到这个文档。\n"
+        "Future daily, weekly, and project automation reports will be appended here.\n"
     )
 
 

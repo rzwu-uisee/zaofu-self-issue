@@ -59,7 +59,7 @@ def test_no_feishu_yaml_no_routing(tmp_path):
 
 
 def test_conflict_in_both_is_configerror(tmp_path):
-    with pytest.raises(ConfigError, match="BOTH zf.yaml and feishu.yaml"):
+    with pytest.raises(ConfigError, match="both zf.yaml and feishu.yaml"):
         _write(tmp_path, zf_extra="""\
 integrations:
   feishu_routing:

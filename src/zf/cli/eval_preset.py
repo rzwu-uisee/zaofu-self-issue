@@ -48,7 +48,7 @@ def run_eval_preset(args: argparse.Namespace) -> int:
             mark = {"PASS": "PASS", "WARN": "WARN", "FAIL": "FAIL"}.get(c["status"], c["status"])
             line = f"{mark} {c['name']}"
             if c["detail"]:
-                line += f" — {c['detail']}"
+                line += f" - {c['detail']}"
             print(line)
         s = report["summary"]
         print(f"\n{s['pass']} pass, {s['warn']} warn, {s['fail']} fail")

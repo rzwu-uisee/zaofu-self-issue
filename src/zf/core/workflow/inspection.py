@@ -232,8 +232,8 @@ def _reserved_event_diagnostics(config: ZfConfig) -> list[dict[str, Any]]:
                     severity="STOP",
                     kind="role_uses_reserved_trigger",
                     message=(
-                        f"role `{role_ref}` 使用保留 trigger `{event}`；"
-                        "任务入口应由 kernel 分派事件驱动"
+                        f"role `{role_ref}` uses reserved trigger `{event}`; "
+                        "task entry must be driven by a kernel dispatch event"
                     ),
                     role=role_ref,
                     event=event,
@@ -244,8 +244,8 @@ def _reserved_event_diagnostics(config: ZfConfig) -> list[dict[str, Any]]:
                     severity="STOP",
                     kind="role_publishes_reserved_terminal",
                     message=(
-                        f"role `{role_ref}` 发布保留终态事件 `{event}`；"
-                        "终态必须由 Layer 1 gate 写入"
+                        f"role `{role_ref}` publishes reserved terminal event `{event}`; "
+                        "terminal state must be written by the Layer 1 gate"
                     ),
                     role=role_ref,
                     event=event,
@@ -280,7 +280,10 @@ def _terminal_policy_diagnostics(config: ZfConfig, graph: Any) -> list[dict[str,
         diagnostics.append(_diag(
             severity="STOP",
             kind="terminal_event_without_producer",
-            message=f"终态事件 `{event}` 没有任何 role 发布，任务无法自然结束",
+            message=(
+                f"terminal event `{event}` has no publishing role; "
+                "the task cannot finish naturally"
+            ),
             event=event,
         ))
     return diagnostics
@@ -318,8 +321,8 @@ def _explicit_rework_route_diagnostics(
                 severity="INFO",
                 kind="kernel_swept_failure_event",
                 message=(
-                    f"失败事件 `{event}` 由 kernel candidate-rework sweep 兜底"
-                    f"(doc 79;显式 routing 曾导致竞争 re-plan 死循环,勿配置)"
+                    f"failure event `{event}` is handled by the kernel "
+                    "candidate-rework sweep; do not configure a competing route"
                 ),
                 event=event,
                 role=producer,
@@ -332,8 +335,8 @@ def _explicit_rework_route_diagnostics(
                 severity="WARN",
                 kind="failure_event_without_explicit_rework_route",
                 message=(
-                    f"失败事件 `{event}` 没有配置 `workflow.rework_routing`，"
-                    f"但会唤醒 {', '.join(consumers[event])}"
+                    f"failure event `{event}` has no `workflow.rework_routing` "
+                    f"entry but will wake {', '.join(consumers[event])}"
                 ),
                 event=event,
                 role=producer,
@@ -343,7 +346,9 @@ def _explicit_rework_route_diagnostics(
         diagnostics.append(_diag(
             severity="STOP",
             kind="explicit_rework_route_missing",
-            message=f"失败事件 `{event}` 没有配置 `workflow.rework_routing` 回流目标",
+            message=(
+                f"failure event `{event}` has no `workflow.rework_routing` target"
+            ),
             event=event,
             role=producer,
         ))
@@ -437,10 +442,9 @@ def _external_trigger_producer_diagnostics(config: ZfConfig) -> list[dict[str, A
                 severity="WARN",
                 kind="external_trigger_without_producer",
                 message=(
-                    f"`{ev}` 被列为 external_trigger 且驱动 writer/impl 阶段，但没有任何 stage "
-                    "produces 它、kernel 也无确定性 producer —— 上游 handoff 可能无 owner(P0-2 类，"
-                    "refactor plan→task_map.ready livelock 就是此形)。确认由 operator 注入，"
-                    "或补确定性 kernel producer 并加入 _KERNEL_PRODUCED_EXTERNAL_TRIGGERS。"
+                    f"`{ev}` is an external trigger that drives a writer or impl "
+                    "stage, but no stage or deterministic kernel path produces it. "
+                    "Confirm operator injection or add a deterministic producer."
                 ),
                 event=ev,
             ))
@@ -459,8 +463,8 @@ def _pure_aggregator_policy_diagnostics(config: ZfConfig) -> list[dict[str, Any]
                 severity="STOP",
                 kind="pure_aggregator_role_is_writer",
                 message=(
-                    f"fanout synth role `{role_ref}` 是 writer；"
-                    "synth/reducer 必须是 reader 纯聚合角色"
+                    f"fanout synthesis role `{role_ref}` is a writer; "
+                    "a synthesis or reducer role must be a read-only aggregator"
                 ),
                 role=role_ref,
                 detail={"policy_id": plan.get("policy_id", "")},
@@ -471,8 +475,8 @@ def _pure_aggregator_policy_diagnostics(config: ZfConfig) -> list[dict[str, Any]
                 severity="WARN",
                 kind="pure_aggregator_runner_policy_applied",
                 message=(
-                    f"fanout synth role `{role_ref}` 将在 runner spawn 时应用 "
-                    "pure_aggregator 权限收窄"
+                    f"fanout synthesis role `{role_ref}` will apply the "
+                    "pure_aggregator restriction when the runner starts"
                 ),
                 role=role_ref,
                 detail={
@@ -505,8 +509,8 @@ def _goal_closure_judge_policy_diagnostics(
                 severity="STOP",
                 kind="goal_closure_judge_role_is_writer",
                 message=(
-                    f"Thin Judge role `{role_ref}` 是 writer；"
-                    "Goal closure synthesis 必须使用只读 reader role"
+                    f"Thin Judge role `{role_ref}` is a writer; "
+                    "goal closure synthesis requires a read-only role"
                 ),
                 role=role_ref,
                 detail={"policy_id": plan.get("policy_id", "")},
@@ -516,7 +520,8 @@ def _goal_closure_judge_policy_diagnostics(
             severity="INFO",
             kind="goal_closure_judge_runner_policy_applied",
             message=(
-                f"Thin Judge role `{role_ref}` 将在 runner spawn 时应用只读策略"
+                f"Thin Judge role `{role_ref}` will apply a read-only policy "
+                "when the runner starts"
             ),
             role=role_ref,
             detail={
@@ -561,8 +566,8 @@ def _skill_report(
                     severity=skill_missing_severity,
                     kind="skill_resolution_failed",
                     message=(
-                        f"role `{role_ref}` 启用的 skill `{item.get('name', '')}` "
-                        f"解析状态为 `{item.get('status', '')}`"
+                        f"role `{role_ref}` enables skill `{item.get('name', '')}` "
+                        f"with resolution status `{item.get('status', '')}`"
                     ),
                     role=str(role_ref),
                     field=str(item.get("name", "")),
@@ -572,8 +577,8 @@ def _skill_report(
                     severity="WARN",
                     kind="skill_source_collision",
                     message=(
-                        f"role `{role_ref}` 的 skill `{item.get('name', '')}` "
-                        "存在多个候选来源，需要确认覆盖顺序"
+                        f"role `{role_ref}` skill `{item.get('name', '')}` has "
+                        "multiple candidate sources; confirm precedence"
                     ),
                     role=str(role_ref),
                     field=str(item.get("name", "")),
@@ -584,8 +589,8 @@ def _skill_report(
                     severity="WARN",
                     kind="skill_metadata_warning",
                     message=(
-                        f"role `{role_ref}` 的 skill `{item.get('name', '')}` "
-                        "metadata 不完整"
+                        f"role `{role_ref}` skill `{item.get('name', '')}` has "
+                        "incomplete metadata"
                     ),
                     role=str(role_ref),
                     field=str(item.get("name", "")),
@@ -596,8 +601,8 @@ def _skill_report(
                     severity="WARN",
                     kind="skill_routing_warning",
                     message=(
-                        f"role `{role_ref}` 的 skill `{item.get('name', '')}` "
-                        "与 stage / role / backend visibility 不完全匹配"
+                        f"role `{role_ref}` skill `{item.get('name', '')}` does "
+                        "not fully match stage, role, or backend visibility"
                     ),
                     role=str(role_ref),
                     field=str(item.get("name", "")),
@@ -683,8 +688,8 @@ def _duplicate_skill_owner_diagnostics(config: ZfConfig) -> list[dict[str, Any]]
             severity="WARN",
             kind="skill_duplicate_verification_owner",
             message=(
-                f"skill `{skill}` 同时挂在多个 review/test/verify/judge owner 上，"
-                "建议保留一个明确 owner 或拆分 stage-specific skill"
+                f"skill `{skill}` is assigned to multiple review, test, verify, "
+                "or judge owners; keep one owner or split it by stage"
             ),
             field=skill,
             detail={
@@ -850,17 +855,17 @@ def _graph_message(item: dict[str, str]) -> str:
     field = item.get("field", "")
     target = item.get("target_role", "")
     if kind == "trigger_without_producer":
-        return f"stage `{stage_id}` 的 trigger `{event}` 没有生产者"
+        return f"stage `{stage_id}` trigger `{event}` has no producer"
     if kind == "missing_aggregate_success_event":
-        return f"fanout stage `{stage_id}` 缺少 aggregate.success_event"
+        return f"fanout stage `{stage_id}` is missing aggregate.success_event"
     if kind == "missing_aggregate_failure_event":
-        return f"fanout stage `{stage_id}` 缺少 aggregate.failure_event"
+        return f"fanout stage `{stage_id}` is missing aggregate.failure_event"
     if kind == "event_without_consumer":
-        return f"stage `{stage_id}` 的 `{field}` 事件 `{event}` 没有消费者"
+        return f"stage `{stage_id}` `{field}` event `{event}` has no consumer"
     if kind == "invalid_rework_target":
-        return f"rework event `{event}` 指向不存在的 role `{target}`"
+        return f"rework event `{event}` targets unknown role `{target}`"
     if kind == "missing_rework_route":
-        return f"失败事件 `{event}` 缺少 rework route"
+        return f"failure event `{event}` has no rework route"
     return kind
 
 

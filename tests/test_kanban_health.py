@@ -312,7 +312,7 @@ def test_render_md_includes_all_6_sections() -> None:
         "recommendations": [],
     }
     md = render_health_md(snap)
-    assert "Kanban Health · 7d window" in md
+    assert "Kanban Health - 7d window" in md
     assert "THROUGHPUT" in md
     assert "WORKFLOW COVERAGE" in md
     assert "ROLE HEALTH" in md

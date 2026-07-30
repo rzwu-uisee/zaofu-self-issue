@@ -179,7 +179,7 @@ def _run_why_not_done(args: argparse.Namespace) -> int:
         return 0
     for item in reasons:
         print(
-            f"- {item.get('severity', '')}: {item.get('kind', '')} — "
+            f"- {item.get('severity', '')}: {item.get('kind', '')} - "
             f"{item.get('message', '')}"
         )
     action = data.get("recommended_action") or {}

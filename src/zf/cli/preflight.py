@@ -48,7 +48,7 @@ def run(args: argparse.Namespace) -> int:
                 next_actions=("Fix zf.yaml and rerun `zf preflight`.",),
             )
             return 1
-        print(f"✗ config: {exc}")
+        print(f"FAIL config: {exc}")
         return 1
 
     results = run_preflight_checks(
@@ -74,7 +74,7 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0 if ok else 1
     for result in results:
-        mark = "✓" if result.ok else "✗"
+        mark = "PASS" if result.ok else "FAIL"
         print(f"{mark} {result.name}: {result.detail}")
     print("\npreflight: " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

@@ -61,7 +61,7 @@ def build_event_signer(
         if warn:
             print(
                 f"Warning: {message}; "
-                f"allow_unsigned_fallback=true → falling back to unsigned events.",
+                "allow_unsigned_fallback=true, falling back to unsigned events.",
                 file=sys.stderr,
             )
         return None

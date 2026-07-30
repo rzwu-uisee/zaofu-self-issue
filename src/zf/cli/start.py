@@ -743,9 +743,8 @@ def _requeue_inflight_for_start(
             event_log_from_project(state_dir, config=config),
             source="zf_start_boot_reconcile",
             reason=(
-                "zf start boot reconcile — worker sessions do not "
-                "survive restart; release in-flight WIP "
-                "(ZF-E2E-RACING-P1 2026-07-11)"
+                "zf start boot reconcile: worker sessions do not "
+                "survive restart; release in-flight work"
             ),
         )
     except Exception:

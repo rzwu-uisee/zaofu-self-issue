@@ -56,7 +56,10 @@ def run_tick(args: argparse.Namespace) -> int:
         return 1
 
     if not context.state_dir.exists():
-        print("Error: runtime state dir 不存在,请先运行 zf init。", file=sys.stderr)
+        print(
+            "Error: runtime state directory does not exist; run `zf init` first.",
+            file=sys.stderr,
+        )
         return 1
 
     result = run_autopilot_tick(
@@ -76,13 +79,13 @@ def run_tick(args: argparse.Namespace) -> int:
         return 0
 
     if not result.enabled:
-        print("Autopilot 未启用: zf.yaml autopilot.enabled=false")
+        print("Autopilot is disabled: zf.yaml autopilot.enabled=false")
         return 0
 
-    action = "候选" if result.dry_run else "创建"
+    action = "would create" if result.dry_run else "created"
     print(
-        f"Autopilot tick 完成: {action} {result.created_count} 个 proposal, "
-        f"跳过 {result.skipped_duplicates} 个重复项。"
+        f"Autopilot tick complete: {action} {result.created_count} proposal(s); "
+        f"skipped {result.skipped_duplicates} duplicate(s)."
     )
     for proposal in result.created:
         payload = proposal.payload()

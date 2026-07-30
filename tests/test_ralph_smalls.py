@@ -72,5 +72,5 @@ class TestBudgetPlain:
         contract, _ = compile_lane_pipeline(
             parse_lane_pipeline(_hermes_raw()), _hermes_roles(),
         )
-        assert "次返工" in contract["budget_plain"]
+        assert "reworks" in contract["budget_plain"]
         assert "quarantine" in contract["budget_plain"]

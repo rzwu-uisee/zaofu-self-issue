@@ -73,7 +73,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     # P1-12(审计 SYNTHESIS §6):S1-S5「跑稳」判据机械化
     stability = sub.add_parser(
         "stability",
-        help="S1-S5 stability verdict over an events log (audit SYNTHESIS §6)",
+        help="Evaluate stability over an events log",
     )
     stability.add_argument("--state-dir", default=None)
     stability.add_argument(
@@ -237,7 +237,7 @@ def _run_decision_ratio(args: argparse.Namespace) -> int:
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"Orchestrator Decision Ratio · {total} wakes\n")
+    print(f"Orchestrator Decision Ratio - {total} wakes\n")
     for kind, count in decision_counter.most_common():
         pct = 100 * count / total if total else 0.0
         print(f"  {kind:12s}: {count:5d} ({pct:.0f}%)")
@@ -246,9 +246,9 @@ def _run_decision_ratio(args: argparse.Namespace) -> int:
         "n/a" if ratio is None or ratio == float("inf") else f"{ratio:.2f}"
     )
     band_label = {
-        "healthy": "✓ healthy",
-        "over_cautious": "⚠ over-cautious (rarely dispatches)",
-        "over_eager": "⚠ over-eager (dispatches without thinking)",
+        "healthy": "OK healthy",
+        "over_cautious": "WARNING over-cautious (rarely dispatches)",
+        "over_eager": "WARNING over-eager (dispatches without thinking)",
         "n/a": "n/a (insufficient data)",
     }.get(band, band)
     print(
@@ -295,22 +295,22 @@ def _run_snapshot(args: argparse.Namespace) -> int:
 
 # Friendly labels for table view (group, display name).
 _ROWS: list[tuple[str, str, str]] = [
-    ("A. 持续性", "MTTS", "mtts"),
-    ("A. 持续性", "StuckRecoveryRate", "stuck_recovery_rate"),
-    ("A. 持续性", "CrashFreeHours", "crash_free_hours"),
-    ("A. 持续性", "ResumeFidelity", "resume_fidelity"),
-    ("B. 对齐",  "VCR", "vcr"),
-    ("B. 对齐",  "ScopeViolationRate", "scope_violation_rate"),
-    ("B. 对齐",  "DiscriminatorCatchRate", "discriminator_catch_rate"),
-    ("B. 对齐",  "GoalDrift", "goal_drift"),
-    ("C. 进度",  "Throughput/h", "throughput_per_hour"),
-    ("C. 进度",  "ReworkRatio", "rework_ratio"),
-    ("C. 进度",  "CausalDepthMean", "causal_depth_mean"),
-    ("C. 进度",  "MemoryHitRate", "memory_hit_rate"),
-    ("D. 经济",  "Cost/Task USD", "cost_per_task"),
-    ("D. 经济",  "Tokens/Task", "token_per_task"),
-    ("D. 经济",  "RecycleFreq/h", "recycle_freq_per_hour"),
-    ("D. 经济",  "BudgetBreachRate", "budget_breach_rate"),
+    ("A. Continuity", "MTTS", "mtts"),
+    ("A. Continuity", "StuckRecoveryRate", "stuck_recovery_rate"),
+    ("A. Continuity", "CrashFreeHours", "crash_free_hours"),
+    ("A. Continuity", "ResumeFidelity", "resume_fidelity"),
+    ("B. Alignment", "VCR", "vcr"),
+    ("B. Alignment", "ScopeViolationRate", "scope_violation_rate"),
+    ("B. Alignment", "DiscriminatorCatchRate", "discriminator_catch_rate"),
+    ("B. Alignment", "GoalDrift", "goal_drift"),
+    ("C. Progress", "Throughput/h", "throughput_per_hour"),
+    ("C. Progress", "ReworkRatio", "rework_ratio"),
+    ("C. Progress", "CausalDepthMean", "causal_depth_mean"),
+    ("C. Progress", "MemoryHitRate", "memory_hit_rate"),
+    ("D. Economics", "Cost/Task USD", "cost_per_task"),
+    ("D. Economics", "Tokens/Task", "token_per_task"),
+    ("D. Economics", "RecycleFreq/h", "recycle_freq_per_hour"),
+    ("D. Economics", "BudgetBreachRate", "budget_breach_rate"),
 ]
 
 
@@ -327,7 +327,7 @@ def _print_table(snap: MetricsSnapshot) -> None:
         print(f"  {label:24s}  {val:.3f}" if isinstance(val, float)
               else f"  {label:24s}  {val}")
     if snap.alerts:
-        print("\n⚠️  Alerts:")
+        print("\nWARNING: Alerts:")
         for a in snap.alerts:
             print(f"  - {a}")
 

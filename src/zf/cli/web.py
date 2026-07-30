@@ -103,7 +103,7 @@ def run(args: argparse.Namespace) -> int:
     workspace_shell = bool(getattr(args, "workspace_only", False))
     if not state_dir.exists() and explicit_state_dir is not None:
         print(
-            f"error: state dir {state_dir} not found — run `zf init` first or pass --state-dir",
+            f"error: state dir {state_dir} not found; run `zf init` first or pass --state-dir",
             file=sys.stderr,
         )
         return 2
@@ -137,7 +137,7 @@ def run(args: argparse.Namespace) -> int:
     )
     mode = "workspace" if workspace_shell else "project"
     print(
-        f"zaofu dashboard → http://{args.host}:{args.port}/"
+        f"zaofu dashboard -> http://{args.host}:{args.port}/"
         f"  (mode={mode}, state_dir={state_dir})"
     )
     uvicorn.run(

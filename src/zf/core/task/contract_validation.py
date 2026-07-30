@@ -126,8 +126,8 @@ def validate_backlog_refs(
         if not _is_ref_present(value):
             errors.append(
                 f"{task.id}: contract.{ref_name} is required "
-                f"(workflow.dag.required_backlog_refs); orchestrator must "
-                f"populate it at stage ④ backlog before dispatching dev"
+                f"(workflow.dag.required_backlog_refs); the orchestrator must "
+                "populate it during backlog preparation before dispatching dev"
             )
     return errors
 

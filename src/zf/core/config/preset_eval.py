@@ -116,7 +116,7 @@ def _check_worker_reachability(config: Any) -> list[CheckResult]:
         if not triggers and not publishes:
             out.append(CheckResult(
                 f"worker_reachable[{name}]", "WARN",
-                "role has neither triggers nor publishes — unreachable in the DAG",
+                "role has neither triggers nor publishes; unreachable in the DAG",
             ))
     if not out:
         out.append(CheckResult("worker_reachable", "PASS"))

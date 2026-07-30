@@ -24,8 +24,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         default="md",
         help=(
             "md (default, human-readable) | json (v1 task list) | "
-            "state-packet (SP-001 projection — recommended for "
-            "long-horizon resume; doc 39 §4.1)"
+            "state-packet (recommended for long-horizon resume)"
         ),
     )
     parser.add_argument(
@@ -178,11 +177,11 @@ def compute_handoff_score(packet, *, state_dir) -> dict:
         })
 
     _add("run_id_present", bool(packet.run_id), "set run_id when invoking handoff")
-    _add("task_id_present", bool(packet.task_id), "no active task — nothing to hand off")
+    _add("task_id_present", bool(packet.task_id), "no active task; nothing to hand off")
     _add(
         "current_stage_filled",
         bool(packet.current_stage and packet.current_stage != "no_task"),
-        "task lacks stage progression — check projector",
+        "task lacks stage progression; check the projector",
     )
     next_event_ok = bool(packet.next_event) or (
         packet.current_stage == "ship" and not packet.next_event
@@ -190,7 +189,7 @@ def compute_handoff_score(packet, *, state_dir) -> dict:
     _add(
         "next_event_clear_or_terminal",
         next_event_ok,
-        "next_event empty + stage != ship — what should the next worker do?",
+        "next_event is empty while stage is not ship; define the next worker action",
     )
     _add(
         "evidence_present",
@@ -200,7 +199,7 @@ def compute_handoff_score(packet, *, state_dir) -> dict:
     _add(
         "refs_complete",
         bool(packet.refs.base_ref) and bool(packet.refs.task_ref),
-        "base_ref or task_ref missing — git context broken",
+        "base_ref or task_ref is missing; git context is incomplete",
     )
     _add(
         "acceptance_criteria_present",
@@ -212,7 +211,7 @@ def compute_handoff_score(packet, *, state_dir) -> dict:
     _add(
         "residual_risks_recorded",
         len(packet.risks) >= 1,
-        "no residual_risks recorded — worker did not surface known gaps",
+        "no residual_risks recorded; the worker did not surface known gaps",
     )
 
     # Recovery briefing + projection files (depend on commits c118146 +
@@ -245,7 +244,7 @@ def compute_handoff_score(packet, *, state_dir) -> dict:
     _add(
         "recovery_briefing_ready",
         recovery_ready,
-        "no .zf/briefings/<task>/*/state-packet.md — run SP-001 projector",
+        "no .zf/briefings/<task>/*/state-packet.md; run the state packet projector",
     )
     _add(
         "projection_files_ready",
@@ -265,16 +264,16 @@ def render_score_md(score: dict) -> str:
     """Render handoff_score dict as a markdown block."""
     lines = ["", f"## Handoff Quality Score: {score['score']}/{score['max_score']}", ""]
     for d in score["dimensions"]:
-        icon = "✓" if d["passed"] else "✗"
+        icon = "PASS" if d["passed"] else "FAIL"
         line = f"  {icon} {d['name']}"
         lines.append(line)
         if not d["passed"] and d["hint"]:
-            lines.append(f"    → {d['hint']}")
+            lines.append(f"    -> {d['hint']}")
     if score["score"] < score["max_score"]:
         gap = score["max_score"] - score["score"]
         lines.append("")
         lines.append(
             f"To score {score['max_score']}/{score['max_score']}: "
-            f"address the {gap} ✗ item(s) above."
+            f"address the {gap} failed item(s) above."
         )
     return "\n".join(lines)

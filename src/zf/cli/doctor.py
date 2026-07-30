@@ -414,7 +414,7 @@ def _print_event_contract_report(report: dict[str, Any]) -> None:
         for item in errors:
             print(
                 "  - "
-                f"{item.get('kind')}: {item.get('event_type')} — "
+                f"{item.get('kind')}: {item.get('event_type')} - "
                 f"{item.get('message')}"
             )
     if warnings:
@@ -422,7 +422,7 @@ def _print_event_contract_report(report: dict[str, Any]) -> None:
         for item in warnings:
             print(
                 "  - "
-                f"{item.get('kind')}: {item.get('event_type')} — "
+                f"{item.get('kind')}: {item.get('event_type')} - "
                 f"{item.get('message')}"
             )
     if not errors and not warnings:

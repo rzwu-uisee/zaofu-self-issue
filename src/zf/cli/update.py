@@ -126,7 +126,7 @@ def run_agents_md(args: argparse.Namespace) -> int:
         )
         sys.stdout.write("".join(diff))
         sys.stdout.write(
-            f"\n(dry-run — pass --write to apply, or --check for CI exit code)\n"
+            "\n(dry-run; pass --write to apply, or --check for a CI exit code)\n"
         )
         return 0
 

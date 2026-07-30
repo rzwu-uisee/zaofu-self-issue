@@ -198,7 +198,7 @@ def _run_impl(args: argparse.Namespace) -> int:
         # 故 WARN 不 FAIL,但必须可见。
         print(
             f"  WARNING: global_budget_usd={budget_usd} declared but "
-            "budget_enforcement_enabled=false — overspend will NOT be "
+            "budget_enforcement_enabled=false; overspend will NOT be "
             "blocked. Set budget_enforcement_enabled: true to enforce.",
             file=sys.stderr,
         )
@@ -236,7 +236,7 @@ def _run_impl(args: argparse.Namespace) -> int:
         # candidate typecheck 断裂而 judge 照审坏树。观测型运行合法,WARN。
         print(
             "  WARNING: workflow has fanout_writer stages but no "
-            "quality_gates configured — the integrated candidate tree is "
+            "quality_gates configured; the integrated candidate tree is "
             "NEVER verified (per-lane verify cannot catch cross-lane "
             "skew). Configure quality_gates (e.g. typecheck + unit tests).",
             file=sys.stderr,
@@ -288,7 +288,7 @@ def _stage_failure_event_collisions(config) -> list[str]:
         if failure_event in seen:
             out.append(
                 f"stages {seen[failure_event]!r} and {stage_id!r} share "
-                f"failure_event {failure_event!r} — kernel failure→stage "
+                f"failure_event {failure_event!r}; kernel failure-to-stage "
                 "mapping is first-wins and will misroute replans"
             )
         else:
@@ -308,19 +308,18 @@ def _dead_letter_channel_warnings(config) -> list[str]:
     warnings: list[str] = []
     if not bool(getattr(getattr(runtime, "autoresearch_resident", None), "enabled", False)):
         warnings.append(
-            "runtime.autoresearch_resident.enabled=false — Run Manager 的诊断"
-            "请求(autoresearch.loop.requested)将无人执行,诊断动作会以 "
-            "'request became stale' 逐个失败。"
+            "runtime.autoresearch_resident.enabled=false; Run Manager "
+            "diagnostic requests will have no consumer and become stale"
         )
     if not bool(getattr(getattr(run_manager, "reflect", None), "enabled", False)):
         warnings.append(
-            "runtime.run_manager.reflect.enabled=false — resident/agent 的 "
-            "reflect 建议将恒被 blocked。"
+            "runtime.run_manager.reflect.enabled=false; resident and agent "
+            "reflection proposals will remain blocked"
         )
     if not bool(getattr(getattr(run_manager, "source_repair", None), "enabled", False)):
         warnings.append(
-            "runtime.run_manager.source_repair.enabled=false — agent 的 "
-            "repair 建议将恒挂 owner 审批(approval.requested)。"
+            "runtime.run_manager.source_repair.enabled=false; agent repair "
+            "proposals will remain pending owner approval"
         )
     try:
         from zf.runtime.repair_authorization import auto_repair_consumer_enabled
@@ -329,9 +328,10 @@ def _dead_letter_channel_warnings(config) -> list[str]:
         consumer_on = True
     if not consumer_on:
         warnings.append(
-            "self-repair 执行消费者未授权(需 ZF_AUTORESEARCH_AUTO_REPAIR="
-            "authorized 或 repair_mode=bounded_repair)— repair dispatch "
-            "请求将无消费者。"
+            "the self-repair consumer is not authorized; set "
+            "ZF_AUTORESEARCH_AUTO_REPAIR=authorized or "
+            "repair_mode=bounded_repair, otherwise repair dispatches "
+            "will have no consumer"
         )
     return warnings
 
@@ -467,7 +467,7 @@ def _run_cold_start(config_path: Path) -> int:
 
     if handoff_fatal:
         print(
-            "\n  [FAIL] workflow_handoff: fatal handoff break — "
+            "\n  [FAIL] workflow_handoff: fatal handoff break - "
             + "; ".join(handoff_fatal)
             + "\nTo fix: every stage event needs a reachable producer (role "
             "triggers form the wake chain) and every reactor handler needs a "
@@ -534,7 +534,7 @@ def _print_backend_isolation_check(config) -> None:
     print("Backend Isolation:")
     if not builder_backend:
         print(
-            "  (no dev/builder role found — skipping adversarial-backend "
+            "  (no dev/builder role found; skipping adversarial-backend "
             "comparison)"
         )
         return
@@ -544,7 +544,7 @@ def _print_backend_isolation_check(config) -> None:
         adv_backend = role_backends.get(adv)
         if adv_backend and adv_backend == builder_backend:
             print(
-                f"  ⚠ {adv} and dev/builder use same backend "
+                f"  WARNING: {adv} and dev/builder use the same backend "
                 f"({adv_backend!r}). "
                 f"Risk: self-confirmation bias. Recommend: assign a "
                 f"different backend to {adv}."
@@ -552,7 +552,7 @@ def _print_backend_isolation_check(config) -> None:
             issues += 1
     if issues == 0:
         print(
-            "  ✓ adversarial roles use different backend(s) from "
+            "  PASS: adversarial roles use different backend(s) from "
             f"builder ({builder_backend!r})"
         )
 
@@ -580,7 +580,7 @@ def _print_backend_capability_matrix(config) -> list[str]:
         try:
             adapter = get_adapter(backend)
         except ValueError as exc:
-            print(f"  {backend}: ERROR — {exc}")
+            print(f"  {backend}: ERROR - {exc}")
             errors.append(f"backend_capability={backend}:{exc}")
             continue
         caps = adapter.capabilities
@@ -618,7 +618,7 @@ def _print_stage_reachability(config):
     if report.ok:
         print("Stage reachability: PASS (all stage_order events producible)")
         return report
-    print("Stage reachability: FAIL — declared but unreachable stage events:")
+    print("Stage reachability: FAIL - declared but unreachable stage events:")
     for ev in report.unproducible_stage_events:
         print(
             f"  [FAIL] {ev}: no role can be woken to publish it "
@@ -737,13 +737,13 @@ def _print_event_contract_report(config) -> dict:
     for item in report.get("errors", [])[:10]:
         print(
             "  [FAIL] "
-            f"{item.get('kind')}: {item.get('event_type')} — "
+            f"{item.get('kind')}: {item.get('event_type')} - "
             f"{item.get('message')}"
         )
     for item in report.get("warnings", [])[:10]:
         print(
             "  [WARN] "
-            f"{item.get('kind')}: {item.get('event_type')} — "
+            f"{item.get('kind')}: {item.get('event_type')} - "
             f"{item.get('message')}"
         )
     return report

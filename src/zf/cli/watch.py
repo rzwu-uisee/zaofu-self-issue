@@ -115,4 +115,4 @@ def _short_json(obj) -> str:
 
 def _truncate(text: str, n: int) -> str:
     text = str(text).replace("\n", " ")
-    return text if len(text) <= n else text[: n - 1] + "…"
+    return text if len(text) <= n else text[: n - 3] + "..."

@@ -66,7 +66,7 @@ def test_healthy_ratio_dispatch_to_no_action(
     )
     out = capsys.readouterr().out
     assert rc == 0
-    assert "✓ healthy" in out
+    assert "OK healthy" in out
     assert "dispatch:no_action = 10:10" in out
 
 

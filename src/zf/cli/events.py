@@ -390,7 +390,7 @@ def run_trace(args: argparse.Namespace) -> int:
 
     print(f"Causation chain for {args.event_id} ({len(chain)} events):")
     for i, ev in enumerate(chain):
-        arrow = "  " if i == 0 else "→ "
+        arrow = "  " if i == 0 else "-> "
         task = f" task={ev.task_id}" if ev.task_id else ""
         actor = f" actor={ev.actor}" if ev.actor else ""
         print(f"{arrow}[{ev.ts}] {ev.id} {ev.type}{actor}{task}")

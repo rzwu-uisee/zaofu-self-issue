@@ -55,7 +55,7 @@ def _reject_unknown(raw: dict, known: frozenset[str], context: str) -> None:
     if unknown:
         raise LanePipelineSpecError(
             f"lane_pipeline {context}: unknown key(s) {unknown}; "
-            f"typo'd keys must fail closed (doc 88 P0)"
+            "unknown keys are rejected to keep the contract fail-closed"
         )
 
 
@@ -346,10 +346,9 @@ def compile_lane_pipeline(
     if not spec.assembly_declared:
         diagnostics.append(_stop(
             "lane_pipeline_missing_assembly_decl",
-            f"{spec.pipeline_id}: assembly 声明位缺失 —— greenfield 流水线的"
-            f"两类无主地带(R21 脚手架无主 / R24 组装无主)必须显式归属:"
-            f"assembly: {{task: <id>}} 或 assembly: none(自担后果;"
-            f"doc 88 §3.2 / doc 90 §3.3.1)",
+            f"{spec.pipeline_id}: assembly ownership is missing. "
+            "A greenfield pipeline must explicitly set "
+            "assembly: {task: <id>} or assembly: none.",
         ))
     if spec.final_role and spec.final_role not in known_instances:
         diagnostics.append(_stop(
@@ -475,13 +474,13 @@ def compile_lane_pipeline(
         "lane_release_on": list(LANE_RELEASE_TERMINALS),
         "attempt_binding": "unique_derivation_or_stale",
         "trace_budget": effective_budget,
-        "recovery_owner": "doc87-reconciler",  # 88 不实现 recovery sweep
+        "recovery_owner": "reconciler",  # The compiler does not run recovery sweeps.
         "schema_profile": spec.schema_profile,  # A2(来源映射由 loader 落)
         # V4:预算用大白话进 inspect。
         "budget_plain": (
-            f"本 trace 预算 {effective_budget} 次推进机会;"
-            f"每 stage 最多 {spec.max_rework_attempts} 次返工,"
-            f"超出即 quarantine(doc 87 终态裁决)"
+            f"This trace has {effective_budget} progression attempts; "
+            f"each stage allows at most {spec.max_rework_attempts} reworks, "
+            "then the task is quarantined."
         ),
         "instruction_refs": dict(spec.instruction_refs),  # 引用,非 truth(§6.1)
         "assembly": (
@@ -707,8 +706,8 @@ def validate_lane_pipeline_admission(
     if not root_owners and _workspace_root_owner_required():
         problems.append(
             f"no task in the task_map owns workspace-root paths "
-            f"(scaffolding such as package.json/tsconfig has no owner — "
-            f"the R21 failure shape); give the assembly/scaffold task a "
+            f"(scaffolding such as package.json/tsconfig has no owner); "
+            f"give the assembly/scaffold task a "
             f"root-level allowed_path or split one out"
         )
     return problems
@@ -772,7 +771,7 @@ def instruction_ref_diagnostics(
                 "message": (
                     f"{spec.pipeline_id}.instruction_refs[{name}]: "
                     f"{raw_path!r} does not exist "
-                    f"(baseline WARN, strict/release STOP; doc 90 §6.1)"
+                    f"(WARN in baseline, STOP in strict or release mode)"
                 ),
             })
     return diagnostics
