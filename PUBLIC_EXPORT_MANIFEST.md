@@ -11,6 +11,7 @@
 - `feishu.yaml`
 - `README.md`
 - `README.zh-CN.md`
+- `CHANGELOG.md`
 - `LICENSE`
 - `DISCLAIMER.md`
 - `assets/readme`
@@ -32,6 +33,7 @@
 - `.claude/skills`
 - `.codex/skills`
 - `docs/manual`
+- `docs/releases`
 
 ## Explicitly Excluded
 
@@ -40,7 +42,7 @@
   command, and tracked skill mirrors are included
 - `.codex/` local state except tracked skill mirrors; `.zf/`, runtime
   state, caches, and local env files
-- all `docs/` subtrees except `docs/manual/`
+- all `docs/` subtrees except `docs/manual/` and `docs/releases/`
 - `backlogs/`, `tasks/`, `prompt/`, `prompts/`, `ideas/`, `reports/`, `slides/`
 - project-specific `skills/cangjie-*`
 

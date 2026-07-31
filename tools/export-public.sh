@@ -53,6 +53,7 @@ trap 'rm -rf "$tmp"' EXIT
 includes=(
   README.md
   README.zh-CN.md
+  CHANGELOG.md
   LICENSE
   DISCLAIMER.md
   AGENTS.md
@@ -75,6 +76,7 @@ includes=(
   assets/readme
   docs/manual
   docs/design
+  docs/releases
   .claude/rules
   .claude/commands
   .claude/skills

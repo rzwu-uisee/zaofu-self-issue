@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Protocol
 
+from zf import __version__
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import FileLock
 from zf.runtime.channel_contracts import (
@@ -711,7 +712,7 @@ class CodexHeadlessBackend:
                     "clientInfo": {
                         "name": "zaofu-kanban-agent",
                         "title": "ZaoFu Kanban Agent",
-                        "version": "0.1.0",
+                        "version": __version__,
                     },
                     "capabilities": {"experimentalApi": True},
                 })

@@ -35,6 +35,8 @@ docs/*
 !docs/design/**
 !docs/runbooks/
 !docs/runbooks/**
+!docs/releases/
+!docs/releases/**
 examples/tmp/
 backlogs/
 tasks/

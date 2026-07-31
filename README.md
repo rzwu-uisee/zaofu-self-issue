@@ -9,7 +9,8 @@
 [中文说明](README.zh-CN.md) · [Product Tour](#product-tour) ·
 [Quick Start](#quick-start) ·
 [Capabilities](#core-capabilities) · [How It Works](#how-it-works) ·
-[Product Surfaces](#product-surfaces) · [Documentation](#documentation)
+[Product Surfaces](#product-surfaces) · [Documentation](#documentation) ·
+[Changelog](CHANGELOG.md)
 
 ZaoFu turns isolated coding-agent sessions into a governed delivery team. It
 does not replace Codex, Claude Code, or other provider CLIs. It gives them

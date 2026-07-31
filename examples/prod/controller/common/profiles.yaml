@@ -92,6 +92,23 @@ metadata:
   name: kanban-collaboration/v1
 spec:
   roles:
+    - name: research_root
+      instance_id: research_root
+      role_kind: reader
+      backend: claude-code
+      permission_mode: allowlist
+      allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, Agent, "Bash(zf emit *)"]
+      transport: tmux
+      lifecycle: {mode: on_demand}
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      budget_usd: 25
+      provider_session:
+        effort: high
+      skills:
+        - source-verification
+        - zf-project-suggest
+        - zf-research-adaptive-root
     - &research_reader
       name: source_researcher
       instance_id: source_researcher
@@ -100,6 +117,7 @@ spec:
       permission_mode: allowlist
       allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"]
       transport: tmux
+      lifecycle: {mode: on_demand}
       stuck_threshold_seconds: 900
       spawn_ready_timeout_seconds: 240
       skills: [source-verification, zf-project-suggest]
@@ -119,31 +137,34 @@ spec:
       name: synthesizer
       instance_id: synthesizer
       skills: [zf-project-suggest]
-    - <<: *research_reader
-      name: research_root
-      instance_id: research_root
-      allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, Agent, "Bash(zf emit *)"]
-      lifecycle:
-        mode: on_demand
-      skills: [zf-research-adaptive-root]
   workflow:
     stages:
       - id: research-adaptive
         trigger: workflow.invoke.requested
         topology: fanout_reader
-        roles:
-          - research_root
+        roles: [research_root]
+        criteria:
+          instructions:
+            - This is an explicit provider-native read-only pilot, not a production capability declaration.
+            - The research_root may use zero to four provider-native Explore subagents at depth one, must join every child, and remains the only ZaoFu protocol actor.
+            - Children must not call zf, mutate runtime state, write project files, create canonical Tasks, or spawn further children.
+            - Preserve source citations, contradictory evidence, open questions, child provenance, settlement, usage, and cost in the root report.
         fanout:
           children:
             - role_instance: research_root
-              payload: {child_id: research_root}
+              payload:
+                child_id: research_root
+                instruction: Run the bounded adaptive Research root operation and return one complete evidence-backed report.
+                provider_native_access: read_only
+                provider_native_max_children: 4
+                provider_native_max_depth: 1
         aggregate:
           mode: wait_for_all
           child_success_event: research.child.completed
           child_failure_event: research.child.failed
           success_event: research.adaptive.completed
           failure_event: research.adaptive.failed
-        timeout_seconds: 1800
+        timeout_seconds: 1500
       - id: research-fanout
         trigger: workflow.invoke.requested
         topology: fanout_reader

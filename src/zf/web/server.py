@@ -50,6 +50,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from zf import __version__
 from zf.core.config.schema import ZfConfig
 from zf.core.config.project_context import ProjectContext, resolve_project_context
 from zf.core.cost.tracker import CostTracker
@@ -654,7 +655,7 @@ def create_app(
     Factory pattern keeps the app stateless across tests — each test
     gets a fresh app pointing at its own tmp .zf.
     """
-    app = FastAPI(title="zaofu dashboard", version="0.1.0")
+    app = FastAPI(title="zaofu dashboard", version=__version__)
     state_dir = Path(state_dir).resolve()
     project_root = _resolve_project_root_for_state(state_dir, project_root)
     app.state.kanban_agent_recovery = reconcile_kanban_startup(state_dir, config=config)

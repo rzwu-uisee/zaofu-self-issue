@@ -58,6 +58,7 @@ def _init_fixture_repo(root: Path, manual_name: str, manual_text: str) -> Path:
     (source / "tools").mkdir(parents=True)
     (source / "assets" / "readme").mkdir(parents=True)
     (source / "docs" / "manual").mkdir(parents=True)
+    (source / "docs" / "releases").mkdir(parents=True)
     (source / ".claude" / "rules").mkdir(parents=True)
     (source / ".claude" / "commands").mkdir(parents=True)
     (source / ".claude" / "skills" / "public-skill").mkdir(parents=True)
@@ -103,12 +104,16 @@ def _init_fixture_repo(root: Path, manual_name: str, manual_text: str) -> Path:
     )
     (source / "README.md").write_text("# Public fixture\n", encoding="utf-8")
     (source / "README.zh-CN.md").write_text("# Public fixture\n", encoding="utf-8")
+    (source / "CHANGELOG.md").write_text("# Public changelog\n", encoding="utf-8")
     (source / "LICENSE").write_text("fixture license\n", encoding="utf-8")
     (source / "DISCLAIMER.md").write_text("fixture disclaimer\n", encoding="utf-8")
     (source / "assets" / "readme" / "fixture.txt").write_text(
         "public readme asset\n", encoding="utf-8"
     )
     (source / "docs" / "manual" / manual_name).write_text(manual_text, encoding="utf-8")
+    (source / "docs" / "releases" / "v0.0.1.md").write_text(
+        "# Public release notes\n", encoding="utf-8"
+    )
 
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
     subprocess.run(
@@ -122,6 +127,7 @@ def _init_fixture_repo(root: Path, manual_name: str, manual_text: str) -> Path:
             "feishu.yaml",
             "README.md",
             "README.zh-CN.md",
+            "CHANGELOG.md",
             "LICENSE",
             "DISCLAIMER.md",
             "assets/readme/fixture.txt",
@@ -134,6 +140,7 @@ def _init_fixture_repo(root: Path, manual_name: str, manual_text: str) -> Path:
             "yoke/context-hygiene/SKILL.md",
             "tools/export-public.sh",
             f"docs/manual/{manual_name}",
+            "docs/releases/v0.0.1.md",
         ],
         cwd=source,
         check=True,
@@ -179,14 +186,16 @@ def test_export_includes_disclaimer_and_accepts_no_private_matches(tmp_path: Pat
             encoding="utf-8"
         ) == expected_disclaimer
         for readme in ("README.md", "README.zh-CN.md"):
-            expected_readme = subprocess.run(
-                ["git", "show", f"HEAD:{readme}"],
-                cwd=ROOT,
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout
+            expected_readme = (ROOT / readme).read_text(encoding="utf-8")
             assert (target / readme).read_text(encoding="utf-8") == expected_readme
+        assert (target / "CHANGELOG.md").read_text(encoding="utf-8") == (
+            ROOT / "CHANGELOG.md"
+        ).read_text(encoding="utf-8")
+        assert (target / "docs" / "releases" / "v0.0.1.md").read_text(
+            encoding="utf-8"
+        ) == (ROOT / "docs" / "releases" / "v0.0.1.md").read_text(
+            encoding="utf-8"
+        )
         assert (target / "docs" / "manual" / "00-index.en.md").is_file()
         assert (target / "AGENTS.md").is_file()
         assert (target / "CLAUDE.md").is_file()
@@ -247,6 +256,9 @@ def test_grep_fallback_sanitizes_path_with_spaces(tmp_path: Path) -> None:
     )
     assert "/home/user/" not in exported
     assert "/path/to/zaofu" in exported
+    assert (target / "docs" / "releases" / "v0.0.1.md").read_text(
+        encoding="utf-8"
+    ) == "# Public release notes\n"
     assert (target / "assets" / "readme" / "fixture.txt").read_text(
         encoding="utf-8"
     ) == "public readme asset\n"
@@ -266,6 +278,13 @@ def test_grep_fallback_sanitizes_path_with_spaces(tmp_path: Path) -> None:
     assert (
         target / ".codex" / "skills" / "public-skill" / "SKILL.md"
     ).is_file()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    release_ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--", "docs/releases/v0.0.1.md"],
+        cwd=target,
+        check=False,
+    )
+    assert release_ignored.returncode == 1
     assert not (target / ".claude" / "settings.local.json").exists()
     assert not (target / ".claude" / "worktrees").exists()
 

@@ -585,7 +585,7 @@ def test_codex_headless_streaming_turn_uses_idle_timeout_not_total_timeout(
             "    elif req_id and method == 'turn/start':",
             "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'turn':{'id':'turn-1','status':'inProgress'}}}), flush=True)",
             "        for part in ['slow ', 'stream ', 'done']:",
-            "            time.sleep(0.12)",
+            "            time.sleep(0.4)",
             "            print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':part}}), flush=True)",
             "        print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'threadId':'codex-thread-1','turn':{'id':'turn-1','status':'completed'}}}), flush=True)",
         ]),
@@ -602,7 +602,7 @@ def test_codex_headless_streaming_turn_uses_idle_timeout_not_total_timeout(
         provider_session_id="",
         on_session_id=lambda _: None,
         on_message=messages.append,
-        timeout_s=0.2,
+        timeout_s=1.0,
     )
 
     assert result.ok is True
