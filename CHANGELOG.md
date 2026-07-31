@@ -7,7 +7,10 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 - 暂无。
 
-## [v0.0.1](docs/releases/v0.0.1.md) - 2026-07-30
+## v0.0.1 - 2026-07-30
+
+Release notes: [中文](docs/releases/v0.0.1.md) |
+[English](docs/releases/v0.0.1.en.md)
 
 首个公开 Developer Preview。
 
