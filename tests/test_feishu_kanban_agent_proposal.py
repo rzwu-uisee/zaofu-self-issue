@@ -246,6 +246,9 @@ def test_kanban_member_invite_carries_proposal_reply_contract(tmp_path, monkeypa
     assert '"decision": "propose_action"' in member["reply_contract"]
     assert "exact verbatim user substring" in member["reply_contract"]
     assert "not through English or Chinese keyword spelling" in member["reply_contract"]
+    assert "subject_type=task_create with two or three options" in member["reply_contract"]
+    assert "Do not nest contract or channel_authority" in member["reply_contract"]
+    assert "effect.mode=continue, not defer" in member["reply_contract"]
     prompt = _build_channel_system_prompt(member)
     assert KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT in prompt
 

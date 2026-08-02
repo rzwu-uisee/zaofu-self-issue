@@ -10,6 +10,7 @@ from zf.core.events.log import EventLog
 from zf.runtime.channel_context import build_channel_context_pack
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
+from zf.runtime.channel_reply_prompt import channel_reply_response_contract
 
 
 CHANNEL_ID = "ch-typed"
@@ -68,6 +69,20 @@ def _emit_contribution(
         actor="test",
         source="test",
     )
+
+
+def test_synthesis_prompt_states_mechanical_json_types() -> None:
+    prompt = channel_reply_response_contract(
+        {},
+        {"thread_id": "main"},
+        {"refs": {"synthesis_request_id": "synth-types"}},
+    )
+
+    assert (
+        "recommended_workflow and classification must each be JSON objects"
+        in prompt
+    )
+    assert "All plural fields must be JSON arrays" in prompt
 
 
 def test_typed_contribution_and_synthesis_preserve_evidence_and_objects(
@@ -194,12 +209,16 @@ def test_typed_contribution_and_synthesis_preserve_evidence_and_objects(
     assert synthesis.payload["evidence_refs"] == [
         "artifact:api-contract"
     ]
-    human_artifact = (
-        state_dir / synthesis.payload["artifact_ref"]
-    ).read_text(encoding="utf-8")
-    assert '{"decision":"keep API compatibility","owner":"platform"}' in (
-        human_artifact
+    canonical_prd = json.loads(
+        (state_dir / synthesis.payload["artifact_ref"]).read_text(
+            encoding="utf-8",
+        )
     )
+    assert canonical_prd["schema_version"] == "channel-prd.v1"
+    assert canonical_prd["body"]["synthesis"]["decisions"][0] == {
+        "decision": "keep API compatibility",
+        "owner": "platform",
+    }
 
 
 def test_context_pack_preserves_complete_contribution_index() -> None:

@@ -7,6 +7,7 @@ export interface CanonicalChannelPrd {
   ready: boolean;
   sourceRefs: string[];
   synthesisEventId: string;
+  revision: number;
 }
 
 export interface ChannelWorkflowPlanningRequest {
@@ -76,6 +77,7 @@ export function canonicalChannelPrd(
       ? synthesis.source_refs.map((item) => text(item)).filter(Boolean)
       : [],
     synthesisEventId: text(synthesis?.event_id),
+    revision: Number(consensus.prd_revision ?? synthesis?.prd_revision ?? 0),
   };
 }
 
@@ -91,7 +93,7 @@ export function buildChannelWorkflowPlanningRequest(args: {
   const channelId = text(args.channelId);
   const objective = text(args.objective);
   const prd = canonicalChannelPrd(args.detail, threadId);
-  if (!taskId || !channelId || !prd.ready) return null;
+  if (!channelId || !prd.ready) return null;
 
   const sourceRefs = {
     channel_id: channelId,
@@ -113,22 +115,35 @@ export function buildChannelWorkflowPlanningRequest(args: {
     thread_id: threadId,
     synthesis_event_id: prd.synthesisEventId,
     source_ref: prd.artifactRef,
+    source_digest: prd.artifactDigest,
     source_refs: sourceRefs,
     artifact_refs: artifactRefs,
     expected_output: objective || "Complete the approved Task.",
+    channel_member_id: text(args.detail?.leader_member_id),
+    leader_revision: Number(args.detail?.leader_revision ?? 0),
+    prd_revision: prd.revision,
   };
   const lineage = JSON.stringify({
     task_id: taskId,
     ...sourceRefs,
     source_refs: prd.sourceRefs,
   }, null, 2);
-  const message = [
-    `为现有 Task ${taskId} 规划执行 workflow。`,
-    objective ? `目标：${objective}` : "",
-    "请根据注入的 workflow route catalog 和 Task 复杂度给出 2-3 个 task_workflow Plan 选项，其中一个标记 recommended；可包含一个不启动 workflow 的 continue 选项。",
-    "每个执行选项必须使用 effect.mode=propose、effect.action=workflow-start，并绑定当前 task_id、有效 route_id 和 objective。只返回一个 plan_request JSON，不要直接启动 workflow，也不要创建新 Task。",
-    "Canonical Channel PRD lineage:",
-    lineage,
-  ].filter(Boolean).join("\n\n");
+  const message = taskId
+    ? [
+        `为现有 Task ${taskId} 规划执行 workflow。`,
+        objective ? `目标：${objective}` : "",
+        "请根据注入的 workflow route catalog 和 Task 复杂度给出 2-3 个 task_workflow Plan 选项，其中一个标记 recommended；可包含一个不启动 workflow 的 continue 选项。",
+        "每个执行选项必须使用 effect.mode=propose、effect.action=workflow-start，并绑定当前 task_id、有效 route_id 和 objective。只返回一个 plan_request JSON，不要直接启动 workflow，也不要创建新 Task。",
+        "Canonical Channel PRD lineage:",
+        lineage,
+      ].filter(Boolean).join("\n\n")
+    : [
+        "基于已确认的 canonical Channel PRD 提议创建一个 Task。",
+        objective ? `目标：${objective}` : "",
+        "返回一个 subject_type=task_create 的 plan_request JSON，提供 2-3 个选项，其中一个标记 recommended。",
+        "创建选项必须使用 effect.mode=propose、effect.action=create-task；payload 只包含 title、objective、priority、scope、acceptance、acceptance_criteria、explicit_non_goals 和 skills_required。不要直接创建 Task 或启动 workflow。",
+        "Canonical Channel PRD lineage:",
+        lineage,
+      ].filter(Boolean).join("\n\n");
   return { message, workflowContext };
 }

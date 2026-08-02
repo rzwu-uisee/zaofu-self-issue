@@ -18,8 +18,10 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  clarifyWorkflowRequest,
   getWorkflowRequestDetail,
   getWorkflowRequests,
+  prepareWorkflowProposal,
 } from "../../api/client";
 import type {
   ActionResponse,
@@ -41,6 +43,7 @@ import {
   WorkflowExecutionPlan,
   WorkflowList,
 } from "./WorkflowProposalParts";
+import { WorkflowClarificationPanel } from "./WorkflowClarificationPanel";
 import {
   diagnosticSeverity,
   expectedOutputLabel,
@@ -163,6 +166,45 @@ export function WorkflowProposalPage({
     try {
       const result = await onAction(action, payload);
       setFeedback(result);
+      await loadRequests();
+      await loadDetail();
+    } catch (reason) {
+      setFeedback({
+        ok: false,
+        status: "failed",
+        action,
+        reason: reason instanceof Error ? reason.message : String(reason),
+      });
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function executeRequestTransition(
+    action: "workflow-clarify" | "workflow-prepare",
+    payload: Record<string, unknown>,
+  ) {
+    if (busyAction) return;
+    setBusyAction(action);
+    setFeedback(null);
+    try {
+      let result = action === "workflow-clarify"
+        ? await clarifyWorkflowRequest(projectId, payload)
+        : await prepareWorkflowProposal(projectId, payload);
+      if (
+        action === "workflow-clarify"
+        && result.ok === true
+        && textValue(result.status) === "ready"
+      ) {
+        setBusyAction("workflow-prepare");
+        result = await prepareWorkflowProposal(projectId, {
+          request_id: payload.request_id,
+          intake_ref: payload.intake_ref,
+          kind: payload.kind,
+          allow_missing_env: true,
+        });
+      }
+      setFeedback(workflowRequestFeedback(action, result));
       await loadRequests();
       await loadDetail();
     } catch (reason) {
@@ -306,7 +348,9 @@ export function WorkflowProposalPage({
                 onApply={(payload) => void execute("workflow-config-apply", payload)}
                 onApprove={(payload) => void execute("workflow-submit", payload)}
                 onCancel={(payload) => void execute("workflow-cancel", payload)}
+                onClarify={(payload) => void executeRequestTransition("workflow-clarify", payload)}
                 onOpenRuns={() => onOpenPage("runs")}
+                onPrepare={(payload) => void executeRequestTransition("workflow-prepare", payload)}
                 onReject={(payload) => void execute("workflow-reject", payload)}
                 onRunCancel={(payload) => void execute("run-cancel", payload)}
                 onRunPause={(payload) => void execute("run-pause", payload)}
@@ -330,7 +374,9 @@ function WorkflowProposalDetail({
   onApply,
   onApprove,
   onCancel,
+  onClarify,
   onOpenRuns,
+  onPrepare,
   onReject,
   onRunCancel,
   onRunPause,
@@ -343,7 +389,9 @@ function WorkflowProposalDetail({
   onApply: (payload: Record<string, unknown>) => void;
   onApprove: (payload: Record<string, unknown>) => void;
   onCancel: (payload: Record<string, unknown>) => void;
+  onClarify: (payload: Record<string, unknown>) => void;
   onOpenRuns: () => void;
+  onPrepare: (payload: Record<string, unknown>) => void;
   onReject: (payload: Record<string, unknown>) => void;
   onRunCancel: (payload: Record<string, unknown>) => void;
   onRunPause: (payload: Record<string, unknown>) => void;
@@ -361,6 +409,7 @@ function WorkflowProposalDetail({
   const proposalDigest = textValue(request.proposal_digest);
   const requestId = textValue(request.request_id);
   const requestStatus = textValue(request.status);
+  const requestKind = textValue(request.kind);
   const changeMode = textValue(proposal.change_mode);
   const configApplied = lifecycle.config_applied === true;
   const submitted = lifecycle.submitted === true || ["submitted", "running"].includes(requestStatus);
@@ -645,6 +694,19 @@ function WorkflowProposalDetail({
         ) : null}
       </section>
 
+      <WorkflowClarificationPanel
+        actionReady={actionReady}
+        actionState={actionState}
+        busyAction={busyAction}
+        intakeRef={textValue(links.intake_ref)}
+        onClarify={onClarify}
+        onPrepare={onPrepare}
+        requestKind={requestKind}
+        requestId={requestId}
+        requestStatus={requestStatus}
+        requirement={requirement}
+      />
+
       {expectedOutputs.length ? (
         <section className="workflow-expected-output">
           <PackageCheck aria-hidden="true" size={19} />
@@ -794,4 +856,22 @@ function decisionFeedback(result: ActionResponse): string {
   if (result.action === "workflow-reject" && result.ok) return "Proposal rejected.";
   if (result.action === "workflow-config-apply" && result.ok) return "Config applied.";
   return result.ok ? "Action completed." : "Action failed.";
+}
+
+function workflowRequestFeedback(
+  action: "workflow-clarify" | "workflow-prepare",
+  response: Record<string, unknown>,
+): ActionResponse {
+  const result = asRecord(response.result);
+  const blockers = asRecordArray(result.blockers);
+  const reason = textValue(response.reason)
+    || blockers.map((item) => textValue(item.message) || textValue(item.title)).filter(Boolean).join("; ")
+    || (response.ok === true ? "Proposal prepared." : "Request still needs clarification.");
+  return {
+    ok: response.ok === true,
+    status: textValue(response.status) || (response.ok === true ? "completed" : "failed"),
+    action,
+    reason,
+    result,
+  };
 }

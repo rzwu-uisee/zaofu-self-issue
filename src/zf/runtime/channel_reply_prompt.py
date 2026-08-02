@@ -120,8 +120,10 @@ def channel_reply_response_contract(
             "acceptance_criteria, open_questions, risks, "
             "recommended_workflow, source_refs, evidence_refs, "
             "consumed_contribution_refs, consumed_contribution_digests, "
-            "classification, dissent, and confidence. Keep the "
-            "preceding Markdown concise."
+            "classification, dissent, and confidence. "
+            "recommended_workflow and classification must each be JSON "
+            "objects; use {} when no structured value applies. All plural "
+            "fields must be JSON arrays. Keep the preceding Markdown concise."
         )
     thread_id = str(request.get("thread_id") or "main")
     sessions = channel.get("discussions")

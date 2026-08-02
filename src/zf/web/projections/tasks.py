@@ -249,12 +249,15 @@ def _workflow_events_with_candidate_context(
             if (
                 isinstance(task, Task)
                 and all_events
+                # Child failures are normalized below; supersession must use
+                # that workflow failure type rather than the transport type.
                 and _global_failure_superseded_for_task(
                     task.id,
                     seq,
                     event,
                     all_events,
                     context_refs=context_refs,
+                    projected_failure_type=failure_type,
                 )
             ):
                 continue
@@ -404,22 +407,42 @@ def _global_failure_superseded_for_task(
     all_events: list[tuple[int, ZfEvent]],
     *,
     context_refs: set[str],
+    projected_failure_type: str = "",
 ) -> bool:
-    failure_type = str(getattr(failure, "type", "") or "")
+    failure_type = projected_failure_type or str(
+        getattr(failure, "type", "") or ""
+    )
     if failure_type in _PLAN_FAILURE_EVENTS:
         superseding_events = _PLAN_FAILURE_SUPERSEDING_EVENTS
     elif failure_type in _QUALITY_FAILURE_EVENTS:
         superseding_events = _QUALITY_FAILURE_SUPERSEDING_EVENTS
     else:
         return False
+    failure_workflow_run_id = _event_workflow_run_id(failure)
     for seq, event in all_events:
         if seq <= failure_seq:
             continue
         if str(getattr(event, "type", "") or "") not in superseding_events:
             continue
+        event_workflow_run_id = _event_workflow_run_id(event)
+        if (
+            failure_workflow_run_id
+            and event_workflow_run_id
+            and event_workflow_run_id != failure_workflow_run_id
+        ):
+            continue
         if _event_context_applies_to_task(task_id, event, context_refs=context_refs):
             return True
     return False
+
+
+def _event_workflow_run_id(event: ZfEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    return str(
+        payload.get("workflow_run_id")
+        or getattr(event, "correlation_id", "")
+        or ""
+    ).strip()
 
 
 def _global_failure_projection_type(event_type: str) -> str:

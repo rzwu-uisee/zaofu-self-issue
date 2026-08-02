@@ -177,6 +177,18 @@ class ControlledActionOrchestrator:
         status: str = "failed",
         result: dict[str, Any] | None = None,
     ) -> None:
+        structured_result = {
+            key: (result or {}).get(key)
+            for key in (
+                "actionability",
+                "failure_class",
+                "recovery_action",
+                "recovery_policy",
+                "replacement_plan_event_id",
+                "replacement_revision",
+            )
+            if (result or {}).get(key) not in (None, "", [], {})
+        }
         self.writer.emit(
             "runtime.action.attempt.failed",
             actor=self.actor,
@@ -196,6 +208,7 @@ class ControlledActionOrchestrator:
                 "failed_at": _now(),
                 "result_event_id": str((result or {}).get("event_id") or ""),
                 "reply_event_id": str((result or {}).get("reply_event_id") or ""),
+                **structured_result,
             }),
         )
 

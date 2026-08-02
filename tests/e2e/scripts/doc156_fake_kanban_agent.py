@@ -137,6 +137,7 @@ def _channel_plan_request() -> dict[str, Any]:
                 "Which member set and turn budget should handle "
                 "DOC156_CHANNEL_SETUP?"
             ),
+            "discussion_seed": "Handle DOC156_CHANNEL_SETUP.",
             "submit_action": "channel-create-and-start",
             "submit_label": "Create & start",
             "options": [

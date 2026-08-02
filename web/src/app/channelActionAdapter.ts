@@ -52,6 +52,11 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     artifactDigest: string,
     blocker = "",
   ) {
+    const consensus = args.channelDetail?.consensus?.[threadId] ?? {};
+    const prdRevision = Number(consensus.prd_revision ?? 0);
+    const readinessVerdict = String(
+      consensus.readiness_verdict ?? "unassessed",
+    );
     await args.submitAction(
       decision === "confirm"
         ? "channel-consensus-confirm"
@@ -61,6 +66,11 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
         thread_id: threadId,
         artifact_ref: artifactRef,
         artifact_digest: artifactDigest,
+        prd_revision: prdRevision,
+        accept_readiness_risk: (
+          readinessVerdict === "needs_owner"
+          || readinessVerdict === "needs_multi_lens"
+        ) || undefined,
         member_id: "owner:operator",
         blocker_question: blocker || undefined,
         source: "web-channel-consensus",
@@ -109,7 +119,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       storedBackend: args.readStoredBackend(),
     });
     const permissionProfile = agentSurface?.permission_profile || "dangerous_full";
-    args.prepareTaskAgent(taskId);
+    if (taskId) args.prepareTaskAgent(taskId);
     await args.submitAction("chat-orchestrator", {
       backend,
       permission_profile: permissionProfile,

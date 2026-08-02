@@ -16,34 +16,17 @@ from zf.runtime.kanban_plan_requests import (
     plan_request_digest,
     plan_request_id,
 )
+from zf.runtime.task_workflow_plans import (
+    normalize_task_workflow_parameters,
+    workflow_route_missing_parameters,
+)
 from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
     workflow_route_catalog,
 )
 from zf.runtime.workflow_start import is_workflow_start_action
+from zf.web.channel_task_plan import normalize_channel_task_submit_payload
 from zf.web.proposal_extraction import json_candidates
-
-
-_TASK_WORKFLOW_PARAMETER_KEYS = frozenset({
-    "acceptance",
-    "artifact_refs",
-    "backend",
-    "channel_id",
-    "constraints",
-    "expected_output",
-    "open_questions",
-    "risk",
-    "scope",
-    "source_ref",
-    "source_refs",
-    "source_root",
-    "strictness",
-    "synthesis_event_id",
-    "target_ref",
-    "target_root",
-    "thread_id",
-    "topic",
-})
 
 
 def extract_plan_request(
@@ -140,20 +123,16 @@ def normalize_plan_request(
     if not isinstance(workflow_context, dict):
         validation_errors.append("workflow_parameters must be a mapping")
         workflow_context = {}
-    unknown_context_parameters = sorted(
-        set(workflow_context) - _TASK_WORKFLOW_PARAMETER_KEYS
+    normalized_workflow_context, workflow_context_error = (
+        normalize_task_workflow_parameters(workflow_context)
     )
-    if unknown_context_parameters:
+    if workflow_context_error:
         validation_errors.append(
-            "unsupported workflow context field(s): "
-            + ", ".join(unknown_context_parameters)
+            workflow_context_error.replace(
+                "unsupported parameter field(s)",
+                "unsupported workflow context field(s)",
+            )
         )
-        workflow_context = {}
-    normalized_workflow_context = {
-        str(key): value
-        for key, value in workflow_context.items()
-        if value not in (None, "", [], {})
-    }
     submit_action = str(
         raw.get("submit_action")
         or raw.get("commit_action")
@@ -188,11 +167,20 @@ def normalize_plan_request(
     if subject_type not in {
         "channel_setup",
         "clarification",
+        "task_create",
         "task_workflow",
     }:
         validation_errors.append(
-            "subject_type must be channel_setup, clarification, or task_workflow"
+            "subject_type must be channel_setup, clarification, "
+            "task_create, or task_workflow"
         )
+    discussion_seed = str(raw.get("discussion_seed") or "").strip()
+    if subject_type == "channel_setup" and not discussion_seed:
+        validation_errors.append(
+            "channel_setup requires a clean discussion_seed"
+        )
+    if len(discussion_seed) > 8000:
+        validation_errors.append("discussion_seed exceeds 8000 characters")
 
     raw_options = question.get("options")
     options: list[dict[str, Any]] = []
@@ -240,6 +228,7 @@ def normalize_plan_request(
                 option_submit_action = str(
                     effect.get("action")
                     or item.get("submit_action")
+                    or item.get("action")
                     or submit_action
                     or ""
                 ).strip()
@@ -248,12 +237,17 @@ def normalize_plan_request(
                 option_submit_mode = str(
                     effect.get("mode")
                     or item.get("submit_mode")
+                    or item.get("mode")
                     or ("apply" if option_submit_action == submit_action and submit_action else "continue")
                 ).strip().lower()
                 raw_submit_payload = (
                     effect.get("payload")
                     if isinstance(effect.get("payload"), dict)
-                    else item.get("submit_payload")
+                    else (
+                        item.get("submit_payload")
+                        if isinstance(item.get("submit_payload"), dict)
+                        else item.get("payload")
+                    )
                 )
             if option_submit_mode not in {"apply", "continue", "propose"}:
                 validation_errors.append(
@@ -295,6 +289,27 @@ def normalize_plan_request(
                     f"option {index}: {boundary_error}"
                 )
             if option_submit_action:
+                if (
+                    option_submit_action == "create-task"
+                    and isinstance(raw_submit_payload, dict)
+                    and normalized_workflow_context
+                ):
+                    raw_submit_payload = {
+                        **raw_submit_payload,
+                        "channel_authority": {
+                            key: normalized_workflow_context[key]
+                            for key in (
+                                "channel_id",
+                                "thread_id",
+                                "channel_member_id",
+                                "leader_revision",
+                                "prd_revision",
+                                "source_ref",
+                                "source_digest",
+                            )
+                            if key in normalized_workflow_context
+                        },
+                    }
                 if (
                     is_workflow_start_action(option_submit_action)
                     and isinstance(raw_submit_payload, dict)
@@ -424,6 +439,7 @@ def normalize_plan_request(
         "schema_version": PLAN_REQUEST_SCHEMA_VERSION,
         "interaction_mode": "plan",
         "subject_type": subject_type,
+        "discussion_seed": discussion_seed,
         "revision": _revision(raw.get("revision")),
         "expires_at": str(raw.get("expires_at") or ""),
         "header": request_header,
@@ -468,6 +484,7 @@ def normalize_plan_request(
         "requirement_digest": str(
             context.get("requirement_digest") or ""
         ),
+        "workflow_parameters": normalized_workflow_context,
         "valid": not validation_errors,
         "validation_error": "; ".join(dict.fromkeys(validation_errors)),
     }
@@ -619,6 +636,8 @@ def _normalize_plan_submit_payload(
             config=config,
             task_binding_digests=task_binding_digests or {},
         )
+    if action == "create-task":
+        return normalize_channel_task_submit_payload(raw_payload)
     if action != "channel-create-and-start":
         return {}, {}, f"unsupported Plan submit action: {action}"
 
@@ -743,16 +762,9 @@ def _normalize_task_workflow_submit_payload(
         parameters = {}
     if not isinstance(parameters, dict):
         return {}, {}, "submit_payload.parameters must be a mapping"
-    unknown_parameters = sorted(
-        set(parameters) - _TASK_WORKFLOW_PARAMETER_KEYS
+    parameters, parameter_error = normalize_task_workflow_parameters(
+        parameters
     )
-    if unknown_parameters:
-        return (
-            {},
-            {},
-            "unsupported workflow parameter field(s): "
-            + ", ".join(unknown_parameters),
-        )
     catalog = workflow_route_catalog(config)
     config_digest = str(
         raw_payload.get("config_digest")
@@ -766,6 +778,32 @@ def _normalize_task_workflow_submit_payload(
     )
     if route is None:
         return {}, {}, f"workflow route {route_id!r} is stale or unavailable"
+    missing = workflow_route_missing_parameters(
+        route,
+        objective=objective,
+        parameters=parameters,
+    )
+    errors: list[str] = []
+    if parameter_error:
+        errors.append(parameter_error.replace(
+            "unsupported parameter field(s)",
+            "unsupported workflow parameter field(s)",
+        ))
+    if missing:
+        errors.append("missing executable parameter(s): " + ", ".join(missing))
+    if errors:
+        return (
+            {
+                "task_id": task_id,
+                "route_id": route_id,
+                "objective": objective,
+                "config_digest": config_digest,
+                "task_contract_digest": current_task_digest,
+                "parameters": parameters,
+            },
+            {},
+            "; ".join(errors),
+        )
     payload = {
         "task_id": task_id,
         "route_id": route_id,
@@ -823,8 +861,12 @@ def _plan_subject_type(
             )
             if is_workflow_start_action(action):
                 return "task_workflow"
+            if action == "create-task":
+                return "task_create"
     if submit_action == "channel-create-and-start":
         return "channel_setup"
+    if submit_action == "create-task":
+        return "task_create"
     return "clarification"
 
 
@@ -841,6 +883,11 @@ def _subject_action_error(
             return ""
         if mode != "propose" or not is_workflow_start_action(action):
             return "task_workflow only allows workflow-start proposals"
+    elif subject_type == "task_create":
+        if mode == "continue" and not action:
+            return ""
+        if mode != "propose" or action != "create-task":
+            return "task_create only allows create-task proposals"
     elif action:
         return "clarification options cannot carry actions"
     return ""

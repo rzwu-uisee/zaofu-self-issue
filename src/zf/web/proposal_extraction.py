@@ -81,6 +81,40 @@ def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
             for key in ("objective", "message", "text")
         ):
             return "objective, message, or text is required"
+    if action == "channel-invite-member":
+        if not str(payload.get("channel_id") or "").strip():
+            return "channel_id is required"
+        if not str(payload.get("member_id") or "").strip():
+            return "member_id is required"
+        if not str(payload.get("profile_id") or "").strip():
+            return "profile_id is required for roster proposals"
+    if action == "channel-remove-member":
+        if not str(payload.get("channel_id") or "").strip():
+            return "channel_id is required"
+        if not str(payload.get("member_id") or "").strip():
+            return "member_id is required"
+    if action in {
+        "channel-delete",
+        "channel-clear-history",
+        "channel-mark-read",
+        "channel-pin-message",
+    } and not str(payload.get("channel_id") or "").strip():
+        return "channel_id is required"
+    if action == "channel-pin-message" and not str(
+        payload.get("message_id") or ""
+    ).strip():
+        return "message_id is required"
+    if action == "channel-set-leader":
+        if not str(payload.get("channel_id") or "").strip():
+            return "channel_id is required"
+        if not str(payload.get("leader_member_id") or "").strip():
+            return "leader_member_id is required"
+        try:
+            expected_revision = int(payload.get("expected_revision"))
+        except (TypeError, ValueError):
+            expected_revision = -1
+        if expected_revision < 0:
+            return "expected_revision must be a non-negative integer"
     if action == "workflow-invoke":
         if not str(payload.get("task_id") or "").strip():
             return "task_id is required"

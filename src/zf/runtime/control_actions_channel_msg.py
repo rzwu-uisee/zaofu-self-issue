@@ -1,74 +1,25 @@
 """ChannelMessageActionsMixin — controlled-action handlers (moved verbatim from control_actions.py)."""
 from __future__ import annotations
 
-import threading
-
-from zf.core.events import EventWriter, ZfEvent
-from zf.core.events.factory import event_log_from_project
-from zf.core.security.redaction import redact_obj
+from zf.core.events import ZfEvent
 from zf.runtime.channel_adapter import dispatch_pending_replies
 from zf.runtime.channel_contracts import default_debate_max_rounds
 from zf.runtime.channel_handoff import request_channel_handoff
+from zf.runtime.channel_message_ingress import (
+    dispatch_channel_replies_background,
+    execute_channel_message_ingress,
+)
 from zf.runtime.channel_owner_report import build_owner_report_payload
 from zf.runtime.channel_projection import project_channel
-from zf.runtime.channel_router import detect_channel_mention_tokens
-from zf.runtime.channel_router import resolve_channel_mentions
-from zf.runtime.channel_router import routable_backing_worker_member
 from zf.runtime.channel_router import route_channel_message
 from zf.runtime.channel_sidecar import channel_message_event_payload
 from zf.runtime.control_actions_helpers import _normal_channel_id
 from zf.runtime.control_actions_helpers import _optional_str
 from zf.runtime.control_actions_helpers import _required_text
-from zf.runtime.control_actions_helpers import _safe_int
 from zf.runtime.control_actions_helpers import _stable_control_id
 from zf.runtime.control_actions_helpers import _string_list
 from zf.runtime.control_actions_helpers import _synthesis_target_member
 from zf.runtime.control_actions_helpers import _task_id_from_payload
-
-
-def _dispatch_channel_replies_background(
-    *,
-    state_dir,
-    channel_id: str,
-    actor: str,
-    source: str,
-    project_root,
-    config,
-    openclaw_client,
-    max_dispatch: int,
-) -> None:
-    def run() -> None:
-        writer = EventWriter(event_log_from_project(state_dir, config=config))
-        try:
-            dispatch_pending_replies(
-                state_dir=state_dir,
-                writer=writer,
-                channel_id=channel_id,
-                actor=actor,
-                source=f"{source}:background",
-                max_dispatch=max_dispatch,
-                project_root=project_root,
-                config=config,
-                openclaw_client=openclaw_client,
-            )
-        except Exception as exc:
-            writer.emit(
-                "channel.agent.reply.dispatch_failed",
-                actor=actor,
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "reason": f"background dispatch crashed: {exc}",
-                    "source": f"{source}:background",
-                },
-            )
-
-    thread = threading.Thread(
-        target=run,
-        name=f"zf-channel-dispatch-{channel_id}",
-        daemon=True,
-    )
-    thread.start()
 
 
 class ChannelMessageActionsMixin:
@@ -81,203 +32,15 @@ class ChannelMessageActionsMixin:
         payload: dict,
         emit_completion: bool = True,
     ) -> dict:
-        channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
-        thread_id = _optional_str(payload.get("thread_id")) or "main"
-        message_id = _optional_str(payload.get("message_id")) or f"msg-{requested.id.removeprefix('evt-')}"
-        member_id = _optional_str(payload.get("member_id")) or "operator"
-        text = str(payload.get("text") or payload.get("message") or "")
-        role = _optional_str(payload.get("role")) or "user"
-        explicit_mentions = _string_list(payload.get("mentions"))
-        channel = project_channel(self.state_dir, channel_id)
-        resolved_mentions = resolve_channel_mentions(
-            channel,
-            text=text,
-            explicit_mentions=explicit_mentions,
-            sender_member_id=member_id,
+        return execute_channel_message_ingress(
+            self,
+            requested=requested,
+            action=action,
+            requested_action=requested_action,
+            payload=payload,
+            emit_completion=emit_completion,
         )
-        mention_tokens = detect_channel_mention_tokens(
-            text,
-            explicit_mentions=explicit_mentions,
-        )
-        mentions = resolved_mentions or explicit_mentions
-        posted_payload = channel_message_event_payload(self.state_dir, {
-            "channel_id": channel_id,
-            "thread_id": thread_id,
-            "message_id": message_id,
-            "member_id": member_id,
-            "role": role,
-            "source": self.surface,
-            "text": text,
-            "mentions": mentions,
-            "mention_tokens": mention_tokens,
-            "refs": payload.get("refs") if isinstance(payload.get("refs"), dict) else {},
-        }, created_by=f"channel-message:{self.surface}")
-        event = self.writer.emit(
-            "channel.message.posted",
-            actor=self.actor,
-            task_id=_task_id_from_payload(payload),
-            causation_id=requested.id,
-            correlation_id=channel_id,
-            payload=posted_payload,
-        )
-        attachment_event_ids: list[str] = []
-        refs = posted_payload["refs"] if isinstance(posted_payload.get("refs"), dict) else {}
-        attachments = refs.get("attachments") if isinstance(refs.get("attachments"), list) else []
-        for index, attachment in enumerate(attachments):
-            if not isinstance(attachment, dict):
-                continue
-            attachment_id = (
-                _optional_str(attachment.get("attachment_id"))
-                or _optional_str(attachment.get("id"))
-                or f"att-{message_id}-{index + 1}"
-            )
-            uploaded = self.writer.emit(
-                "channel.attachment.uploaded",
-                actor=self.actor,
-                task_id=_task_id_from_payload(payload),
-                causation_id=event.id,
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": thread_id,
-                    "attachment_id": attachment_id,
-                    "message_id": message_id,
-                    "member_id": member_id,
-                    "name": _optional_str(attachment.get("name") or attachment.get("filename")) or "",
-                    "mime": _optional_str(
-                        attachment.get("mime")
-                        or attachment.get("type")
-                        or attachment.get("content_type"),
-                    ) or "",
-                    "size": _safe_int(attachment.get("size") if attachment.get("size") is not None else attachment.get("bytes")),
-                    "hash": _optional_str(attachment.get("hash") or attachment.get("sha256")) or "",
-                    "uri": _optional_str(attachment.get("uri")) or "",
-                    "refs": redact_obj({
-                        "source": attachment.get("source") if isinstance(attachment.get("source"), str) else "",
-                        "lastModified": attachment.get("lastModified"),
-                    }),
-                    "source": self.surface,
-                },
-            )
-            attachment_event_ids.append(uploaded.id)
-        route_result = route_channel_message(
-            state_dir=self.state_dir,
-            writer=self.writer,
-            message_event=event,
-            message_payload={**posted_payload, "task_id": str(payload.get("task_id") or "")},
-            actor=self.actor,
-            source=self.surface,
-            project_root=self.project_root,
-            config=self.config,
-            openclaw_client=self.openclaw_client,
-            dispatch_inline=False,
-        )
-        if route_result.reply_requests:
-            _dispatch_channel_replies_background(
-                state_dir=self.state_dir,
-                channel_id=channel_id,
-                actor=self.actor,
-                source=self.surface,
-                project_root=self.project_root,
-                config=self.config,
-                openclaw_client=self.openclaw_client,
-                max_dispatch=max(1, len(route_result.reply_requests)),
-            )
-        instance_id = str(
-            payload.get("instance_id")
-            or payload.get("worker")
-            or payload.get("backing_worker_session_id")
-            or ""
-        ).strip()
-        if instance_id:
-            # 2026-06-10 review P1-7: the raw instance_id path previously
-            # bypassed channel membership/permission gating entirely,
-            # giving any token holder direct_role_dispatch into a role
-            # pane (forbidden by docs 48/75 + operator_contract).
-            target_member = routable_backing_worker_member(
-                project_channel(self.state_dir, channel_id) or {},
-                instance_id,
-                sender_member_id=member_id,
-            )
-            if target_member is None:
-                self.writer.emit(
-                    "channel.route.blocked",
-                    actor=self.actor,
-                    task_id=_task_id_from_payload(payload),
-                    causation_id=event.id,
-                    correlation_id=channel_id,
-                    payload={
-                        "channel_id": channel_id,
-                        "thread_id": thread_id,
-                        "message_id": message_id,
-                        "member_id": member_id,
-                        "instance_id": instance_id,
-                        "reason": "worker_not_channel_member",
-                        "source": self.surface,
-                    },
-                )
-            else:
-                self.writer.emit(
-                    "worker.reply.requested",
-                    actor=self.actor,
-                    task_id=_task_id_from_payload(payload),
-                    causation_id=event.id,
-                    correlation_id=channel_id,
-                    payload={
-                        "instance_id": instance_id,
-                        "message": text,
-                        "task_id": str(payload.get("task_id") or ""),
-                        "channel_id": channel_id,
-                        "thread_id": thread_id,
-                        "message_id": message_id,
-                    },
-                )
-                self.writer.emit(
-                    "channel.message.delivered",
-                    actor=self.actor,
-                    task_id=_task_id_from_payload(payload),
-                    causation_id=event.id,
-                    correlation_id=channel_id,
-                    payload={
-                        "channel_id": channel_id,
-                        "thread_id": thread_id,
-                        "message_id": message_id,
-                        "member_id": str(payload.get("member_id") or instance_id),
-                        "worker_session_id": instance_id,
-                        "source": self.surface,
-                    },
-                )
-        if emit_completion:
-            self._completed(
-                requested=requested,
-                event=event,
-                action=action,
-                requested_action=requested_action,
-                status="posted",
-                task_id=_task_id_from_payload(payload),
-                extra={
-                    "channel_id": channel_id,
-                    "thread_id": thread_id,
-                    "message_id": message_id,
-                },
-            )
-        return {
-            "_status_code": 202,
-            "ok": True,
-            "status": "posted",
-            "action": action,
-            "requested_action": requested_action,
-            "channel_id": channel_id,
-            "thread_id": thread_id,
-            "message_id": message_id,
-            "request_id": message_id,
-            "event_id": event.id,
-            "attachment_event_ids": attachment_event_ids,
-            "target_count": len(route_result.targets),
-            "reply_request_count": len(route_result.reply_requests),
-            "queued_count": len(route_result.queued),
-            "route": route_result.as_dict(),
-        }
+
     def _channel_mark_read(
         self,
         *,
@@ -348,6 +111,124 @@ class ChannelMessageActionsMixin:
             "member_id": member_id,
             "event_id": event.id,
         }
+
+    def _channel_pin_message(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
+        thread_id = _optional_str(payload.get("thread_id")) or "main"
+        message_id = _required_text(payload, "message_id")
+        member_id = _optional_str(payload.get("member_id")) or "operator"
+        channel = project_channel(self.state_dir, channel_id) or {}
+        message = next(
+            (
+                item
+                for item in channel.get("messages") or []
+                if isinstance(item, dict)
+                and str(item.get("message_id") or "") == message_id
+                and str(item.get("thread_id") or "main") == thread_id
+            ),
+            None,
+        )
+        if message is None:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason="Channel message does not exist in the exact thread",
+                status_code=404,
+                status="not_found",
+            )
+        owner_actor_ref = str(channel.get("owner_actor_ref") or "")
+        owner_aliases = {
+            owner_actor_ref,
+            owner_actor_ref.removeprefix("owner:"),
+        }
+        member = next(
+            (
+                item
+                for item in channel.get("members") or []
+                if isinstance(item, dict)
+                and str(item.get("member_id") or "") == member_id
+            ),
+            None,
+        )
+        member_allowed = (
+            isinstance(member, dict)
+            and str(member.get("status") or "active").lower()
+            not in {"failed", "rejected", "removed", "suspended"}
+            and (
+                not member.get("permissions")
+                or "message" in set(member.get("permissions") or [])
+            )
+        )
+        if (
+            member_id not in owner_aliases
+            and self.actor not in owner_aliases
+            and not member_allowed
+        ):
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason="pin requires the Channel Owner or an active messaging member",
+                status_code=403,
+                status="forbidden",
+            )
+        pinned = bool(payload.get("pinned", True))
+        event = self.writer.emit(
+            "channel.message.pinned",
+            actor=self.actor,
+            task_id=_task_id_from_payload(payload),
+            causation_id=requested.id,
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "member_id": member_id,
+                "pinned": pinned,
+                "reason": str(payload.get("reason") or ""),
+                "idempotency_key": str(
+                    payload.get("idempotency_key") or requested.id
+                ),
+                "source": self.surface,
+            },
+        )
+        self._completed(
+            requested=requested,
+            event=event,
+            action=action,
+            requested_action=requested_action,
+            status="pinned" if pinned else "unpinned",
+            task_id=_task_id_from_payload(payload),
+            extra={
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "pinned": pinned,
+            },
+        )
+        return {
+            "_status_code": 202,
+            "ok": True,
+            "status": "pinned" if pinned else "unpinned",
+            "action": action,
+            "requested_action": requested_action,
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "pinned": pinned,
+            "event_id": event.id,
+        }
+
     def _channel_owner_report(
         self,
         *,
@@ -629,7 +510,7 @@ class ChannelMessageActionsMixin:
             dispatch_inline=False,
         )
         if route_result.reply_requests:
-            _dispatch_channel_replies_background(
+            dispatch_channel_replies_background(
                 state_dir=self.state_dir,
                 channel_id=channel_id,
                 actor=self.actor,
@@ -792,6 +673,10 @@ class ChannelMessageActionsMixin:
         # blind roster, synthesizer, or phase deadlines through this action.
         if payload.get("max_relay_depth") is not None:
             event_payload["max_relay_depth"] = payload.get("max_relay_depth")
+        if payload.get("max_parallel_replies") is not None:
+            event_payload["max_parallel_replies"] = payload.get(
+                "max_parallel_replies"
+            )
         if payload.get("participants") is not None:
             event_payload["participants"] = payload.get("participants")
         if payload.get("synthesizer") is not None:

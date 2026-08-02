@@ -2,6 +2,7 @@
 import { search } from "../../api/client";
 import type { ActionResponse, ChannelDetail, ChannelHistorySearchResult, ChannelSummary, RecentEvent, RoleSummary, Task } from "../../api/types";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
+import type { AgentSessionMessage } from "../../components/agent-session/types";
 import { buildChannelConversation } from "../../components/agent-session/projection";
 import { channelLiveStreamRows, compactChannelLiveRows, foldChannelLiveStream } from "../agent-session/channelLiveStream";
 import { mergeEventsByIdentity } from "../orchestrator/kanbanSessionEvents";
@@ -49,6 +50,23 @@ interface PendingChannelMessage {
   refs?: Record<string, unknown>;
 }
 
+interface ChannelMessageIngress {
+  clientMessageId: string;
+  threadId: string;
+  replyToMessageId?: string;
+}
+
+interface ChannelComposerDraft {
+  schemaVersion: "channel-composer-draft.v1";
+  clientMessageId: string;
+  threadId: string;
+  text: string;
+  html: string;
+  attachments: ComposerAttachment[];
+  refs?: Record<string, unknown>;
+  reason: string;
+}
+
 
 interface ChannelMentionDigest {
   id: string;
@@ -85,6 +103,17 @@ function channelActionNoticeText(result: ActionResponse): string {
       : "posted; no reply requested";
   }
   return result.reason || "message posted";
+}
+
+function channelDraftStorageKey(channelId: string, threadId: string): string {
+  return `zf.channelDraft:${channelId || "ch-zaofu"}:${threadId || "main"}`;
+}
+
+function newClientMessageId(): string {
+  const suffix = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  return `client-${suffix}`;
 }
 
 
@@ -361,6 +390,7 @@ export function ChannelPage({
   onDrainReplies,
   onGenerateOwnerReport,
   onMarkRead,
+  onPinMessage,
   onNewChannel,
   onOpenChannel,
   onPostMessage,
@@ -389,9 +419,18 @@ export function ChannelPage({
   onDrainReplies: () => Promise<void>;
   onGenerateOwnerReport: () => Promise<void>;
   onMarkRead: (threadId: string) => Promise<void>;
+  onPinMessage: (
+    messageId: string,
+    threadId: string,
+    pinned: boolean,
+  ) => Promise<void>;
   onNewChannel: () => void;
   onOpenChannel: (channelId: string) => void;
-  onPostMessage: (text: string, refs?: Record<string, unknown>) => Promise<void>;
+  onPostMessage: (
+    text: string,
+    refs?: Record<string, unknown>,
+    ingress?: ChannelMessageIngress,
+  ) => Promise<void>;
   onRemoveMember: (memberId: string) => Promise<void>;
   onResearchAdopt: (payload: Record<string, unknown>) => Promise<void>;
   onRequestSynthesis: (targetMemberId?: string) => Promise<void>;
@@ -423,6 +462,8 @@ export function ChannelPage({
   const [formattingOpen, setFormattingOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [retryClientMessageId, setRetryClientMessageId] = useState("");
+  const [replyTarget, setReplyTarget] = useState<AgentSessionMessage | null>(null);
   const [pendingChannelMessages, setPendingChannelMessages] = useState<PendingChannelMessage[]>([]);
   const [activeChannelThreadId, setActiveChannelThreadId] = useState("main");
   const [channelSplitThreadId, setChannelSplitThreadId] = useState("");
@@ -450,6 +491,30 @@ export function ChannelPage({
   useEffect(() => {
     setPendingChannelMessages((current) => current.filter((item) => !channelDetailHasMessage(detail, item)));
   }, [detail]);
+  useEffect(() => {
+    const key = channelDraftStorageKey(
+      selectedChannelId,
+      activeChannelThreadId,
+    );
+    const raw = window.localStorage.getItem(key);
+    if (!raw || composerPlainText().trim() || composerAttachments.length) return;
+    try {
+      const draft = JSON.parse(raw) as Partial<ChannelComposerDraft>;
+      if (
+        draft.schemaVersion !== "channel-composer-draft.v1"
+        || draft.threadId !== activeChannelThreadId
+        || typeof draft.text !== "string"
+      ) return;
+      restoreComposerEditor(String(draft.html || ""), draft.text);
+      setComposerAttachments(
+        Array.isArray(draft.attachments) ? draft.attachments : [],
+      );
+      setRetryClientMessageId(String(draft.clientMessageId || ""));
+      setComposerError(String(draft.reason || "message draft restored"));
+    } catch {
+      window.localStorage.removeItem(key);
+    }
+  }, [activeChannelThreadId, selectedChannelId]);
   // Live-stream fold (operator report 2026-07-16): member replies stream
   // token deltas over the SSE live bus; buffer this channel's rows (the App
   // event window is capped at 120 — a long reply outlives it) and fold them
@@ -657,7 +722,8 @@ export function ChannelPage({
   const stateUpdates = detail?.state_updates ?? [];
   const ownerReports = detail?.owner_reports ?? [];
   const automationReports = detail?.automation_reports ?? [];
-  const discussionMode = recordString(detail?.discussion ?? {}, "mode", "manual_mention");
+  const resultReceipts = detail?.result_receipts ?? [];
+  const discussionMode = recordString(detail?.discussion ?? {}, "mode", "conversation");
   const defaultResponderId = recordString(detail?.discussion ?? {}, "default_responder_id");
   const replyCapableMembers = members.filter((member) => {
     const status = recordString(member, "status");
@@ -688,6 +754,12 @@ export function ChannelPage({
   const timeline = [
     ...messages,
     ...stateUpdates.map((item) => ({ ...item, role: "state_update", text: item.summary })),
+    ...resultReceipts.map((item) => ({
+      ...item,
+      role: "state_update",
+      text: recordString(item, "summary")
+        || `${recordString(item, "receipt_kind", "result")} ${recordString(item, "status", "available")}`,
+    })),
   ] as Record<string, unknown>[];
   const drawerTitles: Record<ChannelDrawerKey, string> = {
     members: "Members",
@@ -730,6 +802,7 @@ export function ChannelPage({
   function channelAttentionCount(channel: ChannelSummary): number {
     return (
       Number(channel.pending_reply_count ?? 0) +
+      Number(channel.unread_count ?? 0) +
       (channel.attention?.length ?? 0) +
       (channel.running_replies?.length ?? 0) +
       (channel.queued_replies?.length ?? 0)
@@ -1086,7 +1159,12 @@ export function ChannelPage({
     const pendingText = plainText;
     const pendingHtml = composerRef.current?.innerHTML ?? "";
     const pendingAttachments = composerAttachments;
-    const pendingId = `pending-${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+    const clientMessageId = retryClientMessageId || newClientMessageId();
+    const pendingId = clientMessageId;
+    const draftKey = channelDraftStorageKey(
+      selectedChannelId,
+      activeChannelThreadId,
+    );
     setComposerError("");
     setChannelPinnedToBottom(true);
     setChannelHasNewBelow(false);
@@ -1102,8 +1180,15 @@ export function ChannelPage({
     setMentionOpen(false);
     setMentionQuery("");
     setPostingCount((count) => count + 1);
-    void onPostMessage(messageText, refs)
+    void onPostMessage(messageText, refs, {
+      clientMessageId,
+      threadId: activeChannelThreadId,
+      replyToMessageId: replyTarget?.id || undefined,
+    })
       .then(() => {
+        window.localStorage.removeItem(draftKey);
+        setRetryClientMessageId("");
+        setReplyTarget(null);
         // Success: keep the optimistic row until the REAL message lands in
         // `detail` — channelDetailWithPendingMessage drops it by identity
         // the moment the projection catches up. Removing it here (the old
@@ -1116,7 +1201,20 @@ export function ChannelPage({
         }, 20000);
       })
       .catch((error) => {
-        setComposerError(error instanceof Error ? error.message : "message was not posted");
+        const reason = error instanceof Error ? error.message : "message was not posted";
+        setComposerError(reason);
+        const draft: ChannelComposerDraft = {
+          schemaVersion: "channel-composer-draft.v1",
+          clientMessageId,
+          threadId: activeChannelThreadId,
+          text: pendingText,
+          html: pendingHtml,
+          attachments: pendingAttachments,
+          refs,
+          reason,
+        };
+        window.localStorage.setItem(draftKey, JSON.stringify(draft));
+        setRetryClientMessageId(clientMessageId);
         if (!composerPlainText().trim()) restoreComposerEditor(pendingHtml, pendingText);
         setComposerAttachments((current) => current.length ? current : pendingAttachments);
         setPendingChannelMessages((current) => current.filter((item) => item.id !== pendingId));
@@ -1349,12 +1447,66 @@ export function ChannelPage({
           </label>
         </div>
         <div className="channel-control-actions">
+          <button
+            className="icon-button"
+            disabled={!actionReady || controlsBusy || !canonicalPrd.ready}
+            type="button"
+            onClick={() => void runControl(async () => {
+              await onWorkflowRequest(
+                "",
+                workflowDraft.reason.trim()
+                  || "Create a Task bound to the canonical Channel PRD.",
+                controlThreadId,
+              );
+            })}
+          >
+            <Plus size={16} />
+            Create Task from PRD
+          </button>
           <button className="icon-button primary" disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !workflowDraft.taskId.trim()} type="submit">
             <PlayCircle size={16} />
             Plan workflow
           </button>
         </div>
       </form>
+    );
+  }
+  function renderResultReceipts() {
+    if (!resultReceipts.length) return null;
+    return (
+      <div className="channel-result-receipts">
+        <div className="inline-heading">
+          <h3>Linked results</h3>
+          <span className="muted">{resultReceipts.length} receipts</span>
+        </div>
+        <div className="channel-result-receipt-list">
+          {resultReceipts.slice().reverse().slice(0, 12).map((receipt, index) => {
+            const kind = recordString(receipt, "receipt_kind", "result");
+            const status = recordString(receipt, "status", "available");
+            const artifactRef = recordString(receipt, "artifact_ref");
+            const taskId = recordString(receipt, "task_id");
+            const workflowRunId = recordString(receipt, "workflow_run_id");
+            const receiptId = recordString(receipt, "receipt_id")
+              || recordString(receipt, "event_id")
+              || `${kind}-${index}`;
+            return (
+              <article className="channel-result-receipt" key={receiptId}>
+                <div>
+                  <strong>{kind.replaceAll("_", " ")}</strong>
+                  <span className={`status-pill status-${status}`}>{status}</span>
+                </div>
+                <small>{[taskId, workflowRunId].filter(Boolean).join(" / ") || "Channel result"}</small>
+                {artifactRef ? (
+                  <code title={artifactRef}>
+                    <Link size={13} />
+                    {artifactRef}
+                  </code>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      </div>
     );
   }
   function renderHistorySearchPanel() {
@@ -1713,12 +1865,9 @@ export function ChannelPage({
                   void runControl(() => onSetDiscussionMode(mode, defaultResponderId));
                 }}
               >
-                <option value="manual_mention">manual mention</option>
-                <option value="round_robin">round robin</option>
-                <option value="priority">priority</option>
-                <option value="leader_delegation">leader delegation</option>
-                <option value="fanout_then_synthesis">fanout then synthesis</option>
-                <option value="debate_judge">debate judge</option>
+                <option value="conversation">conversation</option>
+                <option value="clarification">clarification</option>
+                <option value="multi_lens">multi lens</option>
               </select>
             </label>
             <label className="channel-control-row">
@@ -1874,6 +2023,7 @@ export function ChannelPage({
       return (
         <>
           {renderWorkflowRequestForm()}
+          {renderResultReceipts()}
           <TablePage title="Workflow Requests" rows={workflowRequests} embedded />
           <TablePage title="Synthesis / Handoffs" rows={[...syntheses, ...handoffs]} embedded />
         </>
@@ -1936,12 +2086,9 @@ export function ChannelPage({
               void runControl(() => onSetDiscussionMode(mode, defaultResponderId));
             }}
           >
-            <option value="manual_mention">manual mention</option>
-            <option value="round_robin">round robin</option>
-            <option value="priority">priority</option>
-            <option value="leader_delegation">leader delegation</option>
-            <option value="fanout_then_synthesis">fanout then synthesis</option>
-            <option value="debate_judge">debate judge</option>
+            <option value="conversation">conversation</option>
+            <option value="clarification">clarification</option>
+            <option value="multi_lens">multi lens</option>
           </select>
           <select
             className="filter-input"
@@ -2319,6 +2466,18 @@ export function ChannelPage({
                       setResearchActionBusyId("");
                     });
                   }}
+                  onPinMessage={(message, threadId) => {
+                    void runControl(() => onPinMessage(
+                      message.id,
+                      threadId,
+                      !Boolean(message.refs?.pinned),
+                    ));
+                  }}
+                  onReplyMessage={(message, threadId) => {
+                    setActiveChannelThreadId(threadId);
+                    setReplyTarget(message);
+                    window.setTimeout(() => focusComposer(), 0);
+                  }}
                   onActiveThreadChange={(threadId) => {
                     setActiveChannelThreadId(threadId);
                     if (channelSplitThreadId === threadId) setChannelSplitThreadId("");
@@ -2343,6 +2502,22 @@ export function ChannelPage({
                   void submitComposer();
                 }}
               >
+                {replyTarget ? (
+                  <div className="channel-composer-reply" data-testid="channel-reply-target">
+                    <span>
+                      Replying to <strong>{replyTarget.label}</strong>
+                    </span>
+                    <button
+                      aria-label="Cancel reply"
+                      className="icon-button"
+                      title="Cancel reply"
+                      type="button"
+                      onClick={() => setReplyTarget(null)}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : null}
                 <input
                   ref={attachmentInputRef}
                   className="channel-file-input"

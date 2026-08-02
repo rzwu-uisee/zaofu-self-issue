@@ -829,6 +829,45 @@ export function getWorkflowRequestDetail(
   );
 }
 
+export async function clarifyWorkflowRequest(
+  projectId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return mutateWorkflowRequest(projectId, "workflow-clarify", payload);
+}
+
+export async function prepareWorkflowProposal(
+  projectId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return mutateWorkflowRequest(projectId, "workflow-submit", {
+    ...payload,
+    apply: false,
+  });
+}
+
+async function mutateWorkflowRequest(
+  projectId: string,
+  action: "workflow-clarify" | "workflow-submit",
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${projectPrefix(projectId)}/${action}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...webActionAuthHeaders(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await response.json()) as Record<string, unknown>;
+  if (!response.ok && response.status >= 500) {
+    throw new Error(String(data.reason || `${action} returned ${response.status}`));
+  }
+  invalidateProjectReadCache(projectId);
+  return data;
+}
+
 export async function getWebSession(): Promise<NonNullable<RuntimeSummary["web_session"]>> {
   const response = await fetch("/api/web-session", {
     headers: { Accept: "application/json" },

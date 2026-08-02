@@ -33,7 +33,7 @@ from zf.core.verification.evidence import (
     validate_terminal_done_evidence,
 )
 from zf.runtime.channel_adapter import dispatch_reply_request
-from zf.runtime.channel_router import route_channel_message
+from zf.runtime.channel_message_ingress import route_reactor_message_after_ingress
 from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
     react_channel_cross_review_requested,
@@ -161,6 +161,7 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ),
     ("channel.synthesis.requested", "_on_channel_synthesis_requested"),
     ("channel.agent.reply.completed", "_on_channel_discussion_event"),
+    ("channel.agent.reply.failed", "_on_channel_discussion_event"),
     ("channel.question.opened", "_on_channel_discussion_event"),
     ("channel.question.resolved", "_on_channel_discussion_event"),
     ("channel.question.merged", "_on_channel_discussion_event"),
@@ -5856,17 +5857,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.actor == "orchestrator-reactor":
             return None
-        route_channel_message(
-            state_dir=self.state_dir,
-            writer=self.event_writer,
-            message_event=event,
-            message_payload=payload,
-            actor="orchestrator-reactor",
-            source="runtime",
-            project_root=getattr(self, "project_root", None),
-            config=getattr(self, "config", None),
-            openclaw_client=getattr(self, "openclaw_client", None),
-        )
+        route_reactor_message_after_ingress(self, event=event, payload=payload)
         return None
 
     def _on_channel_discussion_event(self, event: ZfEvent) -> OrchestratorDecision | None:
@@ -5892,6 +5883,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             config=getattr(self, "config", None),
             project_root=getattr(self, "project_root", None),
         )
+        from zf.runtime.channel_reply_remediation import drain_terminal_channel_reply
+
+        drain_terminal_channel_reply(self, event, channel_id)
         return None
 
     def _on_channel_synthesis_requested(
@@ -5998,6 +5992,11 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             events=events,
             dispatch=_dispatch,
         )
+        from zf.runtime.channel_reply_remediation import (
+            resume_pending_channel_reply_queues,
+        )
+
+        resume_pending_channel_reply_queues(self, events)
 
     def _on_worker_completed(self, event: ZfEvent) -> OrchestratorDecision | None:
         """Route provider/worker self-completion through completion audit.

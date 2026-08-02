@@ -126,7 +126,7 @@ export interface AgentSessionPlanRequest {
   requestDigest?: string;
   revision: number;
   header: string;
-  subjectType?: "channel_setup" | "clarification" | "task_workflow";
+  subjectType?: "channel_setup" | "clarification" | "task_create" | "task_workflow";
   questionId: string;
   question: string;
   options: AgentSessionPlanOption[];

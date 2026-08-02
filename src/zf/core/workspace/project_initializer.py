@@ -405,7 +405,7 @@ def ensure_feishu_default_channel_bootstrap(
             causation_id=causation_id,
             payload={
                 "channel_id": DEFAULT_FEISHU_CHANNEL_ID,
-                "mode": "leader_delegation",
+                "mode": "conversation",
                 "default_responder_id": DEFAULT_FEISHU_LEADER_ID,
                 "source": "zf-init",
             },

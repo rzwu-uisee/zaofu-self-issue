@@ -19,6 +19,9 @@ from zf.runtime.channel_templates import (
     template_digest,
 )
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.control_actions_plan_apply_helpers import (
+    channel_plan_discussion_seed,
+)
 from zf.runtime.kanban_plan_requests import (
     PLAN_ANSWERED_EVENT,
     PLAN_REQUESTED_EVENT,
@@ -56,6 +59,17 @@ def _execute(service, writer, action: str, payload: dict):
         payload=payload,
         requested=requested,
     )
+
+
+def test_legacy_channel_setup_plan_uses_explicit_origin_fallback():
+    seed, legacy, error = channel_plan_discussion_seed(
+        {"subject_type": "channel_setup"},
+        "Legacy canonical requirement.",
+    )
+
+    assert seed == "Legacy canonical requirement."
+    assert legacy is True
+    assert error == ""
 
 
 def test_template_role_skill_mappings_are_method_scoped():
@@ -139,13 +153,22 @@ def test_prd_template_persists_version_digest_roles_and_discussion(
     }
     members = {member["channel_role"]: member for member in channel["members"]}
     assert set(members) == {"product_pm", "arch", "critic", "synthesizer"}
-    assert members["product_pm"]["permission_profile"] == "project_writer"
-    assert members["arch"]["permission_profile"] == "read_only"
+    assert all(
+        member["permission_profile"] == "read_only"
+        for member in members.values()
+    )
+    assert channel["leader_member_id"] == "product_pm"
+    assert "propose_workflow" in members["product_pm"]["permissions"]
+    assert all(
+        "propose_workflow" not in member["permissions"]
+        for role, member in members.items()
+        if role != "product_pm"
+    )
     assert members["synthesizer"]["skill_refs"] == [
         "skills/zf-channel-discussion-participant/SKILL.md",
         "skills/zf-channel-discussion-synthesizer/SKILL.md",
     ]
-    assert channel["discussion"]["mode"] == "fanout_then_synthesis"
+    assert channel["discussion"]["mode"] == "conversation"
     assert channel["discussion"]["synthesizer"] == "synthesizer"
 
     conflict = _execute(
@@ -285,7 +308,7 @@ def test_template_preflight_rejects_unknown_override_without_partial_channel(
     assert project_channel(state_dir, "ch-stale-plan") is None
 
 
-def test_quick_change_grants_at_most_one_writer():
+def test_quick_change_is_read_only_and_grants_only_leader_proposal():
     materialized, error = materialize_channel_template(
         "quick-change",
         overrides={"backend": "fake"},
@@ -293,13 +316,17 @@ def test_quick_change_grants_at_most_one_writer():
 
     assert error == ""
     assert materialized is not None
-    writers = [
-        member for member in materialized["members"]
-        if member["permission_profile"] != "read_only"
+    assert all(
+        member["permission_profile"] == "read_only"
+        for member in materialized["members"]
+    )
+    assert materialized["leader_member_id"] == "tech_leader"
+    workflow_proposers = [
+        member["member_id"]
+        for member in materialized["members"]
+        if "propose_workflow" in member["permissions"]
     ]
-    assert [(member["channel_role"], member["permission_profile"]) for member in writers] == [
-        ("tech_leader", "workspace_writer")
-    ]
+    assert workflow_proposers == ["tech_leader"]
 
     invalid, invalid_error = materialize_channel_template(
         "quick-change",
@@ -360,7 +387,7 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
     assert result["max_rounds"] == 4
     channel = project_channel(state_dir, "ch-auto") or {}
     assert channel["discussion"]["default_responder_id"] == "tech_leader"
-    assert channel["discussions"]["main"]["state"] == "phase1_blind"
+    assert channel["discussions"]["main"]["state"] == "active"
     requirement = next(
         event
         for event in log.read_all()
@@ -371,7 +398,7 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
         state_dir,
         requirement.payload,
         strict=True,
-    ) == "@all Review and implement the requested API change."
+    ) == "Review and implement the requested API change."
     completions = [
         event
         for event in log.read_all()
@@ -466,7 +493,8 @@ def test_controlled_question_resolution_and_consensus_confirmation(
         event
         for event in log.read_all()
         if event.type == "channel.consensus.signed"
-        and event.payload.get("member_id") == "owner:operator"
+        and event.payload.get("member_id")
+        == project_channel(state_dir, "ch-owner-controls")["owner_actor_ref"]
     ]
     assert len(signed) == 1
 
@@ -507,6 +535,7 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
             "header": "Channel setup",
             "id": "channel-setup",
             "question": "Which team should collaborate?",
+            "discussion_seed": "The migration must preserve Task contract refs and provider session continuity.",
             "submit_action": "channel-create-and-start",
             "submit_label": "Create & start",
             "options": [
@@ -613,10 +642,7 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
         state_dir,
         requirement.payload,
         strict=True,
-    ) == (
-        "@all The migration must preserve Task contract refs and "
-        "provider session continuity.\n\n基于上面的需求创建评审 Channel。"
-    )
+    ) == "The migration must preserve Task contract refs and provider session continuity."
     assert requirement.payload["refs"]["plan_requirement_event_ids"] == [
         requirement_seed.id,
         origin.id,
@@ -624,6 +650,7 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
     assert requirement.payload["refs"]["plan_requirement_digest"] == (
         request["requirement_digest"]
     )
+    assert requirement.payload["refs"]["discussion_seed_legacy_fallback"] is False
     assert [
         event
         for event in log.read_all()
@@ -814,6 +841,7 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
             "channel_id": "ch-quick",
             "thread_id": "review-1",
             "message": "Review the requested change.",
+            "mode": "multi_lens",
         },
     )
 

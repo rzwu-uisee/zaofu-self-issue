@@ -280,10 +280,7 @@ def test_runner_contracts_are_worktree_relative() -> None:
 
 
 def test_ci_uses_current_controller_and_skips_provider_auth() -> None:
-    pipeline_path = ROOT / ".gitlab-ci.yml"
-    if not pipeline_path.exists():
-        pytest.skip(".gitlab-ci.yml is not part of this worktree")
-    pipeline = pipeline_path.read_text()
+    pipeline = (ROOT / ".gitlab-ci.yml").read_text()
 
     assert "examples/safe-team.yaml" not in pipeline
     assert "examples/prod/controller/prd-light-v3.yaml" in pipeline

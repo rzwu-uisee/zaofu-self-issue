@@ -143,6 +143,9 @@ def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
     assert '"decision": "propose_action"' in prompt
     assert "exact verbatim substring" in prompt
     assert "do not rely on English or Chinese keyword spelling" in prompt
+    assert "subject_type=task_create with two or three options" in prompt
+    assert "Do not nest a contract or channel_authority" in prompt
+    assert "effect.mode=continue, not defer" in prompt
 
 
 def test_chat_plan_payload_rejects_discussion_and_response_together() -> None:
@@ -585,7 +588,7 @@ def test_codex_headless_streaming_turn_uses_idle_timeout_not_total_timeout(
             "    elif req_id and method == 'turn/start':",
             "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'turn':{'id':'turn-1','status':'inProgress'}}}), flush=True)",
             "        for part in ['slow ', 'stream ', 'done']:",
-            "            time.sleep(0.4)",
+            "            time.sleep(0.12)",
             "            print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':part}}), flush=True)",
             "        print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'threadId':'codex-thread-1','turn':{'id':'turn-1','status':'completed'}}}), flush=True)",
         ]),
@@ -602,7 +605,7 @@ def test_codex_headless_streaming_turn_uses_idle_timeout_not_total_timeout(
         provider_session_id="",
         on_session_id=lambda _: None,
         on_message=messages.append,
-        timeout_s=1.0,
+        timeout_s=0.2,
     )
 
     assert result.ok is True

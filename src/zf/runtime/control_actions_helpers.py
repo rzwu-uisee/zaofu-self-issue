@@ -375,8 +375,13 @@ def validate_shared_action_payload(
     if action == "channel-post-message":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
-        if not str(payload.get("text") or payload.get("message") or "").strip():
-            return "text is required"
+        refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+        attachments = refs.get("attachments") if isinstance(refs.get("attachments"), list) else []
+        if (
+            not str(payload.get("text") or payload.get("message") or "").strip()
+            and not attachments
+        ):
+            return "text or attachment is required"
     if action == "channel-create":
         name = _required_text(payload, "name") or _required_text(payload, "channel_name")
         if not name:
@@ -444,6 +449,11 @@ def validate_shared_action_payload(
         contract_error = validate_channel_member_contract(payload)
         if contract_error:
             return contract_error
+    if action == "channel-set-leader":
+        if not _required_text(payload, "channel_id"):
+            return "channel_id is required"
+        if payload.get("expected_revision") is None:
+            return "expected_revision is required"
     if action == "channel-synthesis":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
@@ -575,6 +585,11 @@ def validate_shared_action_payload(
     if action == "channel-mark-read":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
+    if action == "channel-pin-message":
+        if not _required_text(payload, "channel_id"):
+            return "channel_id is required"
+        if not _required_text(payload, "message_id"):
+            return "message_id is required"
     if action == "channel-handoff":
         for key in ("channel_id", "message_id", "member_id", "target_member_id", "reason"):
             if not _required_text(payload, key):

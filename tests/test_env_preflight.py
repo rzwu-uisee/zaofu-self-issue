@@ -14,9 +14,7 @@ from zf.runtime.env_preflight import (
 
 
 def test_hook_command_healthy_for_real_zf() -> None:
-    from zf.runtime.cli_command import default_zf_cli_cmd
-
-    result = check_hook_command(default_zf_cli_cmd())
+    result = check_hook_command("/path/to/zaofu/.venv/bin/zf")
     assert result.ok, result.detail
 
 
@@ -51,10 +49,8 @@ def test_browser_deps_only_when_declared(tmp_path: Path) -> None:
 
 
 def test_run_env_preflight_shape(tmp_path: Path) -> None:
-    from zf.runtime.cli_command import default_zf_cli_cmd
-
     checks = run_env_preflight(
-        zf_cmd=default_zf_cli_cmd(),
+        zf_cmd="/path/to/zaofu/.venv/bin/zf",
         state_dir=tmp_path / ".zf",
         project_root=tmp_path,
     )

@@ -18,7 +18,7 @@ export type DiagnosticGroup = {
 export function workflowViewForRequest(request: WorkflowRequest): WorkflowView {
   const status = textValue(request.status).toLowerCase();
   const operationStatus = textValue(asRecord(request.operation).queue_status).toLowerCase();
-  if (["proposed", "draft", "ready"].includes(status)) return "decision";
+  if (["proposed", "draft", "ready", "clarifying"].includes(status)) return "decision";
   if (
     ["queued", "running", "submitted", "approved", "paused", "in_progress"].includes(status)
     || ["queued", "running"].includes(operationStatus)
@@ -50,6 +50,15 @@ export function readinessPresentation({
   }
   if (["submitted", "approved"].includes(requestStatus)) {
     return { title: "Run submitted", tone: "info" };
+  }
+  if (requestStatus === "clarifying") {
+    return { title: "Needs clarification", tone: "error" };
+  }
+  if (requestStatus === "draft") {
+    return { title: "Needs confirmation", tone: "info" };
+  }
+  if (requestStatus === "ready") {
+    return { title: "Ready to prepare proposal", tone: "info" };
   }
   return { title: "Ready to run", tone: "ok" };
 }

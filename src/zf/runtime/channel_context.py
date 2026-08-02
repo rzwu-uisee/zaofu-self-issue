@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 from zf.core.security.redaction import redact_obj
@@ -12,6 +13,7 @@ from zf.runtime.channel_roles import (
     load_role_definition_excerpt,
     normalize_role_context_ref,
 )
+from zf.runtime.channel_profiles import load_channel_profile_role_definition
 from zf.runtime.channel_question_dedup import (
     question_ledger as canonical_question_ledger,
     question_ledger_digest as canonical_question_ledger_digest,
@@ -36,6 +38,9 @@ def build_channel_context_pack(
     skill_refs: object = None,
     resolved_skill_refs: object = None,
     permission_profile: str = "",
+    profile_binding: object = None,
+    state_dir: Path | None = None,
+    project_root: Path | None = None,
     max_messages: int = 8,
     max_text_chars: int = 4000,
 ) -> dict[str, Any]:
@@ -58,6 +63,30 @@ def build_channel_context_pack(
         if isinstance(resolved_skill_refs, list)
         else []
     )
+    member_profile = (
+        profile_binding if isinstance(profile_binding, dict) else {}
+    )
+    if state_dir is not None and str(
+        member_profile.get("profile_snapshot_ref") or ""
+    ):
+        role_definition = load_channel_profile_role_definition(
+            Path(state_dir),
+            member_profile,
+        )
+    else:
+        role_definition = load_role_definition_excerpt(
+            safe_role_context_ref,
+            repo_root=project_root,
+            max_chars=_profile_limits(
+                profile,
+                max_messages=max_messages,
+                max_text_chars=max_text_chars,
+            )["role_definition_chars"],
+            fallback_to_builtin=(
+                str(member_profile.get("profile_provenance") or "")
+                != "project_catalog"
+            ),
+        )
     profile_limits = _profile_limits(profile, max_messages=max_messages, max_text_chars=max_text_chars)
     trigger_refs = _trigger_message_refs(
         channel,
@@ -125,15 +154,33 @@ def build_channel_context_pack(
         "visibility_profile": profile,
         "channel_role": channel_role,
         "permission_profile": normalized_permission_profile,
+        "profile_id": str(member_profile.get("profile_id") or ""),
+        "profile_revision": int(
+            member_profile.get("profile_revision") or 1
+        ),
+        "profile_provenance": str(
+            member_profile.get("profile_provenance") or "legacy_inline"
+        ),
+        "profile_digest": str(member_profile.get("profile_digest") or ""),
+        "config_digest": str(member_profile.get("config_digest") or ""),
+        "skill_set_digest": str(
+            member_profile.get("skill_set_digest") or ""
+        ),
+        "permission_digest": str(
+            member_profile.get("permission_digest") or ""
+        ),
+        "profile_snapshot_ref": str(
+            member_profile.get("profile_snapshot_ref") or ""
+        ),
+        "profile_snapshot_sha256": str(
+            member_profile.get("profile_snapshot_sha256") or ""
+        ),
         "role_context_ref": safe_role_context_ref,
         "skill_refs": safe_skill_refs,
         "resolved_skill_refs": safe_resolved_skill_refs,
         "skill_metadata": _skill_metadata(safe_skill_refs),
         "collaboration_contract": collaboration_contract,
-        "role_definition": load_role_definition_excerpt(
-            safe_role_context_ref,
-            max_chars=profile_limits["role_definition_chars"],
-        ),
+        "role_definition": role_definition,
         "summary": str((channel or {}).get("summary") or ""),
         "message_refs": [
             {

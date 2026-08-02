@@ -355,6 +355,7 @@ def test_signed_channel_setup_plan_auto_creates_and_starts_without_continuation(
                 "header": "Channel setup",
                 "id": "channel-setup",
                 "question": "Which collaboration setup?",
+                "discussion_seed": "Review the Feishu migration requirement.",
                 "submit_action": "channel-create-and-start",
                 "submit_label": "Create & start",
                 "options": [
@@ -471,7 +472,7 @@ def test_signed_channel_setup_plan_auto_creates_and_starts_without_continuation(
         and item.payload.get("channel_id") == "ch-feishu-auto"
     )
     assert requirement.payload["text"] == (
-        "@all Review the Feishu migration requirement."
+        "Review the Feishu migration requirement."
     )
     answered = next(
         item for item in events

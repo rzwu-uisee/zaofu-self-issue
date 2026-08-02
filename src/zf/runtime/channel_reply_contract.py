@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any
 
 from zf.core.events import EventWriter
 from zf.core.state.atomic_io import atomic_write_text
+from zf.core.state.locks import locked_path
 from zf.runtime.channel_contract_artifacts import (
     persist_channel_contract,
     persist_channel_source_manifest,
@@ -17,11 +17,15 @@ from zf.runtime.channel_contract_artifacts import (
     typed_items,
     validate_channel_contract,
 )
+from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_deliberation_contract import (
-    active_discussion_roster,
     apply_consensus_review_reply,
     apply_cross_review_reply,
     reply_question_records,
+)
+from zf.runtime.channel_prd_revision import (
+    consensus_mode_and_required_signers,
+    persist_synthesis_prd_revision,
 )
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
 from zf.runtime.channel_question_dedup import apply_question_dedup_reply
@@ -182,6 +186,44 @@ def _emit_synthesis(
     actor: str,
     source: str,
 ) -> None:
+    safe_channel_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", channel_id)
+    safe_thread_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", thread_id)
+    with locked_path(
+        Path(state_dir)
+        / "locks"
+        / f"channel-prd-{safe_channel_id}-{safe_thread_id}"
+    ):
+        _emit_synthesis_locked(
+            state_dir=state_dir,
+            writer=writer,
+            channel=project_channel(Path(state_dir), channel_id) or channel,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            member_id=member_id,
+            request=request,
+            reply=reply,
+            reply_event_id=reply_event_id,
+            synthesis_request_id=synthesis_request_id,
+            actor=actor,
+            source=source,
+        )
+
+
+def _emit_synthesis_locked(
+    *,
+    state_dir: Path,
+    writer: EventWriter,
+    channel: dict[str, Any],
+    channel_id: str,
+    thread_id: str,
+    member_id: str,
+    request: dict[str, Any],
+    reply: str,
+    reply_event_id: str,
+    synthesis_request_id: str,
+    actor: str,
+    source: str,
+) -> None:
     synthesis = _structured_reply_payload(reply, "channel_synthesis")
     if not synthesis:
         _emit_invalid_contract_finding(
@@ -227,6 +269,16 @@ def _emit_synthesis(
             status="invalid_channel_synthesis",
             reason=validation_error,
         )
+        return
+    if any(
+        event.type == "channel.synthesis.proposed"
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("channel_id") or "") == channel_id
+        and str(event.payload.get("thread_id") or "main") == thread_id
+        and str(event.payload.get("request_id") or "")
+        == synthesis_request_id
+        for event in writer.event_log.read_all()
+    ):
         return
     question_records, question_error = reply_question_records(
         synthesis,
@@ -314,7 +366,25 @@ def _emit_synthesis(
         source_refs=source_refs,
     )
     atomic_write_text(artifact_path, artifact_body)
-    digest = hashlib.sha256(artifact_body.encode("utf-8")).hexdigest()
+    revision = persist_synthesis_prd_revision(
+        state_dir,
+        channel=channel,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        member_id=member_id,
+        actor=actor,
+        reply_event_id=reply_event_id,
+        synthesis=synthesis,
+        typed_synthesis=typed_synthesis,
+        summary=summary,
+        artifact_ref=artifact_ref,
+        artifact_body=artifact_body,
+        source_refs=source_refs,
+        evidence_refs=evidence_refs,
+    )
+    canonical_artifact_ref = str(revision["artifact_ref"])
+    digest = str(revision["artifact_digest"])
+    prd_revision = int(revision["prd_revision"])
     synthesis_event = writer.emit(
         "channel.synthesis.proposed",
         actor=member_id or actor,
@@ -338,8 +408,7 @@ def _emit_synthesis(
                 if isinstance(synthesis.get("recommended_workflow"), dict)
                 else {}
             ),
-            "artifact_ref": artifact_ref.as_posix(),
-            "artifact_digest": digest,
+            **revision,
             "contract_ref": contract_descriptor["ref"],
             "contract_digest": contract_descriptor["sha256"],
             "source_refs": source_refs,
@@ -390,9 +459,11 @@ def _emit_synthesis(
     )
     if prior_consensus:
         return
-    required_signers = active_discussion_roster(
-        channel,
-        thread_id=thread_id,
+    product_mode, required_signers = (
+        consensus_mode_and_required_signers(
+            channel,
+            thread_id=thread_id,
+        )
     )
     if member_id and member_id not in required_signers:
         required_signers.append(member_id)
@@ -405,8 +476,11 @@ def _emit_synthesis(
         payload={
             "channel_id": channel_id,
             "thread_id": thread_id,
-            "artifact_ref": artifact_ref.as_posix(),
-            "artifact_digest": digest,
+            **revision,
+            "owner_actor_ref": str(
+                channel.get("owner_actor_ref") or ""
+            ),
+            "product_mode": product_mode,
             "proposed_by": member_id or actor,
             "required_signers": required_signers,
             "dissent": typed_items(synthesis.get("dissent")),
@@ -425,8 +499,9 @@ def _emit_synthesis(
                 "channel_id": channel_id,
                 "thread_id": thread_id,
                 "member_id": member_id,
-                "artifact_ref": artifact_ref.as_posix(),
+                "artifact_ref": canonical_artifact_ref,
                 "artifact_digest": digest,
+                "prd_revision": prd_revision,
                 "source": source,
             },
         )

@@ -1508,6 +1508,7 @@ export interface ChannelSummary {
   automation_reports?: Array<Record<string, unknown>>;
   discussion?: Record<string, unknown>;
   pending_reply_count?: number;
+  unread_count?: number;
 }
 
 export interface ExecutionPatternProjection {
@@ -2069,6 +2070,7 @@ export interface ChannelDetail extends ChannelSummary {
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
   discussions?: Record<string, Record<string, unknown>>;
+  consensus?: Record<string, Record<string, unknown>>;
   open_questions?: Array<Record<string, unknown>> | Record<string, Record<string, unknown>>;
   reply_requests?: Array<Record<string, unknown>>;
   provider_runs?: Array<Record<string, unknown>>;
@@ -2084,7 +2086,12 @@ export interface ChannelDetail extends ChannelSummary {
   state_updates?: Array<Record<string, unknown>>;
   owner_reports?: Array<Record<string, unknown>>;
   automation_reports?: Array<Record<string, unknown>>;
+  result_receipts?: Array<Record<string, unknown>>;
   discussion?: Record<string, unknown>;
+  owner_actor_ref?: string;
+  leader_member_id?: string;
+  leader_revision?: number;
+  origin_binding?: Record<string, unknown>;
   pending_reply_count?: number;
   linked_events?: EventRecord[];
   history_cleared_at?: string;
@@ -2375,6 +2382,10 @@ export interface ActionResponse {
   result?: Record<string, unknown>;
   reply?: Record<string, unknown>;
   route?: Record<string, unknown>;
+  receipt?: Record<string, unknown>;
+  client_message_id?: string;
+  message_id?: string;
+  duplicate?: boolean;
   blockers?: string[];
 }
 

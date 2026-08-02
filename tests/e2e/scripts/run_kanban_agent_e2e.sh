@@ -142,6 +142,7 @@ if marker.startswith("KBA_CHANNEL_"):
             "header": "Channel setup",
             "id": "channel-setup",
             "question": "Which collaboration setup should review the API authentication change?",
+            "discussion_seed": "Review the API authentication change.",
             "submit_action": "channel-create-and-start",
             "submit_label": "Create & start",
             "options": [

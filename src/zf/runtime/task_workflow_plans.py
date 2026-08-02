@@ -10,6 +10,7 @@ from typing import Any
 
 from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task
+from zf.core.workflow.request_policy import missing_fields_for_kind
 from zf.runtime.kanban_plan_requests import (
     PLAN_REQUEST_SCHEMA_VERSION,
     plan_request_digest,
@@ -23,19 +24,24 @@ from zf.runtime.workflow_anchor import workflow_task_request_binding
 
 
 TASK_WORKFLOW_PLAN_SCHEMA_VERSION = "task-workflow-plan.v1"
-_PARAMETER_KEYS = frozenset({
+TASK_WORKFLOW_PARAMETER_KEYS = frozenset({
     "acceptance",
     "artifact_refs",
     "backend",
     "channel_id",
+    "channel_member_id",
+    "consensus_event_id",
     "constraints",
     "expected_output",
+    "leader_revision",
     "open_questions",
+    "prd_revision",
     "risk",
     "request_id",
     "request_revision",
     "scope",
     "source_ref",
+    "source_digest",
     "source_refs",
     "source_root",
     "strictness",
@@ -45,6 +51,32 @@ _PARAMETER_KEYS = frozenset({
     "thread_id",
     "topic",
 })
+
+_PARAMETER_ALIASES = {
+    "channel_consensus_event_id": "consensus_event_id",
+}
+
+
+def workflow_route_missing_parameters(
+    route: dict[str, Any],
+    *,
+    objective: str,
+    parameters: dict[str, Any],
+) -> list[str]:
+    """Return mechanical Request fields missing from one executable route."""
+
+    if str(route.get("start_adapter") or "") not in {
+        "delivery_request_submit",
+        "registered_general",
+    }:
+        return []
+    return missing_fields_for_kind(
+        str(route.get("kind") or "workflow"),
+        objective=objective,
+        source_ref=str(parameters.get("source_ref") or ""),
+        source_root=str(parameters.get("source_root") or ""),
+        target_root=str(parameters.get("target_root") or ""),
+    )
 
 
 def build_task_workflow_plan_request(
@@ -115,7 +147,9 @@ def build_task_workflow_plan_request(
             nested_objective = str(
                 raw_parameters.pop("objective") or ""
             ).strip()
-        parameters, parameter_error = _normalize_parameters(raw_parameters)
+        parameters, parameter_error = normalize_task_workflow_parameters(
+            raw_parameters
+        )
         if parameter_error:
             errors.append(f"option {index}: {parameter_error}")
             continue
@@ -152,6 +186,17 @@ def build_task_workflow_plan_request(
             or raw_plan.get("objective")
             or task.title
         ).strip()
+        missing = workflow_route_missing_parameters(
+            route,
+            objective=objective,
+            parameters=parameters,
+        )
+        if missing:
+            errors.append(
+                f"option {index}: missing executable parameter(s): "
+                + ", ".join(missing)
+            )
+            continue
         option.update({
             "submit_mode": "propose",
             "submit_action": "workflow-start",
@@ -278,24 +323,32 @@ def build_task_workflow_plan_request(
     return redact_obj(request), ""
 
 
-def _normalize_parameters(
+def normalize_task_workflow_parameters(
     raw: object,
 ) -> tuple[dict[str, Any], str]:
     if raw in (None, ""):
         return {}, ""
     if not isinstance(raw, dict):
         return {}, "parameters must be a mapping"
-    unknown = sorted(set(raw) - _PARAMETER_KEYS)
+    normalized_raw = dict(raw)
+    for alias, canonical in _PARAMETER_ALIASES.items():
+        if alias not in normalized_raw:
+            continue
+        normalized_raw.setdefault(canonical, normalized_raw[alias])
+        normalized_raw.pop(alias, None)
+    unknown = sorted(set(normalized_raw) - TASK_WORKFLOW_PARAMETER_KEYS)
+    parameters = {
+        str(key): value
+        for key, value in normalized_raw.items()
+        if key in TASK_WORKFLOW_PARAMETER_KEYS
+        and value not in (None, "", [], {})
+    }
     if unknown:
         return (
-            {},
+            parameters,
             "unsupported parameter field(s): " + ", ".join(unknown),
         )
-    return {
-        str(key): value
-        for key, value in raw.items()
-        if value not in (None, "", [], {})
-    }, ""
+    return parameters, ""
 
 
 def task_workflow_binding_digest(task: Task) -> str:
@@ -341,6 +394,9 @@ def _unique_id(candidate: str, used: set[str]) -> str:
 
 __all__ = [
     "TASK_WORKFLOW_PLAN_SCHEMA_VERSION",
+    "TASK_WORKFLOW_PARAMETER_KEYS",
     "build_task_workflow_plan_request",
+    "normalize_task_workflow_parameters",
     "task_workflow_binding_digest",
+    "workflow_route_missing_parameters",
 ]

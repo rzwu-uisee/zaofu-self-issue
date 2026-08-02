@@ -36,6 +36,9 @@ from zf.integrations.feishu.lark_cli import (
     LarkCliDocumentClient,
 )
 from zf.integrations.feishu.controls import ControlHandler
+from zf.integrations.feishu.channel_result_card import (
+    push_channel_result_cards_once,
+)
 from zf.integrations.feishu.delivery_card import push_delivery_cards_once
 from zf.integrations.feishu.gateway import (
     AuthLevel,
@@ -739,6 +742,21 @@ def run_push(args: argparse.Namespace) -> int:
                     f"delivery push failed (channel unaffected): {exc}",
                     file=sys.stderr,
                 )
+        channel_result_sent = 0
+        try:
+            channel_result = push_channel_result_cards_once(
+                context.state_dir,
+                transport,
+                receive_id_type=str(
+                    getattr(args, "receive_id_type", "chat_id") or "chat_id"
+                ),
+            )
+            channel_result_sent = len(channel_result.get("sent", []))
+        except Exception as exc:
+            print(
+                f"channel result push failed (receipt unaffected): {exc}",
+                file=sys.stderr,
+            )
         # Streaming Q&A cards (feishu-stream P0-1): fold a reply's part.delta into
         # one typewriter card per request. Same fallback rule; §5.1 — deltas drive
         # the card only, never events.jsonl.
@@ -868,6 +886,7 @@ def run_push(args: argparse.Namespace) -> int:
             f"plan_cards_sent={plan_sent} plan_cards_updated={plan_updated}; "
             f"replan_cards_sent={replan_sent} replan_cards_updated={replan_updated}; "
             f"delivery_cards_sent={delivery_sent} delivery_cards_updated={delivery_updated}; "
+            f"channel_result_cards_sent={channel_result_sent}; "
             f"stream_cards_sent={stream_sent} stream_cards_updated={stream_updated}; "
             f"run_manager_status_sent={run_manager_status_sent} "
             f"run_manager_status_updated={run_manager_status_updated}; "

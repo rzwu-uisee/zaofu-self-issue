@@ -59,6 +59,7 @@ def _channel_setup_answer() -> str:
     "header": "Channel setup",
     "id": "channel-setup",
     "question": "Which collaboration setup should run?",
+    "discussion_seed": "Preserve all Task contract refs during migration.",
     "submit_action": "channel-create-and-start",
     "submit_label": "Create & start",
     "options": [
@@ -116,7 +117,7 @@ def _task_workflow_answer() -> str:
                             "task_id": "TASK-PLAN",
                             "route_id": "delivery:prd:standard",
                             "objective": "Implement the approved Task.",
-                            "parameters": {},
+                            "parameters": {"target_root": "/workspace/project"},
                         },
                     },
                 },
@@ -145,6 +146,64 @@ def _task_workflow_answer() -> str:
             "allow_other": True,
         },
     })
+
+
+def test_channel_task_create_plan_accepts_provider_option_aliases() -> None:
+    request = extract_plan_request(
+        json.dumps({
+            "plan_request": {
+                "subject_type": "task_create",
+                "header": "Create Task",
+                "id": "create-task",
+                "question": "Create the exact PRD-bound Task?",
+                "options": [
+                    {
+                        "id": "create",
+                        "label": "Create Task (Recommended)",
+                        "description": "Prepare the proposal.",
+                        "recommended": True,
+                        "mode": "propose",
+                        "action": "create-task",
+                        "payload": {
+                            "title": "Deliver the Channel PRD",
+                            "objective": "Implement the confirmed requirement.",
+                            "acceptance": "Acceptance checks pass.",
+                            "acceptance_criteria": ["Run focused tests."],
+                            "priority": 3,
+                        },
+                    },
+                    {
+                        "id": "continue",
+                        "label": "Continue discussion",
+                        "description": "Do not create work yet.",
+                        "mode": "continue",
+                    },
+                ],
+                "allow_other": False,
+            },
+        }),
+        plan_context={
+            "workflow_parameters": {
+                "channel_id": "ch-product",
+                "thread_id": "main",
+                "channel_member_id": "product-pm",
+                "leader_revision": 1,
+                "prd_revision": 2,
+                "source_ref": "channels/ch-product/prd/r2.json",
+                "source_digest": "a" * 64,
+            },
+        },
+    )
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    create, keep_discussing = request["options"]
+    assert create["submit_mode"] == "propose"
+    assert create["submit_action"] == "create-task"
+    assert create["submit_payload"]["title"] == "Deliver the Channel PRD"
+    assert create["submit_payload"]["channel_authority"]["prd_revision"] == 2
+    assert keep_discussing["submit_mode"] == "continue"
+    assert keep_discussing.get("submit_action", "") == ""
 
 
 def _requested(event_id: str = "evt-plan") -> ZfEvent:
@@ -328,6 +387,9 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
     assert request is not None
     assert request["valid"] is True
     assert request["submit_action"] == "channel-create-and-start"
+    assert request["discussion_seed"] == (
+        "Preserve all Task contract refs during migration."
+    )
     assert request["submit_label"] == "Create & start"
     assert request["allow_other"] is False
     quick = request["options"][0]
@@ -436,6 +498,9 @@ def test_task_workflow_plan_normalizes_option_effects_and_route_details() -> Non
         request["config_digest"]
     )
     assert delivery["submit_payload"]["parameters"]["channel_id"] == "ch-prd"
+    assert delivery["submit_payload"]["parameters"]["target_root"] == (
+        "/workspace/project"
+    )
     assert delivery["submit_payload"]["parameters"]["source_refs"][
         "channel_prd_digest"
     ] == "sha256:canonical"
@@ -466,6 +531,90 @@ def test_task_workflow_plan_normalizes_option_effects_and_route_details() -> Non
     assert gate["submit_mode"] == "propose"
     assert gate["submit_action"] == "workflow-start"
     assert gate["submit_payload"]["route_id"] == "research:fixed"
+
+
+def test_agent_task_workflow_plan_rejects_missing_route_parameters() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    answer = json.loads(_task_workflow_answer())
+    del answer["plan_request"]["options"][0]["effect"]["payload"][
+        "parameters"
+    ]["target_root"]
+
+    request = extract_plan_request(
+        json.dumps(answer),
+        plan_context={
+            "task_id": "TASK-PLAN",
+            "task_contract_digest": "sha256:task-binding",
+        },
+        config=config,
+    )
+
+    assert request is not None
+    assert request["valid"] is False
+    assert "missing executable parameter(s): target_root" in (
+        request["validation_error"]
+    )
+
+
+def test_agent_task_workflow_plan_uses_trusted_context_route_parameters() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    answer = json.loads(_task_workflow_answer())
+    del answer["plan_request"]["options"][0]["effect"]["payload"][
+        "parameters"
+    ]["target_root"]
+
+    request = extract_plan_request(
+        json.dumps(answer),
+        plan_context={
+            "task_id": "TASK-PLAN",
+            "task_contract_digest": "sha256:task-binding",
+            "workflow_parameters": {
+                "target_root": "/trusted/project",
+            },
+        },
+        config=config,
+    )
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    assert request["options"][0]["submit_payload"]["parameters"][
+        "target_root"
+    ] == "/trusted/project"
+
+
+def test_invalid_workflow_field_preserves_known_context_for_repair() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    answer = json.loads(_task_workflow_answer())
+    parameters = answer["plan_request"]["options"][0]["effect"]["payload"][
+        "parameters"
+    ]
+    parameters["channel_consensus_event_id"] = "evt-consensus"
+    parameters["invented_provider_field"] = "must-not-survive"
+
+    request = extract_plan_request(
+        json.dumps(answer),
+        plan_context={
+            "task_id": "TASK-PLAN",
+            "task_contract_digest": "sha256:task-binding",
+            "workflow_parameters": {
+                "channel_id": "ch-plan",
+                "channel_member_id": "leader-1",
+                "leader_revision": 2,
+                "target_root": "/trusted/project",
+            },
+        },
+        config=config,
+    )
+
+    assert request is not None
+    assert request["valid"] is False
+    assert "invented_provider_field" in request["validation_error"]
+    payload = request["options"][0]["submit_payload"]
+    assert payload["parameters"]["channel_id"] == "ch-plan"
+    assert payload["parameters"]["channel_member_id"] == "leader-1"
+    assert payload["parameters"]["target_root"] == "/trusted/project"
+    assert payload["parameters"]["consensus_event_id"] == "evt-consensus"
+    assert "invented_provider_field" not in payload["parameters"]
 
 
 def test_plan_subject_boundaries_keep_channel_and_workflow_orthogonal() -> None:

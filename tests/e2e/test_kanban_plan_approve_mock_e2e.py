@@ -12,6 +12,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 from zf.core.config.loader import load_config
+from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
@@ -175,11 +176,84 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
             behavior="Implement the accepted Channel requirement.",
             verification="Run the Task acceptance checks.",
             spec_ref="channel-artifacts/ch-prd/prd.md",
-            source_ref="channel:ch-prd/main",
+            source_ref="channel-artifacts/ch-prd/prd.md",
+            source_revision="1",
+            source_mode="channel_prd",
+            evidence_contract={
+                "channel_id": "ch-prd",
+                "thread_id": "main",
+                "channel_member_id": "product-pm",
+                "leader_revision": 1,
+                "prd_revision": 1,
+                "source_digest": "sha256:canonical-prd",
+            },
             handoff_artifacts=["channel-artifacts/ch-prd/prd.md"],
         ),
     )
     TaskStore(state_dir / "kanban.json").add(task)
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id="ch-prd",
+        payload={
+            "channel_id": "ch-prd",
+            "name": "Canonical PRD",
+            "owner_actor_ref": "owner:operator",
+            "leader_member_id": "product-pm",
+            "leader_revision": 1,
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.member.added",
+        actor="web",
+        correlation_id="ch-prd",
+        payload={
+            "channel_id": "ch-prd",
+            "member_id": "product-pm",
+            "member_type": "provider_agent",
+            "channel_role": "product_pm",
+            "provider": "deterministic",
+            "permission_profile": "read_only",
+            "permissions": [
+                "read",
+                "message",
+                "summarize",
+                "propose_workflow",
+            ],
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.consensus.proposed",
+        actor="product-pm",
+        correlation_id="ch-prd",
+        payload={
+            "channel_id": "ch-prd",
+            "thread_id": "main",
+            "prd_ref": "channel-artifacts/ch-prd/prd.md",
+            "prd_digest": "canonical-prd",
+            "prd_revision": 1,
+            "owner_actor_ref": "owner:operator",
+            "proposed_by": "product-pm",
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.consensus.reached",
+        actor="owner:operator",
+        correlation_id="ch-prd",
+        payload={
+            "channel_id": "ch-prd",
+            "thread_id": "main",
+            "prd_ref": "channel-artifacts/ch-prd/prd.md",
+            "prd_digest": "canonical-prd",
+            "prd_revision": 1,
+            "confirmed_by": "owner:operator",
+            "source": "test",
+        },
+    )
     script = tmp_path / "fake_task_workflow_plan.py"
     script.write_text(
         "\n".join([
@@ -222,23 +296,14 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
         project_root=tmp_path,
     ))
     headers = {"x-zf-web-token": "test-token"}
-    workflow_context = {
+    expected_authority = {
         "channel_id": "ch-prd",
         "thread_id": "main",
-        "synthesis_event_id": "evt-synthesis",
+        "channel_member_id": "product-pm",
+        "leader_revision": 1,
+        "prd_revision": 1,
         "source_ref": "channel-artifacts/ch-prd/prd.md",
-        "source_refs": {
-            "channel_id": "ch-prd",
-            "thread_id": "main",
-            "synthesis_event_id": "evt-synthesis",
-            "channel_prd_ref": "channel-artifacts/ch-prd/prd.md",
-            "channel_prd_digest": "sha256:canonical-prd",
-        },
-        "artifact_refs": [{
-            "kind": "channel_prd",
-            "ref": "channel-artifacts/ch-prd/prd.md",
-            "digest": "sha256:canonical-prd",
-        }],
+        "source_digest": "sha256:canonical-prd",
     }
 
     planned = client.post(
@@ -252,7 +317,6 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
             "task_id": task.id,
             "sync": True,
             "message": "Plan a workflow for the canonical Channel PRD.",
-            "workflow_context": workflow_context,
         },
     )
 
@@ -260,12 +324,10 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
     plan = planned.json()["reply"]["plan_request"]
     assert plan["valid"] is True, plan["validation_error"]
     selected = plan["options"][0]["submit_payload"]
-    assert selected["parameters"]["source_refs"] == (
-        workflow_context["source_refs"]
-    )
-    assert selected["parameters"]["artifact_refs"] == (
-        workflow_context["artifact_refs"]
-    )
+    assert {
+        key: selected["parameters"][key]
+        for key in expected_authority
+    } == expected_authority
     events = EventLog(state_dir / "events.jsonl").read_all()
     assert not any(
         event.type == "workflow.invoke.requested"
@@ -297,9 +359,10 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
         if event.type == "operator.action.proposed"
     )
     assert proposal["action"] == "workflow-start"
-    assert proposal["payload"]["parameters"]["source_refs"][
-        "channel_prd_digest"
-    ] == "sha256:canonical-prd"
+    assert {
+        key: proposal["payload"]["parameters"][key]
+        for key in expected_authority
+    } == expected_authority
     assert not any(
         event.type == "workflow.invoke.requested"
         for event in final_events

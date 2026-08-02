@@ -36,6 +36,10 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "channel-create-from-template",
     "channel-create-and-start",
     "channel-discussion-start",
+    "channel-set-leader",
+    "channel-invite-member",
+    "channel-remove-member",
+    "channel-pin-message",
     "channel-question-resolve",
     "channel-consensus-confirm",
     "channel-consensus-block",
@@ -284,6 +288,7 @@ CANONICAL_ACTIONS = {
     "channel.create_and_start": "channel-create-and-start",
     "channel.setup.apply": "channel-create-and-start",
     "channel.discussion.start": "channel-discussion-start",
+    "channel.leader.set": "channel-set-leader",
     "channel.add_member": "channel-invite-member",
     "channel-add-member": "channel-invite-member",
     "channel.member.permission": "channel-update-member-permission",
@@ -297,6 +302,7 @@ CANONICAL_ACTIONS = {
     "channel.consensus.confirm": "channel-consensus-confirm",
     "channel.consensus.block": "channel-consensus-block",
     "channel.mark_read": "channel-mark-read",
+    "channel.message.pin": "channel-pin-message",
     "channel.handoff": "channel-handoff",
     "channel.discussion_mode": "channel-discussion-mode",
     "channel.owner_report.request": "channel-owner-report",
@@ -383,7 +389,8 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "an action. Never request secrets, never combine "
     "plan_request with action_proposal. Ordinary Plan requests are clarification, "
     "not permission or approval. A Channel setup Plan is the sole bounded "
-    "exception: set submit_action=channel-create-and-start, "
+    "exception: set submit_action=channel-create-and-start, include a clean "
+    "discussion_seed containing only the business requirement, "
     "submit_label='Create & start', allow_other=false, and give every option "
     "an exact submit_payload containing template_id plus optional name/overrides. "
     "The selected option atomically creates the Channel and members, posts the "
@@ -425,7 +432,17 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "action=channel-create-and-start with template_id and the requirement. "
     "When asked to start a discussion in an existing Channel, use "
     "action=channel-discussion-start with payload.channel_id and "
-    "payload.objective. For an existing Task, return a task_workflow Plan whose "
+    "payload.objective. For an exact confirmed Channel PRD Task handoff, return "
+    "subject_type=task_create with two or three options. The recommended option "
+    "uses mode=propose, action=create-task, and a flat submit payload limited "
+    "to title, objective, acceptance, acceptance_criteria, scope, "
+    "explicit_non_goals, skills_required, priority, and optional task_id; "
+    "priority must be an integer from 1 through 5. Put mode, action, and "
+    "payload inside the option's effect object. "
+    "Do not nest contract or channel_authority; runtime binds the exact "
+    "authority. Include a second no-action alternative with "
+    "effect.mode=continue, not defer, and do not combine this Plan with "
+    "action_proposal. For an existing Task, return a task_workflow Plan whose "
     "executable options use mode=propose, action=workflow-start, and exact "
     "task_id, route_id, objective, config_digest, and parameters. The selected "
     "option is bound to the current task_contract_digest and becomes a separate "

@@ -32,6 +32,7 @@ from zf.core.config.schema import (
 from zf.core.cost.tracker import CostTracker
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.core.verification.event_schema import (
@@ -259,7 +260,7 @@ spec:
         assert "workflow.submit.accepted" in types
         assert "workflow.invoke.requested" in types
 
-    def test_channel_request_proposes_then_project_submit_explicitly_ignites(
+    def test_legacy_channel_request_checks_authority_but_does_not_ignite(
         self,
         tmp_path,
         monkeypatch,
@@ -286,6 +287,66 @@ spec:
         state.mkdir()
         (state / "kanban.json").write_text("[]\n", encoding="utf-8")
         log = EventLog(state / "events.jsonl")
+        writer = EventWriter(log)
+        writer.emit(
+            "channel.created",
+            actor="web",
+            correlation_id="ch-product",
+            payload={
+                "channel_id": "ch-product",
+                "name": "Product",
+                "owner_actor_ref": "web",
+                "leader_member_id": "product-pm",
+                "leader_revision": 1,
+                "source": "web",
+            },
+        )
+        writer.emit(
+            "channel.member.invited",
+            actor="web",
+            correlation_id="ch-product",
+            payload={
+                "channel_id": "ch-product",
+                "member_id": "product-pm",
+                "persona": "Product PM",
+                "channel_role": "product_pm",
+                "permissions": [
+                    "read",
+                    "message",
+                    "propose_workflow",
+                ],
+                "source": "web",
+            },
+        )
+        writer.emit(
+            "channel.consensus.proposed",
+            actor="product-pm",
+            correlation_id="ch-product",
+            payload={
+                "channel_id": "ch-product",
+                "thread_id": "main",
+                "artifact_ref": "channels/ch-product/prd/r1.json",
+                "artifact_digest": "a" * 64,
+                "prd_ref": "channels/ch-product/prd/r1.json",
+                "prd_digest": "a" * 64,
+                "prd_revision": 1,
+                "source": "web",
+            },
+        )
+        writer.emit(
+            "channel.consensus.reached",
+            actor="web",
+            correlation_id="ch-product",
+            payload={
+                "channel_id": "ch-product",
+                "thread_id": "main",
+                "prd_ref": "channels/ch-product/prd/r1.json",
+                "prd_digest": "a" * 64,
+                "prd_revision": 1,
+                "confirmed_by": "web",
+                "source": "web",
+            },
+        )
         app = create_app(state, config=load_config(config_path), project_root=tmp_path)
         client = TestClient(app)
 
@@ -298,37 +359,22 @@ spec:
                 "objective": "Fix checkout timeout and add a regression test",
                 "backend": "mock",
                 "allow_missing_env": True,
+                "channel_member_id": "product-pm",
+                "leader_revision": 1,
+                "prd_revision": 1,
+                "source_ref": "channels/ch-product/prd/r1.json",
+                "source_digest": "a" * 64,
             },
         )
 
         assert proposed.status_code == 202, proposed.text
         proposal = proposed.json()
-        assert proposal["status"] == "proposal_ready"
-        assert "workflow.invoke.requested" not in [event.type for event in log.read_all()]
-        preview = proposal["result"]
-        intake_ref = preview["payload"]["workflow_prompt_ref"]
-
-        submitted = client.post(
-            "/api/projects/default/workflow-submit",
-            headers={"x-zf-web-token": "test-token"},
-            json={
-                "intake_ref": intake_ref,
-                "request_id": preview["payload"]["request_id"],
-                "proposal_ref": preview["proposal_ref"],
-                "proposal_digest": preview["proposal"]["proposal_digest"],
-                "kind": "issue",
-                "apply": True,
-                "allow_missing_env": True,
-            },
-        )
-
-        assert submitted.status_code == 202, submitted.text
-        invokes = [
-            event for event in log.read_all()
-            if event.type == "workflow.invoke.requested"
-        ]
-        assert len(invokes) == 1
-        assert invokes[0].payload["flow_kind"] == "issue"
+        assert proposal["status"] == "queued_no_runtime"
+        assert proposal["deprecated_route"] is True
+        assert "Leader -> Kanban Agent Plan" in proposal["replacement"]
+        event_types = [event.type for event in log.read_all()]
+        assert "workflow.invoke.requested" not in event_types
+        assert "task.created" not in event_types
 
     def test_with_tasks(self, state_dir, client):
         TaskStore(state_dir / "kanban.json").add(
@@ -1789,6 +1835,17 @@ class TestApiChannels:
                 "permissions": ["read", "message"],
             },
         )
+        local_client.post(
+            "/api/actions/channel.add_member",
+            headers={"x-zf-web-token": "test-token"},
+            json={
+                "channel_id": "ch-zaofu",
+                "member_id": "codex-1",
+                "member_type": "codex",
+                "backend": "codex",
+                "permissions": ["read", "message"],
+            },
+        )
 
         r = local_client.post(
             "/api/channels/ch-zaofu/messages",
@@ -1843,7 +1900,11 @@ class TestApiChannels:
         assert handoff.status_code == 202
         assert TaskStore(state_dir / "kanban.json").list_all() == []
         detail = local_client.get("/api/channels/ch-zaofu").json()
-        assert detail["discussion"]["mode"] == "fanout_then_synthesis"
+        assert detail["discussion"]["mode"] == "multi_lens"
+        assert (
+            detail["discussion"]["engine_mode"]
+            == "fanout_then_synthesis"
+        )
         assert detail["handoffs"][1]["status"] == "accepted"
         assert detail["reply_requests"][0]["status"] == "completed"
 
@@ -1861,14 +1922,17 @@ class TestApiChannels:
                 "channel_id": "ch-relay",
                 "mode": "mention_relay",
                 "max_relay_depth": 2,
+                "max_parallel_replies": 1,
                 "phase_deadline_seconds": {"phase1_blind": 120},
                 "synthesizer": "arch-1",
             },
         )
         assert resp.status_code == 202
         discussion = local_client.get("/api/channels/ch-relay").json()["discussion"]
-        assert discussion["mode"] == "mention_relay"
+        assert discussion["mode"] == "clarification"
+        assert discussion["engine_mode"] == "mention_relay"
         assert discussion["max_relay_depth"] == 2
+        assert discussion["max_parallel_replies"] == 1
         assert discussion["phase_deadline_seconds"] == {"phase1_blind": 120}
         assert discussion["synthesizer"] == "arch-1"
 

@@ -234,21 +234,27 @@ def test_doc156_channel_research_adoption_and_workflow_start(
             if event.type == "channel.agent.reply.completed"
             and event.payload.get("thread_id") == "main"
         ]
-        if len(replies) >= 3:
+        if len(replies) >= 1:
             break
         time.sleep(0.02)
-    assert len(replies) == 3
+    assert len(replies) == 1
+
+    requested_synthesis = _approved_action(
+        service,
+        writer,
+        "channel-synthesis-request",
+        {
+            "channel_id": channel_id,
+            "thread_id": "main",
+            "target_member_id": "tech_leader",
+            "reason": "Finalize the explicit discussion into a PRD draft.",
+        },
+    )
+    assert requested_synthesis["status"] == "requested"
 
     synthesis_request = None
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        advance_discussion(
-            state_dir,
-            writer,
-            channel_id=channel_id,
-            thread_id="main",
-            project_root=tmp_path,
-        )
         synthesis_request = next(
             (
                 event
@@ -262,24 +268,19 @@ def test_doc156_channel_research_adoption_and_workflow_start(
             break
         time.sleep(0.02)
     assert synthesis_request is not None
-    host = SimpleNamespace(
-        state_dir=state_dir,
-        event_log=log,
-        event_writer=writer,
-        project_root=tmp_path,
-        config=config,
-        openclaw_client=None,
-    )
-    EventReactorMixin._on_channel_synthesis_requested(
-        host,
-        synthesis_request,
-    )
-    assert any(
-        event.type == "channel.synthesis.proposed"
-        and event.payload.get("request_id")
-        == synthesis_request.payload["request_id"]
-        for event in log.read_all()
-    )
+    deadline = time.monotonic() + 3
+    synthesis_proposed = False
+    while time.monotonic() < deadline:
+        synthesis_proposed = any(
+            event.type == "channel.synthesis.proposed"
+            and event.payload.get("request_id")
+            == synthesis_request.payload["request_id"]
+            for event in log.read_all()
+        )
+        if synthesis_proposed:
+            break
+        time.sleep(0.02)
+    assert synthesis_proposed
 
     request = _approved_action(
         service,
@@ -502,7 +503,7 @@ def test_doc156_channel_research_adoption_and_workflow_start(
     assert sum(
         event.type == "operator.action.resolved"
         for event in events
-    ) == 6
+    ) == 7
 
 
 def test_four_lens_discussion_cross_review_and_signoff_closes(
@@ -741,7 +742,9 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
         {
             "channel_id": channel_id,
             "thread_id": thread_id,
+            "artifact_ref": consensus.payload["artifact_ref"],
             "artifact_digest": consensus.payload["artifact_digest"],
+            "prd_revision": consensus.payload["prd_revision"],
         },
     )
     assert confirmed["status"] == "confirmed"

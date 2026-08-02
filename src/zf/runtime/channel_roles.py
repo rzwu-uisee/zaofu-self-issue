@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path, PurePosixPath
 
 from zf.core.package_source import installed_local_source_root
@@ -52,6 +53,7 @@ def load_role_definition_excerpt(
     *,
     repo_root: Path | None = None,
     max_chars: int = ROLE_CONTEXT_MAX_CHARS,
+    fallback_to_builtin: bool = False,
 ) -> dict[str, str]:
     """Load a bounded role definition excerpt for context packs.
 
@@ -61,23 +63,33 @@ def load_role_definition_excerpt(
     ref = normalize_role_context_ref(role_context_ref)
     if not ref:
         return {}
-    root = Path(repo_root) if repo_root is not None else _REPO_ROOT
-    path = (root / ref).resolve()
-    allowed_root = (root / ROLE_CONTEXT_DIR).resolve()
-    try:
-        path.relative_to(allowed_root)
-    except ValueError:
-        return {}
-    if not path.is_file():
-        return {"role_context_ref": ref, "status": "missing"}
-    text = path.read_text(encoding="utf-8")
-    excerpt = _clip_role_definition(text, max_chars=max_chars)
-    return {
-        "role_context_ref": ref,
-        "status": "loaded",
-        "excerpt": excerpt,
-        "chars": str(len(excerpt)),
-    }
+    roots: list[tuple[Path, str]] = []
+    if repo_root is not None:
+        roots.append((Path(repo_root), "project"))
+    else:
+        roots.append((_REPO_ROOT, "package"))
+    if fallback_to_builtin and all(root != _REPO_ROOT for root, _ in roots):
+        roots.append((_REPO_ROOT, "package"))
+    for root, source in roots:
+        path = (root / ref).resolve()
+        allowed_root = (root / ROLE_CONTEXT_DIR).resolve()
+        try:
+            path.relative_to(allowed_root)
+        except ValueError:
+            continue
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        excerpt = _clip_role_definition(text, max_chars=max_chars)
+        return {
+            "role_context_ref": ref,
+            "status": "loaded",
+            "source": source,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "excerpt": excerpt,
+            "chars": str(len(excerpt)),
+        }
+    return {"role_context_ref": ref, "status": "missing"}
 
 
 def _clip_role_definition(text: str, *, max_chars: int) -> str:

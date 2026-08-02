@@ -74,7 +74,7 @@ def test_wake_list_changes_are_explicit():
             f"provider.turn.closed → 148; Channel question dedup request/"
             f"apply lifecycle +2 → 150; typed Channel question update, "
             f"cross-review request/result, and consensus-review rejection "
-            f"lifecycle +5 → 155; controlled run cancel housekeeping "
+            f"lifecycle +5 → 155; controlled run cancellation wake edge "
             f"+1:run.cancelled → 156"
         )
 

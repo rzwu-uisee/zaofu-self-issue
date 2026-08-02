@@ -15,7 +15,7 @@ from zf.runtime.channel_contracts import (
 )
 
 
-TEMPLATE_VERSION = "2026-07-30.2"
+TEMPLATE_VERSION = "2026-07-31.1"
 WRITER_PROFILES = {
     "artifact_writer",
     "project_writer",
@@ -94,7 +94,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
         "writer_roles": ["product_pm"],
         "writer_scope": ["docs/design/**", "docs/impl/**"],
         "discussion": {
-            "mode": "fanout_then_synthesis",
+            "mode": "conversation",
             "synthesizer": "synthesizer",
         },
     },
@@ -141,7 +141,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
         "writer_roles": ["researcher"],
         "writer_scope": [".zf/research/**", "/tmp/zf-research/**"],
         "discussion": {
-            "mode": "fanout_then_synthesis",
+            "mode": "conversation",
             "synthesizer": "synthesizer",
         },
     },
@@ -184,7 +184,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
         "writer_roles": ["arch"],
         "writer_scope": ["docs/design/**", "docs/impl/**"],
         "discussion": {
-            "mode": "fanout_then_synthesis",
+            "mode": "multi_lens",
             "synthesizer": "arch",
         },
     },
@@ -219,7 +219,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
         "writer_roles": ["tech_leader"],
         "writer_scope": ["**"],
         "discussion": {
-            "mode": "fanout_then_synthesis",
+            "mode": "conversation",
             "synthesizer": "tech_leader",
         },
     },
@@ -256,7 +256,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
         "writer_roles": ["tech_leader"],
         "writer_scope": ["**"],
         "discussion": {
-            "mode": "fanout_then_synthesis",
+            "mode": "clarification",
             "synthesizer": "tech_leader",
         },
     },
@@ -327,21 +327,18 @@ def materialize_channel_template(
         member.setdefault("provider", provider)
         member.setdefault("model", model)
         member["member_type"] = "provider_agent"
-        member["permissions"] = ["read", "message", "summarize", "propose_workflow"]
+        member["profile_id"] = str(member["member_id"])
+        member["profile_revision"] = 1
+        member["profile_provenance"] = "template_inline"
+        member["permission_profile"] = "read_only"
+        member["permission_ceiling"] = "read_only"
+        member["permissions"] = ["read", "message", "summarize"]
         enabled_members.append(member)
     result["members"] = enabled_members
 
     writer_role = str(
         override_map.get("writer_role")
-        or next(
-            (
-                member["channel_role"]
-                for member in enabled_members
-                if normalize_permission_profile(member.get("permission_profile"))
-                in WRITER_PROFILES
-            ),
-            "",
-        )
+        or next(iter(result.get("writer_roles") or []), "")
     ).strip()
     if writer_role and writer_role not in result.get("writer_roles", []):
         return None, f"writer_role is not allowed by template: {writer_role}"
@@ -354,24 +351,24 @@ def materialize_channel_template(
         )
     ):
         return None, "writer_scope must be a non-empty string list"
+    leader_member_id = writer_role or str(
+        result.get("discussion", {}).get("synthesizer") or ""
+    )
     for member in enabled_members:
         role = str(member["channel_role"])
         profile = normalize_permission_profile(member.get("permission_profile"))
-        if role != writer_role and profile in WRITER_PROFILES:
-            member["permission_profile"] = "read_only"
-        member["writer_scope"] = list(writer_scope) if role == writer_role else []
+        member["writer_scope"] = []
+        if str(member["member_id"]) == leader_member_id:
+            member["permissions"] = [
+                "read",
+                "message",
+                "summarize",
+                "propose_workflow",
+            ]
         if normalize_permission_profile(member["permission_profile"]) not in (
             CHANNEL_PERMISSION_PROFILES
         ):
             return None, f"unknown permission profile for role: {role}"
-    writers = [
-        member for member in enabled_members
-        if normalize_permission_profile(member.get("permission_profile"))
-        in WRITER_PROFILES
-    ]
-    if len(writers) > 1:
-        return None, "channel template may grant writer authority to at most one member"
-
     budget = override_map.get("budget") or {}
     if not isinstance(budget, dict):
         return None, "budget must be a mapping"
@@ -426,6 +423,7 @@ def materialize_channel_template(
         "materialization_digest": materialization_digest,
         "writer_role": writer_role,
         "writer_scope": list(writer_scope),
+        "leader_member_id": leader_member_id,
     })
     return result, ""
 

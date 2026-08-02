@@ -5,10 +5,13 @@
 
 import { useState } from "react";
 import { AgentSessionTimeline } from "./AgentSessionTimeline";
+import { PlanInteractionForm } from "./AgentInteractionControls";
 import { ComposerSubmitButton } from "./ComposerSubmitButton";
 import type {
   AgentConversation,
   AgentSessionPart,
+  AgentSessionPlanRequest,
+  AgentSessionPlanResponse,
   AgentSessionRun,
   AgentSessionStatus,
   AgentSessionThread,
@@ -85,8 +88,71 @@ const channelConversation: AgentConversation = {
 
 const COMPOSER_STATES: ComposerStatus[] = ["idle", "submitted", "streaming", "error"];
 
+function fixturePlan(
+  subjectType: "task_create" | "task_workflow",
+): AgentSessionPlanRequest {
+  const taskCreate = subjectType === "task_create";
+  return {
+    requestEventId: `evt-${subjectType}`,
+    requestId: `request-${subjectType}`,
+    revision: 1,
+    header: taskCreate ? "Create Task from PRD" : "Plan workflow",
+    subjectType,
+    questionId: `question-${subjectType}`,
+    question: taskCreate
+      ? "How should the canonical PRD become a Task?"
+      : "Which workflow route should execute the Task?",
+    options: taskCreate ? [
+      {
+        id: "full-task",
+        label: "Full delivery Task (Recommended)",
+        recommended: true,
+        submitAction: "create-task",
+        submitMode: "propose",
+      },
+      {
+        id: "focused-task",
+        label: "Focused Task",
+        submitAction: "create-task",
+        submitMode: "propose",
+      },
+      {
+        id: "task-later",
+        label: "No Task yet",
+        submitMode: "continue",
+      },
+    ] : [
+      {
+        id: "delivery",
+        label: "Delivery workflow (Recommended)",
+        recommended: true,
+        submitAction: "workflow-start",
+        submitMode: "propose",
+      },
+      {
+        id: "research",
+        label: "Research workflow",
+        submitAction: "workflow-start",
+        submitMode: "propose",
+      },
+      {
+        id: "workflow-later",
+        label: "No workflow yet",
+        submitMode: "continue",
+      },
+    ],
+    allowOther: false,
+    questions: [],
+    valid: true,
+  };
+}
+
 export function AgentSessionFixturePage() {
   const [interrupted, setInterrupted] = useState("");
+  const [taskPlanResponse, setTaskPlanResponse] = useState<AgentSessionPlanResponse>();
+  const [workflowPlanResponse, setWorkflowPlanResponse] = useState<AgentSessionPlanResponse>();
+  const taskPlan = fixturePlan("task_create");
+  const workflowPlan = fixturePlan("task_workflow");
   return (
     <div style={{ padding: 24, maxWidth: 980, margin: "0 auto" }}>
       <h2>AgentSessionTimeline fixture</h2>
@@ -106,6 +172,22 @@ export function AgentSessionFixturePage() {
         ))}
       </div>
       {interrupted ? <p data-testid="interrupt-echo" className="muted">{interrupted}</p> : null}
+
+      <h3 style={{ marginTop: 24 }}>Plan options - Task creation</h3>
+      <div data-testid="fx-task-plan-options">
+        <PlanInteractionForm
+          request={{ ...taskPlan, response: taskPlanResponse }}
+          onSubmit={setTaskPlanResponse}
+        />
+      </div>
+
+      <h3 style={{ marginTop: 24 }}>Plan options - Workflow ignition</h3>
+      <div data-testid="fx-workflow-plan-options">
+        <PlanInteractionForm
+          request={{ ...workflowPlan, response: workflowPlanResponse }}
+          onSubmit={setWorkflowPlanResponse}
+        />
+      </div>
 
       <h3 style={{ marginTop: 24 }}>Timeline — kanban_agent(orchestrator 同款 props)</h3>
       <div data-testid="fx-kanban-compact">

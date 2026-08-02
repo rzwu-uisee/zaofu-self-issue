@@ -104,7 +104,14 @@ from zf.runtime.gate_projection import project_gate_projection
 from zf.runtime.hook_registry import project_hook_registry
 from zf.runtime.kanban_agent_summary import project_kanban_agent_summary
 from zf.runtime.channel_prd_context import canonical_channel_prd_context
-from zf.runtime.channel_prd_context import workflow_context_from_payload
+from zf.runtime.channel_prd_context import (
+    workflow_context_for_project,
+    workflow_context_from_payload,
+)
+from zf.runtime.channel_workflow_authority import (
+    bind_task_channel_authority,
+    channel_workflow_authority_error,
+)
 from zf.runtime.task_workflow_plans import task_workflow_binding_digest
 from zf.runtime.workflow_route_catalog import workflow_route_catalog
 from zf.runtime.operator_reliability import (
@@ -175,6 +182,9 @@ from zf.web.provider_dev_chat import (
 )
 from zf.web.headless_recovery import reconcile_kanban_startup
 from zf.web.collaboration_action_validation import validate_collaboration_action_payload
+from zf.web.channel_workflow_legacy_route import (
+    run_legacy_channel_workflow_route,
+)
 from zf.web.operator_session import OperatorSessionManager
 from zf.web.perf import (
     record_timing,
@@ -515,6 +525,8 @@ _ACTION_ALIASES = {
     "channel.setup.apply",
     "channel-discussion-start",
     "channel.discussion.start",
+    "channel-set-leader",
+    "channel.leader.set",
     "channel-post-message",
     "channel-invite-member",
     "channel.add_member",
@@ -538,6 +550,8 @@ _ACTION_ALIASES = {
     "channel-drain-replies",
     "channel-mark-read",
     "channel.mark_read",
+    "channel-pin-message",
+    "channel.message.pin",
     "channel-handoff",
     "channel.handoff",
     "channel-discussion-mode",
@@ -3269,100 +3283,20 @@ def create_app(
     ) -> JSONResponse:
         payload = await _request_json(request)
         payload["channel_id"] = channel_id
-        if config is not None and (project_root / "zf.yaml").exists():
-            auth_error = _web_mutation_auth_error(
-                "workflow-submit",
-                authorization=authorization,
-                x_zf_web_token=x_zf_web_token,
-                web_session_token=_web_session_cookie(request),
-            )
-            if auth_error is not None:
-                return JSONResponse(auth_error, status_code=int(auth_error.pop("_status_code", 403)))
-            request_id = str(payload.get("request_id") or x_idempotency_key or "")
-            intake_ref = str(payload.get("intake") or payload.get("intake_ref") or "").strip()
-            if not intake_ref:
-                intake = build_flow_intake(
-                    kind=str(payload.get("kind") or payload.get("request_kind") or "auto"),
-                    source_ref=str(payload.get("from") or payload.get("source_ref") or ""),
-                    objective=str(payload.get("objective") or payload.get("reason") or payload.get("summary") or ""),
-                    source_root=str(payload.get("source_root") or ""),
-                    target_root=str(payload.get("target_root") or payload.get("target") or ""),
-                    backend=str(payload.get("backend") or "codex"),
-                    lanes=int(payload.get("lanes") or payload.get("requested_lanes") or 0),
-                    project_id=default_project_id,
-                    request_id=request_id,
-                    source="channel",
-                    created_by=str(payload.get("requested_by") or "channel"),
-                    channel_id=channel_id,
-                    thread_id=str(payload.get("thread_id") or ""),
-                    acceptance=tuple(workflow_request_routes.workflow_request_strings(payload.get("acceptance"))),
-                    constraints=tuple(workflow_request_routes.workflow_request_strings(payload.get("constraints"))),
-                    open_questions=tuple(workflow_request_routes.workflow_request_strings(payload.get("open_questions"))),
-                    output=(project_root / "docs" / "intake" / f"{request_id}.md") if request_id else None,
-                )
-                intake_ref = str(intake.get("intake_ref") or "")
-                build_flow_intent(intake_path=Path(intake_ref), explicit_kind=str(payload.get("kind") or "auto"))
-            workflow_request_routes.confirm_workflow_intake(
-                state_dir=state_dir,
-                intake_ref=intake_ref,
-                actor=str(payload.get("requested_by") or "channel"),
-                config=config,
-            )
-            result = build_flow_submit_preview(
-                config_path=project_root / "zf.yaml",
-                intake_path=Path(intake_ref),
-                flow_kind=str(payload.get("kind") or ""),
-                task_id=str(payload.get("task_id") or ""),
-                pattern_id=str(payload.get("pattern_id") or ""),
-                requested_by=str(payload.get("requested_by") or "channel"),
-                reason=str(payload.get("reason") or "channel workflow request"),
-                allow_missing_env=bool(payload.get("allow_missing_env")),
-            )
-            code = 202 if result.get("status") != "STOP" else 409
-            EventWriter(event_log_from_project(state_dir, config=config)).append(ZfEvent(
-                type="channel.state_update.posted",
-                actor="web",
-                task_id=str((result.get("payload") or {}).get("task_id") or payload.get("task_id") or ""),
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": str(payload.get("thread_id") or "main"),
-                    "status": (
-                        "workflow_clarification_required"
-                        if result.get("status") == "STOP"
-                        else "workflow_proposal_ready"
-                    ),
-                    "summary": (
-                        "workflow request needs clarification before ignition"
-                        if result.get("status") == "STOP"
-                        else "workflow request is ready for explicit approval"
-                    ),
-                    "task_id": str((result.get("payload") or {}).get("task_id") or payload.get("task_id") or ""),
-                    "refs": {
-                        "workflow_submit_preview_ref": str(result.get("submit_preview_ref") or ""),
-                        "workflow_input_manifest_ref": str((result.get("payload") or {}).get("workflow_input_manifest_ref") or ""),
-                        "workflow_prompt_ref": str((result.get("payload") or {}).get("workflow_prompt_ref") or ""),
-                    },
-                    "source": "workflow-request",
-                },
-            ))
-            return JSONResponse({
-                "ok": result.get("status") != "STOP",
-                "status": (
-                    "clarification_required"
-                    if result.get("status") == "STOP"
-                    else "proposal_ready"
-                ),
-                "action": "workflow-request",
-                "requested_action": "workflow-request",
-                "result": result,
-                "next_action": "approve through project workflow-submit with apply=true",
-            }, status_code=code)
-        return JSONResponse({
-            "ok": False,
-            "status": "project_initialization_required",
-            "reason": "initialize/register the project before discussing and submitting a workflow",
-        }, status_code=409)
+        result, status_code = run_legacy_channel_workflow_route(
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+            default_project_id=default_project_id,
+            channel_id=channel_id,
+            payload=payload,
+            authorization=authorization,
+            web_action_token=x_zf_web_token,
+            web_session_token=_web_session_cookie(request),
+            idempotency_key=x_idempotency_key,
+            action_runner=_web_action,
+        )
+        return JSONResponse(result, status_code=status_code)
 
     @app.get("/api/web-session")
     def web_session(request: Request) -> JSONResponse:
@@ -6037,6 +5971,7 @@ def _web_action(
         "channel-create-from-template",
         "channel-create-and-start",
         "channel-discussion-start",
+        "channel-set-leader",
         "channel-post-message",
         "channel-invite-member",
         "channel-update-member-permission",
@@ -6049,6 +5984,7 @@ def _web_action(
         "channel-consensus-block",
         "channel-drain-replies",
         "channel-mark-read",
+        "channel-pin-message",
         "channel-handoff",
         "channel-discussion-mode",
         "channel-owner-report",
@@ -6475,8 +6411,13 @@ def _validate_action_payload(
     if action == "channel-post-message":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
-        if not str(payload.get("text") or payload.get("message") or "").strip():
-            return "text is required"
+        refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+        attachments = refs.get("attachments") if isinstance(refs.get("attachments"), list) else []
+        if (
+            not str(payload.get("text") or payload.get("message") or "").strip()
+            and not attachments
+        ):
+            return "text or attachment is required"
     if action == "channel-create":
         if not str(payload.get("name") or payload.get("channel_name") or "").strip():
             return "name is required"
@@ -6498,14 +6439,28 @@ def _validate_action_payload(
         contract_error = validate_channel_member_contract(payload)
         if contract_error:
             return contract_error
+    if action == "channel-set-leader":
+        if not str(payload.get("channel_id") or "").strip():
+            return "channel_id is required"
+        if payload.get("expected_revision") is None:
+            return "expected_revision is required"
     if action == "channel-remove-member":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
         if not str(payload.get("member_id") or "").strip():
             return "member_id is required"
-    if action in {"channel-delete", "channel-clear-history", "channel-mark-read"}:
+    if action in {
+        "channel-delete",
+        "channel-clear-history",
+        "channel-mark-read",
+        "channel-pin-message",
+    }:
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
+    if action == "channel-pin-message" and not str(
+        payload.get("message_id") or ""
+    ).strip():
+        return "message_id is required"
     if action == "channel-synthesis":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
@@ -6971,6 +6926,20 @@ def _handle_chat_orchestrator(
     project_root: Path | None = None,
     config: ZfConfig | None = None,
 ) -> dict:
+    if str(payload.get("source") or "") == "web-channel-workflow-plan":
+        authority_error = _channel_workflow_planning_authority_error(
+            state_dir,
+            payload,
+        )
+        if authority_error:
+            return {
+                "_status_code": 403,
+                "ok": False,
+                "status": "forbidden",
+                "action": action,
+                "requested_action": requested_action,
+                "reason": authority_error,
+            }
     task_id = _task_id_from_payload(payload)
     payload, terminal = plan_runtime.prepare_web_plan_interaction(
         writer, requested=requested, action=action,
@@ -7087,6 +7056,16 @@ def _handle_chat_orchestrator(
     return response
 
 
+def _channel_workflow_planning_authority_error(
+    state_dir: Path,
+    payload: dict,
+) -> str:
+    return channel_workflow_authority_error(
+        state_dir,
+        workflow_context_from_payload(payload),
+    )
+
+
 def _handle_headless_kanban_agent_chat(
     state_dir: Path,
     writer: EventWriter,
@@ -7102,6 +7081,7 @@ def _handle_headless_kanban_agent_chat(
     config: ZfConfig | None = None,
 ) -> dict:
     task_id = _task_id_from_payload(payload)
+    workflow_context = workflow_context_for_project(payload, project_root)
     thread_key = str(payload.get("thread_key") or "").strip()
     permission_profile = normalize_permission_profile(payload.get("permission_profile"))
     turn_id = str(payload.get("turn_id") or uuid.uuid4())
@@ -7163,6 +7143,7 @@ def _handle_headless_kanban_agent_chat(
         "message": message,
         "backend": backend,
         "project_root": project_root,
+        "workflow_context": workflow_context,
         "task_id": task_id,
         "thread_key": thread_key,
         "turn_id": turn_id,
@@ -7363,6 +7344,7 @@ def _run_headless_kanban_agent_turn(
     message: str,
     backend: str,
     project_root: Path,
+    workflow_context: dict[str, Any],
     task_id: str | None,
     thread_key: str,
     turn_id: str,
@@ -7387,6 +7369,11 @@ def _run_headless_kanban_agent_turn(
         )
 
         task = TaskStore(state_dir / "kanban.json").get(task_id) if task_id else None
+        if task is not None:
+            workflow_context = bind_task_channel_authority(
+                workflow_context,
+                task,
+            )
         role = SimpleNamespace(
             name="kanban-agent",
             instance_id="kanban-agent",
@@ -7517,7 +7504,7 @@ def _run_headless_kanban_agent_turn(
                 "runtime_snapshot_ref": runtime_snapshot_ref,
                 "workflow_route_catalog": workflow_route_catalog(config),
                 "canonical_channel_prds": canonical_channel_prd_context(state_dir),
-                "workflow_context": workflow_context_from_payload(payload),
+                "workflow_context": workflow_context,
                 "plan_discussion": payload.get("plan_discussion") or {},
             },
             on_message=delta_emitter.emit,
@@ -7615,7 +7602,7 @@ def _run_headless_kanban_agent_turn(
             if task is not None
             else ""
         ),
-        workflow_context=workflow_context_from_payload(payload),
+        workflow_context=workflow_context,
         correlation_id=user_message.correlation_id,
         config=config,
     )

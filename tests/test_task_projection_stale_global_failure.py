@@ -71,3 +71,69 @@ def test_global_failure_during_task_lifecycle_is_attributed(tmp_path: Path):
     )
 
     assert [e for _, e in out if e.type == "review.rejected"]
+
+
+def _verify_child_failed(
+    *,
+    event_type: str = "verify.child.failed",
+    workflow_run_id: str = "workflow-current",
+) -> ZfEvent:
+    return ZfEvent(
+        type=event_type,
+        actor="verify-lane-0",
+        payload={
+            "stage_id": "prd-lanes-verify",
+            "task_id": "TASK-RACING",
+            "workflow_run_id": workflow_run_id,
+            "reason": "current verification failure",
+        },
+        correlation_id=workflow_run_id,
+    )
+
+
+def _rework_child_dispatched(*, workflow_run_id: str = "workflow-current") -> ZfEvent:
+    return ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-orchestrator",
+        payload={
+            "fanout_id": "fanout-prd-lanes-impl-rework",
+            "stage_id": "prd-lanes-impl",
+            "task_id": "TASK-RACING",
+            "workflow_run_id": workflow_run_id,
+        },
+        correlation_id=workflow_run_id,
+    )
+
+
+def test_verify_child_failure_is_superseded_by_later_rework_attempt(tmp_path: Path):
+    """A child failure is normalized to verify.failed before supersession."""
+    created = _created()
+    failed = _verify_child_failed()
+    transport_failed = _verify_child_failed(event_type="fanout.child.failed")
+    rework = _rework_child_dispatched()
+    task_events = [(0, created), (1, failed), (2, transport_failed), (3, rework)]
+
+    out = _workflow_events_with_candidate_context(
+        _task(),
+        task_events,
+        task_events,
+        state_dir=tmp_path,
+    )
+
+    assert not [event for _, event in out if event.type == "verify.failed"]
+
+
+def test_verify_child_failure_is_not_superseded_by_another_workflow(tmp_path: Path):
+    created = _created()
+    failed = _verify_child_failed()
+    unrelated = _rework_child_dispatched(workflow_run_id="workflow-other")
+    task_events = [(0, created), (1, failed), (2, unrelated)]
+
+    out = _workflow_events_with_candidate_context(
+        _task(),
+        task_events,
+        task_events,
+        state_dir=tmp_path,
+    )
+
+    assert [event for _, event in out if event.type == "verify.failed"]

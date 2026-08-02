@@ -1,5 +1,6 @@
 import {
   diagnosticSeverity,
+  readinessPresentation,
   stageLevels,
   stagesForCurrentFlow,
   workflowViewForRequest,
@@ -11,8 +12,30 @@ function assert(condition: unknown, message: string): void {
 
 function testLifecycleBuckets(): void {
   assert(workflowViewForRequest({ status: "proposed" }) === "decision", "proposals need a decision");
+  assert(workflowViewForRequest({ status: "clarifying" }) === "decision", "clarification needs a decision");
   assert(workflowViewForRequest({ status: "running" }) === "active", "running workflows are active");
   assert(workflowViewForRequest({ status: "rejected" }) === "history", "rejected workflows are history");
+}
+
+function testRequestReadinessPrecedesProposalReadiness(): void {
+  assert(
+    readinessPresentation({
+      blockerCount: 0,
+      requestStatus: "clarifying",
+      runStatus: "",
+      terminal: "",
+    }).title === "Needs clarification",
+    "clarifying requests must not be presented as runnable",
+  );
+  assert(
+    readinessPresentation({
+      blockerCount: 0,
+      requestStatus: "ready",
+      runStatus: "",
+      terminal: "",
+    }).title === "Ready to prepare proposal",
+    "ready requirements still need a proposal",
+  );
 }
 
 function testSeverityPreservesInfo(): void {
@@ -70,5 +93,6 @@ function testCurrentFlowUsesDeclaredTasks(): void {
 }
 
 testLifecycleBuckets();
+testRequestReadinessPrecedesProposalReadiness();
 testSeverityPreservesInfo();
 testCurrentFlowUsesDeclaredTasks();

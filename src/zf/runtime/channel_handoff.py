@@ -14,6 +14,7 @@ from zf.runtime.channel_context import build_channel_context_pack
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_run_owner import provider_run_fields
 from zf.runtime.channel_sidecar import channel_context_pack_event_payload
+from zf.runtime.sidecar_refs import SidecarRefError
 from zf.runtime.openclaw_provider import OpenClawGatewayClient
 
 
@@ -120,13 +121,45 @@ def request_channel_handoff(
         },
     )
     member = _member_by_id(channel, target_member_id)
-    context_pack = build_channel_context_pack(
-        channel,
-        channel_id=channel_id,
-        thread_id=thread_id or "main",
-        target_member_id=target_member_id,
-        trigger_message_id=message_id,
-    )
+    try:
+        context_pack = build_channel_context_pack(
+            channel,
+            channel_id=channel_id,
+            thread_id=thread_id or "main",
+            target_member_id=target_member_id,
+            trigger_message_id=message_id,
+            visibility_profile=str(member.get("visibility_profile") or ""),
+            channel_role=str(member.get("channel_role") or ""),
+            role_context_ref=str(member.get("role_context_ref") or ""),
+            skill_refs=member.get("skill_refs", []),
+            resolved_skill_refs=member.get("resolved_skill_refs", []),
+            permission_profile=str(member.get("permission_profile") or ""),
+            profile_binding=member,
+            state_dir=Path(state_dir),
+            project_root=project_root,
+        )
+    except SidecarRefError as exc:
+        writer.emit(
+            "channel.handoff.failed",
+            actor=actor,
+            causation_id=accepted.id,
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": thread_id or "main",
+                "message_id": message_id,
+                "member_id": member_id,
+                "target_member_id": target_member_id,
+                "reason": f"profile_snapshot_{exc.code}",
+                "source": source,
+            },
+        )
+        return HandoffResult(
+            skipped=[{
+                "target_member_id": target_member_id,
+                "reason": f"profile_snapshot_{exc.code}",
+            }]
+        )
     writer.emit(
         "channel.context_pack.built",
         actor=actor,
@@ -160,7 +193,7 @@ def request_channel_handoff(
             "backend": str(member.get("backend") or ""),
             "worker_session_id": _worker_session(member),
             # P0.2: thread the handoff event id through so that adapter
-            # failure callbacks (channel_adapter._emit_headless_failed) can
+            # failure callbacks (channel_reply_remediation.emit_channel_reply_failed) can
             # write channel.handoff.failed and unstick the handoff state
             # machine instead of leaving it suspended at "accepted".
             "handoff_request_event_id": requested.id,

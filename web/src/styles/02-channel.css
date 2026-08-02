@@ -568,6 +568,54 @@
   box-shadow: 0 1px 3px color-mix(in oklab, var(--shadow) 55%, transparent);
 }
 
+.channel-composer-reply {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-left: 2px solid var(--accent);
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  font-size: var(--text-12);
+}
+
+.channel-result-receipts {
+  display: grid;
+  gap: 10px;
+}
+
+.channel-result-receipt-list {
+  display: grid;
+  gap: 8px;
+}
+
+.channel-result-receipt {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+
+.channel-result-receipt > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.channel-result-receipt code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .channel-file-input {
   display: none;
 }

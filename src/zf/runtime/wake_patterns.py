@@ -186,6 +186,10 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # them wakeable; otherwise strict cold-start sees registered handlers that
     # the live watcher will never deliver.
     "channel.agent.reply.completed",
+    # Reply failures are external provider outcomes. Wake the reactor so the
+    # bounded remediation policy can classify and settle them without waiting
+    # for an unrelated workflow event.
+    "channel.agent.reply.failed",
     "channel.question.opened",
     "channel.question.updated",
     "channel.question.resolved",

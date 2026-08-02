@@ -288,7 +288,7 @@ def test_channel_message_endpoint_uses_token_gated_action_path(
     assert any(m["text"] == "请 QA 看下" for m in detail["messages"])
 
 
-def test_channel_workflow_request_prepares_proposal_without_invoking(
+def test_channel_workflow_request_requires_exact_leader_and_prd_binding(
     state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -334,15 +334,158 @@ spec:
         },
     )
 
-    assert response.status_code == 202, response.text
-    assert response.json()["status"] == "proposal_ready"
+    assert response.status_code == 403, response.text
+    assert response.json()["status"] == "forbidden"
+    assert response.json()["deprecated_route"] is True
     events = EventLog(state_dir / "events.jsonl").read_all()
     assert not any(event.type == "workflow.invoke.requested" for event in events)
+    assert not any(event.type == "task.created" for event in events)
+
+
+def test_legacy_channel_workflow_request_adapts_exact_binding_to_plan_only(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    config_path = state_dir.parent / "zf.yaml"
+    config_path.write_text(
+        """\
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata: {name: issue-demo}
+spec:
+  lanes: 1
+  backend: deterministic
+  issueRef: docs/intake/channel.md
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata: {name: demo}
+spec:
+  version: "1.0"
+  project: {name: demo, state_dir: .zf}
+""",
+        encoding="utf-8",
+    )
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    prd_ref = "channels/ch-zaofu/prd/r1.json"
+    prd_digest = "a" * 64
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "name": "ZaoFu",
+            "owner_actor_ref": "owner:operator",
+            "leader_member_id": "product-pm",
+            "leader_revision": 1,
+            "source": "web",
+        },
+    )
+    writer.emit(
+        "channel.member.added",
+        actor="web",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "th-plan",
+            "member_id": "product-pm",
+            "member_type": "provider_agent",
+            "channel_role": "product_pm",
+            "provider": "deterministic",
+            "permission_profile": "read_only",
+            "permissions": [
+                "read",
+                "message",
+                "summarize",
+                "propose_workflow",
+            ],
+            "source": "web",
+        },
+    )
+    writer.emit(
+        "channel.message.posted",
+        actor="web",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "th-plan",
+            "message_id": "msg-origin",
+            "member_id": "operator",
+            "role": "user",
+            "text": "Review and fix the release risk.",
+            "source": "web",
+        },
+    )
+    writer.emit(
+        "channel.consensus.proposed",
+        actor="product-pm",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "th-plan",
+            "artifact_ref": prd_ref,
+            "artifact_digest": prd_digest,
+            "prd_ref": prd_ref,
+            "prd_digest": prd_digest,
+            "prd_revision": 1,
+            "owner_actor_ref": "owner:operator",
+            "proposed_by": "product-pm",
+            "source": "web",
+        },
+    )
+    writer.emit(
+        "channel.consensus.reached",
+        actor="owner:operator",
+        correlation_id="ch-zaofu",
+        payload={
+            "channel_id": "ch-zaofu",
+            "thread_id": "th-plan",
+            "prd_ref": prd_ref,
+            "prd_digest": prd_digest,
+            "prd_revision": 1,
+            "confirmed_by": "owner:operator",
+            "source": "web",
+        },
+    )
+    client = TestClient(
+        create_app(
+            state_dir,
+            config=load_config(config_path),
+            project_root=state_dir.parent,
+        )
+    )
+
+    response = client.post(
+        "/api/channels/ch-zaofu/workflow-request",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "request_id": "REQ-CHANNEL-UPGRADE",
+            "thread_id": "th-plan",
+            "kind": "issue",
+            "objective": "Review and fix the release risk",
+            "backend": "deterministic",
+            "channel_member_id": "product-pm",
+            "leader_revision": 1,
+            "prd_revision": 1,
+            "source_ref": prd_ref,
+            "source_digest": prd_digest,
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "queued_no_runtime"
+    assert response.json()["deprecated_route"] is True
+    events = log.read_all()
     assert any(
-        event.type == "channel.state_update.posted"
-        and event.payload.get("status") == "workflow_proposal_ready"
+        event.type == "user.message"
+        and event.payload.get("source") == "kanban"
         for event in events
     )
+    assert not any(event.type == "workflow.invoke.requested" for event in events)
+    assert not any(event.type == "task.created" for event in events)
 
 
 def test_workflow_graph_projects_role_trigger_edges_without_stages(state_dir: Path):

@@ -12,11 +12,13 @@ from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.runtime.channel_contracts import (
     default_debate_max_rounds,
+    discussion_engine_mode,
     normalize_channel_skill_refs,
     normalize_channel_role,
     normalize_member_type,
     normalize_permission_profile,
     normalize_permissions,
+    normalize_product_discussion_mode,
     normalize_provider,
     normalize_visibility_profile,
     permission_profile_write_policy,
@@ -51,6 +53,7 @@ CHANNEL_EVENT_TYPES = {
     "channel.member.permissions.updated",
     "channel.member.permission_profile.audit",
     "channel.member.visibility.updated",
+    "channel.leader.updated",
     "channel.owner_report.requested",
     "channel.owner_report.generated",
     "channel.owner_report.delivered",
@@ -90,6 +93,7 @@ CHANNEL_EVENT_TYPES = {
     "channel.state_update.posted",
     "channel.discussion.mode.set",
     "channel.discussion.started",
+    "channel.discussion.continued",
     "channel.discussion.phase.changed",
     "channel.discussion.closed",
     "channel.discussion.participant.missed",
@@ -116,7 +120,9 @@ CHANNEL_EVENT_TYPES = {
     "channel.message.delivered",
     "channel.message.failed",
     "channel.message.read",
+    "channel.message.pinned",
     "channel.history.cleared",
+    "channel.result.receipt.recorded",
     "channel.finding.recorded",
     "channel.summary.updated",
     "channel.synthesis.requested",
@@ -389,8 +395,41 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
                 or channel_id
             )
             channel["scope"] = payload.get("scope") if isinstance(payload.get("scope"), dict) else channel["scope"]
+            channel["owner_actor_ref"] = (
+                _payload_str(payload, "owner_actor_ref")
+                or channel["owner_actor_ref"]
+            )
+            channel["owner_delegates"] = (
+                redact_obj(payload.get("owner_delegates"))
+                if isinstance(payload.get("owner_delegates"), list)
+                else channel["owner_delegates"]
+            )
+            channel["leader_member_id"] = (
+                _payload_str(payload, "leader_member_id")
+                or channel["leader_member_id"]
+            )
+            channel["leader_revision"] = int(
+                payload.get("leader_revision")
+                or channel["leader_revision"]
+                or 0
+            )
+            channel["origin_binding"] = (
+                redact_obj(payload.get("origin_binding"))
+                if isinstance(payload.get("origin_binding"), dict)
+                else channel["origin_binding"]
+            )
         elif event.type == "channel.archived":
             channel["status"] = "archived"
+        elif event.type == "channel.leader.updated":
+            channel["leader_member_id"] = _payload_str(
+                payload, "leader_member_id"
+            )
+            channel["leader_revision"] = int(
+                payload.get("leader_revision")
+                or channel["leader_revision"]
+                or 0
+            )
+            channel["leader_event_id"] = event.id
         elif event.type in {
             "channel.member.added",
             "channel.member.connected",
@@ -432,6 +471,8 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_discussion_mode(channel, event, payload)
         elif event.type == "channel.discussion.started":
             _apply_discussion_started(channel, event, payload)
+        elif event.type == "channel.discussion.continued":
+            _apply_discussion_continued(channel, event, payload)
         elif event.type == "channel.discussion.phase.changed":
             _apply_discussion_phase(channel, event, payload)
         elif event.type == "channel.discussion.closed":
@@ -456,8 +497,12 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_delivery(channel, event, payload)
         elif event.type == "channel.message.read":
             _apply_read(channel, event, payload)
+        elif event.type == "channel.message.pinned":
+            _apply_message_pinned(channel, event, payload)
         elif event.type == "channel.history.cleared":
             _apply_history_cleared(channel, event, payload)
+        elif event.type == "channel.result.receipt.recorded":
+            _apply_result_receipt(channel, event, payload)
         elif event.type == "channel.summary.updated":
             channel["summary"] = _payload_str(payload, "summary")
             channel["summary_event_id"] = event.id
@@ -486,10 +531,18 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "created_at": "",
         "created_by": "",
         "created_by_event": False,
+        "owner_actor_ref": "",
+        "owner_delegates": [],
+        "leader_member_id": "",
+        "leader_revision": 0,
+        "leader_event_id": "",
+        "origin_binding": {},
         "members": {},
         "messages": {},
         "threads": {},
         "read_state": {},
+        "pinned_message_ids": {},
+        "result_receipts": {},
         "attention": [],
         "syntheses": [],
         "synthesis_requests": [],
@@ -508,8 +561,11 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "owner_reports": [],
         "automation_reports": [],
         "discussion": {
-            "mode": "manual_mention",
+            "mode": "conversation",
+            "engine_mode": "manual_mention",
+            "legacy_mode": "",
             "max_rounds": 6,
+            "max_parallel_replies": 6,
             "default_responder_id": "",
             "speaker_policy": {},
             "provider_capabilities": DEFAULT_PROVIDER_CAPABILITIES,
@@ -569,6 +625,23 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
     )
     member["persona"] = _payload_str(payload, "persona") or member["persona"]
     member["display_name"] = _payload_str(payload, "display_name") or member.get("display_name", "") or member["persona"]
+    for field in (
+        "profile_id",
+        "profile_provenance",
+        "profile_digest",
+        "config_digest",
+        "skill_set_digest",
+        "permission_digest",
+        "role_definition_digest",
+        "profile_snapshot_ref",
+        "profile_snapshot_sha256",
+    ):
+        member[field] = _payload_str(payload, field) or member.get(field, "")
+    member["profile_revision"] = int(
+        payload.get("profile_revision")
+        or member.get("profile_revision")
+        or 1
+    )
     member["member_type"] = member_type
     if legacy_member_type and legacy_member_type != member_type:
         member["legacy_member_type"] = legacy_member_type
@@ -764,6 +837,17 @@ def _apply_message(channel: dict[str, Any], event: ZfEvent, payload: dict[str, A
     mention_tokens = _string_list(payload.get("mention_tokens"))
     message = {
         "message_id": message_id,
+        "client_message_id": (
+            _payload_str(payload, "client_message_id") or message_id
+        ),
+        "idempotency_key": (
+            _payload_str(payload, "idempotency_key")
+            or _payload_str(payload, "client_message_id")
+            or message_id
+        ),
+        "reply_to_message_id": _payload_str(
+            payload, "reply_to_message_id"
+        ),
         "thread_id": thread_id,
         "event_id": event.id,
         "ts": event.ts,
@@ -791,6 +875,17 @@ def _apply_message(channel: dict[str, Any], event: ZfEvent, payload: dict[str, A
         "delivery": {},
     }
     channel["messages"][message_id] = redact_obj(message)
+    consensus = channel.get("consensus", {}).get(thread_id)
+    if (
+        isinstance(consensus, dict)
+        and str(consensus.get("status") or "") == "reached"
+        and (
+            str(message.get("role") or "") == "user"
+            or str(message.get("member_id") or "") == "operator"
+        )
+    ):
+        consensus["revision_pending"] = True
+        consensus["revision_pending_since_event_id"] = event.id
     thread = channel["threads"].setdefault(thread_id, {
         "thread_id": thread_id,
         "message_ids": [],
@@ -844,10 +939,65 @@ def _apply_read(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]
     state["attention"] = {"level": "none", "reason": "", "raised_at": event.ts}
 
 
+def _apply_message_pinned(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    message_id = _payload_str(payload, "message_id")
+    if not message_id or message_id not in channel["messages"]:
+        return
+    pinned = bool(payload.get("pinned", True))
+    channel["pinned_message_ids"][message_id] = pinned
+    channel["messages"][message_id]["pinned"] = pinned
+    channel["messages"][message_id]["pin_event_id"] = event.id
+    channel["messages"][message_id]["pinned_by"] = (
+        _payload_str(payload, "member_id") or event.actor
+    )
+
+
+def _apply_result_receipt(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    receipt_id = _payload_str(payload, "receipt_id") or event.id
+    channel["result_receipts"][receipt_id] = redact_obj({
+        "receipt_id": receipt_id,
+        "event_id": event.id,
+        "receipt_kind": _payload_str(payload, "receipt_kind"),
+        "status": _payload_str(payload, "status"),
+        "thread_id": _payload_str(payload, "thread_id") or "main",
+        "source_event_id": _payload_str(payload, "source_event_id"),
+        "source_event_type": _payload_str(payload, "source_event_type"),
+        "receipt_ref": _payload_str(payload, "receipt_ref"),
+        "receipt_digest": _payload_str(payload, "receipt_digest"),
+        "artifact_ref": _payload_str(payload, "artifact_ref"),
+        "artifact_digest": _payload_str(payload, "artifact_digest"),
+        "revision": int(payload.get("revision") or 0),
+        "task_id": _payload_str(payload, "task_id") or str(event.task_id or ""),
+        "workflow_run_id": _payload_str(payload, "workflow_run_id"),
+        "delivery_id": _payload_str(payload, "delivery_id"),
+        "links": (
+            payload.get("links")
+            if isinstance(payload.get("links"), dict)
+            else {}
+        ),
+        "idempotency_key": _payload_str(payload, "idempotency_key"),
+        "origin_binding": (
+            payload.get("origin_binding")
+            if isinstance(payload.get("origin_binding"), dict)
+            else {}
+        ),
+        "ts": event.ts,
+    })
+
+
 def _apply_history_cleared(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
     channel["messages"] = {}
     channel["threads"] = {}
     channel["read_state"] = {}
+    channel["pinned_message_ids"] = {}
     channel["attention"] = []
     channel["mentions_detected"] = []
     channel["routes"] = []
@@ -977,7 +1127,7 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
         "run_generation": incoming_generation,
         "reason": _payload_str(payload, "reason") or str(item.get("reason") or ""),
         # P0.2: thread the originating handoff event id through projection so
-        # channel_adapter._emit_headless_failed can wire failure back to
+        # channel_reply_remediation.emit_channel_reply_failed can wire failure back to
         # channel.handoff.failed via this field on the reply_request snapshot.
         "handoff_request_event_id": (
             _payload_str(payload, "handoff_request_event_id")
@@ -1397,7 +1547,15 @@ def _apply_state_update(channel: dict[str, Any], event: ZfEvent, payload: dict[s
 
 def _apply_discussion_mode(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
     discussion = channel["discussion"]
-    discussion["mode"] = _payload_str(payload, "mode") or discussion.get("mode", "manual_mention")
+    raw_mode = _payload_str(payload, "mode") or discussion.get(
+        "mode", "conversation"
+    )
+    product_mode = normalize_product_discussion_mode(raw_mode)
+    discussion["mode"] = product_mode
+    discussion["engine_mode"] = discussion_engine_mode(raw_mode)
+    discussion["legacy_mode"] = (
+        raw_mode if raw_mode != product_mode else ""
+    )
     # 2026-07-03: _empty_channel() bootstraps discussion["max_rounds"] = 6
     # before any event is processed, so falling back to
     # `discussion.get("max_rounds")` here can never be distinguished from
@@ -1417,6 +1575,14 @@ def _apply_discussion_mode(channel: dict[str, Any], event: ZfEvent, payload: dic
         discussion["max_rounds_explicit"] = int(payload.get("max_rounds") or 0) > 0
     except (TypeError, ValueError):
         discussion["max_rounds_explicit"] = False
+    if payload.get("max_parallel_replies") is not None:
+        try:
+            discussion["max_parallel_replies"] = max(
+                1,
+                min(int(payload.get("max_parallel_replies")), 64),
+            )
+        except (TypeError, ValueError):
+            pass
     if isinstance(payload.get("speaker_policy"), dict):
         discussion["speaker_policy"] = redact_obj(payload.get("speaker_policy"))
     if "default_responder_id" in payload:
@@ -1459,9 +1625,20 @@ def _question_activity(channel: dict[str, Any], event: ZfEvent, thread_id: str) 
 
 def _apply_discussion_started(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
     thread_id = _payload_str(payload, "thread_id") or "main"
+    state = _payload_str(payload, "state") or "phase1_blind"
     channel["discussions"][thread_id] = {
         "thread_id": thread_id,
-        "state": "phase1_blind",
+        "discussion_id": (
+            _payload_str(payload, "discussion_id")
+            or f"discussion-{event.id.removeprefix('evt-')}"
+        ),
+        "revision": int(payload.get("revision") or 1),
+        "context_digest": _payload_str(payload, "context_digest"),
+        "product_mode": normalize_product_discussion_mode(
+            payload.get("product_mode")
+            or channel.get("discussion", {}).get("mode")
+        ),
+        "state": state,
         "trigger": _payload_str(payload, "trigger"),
         "roster": _string_list(payload.get("roster")),
         "synthesizer": _payload_str(payload, "synthesizer"),
@@ -1473,11 +1650,44 @@ def _apply_discussion_started(channel: dict[str, Any], event: ZfEvent, payload: 
     }
 
 
+def _apply_discussion_continued(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    thread_id = _payload_str(payload, "thread_id") or "main"
+    session = channel["discussions"].setdefault(
+        thread_id,
+        {"thread_id": thread_id, "state": "active"},
+    )
+    session["discussion_id"] = (
+        _payload_str(payload, "discussion_id")
+        or session.get("discussion_id", "")
+    )
+    session["revision"] = int(
+        payload.get("revision") or session.get("revision") or 1
+    )
+    session["context_digest"] = (
+        _payload_str(payload, "context_digest")
+        or session.get("context_digest", "")
+    )
+    session["continued_event_id"] = event.id
+    session["phase_changed_at"] = event.ts
+    if str(session.get("state") or "") == "idle":
+        session["state"] = "active"
+
+
 def _apply_discussion_phase(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
     thread_id = _payload_str(payload, "thread_id") or "main"
     session = channel["discussions"].setdefault(thread_id, {"thread_id": thread_id, "state": "idle"})
     phase = _payload_str(payload, "phase")
-    if phase in {"phase1_blind", "phase2_relay", "phase3_synthesis", "idle"}:
+    if phase in {
+        "active",
+        "phase1_blind",
+        "phase2_relay",
+        "phase3_synthesis",
+        "idle",
+    }:
         session["state"] = phase
     session["phase_reason"] = _payload_str(payload, "reason")
     session["phase_event_id"] = event.id
@@ -1791,6 +2001,34 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
                 payload.get("required_signers")
             ),
             "source_refs": _string_list(payload.get("source_refs")),
+            "prd_ref": (
+                _payload_str(payload, "prd_ref")
+                or _payload_str(payload, "artifact_ref")
+            ),
+            "prd_digest": (
+                _payload_str(payload, "prd_digest")
+                or _payload_str(payload, "artifact_digest")
+            ),
+            "prd_revision": int(payload.get("prd_revision") or 0),
+            "readiness_ref": _payload_str(payload, "readiness_ref"),
+            "readiness_digest": _payload_str(
+                payload, "readiness_digest"
+            ),
+            "readiness_verdict": _payload_str(
+                payload, "readiness_verdict"
+            ),
+            "conclusion_ref": _payload_str(
+                payload, "conclusion_ref"
+            ),
+            "conclusion_digest": _payload_str(
+                payload, "conclusion_digest"
+            ),
+            "owner_actor_ref": _payload_str(
+                payload, "owner_actor_ref"
+            ),
+            "product_mode": normalize_product_discussion_mode(
+                payload.get("product_mode")
+            ),
             "proposed_by": _payload_str(payload, "proposed_by") or event.actor,
             "proposed_event_id": event.id,
             "signed": {},
@@ -1798,6 +2036,8 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "reached_event_id": "",
             "reopened": False,
             "human_confirmed": False,
+            "status": "proposed",
+            "revision_pending": False,
             "ts": event.ts,
         })
         return
@@ -1834,6 +2074,13 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         return
     if event.type == "channel.consensus.reached":
         item["reached_event_id"] = event.id
+        item["status"] = "reached"
+        item["confirmed_revision"] = int(
+            payload.get("prd_revision")
+            or item.get("prd_revision")
+            or 0
+        )
+        item["revision_pending"] = False
 
 
 def _apply_synthesis_request(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
@@ -1865,9 +2112,32 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         ),
         "artifact_ref": _payload_str(payload, "artifact_ref"),
         "artifact_digest": _payload_str(payload, "artifact_digest"),
+        "prd_ref": (
+            _payload_str(payload, "prd_ref")
+            or _payload_str(payload, "artifact_ref")
+        ),
+        "prd_digest": (
+            _payload_str(payload, "prd_digest")
+            or _payload_str(payload, "artifact_digest")
+        ),
+        "prd_revision": int(payload.get("prd_revision") or 0),
+        "previous_prd_ref": _payload_str(payload, "previous_prd_ref"),
+        "previous_prd_digest": _payload_str(
+            payload, "previous_prd_digest"
+        ),
+        "readiness_ref": _payload_str(payload, "readiness_ref"),
+        "readiness_digest": _payload_str(payload, "readiness_digest"),
+        "readiness_verdict": _payload_str(
+            payload, "readiness_verdict"
+        ),
+        "conclusion_ref": _payload_str(payload, "conclusion_ref"),
+        "conclusion_digest": _payload_str(
+            payload, "conclusion_digest"
+        ),
         "contract_ref": _payload_str(payload, "contract_ref"),
         "contract_digest": _payload_str(payload, "contract_digest"),
         "spec_path": _payload_str(payload, "spec_path"),
+        "spec_digest": _payload_str(payload, "spec_digest"),
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),
         "consumed_contribution_refs": _string_list(
@@ -1957,19 +2227,49 @@ def _read_state(channel: dict[str, Any], thread_id: str, member_id: str) -> dict
 
 
 def _refresh_attention(channel: dict[str, Any]) -> None:
+    recipient_ids = {"operator"}
+    recipient_ids.update(
+        str(member.get("member_id") or "")
+        for member in channel["members"].values()
+        if str(member.get("member_id") or "")
+        and str(member.get("status") or "active").lower()
+        not in {"failed", "rejected", "removed", "suspended"}
+    )
+    for state in channel["read_state"].values():
+        state["unread_count"] = 0
+        state["mention_count"] = 0
+        if str(state.get("attention", {}).get("reason") or "") == "mention":
+            state["attention"] = {
+                "level": "none",
+                "reason": "",
+                "raised_at": "",
+            }
     for message in channel["messages"].values():
         thread_id = str(message.get("thread_id") or "main")
-        for member_id in _string_list(message.get("mentions")):
+        message_id = str(message.get("message_id") or "")
+        sender = str(message.get("member_id") or "")
+        mentions = set(_string_list(message.get("mentions")))
+        for member_id in sorted(recipient_ids - {sender}):
             state = _read_state(channel, thread_id, member_id)
-            if not _message_is_after_read(channel, thread_id, str(message.get("message_id") or ""), state):
+            if not _message_is_after_read(
+                channel,
+                thread_id,
+                message_id,
+                state,
+            ):
                 continue
-            state["unread_count"] = max(state.get("unread_count", 0), 1)
-            if state.get("attention", {}).get("level") == "none":
+            state["unread_count"] = int(state.get("unread_count") or 0) + 1
+            if member_id not in mentions:
+                continue
+            state["mention_count"] = int(
+                state.get("mention_count") or 0
+            ) + 1
+            if state.get("attention", {}).get("level") in {"", "none"}:
                 state["attention"] = {
                     "level": "waiting",
                     "reason": "mention",
                     "raised_at": message.get("ts", ""),
-                    "message_id": message.get("message_id", ""),
+                    "message_id": message_id,
                 }
     channel["attention"] = [
         state for state in channel["read_state"].values()
@@ -2080,6 +2380,12 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "created_at": channel["created_at"],
         "created_by": channel["created_by"],
         "created_by_event": bool(channel["created_by_event"]),
+        "owner_actor_ref": channel["owner_actor_ref"],
+        "owner_delegates": redact_obj(channel["owner_delegates"]),
+        "leader_member_id": channel["leader_member_id"],
+        "leader_revision": channel["leader_revision"],
+        "leader_event_id": channel["leader_event_id"],
+        "origin_binding": redact_obj(channel["origin_binding"]),
         "scope": redact_obj(channel["scope"]),
         "members": members,
         "member_count": len(members),
@@ -2087,6 +2393,24 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "read_state": sorted(
             channel["read_state"].values(),
             key=lambda item: (item["thread_id"], item["member_id"]),
+        ),
+        "unread_count": sum(
+            int(item.get("unread_count") or 0)
+            for item in channel["read_state"].values()
+            if str(item.get("member_id") or "") == "operator"
+        ),
+        "pinned_message_ids": sorted(
+            message_id
+            for message_id, pinned in channel["pinned_message_ids"].items()
+            if pinned
+        ),
+        "result_receipts": sorted(
+            channel["result_receipts"].values(),
+            key=lambda item: (
+                str(item.get("thread_id") or ""),
+                int(item.get("revision") or 0),
+                str(item.get("ts") or ""),
+            ),
         ),
         "attention": channel["attention"],
         "syntheses": channel["syntheses"],

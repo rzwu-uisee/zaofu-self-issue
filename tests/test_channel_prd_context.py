@@ -5,6 +5,7 @@ from pathlib import Path
 from zf.core.events import EventLog, EventWriter
 from zf.runtime.channel_prd_context import (
     canonical_channel_prd_context,
+    workflow_context_for_project,
     workflow_context_from_payload,
 )
 
@@ -83,3 +84,16 @@ def test_workflow_context_from_payload_is_a_defensive_mapping_copy() -> None:
     assert copied == source
     assert copied is not source
     assert workflow_context_from_payload({"workflow_context": []}) == {}
+
+
+def test_workflow_context_defaults_target_without_overwriting_explicit_value(
+    tmp_path: Path,
+) -> None:
+    defaulted = workflow_context_for_project({}, tmp_path)
+    explicit = workflow_context_for_project(
+        {"workflow_context": {"target_root": "/explicit/target"}},
+        tmp_path,
+    )
+
+    assert defaulted["target_root"] == str(tmp_path.resolve())
+    assert explicit["target_root"] == "/explicit/target"

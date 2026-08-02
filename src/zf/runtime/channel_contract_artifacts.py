@@ -12,6 +12,9 @@ from zf.runtime.sidecar_refs import write_sidecar_json
 
 CONTRIBUTION_SCHEMA_VERSION = "channel.contribution.v2"
 SYNTHESIS_SCHEMA_VERSION = "channel.synthesis.v2"
+CHANNEL_PRD_SCHEMA_VERSION = "channel-prd.v1"
+CHANNEL_PRD_READINESS_SCHEMA_VERSION = "channel-prd-readiness.v1"
+CHANNEL_CONCLUSION_SCHEMA_VERSION = "channel-conclusion.v1"
 
 
 def validate_channel_contract(
@@ -164,6 +167,156 @@ def persist_channel_source_manifest(
     )
 
 
+def persist_channel_prd_readiness(
+    state_dir: Path,
+    *,
+    channel_id: str,
+    thread_id: str,
+    revision: int,
+    body: dict[str, Any],
+    created_by: str,
+    source_event_id: str,
+) -> dict[str, Any]:
+    payload = redact_obj({
+        "schema_version": CHANNEL_PRD_READINESS_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "revision": revision,
+        "verdict": str(body.get("verdict") or "unassessed"),
+        "gaps": body.get("gaps") if isinstance(body.get("gaps"), list) else [],
+        "risks": body.get("risks") if isinstance(body.get("risks"), list) else [],
+        "evidence_refs": (
+            body.get("evidence_refs")
+            if isinstance(body.get("evidence_refs"), list)
+            else []
+        ),
+        "reason": str(body.get("reason") or ""),
+    })
+    return write_sidecar_json(
+        Path(state_dir),
+        (
+            PurePosixPath("channels")
+            / _safe_segment(channel_id)
+            / "prd"
+            / f"r{revision}-readiness.json"
+        ),
+        payload,
+        kind="channel_prd_readiness",
+        schema_version=CHANNEL_PRD_READINESS_SCHEMA_VERSION,
+        created_by=created_by,
+        source_event_id=source_event_id,
+        access_scope={
+            "visibility": "project",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+        },
+        retention={"class": "audit_required"},
+        required=True,
+        preview=str(payload["verdict"]),
+    )
+
+
+def persist_channel_prd(
+    state_dir: Path,
+    *,
+    channel_id: str,
+    thread_id: str,
+    revision: int,
+    previous_ref: str,
+    previous_digest: str,
+    body: dict[str, Any],
+    readiness_descriptor: dict[str, Any],
+    created_by: str,
+    source_event_id: str,
+) -> dict[str, Any]:
+    payload = redact_obj({
+        "schema_version": CHANNEL_PRD_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "revision": revision,
+        "previous_ref": previous_ref,
+        "previous_digest": previous_digest,
+        "readiness_ref": str(readiness_descriptor.get("ref") or ""),
+        "readiness_digest": str(
+            readiness_descriptor.get("sha256") or ""
+        ),
+        "body": body,
+    })
+    return write_sidecar_json(
+        Path(state_dir),
+        (
+            PurePosixPath("channels")
+            / _safe_segment(channel_id)
+            / "prd"
+            / f"r{revision}.json"
+        ),
+        payload,
+        kind="channel_prd",
+        schema_version=CHANNEL_PRD_SCHEMA_VERSION,
+        created_by=created_by,
+        source_event_id=source_event_id,
+        access_scope={
+            "visibility": "project",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+        },
+        retention={"class": "audit_required"},
+        required=True,
+        preview=str(body.get("summary") or "")[:240],
+    )
+
+
+def persist_channel_conclusion(
+    state_dir: Path,
+    *,
+    channel_id: str,
+    thread_id: str,
+    revision: int,
+    prd_descriptor: dict[str, Any],
+    readiness_descriptor: dict[str, Any],
+    summary: str,
+    source_refs: list[str],
+    created_by: str,
+    source_event_id: str,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": CHANNEL_CONCLUSION_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "revision": revision,
+        "prd_ref": str(prd_descriptor.get("ref") or ""),
+        "prd_digest": str(prd_descriptor.get("sha256") or ""),
+        "readiness_ref": str(readiness_descriptor.get("ref") or ""),
+        "readiness_digest": str(
+            readiness_descriptor.get("sha256") or ""
+        ),
+        "summary": summary,
+        "source_refs": source_refs,
+    }
+    return write_sidecar_json(
+        Path(state_dir),
+        (
+            PurePosixPath("channels")
+            / _safe_segment(channel_id)
+            / "conclusions"
+            / f"r{revision}.json"
+        ),
+        payload,
+        kind="channel_conclusion",
+        schema_version=CHANNEL_CONCLUSION_SCHEMA_VERSION,
+        created_by=created_by,
+        source_event_id=source_event_id,
+        access_scope={
+            "visibility": "project",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+        },
+        retention={"class": "audit_required"},
+        required=True,
+        preview=summary[:240],
+    )
+
+
 def typed_items(value: object) -> list[Any]:
     if not isinstance(value, list):
         return []
@@ -188,7 +341,13 @@ def _safe_segment(value: str) -> str:
 __all__ = [
     "CONTRIBUTION_SCHEMA_VERSION",
     "SYNTHESIS_SCHEMA_VERSION",
+    "CHANNEL_CONCLUSION_SCHEMA_VERSION",
+    "CHANNEL_PRD_READINESS_SCHEMA_VERSION",
+    "CHANNEL_PRD_SCHEMA_VERSION",
+    "persist_channel_conclusion",
     "persist_channel_contract",
+    "persist_channel_prd",
+    "persist_channel_prd_readiness",
     "persist_channel_source_manifest",
     "string_refs",
     "typed_items",

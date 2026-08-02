@@ -62,12 +62,6 @@ def build_flow_submit_preview(
     projection_dir.mkdir(parents=True, exist_ok=True)
     preflight_path = projection_dir / "workflow-preflight.json"
     preview_path = (output or projection_dir / "workflow-submit-preview.json").expanduser()
-    report = build_flow_preflight_report(
-        config_path.resolve(),
-        flow_kind=flow_kind or str(manifest.get("kind") or ""),
-        intake_path=intake_path,
-        allow_missing_env=allow_missing_env,
-    )
     request_projection: dict[str, Any] = {}
     request_blockers: list[dict[str, Any]] = []
     if manifest_path is not None:
@@ -112,6 +106,16 @@ def build_flow_submit_preview(
             and manifest["requirement_spec_ref"] not in manifest["artifact_refs"]
         ):
             manifest["artifact_refs"].append(manifest["requirement_spec_ref"])
+    effective_manifest_path = Path(
+        str(request_projection.get("workflow_input_manifest_ref") or "")
+    ) if request_projection.get("workflow_input_manifest_ref") else manifest_path
+    report = build_flow_preflight_report(
+        config_path.resolve(),
+        flow_kind=flow_kind or str(manifest.get("kind") or ""),
+        intake_path=intake_path,
+        workflow_input_manifest_path=effective_manifest_path,
+        allow_missing_env=allow_missing_env,
+    )
     effective_config_path = config_path.resolve()
     if request_projection and synthesis_result_ref is not None:
         from zf.runtime.workflow_proposal import (
@@ -133,6 +137,7 @@ def build_flow_submit_preview(
                 effective_config_path,
                 flow_kind=synthesis_kind,
                 intake_path=intake_path,
+                workflow_input_manifest_path=effective_manifest_path,
                 allow_missing_env=allow_missing_env,
             )
     resolved_kind = _normalize_request_kind(
@@ -178,9 +183,6 @@ def build_flow_submit_preview(
         json.dumps(_public_preflight_report(report), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    effective_manifest_path = Path(
-        str(request_projection.get("workflow_input_manifest_ref") or "")
-    ) if request_projection.get("workflow_input_manifest_ref") else manifest_path
     manifest_artifact_refs = _workflow_manifest_artifact_refs(
         manifest,
         manifest_path=effective_manifest_path,

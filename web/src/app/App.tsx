@@ -1498,7 +1498,15 @@ export function App() {
     await refresh();
   }
 
-  async function submitChannelMessage(text: string, refs?: Record<string, unknown>) {
+  async function submitChannelMessage(
+    text: string,
+    refs?: Record<string, unknown>,
+    ingress?: {
+      clientMessageId: string;
+      threadId: string;
+      replyToMessageId?: string;
+    },
+  ) {
     const channelId = selectedChannelId || "ch-zaofu";
     const projectId = activeProjectId || undefined;
     const ticket = projectRequestScope.capture(projectId || "");
@@ -1531,11 +1539,14 @@ export function App() {
     refreshWhilePosting();
     try {
       const result = await postChannelMessage(channelId, {
-        thread_id: "main",
+        thread_id: ingress?.threadId || "main",
         text,
         member_id: "operator",
         role: "user",
         source: "web-channel-composer",
+        client_message_id: ingress?.clientMessageId,
+        idempotency_key: ingress?.clientMessageId,
+        reply_to_message_id: ingress?.replyToMessageId,
         ...(refs ? { refs } : {}),
       }, projectId);
       if (!projectRequestScope.isCurrent(ticket)) return;
@@ -1639,6 +1650,21 @@ export function App() {
       thread_id: threadId || "main",
       member_id: "operator",
       source: "web-channel-read-state",
+    });
+  }
+
+  async function pinChannelMessage(
+    messageId: string,
+    threadId: string,
+    pinned: boolean,
+  ) {
+    await submitAction("channel-pin-message", {
+      channel_id: selectedChannelId || "ch-zaofu",
+      thread_id: threadId || "main",
+      message_id: messageId,
+      member_id: "operator",
+      pinned,
+      source: "web-channel-message-action",
     });
   }
 
@@ -2014,12 +2040,15 @@ export function App() {
                 onAddAgent={() => setAddAgentOpen(true)}
                 onNewChannel={() => setNewChannelOpen(true)}
                 onOpenChannel={openChannel}
-                onPostMessage={(text, refs) => submitChannelMessage(text, refs)}
+                onPostMessage={(text, refs, ingress) => submitChannelMessage(text, refs, ingress)}
                 onDrainReplies={() => drainChannelReplies()}
                 onGenerateOwnerReport={() => generateChannelOwnerReport()}
                 onClearHistory={() => clearChannelHistory()}
                 onDeleteChannel={() => deleteChannel()}
                 onMarkRead={(threadId) => markChannelRead(threadId)}
+                onPinMessage={(messageId, threadId, pinned) => (
+                  pinChannelMessage(messageId, threadId, pinned)
+                )}
                 onSearchHistory={(query, threadId) => runChannelHistorySearch(query, threadId)}
                 onRequestSynthesis={(targetMemberId) => requestChannelSynthesis(targetMemberId)}
                 onResolveQuestion={channelActions.resolveQuestion}

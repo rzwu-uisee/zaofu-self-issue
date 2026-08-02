@@ -165,6 +165,7 @@ def _channel_setup_plan() -> dict[str, Any]:
                 "Which member set and two-round budget should clarify "
                 "FOURFLOW_CHANNEL_SETUP?"
             ),
+            "discussion_seed": "Clarify FOURFLOW_CHANNEL_SETUP.",
             "submit_action": "channel-create-and-start",
             "submit_label": "Create & start",
             "options": [

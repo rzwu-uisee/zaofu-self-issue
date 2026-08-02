@@ -16,6 +16,7 @@ PLAN_REQUEST_SCHEMA_VERSION = "kanban-plan-request.v3"
 PLAN_RESPONSE_SCHEMA_VERSION = "kanban-plan-response.v2"
 PLAN_DIRECT_APPLY_ACTIONS = frozenset({"channel-create-and-start"})
 PLAN_PROPOSAL_ACTIONS = frozenset({
+    "create-task",
     "workflow-start",
     "task-workflow-start",
 })
@@ -48,9 +49,11 @@ def plan_request_digest(request: dict[str, Any]) -> str:
             request.get("requirement_digest") or ""
         ),
         "subject_type": str(request.get("subject_type") or ""),
+        "discussion_seed": str(request.get("discussion_seed") or ""),
         "config_digest": str(request.get("config_digest") or ""),
         "submit_action": str(request.get("submit_action") or ""),
         "submit_label": str(request.get("submit_label") or ""),
+        "workflow_parameters": request.get("workflow_parameters") or {},
     }
     if len(questions) == 1:
         semantics.update({

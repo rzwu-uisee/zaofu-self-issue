@@ -186,6 +186,24 @@ def test_channel_question_dedup_rejection_routes_to_run_manager_first() -> None:
     )
 
 
+def test_channel_result_receipt_failure_stays_with_bounded_reconciler() -> None:
+    spec = spec_for_event("channel.result.receipt.failed")
+
+    assert spec is not None
+    assert spec.event_class == "expected_negative"
+    assert spec.problem_class == "external_side_effect"
+    assert spec.action_policy == "kernel_consumed"
+    assert spec.supervisor_attention == "none"
+    assert spec.autoresearch_eligible is False
+    assert spec.effective_notification_policy == "trace_only"
+    assert spec.effective_recovery_policy == "none"
+    assert spec.dedupe_key_fields == (
+        "channel_id",
+        "thread_id",
+        "idempotency_key",
+    )
+
+
 def test_role_lifecycle_suspended_is_normal_observation() -> None:
     spec = spec_for_event("role.lifecycle.suspended")
 

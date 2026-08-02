@@ -1565,6 +1565,42 @@ class IntegrationsConfig:
     feishu_routing: dict[str, FeishuRouteConfig] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ChannelAgentProfileConfig:
+    """Project-owned semantic identity for one Channel agent."""
+
+    revision: int = 1
+    persona: str = ""
+    display_name: str = ""
+    channel_role: str = ""
+    provider: str = ""
+    backend: str = ""
+    model: str = ""
+    role_context_ref: str = ""
+    skill_refs: list[str] = field(default_factory=list)
+    visibility_ceiling: str = "minimal"
+    permission_ceiling: str = "read_only"
+    lifecycle: str = "persistent"
+
+    def __post_init__(self) -> None:
+        if self.revision < 1:
+            raise ValueError("channel agent profile revision must be >= 1")
+        if self.lifecycle not in {"persistent", "turn", "ephemeral"}:
+            raise ValueError(
+                "channel agent profile lifecycle must be persistent, turn, "
+                "or ephemeral"
+            )
+
+
+@dataclass
+class ChannelConfig:
+    """Project-level Channel product configuration."""
+
+    agent_profiles: dict[str, ChannelAgentProfileConfig] = field(
+        default_factory=dict
+    )
+
+
 @dataclass
 class AutopilotScheduleConfig:
     id: str = ""
@@ -1672,6 +1708,7 @@ class ZfConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
     integrations: IntegrationsConfig = field(default_factory=IntegrationsConfig)
+    channel: ChannelConfig = field(default_factory=ChannelConfig)
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
     autoresearch: AutoresearchConfig = field(default_factory=AutoresearchConfig)
     skill_sources: list[SkillSourceConfig] = field(default_factory=list)

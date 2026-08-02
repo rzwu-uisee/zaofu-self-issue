@@ -133,6 +133,8 @@ from zf.core.config.schema import (  # noqa: E402
     OpenClawProviderConfig,
     OpenClawRemoteBindingConfig,
     IntegrationsConfig,
+    ChannelAgentProfileConfig,
+    ChannelConfig,
     FeishuIdentityConfig,
     FeishuIdentityUserConfig,
     FeishuRouteConfig,
@@ -282,7 +284,22 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "autopilot", "autoresearch", "skill_sources", "global_budget_usd",
     "budget_enforcement", "budget_enforcement_enabled",
     # P0-8 存量遗漏(与 attempt_lease_grace_s 同族白名单坑)+ 133/G 批
-    "budget_fail_closed", "goal",
+    "budget_fail_closed", "goal", "channel",
+})
+_KNOWN_CHANNEL_KEYS = frozenset({"agent_profiles"})
+_KNOWN_CHANNEL_AGENT_PROFILE_KEYS = frozenset({
+    "revision",
+    "persona",
+    "display_name",
+    "channel_role",
+    "provider",
+    "backend",
+    "model",
+    "role_context_ref",
+    "skill_refs",
+    "visibility_ceiling",
+    "permission_ceiling",
+    "lifecycle",
 })
 _KNOWN_WORKFLOW_KEYS = frozenset({
     "attempt_lease_grace_s",  # 131-P2-3 lease 宽限(r6 首用)
@@ -2585,10 +2602,7 @@ def load_config(path: Path) -> ZfConfig:
             ),
             flow_metadata=workflow_data.get("_flow_metadata", {}) or {},
             flow_metadata_by_kind=_build_flow_metadata_by_kind(
-                workflow_data.get(
-                    "flow_metadata_by_kind",
-                    workflow_data.get("_flow_metadata_by_kind"),
-                )
+                workflow_data.get("_flow_metadata_by_kind")
             ),
             pipelines=pipelines,
             pipelines_role_meta=pipelines_role_meta,
@@ -2607,6 +2621,7 @@ def load_config(path: Path) -> ZfConfig:
         runtime=_build_runtime(raw.get("runtime")),
         providers=_build_providers(raw.get("providers")),
         integrations=_build_integrations(raw.get("integrations")),
+        channel=_build_channel(raw.get("channel")),
         autopilot=_build_autopilot(raw.get("autopilot")),
         autoresearch=_build_autoresearch(raw.get("autoresearch")),
         skill_sources=_build_skill_sources(raw.get("skill_sources")),
@@ -3582,6 +3597,87 @@ def _build_integrations(data: object) -> IntegrationsConfig:
         feishu_identity=_build_feishu_identity(data.get("feishu_identity")),
         feishu_routing=_build_feishu_routing(data.get("feishu_routing")),
     )
+
+
+_CHANNEL_PROFILE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+_CHANNEL_VISIBILITY_CEILINGS = {
+    "minimal",
+    "planner",
+    "reviewer",
+    "owner_report",
+    "full_audit",
+}
+
+
+def _build_channel(data: object) -> ChannelConfig:
+    if data in (None, ""):
+        return ChannelConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("channel must be a mapping")
+    _reject_unknown_keys(data, _KNOWN_CHANNEL_KEYS, "channel")
+    raw_profiles = data.get("agent_profiles") or {}
+    if not isinstance(raw_profiles, dict):
+        raise ConfigError("channel.agent_profiles must be a mapping")
+
+    profiles: dict[str, ChannelAgentProfileConfig] = {}
+    for raw_profile_id, raw_profile in raw_profiles.items():
+        profile_id = str(raw_profile_id or "").strip()
+        context = f"channel.agent_profiles[{profile_id!r}]"
+        if not _CHANNEL_PROFILE_ID_RE.match(profile_id):
+            raise ConfigError(
+                f"{context} id must start with a letter and contain only "
+                "letters, digits, dot, underscore, or hyphen"
+            )
+        if not isinstance(raw_profile, dict):
+            raise ConfigError(f"{context} must be a mapping")
+        _reject_unknown_keys(
+            raw_profile,
+            _KNOWN_CHANNEL_AGENT_PROFILE_KEYS,
+            context,
+        )
+        skill_refs = raw_profile.get("skill_refs") or []
+        if not isinstance(skill_refs, list) or not all(
+            isinstance(item, str) and item.strip() for item in skill_refs
+        ):
+            raise ConfigError(f"{context}.skill_refs must be a string list")
+        visibility = str(
+            raw_profile.get("visibility_ceiling") or "minimal"
+        ).strip()
+        if visibility not in _CHANNEL_VISIBILITY_CEILINGS:
+            raise ConfigError(
+                f"{context}.visibility_ceiling must be one of "
+                f"{sorted(_CHANNEL_VISIBILITY_CEILINGS)}"
+            )
+        permission = str(
+            raw_profile.get("permission_ceiling") or "read_only"
+        ).strip().lower().replace("-", "_").replace(" ", "_")
+        if permission not in _FEISHU_PERMISSION_PROFILES:
+            raise ConfigError(
+                f"{context}.permission_ceiling must be one of "
+                f"{sorted(_FEISHU_PERMISSION_PROFILES)}"
+            )
+        try:
+            profiles[profile_id] = ChannelAgentProfileConfig(
+                revision=int(raw_profile.get("revision", 1)),
+                persona=str(raw_profile.get("persona") or ""),
+                display_name=str(raw_profile.get("display_name") or ""),
+                channel_role=str(raw_profile.get("channel_role") or ""),
+                provider=str(raw_profile.get("provider") or ""),
+                backend=str(raw_profile.get("backend") or ""),
+                model=str(raw_profile.get("model") or ""),
+                role_context_ref=str(
+                    raw_profile.get("role_context_ref") or ""
+                ),
+                skill_refs=[str(item).strip() for item in skill_refs],
+                visibility_ceiling=visibility,
+                permission_ceiling=permission,
+                lifecycle=str(
+                    raw_profile.get("lifecycle") or "persistent"
+                ).strip(),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{context}: {exc}") from exc
+    return ChannelConfig(agent_profiles=profiles)
 
 
 _FEISHU_ROUTE_TARGETS = {

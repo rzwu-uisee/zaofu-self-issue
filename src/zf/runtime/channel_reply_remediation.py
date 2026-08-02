@@ -34,6 +34,116 @@ _STATUS_BY_TYPE = {
     "channel.agent.reply.failed": "failed",
 }
 
+_NON_RETRYABLE_FAILURE_STATUSES = frozenset({
+    "command_unavailable",
+    "permission_denied",
+    "permission_drift_blocked",
+    "provider_binding_missing",
+    "sandbox_unsupported",
+    "target_member_inactive",
+})
+_NON_RETRYABLE_REASON_MARKERS = (
+    "command is unavailable",
+    "permission drift",
+    "provider binding is missing",
+    "sandbox cannot be created",
+    "sandbox_unsupported",
+    "target_member_inactive",
+    "unshare",
+)
+
+
+def classify_channel_reply_failure(
+    *,
+    status: object = "",
+    reason: object = "",
+    retryable: object = None,
+) -> dict[str, Any]:
+    """Classify provider failures before the bounded redispatch policy."""
+
+    normalized_status = str(status or "failed").strip().lower()
+    normalized_reason = str(reason or "").strip()
+    reason_lower = normalized_reason.lower()
+    superseded = "superseded by" in reason_lower
+    if isinstance(retryable, bool):
+        is_retryable = retryable
+    else:
+        is_retryable = not (
+            superseded
+            or normalized_status in _NON_RETRYABLE_FAILURE_STATUSES
+            or any(marker in reason_lower for marker in _NON_RETRYABLE_REASON_MARKERS)
+        )
+    return {
+        "failure_status": normalized_status,
+        "failure_class": (
+            "channel_reply_superseded"
+            if superseded
+            else f"provider_{normalized_status.replace('-', '_')}"
+        ),
+        "retryable": is_retryable,
+        "terminal_disposition": "superseded" if superseded else "failed",
+    }
+
+
+def emit_channel_reply_failed(
+    *,
+    writer: EventWriter,
+    request: dict[str, Any],
+    request_id: str,
+    started_event_id: str,
+    actor: str,
+    source: str,
+    channel_id: str,
+    reason: str,
+    provider_session_id: str,
+    failure_status: str = "failed",
+) -> None:
+    """Emit one classified provider failure and close a bound handoff."""
+
+    from zf.runtime.channel_run_owner import provider_run_fields_for_request
+
+    writer.emit(
+        "channel.agent.reply.failed",
+        actor=actor,
+        task_id=str(request.get("task_id") or "") or None,
+        causation_id=started_event_id,
+        correlation_id=channel_id,
+        payload={
+            "channel_id": channel_id,
+            "thread_id": str(request.get("thread_id") or "main"),
+            "request_id": request_id,
+            "message_id": str(request.get("message_id") or ""),
+            "target_member_id": str(request.get("target_member_id") or ""),
+            "context_pack_id": str(request.get("context_pack_id") or ""),
+            "provider_session_id": provider_session_id,
+            "reason": reason,
+            **classify_channel_reply_failure(status=failure_status, reason=reason),
+            **provider_run_fields_for_request(channel_id, request),
+            "source": source,
+        },
+    )
+    handoff_request_event_id = str(request.get("handoff_request_event_id") or "")
+    if not handoff_request_event_id:
+        return
+    writer.emit(
+        "channel.handoff.failed",
+        actor=actor,
+        task_id=str(request.get("task_id") or "") or None,
+        causation_id=handoff_request_event_id,
+        correlation_id=channel_id,
+        payload={
+            "channel_id": channel_id,
+            "thread_id": str(request.get("thread_id") or "main"),
+            "message_id": str(request.get("message_id") or ""),
+            "member_id": str(request.get("member_id") or ""),
+            "target_member_id": str(request.get("target_member_id") or ""),
+            "request_id": request_id,
+            "handoff_request_event_id": handoff_request_event_id,
+            "reason": reason,
+            "source": source,
+        },
+    )
+
 
 def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str], dict[str, Any]]:
     """Latest-generation state per (channel_id, request_id).
@@ -60,6 +170,10 @@ def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str]
             "status": "",
             "run_generation": 1,
             "reason": "",
+            "failure_status": "",
+            "failure_class": "",
+            "retryable": True,
+            "terminal_disposition": "",
             "updated_at": "",
             "last_event_id": "",
         })
@@ -67,6 +181,15 @@ def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str]
         incoming = _positive_int(payload.get("run_generation"), default=current)
         if event.type != _REQUESTED and "run_generation" in payload and incoming < current:
             continue
+        failure = (
+            classify_channel_reply_failure(
+                status=payload.get("failure_status") or payload.get("status"),
+                reason=payload.get("reason"),
+                retryable=payload.get("retryable"),
+            )
+            if status == "failed"
+            else {}
+        )
         item.update({
             "thread_id": str(payload.get("thread_id") or item["thread_id"] or "main"),
             "message_id": str(payload.get("message_id") or item["message_id"]),
@@ -76,6 +199,7 @@ def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str]
             "reason": str(payload.get("reason") or "") if status == "failed" else "",
             "updated_at": event.ts,
             "last_event_id": event.id,
+            **failure,
         })
     return states
 
@@ -106,6 +230,8 @@ def channel_reply_remediation_candidates(
         if age is not None and age > max_age_seconds:
             continue
         if status == "failed":
+            if str(item.get("terminal_disposition") or "") == "superseded":
+                continue
             stuck = True
         elif status in {"running", "pending"}:
             stuck = age is not None and age > stuck_after_seconds
@@ -114,7 +240,11 @@ def channel_reply_remediation_candidates(
         if not stuck:
             continue
         generation = _positive_int(item.get("run_generation"), default=1)
-        if generation >= max_generation:
+        if not bool(item.get("retryable", True)):
+            if exhausted_marked.get(key, 0) >= generation:
+                continue
+            kind = "exhaust"
+        elif generation >= max_generation:
             if exhausted_marked.get(key, 0) >= generation:
                 continue
             kind = "exhaust"
@@ -166,6 +296,9 @@ def remediate_channel_replies(
                     "last_status": str(candidate.get("status") or ""),
                     "reason": str(candidate.get("reason") or "")
                     or f"reply stuck in {candidate.get('status')} after {generation} generations",
+                    "failure_status": str(candidate.get("failure_status") or ""),
+                    "failure_class": str(candidate.get("failure_class") or ""),
+                    "retryable": bool(candidate.get("retryable", True)),
                     "source": "runtime",
                 },
             )
@@ -234,6 +367,9 @@ def pending_channel_reply_exhausted_actions(events: list[ZfEvent]) -> list[dict[
             "request_id": request_id,
             "target_member_id": str(payload.get("target_member_id") or state.get("target_member_id") or ""),
             "run_generation": generation,
+            "failure_status": str(payload.get("failure_status") or ""),
+            "provider_failure_class": str(payload.get("failure_class") or ""),
+            "retryable": bool(payload.get("retryable", True)),
             "source_event_id": event.id,
             "source_event_type": event.type,
             "source_event_ids": [event.id] if event.id else [],
@@ -247,6 +383,70 @@ def pending_channel_reply_exhausted_actions(events: list[ZfEvent]) -> list[dict[
             ),
         })
     return out
+
+
+def drain_terminal_channel_reply(
+    runtime: Any,
+    event: ZfEvent,
+    channel_id: str,
+) -> None:
+    if event.type not in {
+        "channel.agent.reply.completed",
+        "channel.agent.reply.failed",
+    }:
+        return
+    from zf.runtime.channel_message_ingress import (
+        dispatch_channel_replies_background,
+    )
+
+    dispatch_channel_replies_background(
+        state_dir=runtime.state_dir,
+        channel_id=channel_id,
+        actor="orchestrator-reactor",
+        source="runtime:terminal-drain",
+        project_root=getattr(runtime, "project_root", None),
+        config=getattr(runtime, "config", None),
+        openclaw_client=getattr(runtime, "openclaw_client", None),
+        max_dispatch=64,
+    )
+
+
+def resume_pending_channel_reply_queues(
+    runtime: Any,
+    events: list[ZfEvent],
+) -> None:
+    channel_ids = {
+        str((event.payload or {}).get("channel_id") or event.correlation_id or "")
+        for event in events
+        if event.type == _REQUESTED
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("status") or "") in {"pending", "queued"}
+    }
+    if not channel_ids:
+        return
+    from zf.runtime.channel_message_ingress import (
+        dispatch_channel_replies_background,
+    )
+    from zf.runtime.channel_projection import project_channel
+
+    for channel_id in sorted(item for item in channel_ids if item):
+        channel = project_channel(runtime.state_dir, channel_id) or {}
+        if not any(
+            isinstance(item, dict)
+            and str(item.get("status") or "") in {"pending", "queued"}
+            for item in channel.get("reply_requests") or []
+        ):
+            continue
+        dispatch_channel_replies_background(
+            state_dir=runtime.state_dir,
+            channel_id=channel_id,
+            actor="orchestrator-remediation",
+            source="runtime:cold-resume",
+            project_root=getattr(runtime, "project_root", None),
+            config=getattr(runtime, "config", None),
+            openclaw_client=getattr(runtime, "openclaw_client", None),
+            max_dispatch=64,
+        )
 
 
 def _age_seconds(ts: str, now: datetime) -> float | None:

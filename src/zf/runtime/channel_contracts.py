@@ -116,6 +116,9 @@ CHANNEL_SAFE_PERMISSIONS = {
     "report_owner",
 }
 CHANNEL_DISCUSSION_MODES = {
+    "conversation",
+    "clarification",
+    "multi_lens",
     "manual_mention",
     "mention_relay",
     "round_robin",
@@ -123,6 +126,15 @@ CHANNEL_DISCUSSION_MODES = {
     "leader_delegation",
     "fanout_then_synthesis",
     "debate_judge",
+}
+CHANNEL_DISCUSSION_MODE_ALIASES = {
+    "manual_mention": "conversation",
+    "mention_relay": "clarification",
+    "round_robin": "multi_lens",
+    "priority": "multi_lens",
+    "leader_delegation": "conversation",
+    "fanout_then_synthesis": "multi_lens",
+    "debate_judge": "multi_lens",
 }
 CHANNEL_PROVIDER_BINDING_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 CHANNEL_SKILL_REF_RE = re.compile(
@@ -149,6 +161,7 @@ CHANNEL_MEMBER_ROLE_DEFAULTS = {
     "automation_reporter": "automation_reporter",
     "observer": "observer",
 }
+MAX_CHANNEL_PARALLEL_REPLIES = 64
 
 
 def normalize_member_type(value: object, *, backend: object = "") -> str:
@@ -214,6 +227,25 @@ def default_debate_max_rounds(member_count: int) -> int:
     return max(6, max(member_count, 1) * 4)
 
 
+def channel_max_parallel_replies(
+    channel: dict[str, Any] | None,
+    *,
+    fallback: int = 6,
+) -> int:
+    """Return the execution-capacity limit without truncating recipients."""
+    discussion = (channel or {}).get("discussion")
+    raw = (
+        discussion.get("max_parallel_replies")
+        if isinstance(discussion, dict)
+        else fallback
+    )
+    try:
+        value = int(raw or fallback)
+    except (TypeError, ValueError):
+        value = fallback
+    return max(1, min(value, MAX_CHANNEL_PARALLEL_REPLIES))
+
+
 def permission_profile_write_policy(value: object) -> dict[str, Any]:
     profile = normalize_permission_profile(value)
     return dict(CHANNEL_PERMISSION_PROFILE_WRITE_POLICY[profile])
@@ -248,7 +280,23 @@ def normalize_permissions(value: object, *, member_type: str = "") -> list[str]:
         return ["read", "summarize", "read_reports", "report_owner"]
     if member_type == "observer":
         return ["read", "summarize"]
-    return ["read", "message", "summarize", "propose_workflow"]
+    return ["read", "message", "summarize"]
+
+
+def normalize_product_discussion_mode(value: object) -> str:
+    raw = str(value or "conversation").strip()
+    if raw in {"conversation", "clarification", "multi_lens"}:
+        return raw
+    return CHANNEL_DISCUSSION_MODE_ALIASES.get(raw, "conversation")
+
+
+def discussion_engine_mode(value: object) -> str:
+    product_mode = normalize_product_discussion_mode(value)
+    return {
+        "conversation": "manual_mention",
+        "clarification": "mention_relay",
+        "multi_lens": "fanout_then_synthesis",
+    }[product_mode]
 
 
 def validate_channel_member_contract(payload: dict[str, Any]) -> str:

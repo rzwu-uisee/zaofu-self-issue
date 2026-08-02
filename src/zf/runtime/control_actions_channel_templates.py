@@ -4,21 +4,30 @@ from __future__ import annotations
 
 from zf.core.events import ZfEvent
 from zf.runtime.channel_contracts import (
+    discussion_engine_mode,
     normalize_channel_role,
     normalize_member_type,
     normalize_permission_profile,
     normalize_permissions,
     normalize_provider,
+    normalize_product_discussion_mode,
     normalize_visibility_profile,
     permission_profile_write_policy,
 )
 from zf.runtime.channel_discussion import discussion_roster
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_profiles import (
+    bind_channel_member_profile,
+    resolve_channel_role_definition,
+    write_channel_profile_snapshot,
+)
+from zf.runtime.channel_owner_authority import normalize_owner_delegates
 from zf.runtime.channel_templates import materialize_channel_template
 from zf.runtime.control_actions_channel_admin import _materialize_channel_skill_refs
 from zf.runtime.control_actions_helpers import (
     _normal_channel_id,
     _required_text,
+    _stable_control_id,
     _task_id_from_payload,
 )
 
@@ -94,7 +103,9 @@ class ChannelTemplateActionsMixin:
                 )
 
         unresolved_skill_refs: list[str] = []
-        for member in materialized["members"]:
+        bound_members: list[dict] = []
+        for raw_member in materialized["members"]:
+            member = dict(raw_member)
             unresolved, resolved = _materialize_channel_skill_refs(
                 list(member.get("skill_refs") or []),
                 project_root=self.project_root or self.state_dir.parent,
@@ -103,6 +114,39 @@ class ChannelTemplateActionsMixin:
             )
             unresolved_skill_refs.extend(unresolved)
             member["resolved_skill_refs"] = resolved
+            bound, bind_error = bind_channel_member_profile(
+                self.config,
+                {**member, "template_id": template_id},
+                allow_inline_profile=True,
+            )
+            if bind_error or bound is None:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason=bind_error or "channel template profile binding failed",
+                    status_code=422,
+                    status="invalid_template",
+                )
+            role_definition, role_error = resolve_channel_role_definition(
+                bound,
+                project_root=self.project_root or self.state_dir.parent,
+            )
+            if role_error:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason=role_error,
+                    status_code=422,
+                    status="invalid_template",
+                )
+            bound["resolved_skill_refs"] = resolved
+            bound["_role_definition_snapshot"] = role_definition
+            bound_members.append(bound)
+        materialized["members"] = bound_members
         unresolved_skill_refs = list(dict.fromkeys(unresolved_skill_refs))
         if unresolved_skill_refs:
             return self._failed(
@@ -148,6 +192,25 @@ class ChannelTemplateActionsMixin:
                 "thread_id": str(payload.get("thread_id") or "main"),
                 "task_id": str(payload.get("task_id") or ""),
                 "created_by": str(payload.get("created_by") or self.actor),
+                "owner_actor_ref": str(
+                    payload.get("owner_actor_ref") or self.actor
+                ),
+                "owner_delegates": normalize_owner_delegates(
+                    payload.get("owner_delegates")
+                ),
+                "leader_member_id": str(
+                    materialized.get("leader_member_id") or ""
+                ),
+                "leader_revision": 1,
+                "origin_binding": (
+                    payload.get("origin_binding")
+                    if isinstance(payload.get("origin_binding"), dict)
+                    else {
+                        "surface": self.surface,
+                        "channel_id": channel_id,
+                        "thread_id": str(payload.get("thread_id") or "main"),
+                    }
+                ),
                 "source": self.surface,
                 "scope": {
                     **(
@@ -179,6 +242,24 @@ class ChannelTemplateActionsMixin:
             )
             profile = normalize_permission_profile(member.get("permission_profile"))
             skill_refs = list(member.get("skill_refs") or [])
+            profile_snapshot = write_channel_profile_snapshot(
+                self.state_dir,
+                channel_id=channel_id,
+                member_id=str(member["member_id"]),
+                binding=member,
+                resolved_skill_refs=list(
+                    member.get("resolved_skill_refs") or []
+                ),
+                role_definition=(
+                    member.get("_role_definition_snapshot")
+                    if isinstance(
+                        member.get("_role_definition_snapshot"), dict
+                    )
+                    else {}
+                ),
+                created_by=self.actor,
+                source_event_id=created.id,
+            )
             event = self.writer.emit(
                 "channel.member.invited",
                 actor=self.actor,
@@ -191,6 +272,35 @@ class ChannelTemplateActionsMixin:
                     "member_id": str(member["member_id"]),
                     "persona": str(member["member_id"]),
                     "display_name": str(member["member_id"]).replace("_", " ").title(),
+                    "profile_id": str(member.get("profile_id") or ""),
+                    "profile_revision": int(
+                        member.get("profile_revision") or 1
+                    ),
+                    "profile_provenance": str(
+                        member.get("profile_provenance")
+                        or "template_inline"
+                    ),
+                    "profile_digest": str(
+                        profile_snapshot.get("profile_digest") or ""
+                    ),
+                    "config_digest": str(
+                        profile_snapshot.get("config_digest") or ""
+                    ),
+                    "skill_set_digest": str(
+                        profile_snapshot.get("skill_set_digest") or ""
+                    ),
+                    "permission_digest": str(
+                        profile_snapshot.get("permission_digest") or ""
+                    ),
+                    "role_definition_digest": str(
+                        profile_snapshot.get("role_definition_digest") or ""
+                    ),
+                    "profile_snapshot_ref": str(
+                        profile_snapshot.get("ref") or ""
+                    ),
+                    "profile_snapshot_sha256": str(
+                        profile_snapshot.get("sha256") or ""
+                    ),
                     "role": role,
                     "channel_role": role,
                     "member_type": member_type,
@@ -467,25 +577,188 @@ class ChannelTemplateActionsMixin:
                 status_code=422,
                 status="invalid_discussion",
             )
+        thread_id = str(payload.get("thread_id") or "main")
+        discussion_config = (
+            channel.get("discussion")
+            if isinstance(channel.get("discussion"), dict)
+            else {}
+        )
+        product_mode = normalize_product_discussion_mode(
+            payload.get("mode") or discussion_config.get("mode")
+        )
+        sessions = (
+            channel.get("discussions")
+            if isinstance(channel.get("discussions"), dict)
+            else {}
+        )
+        session = (
+            sessions.get(thread_id)
+            if isinstance(sessions.get(thread_id), dict)
+            else {}
+        )
+        continuing = bool(payload.get("continue")) or (
+            bool(session)
+            and str(session.get("state") or "idle") != "idle"
+        )
+        expected_revision = int(payload.get("expected_revision") or 0)
+        current_revision = int(session.get("revision") or 0)
+        if expected_revision and expected_revision != current_revision:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=(
+                    "channel discussion revision is stale; "
+                    f"current revision is {current_revision}"
+                ),
+                status_code=409,
+                status="stale_revision",
+            )
+        revision = current_revision + 1 if continuing else 1
+        max_rounds = int(
+            discussion_config.get("max_rounds")
+            or max(1, len(roster) * 4)
+        )
+        if continuing and revision > max_rounds:
+            closed = self.writer.emit(
+                "channel.discussion.closed",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "discussion_id": str(
+                        session.get("discussion_id") or ""
+                    ),
+                    "outcome": "needs_owner",
+                    "reason": "discussion_cap_reached",
+                    "revision": current_revision,
+                    "source": self.surface,
+                },
+            )
+            return {
+                "_status_code": 200,
+                "ok": True,
+                "status": "settled",
+                "outcome": "needs_owner",
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "discussion_id": str(
+                    session.get("discussion_id") or ""
+                ),
+                "revision": current_revision,
+                "event_id": closed.id,
+            }
+        message_id = str(
+            payload.get("message_id")
+            or f"msg-{requested.id.removeprefix('evt-')}"
+        )
+        discussion_id = str(
+            session.get("discussion_id")
+            or _stable_control_id(
+                "discussion",
+                channel_id,
+                thread_id,
+                message_id,
+            )
+        )
+        message = str(
+            payload.get("message")
+            or payload.get("objective")
+            or payload.get("text")
+            or "Continue the discussion."
+        ).strip()
+        context_digest = _stable_control_id(
+            "discussion-context",
+            discussion_id,
+            revision,
+            message,
+        )
+        if continuing:
+            self.writer.emit(
+                "channel.discussion.continued",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "discussion_id": discussion_id,
+                    "revision": revision,
+                    "context_digest": context_digest,
+                    "product_mode": product_mode,
+                    "source": self.surface,
+                },
+            )
+        elif discussion_engine_mode(product_mode) != "fanout_then_synthesis":
+            self.writer.emit(
+                "channel.discussion.started",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "schema_version": "channel.discussion.started.v1",
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "discussion_id": discussion_id,
+                    "revision": revision,
+                    "context_digest": context_digest,
+                    "product_mode": product_mode,
+                    "state": "active",
+                    "trigger": "explicit_discuss",
+                    "roster": roster,
+                    "synthesizer": str(
+                        discussion_config.get("synthesizer")
+                        or discussion_config.get("default_responder_id")
+                        or roster[0]
+                    ),
+                    "requirement_message_id": message_id,
+                    "source": self.surface,
+                },
+            )
+        refs = (
+            dict(payload.get("refs"))
+            if isinstance(payload.get("refs"), dict)
+            else {}
+        )
+        refs.update({
+            "discussion_id": discussion_id,
+            "discussion_revision": revision,
+            "discussion_context_digest": context_digest,
+            "discussion_product_mode": product_mode,
+        })
+        if (
+            not continuing
+            and discussion_engine_mode(product_mode)
+            == "fanout_then_synthesis"
+        ):
+            refs["explicit_discussion_start"] = True
         result = self._channel_post_message(
             requested=requested,
             action=action,
             requested_action=requested_action,
             payload={
                 **payload,
-                "text": "@all " + str(
-                    payload.get("message")
-                    or payload.get("objective")
-                    or payload.get("text")
-                    or "Start the structured discussion."
-                ).removeprefix("@all ").strip(),
-                "mentions": ["all"],
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "text": message.removeprefix("@all ").strip(),
+                "mentions": [],
+                "refs": refs,
             },
             emit_completion=emit_completion,
         )
         if result.get("ok"):
-            result["status"] = "started"
+            result["status"] = "continued" if continuing else "started"
             result["participants"] = roster
+            result["discussion_id"] = discussion_id
+            result["revision"] = revision
+            result["context_digest"] = context_digest
         return result
 
 

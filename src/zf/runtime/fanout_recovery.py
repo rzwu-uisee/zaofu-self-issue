@@ -16,6 +16,7 @@ from typing import Iterable
 from zf.core.config.schema import ZfConfig
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.runtime.writer_contract_handoff import recoverable_writer_handoff_failure
 
 
 _WRITER_RESULT_EVENTS = {
@@ -63,6 +64,8 @@ def find_unrecorded_writer_fanout_results(
     event_list = list(events)
     for event in event_list:
         if event.type not in _FANOUT_TERMINAL_EVENTS:
+            continue
+        if recoverable_writer_handoff_failure(event):
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         fanout_id = str(payload.get("fanout_id") or "")

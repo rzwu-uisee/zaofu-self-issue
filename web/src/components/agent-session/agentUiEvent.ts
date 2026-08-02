@@ -266,8 +266,8 @@ export function parsePlanRequest(payload: Record<string, unknown>): AgentSession
     revision: Math.max(1, Number(request.revision || 1)),
     header: textValue(request.header).trim() || "Plan",
     subjectType: (
-      ["channel_setup", "clarification", "task_workflow"].includes(textValue(request.subject_type))
-        ? textValue(request.subject_type) as "channel_setup" | "clarification" | "task_workflow"
+      ["channel_setup", "clarification", "task_create", "task_workflow"].includes(textValue(request.subject_type))
+        ? textValue(request.subject_type) as "channel_setup" | "clarification" | "task_create" | "task_workflow"
         : undefined
     ),
     questionId: primaryQuestion.id,

@@ -9,9 +9,11 @@ from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.core.state.locks import locked_path
 from zf.core.task.store import TaskStore
-from zf.runtime.channel_sidecar import (
-    SidecarRefError,
-    hydrate_channel_message_text,
+from zf.runtime.channel_workflow_authority import (
+    bind_task_channel_authority_to_submit_payload,
+    channel_authority_context_from_task,
+    channel_authority_context_from_submit_payload,
+    channel_workflow_authority_error,
 )
 from zf.runtime.control_actions_helpers import (
     _normal_channel_id,
@@ -26,8 +28,15 @@ from zf.runtime.kanban_plan_requests import (
     PLAN_REQUESTED_EVENT,
     PLAN_RESPONSE_SCHEMA_VERSION,
     normalize_plan_request_revision,
-    plan_requirement_digest,
     plan_response_gate,
+)
+from zf.runtime.control_actions_plan_apply_helpers import (
+    channel_plan_discussion_seed,
+    channel_plan_discussion_seed_digest,
+    latest_plan_revision as _latest_plan_revision,
+    latest_task_binding_event_id as _latest_task_binding_event_id,
+    originating_plan_message as _originating_plan_message,
+    shared_workflow_parameters as _shared_workflow_parameters,
 )
 from zf.runtime.kanban_proposals import (
     PROPOSAL_EVENT,
@@ -258,6 +267,22 @@ class PlanApplyActionsMixin:
                 status_code=409,
                 status="plan_origin_missing",
             )
+        discussion_seed, legacy_seed_fallback, seed_error = (
+            channel_plan_discussion_seed(
+                request,
+                origin_message,
+            )
+        )
+        if seed_error:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=request_event.task_id,
+                reason=seed_error,
+                status_code=409,
+                status="plan_discussion_seed_missing",
+            )
 
         request_id = str(gate.get("request_id") or "")
         template_id = str(submit_payload.get("template_id") or "")
@@ -271,7 +296,7 @@ class PlanApplyActionsMixin:
             ),
             "thread_id": str(submit_payload.get("thread_id") or "main"),
             "message_id": f"msg-{request_id}",
-            "message": origin_message,
+            "message": discussion_seed,
             "expected_materialization_digest": str(
                 submit_details.get("materialization_digest") or ""
             ),
@@ -298,6 +323,10 @@ class PlanApplyActionsMixin:
                 "plan_requirement_digest": str(
                     request.get("requirement_digest") or ""
                 ),
+                "discussion_seed_digest": channel_plan_discussion_seed_digest(
+                    discussion_seed
+                ),
+                "discussion_seed_legacy_fallback": legacy_seed_fallback,
             },
         }
         validation_error = validate_shared_action_payload(
@@ -421,17 +450,37 @@ class PlanApplyActionsMixin:
         submit_action: str,
         submit_payload: dict[str, Any],
     ) -> dict:
-        validation_error = validate_shared_action_payload(
-            submit_action,
-            submit_payload,
-            config=self.config,
-        )
         task_id = _task_id_from_payload(submit_payload)
         task = (
             TaskStore(self.state_dir / "kanban.json").get(task_id)
             if task_id
             else None
         )
+        if is_workflow_start_action(submit_action) and task is not None:
+            submit_payload = bind_task_channel_authority_to_submit_payload(
+                submit_payload,
+                task,
+            )
+        validation_error = validate_shared_action_payload(
+            submit_action,
+            submit_payload,
+            config=self.config,
+        )
+        authority_context = channel_authority_context_from_submit_payload(
+            submit_payload
+        )
+        task_authority_context = (
+            channel_authority_context_from_task(task)
+            if task is not None
+            else {}
+        )
+        authority_error = ""
+        if not validation_error and (authority_context or task_authority_context):
+            authority_error = channel_workflow_authority_error(
+                self.state_dir,
+                task_authority_context or authority_context,
+            )
+            validation_error = authority_error
         current_task_digest = (
             task_workflow_binding_digest(task)
             if task is not None
@@ -530,13 +579,22 @@ class PlanApplyActionsMixin:
                 },
             )
         if validation_error:
+            extra = {}
+            status = "invalid_plan_action"
+            if authority_error:
+                status = "workflow_authority_invalid"
+                extra = {
+                    "failure_class": "channel_workflow_authority_invalid",
+                    "recovery_policy": "channel_leader_rebind_required",
+                }
             return self._failed(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,
                 task_id=_task_id_from_payload(submit_payload),
                 reason=validation_error,
-                status="invalid_plan_action",
+                status=status,
+                extra=extra,
             )
 
         proposal_action = canonical_proposal_action(submit_action)
@@ -696,6 +754,9 @@ class PlanApplyActionsMixin:
         shared_parameters = _shared_workflow_parameters(
             request.get("options")
         )
+        task_authority = channel_authority_context_from_task(task)
+        if task_authority:
+            shared_parameters = {**shared_parameters, **task_authority}
         options: list[dict[str, Any]] = []
         used_routes: set[str] = set()
         for option in request.get("options") or []:
@@ -721,11 +782,14 @@ class PlanApplyActionsMixin:
                         submit_payload.get("objective") or task.title
                     ),
                     "parameters": (
-                        dict(submit_payload.get("parameters"))
+                        {
+                            **dict(submit_payload.get("parameters")),
+                            **task_authority,
+                        }
                         if isinstance(
                             submit_payload.get("parameters"), dict
                         )
-                        else {}
+                        else dict(task_authority)
                     ),
                 })
             elif str(option.get("submit_mode") or "") == "continue":
@@ -856,130 +920,5 @@ class PlanApplyActionsMixin:
             "request": redact_obj(replacement),
         }
         return self.writer.append(event)
-
-
-def _originating_plan_message(
-    state_dir,
-    events: list[ZfEvent],
-    request: dict[str, Any],
-) -> str:
-    event_ids = [
-        str(item)
-        for item in request.get("originating_message_event_ids", [])
-        if str(item)
-    ]
-    legacy_id = str(
-        request.get("originating_message_event_id") or ""
-    )
-    if not event_ids and legacy_id:
-        event_ids = [legacy_id]
-    by_id = {event.id: event for event in events}
-    rows: list[tuple[str, str]] = []
-    for event_id in event_ids:
-        origin = by_id.get(event_id)
-        if origin is None or not isinstance(origin.payload, dict):
-            return ""
-        if origin.type == "user.message":
-            message = str(
-                origin.payload.get("message")
-                or origin.payload.get("text")
-                or ""
-            ).strip()
-        elif origin.type == "channel.message.posted":
-            try:
-                message = hydrate_channel_message_text(
-                    state_dir,
-                    origin.payload,
-                    strict=True,
-                ).strip()
-            except SidecarRefError:
-                return ""
-        else:
-            return ""
-        if message:
-            rows.append((event_id, message))
-    expected_digest = str(request.get("requirement_digest") or "")
-    if (
-        expected_digest
-        and expected_digest != plan_requirement_digest(rows)
-    ):
-        return ""
-    return "\n\n".join(message for _event_id, message in rows)
-
-
-def _latest_plan_revision(
-    events: list[ZfEvent],
-    *,
-    request_id: str,
-) -> dict[str, Any]:
-    candidates: list[dict[str, Any]] = []
-    for event in events:
-        if event.type != PLAN_REQUESTED_EVENT:
-            continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        request = (
-            payload.get("request")
-            if isinstance(payload.get("request"), dict)
-            else payload.get("plan_request")
-            if isinstance(payload.get("plan_request"), dict)
-            else {}
-        )
-        if str(request.get("request_id") or event.id) != request_id:
-            continue
-        candidates.append({
-            **request,
-            "request_event_id": event.id,
-        })
-    return max(
-        candidates,
-        key=lambda item: int(item.get("revision") or 1),
-        default={},
-    )
-
-
-def _latest_task_binding_event_id(
-    events: list[ZfEvent],
-    *,
-    task_id: str,
-    fallback: str,
-) -> str:
-    for event in reversed(events):
-        if (
-            event.task_id == task_id
-            and event.type in {
-                "task.created",
-                "task.contract.update",
-                "task.updated",
-            }
-        ):
-            return event.id
-    return fallback
-
-
-def _shared_workflow_parameters(value: object) -> dict[str, Any]:
-    parameter_sets: list[dict[str, Any]] = []
-    if not isinstance(value, list):
-        return {}
-    for option in value:
-        if not isinstance(option, dict):
-            continue
-        submit_payload = option.get("submit_payload")
-        if not isinstance(submit_payload, dict):
-            continue
-        parameters = submit_payload.get("parameters")
-        if isinstance(parameters, dict):
-            parameter_sets.append(parameters)
-    if not parameter_sets:
-        return {}
-    shared = dict(parameter_sets[0])
-    for key in list(shared):
-        if any(
-            key not in parameters
-            or parameters[key] != shared[key]
-            for parameters in parameter_sets[1:]
-        ):
-            shared.pop(key)
-    return shared
-
 
 __all__ = ["PlanApplyActionsMixin"]

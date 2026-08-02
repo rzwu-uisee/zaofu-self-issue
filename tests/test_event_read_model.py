@@ -197,7 +197,7 @@ def test_event_ref_is_compact_and_hydrates_controlled_multi_refs(
         assert [event.id for event in events] == ["evt-operation"]
 
 
-def test_read_model_v4_schema_rebuilds_to_v6(tmp_path: Path) -> None:
+def test_read_model_v4_schema_rebuilds_to_v5(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     _write_line(
         state_dir / "events.jsonl",
@@ -691,6 +691,108 @@ def test_agent_session_history_includes_user_prompt_for_long_kanban_turn(tmp_pat
     assert page["context_event_count"] >= 2
     assert page["next_before_seq"] > 1
     assert page["items"][-1]["payload"]["answer"] == "final answer"
+
+
+def test_agent_session_history_returns_only_kanban_workflow_results(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    origin = {
+        "schema_version": "workflow-origin-binding.v1",
+        "surface": "kanban_agent",
+        "source": "kanban-agent",
+        "project_id": "proj-a",
+        "channel_id": "",
+        "thread_id": "",
+        "conversation_id": "kanban:proj-a",
+        "thread_key": "thread-a",
+    }
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="workflow.result.available",
+        id="evt-result",
+        task_id="TASK-1",
+        payload={
+            "schema_version": "workflow-result.v1",
+            "result_kind": "research_report",
+            "status": "available",
+            "project_id": "proj-a",
+            "origin_surface": "kanban_agent",
+            "conversation_id": "kanban:proj-a",
+            "thread_key": "thread-a",
+            "request_id": "REQ-1",
+            "request_revision": 1,
+            "task_id": "TASK-1",
+            "workflow_run_id": "wf-1",
+            "terminal_event_id": "evt-terminal",
+            "artifact_ref": "research/TASK-1/result.md",
+            "artifact_digest": "a" * 64,
+            "summary": "Evidence-backed result.",
+            "origin_binding": origin,
+        },
+    ))
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="workflow.research.adopted",
+        id="evt-adopted",
+        task_id="TASK-1",
+        payload={
+            "project_id": "proj-a",
+            "conversation_id": "kanban:proj-a",
+            "thread_key": "thread-a",
+            "request_id": "REQ-1",
+            "request_revision": 1,
+            "result_event_id": "evt-result",
+            "artifact_ref": "research/TASK-1/result.md",
+            "artifact_digest": "a" * 64,
+            "summary": "Evidence adopted.",
+            "source_event_id": "evt-result",
+            "origin_binding": origin,
+        },
+    ))
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="workflow.result.available",
+        id="evt-channel-result",
+        task_id="TASK-2",
+        payload={
+            "schema_version": "workflow-result.v1",
+            "result_kind": "research_report",
+            "status": "available",
+            "origin_surface": "channel",
+            "channel_id": "ch-other",
+            "request_id": "REQ-2",
+            "request_revision": 1,
+            "task_id": "TASK-2",
+            "workflow_run_id": "wf-2",
+            "terminal_event_id": "evt-terminal-2",
+            "artifact_ref": "research/TASK-2/result.md",
+            "artifact_digest": "b" * 64,
+            "summary": "Other Channel result.",
+            "origin_binding": {
+                **origin,
+                "surface": "channel",
+                "channel_id": "ch-other",
+                "thread_id": "main",
+                "conversation_id": "",
+                "thread_key": "",
+            },
+        },
+    ))
+    read_model.rebuild(state_dir)
+
+    page = read_model.agent_session_history(
+        state_dir,
+        surface="kanban_agent",
+        thread_id="thread-a",
+        project_id="proj-a",
+        conversation_id="kanban:proj-a",
+        limit=20,
+    )
+
+    assert page is not None
+    assert [item["id"] for item in page["items"]] == [
+        "evt-result",
+        "evt-adopted",
+    ]
 
 
 def test_event_log_size_rotation_preserves_read_all_order(tmp_path: Path, monkeypatch) -> None:

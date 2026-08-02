@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 
 import pytest
 
@@ -24,9 +25,11 @@ from zf.runtime.channel_reply_remediation import (
     pending_channel_reply_exhausted_actions,
     remediate_channel_replies,
 )
+from zf.runtime.event_problem_registry import EVENT_PROBLEM_SPECS
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
+from zf.runtime.wake_patterns import WAKE_PATTERNS
 
 CH = "ch-remed"
 REQ = "reply-req-1"
@@ -69,6 +72,56 @@ def test_failed_reply_is_immediate_redispatch_candidate():
     assert cands[0]["kind"] == "redispatch"
     assert cands[0]["status"] == "failed"
     assert cands[0]["run_generation"] == 1
+
+
+def test_permanent_provider_failure_exhausts_without_blind_redispatch():
+    events = [
+        _evt("channel.agent.reply.requested", age=1000),
+        _evt("channel.agent.reply.started", age=990),
+        _evt(
+            "channel.agent.reply.failed",
+            age=980,
+            reason="Codex read-only sandbox cannot be created: unshare Operation not permitted",
+            failure_status="sandbox_unsupported",
+            retryable=False,
+        ),
+    ]
+
+    candidates = channel_reply_remediation_candidates(events, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["kind"] == "exhaust"
+    assert candidates[0]["retryable"] is False
+    assert candidates[0]["failure_class"] == "provider_sandbox_unsupported"
+
+
+def test_reply_failure_wakes_kernel_and_only_exhaustion_routes_run_manager():
+    assert "channel.agent.reply.failed" in WAKE_PATTERNS
+
+    failed = EVENT_PROBLEM_SPECS["channel.agent.reply.failed"]
+    assert failed.action_policy == "kernel_consumed"
+    assert failed.supervisor_attention == "none"
+    assert failed.effective_recovery_policy == "none"
+
+    exhausted = EVENT_PROBLEM_SPECS[
+        "channel.agent.reply.remediation.exhausted"
+    ]
+    assert exhausted.owner_route == "run_manager"
+    assert exhausted.run_manager_semantics == ("pending_action",)
+    assert exhausted.effective_recovery_policy == "run_manager_then_autoresearch"
+
+
+def test_superseded_reply_is_terminal_history_not_recovery_work():
+    events = [
+        _evt("channel.agent.reply.requested", age=1000),
+        _evt(
+            "channel.agent.reply.failed",
+            age=980,
+            reason="superseded by latest queued mention",
+        ),
+    ]
+
+    assert channel_reply_remediation_candidates(events, now=NOW) == []
 
 
 def test_fresh_running_is_not_a_candidate_but_stale_running_is():
@@ -161,6 +214,39 @@ def test_generation_cap_emits_exhausted_exactly_once(tmp_path: Path):
     exhausted = [e for e in log.read_all() if e.type == CHANNEL_REPLY_EXHAUSTED_EVENT]
     assert len(exhausted) == 1
     assert exhausted[0].payload["run_generation"] == 3
+
+
+def test_permanent_failure_emits_exhausted_on_first_generation(tmp_path: Path):
+    log = _seeded_log(tmp_path, [
+        _evt("channel.agent.reply.requested", age=1000),
+        _evt(
+            "channel.agent.reply.failed",
+            age=980,
+            reason="sandbox_unsupported",
+            failure_status="sandbox_unsupported",
+            retryable=False,
+        ),
+    ])
+    writer = EventWriter(log)
+
+    result = remediate_channel_replies(writer, events=log.read_all(), now=NOW)
+
+    assert result == {"redispatched": [], "exhausted": [REQ]}
+    exhausted = [
+        event for event in log.read_all()
+        if event.type == CHANNEL_REPLY_EXHAUSTED_EVENT
+    ]
+    assert len(exhausted) == 1
+    assert exhausted[0].payload["run_generation"] == 1
+    assert exhausted[0].payload["retryable"] is False
+
+    again = remediate_channel_replies(writer, events=log.read_all(), now=NOW)
+    assert again == {"redispatched": [], "exhausted": []}
+    exhausted = [
+        event for event in log.read_all()
+        if event.type == CHANNEL_REPLY_EXHAUSTED_EVENT
+    ]
+    assert len(exhausted) == 1
 
 
 # ------------------------------------------------- run-manager surfacing
@@ -333,6 +419,80 @@ def test_tick_housekeeping_self_heals_failed_reply(
                  if e.type == "channel.agent.reply.completed"
                  and e.payload.get("request_id") == REQ]
     assert completed, "persona fake dispatch should complete the redispatched reply"
+
+
+def test_cold_tick_drains_durable_queued_replies_without_new_message(
+    state_dir: Path,
+    orch: Orchestrator,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_channel(log)
+    log.append(ZfEvent(
+        type="channel.discussion.mode.set",
+        actor="web",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "mode": "conversation",
+            "max_parallel_replies": 1,
+        },
+    ))
+    for index, member_id in enumerate(("dev-1", "dev-2", "dev-3")):
+        if member_id != TARGET:
+            log.append(ZfEvent(
+                type="channel.member.added",
+                actor="web",
+                correlation_id=CH,
+                payload={
+                    "channel_id": CH,
+                    "member_id": member_id,
+                    "member_type": "persona_agent",
+                    "provider": "fake",
+                    "backend": "fake",
+                    "permissions": ["read", "message"],
+                },
+            ))
+        log.append(ZfEvent(
+            type="channel.agent.reply.requested",
+            actor="web",
+            correlation_id=CH,
+            payload={
+                "channel_id": CH,
+                "thread_id": "main",
+                "request_id": f"cold-{index}",
+                "message_id": "msg-1",
+                "target_member_id": member_id,
+                "status": "queued",
+                "queue_state": "parallel_limit",
+                "member_type": "persona_agent",
+                "backend": "fake",
+                "source": "web",
+            },
+        ))
+
+    orch._check_channel_reply_remediation()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        completed = {
+            str(event.payload.get("request_id") or "")
+            for event in log.read_all()
+            if event.type == "channel.agent.reply.completed"
+        }
+        if {f"cold-{index}" for index in range(3)} <= completed:
+            break
+        time.sleep(0.02)
+
+    completed = [
+        event for event in log.read_all()
+        if event.type == "channel.agent.reply.completed"
+        and str(event.payload.get("request_id") or "").startswith("cold-")
+    ]
+    assert sorted(event.payload["request_id"] for event in completed) == [
+        "cold-0",
+        "cold-1",
+        "cold-2",
+    ]
+    assert len({event.payload["request_id"] for event in completed}) == 3
 
 
 def test_tick_registration_present_in_run_once() -> None:

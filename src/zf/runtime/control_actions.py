@@ -268,6 +268,13 @@ class ControlledActionService(
                 requested_action=requested_action,
                 payload=payload,
             )
+        if action == "channel-set-leader":
+            return self._channel_set_leader(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
         if action == "channel-delete":
             return self._channel_delete(
                 requested=requested,
@@ -284,6 +291,13 @@ class ControlledActionService(
             )
         if action == "channel-mark-read":
             return self._channel_mark_read(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+            )
+        if action == "channel-pin-message":
+            return self._channel_pin_message(
                 requested=requested,
                 action=action,
                 requested_action=requested_action,

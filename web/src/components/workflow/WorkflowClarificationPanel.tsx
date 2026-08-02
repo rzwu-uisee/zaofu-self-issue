@@ -1,0 +1,166 @@
+import { Check, FileDiff } from "lucide-react";
+import { useState } from "react";
+
+import { asStringArray, textValue } from "../../app/shared";
+import { StatusBadge } from "./WorkflowProposalParts";
+
+export function WorkflowClarificationPanel({
+  actionReady,
+  actionState,
+  busyAction,
+  intakeRef,
+  onClarify,
+  onPrepare,
+  requestKind,
+  requestId,
+  requestStatus,
+  requirement,
+}: {
+  actionReady: boolean;
+  actionState: string;
+  busyAction: string;
+  intakeRef: string;
+  onClarify: (payload: Record<string, unknown>) => void;
+  onPrepare: (payload: Record<string, unknown>) => void;
+  requestKind: string;
+  requestId: string;
+  requestStatus: string;
+  requirement: Record<string, unknown>;
+}) {
+  const [objective, setObjective] = useState(textValue(requirement.objective));
+  const [sourceRoot, setSourceRoot] = useState(textValue(requirement.source_root));
+  const [targetRoot, setTargetRoot] = useState(textValue(requirement.target_root));
+  const [acceptance, setAcceptance] = useState(asStringArray(requirement.acceptance).join("\n"));
+  const [constraints, setConstraints] = useState(asStringArray(requirement.constraints).join("\n"));
+  const [openQuestions, setOpenQuestions] = useState(asStringArray(requirement.open_questions).join("\n"));
+  const preparePayload = {
+    request_id: requestId,
+    intake_ref: intakeRef,
+    kind: requestKind,
+    allow_missing_env: true,
+  };
+
+  if (requestStatus === "ready") {
+    return (
+      <section className="workflow-clarification compact" data-testid="workflow-ready-to-prepare">
+        <div className="workflow-clarification-head">
+          <div>
+            <span className="eyebrow">Requirement revision</span>
+            <strong>Confirmed and ready</strong>
+          </div>
+          <button
+            className="icon-button primary"
+            disabled={!actionReady || busyAction !== "" || !intakeRef}
+            title={!actionReady ? actionState : "Build the exact proposal for this revision"}
+            type="button"
+            onClick={() => onPrepare(preparePayload)}
+          >
+            <FileDiff aria-hidden="true" size={16} />
+            {busyAction === "workflow-prepare" ? "Preparing" : "Prepare proposal"}
+          </button>
+        </div>
+      </section>
+    );
+  }
+  if (!["clarifying", "draft"].includes(requestStatus)) return null;
+
+  const clarificationPayload = {
+    ...preparePayload,
+    objective,
+    source_root: sourceRoot,
+    target_root: targetRoot,
+    acceptance: multilineValues(acceptance),
+    constraints: multilineValues(constraints),
+    open_questions: multilineValues(openQuestions),
+    confirm: true,
+    requested_by: "web",
+  };
+  return (
+    <section className="workflow-clarification" data-testid="workflow-clarification">
+      <div className="workflow-clarification-head">
+        <div>
+          <span className="eyebrow">Requirement revision</span>
+          <strong>Clarify request</strong>
+        </div>
+        <StatusBadge status={requestStatus} />
+      </div>
+      <label>
+        <span>Objective</span>
+        <textarea
+          rows={3}
+          value={objective}
+          onChange={(event) => setObjective(event.target.value)}
+        />
+      </label>
+      <div className="workflow-clarification-paths">
+        {requestKind === "refactor" ? (
+          <label>
+            <span>Source root</span>
+            <input
+              value={sourceRoot}
+              onChange={(event) => setSourceRoot(event.target.value)}
+            />
+          </label>
+        ) : null}
+        {["prd", "refactor"].includes(requestKind) ? (
+          <label>
+            <span>Target root</span>
+            <input
+              value={targetRoot}
+              onChange={(event) => setTargetRoot(event.target.value)}
+            />
+          </label>
+        ) : null}
+      </div>
+      <div className="workflow-clarification-columns">
+        <label>
+          <span>Acceptance</span>
+          <textarea
+            rows={4}
+            value={acceptance}
+            onChange={(event) => setAcceptance(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>Constraints</span>
+          <textarea
+            rows={4}
+            value={constraints}
+            onChange={(event) => setConstraints(event.target.value)}
+          />
+        </label>
+      </div>
+      {asStringArray(requirement.open_questions).length ? (
+        <label>
+          <span>Open questions</span>
+          <textarea
+            rows={3}
+            value={openQuestions}
+            onChange={(event) => setOpenQuestions(event.target.value)}
+          />
+        </label>
+      ) : null}
+      <div className="workflow-clarification-actions">
+        <button
+          className="icon-button primary"
+          disabled={!actionReady || busyAction !== "" || !objective.trim()}
+          title={!actionReady ? actionState : "Save the revision and prepare its proposal"}
+          type="button"
+          onClick={() => onClarify(clarificationPayload)}
+        >
+          <Check aria-hidden="true" size={16} />
+          {busyAction === "workflow-clarify" || busyAction === "workflow-prepare"
+            ? "Preparing"
+            : "Save & prepare proposal"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function multilineValues(value: string): string[] {
+  return value
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}

@@ -27,6 +27,10 @@ from typing import Any
 
 from zf.core.events import EventWriter
 from zf.runtime.channel_projection import project_channel, project_channels
+from zf.runtime.channel_contracts import (
+    discussion_engine_mode,
+    normalize_product_discussion_mode,
+)
 from zf.runtime.channel_question_dedup import (
     question_ledger,
     question_ledger_digest,
@@ -242,7 +246,9 @@ def relay_route_decision(
     falls back to the legacy blocked path. Returns a suppressed decision
     (allowed=False with reason) when relay applies but a guard fires.
     """
-    mode = str(discussion_config(channel).get("mode") or "manual_mention").strip()
+    mode = discussion_engine_mode(
+        discussion_config(channel).get("mode") or "conversation"
+    )
     if mode not in RELAY_MODES:
         return None
     if mode == "fanout_then_synthesis":
@@ -275,11 +281,17 @@ def should_start_discussion(
     *,
     thread_id: str,
     mention_tokens: list[str],
+    explicit: bool = False,
+    product_mode: str = "",
 ) -> bool:
-    mode = str(discussion_config(channel).get("mode") or "").strip()
+    mode = discussion_engine_mode(
+        product_mode
+        or discussion_config(channel).get("mode")
+        or "conversation"
+    )
     if mode != "fanout_then_synthesis":
         return False
-    if "all" not in mention_tokens:
+    if not explicit and "all" not in mention_tokens:
         return False
     if not discussion_roster(channel):
         # No participants -> starting would strand the thread in phase1_blind
@@ -300,10 +312,19 @@ def start_discussion(
     trigger: str,
     source: str,
     causation_id: str | None = None,
+    product_mode: str = "",
 ) -> list[str]:
     """Emit discussion.started + phase1 transition; returns the blind roster."""
     roster = discussion_roster(channel)
     synthesizer = discussion_synthesizer(channel, roster)
+    discussion_id = "discussion-" + hashlib.sha1(
+        f"{channel_id}:{thread_id}:{trigger_message_id}".encode("utf-8")
+    ).hexdigest()[:16]
+    context_digest = hashlib.sha256(
+        f"{channel_id}:{thread_id}:{trigger_message_id}:{','.join(roster)}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
     started = writer.emit(
         "channel.discussion.started",
         actor=actor,
@@ -313,6 +334,12 @@ def start_discussion(
             "schema_version": "channel.discussion.started.v1",
             "channel_id": channel_id,
             "thread_id": thread_id,
+            "discussion_id": discussion_id,
+            "revision": 1,
+            "context_digest": context_digest,
+            "product_mode": normalize_product_discussion_mode(
+                product_mode or discussion_config(channel).get("mode")
+            ),
             "trigger": trigger,
             "roster": roster,
             "synthesizer": synthesizer,

@@ -97,7 +97,6 @@ KNOWN_TYPES_UNREGISTERED: frozenset[str] = frozenset({
     "autoresearch.validation.failed",
     "bridge.inbound.rejected",
     "bridge.message.failed",
-    "channel.agent.reply.failed",
     "channel.artifact.rejected",
     "channel.consensus.blocked",
     "channel.context_pack.rejected",

@@ -177,12 +177,23 @@ class FeishuHttpTransport(FeishuTransport):
         self._request_func = request_func or urllib.request.urlopen
 
     def send_message(self, message: FeishuMessage) -> bool:
-        receive_id_type = message.receive_id_type or "chat_id"
         body = {
-            "receive_id": message.chat_id,
             "msg_type": message.msg_type,
             "content": _message_content(message),
         }
+        if message.thread_id:
+            body["reply_in_thread"] = True
+            self._request_json(
+                "POST",
+                (
+                    "/im/v1/messages/"
+                    f"{urllib.parse.quote(message.thread_id)}/reply"
+                ),
+                body,
+            )
+            return True
+        receive_id_type = message.receive_id_type or "chat_id"
+        body["receive_id"] = message.chat_id
         self._request_json(
             "POST",
             f"/im/v1/messages?receive_id_type={urllib.parse.quote(receive_id_type)}",
@@ -199,12 +210,24 @@ class FeishuHttpTransport(FeishuTransport):
         return True
 
     def send_card(self, message: FeishuMessage) -> str | None:
-        receive_id_type = message.receive_id_type or "chat_id"
         body = {
-            "receive_id": message.chat_id,
             "msg_type": "interactive",
             "content": _message_content(message),
         }
+        if message.thread_id:
+            body["reply_in_thread"] = True
+            resp = self._request_json(
+                "POST",
+                (
+                    "/im/v1/messages/"
+                    f"{urllib.parse.quote(message.thread_id)}/reply"
+                ),
+                body,
+            )
+            message_id = str((resp.get("data") or {}).get("message_id") or "")
+            return message_id or None
+        receive_id_type = message.receive_id_type or "chat_id"
+        body["receive_id"] = message.chat_id
         resp = self._request_json(
             "POST",
             f"/im/v1/messages?receive_id_type={urllib.parse.quote(receive_id_type)}",

@@ -64,6 +64,43 @@ def _client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path]:
     return TestClient(app), state_dir
 
 
+def _prd_client(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path]:
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    source = tmp_path / "docs" / "prd" / "request.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("Build the confirmed product.\n", encoding="utf-8")
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text(
+        """\
+apiVersion: zaofu.dev/v1
+kind: PrdFlow
+metadata: {name: prd-demo}
+spec:
+  lanes: 1
+  backend: mock
+  prdRef: docs/prd/request.md
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata: {name: demo}
+spec:
+  version: "1.0"
+  project: {name: demo, state_dir: .zf}
+""",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    app = create_app(
+        state_dir,
+        config=load_config(config_path),
+        project_root=tmp_path,
+    )
+    return TestClient(app), state_dir
+
+
 def _action_body(
     action_key: str,
     payload: dict,
@@ -213,7 +250,8 @@ def test_generic_research_cli_preview_and_web_detail_share_proposal(
         config=config,
         project_root=tmp_path,
     )
-    detail = TestClient(app).get(
+    client = TestClient(app)
+    detail = client.get(
         "/api/projects/default/workflow-requests/REQ-GENERIC-RESEARCH"
     )
 
@@ -234,6 +272,20 @@ def test_generic_research_cli_preview_and_web_detail_share_proposal(
         state_dir,
         "REQ-GENERIC-RESEARCH",
     )["proposal_digest"] == cli_proposal["proposal_digest"]
+    replay = client.post(
+        "/api/projects/default/workflow-submit",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "intake_ref": web["links"]["intake_ref"],
+            "kind": "workflow",
+            "apply": False,
+            "allow_missing_env": True,
+        },
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["result"]["proposal"]["proposal_digest"] == (
+        cli_proposal["proposal_digest"]
+    )
 
 
 def test_web_proposal_projection_and_exact_controlled_decisions(
@@ -345,6 +397,72 @@ def test_web_proposal_projection_and_exact_controlled_decisions(
     ).json()
     assert submitted_detail["lifecycle"]["submitted"] is True
     assert submitted_detail["links"]["run_contract_ref"]
+
+
+def test_web_clarification_prepares_current_prd_request_without_agent_roundtrip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, state_dir = _prd_client(tmp_path, monkeypatch)
+    headers = {"x-zf-web-token": "test-token"}
+    created = client.post(
+        "/api/projects/default/workflow-intake",
+        headers=headers,
+        json={
+            "request_id": "REQ-WEB-CLARIFY",
+            "kind": "prd",
+            "from": "docs/prd/request.md",
+            "objective": "Build the confirmed product.",
+            "backend": "mock",
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    detail = client.get(
+        "/api/projects/default/workflow-requests/REQ-WEB-CLARIFY"
+    ).json()
+    assert detail["status"] == "clarifying"
+    assert detail["result"]["missing_required_fields"] == ["target_root"]
+    assert detail["links"]["workflow_input_manifest_ref"] == detail["result"][
+        "workflow_input_manifest_ref"
+    ]
+
+    clarified = client.post(
+        "/api/projects/default/workflow-clarify",
+        headers=headers,
+        json={
+            "request_id": "REQ-WEB-CLARIFY",
+            "intake_ref": detail["links"]["intake_ref"],
+            "target_root": str(tmp_path),
+            "open_questions": [],
+            "confirm": True,
+            "requested_by": "web",
+        },
+    )
+
+    assert clarified.status_code == 200, clarified.text
+    assert clarified.json()["status"] == "ready"
+    prepared = client.post(
+        "/api/projects/default/workflow-submit",
+        headers=headers,
+        json={
+            "request_id": "REQ-WEB-CLARIFY",
+            "intake_ref": detail["links"]["intake_ref"],
+            "kind": "prd",
+            "apply": False,
+            "allow_missing_env": True,
+            "requested_by": "web",
+        },
+    )
+
+    assert prepared.status_code == 200, prepared.text
+    body = prepared.json()
+    assert body["ok"] is True
+    assert body["result"]["proposal"]["approval_status"] == "approvable"
+    projection = load_workflow_request(state_dir, "REQ-WEB-CLARIFY")
+    assert projection["status"] == "proposed"
+    assert projection["proposal_ref"]["ref"]
+    assert projection["proposal_digest"]
 
 
 def test_request_list_and_detail_share_run_admission_projection(

@@ -37,6 +37,15 @@ _SENSITIVE_KEYS = {
     "tenant_access_token",
     "token",
 }
+_ATTACHMENT_BODY_KEYS = {
+    "base64",
+    "body",
+    "bytes_body",
+    "content",
+    "data",
+    "secret",
+    "token",
+}
 
 
 def _sensitive_key(key: object) -> bool:
@@ -75,6 +84,24 @@ def redact_obj(value: Any) -> Any:
 
 
 def _redact_dict_value(key: object, value: Any) -> Any:
+    if (
+        str(key).lower().replace("-", "_") == "attachments"
+        and isinstance(value, list)
+    ):
+        return [
+            {
+                item_key: (
+                    "[REDACTED_ATTACHMENT_BODY]"
+                    if str(item_key).lower().replace("-", "_")
+                    in _ATTACHMENT_BODY_KEYS
+                    else redact_obj(item_value)
+                )
+                for item_key, item_value in item.items()
+            }
+            if isinstance(item, dict)
+            else redact_obj(item)
+            for item in value
+        ]
     if not _sensitive_key(key):
         return redact_obj(value)
     if value is None or isinstance(value, bool | int | float):

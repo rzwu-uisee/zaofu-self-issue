@@ -109,7 +109,20 @@ def workflow_context_from_payload(
     return dict(value) if isinstance(value, dict) else {}
 
 
+def workflow_context_for_project(
+    payload: Mapping[str, Any],
+    project_root: Path,
+) -> dict[str, Any]:
+    """Add only deterministic project-local defaults to Agent Plan context."""
+
+    context = workflow_context_from_payload(payload)
+    if not str(context.get("target_root") or "").strip():
+        context["target_root"] = str(Path(project_root).resolve())
+    return context
+
+
 __all__ = [
     "canonical_channel_prd_context",
+    "workflow_context_for_project",
     "workflow_context_from_payload",
 ]

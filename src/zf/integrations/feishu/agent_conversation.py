@@ -95,6 +95,15 @@ def run_specialist_conversation(
                         "message_id": message_id,
                         "agent_kind": agent_kind,
                         "thread_id": thread_id,
+                        "root_message_id": str(
+                            payload.get("root_message_id") or ""
+                        ),
+                        "parent_message_id": str(
+                            payload.get("parent_message_id") or ""
+                        ),
+                        "quote_message_id": str(
+                            payload.get("quote_message_id") or ""
+                        ),
                     },
                 },
             },

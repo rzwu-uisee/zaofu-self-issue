@@ -120,6 +120,39 @@ def test_real_transport_send_message_supports_open_id_receive_type():
     assert json.loads(body["content"])["text"] == "hello"
 
 
+def test_real_transport_card_reply_uses_exact_origin_message():
+    requests = []
+
+    def fake_urlopen(request, timeout=15):
+        requests.append(request)
+        return FakeResponse({
+            "code": 0,
+            "msg": "ok",
+            "data": {"message_id": "om_result"},
+        })
+
+    transport = FeishuHttpTransport(
+        base_url="https://open.feishu.cn/open-apis",
+        tenant_access_token="tenant-token",
+        request_func=fake_urlopen,
+    )
+
+    message_id = transport.send_card(FeishuMessage(
+        chat_id="oc_exact",
+        thread_id="om_origin",
+        msg_type="interactive",
+        content=json.dumps({"elements": []}),
+    ))
+
+    assert message_id == "om_result"
+    request = requests[0]
+    assert request.full_url.endswith("/im/v1/messages/om_origin/reply")
+    body = json.loads(request.data.decode("utf-8"))
+    assert body["msg_type"] == "interactive"
+    assert body["reply_in_thread"] is True
+    assert "receive_id" not in body
+
+
 def test_real_transport_delete_message_uses_recall_endpoint():
     requests = []
 

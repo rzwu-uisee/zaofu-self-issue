@@ -13,6 +13,8 @@ guard so reactor-emitted side effects do not infinite-loop.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Thread
+import time
 
 import pytest
 
@@ -24,7 +26,10 @@ from zf.core.config.schema import (
 )
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.state.locks import locked_path
 from zf.core.state.session import SessionStore
+from zf.runtime.channel_router import route_channel_message
+from zf.runtime.control_actions_helpers import _stable_control_id
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
@@ -146,6 +151,71 @@ def test_user_posted_mention_via_reactor_routes_to_reply_requested(
     assert detected[0].payload["target_member_id"] == "claude-arch"
     assert len(reply_requested) == 1
     assert reply_requested[0].payload["target_member_id"] == "claude-arch"
+
+
+def test_reactor_waits_for_controlled_ingress_route_before_dedup(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+) -> None:
+    """Web ingress and EventWatcher must not both own the same route.
+
+    Controlled ingress holds the channel-ingress lock while it appends the
+    message and materializes stable reply requests. The reactor waits for that
+    critical section, then its fresh projection deduplicates the same target.
+    """
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_channel(log)
+    orch = Orchestrator(state_dir, config, transport)
+    payload = {
+        "channel_id": CHANNEL_ID,
+        "thread_id": "main",
+        "message_id": "msg-web-race",
+        "member_id": "operator",
+        "role": "user",
+        "text": "@claude-arch review the contract",
+        "source": "web",
+    }
+    msg_event = orch.event_writer.emit(
+        "channel.message.posted",
+        actor="web",
+        payload=payload,
+        correlation_id=CHANNEL_ID,
+    )
+    ingress_lock_id = _stable_control_id(
+        "channel-ingress",
+        CHANNEL_ID,
+        "main",
+    )
+    worker = Thread(
+        target=orch._on_channel_message_posted,
+        args=(msg_event,),
+        daemon=True,
+    )
+
+    with locked_path(state_dir / "locks" / ingress_lock_id):
+        worker.start()
+        time.sleep(0.1)
+        assert not [
+            event for event in log.read_all()
+            if event.type == "channel.agent.reply.requested"
+        ], "reactor must wait while controlled ingress owns routing"
+        route_channel_message(
+            state_dir=state_dir,
+            writer=orch.event_writer,
+            message_event=msg_event,
+            message_payload=payload,
+            actor="web",
+            source="web",
+            dispatch_inline=False,
+        )
+
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    requested = [
+        event for event in log.read_all()
+        if event.type == "channel.agent.reply.requested"
+    ]
+    assert len(requested) == 1
+    assert requested[0].payload["request_id"].startswith("reply-")
 
 
 # ---------------------------------------------------------------- test_b

@@ -63,15 +63,16 @@ class _FakeHeadlessBackend:
 
 
 class _FailingHeadlessBackend(_FakeHeadlessBackend):
-    def __init__(self, *, error: str) -> None:
+    def __init__(self, *, error: str, status: str = "failed") -> None:
         super().__init__(available=True)
         self.error = error
+        self.status = status
 
     def run_turn(self, **kwargs) -> HeadlessTurnResult:
         self.calls.append(kwargs)
         return HeadlessTurnResult(
             ok=False,
-            status="failed",
+            status=self.status,
             backend=self.backend_id,
             thread_id=str(kwargs.get("thread_id") or ""),
             provider_session_id="",
@@ -1192,7 +1193,8 @@ def test_channel_router_reports_codex_sandbox_failure(tmp_path: Path) -> None:
         project_root=tmp_path,
         headless_backends={
             "codex-headless": _FailingHeadlessBackend(
-                error="bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
+                error="bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+                status="sandbox_unsupported",
             )
         },
     )
@@ -1202,6 +1204,14 @@ def test_channel_router_reports_codex_sandbox_failure(tmp_path: Path) -> None:
     assert detail is not None
     assert detail["reply_requests"][0]["status"] == "failed"
     assert "bwrap: loopback" in detail["reply_requests"][0]["reason"]
+    failed = next(
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.agent.reply.failed"
+    )
+    assert failed.payload["failure_status"] == "sandbox_unsupported"
+    assert failed.payload["failure_class"] == "provider_sandbox_unsupported"
+    assert failed.payload["retryable"] is False
 
 
 def test_channel_adapter_skips_dispatch_when_target_already_running(tmp_path: Path) -> None:
@@ -1483,3 +1493,74 @@ def test_channel_adapter_drains_latest_queued_reply(tmp_path: Path) -> None:
     reasons = {item["request_id"]: item["reason"] for item in detail["reply_requests"]}
     assert statuses == {"reply-old": "failed", "reply-new": "completed"}
     assert reasons["reply-old"] == "superseded by latest queued mention"
+
+
+def test_all_targets_are_queued_instead_of_truncated_by_parallel_limit(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id="ch-all",
+        payload={"channel_id": "ch-all", "name": "all targets"},
+    )
+    for index in range(5):
+        writer.emit(
+            "channel.member.invited",
+            actor="web",
+            correlation_id="ch-all",
+            payload={
+                "channel_id": "ch-all",
+                "member_id": f"member-{index}",
+                "member_type": "persona_agent",
+                "provider": "fake",
+                "backend": "fake",
+                "permissions": ["read", "message"],
+            },
+        )
+    writer.emit(
+        "channel.discussion.mode.set",
+        actor="web",
+        correlation_id="ch-all",
+        payload={
+            "channel_id": "ch-all",
+            "mode": "conversation",
+            "max_parallel_replies": 2,
+        },
+    )
+    message = writer.emit(
+        "channel.message.posted",
+        actor="web",
+        correlation_id="ch-all",
+        payload={
+            "channel_id": "ch-all",
+            "thread_id": "main",
+            "message_id": "msg-count",
+            "member_id": "operator",
+            "role": "user",
+            "text": "@all report your number",
+        },
+    )
+
+    result = route_channel_message(
+        state_dir=state_dir,
+        writer=writer,
+        message_event=message,
+        message_payload=message.payload,
+        actor="web",
+        source="web",
+        project_root=tmp_path,
+        dispatch_inline=False,
+    )
+    detail = project_channel(state_dir, "ch-all")
+
+    assert result.targets == [f"member-{index}" for index in range(5)]
+    assert len(result.reply_requests) == 5
+    assert result.queued == ["member-2", "member-3", "member-4"]
+    assert detail is not None
+    statuses = [item["status"] for item in detail["reply_requests"]]
+    assert statuses.count("pending") == 2
+    assert statuses.count("queued") == 3

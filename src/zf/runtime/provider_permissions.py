@@ -117,6 +117,14 @@ def build_provider_permission_snapshot(
     workspace_roots: list[str] | None = None,
     skills: list[str] | None = None,
     hooks: list[str] | None = None,
+    profile_id: str = "",
+    profile_revision: int = 0,
+    profile_digest: str = "",
+    config_digest: str = "",
+    skill_set_digest: str = "",
+    permission_digest: str = "",
+    profile_snapshot_ref: str = "",
+    profile_snapshot_sha256: str = "",
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     profile = normalize_permission_profile(permission_profile)
@@ -139,6 +147,14 @@ def build_provider_permission_snapshot(
         "cwd": cwd_path,
         "workspace_roots": [str(root) for root in roots],
         "permission_profile": profile,
+        "profile_id": str(profile_id or ""),
+        "profile_revision": int(profile_revision or 0),
+        "profile_digest": str(profile_digest or ""),
+        "config_digest": str(config_digest or ""),
+        "skill_set_digest": str(skill_set_digest or ""),
+        "permission_digest": str(permission_digest or ""),
+        "profile_snapshot_ref": str(profile_snapshot_ref or ""),
+        "profile_snapshot_sha256": str(profile_snapshot_sha256 or ""),
         "write_policy": permission_profile_write_policy(profile),
         "skills": list(skills or []),
         "hooks": list(hooks or []),
@@ -178,13 +194,45 @@ def provider_permission_drift(
         "approval_policy",
         "sandbox_policy",
         "permission_mode",
+        "profile_id",
+        "profile_revision",
+        "profile_digest",
+        "config_digest",
+        "skill_set_digest",
+        "permission_digest",
+        "profile_snapshot_ref",
+        "profile_snapshot_sha256",
     ]
     items: list[dict[str, Any]] = []
     for field in fields:
         before = previous.get(field)
         after = current.get(field)
+        if field.startswith("profile_") or field in {
+            "config_digest",
+            "skill_set_digest",
+            "permission_digest",
+        }:
+            if not before and not after:
+                continue
         if before != after:
-            severity = "blocking" if field in {"cwd", "workspace_roots", "backend"} else "warning"
+            severity = (
+                "blocking"
+                if field
+                in {
+                    "cwd",
+                    "workspace_roots",
+                    "backend",
+                    "profile_id",
+                    "profile_revision",
+                    "profile_digest",
+                    "config_digest",
+                    "skill_set_digest",
+                    "permission_digest",
+                    "profile_snapshot_ref",
+                    "profile_snapshot_sha256",
+                }
+                else "warning"
+            )
             items.append({
                 "field": field,
                 "previous": before,

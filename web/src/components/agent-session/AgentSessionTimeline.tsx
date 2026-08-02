@@ -1,10 +1,11 @@
 import { createContext, Fragment, useContext, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleSlash, Clock3, Copy, FileText, GitCompare, Hourglass, Info, ListChecks, Loader2, Maximize2, MessageSquare, Minimize2, Paperclip, PauseCircle, SplitSquareHorizontal, XCircle } from "lucide-react";
+import { AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleSlash, Clock3, Copy, FileText, GitCompare, Hourglass, Info, ListChecks, Loader2, Maximize2, MessageSquare, Minimize2, Paperclip, PauseCircle, Pin, Reply, SplitSquareHorizontal, XCircle } from "lucide-react";
 import type {
   AgentConversation,
   AgentSessionActionProposal,
   AgentSessionCard,
+  AgentSessionMessage,
   AgentSessionPart,
   AgentSessionPlanRequest,
   AgentSessionPlanResponse,
@@ -57,6 +58,8 @@ interface AgentSessionTimelineProps {
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
   onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
+  onReplyMessage?: (message: AgentSessionMessage, threadId: string) => void;
+  onPinMessage?: (message: AgentSessionMessage, threadId: string) => void;
   providerCapabilities?: AgentProviderCapability[];
   emptyTitle?: string;
   emptyBody?: string;
@@ -88,6 +91,8 @@ export function AgentSessionTimeline({
   onCancelQueued,
   onCancelRun,
   onAdoptResearchResult,
+  onReplyMessage,
+  onPinMessage,
   providerCapabilities = [],
   emptyTitle = "No messages",
   emptyBody = "Start a conversation to see agent runs, tools, and proposals.",
@@ -172,6 +177,8 @@ export function AgentSessionTimeline({
                   onCancelQueued={onCancelQueued}
                   onCancelRun={onCancelRun}
                   onAdoptResearchResult={onAdoptResearchResult}
+                  onReplyMessage={onReplyMessage}
+                  onPinMessage={onPinMessage}
                   providerCapabilities={providerCapabilities}
                   channelChatMode={channelChatMode}
                   collapseCompletedRunDetails={collapseCompletedRunDetails}
@@ -217,6 +224,8 @@ function ThreadPane({
   onCancelQueued,
   onCancelRun,
   onAdoptResearchResult,
+  onReplyMessage,
+  onPinMessage,
   providerCapabilities,
   channelChatMode,
   collapseCompletedRunDetails,
@@ -240,6 +249,8 @@ function ThreadPane({
   onCancelQueued?: (cardId: string) => void;
   onCancelRun?: (runId: string) => void;
   onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
+  onReplyMessage?: (message: AgentSessionMessage, threadId: string) => void;
+  onPinMessage?: (message: AgentSessionMessage, threadId: string) => void;
   providerCapabilities: AgentProviderCapability[];
   channelChatMode: boolean;
   collapseCompletedRunDetails: boolean;
@@ -279,6 +290,32 @@ function ThreadPane({
                     previously used plain <p>, showing raw **bold** / `code`. */}
                 <MarkdownText content={turn.user.content || "-"} />
                 <AttachmentChips refs={turn.user.refs} />
+                {channelChatMode && (onReplyMessage || onPinMessage) ? (
+                  <div className="agent-message-actions">
+                    {onReplyMessage ? (
+                      <button
+                        aria-label="Reply to message"
+                        className="icon-button"
+                        title="Reply"
+                        type="button"
+                        onClick={() => onReplyMessage(turn.user!, thread.id)}
+                      >
+                        <Reply size={13} />
+                      </button>
+                    ) : null}
+                    {onPinMessage ? (
+                      <button
+                        aria-label={turn.user.refs?.pinned ? "Unpin message" : "Pin message"}
+                        className="icon-button"
+                        title={turn.user.refs?.pinned ? "Unpin" : "Pin"}
+                        type="button"
+                        onClick={() => onPinMessage(turn.user!, thread.id)}
+                      >
+                        <Pin size={13} />
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
             {turn.runs.map((run) => (

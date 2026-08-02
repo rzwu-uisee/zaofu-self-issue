@@ -193,7 +193,7 @@ def test_init_scaffolds_feishu_default_channel_route_when_inbound_enabled(
     )
     assert member["permission_profile"] == "project_writer"
     assert member["is_default_responder"] is True
-    assert channel["discussion"]["mode"] == "leader_delegation"
+    assert channel["discussion"]["mode"] == "conversation"
 
 
 def test_init_feishu_template_binds_product_manager_to_kanban_agent(

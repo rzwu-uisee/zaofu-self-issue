@@ -1110,7 +1110,8 @@ def test_channel_projection_records_discussion_mode_and_state_update(tmp_path: P
     detail = project_channel(state_dir, "ch-zaofu")
 
     assert detail is not None
-    assert detail["discussion"]["mode"] == "fanout_then_synthesis"
+    assert detail["discussion"]["mode"] == "multi_lens"
+    assert detail["discussion"]["engine_mode"] == "fanout_then_synthesis"
     assert detail["discussion"]["max_rounds"] == 4
     assert detail["state_updates"][0]["status"] == "workflow_requested"
 

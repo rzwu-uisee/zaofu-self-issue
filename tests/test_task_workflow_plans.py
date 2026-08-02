@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.loader import load_config
-from zf.core.events import EventLog, EventWriter
+from zf.core.events import EventLog, EventWriter, ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
@@ -12,6 +14,7 @@ from zf.runtime.event_problem_registry import event_is_recovery_actionable
 from zf.runtime.kanban_plan_requests import (
     PLAN_REQUESTED_EVENT,
     pending_kanban_plan_requests,
+    plan_response_gate,
 )
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.task_workflow_plans import (
@@ -103,6 +106,7 @@ def _workflow_plan() -> dict:
                 "description": "Implement with writer and verify lanes.",
                 "recommended": True,
                 "route_id": "delivery:prd:standard",
+                "parameters": {"target_root": "."},
             },
             {
                 "id": "research",
@@ -171,6 +175,31 @@ def test_builder_binds_routes_to_task_and_active_config() -> None:
     ]
     assert request["options"][2]["submit_mode"] == "continue"
 
+    event = ZfEvent(
+        type=PLAN_REQUESTED_EVENT,
+        actor="kanban-agent",
+        task_id=task.id,
+        payload={"request": request, "plan_request": request},
+    )
+    modes = {}
+    for option in request["options"]:
+        gate = plan_response_gate(
+            [event],
+            request_event_id=event.id,
+            request_id=request["request_id"],
+            revision=request["revision"],
+            question_id=request["question_id"],
+            option_id=option["id"],
+            answer=option["label"],
+        )
+        assert gate["ok"] is True, gate
+        modes[option["id"]] = gate["submit_mode"]
+    assert modes == {
+        "delivery": "propose",
+        "research": "propose",
+        "defer": "continue",
+    }
+
 
 def test_builder_lifts_nested_objective_out_of_parameters() -> None:
     config = load_config(ROOT / "zf.yaml")
@@ -179,6 +208,7 @@ def test_builder_lifts_nested_objective_out_of_parameters() -> None:
     raw_plan["options"][0]["parameters"] = {
         "objective": "Use the explicit nested objective",
         "expected_output": "A verified delivery",
+        "target_root": ".",
     }
 
     request, warning = build_task_workflow_plan_request(
@@ -193,8 +223,26 @@ def test_builder_lifts_nested_objective_out_of_parameters() -> None:
     delivery = request["options"][0]["submit_payload"]
     assert delivery["objective"] == "Use the explicit nested objective"
     assert delivery["parameters"] == {
+        "target_root": ".",
         "expected_output": "A verified delivery",
     }
+
+
+def test_builder_rejects_delivery_option_that_cannot_execute_after_approve() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    task = Task(id="TASK-NOT-READY", title="Missing delivery target")
+    raw_plan = _workflow_plan()
+    raw_plan["options"][0].pop("parameters")
+
+    request, warning = build_task_workflow_plan_request(
+        raw_plan,
+        task=task,
+        task_event_id="evt-task-created",
+        config=config,
+    )
+
+    assert request is None
+    assert "missing executable parameter(s): target_root" in warning
 
 
 def test_create_task_keeps_task_when_workflow_plan_is_invalid(
@@ -244,6 +292,7 @@ def test_create_task_publishes_plan_with_nested_route_objective(
                 "label": "Run standard delivery",
                 "parameters": {
                     "objective": "Check repository metadata",
+                    "target_root": str(tmp_path),
                 },
             },
         ],
@@ -272,13 +321,58 @@ def test_create_task_publishes_plan_with_nested_route_objective(
     assert executable["submit_payload"]["objective"] == (
         "Check repository metadata"
     )
-    assert executable["submit_payload"]["parameters"] == {}
+    assert executable["submit_payload"]["parameters"] == {
+        "target_root": str(tmp_path),
+    }
 
 
-def test_create_task_plan_proposal_and_research_start_are_separate_gates(
+@pytest.mark.parametrize(
+    ("option_id", "expected_route"),
+    [
+        ("delivery", "delivery:prd:standard"),
+        ("research", "research:fixed"),
+    ],
+)
+def test_each_executable_task_workflow_option_requires_approve_then_starts(
     tmp_path: Path,
+    monkeypatch,
+    option_id: str,
+    expected_route: str,
 ) -> None:
-    state_dir, writer, service = _service(tmp_path)
+    monkeypatch.setattr(
+        "zf.runtime.preflight._probe_provider_auth",
+        lambda _backend: (True, "mocked authenticated provider"),
+    )
+    config_ref = tmp_path / "zf.yaml"
+    config_ref.write_text(
+        (ROOT / "zf.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "examples").symlink_to(
+        ROOT / "examples",
+        target_is_directory=True,
+    )
+    (tmp_path / "skills").symlink_to(
+        ROOT / "skills",
+        target_is_directory=True,
+    )
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    service = ControlledActionService(
+        state_dir,
+        writer,
+        config=load_config(config_ref),
+        project_root=tmp_path,
+        actor="web",
+        source="kanban-agent",
+        surface="web",
+    )
+    workflow_plan = _workflow_plan()
+    workflow_plan["options"][0]["parameters"] = {
+        "backend": "mock",
+        "target_root": str(tmp_path),
+    }
 
     created = _execute(service, writer, "create-task", {
         "title": "Assess the workflow planning model",
@@ -286,7 +380,7 @@ def test_create_task_plan_proposal_and_research_start_are_separate_gates(
             "behavior": "Compare the model with current runtime behavior.",
             "verification": "Verify a research run can start.",
         },
-        "workflow_plan": _workflow_plan(),
+        "workflow_plan": workflow_plan,
         "project_id": "zaofu",
         "conversation_id": "kanban:zaofu",
         "thread_id": "main",
@@ -313,8 +407,8 @@ def test_create_task_plan_proposal_and_research_start_are_separate_gates(
         "request_id": request["request_id"],
         "revision": request["revision"],
         "question_id": request["question_id"],
-        "option_id": "research",
-        "answer": "Research first",
+        "option_id": option_id,
+        "answer": option_id,
     }
     proposed = _execute(service, writer, "kanban-plan-apply", {
         "plan_response": response,
@@ -348,8 +442,8 @@ def test_create_task_plan_proposal_and_research_start_are_separate_gates(
         "proposal_event_id": proposals[0].id,
     })
 
-    assert started["ok"] is True
-    assert started["route_id"] == "research:fixed"
+    assert started["ok"] is True, started
+    assert started["route_id"] == expected_route
     assert start_replay["status"] == "already_resolved"
     final_events = writer.event_log.read_all()
     invoke = next(
@@ -368,6 +462,47 @@ def test_create_task_plan_proposal_and_research_start_are_separate_gates(
         for event in final_events
     ) == 1
     assert TaskStore(state_dir / "kanban.json").get(task_id) is not None
+
+
+def test_task_workflow_proposal_reject_has_no_invoke_side_effect(
+    tmp_path: Path,
+) -> None:
+    _state_dir, writer, service = _service(tmp_path)
+    created = _execute(service, writer, "create-task", {
+        "title": "Reject this workflow route",
+        "workflow_plan": _workflow_plan(),
+    })
+    plan_event = next(
+        event for event in writer.event_log.read_all()
+        if event.id == created["workflow_plan_event_id"]
+    )
+    request = plan_event.payload["request"]
+    proposed = _execute(service, writer, "kanban-plan-apply", {
+        "plan_response": {
+            "request_event_id": plan_event.id,
+            "request_id": request["request_id"],
+            "revision": request["revision"],
+            "question_id": request["question_id"],
+            "option_id": "research",
+            "answer": "Research first",
+        },
+    })
+    assert proposed["status"] == "proposal_ready"
+    proposal_event = next(
+        event for event in writer.event_log.read_all()
+        if event.type == "operator.action.proposed"
+    )
+
+    dismissed = _execute(service, writer, "kanban-proposal-dismiss", {
+        "proposal_event_id": proposal_event.id,
+        "reason": "operator rejected the workflow option",
+    })
+
+    assert dismissed["ok"] is True, dismissed
+    assert not any(
+        event.type == "workflow.invoke.requested"
+        for event in writer.event_log.read_all()
+    )
 
 
 def test_task_workflow_start_runs_delivery_request_and_submit(
@@ -554,6 +689,7 @@ def test_plan_selection_remints_when_the_route_binding_is_stale(
     ]
     workflow_plan["options"][0]["parameters"].update({
         "source_ref": "channel-artifacts/ch-prd/prd.md",
+        "target_root": ".",
         "source_refs": {
             "channel_prd_digest": "sha256:canonical",
         },

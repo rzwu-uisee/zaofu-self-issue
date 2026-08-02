@@ -60,6 +60,8 @@ _RUN_MANAGER_NOOP_INPUT_EVENTS = frozenset({
     "workflow.fragment.rejected",
     "workflow.fragment.superseded",
     "workflow.fragment.cancelled",
+    "channel.result.receipt.recorded",
+    "channel.result.receipt.failed",
 })
 _RUN_MANAGER_REACTIVE_SELF_EVENTS = frozenset({
     "run.manager.agent.recommendation",
@@ -137,6 +139,7 @@ class TickServiceResult:
     stillness_state: str = ""
     stillness_redriven: int = 0
     workflow_synthesis_consumed: int = 0
+    channel_result_receipts: int = 0
 
 
 def run_autoresearch_trigger_scan(
@@ -223,6 +226,32 @@ def run_standard_tick_services(
         except Exception:
             pass
 
+    channel_result_receipts = 0
+    try:
+        from zf.runtime.channel_result_receipts import (
+            reconcile_channel_result_receipts,
+        )
+
+        receipt_result = reconcile_channel_result_receipts(
+            state_dir=state_dir,
+            event_log=event_log,
+            writer=event_writer,
+        )
+        channel_result_receipts = receipt_result.recorded
+    except Exception as exc:
+        try:
+            event_writer.append(ZfEvent(
+                type="orchestrator.tick.failed",
+                actor="channel-result-reconciler",
+                payload={
+                    "component": "channel_result_reconciler",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:400],
+                },
+            ))
+        except Exception:
+            pass
+
     goal_dossier_delivery = False
     early_owner_visible_delivery = False
     try:
@@ -269,6 +298,7 @@ def run_standard_tick_services(
                 goal_dossier_delivery=goal_dossier_delivery,
                 owner_visible_delivery=early_owner_visible_delivery,
                 workflow_synthesis_consumed=workflow_synthesis_consumed,
+                channel_result_receipts=channel_result_receipts,
             )
     except Exception:
         pass
@@ -555,6 +585,7 @@ def run_standard_tick_services(
         stillness_redriven=stillness_redriven,
         control_plane_health=control_plane_health,
         workflow_synthesis_consumed=workflow_synthesis_consumed,
+        channel_result_receipts=channel_result_receipts,
     )
 
 

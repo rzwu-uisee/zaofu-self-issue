@@ -12,7 +12,12 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter
 from zf.core.events.model import ZfEvent
 from zf.runtime.channel_adapter import dispatch_reply_request
-from zf.runtime.channel_contracts import default_debate_max_rounds
+from zf.runtime.channel_contracts import (
+    MAX_CHANNEL_PARALLEL_REPLIES,
+    channel_max_parallel_replies,
+    default_debate_max_rounds,
+    discussion_engine_mode,
+)
 from zf.runtime.channel_discussion import (
     advance_discussion,
     discussion_state,
@@ -157,7 +162,7 @@ def route_channel_message(
                 text=text,
                 explicit_mentions=_string_list(message_payload.get("mentions")),
                 sender_member_id=sender,
-                max_targets=max_parallel_replies,
+                max_targets=MAX_CHANNEL_PARALLEL_REPLIES,
             ),
         )
         if relay_decision is None:
@@ -200,14 +205,29 @@ def route_channel_message(
             text=text,
             explicit_mentions=_string_list(message_payload.get("mentions")),
             sender_member_id=sender,
-            max_targets=max_parallel_replies,
+            max_targets=MAX_CHANNEL_PARALLEL_REPLIES,
         )
         routing_reason = "mention"
         mention_tokens_for_start = detect_channel_mention_tokens(
             text, explicit_mentions=_string_list(message_payload.get("mentions")),
         )
+        message_refs = (
+            message_payload.get("refs")
+            if isinstance(message_payload.get("refs"), dict)
+            else {}
+        )
+        explicit_discussion_start = bool(
+            message_refs.get("explicit_discussion_start")
+        )
+        discussion_product_mode = str(
+            message_refs.get("discussion_product_mode") or ""
+        )
         if should_start_discussion(
-            channel, thread_id=thread_id, mention_tokens=mention_tokens_for_start,
+            channel,
+            thread_id=thread_id,
+            mention_tokens=mention_tokens_for_start,
+            explicit=explicit_discussion_start,
+            product_mode=discussion_product_mode,
         ):
             blind_roster = start_discussion(
                 writer,
@@ -216,9 +236,14 @@ def route_channel_message(
                 channel_id=channel_id,
                 thread_id=thread_id,
                 trigger_message_id=message_id,
-                trigger="mention_all",
+                trigger=(
+                    "explicit_discuss"
+                    if explicit_discussion_start
+                    else "mention_all"
+                ),
                 source=source,
                 causation_id=message_event.id,
+                product_mode=discussion_product_mode,
             )
             if blind_roster:
                 targets = blind_roster
@@ -299,6 +324,14 @@ def route_channel_message(
     intent_requests: list[str] = []
     queued: list[str] = []
     skipped: list[dict[str, str]] = []
+    parallel_limit = channel_max_parallel_replies(
+        channel,
+        fallback=max_parallel_replies,
+    )
+    available_slots = max(
+        parallel_limit - _active_reply_count(channel),
+        0,
+    )
     for target_member_id in targets:
         if _has_duplicate_request(channel, message_id, target_member_id):
             skipped.append({"target_member_id": target_member_id, "reason": "duplicate"})
@@ -344,19 +377,51 @@ def route_channel_message(
             skipped.append({"target_member_id": target_member_id, "reason": "context_pack_rejected"})
             continue
         member = _member_by_id(channel, target_member_id)
-        context_pack = build_channel_context_pack(
-            channel,
-            channel_id=channel_id,
-            thread_id=thread_id,
-            target_member_id=target_member_id,
-            trigger_message_id=message_id,
-            visibility_profile=str(member.get("visibility_profile") or ""),
-            channel_role=str(member.get("channel_role") or ""),
-            role_context_ref=str(member.get("role_context_ref") or ""),
-            skill_refs=member.get("skill_refs", []),
-            resolved_skill_refs=member.get("resolved_skill_refs", []),
-            permission_profile=str(member.get("permission_profile") or ""),
-        )
+        try:
+            context_pack = build_channel_context_pack(
+                channel,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                target_member_id=target_member_id,
+                trigger_message_id=message_id,
+                visibility_profile=str(member.get("visibility_profile") or ""),
+                channel_role=str(member.get("channel_role") or ""),
+                role_context_ref=str(member.get("role_context_ref") or ""),
+                skill_refs=member.get("skill_refs", []),
+                resolved_skill_refs=member.get("resolved_skill_refs", []),
+                permission_profile=str(member.get("permission_profile") or ""),
+                profile_binding=member,
+                state_dir=Path(state_dir),
+                project_root=project_root,
+            )
+        except SidecarRefError as exc:
+            writer.emit(
+                "channel.context_pack.rejected",
+                actor=actor,
+                task_id=message_event.task_id,
+                causation_id=detected.id,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "context_pack_id": _stable_reply_request_id(
+                        channel_id,
+                        thread_id,
+                        message_id,
+                        target_member_id,
+                    ).replace("reply-", "ctx-"),
+                    "target_member_id": target_member_id,
+                    "trigger_message_id": message_id,
+                    "reason": f"profile_snapshot_{exc.code}",
+                    "routing_reason": routing_reason,
+                    "source": source,
+                },
+            )
+            skipped.append({
+                "target_member_id": target_member_id,
+                "reason": f"profile_snapshot_{exc.code}",
+            })
+            continue
         writer.emit(
             "channel.context_pack.built",
             actor=actor,
@@ -406,6 +471,9 @@ def route_channel_message(
             intent_requests.append(intent.id)
             continue
         busy = _member_busy(channel, target_member_id)
+        parallel_queued = not busy and available_slots <= 0
+        if not busy and not parallel_queued:
+            available_slots -= 1
         request_id = _stable_reply_request_id(channel_id, thread_id, message_id, target_member_id)
         if busy:
             _supersede_queued_replies(
@@ -431,8 +499,14 @@ def route_channel_message(
                 "message_id": message_id,
                 "target_member_id": target_member_id,
                 "member_id": sender,
-                "status": "queued" if busy else "pending",
-                "queue_state": "latest_only" if busy else "ready",
+                "status": "queued" if busy or parallel_queued else "pending",
+                "queue_state": (
+                    "latest_only"
+                    if busy
+                    else "parallel_limit"
+                    if parallel_queued
+                    else "ready"
+                ),
                 "context_pack_id": context_pack["context_pack_id"],
                 "routing_reason": routing_reason,
                 "member_type": str(member.get("member_type") or ""),
@@ -454,7 +528,7 @@ def route_channel_message(
             },
         )
         reply_requests.append(reply.id)
-        if busy:
+        if busy or parallel_queued:
             queued.append(target_member_id)
             continue
         if dispatch_inline:
@@ -490,6 +564,15 @@ def route_channel_message(
         intent_requests=intent_requests,
         queued=queued,
         skipped=skipped,
+    )
+
+
+def _active_reply_count(channel: dict[str, Any] | None) -> int:
+    return sum(
+        1
+        for item in (channel or {}).get("reply_requests") or []
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in BUSY_REPLY_STATUSES
     )
 
 def _emit_route_blocked(
@@ -604,7 +687,9 @@ def _debate_round_guard_reason(
     discussion = (channel or {}).get("discussion")
     if not isinstance(discussion, dict):
         return ""
-    mode = str(discussion.get("mode") or "manual_mention").strip()
+    mode = discussion_engine_mode(
+        discussion.get("mode") or "conversation"
+    )
     speaker_policy = discussion.get("speaker_policy") if isinstance(discussion.get("speaker_policy"), dict) else {}
     structured = mode in {
         "round_robin",

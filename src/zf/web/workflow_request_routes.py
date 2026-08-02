@@ -205,9 +205,26 @@ def build_workflow_request_router(
                 status_code=422,
             )
         from zf.cli.flow import _load_manifest_for_intake
-        from zf.runtime.workflow_requests import revise_workflow_request
+        from zf.runtime.workflow_requests import (
+            load_workflow_request,
+            revise_workflow_request,
+        )
 
-        manifest_path, _manifest = _load_manifest_for_intake(Path(intake_ref).expanduser())
+        request_id = str(payload.get("request_id") or "").strip()
+        current = (
+            load_workflow_request(context.state_dir, request_id)
+            if request_id
+            else {}
+        )
+        current_manifest_ref = str(
+            current.get("workflow_input_manifest_ref") or ""
+        )
+        if current_manifest_ref:
+            manifest_path = Path(current_manifest_ref).expanduser()
+        else:
+            manifest_path, _manifest = _load_manifest_for_intake(
+                Path(intake_ref).expanduser()
+            )
         if manifest_path is None:
             return JSONResponse(
                 {
@@ -347,6 +364,9 @@ def build_workflow_request_router(
                     or manifest.get("intake_ref")
                     or ""
                 ),
+                "workflow_input_manifest_ref": str(
+                    result.get("workflow_input_manifest_ref") or ""
+                ),
                 "run_id": str(
                     lifecycle.get("run_id")
                     or result.get("run_id")
@@ -463,6 +483,7 @@ def build_workflow_request_router(
                 status_code=422,
             )
         apply = bool(payload.get("apply"))
+        current: dict[str, Any] = {}
         if not apply:
             from zf.cli.flow import _load_manifest_for_intake
             from zf.runtime.workflow_requests import (
@@ -470,17 +491,29 @@ def build_workflow_request_router(
                 revise_workflow_request,
             )
 
-            manifest_path, manifest = _load_manifest_for_intake(
-                Path(intake_ref).expanduser()
-            )
-            request_id = str((manifest or {}).get("request_id") or "")
+            request_id = str(payload.get("request_id") or "").strip()
             current = (
                 load_workflow_request(context.state_dir, request_id)
                 if request_id
                 else {}
             )
+            manifest_path: Path | None = None
+            if current.get("workflow_input_manifest_ref"):
+                manifest_path = Path(
+                    str(current["workflow_input_manifest_ref"])
+                ).expanduser()
+            else:
+                manifest_path, manifest = _load_manifest_for_intake(
+                    Path(intake_ref).expanduser()
+                )
+                request_id = str((manifest or {}).get("request_id") or "")
+                current = (
+                    load_workflow_request(context.state_dir, request_id)
+                    if request_id
+                    else {}
+                )
             if manifest_path is not None and current and not current.get("confirmed"):
-                revise_workflow_request(
+                current = revise_workflow_request(
                     context.state_dir,
                     manifest_path,
                     actor=str(payload.get("requested_by") or "web"),
@@ -527,15 +560,21 @@ def build_workflow_request_router(
             )
             status_code = int(result.pop("_status_code", 200))
             return JSONResponse(result, status_code=status_code)
+        synthesis_ref = (
+            dict(current.get("synthesis_ref"))
+            if isinstance(current.get("synthesis_ref"), dict)
+            else None
+        )
         result = build_flow_submit_preview(
             config_path=config_ref,
             intake_path=Path(intake_ref).expanduser(),
-            flow_kind=str(payload.get("kind") or ""),
+            flow_kind=str(payload.get("kind") or current.get("kind") or ""),
             task_id=str(payload.get("task_id") or ""),
             pattern_id=str(payload.get("pattern_id") or ""),
             requested_by=str(payload.get("requested_by") or "web"),
             reason=str(payload.get("reason") or ""),
             allow_missing_env=bool(payload.get("allow_missing_env")),
+            synthesis_result_ref=synthesis_ref,
         )
         status = str(result.get("status") or "")
         code = 409 if status == "STOP" else 200

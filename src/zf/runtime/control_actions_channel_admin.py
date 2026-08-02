@@ -9,6 +9,7 @@ from typing import Any
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.core.state.atomic_io import atomic_write_text
+from zf.core.state.locks import locked_path
 from zf.core.skills.provenance import (
     resolve_builtin_skill_source,
     resolve_skill_source,
@@ -22,6 +23,12 @@ from zf.runtime.channel_contracts import normalize_provider
 from zf.runtime.channel_contracts import normalize_visibility_profile
 from zf.runtime.channel_contracts import permission_profile_write_policy
 from zf.runtime.channel_openclaw import prepare_openclaw_member_connection
+from zf.runtime.channel_profiles import (
+    bind_channel_member_profile,
+    resolve_channel_role_definition,
+    write_channel_profile_snapshot,
+)
+from zf.runtime.channel_owner_authority import normalize_owner_delegates
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_roles import normalize_role_context_ref
 from zf.runtime.control_actions_helpers import _normal_channel_id
@@ -29,6 +36,7 @@ from zf.runtime.control_actions_helpers import _optional_str
 from zf.runtime.control_actions_helpers import _provider_binding_id
 from zf.runtime.control_actions_helpers import _required_text
 from zf.runtime.control_actions_helpers import _task_id_from_payload
+from zf.runtime.control_actions_helpers import _stable_control_id
 
 
 def _materialize_channel_skill_refs(
@@ -155,6 +163,27 @@ class ChannelAdminActionsMixin:
                 "thread_id": _optional_str(payload.get("thread_id")) or "main",
                 "task_id": str(payload.get("task_id") or ""),
                 "created_by": str(payload.get("created_by") or self.actor),
+                "owner_actor_ref": str(
+                    payload.get("owner_actor_ref") or self.actor
+                ),
+                "owner_delegates": normalize_owner_delegates(
+                    payload.get("owner_delegates")
+                ),
+                "leader_member_id": str(
+                    payload.get("leader_member_id") or ""
+                ),
+                "leader_revision": int(payload.get("leader_revision") or 0),
+                "origin_binding": (
+                    payload.get("origin_binding")
+                    if isinstance(payload.get("origin_binding"), dict)
+                    else {
+                        "surface": self.surface,
+                        "channel_id": channel_id,
+                        "thread_id": (
+                            _optional_str(payload.get("thread_id")) or "main"
+                        ),
+                    }
+                ),
                 "source": self.surface,
                 "scope": payload.get("scope") if isinstance(payload.get("scope"), dict) else {},
             },
@@ -190,15 +219,60 @@ class ChannelAdminActionsMixin:
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         thread_id = _optional_str(payload.get("thread_id")) or "main"
         member_id = _required_text(payload, "member_id")
-        provider = normalize_provider(payload.get("provider") or payload.get("backend") or payload.get("member_type"))
-        member_type = normalize_member_type(payload.get("member_type"), backend=provider)
-        channel_role = normalize_channel_role(payload.get("channel_role") or payload.get("role"), member_type=member_type)
+        bound_payload, profile_error = bind_channel_member_profile(
+            self.config,
+            payload,
+            allow_inline_profile=bool(payload.get("template_id")),
+        )
+        if profile_error or bound_payload is None:
+            return self._channel_reject_member(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                member_id=member_id,
+                provider=normalize_provider(
+                    payload.get("provider") or payload.get("backend")
+                ),
+                backend=str(payload.get("backend") or ""),
+                member_type=normalize_member_type(
+                    payload.get("member_type"),
+                    backend=payload.get("provider") or payload.get("backend"),
+                ),
+                channel_role=normalize_channel_role(
+                    payload.get("channel_role") or payload.get("role")
+                ),
+                visibility_profile=normalize_visibility_profile(
+                    payload.get("visibility_profile")
+                ),
+                permissions=normalize_permissions(payload.get("permissions")),
+                provider_binding_id=_provider_binding_id(payload),
+                reason=profile_error or "channel profile binding failed",
+            )
+        payload = bound_payload
+        provider = normalize_provider(
+            payload.get("provider")
+            or payload.get("backend")
+            or payload.get("member_type")
+        )
+        member_type = normalize_member_type(
+            payload.get("member_type"),
+            backend=provider,
+        )
+        channel_role = normalize_channel_role(
+            payload.get("channel_role") or payload.get("role"),
+            member_type=member_type,
+        )
         visibility_profile = normalize_visibility_profile(
             payload.get("visibility_profile"),
             channel_role=channel_role,
             member_type=member_type,
         )
-        permission_profile = normalize_permission_profile(payload.get("permission_profile"))
+        permission_profile = normalize_permission_profile(
+            payload.get("permission_profile")
+        )
         write_policy = permission_profile_write_policy(permission_profile)
         permissions = normalize_permissions(payload.get("permissions"), member_type=member_type)
         skill_refs = normalize_channel_skill_refs(payload.get("skill_refs"))
@@ -239,6 +313,38 @@ class ChannelAdminActionsMixin:
                     + ", ".join(unresolved_skill_refs)
                 ),
             )
+        role_definition, role_error = resolve_channel_role_definition(
+            payload,
+            project_root=self.project_root or self.state_dir.parent,
+        )
+        if role_error:
+            return self._channel_reject_member(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                member_id=member_id,
+                provider=provider,
+                backend=str(payload.get("backend") or provider),
+                member_type=member_type,
+                channel_role=channel_role,
+                visibility_profile=visibility_profile,
+                permissions=permissions,
+                provider_binding_id=provider_binding_id,
+                reason=role_error,
+            )
+        profile_snapshot = write_channel_profile_snapshot(
+            self.state_dir,
+            channel_id=channel_id,
+            member_id=member_id,
+            binding=payload,
+            resolved_skill_refs=resolved_skill_refs,
+            role_definition=role_definition,
+            created_by=self.actor,
+            source_event_id=requested.id,
+        )
         remote_agent_id = ""
         provider_session_id = ""
         openclaw_capabilities: dict[str, Any] = {}
@@ -296,6 +402,28 @@ class ChannelAdminActionsMixin:
                 "member_id": member_id,
                 "persona": str(payload.get("persona") or member_id),
                 "display_name": str(payload.get("display_name") or payload.get("persona") or member_id),
+                "profile_id": str(payload.get("profile_id") or ""),
+                "profile_revision": int(payload.get("profile_revision") or 1),
+                "profile_provenance": str(
+                    payload.get("profile_provenance") or "legacy_inline"
+                ),
+                "profile_digest": str(payload.get("profile_digest") or ""),
+                "config_digest": str(payload.get("config_digest") or ""),
+                "skill_set_digest": str(
+                    profile_snapshot.get("skill_set_digest")
+                    or payload.get("skill_set_digest")
+                    or ""
+                ),
+                "permission_digest": str(
+                    payload.get("permission_digest") or ""
+                ),
+                "role_definition_digest": str(
+                    profile_snapshot.get("role_definition_digest") or ""
+                ),
+                "profile_snapshot_ref": str(profile_snapshot.get("ref") or ""),
+                "profile_snapshot_sha256": str(
+                    profile_snapshot.get("sha256") or ""
+                ),
                 "role": str(payload.get("role") or channel_role),
                 "channel_role": channel_role,
                 "member_type": member_type,
@@ -573,6 +701,20 @@ class ChannelAdminActionsMixin:
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         thread_id = _optional_str(payload.get("thread_id")) or "main"
         member_id = _required_text(payload, "member_id")
+        channel = project_channel(self.state_dir, channel_id) or {}
+        if str(channel.get("leader_member_id") or "") == member_id:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=(
+                    "current Channel Leader must be replaced or revoked "
+                    "before member removal"
+                ),
+                status_code=409,
+                status="leader_binding_conflict",
+            )
         event = self.writer.emit(
             "channel.member.removed",
             actor=self.actor,
@@ -604,6 +746,177 @@ class ChannelAdminActionsMixin:
             "channel_id": channel_id,
             "member_id": member_id,
             "event_id": event.id,
+        }
+
+    def _channel_set_leader(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+    ) -> dict:
+        channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
+        thread_id = _optional_str(payload.get("thread_id")) or "main"
+        leader_member_id = str(payload.get("leader_member_id") or "").strip()
+        idempotency_key = str(
+            payload.get("idempotency_key")
+            or _stable_control_id(
+                "channel-leader",
+                channel_id,
+                leader_member_id,
+                payload.get("expected_revision"),
+            )
+        )
+        with locked_path(
+            self.state_dir
+            / "locks"
+            / _stable_control_id("channel-leader", channel_id)
+        ):
+            for prior in reversed(self.writer.event_log.read_all()):
+                if prior.type != "channel.leader.updated":
+                    continue
+                prior_payload = (
+                    prior.payload if isinstance(prior.payload, dict) else {}
+                )
+                if (
+                    str(prior_payload.get("channel_id") or "") == channel_id
+                    and str(prior_payload.get("idempotency_key") or "")
+                    == idempotency_key
+                ):
+                    return {
+                        "_status_code": 200,
+                        "ok": True,
+                        "status": "existing",
+                        "action": action,
+                        "requested_action": requested_action,
+                        "channel_id": channel_id,
+                        "leader_member_id": str(
+                            prior_payload.get("leader_member_id") or ""
+                        ),
+                        "leader_revision": int(
+                            prior_payload.get("leader_revision") or 0
+                        ),
+                        "event_id": prior.id,
+                        "idempotency_key": idempotency_key,
+                    }
+            channel = project_channel(self.state_dir, channel_id) or {}
+            if not channel.get("created_by_event"):
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason="channel not found",
+                    status_code=404,
+                    status="not_found",
+                )
+            owner_actor_ref = str(channel.get("owner_actor_ref") or "")
+            if not owner_actor_ref or self.actor != owner_actor_ref:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason="only the canonical Channel Owner may update Leader",
+                    status_code=403,
+                    status="forbidden",
+                )
+            current_revision = int(channel.get("leader_revision") or 0)
+            expected_revision = int(
+                payload.get("expected_revision")
+                if payload.get("expected_revision") is not None
+                else current_revision
+            )
+            if expected_revision != current_revision:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload),
+                    reason=(
+                        "Channel Leader revision is stale; current revision "
+                        f"is {current_revision}"
+                    ),
+                    status_code=409,
+                    status="stale_revision",
+                )
+            if leader_member_id:
+                member = next(
+                    (
+                        item
+                        for item in channel.get("members") or []
+                        if isinstance(item, dict)
+                        and str(item.get("member_id") or "")
+                        == leader_member_id
+                    ),
+                    None,
+                )
+                if (
+                    member is None
+                    or str(member.get("status") or "")
+                    in {"removed", "suspended", "rejected"}
+                    or "propose_workflow"
+                    not in set(member.get("permissions") or [])
+                ):
+                    return self._failed(
+                        requested=requested,
+                        action=action,
+                        requested_action=requested_action,
+                        task_id=_task_id_from_payload(payload),
+                        reason=(
+                            "Leader must be an active Channel member with "
+                            "propose_workflow permission"
+                        ),
+                        status_code=422,
+                        status="invalid_leader",
+                    )
+            event = self.writer.emit(
+                "channel.leader.updated",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "previous_leader_member_id": str(
+                        channel.get("leader_member_id") or ""
+                    ),
+                    "leader_member_id": leader_member_id,
+                    "leader_revision": current_revision + 1,
+                    "owner_actor_ref": owner_actor_ref,
+                    "reason": str(
+                        payload.get("reason") or "Owner updated Channel Leader"
+                    ),
+                    "idempotency_key": idempotency_key,
+                    "source": self.surface,
+                },
+            )
+        self._completed(
+            requested=requested,
+            event=event,
+            action=action,
+            requested_action=requested_action,
+            status="leader_updated",
+            task_id=_task_id_from_payload(payload),
+            extra={
+                "channel_id": channel_id,
+                "leader_member_id": leader_member_id,
+                "leader_revision": current_revision + 1,
+            },
+        )
+        return {
+            "_status_code": 202,
+            "ok": True,
+            "status": "leader_updated",
+            "action": action,
+            "requested_action": requested_action,
+            "channel_id": channel_id,
+            "leader_member_id": leader_member_id,
+            "leader_revision": current_revision + 1,
+            "event_id": event.id,
+            "idempotency_key": idempotency_key,
         }
     def _channel_delete(
         self,

@@ -40,6 +40,7 @@ def build_flow_preflight_report(
     *,
     flow_kind: str = "",
     intake_path: Path | None = None,
+    workflow_input_manifest_path: Path | None = None,
     allow_missing_env: bool = False,
 ) -> dict[str, Any]:
     try:
@@ -87,7 +88,10 @@ def build_flow_preflight_report(
             "fix_it": "按 preflight detail 修复角色/backend/dispatch 配置。",
             "safe_auto_fix": False,
         })
-    intake_report = _intake_preflight_report(intake_path)
+    intake_report = _intake_preflight_report(
+        intake_path,
+        workflow_input_manifest_path=workflow_input_manifest_path,
+    )
     diagnostics.extend(intake_report.get("diagnostics", []))
     effective_kind = str(
         flow_kind
@@ -837,7 +841,11 @@ def _skill_adapter_preflight_report(intake_report: dict[str, Any]) -> dict[str, 
         "diagnostics": diagnostics,
     }
 
-def _intake_preflight_report(intake_path: Path | None) -> dict[str, Any]:
+def _intake_preflight_report(
+    intake_path: Path | None,
+    *,
+    workflow_input_manifest_path: Path | None = None,
+) -> dict[str, Any]:
     if intake_path is None:
         return {
             "status": "not_requested",
@@ -856,13 +864,23 @@ def _intake_preflight_report(intake_path: Path | None) -> dict[str, Any]:
             "safe_auto_fix": False,
         })
         return {"status": "STOP", "intake_ref": str(path), "diagnostics": diagnostics}
-    manifest_path, manifest = _load_manifest_for_intake(path)
+    manifest_path = (
+        workflow_input_manifest_path.expanduser()
+        if workflow_input_manifest_path is not None
+        else None
+    )
+    manifest = _load_json(manifest_path) if manifest_path is not None else {}
     if manifest_path is None:
+        manifest_path, manifest = _load_manifest_for_intake(path)
+    if manifest_path is None or not manifest:
         diagnostics.append({
             "severity": "STOP",
             "kind": "workflow_input_manifest_missing",
             "title": "workflow input manifest 缺失",
-            "message": f"no workflow-input-manifest.json references {path}",
+            "message": (
+                f"workflow input manifest is missing or invalid: "
+                f"{manifest_path or path}"
+            ),
             "why_it_matters": "后续 worker 需要稳定 manifest refs,不能只依赖聊天或 markdown。",
             "fix_it": "使用 `zf flow intake` 重新生成 intake + manifest。",
             "safe_auto_fix": False,

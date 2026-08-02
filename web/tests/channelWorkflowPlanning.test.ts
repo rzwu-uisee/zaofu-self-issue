@@ -19,6 +19,8 @@ function assertEqual(actual: unknown, expected: unknown, message: string): void 
 const detail = {
   channel_id: "ch-prd",
   name: "prd",
+  leader_member_id: "leader-1",
+  leader_revision: 4,
   members: [],
   workflow_requests: [],
   syntheses: [{
@@ -33,6 +35,7 @@ const detail = {
       artifact_ref: "channel-artifacts/ch-prd/prd.md",
       artifact_digest: "canonical",
       reached_event_id: "evt-consensus",
+      prd_revision: 7,
     },
   },
 } as ChannelDetail;
@@ -65,6 +68,36 @@ assertEqual(request.workflowContext.artifact_refs, [{
   source_event_id: "evt-synthesis",
   source_refs: ["event:evt-requirement", "channel:ch-prd/main"],
 }], "artifact refs");
+assertEqual(request.workflowContext.channel_member_id, "leader-1", "leader identity");
+assertEqual(request.workflowContext.leader_revision, 4, "leader revision");
+assertEqual(request.workflowContext.prd_revision, 7, "PRD revision");
+
+const taskCreateRequest = buildChannelWorkflowPlanningRequest({
+  channelId: "ch-prd",
+  detail,
+  objective: "Create an implementation Task from the accepted PRD.",
+  taskId: "",
+});
+assert(taskCreateRequest, "Task-create planning request should be built");
+assert(
+  taskCreateRequest.message.includes("subject_type=task_create"),
+  "empty task id should request a task_create Plan",
+);
+assert(
+  taskCreateRequest.message.includes("不要直接创建 Task 或启动 workflow"),
+  "Task-create request should preserve the proposal boundary",
+);
+const { expected_output: _taskCreateOutput, ...taskCreateAuthority } = (
+  taskCreateRequest.workflowContext
+);
+const { expected_output: _workflowOutput, ...workflowAuthority } = (
+  request.workflowContext
+);
+assertEqual(
+  taskCreateAuthority,
+  workflowAuthority,
+  "Task-create and workflow planning must carry identical Channel authority",
+);
 
 const unresolved = {
   ...detail,

@@ -42,6 +42,7 @@ from zf.runtime.fanout_recovery_runtime import FanoutRecoveryRuntimeMixin
 from zf.runtime.fanout_timeout_operations import FanoutTimeoutOperationsMixin
 from zf.runtime.durable_call_fanout import DurableCallFanoutMixin
 from zf.runtime.fanout_stage_criteria import evaluate_fanout_stage_success_criteria_for_orchestrator
+from zf.runtime.writer_contract_handoff import recoverable_writer_handoff_failure
 from zf.runtime.writer_fanout_result_binding import WriterFanoutResultBindingMixin
 from zf.runtime.writer_dispatch_fence import WriterDispatchFenceMixin
 from zf.runtime.injection import build_task_prompt
@@ -1036,6 +1037,8 @@ class FanoutCoordinationMixin(
         for event in events:
             if event.type not in {"fanout.child.completed", "fanout.child.failed"}:
                 continue
+            if recoverable_writer_handoff_failure(event):
+                continue
             payload = event.payload if isinstance(event.payload, dict) else {}
             fanout_id = str(payload.get("fanout_id") or "")
             child_id = str(payload.get("child_id") or "")
@@ -1225,6 +1228,8 @@ class FanoutCoordinationMixin(
         terminal_children: set[tuple[str, str]] = set()
         for event in events:
             if event.type not in {"fanout.child.completed", "fanout.child.failed"}:
+                continue
+            if recoverable_writer_handoff_failure(event):
                 continue
             payload = event.payload if isinstance(event.payload, dict) else {}
             fanout_id = str(payload.get("fanout_id") or "")
@@ -5296,13 +5301,32 @@ class FanoutCoordinationMixin(
                 source_manifest=manifest,
                 source_child=child or {},
             )
+            adoption_rejection_reason = ""
+            if target is not None:
+                target_task_map_ref = str(
+                    target.child.get("task_map_ref")
+                    or target.manifest.get("task_map_ref")
+                    or ""
+                )
+                if not self._writer_completion_matches_current_contract(
+                    event=event,
+                    task_id=str(
+                        event.task_id
+                        or payload.get("task_id")
+                        or target.child.get("task_id")
+                        or ""
+                    ),
+                    task_map_ref=target_task_map_ref,
+                ):
+                    adoption_rejection_reason = "contract_authority_mismatch"
+                    target = None
             if target is None:
                 self._emit_fanout_identity_stale_completion(
                     event=event,
                     payload=payload,
                     manifest=manifest,
                     child=child,
-                    reason=stale_reason,
+                    reason=adoption_rejection_reason or stale_reason,
                     superseded_by=superseded_by,
                 )
                 return
@@ -5418,17 +5442,28 @@ class FanoutCoordinationMixin(
             try:
                 self._ensure_writer_completion_contract_identity(
                     event=event,
-                    payload=payload,
                     child=child or {},
                     base_payload=base_payload,
                 )
             except TaskContractSnapshotError as exc:
+                prior_handoff_failure = (
+                    self._recoverable_handoff_failure_for_source(event.id)
+                )
+                recovery_fields = {}
+                if prior_handoff_failure is not None:
+                    recovery_fields = {
+                        "handoff_recovery_attempt": 1,
+                        "recovered_from_failure_event_id": (
+                            prior_handoff_failure.id
+                        ),
+                    }
                 self._record_writer_fanout_child_failed(
                     fanout_id=fanout_id,
                     base_payload=base_payload,
                     failure_payload={
                         "reason": f"writer contract handoff snapshot failed: {exc}",
                         "failure_class": "verifier_contract_failure",
+                        **recovery_fields,
                     },
                     event=event,
                     manifest=manifest,
@@ -5759,7 +5794,7 @@ class FanoutCoordinationMixin(
                 str(payload.get("result_event_id") or "") == source_event_id
                 or str(event.causation_id or "") == source_event_id
             ):
-                return True
+                return not recoverable_writer_handoff_failure(event)
         return False
 
     def _fanout_failure_findings(

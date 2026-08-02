@@ -41,6 +41,17 @@ def channel_message_event_payload(
         "channel_id": channel_id,
         "thread_id": str(payload.get("thread_id") or "main"),
         "message_id": message_id,
+        "client_message_id": str(
+            payload.get("client_message_id") or message_id
+        ),
+        "idempotency_key": str(
+            payload.get("idempotency_key")
+            or payload.get("client_message_id")
+            or message_id
+        ),
+        "reply_to_message_id": str(
+            payload.get("reply_to_message_id") or ""
+        ),
         "member_id": str(payload.get("member_id") or ""),
         "role": str(payload.get("role") or ""),
         "source": str(payload.get("source") or ""),
@@ -152,6 +163,21 @@ def channel_context_pack_event_payload(
         "visibility_profile": str(payload.get("visibility_profile") or ""),
         "channel_role": str(payload.get("channel_role") or ""),
         "permission_profile": str(payload.get("permission_profile") or ""),
+        "profile_id": str(payload.get("profile_id") or ""),
+        "profile_revision": int(payload.get("profile_revision") or 1),
+        "profile_provenance": str(
+            payload.get("profile_provenance") or "legacy_inline"
+        ),
+        "profile_digest": str(payload.get("profile_digest") or ""),
+        "config_digest": str(payload.get("config_digest") or ""),
+        "skill_set_digest": str(payload.get("skill_set_digest") or ""),
+        "permission_digest": str(payload.get("permission_digest") or ""),
+        "profile_snapshot_ref": str(
+            payload.get("profile_snapshot_ref") or ""
+        ),
+        "profile_snapshot_sha256": str(
+            payload.get("profile_snapshot_sha256") or ""
+        ),
         "role_context_ref": str(payload.get("role_context_ref") or ""),
         "skill_refs": payload.get("skill_refs") if isinstance(payload.get("skill_refs"), list) else [],
         "resolved_skill_refs": payload.get("resolved_skill_refs") if isinstance(payload.get("resolved_skill_refs"), list) else [],

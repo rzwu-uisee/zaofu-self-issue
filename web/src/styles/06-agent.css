@@ -540,6 +540,18 @@
   font-size: var(--text-12);
 }
 
+.agent-message-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.agent-message-actions .icon-button {
+  width: 26px;
+  height: 26px;
+}
+
 /* feishu-C #1: source chip for messages that entered from Feishu/OpenClaw. */
 .agent-origin-chip {
   margin-right: auto;

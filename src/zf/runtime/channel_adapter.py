@@ -11,6 +11,11 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter
 from zf.core.security.redaction import redact_obj
 from zf.core.state.session import SessionStore, ZfNotInitialized
+from zf.runtime.channel_dispatch_capacity import (
+    channel_dispatch_capacity,
+    channel_dispatch_lock,
+    dispatch_candidate_waves,
+)
 from zf.runtime.channel_openclaw import dispatch_openclaw_channel_reply
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_contract import (
@@ -18,9 +23,14 @@ from zf.runtime.channel_reply_contract import (
     emit_structured_reply_events,
     fake_channel_reply_text,
 )
+from zf.runtime.channel_reply_remediation import emit_channel_reply_failed
 from zf.runtime.channel_contracts import (
     normalize_permission_profile,
     permission_profile_write_policy,
+)
+from zf.runtime.channel_provider_profile import (
+    channel_profile_permission_fields,
+    reject_inactive_channel_member,
 )
 from zf.runtime.channel_run_owner import (
     active_reply_for_target,
@@ -87,57 +97,76 @@ def dispatch_reply_request(
     config: ZfConfig | None = None,
     openclaw_client: OpenClawGatewayClient | None = None,
 ) -> ChannelDispatchResult:
-    channel = project_channel(Path(state_dir), channel_id) or {}
-    request = _reply_by_id(channel, request_id)
-    if not request:
-        return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": "reply_request_not_found"}])
-    status = str(request.get("status") or "")
-    if status not in DISPATCHABLE_STATUSES:
-        return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": f"status_{status}"}])
-    if status == "queued" and not allow_queued:
-        return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": "queued_waiting_for_drain"}])
+    state_dir = Path(state_dir)
+    with channel_dispatch_lock(state_dir, channel_id):
+        channel = project_channel(state_dir, channel_id) or {}
+        request = _reply_by_id(channel, request_id)
+        if not request:
+            return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": "reply_request_not_found"}])
+        status = str(request.get("status") or "")
+        if status not in DISPATCHABLE_STATUSES:
+            return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": f"status_{status}"}])
+        if status == "queued" and not allow_queued:
+            return ChannelDispatchResult(skipped=[{"request_id": request_id, "reason": "queued_waiting_for_drain"}])
 
-    member = _member_by_id(channel, str(request.get("target_member_id") or ""))
-    message = _message_by_id(channel, str(request.get("message_id") or ""))
-    target_member_id = str(request.get("target_member_id") or "")
-    if target_member_id:
-        active_reply = active_reply_for_target(
-            channel,
-            target_member_id,
-            exclude_request_id=request_id,
+        member = _member_by_id(channel, str(request.get("target_member_id") or ""))
+        message = _message_by_id(channel, str(request.get("message_id") or ""))
+        target_member_id = str(request.get("target_member_id") or "")
+        inactive = reject_inactive_channel_member(
+            writer=writer,
+            member=member,
+            request=request,
+            request_id=request_id,
+            channel_id=channel_id,
+            target_member_id=target_member_id,
+            actor=actor,
+            source=source,
         )
-        if active_reply:
+        if inactive:
+            return ChannelDispatchResult(failed=[request_id], skipped=[inactive])
+        if channel_dispatch_capacity(channel) <= 0:
             return ChannelDispatchResult(skipped=[{
                 "request_id": request_id,
-                "reason": "target_busy",
-                "active_request_id": str(active_reply.get("request_id") or ""),
+                "reason": "parallel_limit",
             }])
-    run_fields = provider_run_fields_for_request(channel_id, request)
-    started = writer.emit(
-        "channel.agent.reply.started",
-        actor=actor,
-        task_id=str(request.get("task_id") or "") or None,
-        causation_id=str(request.get("event_id") or "") or None,
-        correlation_id=channel_id,
-        payload={
-            "channel_id": channel_id,
-            "thread_id": str(request.get("thread_id") or "main"),
-            "request_id": request_id,
-            "message_id": str(request.get("message_id") or ""),
-            "target_member_id": str(request.get("target_member_id") or ""),
-            "context_pack_id": str(request.get("context_pack_id") or ""),
-            "provider_session_id": str(member.get("provider_session_id") or ""),
-            "provider_binding_id": str(member.get("provider_binding_id") or ""),
-            "remote_agent_id": str(member.get("remote_agent_id") or ""),
-            "worker_session_id": _worker_session(member) or str(request.get("worker_session_id") or ""),
-            **run_fields,
-            "source": source,
-        },
-    )
+        if target_member_id:
+            active_reply = active_reply_for_target(
+                channel,
+                target_member_id,
+                exclude_request_id=request_id,
+            )
+            if active_reply:
+                return ChannelDispatchResult(skipped=[{
+                    "request_id": request_id,
+                    "reason": "target_busy",
+                    "active_request_id": str(active_reply.get("request_id") or ""),
+                }])
+        run_fields = provider_run_fields_for_request(channel_id, request)
+        started = writer.emit(
+            "channel.agent.reply.started",
+            actor=actor,
+            task_id=str(request.get("task_id") or "") or None,
+            causation_id=str(request.get("event_id") or "") or None,
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": str(request.get("thread_id") or "main"),
+                "request_id": request_id,
+                "message_id": str(request.get("message_id") or ""),
+                "target_member_id": target_member_id,
+                "context_pack_id": str(request.get("context_pack_id") or ""),
+                "provider_session_id": str(member.get("provider_session_id") or ""),
+                "provider_binding_id": str(member.get("provider_binding_id") or ""),
+                "remote_agent_id": str(member.get("remote_agent_id") or ""),
+                "worker_session_id": _worker_session(member) or str(request.get("worker_session_id") or ""),
+                **run_fields,
+                "source": source,
+            },
+        )
     try:
         hydrated_text = hydrate_channel_message_text(Path(state_dir), message, strict=True)
     except Exception as exc:
-        _emit_headless_failed(
+        emit_channel_reply_failed(
             writer=writer,
             request=request,
             request_id=request_id,
@@ -263,7 +292,7 @@ def dispatch_reply_request(
                 client=openclaw_client,
             )
         except Exception as exc:
-            _emit_headless_failed(
+            emit_channel_reply_failed(
                 writer=writer,
                 request=request,
                 request_id=request_id,
@@ -273,6 +302,7 @@ def dispatch_reply_request(
                 channel_id=channel_id,
                 reason=f"openclaw dispatch crashed: {exc}",
                 provider_session_id="",
+                failure_status="exception",
             )
             return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
         if result.ok:
@@ -365,21 +395,13 @@ def dispatch_pending_replies(
             openclaw_client=openclaw_client,
         )
 
-    batch = candidates[:max_dispatch]
-    if len(batch) <= 1:
-        results = [_dispatch_one(item) for item in batch]
-    else:
-        # Fan-out targets are distinct members (deduped above), each dispatch
-        # is an independent backend run, and EventLog.append is lock-guarded —
-        # so a blind round of N agents costs one turn of wall clock, not N
-        # (doc 122 §5; the serial loop made real-agent rounds 3x slower).
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(len(batch), 6),
-            thread_name_prefix=f"zf-channel-dispatch-{channel_id}",
-        ) as pool:
-            results = list(pool.map(_dispatch_one, batch))
+    results = dispatch_candidate_waves(
+        candidates,
+        channel_id=channel_id,
+        channel_loader=lambda: project_channel(Path(state_dir), channel_id) or {},
+        dispatch_one=_dispatch_one,
+        max_dispatch=max_dispatch,
+    )
     for result in results:
         dispatched.extend(result.dispatched)
         completed.extend(result.completed)
@@ -504,7 +526,7 @@ def _dispatch_headless_reply(
             backends=headless_backends,
         )
     except Exception as exc:
-        _emit_headless_failed(
+        emit_channel_reply_failed(
             writer=writer,
             request=request,
             request_id=request_id,
@@ -514,12 +536,13 @@ def _dispatch_headless_reply(
             channel_id=channel_id,
             reason=str(exc),
             provider_session_id="",
+            failure_status="exception",
         )
         return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
 
     if not bool(getattr(result, "ok", False)):
         reason = str(getattr(result, "error", "") or getattr(result, "status", "") or "headless provider failed")
-        _emit_headless_failed(
+        emit_channel_reply_failed(
             writer=writer,
             request=request,
             request_id=request_id,
@@ -529,6 +552,7 @@ def _dispatch_headless_reply(
             channel_id=channel_id,
             reason=reason,
             provider_session_id=str(getattr(result, "provider_session_id", "") or ""),
+            failure_status=str(getattr(result, "status", "") or "failed"),
         )
         return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
 
@@ -664,6 +688,7 @@ def _run_headless_reply(
             role=str(member.get("channel_role") or member.get("role") or ""),
             member_id=str(member.get("member_id") or request.get("target_member_id") or ""),
             source="channel.headless",
+            **channel_profile_permission_fields(member),
         )
         drift = provider_permission_drift(
             store.provider_permission_snapshot(thread, backend=backend),
@@ -905,64 +930,6 @@ def _context_pack_by_id(channel: dict[str, Any], context_pack_id: str) -> dict[s
         if isinstance(item, dict):
             return item
     return {}
-
-
-def _emit_headless_failed(
-    *,
-    writer: EventWriter,
-    request: dict[str, Any],
-    request_id: str,
-    started_event_id: str,
-    actor: str,
-    source: str,
-    channel_id: str,
-    reason: str,
-    provider_session_id: str,
-) -> None:
-    run_fields = provider_run_fields_for_request(channel_id, request)
-    writer.emit(
-        "channel.agent.reply.failed",
-        actor=actor,
-        task_id=str(request.get("task_id") or "") or None,
-        causation_id=started_event_id,
-        correlation_id=channel_id,
-        payload={
-            "channel_id": channel_id,
-            "thread_id": str(request.get("thread_id") or "main"),
-            "request_id": request_id,
-            "message_id": str(request.get("message_id") or ""),
-            "target_member_id": str(request.get("target_member_id") or ""),
-            "context_pack_id": str(request.get("context_pack_id") or ""),
-            "provider_session_id": provider_session_id,
-            "reason": reason,
-            **run_fields,
-            "source": source,
-        },
-    )
-    # P0.2: if this reply.requested was spawned by request_channel_handoff
-    # (channel_handoff.py threads handoff_request_event_id into the request
-    # payload), surface the failure back to the handoff state machine so the
-    # accepted handoff does not silently linger and lock member_busy=true.
-    handoff_request_event_id = str(request.get("handoff_request_event_id") or "")
-    if handoff_request_event_id:
-        writer.emit(
-            "channel.handoff.failed",
-            actor=actor,
-            task_id=str(request.get("task_id") or "") or None,
-            causation_id=handoff_request_event_id,
-            correlation_id=channel_id,
-            payload={
-                "channel_id": channel_id,
-                "thread_id": str(request.get("thread_id") or "main"),
-                "message_id": str(request.get("message_id") or ""),
-                "member_id": str(request.get("member_id") or ""),
-                "target_member_id": str(request.get("target_member_id") or ""),
-                "request_id": request_id,
-                "handoff_request_event_id": handoff_request_event_id,
-                "reason": reason,
-                "source": source,
-            },
-        )
 
 
 def _project_root_for_state(state_dir: Path, project_root: Path | None) -> Path:

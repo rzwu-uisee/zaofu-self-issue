@@ -70,6 +70,12 @@ _ALLOWLIST: dict[tuple[str, str], str] = {
         "flow_metadata=workflow_data.get('_flow_metadata', {}), so the field "
         "name doesn't appear as a literal string"
     ),
+    ("WorkflowConfig", "flow_metadata_by_kind"): (
+        "multi-Flow expansion projection: read via reserved yaml key "
+        "workflow._flow_metadata_by_kind through "
+        "_build_flow_metadata_by_kind; loader.py:2472 wires the result into "
+        "WorkflowConfig"
+    ),
 }
 
 

@@ -222,7 +222,11 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
         ts: recordString(message, "ts"),
         memberId: recordString(message, "member_id"),
         provider: recordString(message, "source"),
-        refs: recordValue(message.refs) ?? undefined,
+        refs: {
+          ...(recordValue(message.refs) ?? {}),
+          pinned: Boolean(message.pinned),
+          reply_to_message_id: recordString(message, "reply_to_message_id"),
+        },
         origin: origin && recordString(origin, "channel")
           ? { channel: recordString(origin, "channel"), chat_id: recordString(origin, "chat_id") }
           : undefined,
