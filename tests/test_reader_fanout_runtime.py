@@ -1324,6 +1324,100 @@ def test_reader_fanout_child_payload_reaches_dispatch_and_briefing(tmp_path: Pat
     assert '"expected_output": "approve docs-only candidate"' in briefing
 
 
+def test_reader_semantic_replan_trigger_is_required_immutable_input(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    transport = _RecordingTransport()
+    config = ZfConfig(
+        project=ProjectConfig(name="test", state_dir=str(state_dir)),
+        roles=[RoleConfig(name="discovery", backend="mock", role_kind="reader")],
+        workflow=WorkflowConfig(
+            flow_metadata={"result_protocol": {"mode": "blocking"}},
+            stages=[WorkflowStageConfig(
+                id="post-verify-discovery",
+                trigger="flow.discovery.requested",
+                topology="fanout_reader",
+                roles=["discovery"],
+                target_ref="candidate/${pdd_id}",
+                aggregate=FanoutAggregateConfig(
+                    mode="wait_for_all",
+                    success_event="flow.discovery.completed",
+                    failure_event="flow.discovery.failed",
+                ),
+            )],
+        ),
+    )
+    orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
+    trigger = ZfEvent(
+        type="flow.discovery.requested",
+        actor="run-manager",
+        task_id="GAP-CURRENT",
+        correlation_id="workflow-1",
+        payload={
+            "schema_version": "semantic-replan-request.v1",
+            "workflow_run_id": "workflow-1",
+            "pdd_id": "PRD-1",
+            "task_id": "GAP-CURRENT",
+            "task_map_ref": "artifacts/plan/task-map.json",
+            "rework_of": "blocked-current",
+            "recommended_action": "replan",
+            "guidance": "Create a new task id and supersede only GAP-CURRENT.",
+            "supersedes_task_ids": ["GAP-CURRENT"],
+            "handoff_kind": "partial_task_continuation",
+            "continuation_commit": "partial456",
+            "continuation_ref": "worker/dev-1",
+            "candidate_ref": "worker/dev-1",
+            "candidate_head_commit": "partial456",
+            "target_ref": "partial456",
+        },
+    )
+
+    orch.run_once(events=[trigger])
+
+    dispatched = next(
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatched"
+    )
+    child_payload = dict(dispatched.payload["payload"])
+    manifest = hydrate_sidecar_ref(
+        state_dir,
+        child_payload["attempt_source_manifest"],
+    ).payload
+    semantic_source = next(
+        source for source in manifest["sources"]
+        if source["source_id"] == "semantic-replan-request"
+    )
+    recovered = read_attempt_artifact(
+        state_dir,
+        manifest=manifest,
+        source_id="semantic-replan-request",
+        artifact_id="semantic-replan-request",
+        json_path="$",
+    )
+    recovered_payload = json.loads(recovered["content"])
+    assert recovered_payload["guidance"] == trigger.payload["guidance"]
+    assert recovered_payload["continuation_commit"] == "partial456"
+    assert recovered_payload["target_ref"] == "partial456"
+    assert semantic_source["sha256"]
+    assert any(
+        item["source_id"] == "semantic-replan-request"
+        for item in child_payload["required_reads"]
+    )
+    briefing = transport.sent[0][1].read_text(encoding="utf-8")
+    started = next(
+        event for event in log.read_all() if event.type == "fanout.started"
+    )
+    assert started.payload["target_ref"] == "partial456"
+    assert dispatched.payload["target_ref"] == "partial456"
+    assert "- target_ref: `partial456`" in briefing
+    assert "--source semantic-replan-request" in briefing
+    assert "--json-path $" in briefing
+
+
 def test_reader_affinity_stage_slot_handoff_uses_upstream_lane(tmp_path: Path):
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -5539,6 +5633,79 @@ def test_reader_fanout_retries_after_worker_relaunch_even_with_prior_activity(
     assert child["status"] == "dispatched"
     assert child["run_id"] == retry_run_id
     assert [sent[0] for sent in transport.sent][-1] == "review-a"
+
+
+def test_reader_fanout_redispatches_synth_lost_by_worker_relaunch(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _state(tmp_path, synth=True)
+    _start_fanout(orch)
+    started = next(event for event in log.read_all() if event.type == "fanout.started")
+    fanout_id = started.payload["fanout_id"]
+    for child_id in ("review-a", "review-b"):
+        orch.run_once(events=[ZfEvent(
+            type="review.approved",
+            actor=child_id,
+            correlation_id="trace-1",
+            payload={
+                "fanout_id": fanout_id,
+                "child_id": child_id,
+                "run_id": f"run-{fanout_id}-{child_id}",
+                "status": "approved",
+            },
+        )])
+    first = next(
+        event for event in log.read_all()
+        if event.type == "fanout.synth.dispatched"
+        and event.payload.get("fanout_id") == fanout_id
+    )
+    first_send_count = len(transport.sent)
+    log.append(ZfEvent(
+        type="worker.launch_artifact.written",
+        actor="zf-cli",
+        ts="2026-08-03T06:53:17+00:00",
+        payload={
+            "instance_id": "review-synth",
+            "role": "review-synth",
+            "backend": "mock",
+            "launch_attempt": 2,
+            "is_resume": True,
+        },
+    ))
+    log.append(ZfEvent(
+        type="agent.usage",
+        actor="review-synth",
+        ts="2026-08-03T06:54:24+00:00",
+        payload={
+            "role": "review-synth",
+            "source": "disk_reader",
+            "usage_timestamp": "2026-08-03T06:27:05Z",
+        },
+    ))
+    orch._active_provider_turn = lambda _role: {"turn_id": "stale-turn"}  # type: ignore[method-assign]
+
+    orch.run_once(events=[])
+
+    events = log.read_all()
+    lost = [
+        event for event in events
+        if event.type == "fanout.child.dispatch_lost"
+        and event.payload.get("fanout_id") == fanout_id
+        and event.payload.get("child_id") == "synth"
+    ]
+    assert len(lost) == 1
+    assert lost[0].payload["lost_signal_type"] == "worker.launch_artifact.written"
+    retries = [
+        event for event in events
+        if event.type == "fanout.synth.dispatched"
+        and event.payload.get("fanout_id") == fanout_id
+    ]
+    assert len(retries) == 2
+    assert retries[-1].payload["run_id"] == first.payload["run_id"]
+    assert retries[-1].payload["retry_of_event_id"] == first.id
+    assert retries[-1].payload["semantic_attempt_consumed"] is False
+    assert len(transport.sent) == first_send_count + 1
+    assert transport.sent[-1][0] == "review-synth"
 
 
 def test_reader_fanout_ignores_stale_lock_purge_for_active_child(

@@ -25,11 +25,10 @@ Web `Add/Open Project` 不再让用户选择 YAML、Controller、kind、lane 或
 或迁移现有控制面时，使用 `zf profile bootstrap` / 配置迁移流程，并在写入前人工审核，
 不要把 YAML 选择重新放回日常 Project 创建表单。
 
-最小形态:
+低层 `ZfConfig` 精简片段（不包含 Flow document/profile 展开）:
 
 ```yaml
 version: "1.0"
-preset: safe-team
 project:
   name: my-project
   state_dir: .zf
@@ -38,6 +37,11 @@ session:
 orchestrator:
   backend: claude-code
 roles:
+  - name: orchestrator
+    backend: claude-code
+    role_kind: reader
+    triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]
+    publishes: [orchestrator.rework.triage.recorded]
   - name: dev
     backend: claude-code
     permission_mode: bypass
@@ -55,8 +59,8 @@ roles:
 | `project.state_dir` | 运行态目录,默认 `.zf`;命令应优先解析它 |
 | `session.tmux_session` | tmux session 名 |
 | `session.tmux_layout` | `window_per_role` 或 `pane_grid` |
-| `orchestrator` | L2 orchestrator backend、turn、timeout、冷却配置 |
-| `roles` | worker/orchestrator 角色列表 |
+| `orchestrator` | Python runtime loop 与兼容 Agent wake 的 backend、turn、timeout、冷却配置；不单独决定 authority |
+| `roles` | worker 与显式 exception-advisor role 列表 |
 | `providers` | workspace/provider 绑定和 provider-specific 配置入口 |
 | `integrations` | 飞书、外部 channel/bridge 等集成配置 |
 | `skill_sources` | skills 来源目录 |
@@ -72,6 +76,10 @@ roles:
 
 判断一个字段是否真实生效时,以 `src/zf/core/config/schema.py` 和 runtime 引用为准。设计文档中仍保留了一些未落地意图。
 
+Product Flow 中，Kernel 根据 topology/profile 做快乐路径机械派发；显式 `orchestrator` role
+只订阅异常分诊事件。Legacy safe-team 才可以让 Layer 2 Agent 做拆解和 assign。`orchestrator`
+配置块、Python `Orchestrator` runtime 和同名 role Agent 是三个需要分别核对的对象。
+
 ## 3. Role 配置
 
 角色的 `name` 是 role type,`instance_id` 是展开后的 worker 实例 ID。`replicas > 1` 时,例如 `name: dev, replicas: 4`,会展开为 `dev-1` 到 `dev-4`。
@@ -86,7 +94,7 @@ roles:
 | `model` | 留空表示使用 provider CLI 默认模型 |
 | `permission_mode` | `bypass`、`allowlist`、`default` 或 `restricted` |
 | `allowed_tools` | allowlist 模式下的工具白名单 |
-| `transport` | 默认 `tmux`;`stream-json` 也是有效 transport,常用于自动化/Layer 2 路径 |
+| `transport` | 默认 `tmux`;`stream-json` 也是有效 transport，适用于已注册的 headless/自动化路径 |
 | `replicas` | 静态副本数 |
 | `role_kind` | `auto`、`writer`、`reader`;配合 workdir/git isolation |
 | `skills` | 当前角色启用的 skill 名 |
@@ -160,7 +168,7 @@ runtime:
 | review | `reader` | 应审查候选 ref,不直接写业务 truth |
 | test | `reader` | 应验证候选 ref,不直接混入 dev worktree |
 | judge | `reader` | 最终判定基于 evidence 和 git refs |
-| orchestrator | `auto` | 调度者不应直接写代码 |
+| orchestrator | `reader` / `auto` | Product Flow 异常 advisor 不应直接写代码或持有快乐路径状态机 |
 
 ## 6. Quality Gates 与 Verification
 

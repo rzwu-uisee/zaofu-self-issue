@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from zf.runtime.module_gap_plan import (
     build_gap_task_map_amend,
+    gap_tasks_from_gap_plan_payload,
     validate_module_gap_plan_payload,
 )
 from zf.runtime.task_map import validate_task_map_payload
@@ -89,6 +90,7 @@ def test_gap_tasks_append_to_full_task_map_as_canonical_tasks() -> None:
 
 
 def test_semantic_replan_replaces_superseded_task_in_amended_map() -> None:
+    base_commit = "a" * 40
     base = {
         "schema_version": "task-map.v1",
         "feature_id": "ISSUE-1",
@@ -109,7 +111,8 @@ def test_semantic_replan_replaces_superseded_task_in_amended_map() -> None:
         "claim_paths": ["src/core/**", "tests/test_core.py"],
         "acceptance": ["core expiry behavior is fixed"],
         "verify_commands": ["uv run pytest tests/test_core.py"],
-        "source_refs": ["docs/issues/1.md"],
+        "base_commit": base_commit,
+        "source_refs": ["docs/issues/1.md", f"git:{base_commit}"],
         "supersedes_task_ids": ["ISSUE-1-MIXED"],
     }]
 
@@ -121,4 +124,89 @@ def test_semantic_replan_replaces_superseded_task_in_amended_map() -> None:
 
     assert [task["task_id"] for task in amended["tasks"]] == ["ISSUE-1-CORE"]
     assert amended["amend"]["superseded_task_ids"] == ["ISSUE-1-MIXED"]
+    assert amended["tasks"][0]["base_commit"] == base_commit
     assert validate_task_map_payload(amended).passed is True
+
+
+def test_assembly_replacement_inherits_parent_mechanical_owner_class() -> None:
+    base_commit = "b" * 40
+    base = {
+        "schema_version": "task-map.v1",
+        "feature_id": "PRD-1",
+        "tasks": [
+            {
+                "task_id": "PRD-1-SLICE",
+                "title": "slice",
+                "owner_role": "dev-lane-0",
+                "wave": 1,
+                "allowed_paths": ["src/core/**"],
+                "allowed_paths_reason": "slice owner",
+                "acceptance": ["slice works"],
+            },
+            {
+                "task_id": "PRD-1-ASSEMBLY",
+                "title": "assembly",
+                "owner_role": "dev-lane-1",
+                "affinity_tag": "assembly",
+                "root_owner_class": "assembly",
+                "wave": 2,
+                "allowed_paths": ["src/app.py"],
+                "allowed_paths_reason": "assembly owner",
+                "acceptance": ["product is assembled"],
+            },
+        ],
+    }
+    gap_task = {
+        "task_id": "PRD-1-ASSEMBLY-GAP",
+        "parent_task_id": "PRD-1-ASSEMBLY",
+        "supersedes_task_ids": ["PRD-1-ASSEMBLY"],
+        "claim_paths": ["src/app.py", "tests/release/**"],
+        "acceptance": ["release assembly closes"],
+        "verify_commands": ["python -m pytest tests/release"],
+        "base_commit": base_commit,
+        "source_refs": ["reports/prd-1-gap.json", f"git:{base_commit}"],
+    }
+
+    amended = build_gap_task_map_amend(
+        base,
+        gap_tasks=[gap_task],
+        supersedes_task_map_ref="artifacts/PRD-1/task_map.json",
+    )
+
+    replacement = next(
+        task for task in amended["tasks"]
+        if task["task_id"] == "PRD-1-ASSEMBLY-GAP"
+    )
+    assert replacement["root_owner_class"] == "assembly"
+    assert replacement["affinity_tag"] == "assembly"
+    assert replacement["base_commit"] == base_commit
+    assert validate_task_map_payload(amended).passed is True
+
+
+def test_parent_gap_identity_overrides_conflicting_child_goal_identity() -> None:
+    tasks = gap_tasks_from_gap_plan_payload({
+        "goal_id": "PRD-1",
+        "goal_kind": "prd",
+        "gap_category": "product_completeness",
+        "gap_tasks": [{
+            "task_id": "PRD-1-GAP",
+            "goal_id": "workflow-run-id",
+            "claim_paths": ["src/app.py"],
+            "acceptance": ["product closes"],
+            "verify_commands": ["python -m pytest"],
+            "source_refs": ["reports/prd-1-gap.json"],
+            "evidence_contract": {"goal_id": "workflow-run-id"},
+        }],
+    })
+
+    assert tasks[0]["goal_id"] == "PRD-1"
+    amended = build_gap_task_map_amend(
+        {
+            "schema_version": "task-map.v1",
+            "feature_id": "PRD-1",
+            "tasks": [],
+        },
+        gap_tasks=tasks,
+        supersedes_task_map_ref="artifacts/PRD-1/task_map.json",
+    )
+    assert amended["tasks"][0]["evidence_contract"]["goal_id"] == "PRD-1"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -23,6 +24,7 @@ from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_briefing import build_orchestrator_briefing
+from zf.runtime.rework_triage import classify_rework_trigger
 from zf.runtime.run_manager import build_run_manager_projection, run_manager_tick
 from zf.runtime.run_manager_rework_triage import (
     TRIAGE_RECORDED,
@@ -33,6 +35,7 @@ from zf.runtime.run_manager_rework_triage import (
 )
 from zf.runtime.semantic_replan import (
     SEMANTIC_REPLAN_ACTION,
+    enrich_semantic_replan_action,
     resolve_semantic_replan_route,
 )
 from zf.runtime.task_contract_snapshot import current_task_contract_identity
@@ -135,25 +138,25 @@ def test_first_unsatisfiable_contract_routes_to_semantic_replan(
             "fanout_id": "fanout-impl",
             "child_id": "assembly-child",
             "failure_class": "task_contract_unsatisfiable",
-            "reason": "required browser config is outside allowed_paths",
+            "recommended_action": "replan",
+            "reason": (
+                "the provided Python environment cannot import the package, "
+                "while an upstream script rejects the required profile"
+            ),
+            "blocker_task_ids": ["TASK-BACKEND"],
+            "evidence_refs": [
+                "artifact:artifacts/contracts/assembly.json",
+                "command:ASSEMBLY-SMOKE",
+            ],
         },
     )
+    triage_result = classify_rework_trigger(blocked)
     triage = writer.emit(
         "task.rework.triage.completed",
         actor="zf-cli",
         task_id="TASK-ASSEMBLY",
         correlation_id="sim-run",
-        payload={
-            "task_id": "TASK-ASSEMBLY",
-            "failed_event_id": blocked.id,
-            "failed_event_type": blocked.type,
-            "classification": "design_issue",
-            "suspected_owner": "planner",
-            "recommended_action": "request_replan",
-            "retryable": False,
-            "is_terminal": False,
-            "notes": "task contract cannot satisfy the mandatory evidence",
-        },
+        payload=triage_result.to_payload(blocked),
     )
     writer.emit(
         "fanout.aggregate.completed",
@@ -210,6 +213,10 @@ def test_first_unsatisfiable_contract_routes_to_semantic_replan(
     )
     pending = projection["pending_actions"]
     assert pending[0]["action"] == SEMANTIC_REPLAN_ACTION
+    assert not any(
+        action["action"] == "candidate-rework-apply"
+        for action in pending
+    )
     assert pending[0]["semantic_replan_trigger"] == "flow.discovery.requested"
     assert not [
         action for action in pending
@@ -352,6 +359,21 @@ def test_semantic_replan_preserves_current_handoff_and_candidate_identity(
         },
     )
     writer.emit(
+        "fanout.child.failed",
+        actor="zf-cli",
+        causation_id=blocked.id,
+        correlation_id="rf-parity-run",
+        payload={
+            "workflow_run_id": "rf-parity-run",
+            "task_id": "TASK-PARITY",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": generation,
+            "base_commit": "candidate123",
+            "continuation_commit": "candidate123",
+            "continuation_ref": "worker/dev",
+        },
+    )
+    writer.emit(
         "task.rework.triage.completed",
         actor="zf-cli",
         task_id="TASK-PARITY",
@@ -413,6 +435,306 @@ def test_semantic_replan_preserves_current_handoff_and_candidate_identity(
     assert payload["workflow_proposal_ref"] == {
         "ref": "artifacts/proposals/current.json",
     }
+
+
+def test_semantic_replan_does_not_target_candidate_behind_task_base(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "zf@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "ZaoFu Test"],
+        check=True,
+    )
+    (tmp_path / "product.txt").write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "product.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-qm", "candidate"],
+        check=True,
+    )
+    candidate_head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (tmp_path / "product.txt").write_text("task base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "product.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-qm", "task base"],
+        check=True,
+    )
+    task_base = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    state_dir, log, writer = _state(tmp_path)
+    task_map = state_dir / "artifacts" / "PRD-BASE" / "task_map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"schema_version":"task-map.v1","pdd_id":"PRD-BASE","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-BASE",
+        title="continue from task base",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            feature_id="PRD-BASE",
+            behavior="continue from task base",
+            acceptance_criteria=["remaining gap closes"],
+            evidence_contract={
+                "workflow_run_id": "prd-base-run",
+                "source_refs": {"task_map_ref": str(task_map)},
+            },
+        ),
+    ))
+    identity = current_task_contract_identity(
+        store.get("TASK-BASE"),
+        task_map_ref=str(task_map),
+    )
+    writer.emit(
+        "candidate.ready",
+        actor="zf-cli",
+        correlation_id="prd-base-run",
+        payload={
+            "workflow_run_id": "prd-base-run",
+            "pdd_id": "PRD-BASE",
+            "task_map_ref": str(task_map),
+            "candidate_ref": candidate_head,
+            "candidate_head_commit": candidate_head,
+            "candidate_base_commit": candidate_head,
+        },
+    )
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev",
+        task_id="TASK-BASE",
+        correlation_id="prd-base-run",
+        payload={
+            "workflow_run_id": "prd-base-run",
+            "task_id": "TASK-BASE",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": identity["task_map_generation"],
+            "task_ref": "task/TASK-BASE",
+            "base_commit": task_base,
+        },
+    )
+
+    config = _config()
+    config.roles.append(RoleConfig(
+        name="prd-flow-discovery",
+        backend="mock",
+        skills=["zf-gap-task-synth"],
+    ))
+    config.workflow.stages.append(WorkflowStageConfig(
+        id="prd-post-verify-discovery",
+        trigger="flow.discovery.requested",
+        topology="fanout_reader",
+        roles=["prd-flow-discovery"],
+        flow_kind="prd",
+    ))
+    action = enrich_semantic_replan_action(
+        {
+            "action": SEMANTIC_REPLAN_ACTION,
+            "task_id": "TASK-BASE",
+            "source_event_id": blocked.id,
+            "failure_event_ids": [blocked.id],
+        },
+        state_dir=state_dir,
+        events=log.read_all(),
+        config=config,
+        project_root=tmp_path,
+    )
+
+    assert action["base_commit"] == task_base
+    assert action["target_ref"] == task_base
+    assert action["handoff_kind"] == "task_base_recovery"
+    assert action["previous_candidate_ref"] == candidate_head
+    assert action["previous_candidate_head_commit"] == candidate_head
+    assert action["candidate_head_commit"] == candidate_head
+
+
+def test_semantic_replan_prefers_failed_task_committed_continuation(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    task_map = state_dir / "artifacts" / "RF-CONT" / "task_map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"schema_version":"task-map.v1","pdd_id":"RF-CONT","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    generation = "generation-continuation"
+    store.add(Task(
+        id="TASK-CONT",
+        title="continue accepted partial delivery",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            feature_id="RF-CONT",
+            behavior="continue accepted partial delivery",
+            acceptance_criteria=["delivery closes the remaining contract gap"],
+            evidence_contract={
+                "workflow_run_id": "rf-cont-run",
+                "source_refs": {
+                    "task_map_ref": str(task_map),
+                    "task_map_generation": generation,
+                },
+            },
+        ),
+    ))
+    identity = current_task_contract_identity(
+        store.get("TASK-CONT"),
+        task_map_ref=str(task_map),
+    )
+    writer.emit(
+        "task_map.ready",
+        actor="zf-cli",
+        correlation_id="rf-cont-run",
+        payload={
+            "workflow_run_id": "rf-cont-run",
+            "pdd_id": "RF-CONT",
+            "feature_id": "RF-CONT",
+            "task_map_ref": str(task_map),
+            "source_commit": "base123",
+            "candidate_base_commit": "base123",
+            "task_map_generation": generation,
+        },
+    )
+    candidate = writer.emit(
+        "candidate.ready",
+        actor="zf-cli",
+        correlation_id="rf-cont-run",
+        payload={
+            "workflow_run_id": "rf-cont-run",
+            "pdd_id": "RF-CONT",
+            "feature_id": "RF-CONT",
+            "task_map_ref": str(task_map),
+            "candidate_ref": "candidate/RF-CONT",
+            "candidate_head_commit": "candidate123",
+            "candidate_base_commit": "base123",
+            "task_map_generation": generation,
+        },
+    )
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev",
+        task_id="TASK-CONT",
+        correlation_id="rf-cont-run",
+        payload={
+            "workflow_run_id": "rf-cont-run",
+            "task_id": "TASK-CONT",
+            "failure_class": "task_contract_unsatisfiable",
+            "reason": "one required path is outside the current contract",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": generation,
+            "task_ref": "task/TASK-CONT",
+            "base_commit": "candidate123",
+        },
+    )
+    failed = writer.emit(
+        "fanout.child.failed",
+        actor="zf-cli",
+        causation_id=blocked.id,
+        correlation_id="rf-cont-run",
+        payload={
+            "workflow_run_id": "rf-cont-run",
+            "task_id": "TASK-CONT",
+            "failure_class": "task_contract_unsatisfiable",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": generation,
+            "task_ref": "task/TASK-CONT",
+            "base_commit": "candidate123",
+            "source_branch": "worker/dev-1",
+            "partial_head_commit": "partial456",
+            "partial_source_branch": "worker/dev-1",
+            "partial_worktree_clean": True,
+            "partial_dirty_files": [],
+            "continuation_commit": "partial456",
+            "continuation_ref": "worker/dev-1",
+        },
+    )
+    writer.emit(
+        "fanout.child.failed",
+        actor="zf-cli",
+        causation_id="unrelated-failure",
+        correlation_id="rf-cont-run",
+        payload={
+            "workflow_run_id": "rf-cont-run",
+            "task_id": "TASK-CONT",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": generation,
+            "continuation_commit": "stale789",
+            "continuation_ref": "worker/stale",
+        },
+    )
+    writer.emit(
+        "task.rework.triage.completed",
+        actor="zf-cli",
+        task_id="TASK-CONT",
+        correlation_id="rf-cont-run",
+        payload={
+            "task_id": "TASK-CONT",
+            "failed_event_id": blocked.id,
+            "failed_event_type": blocked.type,
+            "classification": "design_issue",
+            "suspected_owner": "planner",
+            "recommended_action": "request_replan",
+            "retryable": False,
+            "is_terminal": False,
+        },
+    )
+    config = _config(with_orchestrator=True)
+    config.roles.append(RoleConfig(
+        name="module-parity-scan",
+        backend="mock",
+        skills=["zf-gap-task-synth"],
+    ))
+    config.workflow.stages.append(WorkflowStageConfig(
+        id="flow-module-parity-scan",
+        trigger="verify.parity_scan.requested",
+        topology="fanout_reader",
+        roles=["module-parity-scan"],
+        flow_kind="refactor",
+    ))
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=config,
+        event_log=log,
+        spawn_repairs=False,
+    )
+
+    assert result.actions_applied == 1
+    request = next(
+        event
+        for event in log.read_all()
+        if event.type == "verify.parity_scan.requested"
+    )
+    payload = request.payload
+    assert payload["candidate_event_id"] == candidate.id
+    assert payload["previous_candidate_ref"] == "candidate/RF-CONT"
+    assert payload["previous_candidate_head_commit"] == "candidate123"
+    assert payload["handoff_kind"] == "partial_task_continuation"
+    assert payload["continuation_source_event_id"] == failed.id
+    assert payload["continuation_commit"] == "partial456"
+    assert payload["continuation_ref"] == "worker/dev-1"
+    assert payload["candidate_ref"] == "worker/dev-1"
+    assert payload["candidate_head_commit"] == "partial456"
+    assert payload["target_ref"] == "partial456"
+    assert payload["source_commit"] == "base123"
+    assert payload["candidate_base_commit"] == "base123"
 
 
 def test_immediate_replan_suppression_uses_latest_task_triage() -> None:
@@ -1093,6 +1415,29 @@ def test_split_task_advice_routes_to_declared_gap_planner_and_writes_context(
 def test_semantic_replan_survives_restart_and_adopts_replacement_task(
     tmp_path: Path,
 ) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+    ).strip()
     state_dir, log, writer = _state(tmp_path)
     store = TaskStore(state_dir / "kanban.json")
     store.add(Task(
@@ -1233,15 +1578,19 @@ def test_semantic_replan_survives_restart_and_adopts_replacement_task(
             "goal_kind": "issue",
             "gap_category": "issue_gap",
             "supersedes_task_ids": ["TASK-OLD"],
-            "gap_tasks": [{
-                "task_id": "TASK-CORE",
-                "parent_task_id": "TASK-OLD",
-                "owner_role": "dev",
-                "claim_paths": ["src/core/**", "tests/test_core.py"],
-                "acceptance": ["expiry core behavior works"],
-                "verify_commands": ["uv run pytest tests/test_core.py"],
-                "source_refs": ["docs/issues/restart.md"],
-            }],
+                "gap_tasks": [{
+                    "task_id": "TASK-CORE",
+                    "parent_task_id": "TASK-OLD",
+                    "owner_role": "dev",
+                    "base_commit": base_commit,
+                    "claim_paths": ["src/core/**", "tests/test_core.py"],
+                    "acceptance": ["expiry core behavior works"],
+                    "verify_commands": ["uv run pytest tests/test_core.py"],
+                    "source_refs": [
+                        "docs/issues/restart.md",
+                        f"git:{base_commit}",
+                    ],
+                }],
         },
     )])
 

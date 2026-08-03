@@ -31,6 +31,7 @@ from zf.runtime.channel_context import (
     context_pack_rejection_reason,
 )
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_route_lock import serialized_channel_route
 from zf.runtime.channel_run_owner import provider_run_fields, provider_run_fields_for_request
 from zf.runtime.channel_sidecar import (
     channel_context_pack_event_payload,
@@ -94,6 +95,7 @@ def resolve_channel_mentions(
     return targets
 
 
+@serialized_channel_route
 def route_channel_message(
     *,
     state_dir: Path,

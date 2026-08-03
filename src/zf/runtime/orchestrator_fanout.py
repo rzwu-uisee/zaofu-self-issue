@@ -43,8 +43,13 @@ from zf.runtime.fanout_timeout_operations import FanoutTimeoutOperationsMixin
 from zf.runtime.durable_call_fanout import DurableCallFanoutMixin
 from zf.runtime.fanout_stage_criteria import evaluate_fanout_stage_success_criteria_for_orchestrator
 from zf.runtime.writer_contract_handoff import recoverable_writer_handoff_failure
+from zf.runtime.writer_completion_briefing import writer_completion_discipline_lines
 from zf.runtime.writer_fanout_result_binding import WriterFanoutResultBindingMixin
 from zf.runtime.writer_dispatch_fence import WriterDispatchFenceMixin
+from zf.runtime.writer_preparation_recovery import WriterPreparationRecoveryMixin
+from zf.runtime.writer_failure_continuation import (
+    capture_writer_failure_continuation,
+)
 from zf.runtime.injection import build_task_prompt
 from zf.runtime.lane_stage_handoff import (
     LANE_STAGE_HANDOFF_FAILURE_EVENT,
@@ -376,6 +381,7 @@ class FanoutCoordinationMixin(
     FanoutTimeoutOperationsMixin,
     PlanSynthRuntimeMixin,
     WriterDispatchFenceMixin,
+    WriterPreparationRecoveryMixin,
     WriterFanoutResultBindingMixin,
 ):
     def _recover_unrecorded_writer_fanout_results(self) -> None:
@@ -473,6 +479,11 @@ class FanoutCoordinationMixin(
             except Exception:
                 return
         if self._recover_lost_reader_fanout_dispatches(events):
+            try:
+                events = read_runtime_events(self.event_log, self.state_dir)
+            except Exception:
+                return
+        if self._recover_lost_fanout_synth_dispatches(events):
             try:
                 events = read_runtime_events(self.event_log, self.state_dir)
             except Exception:
@@ -868,8 +879,8 @@ class FanoutCoordinationMixin(
                 return event
         return None
 
-    @staticmethod
     def _reader_role_has_activity_after_dispatch(
+        self,
         events: list[ZfEvent],
         role_instance: str,
         dispatch_index: int,
@@ -882,28 +893,11 @@ class FanoutCoordinationMixin(
         allowed to finish or be handled by the normal stuck-worker path.
         """
 
-        activity_types = {
-            "agent.usage",
-            "agent.text",
-            "agent.tool.use",
-            "agent.tool.result",
-            "refactor.scan.completed",
-            "verify.child.completed",
-            "verify.child.failed",
-            "judge.passed",
-            "judge.failed",
-        }
-        for index, event in enumerate(events):
-            if index <= dispatch_index:
-                continue
-            if event.type not in activity_types:
-                continue
-            if str(event.actor or "").strip() == role_instance:
-                return True
-            payload = event.payload if isinstance(event.payload, dict) else {}
-            if str(payload.get("role_instance") or "").strip() == role_instance:
-                return True
-        return False
+        return self._fanout_role_has_activity_after_signal(
+            events,
+            role_instance,
+            dispatch_index,
+        )
 
     def _recover_unstarted_reader_fanouts(self) -> None:
         try:
@@ -3532,6 +3526,7 @@ class FanoutCoordinationMixin(
             WriterTaskMapPolicyError,
             admit_writer_fanout,
             load_writer_task_map,
+            writer_task_dispatch_base_commit,
         )
 
         for stage in stages:
@@ -3856,6 +3851,12 @@ class FanoutCoordinationMixin(
                     raw_task_item = apply_contract_authority(
                         raw_task_item, self.task_store,
                     )
+                    raw_task_item["dispatch_base_commit"] = (
+                        writer_task_dispatch_base_commit(
+                            raw_task_item,
+                            fallback=writer_target_ref,
+                        )
+                    )
                     trigger_payload = (
                         event.payload if isinstance(event.payload, dict) else {}
                     )
@@ -3877,6 +3878,7 @@ class FanoutCoordinationMixin(
                         if not _writer_task_dependencies_satisfied(
                             self.task_store,
                             raw_task_item,
+                            completed_task_ids=set(loaded.completed_task_ids),
                         ):
                             task_item = self._writer_affinity_task_item(
                                 stage,
@@ -4360,6 +4362,16 @@ class FanoutCoordinationMixin(
                     reason="dispatch_deferred",
                 )
                 return False
+            prepared_dispatch = self._prepare_writer_dispatch_or_defer(
+                context=context,
+                child=child,
+                task_item=task_item,
+                role=role,
+                causation_id=causation_id,
+                prepared_dispatch=prepared_dispatch,
+            )
+            if not prepared_dispatch or prepared_dispatch.get("skip"):
+                return False
             # Bind the canonical kanban task to this fanout dispatch, mirroring
             # the normal dispatch path. The fanout-writer child completes via
             # task.ref.updated, not the normal dispatch lifecycle, so without
@@ -4392,15 +4404,6 @@ class FanoutCoordinationMixin(
                         task_id=task_id,
                         dispatch_id=run_id,
                     )
-            prepared_dispatch = prepared_dispatch or self._prepare_writer_fanout_child_operation(
-                context=context,
-                child=child,
-                task_item=task_item,
-                role=role,
-                causation_id=causation_id,
-            )
-            if prepared_dispatch.get("skip"):
-                return False
             plan = prepared_dispatch["plan"]
             skill_entries = list(prepared_dispatch.get("skill_entries") or [])
             contract_dispatch_fields = dict(
@@ -4459,6 +4462,12 @@ class FanoutCoordinationMixin(
             dispatched = context.child_dispatched_event(child, run_id=run_id)
             dispatched.payload.update({
                 "task_id": task_id,
+                "target_ref": str(
+                    operation_payload.get("target_ref")
+                    or child.target_ref
+                    or context.target_ref
+                    or ""
+                ),
                 "scope": str(task_item.get("scope") or ""),
                 "workdir": plan.project_path,
                 "source_branch": plan.branch_or_ref,
@@ -5733,12 +5742,14 @@ class FanoutCoordinationMixin(
         event: ZfEvent,
         manifest: dict,
     ) -> None:
+        continuation_payload = capture_writer_failure_continuation(base_payload)
         failed_event = self.event_writer.append(ZfEvent(
             type="fanout.child.failed",
             actor="zf-cli",
             payload={
                 **base_payload,
                 **failure_payload,
+                **continuation_payload,
             },
             causation_id=event.id,
             correlation_id=event.correlation_id or manifest.get("trace_id", ""),
@@ -6289,6 +6300,18 @@ class FanoutCoordinationMixin(
             try:
                 from zf.runtime.candidates import CandidateRebuilder
 
+                from zf.runtime.writer_fanout_admission import (
+                    writer_fanout_dispatch_base_commit,
+                )
+
+                candidate_base_ref = writer_fanout_dispatch_base_commit(
+                    [
+                        dict(child.get("payload") or child)
+                        for child in children
+                        if isinstance(child, dict)
+                    ],
+                    fallback=str(manifest.get("target_ref") or ""),
+                )
                 result = CandidateRebuilder(
                     state_dir=self.state_dir,
                     project_root=self.project_root,
@@ -6298,9 +6321,7 @@ class FanoutCoordinationMixin(
                     pdd_id,
                     event_writer=self.event_writer,
                     task_ids=completed_task_ids,
-                    candidate_base_ref=str(
-                        manifest.get("target_ref") or ""
-                    ).strip() or None,
+                    candidate_base_ref=candidate_base_ref or None,
                 )
             except Exception as exc:
                 result = None
@@ -8135,40 +8156,10 @@ class FanoutCoordinationMixin(
                 json.dumps(scope_contract, indent=2),
                 "```",
                 "",
-                "## Completion discipline (candidate integration depends on it)",
-                "1. COMMIT only this task's `files_touched` before emitting dev.build.done. "
-                "Stage them with explicit pathspecs (`git add -- <path>...`); never use "
-                "`git add -A`, `git add .`, or `git commit -a`. Materialized runtime files "
-                "such as `.claude/` and `.zf-setup.done` are not task output. An uncommitted "
-                "task file is rejected at integration (\"workdir has uncommitted\").",
-                "2. The `source_commit` you report MUST be the current branch HEAD. Do NOT touch files "
-                "or commit again after emitting dev.build.done — a later commit makes the reported "
-                "source_commit stale (\"source_commit is not HEAD\") and the ref is rejected.",
-                "3. Stay strictly inside `allowed_paths`. Do NOT create or edit files another slice "
-                "owns — overlapping a sibling's paths is rejected (\"changes outside contract scope\") "
-                "and conflicts at cherry-pick integration.",
-                "4. Identity fields (`fanout_id`/`run_id`/`child_id`) are kernel audit fields, "
-                "pre-filled by this command — you never need to manage or update them. If you "
-                "re-emit after a re-dispatch, the kernel may adopt it only when the canonical "
-                "contract revision and task-map generation are unchanged. A stale contract is "
-                "superseded and cannot advance the current child.",
-                "5. Fill `impl_self_check` after running each declared command. Replace every "
-                "placeholder with the current HEAD, exact command receipt evidence, and one "
-                "result for every mandatory AC. Do not claim that a command or AC passed "
-                "without a durable artifact/event ref.",
-                "",
-                "When finished, update `<HEAD commit>` and `files_touched`, then emit dev.build.done with the runtime state dir explicitly:",
-                "```bash",
-                completion_command,
-                "```",
-                "",
-                "If the contract cannot be satisfied inside `allowed_paths`, do not "
-                "search runtime source or emit success. Fill the blocker evidence "
-                "in the signed result scratch, then submit:",
-                "```bash",
-                blocked_command,
-                "```",
-                "",
+                *writer_completion_discipline_lines(
+                    completion_command=completion_command,
+                    blocked_command=blocked_command,
+                ),
             ])
         write_briefing_with_metrics(
             path, briefing_text, state_dir=self.state_dir,

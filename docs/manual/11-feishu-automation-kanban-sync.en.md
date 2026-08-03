@@ -20,6 +20,12 @@ the routine operational view, with recommended Overview, Highlights, Action
 Required, Delivery Health, Runtime Health, and History views. Detailed traces,
 events, sessions, and task drilldown remain in ZaoFu Web and CLI.
 
+Before synchronization, inspect Daily Brief, Weekly Review, and Project Monitor
+schedule, execution health, insights, outputs, and recent runs in Web
+**Automations**:
+
+![Animated Daily, Weekly, and Project Monitor reports](assets/automations-reports.webp)
+
 ## 2. Environment
 
 Set credentials in the shell or the repository `.env`. Shell values take

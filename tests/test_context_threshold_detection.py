@@ -418,6 +418,49 @@ class TestPendingRecycleDrain:
         # Still busy, state unchanged
         assert orch._instance_state["dev"] == "pending_recycle"
 
+    def test_stale_superseded_child_releases_pending_recycle(
+        self, state_dir, claude_config, transport, monkeypatch
+    ):
+        orch = Orchestrator(state_dir, claude_config, transport)
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="fanout.child.dispatched",
+            actor="zf-cli",
+            task_id="T-OLD",
+            payload={
+                "fanout_id": "fanout-old",
+                "child_id": "dev-T-OLD",
+                "run_id": "run-old",
+                "role_instance": "dev",
+                "task_id": "T-OLD",
+            },
+        ))
+        log.append(ZfEvent(
+            type="fanout.child.stale_completion",
+            actor="zf-cli",
+            task_id="T-OLD",
+            payload={
+                "fanout_id": "fanout-old",
+                "child_id": "dev-T-OLD",
+                "run_id": "run-old",
+                "role_instance": "dev",
+                "task_id": "T-OLD",
+                "reason": "superseded_by_latest_fanout",
+            },
+        ))
+        recycled: list[str] = []
+        monkeypatch.setattr(
+            orch,
+            "_start_recycle",
+            lambda role: recycled.append(role.instance_id),
+        )
+        orch._instance_state["dev"] = "pending_recycle"
+
+        orch._check_pending_recycles()
+
+        assert recycled == ["dev"]
+        assert orch._instance_state["dev"] == "recycling"
+
     def test_restart_recovered_idle_liveness_clears_pending_dispatch_gate(
         self, state_dir, claude_config, transport
     ):

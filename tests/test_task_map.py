@@ -835,3 +835,102 @@ def test_task_map_validation_rejects_unroutable_acceptance_contract(
 
     assert result.passed is False
     assert any(field in error and "unsupported" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    ("base_commit", "source_refs", "expected"),
+    [
+        ("", ["event:blocked"], "base_commit is required"),
+        ("abc123", ["git:abc123"], "full immutable Git commit"),
+        ("a" * 40, ["event:blocked"], "must be bound by source_refs"),
+    ],
+)
+def test_task_map_validation_rejects_unbound_successor_base(
+    base_commit: str,
+    source_refs: list[str],
+    expected: str,
+) -> None:
+    task = {
+        "task_id": "TASK-R2",
+        "title": "continue a verified checkpoint",
+        "owner_role": "dev",
+        "allowed_paths": ["src/**"],
+        "allowed_paths_reason": "bounded continuation scope",
+        "verification": "git diff --check",
+        "source_refs": source_refs,
+        "payload": {"supersedes_task_ids": ["TASK-R1"]},
+    }
+    if base_commit:
+        task["base_commit"] = base_commit
+
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [task],
+    })
+
+    assert result.passed is False
+    assert any(expected in error for error in result.errors)
+
+
+def test_task_map_validation_accepts_source_bound_successor_base() -> None:
+    base_commit = "a" * 40
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R2",
+            "title": "continue a verified checkpoint",
+            "owner_role": "dev",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded continuation scope",
+            "verification": "git diff --check",
+            "base_commit": base_commit,
+            "source_refs": ["event:blocked", f"git:{base_commit}"],
+            "evidence_contract": {
+                "supersedes_task_ids": ["TASK-R1"],
+            },
+        }],
+    })
+
+    assert result.passed is True, result.errors
+
+
+def test_task_map_validation_rejects_noncanonical_continuation_base_alias() -> None:
+    base_commit = "a" * 40
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R1",
+            "title": "retry from accepted checkpoint",
+            "owner_role": "dev",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded retry scope",
+            "verification": "git diff --check",
+            "implementation_base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+        }],
+    })
+
+    assert result.passed is False
+    assert any(
+        "implementation_base_commit is unsupported" in error
+        for error in result.errors
+    )
+
+
+def test_task_map_validation_accepts_source_bound_same_id_retry_base() -> None:
+    base_commit = "a" * 40
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R1",
+            "title": "retry from accepted checkpoint",
+            "owner_role": "dev",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded retry scope",
+            "verification": "git diff --check",
+            "base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+        }],
+    })
+
+    assert result.passed is True, result.errors

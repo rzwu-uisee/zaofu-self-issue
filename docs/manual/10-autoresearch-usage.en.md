@@ -52,7 +52,7 @@ Useful observation commands:
 ```bash
 uv run zf watch --follow --state-dir "$WT/.zf"
 uv run zf watch --type worker.stuck --follow --state-dir "$WT/.zf"
-uv run zf status --workers --state-dir "$WT/.zf"
+(cd "$WT" && uv run zf status --workers)
 uv run zf kanban --board --state-dir "$WT/.zf"
 uv run zf task trace TASK-XXX --state-dir "$WT/.zf"
 ```
@@ -131,7 +131,7 @@ Attach the outer supervisor or inspect the inner state directly:
 ```bash
 tmux attach -t zf-ar-supervisor-<run-id>
 uv run zf watch --follow --state-dir "$WT/.zf"
-uv run zf status --workers --state-dir "$WT/.zf"
+(cd "$WT" && uv run zf status --workers)
 uv run zf kanban --board --state-dir "$WT/.zf"
 ```
 

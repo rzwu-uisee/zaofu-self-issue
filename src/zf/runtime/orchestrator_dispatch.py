@@ -42,6 +42,12 @@ from zf.runtime.recovery_sufficiency import build_artifact_recovery_refs
 from zf.runtime.rework_triage import REWORK_RETRY_CLASSIFICATIONS
 from zf.runtime.task_refs import runtime_materialized_dirty_files
 from zf.runtime.task_attempt_runtime import dispatch_attempt_payload
+from zf.runtime.task_ref_repair_operation import (
+    TASK_REF_REPAIR_REQUESTED_EVENT,
+    prepare_task_ref_repair_dispatch,
+    render_task_ref_repair_section,
+    task_ref_repair_dispatch_id,
+)
 from zf.runtime.transport import transport_error_diagnostics
 from zf.runtime.workflow_anchor import (
     is_workflow_dispatch_managed_task,
@@ -75,7 +81,6 @@ from zf.runtime.rework_dispatch_context import (
 # classification. Adding a new pipeline event → edit
 # WorkflowEventSets.baseline() once.
 _WORKFLOW_EVENT_SETS = WorkflowEventSets.baseline()
-TASK_REF_REPAIR_REQUESTED_EVENT = "task.ref.repair.requested"
 DESIGN_HANDOFF_EVENTS = {"arch.proposal.done", "design.critique.done"}
 
 
@@ -3979,7 +3984,11 @@ class DispatchMixin(
             ))
             return None
         previous_dispatch_id = getattr(task, "active_dispatch_id", "")
-        dispatch_id = _new_dispatch_id()
+        dispatch_id = (
+            task_ref_repair_dispatch_id(task.id, trigger_event)
+            if trigger_event.type == TASK_REF_REPAIR_REQUESTED_EVENT
+            else _new_dispatch_id()
+        )
         self._remember_dispatch_id(task.id, dispatch_id)  # B-STUCK-1
         task.active_dispatch_id = dispatch_id
         # 131-P2-1/P2-3:attempt 族 retry_scheduled 显式发射——counted
@@ -4004,11 +4013,20 @@ class DispatchMixin(
             ))
         except Exception:
             pass
-        base_git_head = _capture_head(self.project_root)
+        repair_baseline = self._task_ref_repair_git_baseline(
+            task,
+            role,
+            trigger_event,
+        )
+        if repair_baseline is None:
+            base_git_head = _capture_head(self.project_root)
+            git_evidence_root = self.project_root
+        else:
+            base_git_head, git_evidence_root = repair_baseline
         base_git_context = None
         try:
             base_git_context = capture_git_diff_context(
-                self.project_root,
+                git_evidence_root,
                 base_sha=base_git_head,
             )
         except Exception:
@@ -4155,6 +4173,27 @@ class DispatchMixin(
             causation_id=rework_request.id,
             correlation_id=rework_request.correlation_id,
         ))
+        briefing_dir = self.state_dir / "briefings"
+        briefing_dir.mkdir(parents=True, exist_ok=True)
+        briefing_path = briefing_dir / f"{role.name}-{task.id}-rework.md"
+        context = self._dispatch_context(
+            role=role,
+            briefing_path=briefing_path,
+            task_id=task.id,
+            trace_id=trigger_event.correlation_id,
+            dispatch_id=dispatch_id,
+        )
+        repair_dispatch = prepare_task_ref_repair_dispatch(
+            self,
+            task=task,
+            role=role,
+            trigger_event=trigger_event,
+            dispatch_context=context,
+            rework_request=rework_request,
+        )
+        if not repair_dispatch.proceed:
+            return None
+        context = repair_dispatch.context
         # Completion command in the briefing derives from role.publishes
         # (P2-1) so critic / arch / doc roles see their own success event
         # rather than hardcoded dev.build.done.
@@ -4206,71 +4245,21 @@ class DispatchMixin(
                 "\n## Legacy Feedback Artifact\n"
                 f"- feedback_artifact_ref: `{feedback_artifact_ref}`\n"
             )
-        task_ref_repair_section = ""
-        if trigger_event.type == "task.ref.repair.requested":
-            if _task_ref_scope_repair_payload(trigger_event.payload):
-                task_ref_repair_section = (
-                    "\n## Task Ref Source Scope Repair Contract\n"
-                    "The rejected `source_commit` contains files outside this "
-                    "task's contract scope. This is a source-scope repair, not "
-                    "a metadata-only handoff repair.\n"
-                    "- Do not emit a metadata-only repair and do not reuse the "
-                    "rejected `source_commit`.\n"
-                    "- Create or select a new `source_commit` whose diff "
-                    "contains only repo-relative files allowed by this task's "
-                    "contract scope, then emit that new commit with "
-                    "`source_branch`, `workdir`, and `files_touched`.\n"
-                    "- Keep `changed_files`, `files_touched`, and "
-                    "`artifact_refs` to repo-relative source/artifact paths "
-                    "inside the task contract scope.\n"
-                    "- Put non-file evidence such as `git:<sha>`, "
-                    "`branch:<name>`, briefing paths, and diagnostics in "
-                    "`evidence_refs` only.\n"
-                    "- If the rejected commit cannot be split without losing "
-                    "required work, emit `dev.failed` with the concrete blocker "
-                    "instead of re-emitting the same rejected commit.\n"
-                )
-            else:
-                task_ref_repair_section = (
-                    "\n## Task Ref Repair Handoff Contract\n"
-                    "This repair is complete only when the next `dev.build.done` "
-                    "payload can be accepted by TaskRefManager in worktree mode.\n"
-                    "- Read the rejected completion named by `source_event_id` "
-                    "in Trigger Payload Evidence and use its `dev.build.done` "
-                    "payload as the base. Preserve its `fanout_id`, `stage_id`, "
-                    "`child_id`, `run_id`, operation/call-result identity, and "
-                    "contract snapshot fields when present.\n"
-                    "- The replacement payload requires a non-empty `summary`; "
-                    "also provide `residual_risks` and `next_agent_input`. Do not "
-                    "run the bare completion command below without `--payload` "
-                    "or `--payload-file`.\n"
-                    "- Emit top-level `source_commit`, `source_branch`, `workdir`, "
-                    "and `files_touched` fields for the current writer worktree.\n"
-                    "- Keep `changed_files`, `files_touched`, and `artifact_refs` "
-                    "to repo-relative source/artifact paths inside the task contract "
-                    "scope; use `[]` when this is a metadata-only repair.\n"
-                    "- Do not put `git:<sha>`, `branch:<name>`, `briefing:<file>`, "
-                    "or other non-file evidence URIs in `changed_files`, "
-                    "`files_touched`, or `artifact_refs`; put those in "
-                    "`evidence_refs` only.\n"
-                    "- `.claude/**` and `.codex/**` skill materialization is "
-                    "runtime-owned and filtered by TaskRefManager's workdir scan. "
-                    "Do not commit, delete, add git excludes for, or declare "
-                    "`worktree_dirty` because of those paths. Use the rejection's "
-                    "`dirty_files` list as the repair scope.\n"
-                    "- Do not commit generated Codex hook state. If the only dirty "
-                    "file is `.codex/hooks.json`, either clean it before emitting or "
-                    "declare `worktree_dirty: true`, "
-                    "`dirty_files: [\".codex/hooks.json\"]`, and a "
-                    "`dirty_scope_note`.\n"
-                )
+        task_ref_repair_section = render_task_ref_repair_section(
+            self,
+            trigger_event=trigger_event,
+            operation=repair_dispatch.operation,
+        )
         if base_git_context is not None:
             git_section = (
                 "\n\n## Git Evidence Context\n"
                 + render_git_diff_context(base_git_context)
             )
         else:
-            git_section = _git_evidence_section(self.project_root, base_git_head)
+            git_section = _git_evidence_section(
+                git_evidence_root,
+                base_git_head,
+            )
         rework_briefing = (
             f"## Rework Required: {task.id}\n"
             f"**Attempt**: {task.retry_count}/{max_attempts}\n"
@@ -4288,9 +4277,6 @@ class DispatchMixin(
             f"```bash\n{zf_cli_cmd()} emit {protocol.success_event} --task {task.id} "
             f"--actor {role.instance_id} --dispatch-id {dispatch_id}\n```\n"
         )
-        briefing_dir = self.state_dir / "briefings"
-        briefing_dir.mkdir(parents=True, exist_ok=True)
-        briefing_path = briefing_dir / f"{role.name}-{task.id}-rework.md"
         briefing_path.write_text(rework_briefing)
         skill_entries = self._record_skill_provenance(role=role, task_id=task.id)
         instructions = generate_role_instructions(
@@ -4306,12 +4292,6 @@ class DispatchMixin(
         (instructions_dir / f"{role.instance_id}.md").write_text(instructions)
 
         prompt = build_task_prompt(role.instance_id, briefing_path)
-        context = self._dispatch_context(
-            role=role,
-            briefing_path=briefing_path,
-            task_id=task.id,
-            trace_id=trigger_event.correlation_id,
-        )
         context = (
             self._send_transport_task(
                 role.instance_id,
@@ -4320,6 +4300,11 @@ class DispatchMixin(
                 context,
             )
             or context
+        )
+        repair_dispatch.publish(
+            self,
+            delivered_context=context,
+            briefing_path=briefing_path,
         )
         self._get_spawn_coordinator().notify_first_dispatch(role)
         self._clear_dispatch_failure(task.id)

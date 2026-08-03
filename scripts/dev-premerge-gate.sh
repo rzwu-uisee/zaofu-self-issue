@@ -20,8 +20,10 @@ if [ -z "$PY" ] && [ -x "$COMMON_ROOT/.venv/bin/python" ]; then
   PY="$COMMON_ROOT/.venv/bin/python"
 fi
 PY="${PY:-$(command -v python3)}"
+env PYTHONPATH=src "$PY" scripts/manual-docs.py check
 exec env PYTHONPATH=src "$PY" -m pytest \
   tests/test_event_contracts.py \
+  tests/test_manual_docs.py \
   tests/test_registry_forcing_closure.py \
   tests/test_structure_discipline.py \
   tests/test_workflow_spine_projection.py \

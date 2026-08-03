@@ -161,6 +161,31 @@ def _trigger_replays_handled_operation(trigger_event, events) -> bool:
     )
 
 
+def _trigger_task_is_superseded(trigger_event, events) -> bool:
+    """A replaced task cannot own a recoverable stage trigger anymore."""
+
+    trigger_payload = _payload(trigger_event)
+    task_id = str(
+        getattr(trigger_event, "task_id", "")
+        or trigger_payload.get("task_id")
+        or ""
+    ).strip()
+    if not task_id:
+        return False
+    for event in events:
+        if getattr(event, "type", "") != "task.superseded":
+            continue
+        payload = _payload(event)
+        superseded_ids = payload.get("superseded_task_ids")
+        if str(getattr(event, "task_id", "") or payload.get("task_id") or "") == task_id:
+            return True
+        if isinstance(superseded_ids, list) and task_id in {
+            str(item) for item in superseded_ids
+        }:
+            return True
+    return False
+
+
 def detect_structural_stalls(
     events,
     *,
@@ -217,6 +242,10 @@ def detect_structural_stalls(
                 trigger_event,
             ) is not None
             or _trigger_replays_handled_operation(
+                trigger_event,
+                [event for _, event in seq],
+            )
+            or _trigger_task_is_superseded(
                 trigger_event,
                 [event for _, event in seq],
             )
@@ -381,7 +410,12 @@ def _redispatch_attempts(fingerprint: str, events) -> int:
     )
 
 
-def _trigger_has_active_fanout(trigger_event, events) -> bool:
+def _trigger_has_active_fanout(
+    trigger_event,
+    events,
+    *,
+    redispatch_fingerprint: str = "",
+) -> bool:
     """B-FIX-06 (R32 双派发): the latest trigger已经起了一个尚未 terminal 的 fanout
     → 重发它就是双派发。redispatch 只该对"trigger 触发但 NO fanout 起"的真停滞
     场景生效。判定 = 存在 fanout.started(trigger_event_id==此 trigger)且其
@@ -389,12 +423,33 @@ def _trigger_has_active_fanout(trigger_event, events) -> bool:
     trigger_id = str(getattr(trigger_event, "id", "") or "")
     if not trigger_id:
         return False
+    trigger_ids = {trigger_id}
+    if redispatch_fingerprint:
+        for event in events:
+            payload = _payload(event)
+            if (
+                getattr(event, "type", "") == getattr(trigger_event, "type", "")
+                and str(payload.get(_REDISPATCH_FINGERPRINT) or "")
+                == redispatch_fingerprint
+            ):
+                original_trigger_id = str(
+                    payload.get("original_trigger_event_id") or ""
+                )
+                if original_trigger_id and original_trigger_id != trigger_id:
+                    continue
+                event_id = str(getattr(event, "id", "") or "")
+                if event_id:
+                    trigger_ids.add(event_id)
+
     started: set[str] = set()
     terminated: set[str] = set()
     for e in events:
         p = _payload(e)
         etype = getattr(e, "type", "")
-        if etype == "fanout.started" and str(p.get("trigger_event_id") or "") == trigger_id:
+        if (
+            etype == "fanout.started"
+            and str(p.get("trigger_event_id") or "") in trigger_ids
+        ):
             fid = str(p.get("fanout_id") or "")
             if fid:
                 started.add(fid)
@@ -433,7 +488,11 @@ def stall_redispatch_event(
     # B-FIX-06 (R32 双派发): 抑制重发 —— latest trigger 已起 active fanout 时,
     # 该 stage 不是真停滞(fanout 只是慢),重发会双派发同一组 task(R32:impl
     # fanout 01:03:45 起,stall-redispatch 01:04:09 又重发 → 第 2 个 impl fanout)。
-    if _trigger_has_active_fanout(latest_trigger, events):
+    if _trigger_has_active_fanout(
+        latest_trigger,
+        events,
+        redispatch_fingerprint=finding.fingerprint,
+    ):
         return None
     payload = dict(_payload(latest_trigger))
     payload[_REDISPATCH_FINGERPRINT] = finding.fingerprint

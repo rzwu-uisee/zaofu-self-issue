@@ -94,7 +94,11 @@ def _run_set(args: argparse.Namespace) -> int:
     writer = EventWriter(event_log_from_project(
         context.state_dir, config=context.config, warn=False,
     ))
+    projection = _projection(context.state_dir, context.config)
+    run_id = str(projection.get("run_id") or "").strip()
     payload: dict = {"source": "zf_goal_cli"}
+    if run_id:
+        payload.update({"run_id": run_id, "workflow_run_id": run_id})
     if objective:
         payload["objective"] = objective
     if status:
@@ -105,6 +109,7 @@ def _run_set(args: argparse.Namespace) -> int:
         type="run.goal.updated",
         actor="operator",
         payload=payload,
+        correlation_id=run_id or None,
     ))
     # codex re-activate 语义:set 回 active = 唤醒(quiescent 的
     # _WAKE_EVENT_TYPES 含 run.goal.updated,tick 服务自动恢复点火)。

@@ -802,12 +802,25 @@ class DurableCallFanoutMixin:
             config=self.config,
         )
         plan = manager.prepare(role)
-        source_ref = str(
-            task_item.get("dispatch_base_commit")
-            or task_item.get("candidate_base_commit")
-            or task_item.get("source_commit")
-            or ""
-        ).strip()
+        from zf.runtime.writer_fanout_admission import (
+            writer_task_dispatch_base_commit,
+        )
+
+        source_ref = writer_task_dispatch_base_commit(
+            task_item,
+            fallback=str(
+                task_item.get("candidate_base_commit")
+                or task_item.get("source_commit")
+                or child.target_ref
+                or context.target_ref
+                or self.config.runtime.git.candidate_base_ref
+                or ""
+            ),
+        )
+        if source_ref:
+            task_item["dispatch_base_commit"] = source_ref
+            if isinstance(child.payload, dict):
+                child.payload["dispatch_base_commit"] = source_ref
         workdir_sync = manager.sync_writer_to_source_ref(
             role,
             source_ref_override=source_ref or None,
@@ -863,7 +876,7 @@ class DurableCallFanoutMixin:
             "child_id": child.child_id,
             "run_id": run_id,
             "role_instance": role.instance_id,
-            "target_ref": child.target_ref or context.target_ref,
+            "target_ref": source_ref or child.target_ref or context.target_ref,
             "skills": list(role.skills),
             "workdir_sync": workdir_sync,
             "dependency_refs": list(
@@ -959,22 +972,20 @@ class DurableCallFanoutMixin:
                     causation_id=causation_id,
                 )
             except Exception as exc:
-                self.event_writer.append(ZfEvent(
-                    type="fanout.child.failed",
-                    actor="zf-cli",
-                    task_id=str(task_item.get("task_id") or "") or None,
-                    payload={
-                        "fanout_id": context.fanout_id,
-                        "trace_id": context.trace_id,
-                        "stage_id": context.stage_id,
-                        "child_id": child.child_id,
-                        "run_id": run_id,
-                        "role_instance": role.instance_id,
-                        "task_id": str(task_item.get("task_id") or ""),
-                        "reason": f"durable operation preregistration failed: {exc}",
-                    },
+                reason = f"durable operation preregistration failed: {exc}"
+                deferred = self._record_writer_preparation_failure(
+                    context=context,
+                    child=child,
+                    task_item=task_item,
+                    role=role,
+                    run_id=run_id,
                     causation_id=causation_id,
-                    correlation_id=context.trace_id,
-                ))
-                prepared[child.child_id] = {"skip": True, "run_id": run_id}
+                    reason=reason,
+                )
+                prepared[child.child_id] = {
+                    "skip": True,
+                    "preparation_failed": True,
+                    "preparation_deferred": deferred,
+                    "run_id": run_id,
+                }
         return prepared

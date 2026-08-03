@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from zf.core.events.log import EventLog
+from zf.core.task.store import TaskStore
 from zf.runtime.artifact_read_ledger import materialize_attempt_source_ref
 from zf.runtime.call_result_envelope import canonical_json_sha256, write_immutable_json_sidecar
 
@@ -56,6 +59,21 @@ _PLAN_REWORK_CONTEXT_KEYS = (
     "downstream_task_ids",
     "resume_scope",
 )
+_TASK_DELIVERY_FACT_TYPES = frozenset({
+    "candidate.ready",
+    "dev.build.done",
+    "impl.self_check.completed",
+    "task.ref.accepted",
+    "verify.passed",
+})
+_TASK_BLOCKING_FACT_TYPES = frozenset({
+    "dev.blocked",
+    "dev.failed",
+    "human.escalate",
+    "task.ref.rejected",
+    "task.rework.capped",
+    "verify.failed",
+})
 
 
 def render_plan_synth_completion_command(
@@ -124,6 +142,14 @@ def build_plan_handoff_input_refs(
         if value not in (None, "", [], {}):
             rework_context[key] = value
     if len(rework_context) > 1:
+        canonical_snapshot = _canonical_rework_task_snapshot(
+            state_dir=state_dir,
+            payload=payload,
+            trigger=trigger,
+        )
+        if canonical_snapshot:
+            rework_context["canonical_task_snapshot"] = canonical_snapshot
+    if len(rework_context) > 1:
         source = write_immutable_json_sidecar(
             state_dir,
             rework_context,
@@ -140,6 +166,145 @@ def build_plan_handoff_input_refs(
         })
         input_refs.append(source)
     return input_refs
+
+
+def _canonical_rework_task_snapshot(
+    *,
+    state_dir: Path,
+    payload: Mapping[str, Any],
+    trigger: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind current TaskStore truth to a replan instead of an obsolete task map."""
+
+    feature_id = str(
+        payload.get("pdd_id")
+        or payload.get("feature_id")
+        or trigger.get("pdd_id")
+        or trigger.get("feature_id")
+        or ""
+    ).strip()
+    if not feature_id:
+        return {}
+    try:
+        active_tasks = [
+            task
+            for task in TaskStore(state_dir / "kanban.json").list_all()
+            if task.id != feature_id
+            and str(task.contract.feature_id or "").strip() == feature_id
+        ]
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not active_tasks:
+        return {}
+
+    task_ids = {task.id for task in active_tasks}
+    workflow_run_id = str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or trigger.get("workflow_run_id")
+        or trigger.get("run_id")
+        or ""
+    ).strip()
+    latest_delivery: dict[str, dict[str, Any]] = {}
+    latest_blocker: dict[str, dict[str, Any]] = {}
+    try:
+        events = EventLog(state_dir / "events.jsonl").read_all()
+    except (OSError, ValueError, TypeError):
+        events = []
+    for event in events:
+        task_id = str(event.task_id or "").strip()
+        if task_id not in task_ids:
+            continue
+        event_payload = event.payload if isinstance(event.payload, dict) else {}
+        event_run_id = str(
+            event.correlation_id
+            or event_payload.get("workflow_run_id")
+            or event_payload.get("run_id")
+            or ""
+        ).strip()
+        if workflow_run_id and event_run_id and event_run_id != workflow_run_id:
+            continue
+        compact = _compact_task_fact(event)
+        if event.type in _TASK_DELIVERY_FACT_TYPES:
+            latest_delivery[task_id] = compact
+        if event.type in _TASK_BLOCKING_FACT_TYPES:
+            latest_blocker[task_id] = compact
+
+    snapshots: list[dict[str, Any]] = []
+    for task in sorted(active_tasks, key=lambda item: item.id):
+        contract = asdict(task.contract)
+        snapshots.append({
+            "task_id": task.id,
+            "title": task.title,
+            "status": task.status,
+            "assigned_to": task.assigned_to or "",
+            "blocked_reason": task.blocked_reason,
+            "retry_count": task.retry_count,
+            "active_dispatch_id": task.active_dispatch_id,
+            "blocked_by": list(task.blocked_by),
+            "contract": contract,
+            "latest_delivery_fact": latest_delivery.get(task.id, {}),
+            "latest_blocking_fact": latest_blocker.get(task.id, {}),
+        })
+    return {
+        "schema_version": "canonical-task-snapshot.v1",
+        "feature_id": feature_id,
+        "workflow_run_id": workflow_run_id,
+        "tasks": snapshots,
+    }
+
+
+def _compact_task_fact(event: Any) -> dict[str, Any]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    self_check = (
+        payload.get("impl_self_check")
+        if isinstance(payload.get("impl_self_check"), dict)
+        else {}
+    )
+    command_receipts = self_check.get("command_receipts")
+    acceptance_results = self_check.get("acceptance_results")
+    return {
+        "event_id": str(event.id or ""),
+        "event_type": str(event.type or ""),
+        "timestamp": str(event.ts or ""),
+        "source_commit": str(
+            payload.get("source_commit")
+            or self_check.get("source_commit")
+            or ""
+        ),
+        "target_commit": str(
+            payload.get("target_commit")
+            or self_check.get("target_commit")
+            or ""
+        ),
+        "task_map_ref": str(payload.get("task_map_ref") or ""),
+        "contract_snapshot_ref": str(
+            payload.get("contract_snapshot_ref")
+            or self_check.get("contract_snapshot_ref")
+            or ""
+        ),
+        "contract_snapshot_digest": str(
+            payload.get("contract_snapshot_digest")
+            or self_check.get("contract_snapshot_digest")
+            or ""
+        ),
+        "failure_class": str(payload.get("failure_class") or ""),
+        "reason": str(payload.get("reason") or ""),
+        "command_receipt_count": (
+            len(command_receipts) if isinstance(command_receipts, list) else 0
+        ),
+        "passed_acceptance_count": (
+            sum(
+                1
+                for item in acceptance_results
+                if isinstance(item, dict) and item.get("status") == "passed"
+            )
+            if isinstance(acceptance_results, list)
+            else 0
+        ),
+        "evidence_refs": list(self_check.get("evidence_refs") or []),
+        "residual_risks": list(self_check.get("residual_risks") or []),
+    }
 
 
 def build_plan_synth_call_payload(

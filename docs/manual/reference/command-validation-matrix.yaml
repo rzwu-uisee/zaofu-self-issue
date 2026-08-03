@@ -1,0 +1,172 @@
+schema_version: zf-manual-command-validation.v1
+
+# `parser` is covered for every fenced manual invocation by manual_commands.py.
+# The cases below are the representative commands that must also execute against
+# durable state from a completed project. State-writing and external cases are
+# kept explicit so a smoke run cannot accidentally apply them to that project.
+cases:
+  - id: cli-version
+    execution_class: completed-project-readonly
+    command: [--version]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: validate-config
+    execution_class: completed-project-runtime-cache-refresh
+    command: [validate, --path, "{config_path}"]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: status-workers
+    execution_class: completed-project-readonly
+    command: [status, --workers]
+    documents: [docs/manual/operations/recover-long-running-run.md]
+
+  - id: kanban-board
+    execution_class: completed-project-readonly
+    command: [kanban, --board, --state-dir, "{state_dir}"]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: task-trace
+    execution_class: completed-project-readonly
+    command: [task, trace, "{task_id}", --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: events-tail
+    execution_class: completed-project-readonly
+    command: [events, --last, "50", --state-dir, "{state_dir}"]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: workflow-routes
+    execution_class: completed-project-readonly
+    command: [workflow, routes, --task, "{task_id}", --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/workflows/controlled-workflow-start.md]
+
+  - id: workflow-inspect
+    execution_class: completed-project-readonly
+    command: [workflow, inspect, --config, "{config_path}", --format, json]
+    documents: [docs/manual/workflows/controlled-workflow-start.md]
+
+  - id: workflow-audit
+    execution_class: completed-project-readonly
+    command: [workflow, audit, --task, "{task_id}", --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/workflows/controlled-workflow-start.md]
+
+  - id: workflow-gates
+    execution_class: completed-project-readonly
+    command: [workflow, gates, --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/workflows/controlled-workflow-start.md]
+
+  - id: projection-status
+    execution_class: completed-project-projection-refresh
+    command: [projection, --state-dir, "{state_dir}", status, --json]
+    documents: [docs/manual/operations/observe-delivery.md]
+
+  - id: projection-doctor
+    execution_class: completed-project-projection-refresh
+    command: [projection, --state-dir, "{state_dir}", doctor, --projection, all, --json]
+    documents: [docs/manual/operations/observe-delivery.md]
+
+  - id: runs-list
+    execution_class: completed-project-projection-refresh
+    command: [runs, --state-dir, "{state_dir}", list, --json]
+    documents: [docs/manual/operations/web-maintainer-validation.md]
+
+  - id: runs-for-task
+    execution_class: completed-project-readonly
+    command: [runs, --state-dir, "{state_dir}", for-task, "{task_id}"]
+    documents: [docs/manual/06-web-observability-e2e.md]
+
+  - id: goal-show
+    execution_class: completed-project-readonly
+    command: [goal, show, --state-dir, "{state_dir}", --json]
+    documents: [docs/manual/operations/observe-delivery.md]
+
+  - id: metrics-snapshot
+    execution_class: completed-project-readonly
+    command: [metrics, snapshot, --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/04-harness-runtime.md]
+
+  - id: refs-verify
+    execution_class: completed-project-readonly
+    command: [refs, verify]
+    documents: [docs/manual/06-web-observability-e2e.md]
+
+  - id: trace-delivery
+    execution_class: completed-project-readonly
+    command: [trace, delivery, "{feature_id}", --format, json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/observe-delivery.md]
+
+  - id: ctx-check
+    execution_class: completed-project-readonly
+    command: [ctx, --task, "{task_id}", --mode, check, --json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: attempt-inspect
+    execution_class: completed-project-projection-refresh
+    command: [attempt, inspect, "{attempt_id}", --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: artifact-list
+    execution_class: completed-project-readonly
+    command: [artifact, list, --attempt, "{attempt_id}", --json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: attempt-missing-reads
+    execution_class: completed-project-projection-refresh
+    command: [attempt, missing-reads, "{attempt_id}", --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: artifact-catalog-list
+    execution_class: completed-project-projection-refresh
+    command: [artifact, catalog, list, --limit, "20", --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: goal-dossier
+    execution_class: completed-project-projection-output
+    command: [report, goal-dossier, --run-id, "{run_id}", --state-dir, "{state_dir}", --out, "{output_dir}/goal-dossier"]
+    documents: [docs/manual/operations/observe-delivery.md]
+
+  - id: recover-workflow-preview
+    execution_class: snapshot-state-projection-write
+    command: [recover, workflow, --dry-run, --json, --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/recover-long-running-run.md]
+
+  - id: runs-rebuild
+    execution_class: snapshot-state-projection-write
+    command: [runs, --state-dir, "{state_dir}", rebuild]
+    documents: [docs/manual/operations/web-maintainer-validation.md]
+
+  - id: artifact-read
+    execution_class: live-runtime-worker-credential
+    command: [artifact, read, --attempt, "{attempt_id}", --source, "{source_id}", --artifact, "{artifact_id}", --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: artifact-read-denied
+    execution_class: snapshot-canonical-event-write
+    command: [artifact, read, --attempt, "{attempt_id}", --source, "{source_id}", --artifact, "{artifact_id}", --state-dir, "{state_dir}"]
+    expected_exit_codes: [1]
+    documents: [docs/manual/operations/context-handoff-artifacts.md]
+
+  - id: channel-say
+    execution_class: snapshot-canonical-event-write
+    command: [channel, say, "{channel_id}", --text, command-validation, --state-dir, "{state_dir}"]
+    documents: [docs/manual/workflows/channel-to-prd.md]
+
+  - id: workflow-start-apply
+    execution_class: authorized-canonical-write
+    command: [workflow, start, --apply, --proposal-event-id, "{proposal_event_id}", --authorization-ref, "{authorization_ref}", --state-dir, "{state_dir}"]
+    documents: [docs/manual/workflows/controlled-workflow-start.md]
+
+  - id: runtime-start-stop
+    execution_class: live-runtime-provider
+    command: [start]
+    documents: [docs/manual/getting-started/first-verified-delivery.md]
+
+  - id: web-playwright
+    execution_class: live-service-browser
+    command: [web, --host, 0.0.0.0, --port, "8002", --state-dir, "{state_dir}"]
+    documents: [docs/manual/operations/web-maintainer-validation.md]
+
+  - id: feishu-sync
+    execution_class: external-integration
+    command: [feishu, sync-kanban-table, --dry-run]
+    documents: [docs/manual/11-feishu-automation-kanban-sync.md]

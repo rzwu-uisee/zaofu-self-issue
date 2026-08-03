@@ -29,6 +29,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.state.locks import locked_path
 from zf.core.state.session import SessionStore
 from zf.runtime.channel_router import route_channel_message
+from zf.runtime.channel_route_lock import channel_route_lock_path
 from zf.runtime.control_actions_helpers import _stable_control_id
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
@@ -216,6 +217,73 @@ def test_reactor_waits_for_controlled_ingress_route_before_dedup(
     ]
     assert len(requested) == 1
     assert requested[0].payload["request_id"].startswith("reply-")
+
+
+def test_direct_route_and_reactor_share_one_per_message_owner(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+) -> None:
+    """Synthesis/direct routes must not race EventWatcher for one message."""
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_channel(log)
+    orch = Orchestrator(state_dir, config, transport)
+    payload = {
+        "channel_id": CHANNEL_ID,
+        "thread_id": "main",
+        "message_id": "msg-direct-race",
+        "member_id": "operator",
+        "role": "user",
+        "text": "@claude-arch synthesize the accepted contract",
+        "source": "web",
+    }
+    msg_event = orch.event_writer.emit(
+        "channel.message.posted",
+        actor="web",
+        payload=payload,
+        correlation_id=CHANNEL_ID,
+    )
+    reactor = Thread(
+        target=orch._on_channel_message_posted,
+        args=(msg_event,),
+        daemon=True,
+    )
+    direct = Thread(
+        target=route_channel_message,
+        kwargs={
+            "state_dir": state_dir,
+            "writer": orch.event_writer,
+            "message_event": msg_event,
+            "message_payload": payload,
+            "actor": "web",
+            "source": "web",
+            "dispatch_inline": False,
+        },
+        daemon=True,
+    )
+    route_lock = channel_route_lock_path(
+        state_dir,
+        channel_id=CHANNEL_ID,
+        thread_id="main",
+        message_id="msg-direct-race",
+    )
+
+    with locked_path(route_lock):
+        reactor.start()
+        direct.start()
+        time.sleep(0.1)
+        assert not [
+            event for event in log.read_all()
+            if event.type == "channel.agent.reply.requested"
+        ]
+
+    reactor.join(timeout=2)
+    direct.join(timeout=2)
+    assert not reactor.is_alive()
+    assert not direct.is_alive()
+    requested = [
+        event for event in log.read_all()
+        if event.type == "channel.agent.reply.requested"
+    ]
+    assert len(requested) == 1
 
 
 # ---------------------------------------------------------------- test_b

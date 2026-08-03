@@ -1,12 +1,9 @@
-"""zf chat — send a user message to the orchestrator agent.
+"""zf chat — append an operator message intent to the event ledger.
 
-Emits a user.message event to .zf/events.jsonl. The Layer 1 EventWatcher
-recognizes this as a wake pattern for the Claude Code Orchestrator (Layer 2),
-which then decides what to do next (decompose into features, dispatch tasks,
-etc).
-
-Without an orchestrator role in zf.yaml, this command still emits the event
-but nothing reacts to it (a human or a future Layer 2 dispatcher consumes it).
+The command always emits ``user.message``. Consumers are configuration and
+orchestration-mode dependent: legacy safe-team may wake a Layer 2 Agent, while
+Product Flow requires an explicit Task/route proposal before execution. The
+command itself never guarantees Task creation or Workflow ignition.
 """
 
 from __future__ import annotations
@@ -21,7 +18,7 @@ from zf.core.events.factory import event_log_from_project
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("chat", help="Send a message to the orchestrator agent")
+    parser = subparsers.add_parser("chat", help="Append an operator message intent")
     parser.add_argument("message", nargs="+", help="The message text")
     parser.add_argument(
         "--state-dir",

@@ -18,13 +18,21 @@ class _Host(LifecycleEvidenceQueriesMixin):
         self.event_log = EventLog(path)
 
 
-def _dispatched(fanout_id: str, child_id: str, instance: str) -> ZfEvent:
+def _dispatched(
+    fanout_id: str,
+    child_id: str,
+    instance: str,
+    *,
+    run_id: str | None = None,
+    task_id: str = "",
+) -> ZfEvent:
     return ZfEvent(type="fanout.child.dispatched", actor="zf-cli", payload={
         "fanout_id": fanout_id,
         "child_id": child_id,
-        "run_id": f"run-{fanout_id}-{child_id}",
+        "run_id": run_id or f"run-{fanout_id}-{child_id}",
         "role_instance": instance,
-    })
+        "task_id": task_id,
+    }, task_id=task_id or None)
 
 
 def test_child_of_cancelled_fanout_is_not_active(tmp_path: Path) -> None:
@@ -59,3 +67,66 @@ def test_timed_out_pending_children_are_terminal(tmp_path: Path) -> None:
         payload={"fanout_id": "fanout-impl-1", "pending_children": ["queued-T2-2"]},
     ))
     assert host._active_fanout_child_for_instance("dev-lane-0") is None
+
+
+def test_stale_completion_terminates_exact_superseded_child(tmp_path: Path) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    host.event_log.append(_dispatched(
+        "fanout-impl-old",
+        "dev-lane-1-T1",
+        "dev-lane-1",
+        run_id="run-old",
+        task_id="T1",
+    ))
+    host.event_log.append(ZfEvent(
+        type="fanout.child.stale_completion",
+        actor="zf-cli",
+        task_id="T1",
+        payload={
+            "fanout_id": "fanout-impl-old",
+            "child_id": "dev-lane-1-T1",
+            "run_id": "run-old",
+            "role_instance": "dev-lane-1",
+            "task_id": "T1",
+            "reason": "superseded_by_latest_fanout",
+        },
+    ))
+
+    assert host._active_fanout_child_for_instance("dev-lane-1") is None
+    assert host._fanout_task_state_for_instance("dev-lane-1", "T1") == "terminal"
+
+
+def test_late_stale_completion_does_not_terminate_newer_run(tmp_path: Path) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    host.event_log.append(_dispatched(
+        "fanout-impl",
+        "dev-lane-1-T1",
+        "dev-lane-1",
+        run_id="run-old",
+        task_id="T1",
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-impl",
+        "dev-lane-1-T1",
+        "dev-lane-1",
+        run_id="run-new",
+        task_id="T1",
+    ))
+    host.event_log.append(ZfEvent(
+        type="fanout.child.stale_completion",
+        actor="zf-cli",
+        task_id="T1",
+        payload={
+            "fanout_id": "fanout-impl",
+            "child_id": "dev-lane-1-T1",
+            "run_id": "run-old",
+            "role_instance": "dev-lane-1",
+            "task_id": "T1",
+            "reason": "superseded_by_latest_fanout",
+        },
+    ))
+
+    child = host._active_fanout_child_for_instance("dev-lane-1")
+    assert child is not None
+    assert child["run_id"] == "run-new"
+    assert host._fanout_task_state_for_instance("dev-lane-1", "T1") == "active"

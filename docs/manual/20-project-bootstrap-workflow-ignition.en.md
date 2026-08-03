@@ -333,6 +333,8 @@ declared stack, primary provider, and Mixed team policy.
 
 ![Current Add/Open Project form](assets/project-add-open-current.png)
 
+![Animated Add/Open Project flow](assets/quickstart-project.webp)
+
 The brief remains canonical as `project.description`, appears in Project
 Overview, and is projected into the managed Project Context section in
 `AGENTS.md`. The detected or declared stack and build/test/gate commands enter
@@ -355,7 +357,7 @@ Task is explicitly created/confirmed and its Plan and Approve steps complete.
 |---|---:|---:|
 | Normal Kanban Agent coding | No | No; ordinary provider-session work |
 | `Create Task` | No | No; creates tracking only |
-| Channel setup/discussion | No | No; creates collaboration and starts discussion |
+| Channel setup/discussion | No | No; creates collaboration, while default conversation waits for directed interaction |
 | Research Workflow | Yes | Separate Approve after Plan |
 | PRD/Issue/Refactor/Planning Workflow | Yes | Separate Approve after Plan |
 
@@ -368,16 +370,18 @@ from chat text.
 
 Selecting a Channel setup Plan may directly execute
 `channel-create-and-start`, atomically creating the Channel and template
-Members, posting the original requirement, and starting discussion:
+Members, posting the original requirement, and initializing the discussion mode:
 
 ![Channel setup Plan](assets/kanban-channel-plan.png)
 
 This is the bounded Plan direct-apply exception. It does not allow Channel to
-ignite a Workflow. Channel/Research synthesis, a canonical PRD, or another
-conclusion does not automatically create a Task. The operator explicitly asks
-for and confirms a `Create Task` proposal. PRD decomposition, the planning
-artifact, and `task_map` are produced later by the selected Workflow planning
-stage.
+ignite a Workflow. Default `conversation` does not fan out; only explicit
+Discuss / `multi_lens` runs bounded multi-perspective work. Explicit Finalize
+creates a PRD draft, and only an Owner-confirmed revision is the canonical PRD.
+Neither synthesis nor a confirmed PRD automatically creates a Task. The
+operator explicitly requests and confirms a `Create Task` proposal. PRD
+decomposition, the planning artifact, and `task_map` are produced later by the
+selected Workflow planning stage.
 
 ### 8.3 Task-bound Workflow uses Plan then Approve
 
@@ -395,6 +399,8 @@ zf workflow routes --task TASK-ID
 ![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
 
 ![Exact Workflow proposal approval](assets/kanban-task-workflow-approve.png)
+
+![Animated Task creation, Workflow Plan, independent approval, and ignition](assets/quickstart-direct-workflow.webp)
 
 Plan supports `Chat about` and `Customize` for source/input refs, expected
 output, scope, or another route-changing parameter. Selecting a route creates a

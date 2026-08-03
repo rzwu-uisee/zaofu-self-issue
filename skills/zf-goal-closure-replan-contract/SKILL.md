@@ -36,12 +36,29 @@ Do not re-derive a gap from chat or a one-line reason when a typed result exists
 4. Reuse stable task identity where the contract is unchanged; mint a revised
    contract/task only when the required behavior or ownership changed.
 5. Record what changed from the prior plan and which old attempt/task is
-   superseded.
+   superseded. A replacement task must declare the full immutable
+   `base_commit` containing accepted prior work and bind it as
+   `git:<base_commit>` in task `source_refs`; prose-only continuation anchors
+   are not executable contracts. A same-id retry follows the same rule when it
+   resumes an accepted checkpoint; never substitute an alias such as
+   `implementation_base_commit`. If the latest delivery commit has complete
+   passing receipts and the blocker is only task identity/scope/admission
+   metadata, that delivery commit is the continuation base; an older commit
+   retained for unchanged-tree or compatibility checks belongs in the
+   verification command, not in `base_commit`.
 6. Declare the semantic `required_delta`: changed AC/evidence fields,
    ownership paths, whether a Task Map revision is required, and the expected
    postcondition. Preserve unchanged logical ports by explicit inheritance
    from the current Package rather than rediscovering files.
-7. Persist the gap plan at the path supplied by the briefing, then use
+7. Before finalizing verification commands, apply the candidate-safe Git
+   evidence rules from `zf-gap-task-synth`. A worker commit may be recorded as
+   provenance, but must not be asserted equal to candidate `HEAD` or its
+   parents because candidate integration may cherry-pick and rewrite commit
+   hashes. Candidate identity comes from the later kernel event/manifest;
+   cross-check the patch/tree, owned paths, digests, task ref, and receipts.
+   Every command intended for candidate quality must also be valid in a
+   reconstructed cherry-picked candidate checkout.
+8. Persist the gap plan at the path supplied by the briefing, then use
    `zf-verify-gap-producer-contract` for the exact canonical submission.
 
 The current runtime output profile is authoritative for artifact/event shape.

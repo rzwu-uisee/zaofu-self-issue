@@ -271,6 +271,47 @@ def test_workdir_manager_worktree_mode_reuses_owned_worktree(tmp_path: Path):
     assert (Path(second.project_path) / ".git").exists()
 
 
+def test_managed_worktree_clean_repairs_readonly_generated_directories(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[RoleConfig(name="review", backend="mock", role_kind="reader")],
+        runtime=RuntimeConfig(
+            workdirs=WorkdirConfig(enabled=True, mode="worktree"),
+        ),
+    )
+    manager = WorkdirManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+    )
+    plan = manager.prepare(config.roles[0])
+    project_path = Path(plan.project_path)
+    evidence = project_path / "evidence" / "runtime" / "sealed"
+    evidence.mkdir(parents=True)
+    (evidence / "result.json").write_text("{}\n", encoding="utf-8")
+    for directory in (evidence, evidence.parent, evidence.parent.parent):
+        directory.chmod(0o555)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "keep.txt"
+    outside_file.write_text("keep\n", encoding="utf-8")
+    outside.chmod(0o555)
+    (project_path / "outside-link").symlink_to(outside, target_is_directory=True)
+
+    manager.checkout_reader_ref(config.roles[0], "HEAD")
+
+    assert not (project_path / "evidence").exists()
+    assert outside_file.read_text(encoding="utf-8") == "keep\n"
+    assert outside.stat().st_mode & 0o777 == 0o555
+    outside.chmod(0o755)
+
+
 def test_writer_worktree_syncs_clean_stale_branch_to_source_ref(tmp_path: Path):
     old_head = _init_repo(tmp_path)
     state_dir = tmp_path / ".zf"

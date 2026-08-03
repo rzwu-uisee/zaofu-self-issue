@@ -60,12 +60,14 @@ from zf.runtime.lifecycle_observation import LifecycleObservationMixin
 from zf.runtime.lifecycle_liveness_evidence import (
     LifecycleLivenessEvidenceMixin,
 )
+from zf.runtime.task_completion_liveness import TaskCompletionLivenessMixin
 
 
 class LifecycleManagerMixin(
     LifecycleEvidenceQueriesMixin,
     LifecycleObservationMixin,
     LifecycleLivenessEvidenceMixin,
+    TaskCompletionLivenessMixin,
 ):
     """Lifecycle methods of Orchestrator (worker watchdog, recycle,
     refresh triggers, drift detection, recovery briefing, orphan
@@ -151,6 +153,10 @@ class LifecycleManagerMixin(
                 # Not in_progress → not orphan-eligible. Also clear any
                 # prior warning mark so reentering in_progress gets a
                 # fresh clock.
+                self._orphan_warned.discard(task.id)
+                continue
+            if self._task_has_admitted_writer_completion(task.id):
+                self._dispatch_epoch.pop(task.id, None)
                 self._orphan_warned.discard(task.id)
                 continue
             epoch = self._dispatch_epoch.get(task.id)

@@ -50,6 +50,11 @@ zf trace export F-CANGJIE-GA --format otlp-json
 zf trace export --run-id run-20260724-001 --format completion-json
 ```
 
+Web drills through the same projection across Delivery, Graph, Loop, and
+Observability:
+
+![Animated Delivery Trace, Graph, Loop, and Observability views](assets/observe-delivery.webp)
+
 Overall `status` can be `in_progress`, `done`, `blocked`, `not_started`, or
 `empty`. Ship readiness is `ready` only when every node is done and no
 error-level drift exists. It is still only a projection; actual shipping
@@ -110,4 +115,4 @@ traces.
 ## 7. Principle
 
 `task-map.v1` says how work should run. `zf trace delivery` reports whether it
-ran that way. Corrections still go through Orchestrator, rework, or remapping.
+ran that way. Corrections still go through controlled actions, rework, or remapping.

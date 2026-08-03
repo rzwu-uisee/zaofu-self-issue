@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -357,7 +359,7 @@ class WorkdirManager:
         self.prepare(role)
         project_path = Path(plan.project_path)
         self._git(project_path, "reset", "--hard", "HEAD")
-        self._git(project_path, "clean", "-fd")
+        self._clean_managed_worktree(project_path)
         checkout_ref = self._resolve_reader_checkout_ref(target_ref)
         self._git(project_path, "checkout", "--detach", checkout_ref)
         provision_worktree_env(
@@ -392,7 +394,7 @@ class WorkdirManager:
         self.prepare(role)
         project_path = Path(plan.project_path)
         self._git(project_path, "reset", "--hard", "HEAD")
-        self._git(project_path, "clean", "-fd")
+        self._clean_managed_worktree(project_path)
         self._git(project_path, "checkout", "--detach", pinned)
         head = self._git(project_path, "rev-parse", "HEAD").strip()
         if head != pinned:
@@ -462,7 +464,7 @@ class WorkdirManager:
         status = self._reader_reportable_status(project_path, status)
         if status.strip():
             self._git(project_path, "reset", "--hard", "HEAD")
-            self._git(project_path, "clean", "-fd")
+            self._clean_managed_worktree(project_path)
         return status
 
     def _reader_reportable_status(self, project_path: Path, status: str) -> str:
@@ -645,7 +647,7 @@ class WorkdirManager:
                 # need to clear the dirty state. Reset hard discards
                 # the uncommitted changes (last resort).
                 self._git(project_path, "reset", "--hard", before)
-                self._git(project_path, "clean", "-fd")
+                self._clean_managed_worktree(project_path)
                 stashed_ref = ""
         if before == source_ref and not stashed_ref:
             return {
@@ -661,7 +663,7 @@ class WorkdirManager:
         backup_ref = f"refs/zf/workdir-backups/{role.instance_id}/{stamp}"
         self._git(project_path, "update-ref", backup_ref, before)
         self._git(project_path, "reset", "--hard", source_ref)
-        self._git(project_path, "clean", "-fd")
+        self._clean_managed_worktree(project_path)
         after = self._git(project_path, "rev-parse", "HEAD").strip()
         return {
             "project_path": str(project_path),
@@ -707,12 +709,70 @@ class WorkdirManager:
             stash_commit = self._git(project_path, "rev-parse", "HEAD").strip()
             self._git(project_path, "update-ref", stashed_ref, stash_commit)
             self._git(project_path, "reset", "--hard", before)
-            self._git(project_path, "clean", "-fd")
+            self._clean_managed_worktree(project_path)
             return stashed_ref
         except RuntimeError:
             self._git(project_path, "reset", "--hard", before)
-            self._git(project_path, "clean", "-fd")
+            self._clean_managed_worktree(project_path)
             return ""
+
+    def _clean_managed_worktree(self, project_path: Path) -> None:
+        """Clean a managed worktree, repairing same-owner directory modes once."""
+
+        try:
+            self._git(project_path, "clean", "-fd")
+            return
+        except RuntimeError as first_error:
+            changed = self._restore_managed_directory_write_bits(project_path)
+            if not changed:
+                raise
+            try:
+                self._git(project_path, "clean", "-fd")
+                return
+            except RuntimeError as retry_error:
+                raise RuntimeError(
+                    f"{retry_error}; initial clean failure: {first_error}"
+                ) from retry_error
+
+    def _restore_managed_directory_write_bits(self, project_path: Path) -> bool:
+        resolved = PathGuard.assert_under(project_path, self.root)
+        assert_owned_workdir(resolved.parent, state_dir=self.state_dir)
+        if not (resolved / ".git").exists():
+            raise RuntimeError(f"managed project is not a git worktree: {resolved}")
+
+        changed = False
+
+        def make_owner_writable(path: Path) -> bool:
+            nonlocal changed
+            PathGuard.assert_under(path, resolved)
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                return False
+            if info.st_uid != os.geteuid():
+                return False
+            mode = stat.S_IMODE(info.st_mode)
+            wanted = mode | stat.S_IWUSR | stat.S_IXUSR
+            if wanted != mode:
+                os.chmod(path, wanted, follow_symlinks=False)
+                changed = True
+            return True
+
+        make_owner_writable(resolved)
+        for current_root, dir_names, _file_names in os.walk(
+            resolved,
+            topdown=True,
+            followlinks=False,
+        ):
+            current = Path(current_root)
+            safe_names: list[str] = []
+            for name in dir_names:
+                candidate = current / name
+                if candidate.is_symlink():
+                    continue
+                if make_owner_writable(candidate):
+                    safe_names.append(name)
+            dir_names[:] = safe_names
+        return changed
 
     def apply_dependency_task_refs(
         self,

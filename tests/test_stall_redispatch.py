@@ -160,6 +160,68 @@ def test_redispatch_suppressed_when_trigger_already_has_active_fanout():
     assert stall_redispatch_event(_finding(), events) is None
 
 
+def test_redispatch_suppressed_when_descendant_redispatch_has_active_fanout():
+    trigger = _ev(
+        "candidate.ready",
+        feature_id="F1",
+        candidate_ref="cand/F1",
+        fanout_id="impl-1",
+    )
+    first_redispatch = _ev(
+        "candidate.ready",
+        feature_id="F1",
+        candidate_ref="cand/F1",
+        redispatch_fingerprint=FP,
+        redispatch_attempt=1,
+        original_trigger_event_id=trigger.id,
+    )
+    events = [
+        trigger,
+        first_redispatch,
+        _ev(
+            "fanout.started",
+            fanout_id="fo-recovery-1",
+            trigger_event_id=first_redispatch.id,
+        ),
+        *[_ev("orchestrator.decision.recorded") for _ in range(6)],
+    ]
+
+    assert stall_redispatch_event(_finding(), events) is None
+
+
+def test_redispatch_continues_when_descendant_fanout_is_terminal():
+    trigger = _ev(
+        "candidate.ready",
+        feature_id="F1",
+        candidate_ref="cand/F1",
+        fanout_id="impl-1",
+    )
+    first_redispatch = _ev(
+        "candidate.ready",
+        feature_id="F1",
+        candidate_ref="cand/F1",
+        redispatch_fingerprint=FP,
+        redispatch_attempt=1,
+        original_trigger_event_id=trigger.id,
+    )
+    events = [
+        trigger,
+        first_redispatch,
+        _ev(
+            "fanout.started",
+            fanout_id="fo-recovery-1",
+            trigger_event_id=first_redispatch.id,
+        ),
+        _ev("fanout.cancelled", fanout_id="fo-recovery-1"),
+        *[_ev("orchestrator.decision.recorded") for _ in range(6)],
+    ]
+
+    redispatch = stall_redispatch_event(_finding(), events)
+
+    assert redispatch is not None
+    assert redispatch.payload["redispatch_attempt"] == 2
+
+
 def test_redispatch_fires_when_trigger_fanout_already_terminal():
     trigger = _ev("candidate.ready", feature_id="F1", candidate_ref="cand/F1", fanout_id="impl-1")
     events = [
@@ -175,3 +237,44 @@ def test_redispatch_fires_when_trigger_fanout_already_terminal():
 def test_redispatch_fires_when_trigger_started_no_fanout():
     # 原始恢复场景:trigger 触发但 NO fanout 起 → 照常重发(不被新 dedup 误伤)
     assert stall_redispatch_event(_finding(), _stalled()) is not None
+
+
+def test_superseded_task_trigger_is_settled_without_redispatch_or_escalation(tmp_path):
+    trigger = ZfEvent(
+        type="flow.discovery.requested",
+        task_id="GAP-RELEASE-R1",
+        payload={
+            "task_id": "GAP-RELEASE-R1",
+            "workflow_run_id": "workflow-1",
+            "flow_kind": "prd",
+        },
+    )
+    events = [
+        trigger,
+        *[_ev("orchestrator.decision.recorded") for _ in range(6)],
+        ZfEvent(
+            type="task.superseded",
+            task_id="GAP-RELEASE-R1",
+            payload={
+                "superseded_task_ids": ["GAP-RELEASE-R1"],
+                "status": "cancelled",
+            },
+        ),
+        _ev("task.created", task_id="GAP-RELEASE-R2"),
+    ]
+    stages = [
+        (
+            "prd-post-verify-discovery",
+            "flow.discovery.requested",
+            "flow.discovery.completed",
+            "prd",
+        ),
+    ]
+
+    assert detect_structural_stalls(events, stages=stages) == []
+
+    log = EventLog(tmp_path / "events.jsonl")
+    emitted = emit_stall_recoveries(events, EventWriter(log), stages=stages)
+
+    assert emitted == 0
+    assert log.read_all() == []

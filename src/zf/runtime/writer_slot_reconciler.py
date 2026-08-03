@@ -97,15 +97,24 @@ def reconcile_affinity_writer_slots(
     # their completed writer child is the terminal dependency fact.  In a
     # per-lane pipeline, an impl child still has review/verify work ahead; only
     # canonical task terminal may release downstream tasks.
-    completed_task_ids = set()
+    trigger_payload = (
+        manifest.get("trigger_payload")
+        if isinstance(manifest.get("trigger_payload"), dict)
+        else {}
+    )
+    completed_task_ids = {
+        str(task_id).strip()
+        for task_id in trigger_payload.get("completed_task_ids", []) or []
+        if str(task_id or "").strip()
+    }
     if per_lane_flow_match(orchestrator.config, stage.id, stage_slot) is None:
-        completed_task_ids = {
+        completed_task_ids.update({
             str(child.get("task_id") or "")
             for child in manifest.get("children", []) or []
             if isinstance(child, dict)
             and str(child.get("status") or "") == "completed"
             and str(child.get("task_id") or "")
-        }
+        })
     context = FanoutContext(
         fanout_id=fanout_id,
         stage_id=str(manifest.get("stage_id") or ""),

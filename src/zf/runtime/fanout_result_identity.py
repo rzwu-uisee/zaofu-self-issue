@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 
-_KERNEL_BOUND_FIELDS = (
+KERNEL_BOUND_WRITER_RESULT_FIELDS = (
     "task_id",
     "role_instance",
+    "fanout_id",
+    "stage_id",
+    "child_id",
+    "run_id",
     "workflow_run_id",
     "contract_revision",
     "task_map_generation",
@@ -54,7 +58,7 @@ def bind_blocking_writer_result_identity(
     if protocol_mode != "blocking":
         return result
 
-    for key in _KERNEL_BOUND_FIELDS:
+    for key in KERNEL_BOUND_WRITER_RESULT_FIELDS:
         value = canonical.get(key)
         if value not in (None, ""):
             result[key] = value
@@ -82,4 +86,7 @@ def bind_blocking_writer_result_identity(
     return result
 
 
-__all__ = ["bind_blocking_writer_result_identity"]
+__all__ = [
+    "KERNEL_BOUND_WRITER_RESULT_FIELDS",
+    "bind_blocking_writer_result_identity",
+]

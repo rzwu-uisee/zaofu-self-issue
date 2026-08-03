@@ -132,7 +132,7 @@ def build_run_admission_projection(
             event.type in RUN_ADMISSION_EVENT_TYPES
             or event.type in RUN_TERMINAL_EVENT_TYPES
             or event.type in _LEGACY_RUNNING_EVENTS
-            or event.type in {"run.paused", "run.resumed"}
+            or event.type in {"run.paused", "run.resumed", "run.goal.updated"}
         )
         if not relevant:
             continue
@@ -186,6 +186,15 @@ def build_run_admission_projection(
         elif event.type == "run.resumed":
             if not entry.terminal:
                 entry.status = "running"
+        elif event.type == "run.goal.updated":
+            updated_status = str(payload.get("status") or "").strip()
+            if updated_status in {"active", "running"} and (
+                not entry.terminal or entry.terminal_type == "run.goal.blocked"
+            ):
+                entry.status = "running"
+                entry.blocker = ""
+                entry.terminal_event_id = ""
+                entry.terminal_type = ""
         elif event.type in _LEGACY_RUNNING_EVENTS:
             if (
                 not entry.terminal

@@ -21,6 +21,11 @@ Automation 文档定位是项目 Overview 封面,不是原始运行日志或诊�
 详细 trace、events、agent/session、task drilldown 留在 ZaoFu Web / CLI;
 详细任务列表仍以 Kanban 多维表格为准。
 
+同步前先在 Web `Automations` 核对 Daily Brief、Weekly Review 和 Project Monitor
+的 schedule、execution health、insights、outputs 与 recent runs：
+
+![Daily、Weekly 与 Project Monitor 自动化报告动态演示](assets/automations-reports.webp)
+
 ## 环境变量
 
 真实同步需要飞书应用凭据。可以直接 `export`,也可以写到项目根目录 `.env`;

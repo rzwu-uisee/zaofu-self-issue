@@ -130,6 +130,11 @@ Git evidence 让 review/test/judge/recovery 不只依赖 agent 自述,而是能�
 - rework 没有实际 delta。
 - final judge 无法证明交付内容来自本轮任务。
 
+Web 的 Task `Evidence` / `Advanced` 与 `Agents` 视图可把 artifact、Task Map、
+session、context、token 和 cost 放回同一 Task 身份下核对：
+
+![Task evidence、运行上下文与 Agent 资源动态演示](assets/task-context-handoff.webp)
+
 ## 7. Review Git Log 的建议
 
 有必要把 git log review 集成到 review/test/judge 的 skill 和 briefing 中,但不要让 agent 直接把 git log 当作唯一 truth。

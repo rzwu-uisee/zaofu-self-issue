@@ -64,6 +64,10 @@ zf trace export F-CANGJIE-GA --format otlp-json
 zf trace export --run-id run-20260724-001 --format completion-json
 ```
 
+Web 使用同一投影在 Delivery、Graph、Loop 与 Observability 间逐层下钻：
+
+![Delivery Trace、Graph、Loop 与 Observability 动态演示](assets/observe-delivery.webp)
+
 `delivery` 表格输出示例：
 
 ```text
@@ -139,4 +143,4 @@ replan、A/B 对比等循环和 delivery trace 连起来。
 ## 7. 一句话原则
 
 `task-map.v1` 说明「计划怎么执行」；`zf trace delivery` 说明「实际是否按计划执行」。
-后者是只读观测，任何修正仍走 orchestrator / rework / re-map。
+后者是只读观测，任何修正仍走受控 action、rework 或 re-map。

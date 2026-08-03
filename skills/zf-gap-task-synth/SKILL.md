@@ -35,6 +35,28 @@ Each generated gap task must be a normal task-map task with:
 Do not synthesize vague tasks such as "finish web UI" without precise source
 anchors and verification.
 
+## Split-quality Preflight
+
+Before emitting a gap plan, read the effective workflow work-unit contract from
+the current briefing/effective config. When
+`workflow.work_units.split_quality.max_acceptance_criteria` is non-zero, every
+generated task must stay at or below that limit.
+
+Treat this as a shape constraint, not permission to drop requirements:
+
+- merge criteria that prove the same acceptance domain into one explicit
+  clause while retaining all commands/evidence anchors;
+- if independent acceptance domains still exceed the limit, split them into
+  non-overlapping tasks with explicit ownership and dependency closure;
+- never truncate criteria, hide requirements in prose, or weaken coverage just
+  to pass admission;
+- count the final `acceptance_criteria` array mechanically before emit and
+  revise the artifact while it is still local.
+
+The same preflight applies to replacement tasks synthesized after verify,
+semantic replan, or admission feedback. Include the admission reason in the
+next attempt's source anchors so a repeated shape rejection is auditable.
+
 ## Ownership
 
 Keep gaps small and lane-friendly:
@@ -45,6 +67,75 @@ Keep gaps small and lane-friendly:
 - put root assembly/package files under an assembly/root task when needed;
 - 以 `diagnosis.completed` 触发时,lane / affinity 归属优先采纳诊断报告的
   `target_lane`,而非默认沿用原 lane。
+
+## Gap-only Dependency Closure
+
+Treat the pinned candidate/target as the dependency baseline. A prior task whose
+accepted implementation is already present in that immutable target is completed
+input, not an outstanding dependency:
+
+- cite it through `source_refs`, candidate refs, or accepted task-ref evidence;
+- do **not** copy it into `blocked_by` / `dependencies` merely because it preceded
+  the failed task in the original task map;
+- use `blocked_by` only for a task in the same amendment that will actually be
+  dispatched before this task, or for a task the current briefing/runtime
+  explicitly lists in `completed_task_ids` / active runnable scope;
+- when replacing a failed task, put the replaced id in `supersedes_task_ids`, not
+  in `blocked_by`.
+
+Bind replacement identity to the **current** `task_map_ref`, not to an older
+amendment or failure report:
+
+- load the task ids from the current task map before choosing a replacement;
+- every `supersedes_task_ids` value must exist in that current task map;
+- the replacement `task_id` must be new and must differ from every superseded
+  id;
+- record older task generations only in `source_refs` / `replan_history_ref`;
+  do not carry their ids forward as current supersede targets.
+
+Every replacement task with non-empty `supersedes_task_ids` must also declare
+an explicit immutable `base_commit` at task top level. Select the commit that
+already contains all accepted work the successor must preserve, and bind that
+exact full commit id through a `git:<base_commit>` entry in task `source_refs`.
+Do not leave the baseline only in acceptance prose, infer it from source-ref
+ordering, or fall back to the original run target. Additive gap tasks without
+`supersedes_task_ids` do not use this successor rule.
+
+Do not confuse the continuation checkout with an older comparison baseline.
+When the current canonical task has a `dev.build.done` or self-check checkpoint
+whose required receipts passed, and a later blocker only concerns task-map
+identity, scope/base metadata, admission, or handoff, use that verified
+`source_commit` as the successor `base_commit`. Keep an older commit used for
+unchanged-tree, compatibility, or ancestry comparison inside the relevant
+verification command. Reusing the older comparison baseline as `base_commit`
+would discard verified work and force a needless rebuild. If the blocker
+implicates product behavior or the receipts are incomplete, do not promote the
+failed delivery checkpoint; retain the last independently accepted commit.
+
+A continuation or retry that deliberately reuses the same `task_id` must use
+the same top-level `base_commit` + `git:<base_commit>` binding whenever it
+starts from an accepted checkpoint. Do not invent aliases such as
+`implementation_base_commit`; downstream writer snapshots consume only the
+canonical `base_commit` field.
+
+Before emit, assert both set checks mechanically:
+
+```text
+set(supersedes_task_ids) <= set(current_task_map_task_ids)
+replacement_task_id not in set(current_task_map_task_ids)
+base_commit in full_git_commit_ids
+"git:" + base_commit in source_refs
+```
+
+If either check fails, revise the gap task identity before submission. A mixed
+current-plus-historical supersede list is invalid even when the semantic gap is
+otherwise correct.
+
+Before emitting, simulate `resume_scope=gap_tasks_only`: every dependency must be
+either part of the emitted gap task set or explicitly proven complete by the
+current runtime contract. If a dependency would only remain in the historical
+full task map, revise the gap plan before submission; otherwise the child can be
+admitted but remain permanently queued.
 
 ## Evidence Contract
 
@@ -63,6 +154,30 @@ Add an `evidence_contract` or source fields that preserve:
   ordinary additive verify gaps.
 
 The worker briefing must show this context before implementation.
+
+## Candidate-safe Git Evidence
+
+Generated acceptance and verification commands must remain valid after the
+kernel assembles task commits into a candidate. Candidate integration uses
+patch-equivalent cherry-picks, so worker/source commit hashes are provenance
+identities, not candidate commit identities:
+
+- never require a worker `source_commit` (or one of its parents) to equal the
+  candidate `HEAD` / `HEAD^`;
+- never place a not-yet-created candidate commit in a worker-owned receipt;
+- bind worker provenance through the task ref, source commit, contract
+  snapshot, patch/tree or owned-path digest, and command receipts;
+- obtain the candidate ref/head only from the kernel candidate event or
+  manifest, then verify that the candidate contains the required patch/tree
+  and evidence;
+- when one command is declared as a task/candidate quality gate, preflight it
+  conceptually against both the worker checkout and a cherry-picked candidate
+  checkout. A command that depends on unchanged commit hashes is invalid.
+
+Use `git rev-list --cherry-pick` / patch equivalence for integration identity,
+or compare the declared owned paths and their digests. Exact commit equality is
+appropriate only inside the same immutable ref namespace. This is a task
+contract rule, not permission for an agent to write candidate refs.
 
 ## Emit Discipline
 

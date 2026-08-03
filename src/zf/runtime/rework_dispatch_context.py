@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from zf.core.config.schema import RoleConfig
+from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
 from zf.runtime.rework_feedback import (
     descriptor_from_payload as feedback_descriptor_from_payload,
@@ -125,6 +127,107 @@ def _payload_excerpt(payload: object, *, limit: int = 3000) -> str:
 
 
 class ReworkDispatchContextMixin:
+    @staticmethod
+    def _task_ref_repair_identity_instruction(
+        trigger_event: ZfEvent,
+    ) -> str:
+        payload = (
+            trigger_event.payload
+            if isinstance(trigger_event.payload, dict)
+            else {}
+        )
+        if "stale task contract" in str(payload.get("reason") or "").lower():
+            return (
+                "Preserve its logical `fanout_id`, `stage_id`, `child_id`, and "
+                "source baseline, but replace contract revision and snapshot "
+                "fields from the current kernel task capsule. When the Kernel "
+                "renders a `Runtime Durable Repair Identity`, use its new "
+                "`run_id`, operation, request, and attempt identity; never copy "
+                "the rejected call identity. Never copy the rejected stale "
+                "contract snapshot. "
+                "The nested `impl_self_check.attempt_id` is scheduler TaskAttempt "
+                "identity, not fanout/run identity: set it to the current "
+                "`Runtime TaskAttempt Identity` rendered below and never copy the "
+                "source completion's old scheduler attempt.\n"
+            )
+        return (
+            "Preserve its logical `fanout_id`, `stage_id`, `child_id`, source "
+            "baseline, and current contract fields. When the Kernel renders a "
+            "`Runtime Durable Repair Identity`, use its new `run_id`, operation, "
+            "request, and attempt identity instead of copying the source "
+            "completion's call identity. The nested `impl_self_check.attempt_id` "
+            "is scheduler "
+            "TaskAttempt identity, not fanout/run identity: set it to the current "
+            "`Runtime TaskAttempt Identity` rendered below and never copy the "
+            "source completion's old scheduler attempt.\n"
+        )
+
+    def _task_ref_repair_git_baseline(
+        self,
+        task: Task,
+        role: RoleConfig,
+        trigger_event: ZfEvent,
+    ) -> tuple[str, Path] | None:
+        """Recover the immutable writer baseline for task-ref repair.
+
+        A repair dispatch happens after the original writer result, so the
+        project checkout may already point at an unrelated candidate commit.
+        Reusing that checkout HEAD breaks the original fanout lineage.  The
+        rejected completion and its kernel-owned child retain the correct
+        dispatch base and writer workdir.
+        """
+
+        if (
+            getattr(trigger_event, "type", "") != "task.ref.repair.requested"
+            or str(getattr(role, "role_kind", "") or "") != "writer"
+        ):
+            return None
+        payload = (
+            trigger_event.payload
+            if isinstance(getattr(trigger_event, "payload", None), dict)
+            else {}
+        )
+        source_event_id = str(payload.get("source_event_id") or "").strip()
+        if not source_event_id:
+            return None
+        try:
+            source_event = next(
+                event
+                for event in reversed(self.event_log.read_all())
+                if event.id == source_event_id
+            )
+        except (OSError, StopIteration):
+            return None
+        source_payload = (
+            source_event.payload
+            if isinstance(source_event.payload, dict)
+            else {}
+        )
+        child = self._writer_source_fanout_child(
+            source_payload,
+            task_id=task.id,
+        )
+        child_payload = (
+            child.get("payload")
+            if isinstance(child.get("payload"), dict)
+            else {}
+        )
+        base_git_head = (
+            self._writer_child_base_commit(child)
+            or str(source_payload.get("base_git_head") or "").strip()
+            or str(source_payload.get("base_commit") or "").strip()
+        )
+        if not base_git_head:
+            return None
+        workdir = str(
+            child.get("workdir")
+            or child_payload.get("workdir")
+            or source_payload.get("workdir")
+            or ""
+        ).strip()
+        evidence_root = Path(workdir) if workdir else Path(self.project_root)
+        return base_git_head, evidence_root
+
     def _rework_context_for_dispatch(self, task: Task, role: RoleConfig) -> str:
         if getattr(task, "retry_count", 0) <= 0:
             return ""

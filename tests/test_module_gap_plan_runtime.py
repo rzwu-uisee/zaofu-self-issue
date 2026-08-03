@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -40,6 +41,32 @@ class _RecordingTransport:
 
     def poll_events(self):
         return []
+
+
+def _init_git_base(project_root: Path) -> str:
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project_root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=project_root,
+        check=True,
+    )
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        text=True,
+    ).strip()
 
 
 def _config(state_dir: Path) -> ZfConfig:
@@ -852,6 +879,21 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
 ) -> None:
     state_dir, log, transport, orch = _state(tmp_path)
     task_map_ref = _write_base_task_map(state_dir)
+    orch.config.workflow.stages[0].flow_kind = "prd"
+    orch.config.workflow.stages.append(WorkflowStageConfig(
+        id="refactor-gap-impl",
+        trigger="task_map.ready",
+        topology="fanout_writer_scoped",
+        roles=["dev-lane-0"],
+        flow_kind="refactor",
+        task_map="${task_map_ref}",
+        synthesize_canonical_tasks=True,
+        aggregate=FanoutAggregateConfig(
+            mode="candidate_integration",
+            success_event="candidate.ready",
+            failure_event="integration.failed",
+        ),
+    ))
 
     decisions = orch.run_once(events=[ZfEvent(
         id="flow-discovery-completed-gaps",
@@ -896,6 +938,10 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
     assert gap_ready.payload["candidate_base_commit"] == "candidate-head-123"
     assert gap_ready.payload["dispatch_base_commit"] == "candidate-head-123"
     assert ready.payload["gap_event_type"] == "flow.gap_plan.ready"
+    assert ready.payload["flow_kind"] == "prd"
+    assert ready.payload["goal_kind"] == "prd"
+    assert ready.payload["workflow_run_id"] == "trace-prd-gap"
+    assert ready.payload["goal_id"] == "CANGJIE"
     assert ready.payload["dispatch_base_commit"] == "candidate-head-123"
     assert ready.payload["resume_scope"] == "gap_tasks_only"
     assert ready.payload["task_ids"] == ["CANGJIE-PRD-GAP-001"]
@@ -903,6 +949,12 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
     assert task is not None
     assert task.contract.evidence_contract["goal_kind"] == "prd"
     assert task.contract.evidence_contract["gap_category"] == "acceptance_gap"
+    started_stages = [
+        event.payload["stage_id"]
+        for event in events
+        if event.type == "fanout.started"
+    ]
+    assert started_stages == ["module-gap-impl"]
     assert transport.sent and transport.sent[0][0] == "dev-lane-0"
 
 
@@ -939,6 +991,7 @@ def test_flow_discovery_fanout_preserves_gap_tasks_for_incremental_adoption(
     recommendation: str,
     aggregate_event_type: str,
 ) -> None:
+    base_commit = _init_git_base(tmp_path)
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
@@ -1016,7 +1069,11 @@ def test_flow_discovery_fanout_preserves_gap_tasks_for_incremental_adoption(
                     "claim_paths": ["web/src/core/**", "tests/test_web_core.py"],
                     "acceptance": ["web core behavior is covered"],
                     "verify_commands": ["uv run pytest tests/test_web_core.py"],
-                    "source_refs": ["reports/CANGJIE/issue-gap.json"],
+                    "base_commit": base_commit,
+                    "source_refs": [
+                        "reports/CANGJIE/issue-gap.json",
+                        f"git:{base_commit}",
+                    ],
                 }],
             },
         },
@@ -1724,6 +1781,7 @@ def test_verify_fanout_success_immediately_requests_module_parity_scan(
 def test_module_parity_scan_completed_with_gaps_amends_task_map(
     tmp_path: Path,
 ) -> None:
+    base_commit = _init_git_base(tmp_path)
     state_dir, log, transport, orch = _state(tmp_path)
     task_map_ref = _write_base_task_map(state_dir)
     TaskStore(state_dir / "kanban.json").add(Task(
@@ -1753,9 +1811,10 @@ def test_module_parity_scan_completed_with_gaps_amends_task_map(
                 "owner_role": "dev",
                 "claim_paths": ["web/src/**", "packages/web-adapter/**"],
                 "acceptance": ["WebChat reaches Cangjie runtime"],
-                "verify_commands": ["npm run test:e2e:webchat"],
-                "source_refs": ["hermes-agent/web"],
-            }],
+                    "verify_commands": ["npm run test:e2e:webchat"],
+                    "base_commit": base_commit,
+                    "source_refs": ["hermes-agent/web", f"git:{base_commit}"],
+                }],
         },
     )])
 
@@ -2244,7 +2303,7 @@ def test_gap_plan_ready_without_gap_tasks_fails_closed(tmp_path: Path) -> None:
     state_dir, log, _transport, orch = _state(tmp_path)
     task_map_ref = _write_base_task_map(state_dir)
 
-    decision = orch.run_once(events=[ZfEvent(
+    source = ZfEvent(
         id="gap-plan-empty",
         type="gap_plan.ready",
         actor="zf-cli",
@@ -2256,9 +2315,17 @@ def test_gap_plan_ready_without_gap_tasks_fails_closed(tmp_path: Path) -> None:
             "task_map_ref": task_map_ref,
             "gap_tasks": [],
         },
-    )])[0]
+    )
+    decision = orch.run_once(events=[source])[0]
+    replayed_orch = Orchestrator(
+        state_dir,
+        _config(state_dir),
+        _transport,
+    )  # type: ignore[arg-type]
+    repeated = replayed_orch.run_once(events=[source])[0]
 
     assert decision.action == "block"
+    assert repeated.action == "noop"
     failed = [event for event in log.read_all() if event.type == "task_map.amend.failed"]
-    assert failed
+    assert len(failed) == 1
     assert failed[-1].payload["reason"] == "gap_plan.ready contains no gap_tasks"

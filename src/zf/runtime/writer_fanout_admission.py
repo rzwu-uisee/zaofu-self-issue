@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.task_map import task_verification_commands
+from zf.runtime.task_map_successor import (
+    task_map_successor_base_commit,
+    task_map_supersedes_task_ids,
+)
 from zf.runtime.verification_commands import validation_with_commands
 from zf.runtime.task_contract_normalize import (
     canonical_verification_tiers,
@@ -31,6 +36,7 @@ class LoadedWriterTaskMap:
     pdd_id: str = ""
     wave: int | None = None
     requested_task_ids: list[str] = field(default_factory=list)
+    completed_task_ids: list[str] = field(default_factory=list)
     is_replan: bool = False
     dispatch_base_commit: str = ""
     plan_artifact_package_id: str = ""
@@ -74,6 +80,40 @@ class WriterTaskMapPolicyError(ValueError):
         )
         self.errors = list(errors)
         self.task_items = list(task_items)
+
+
+def writer_task_dispatch_base_commit(
+    task_item: dict[str, Any],
+    *,
+    fallback: str = "",
+) -> str:
+    """Resolve the immutable checkout base for one admitted writer task."""
+
+    return (
+        task_map_successor_base_commit(task_item)
+        or str(task_item.get("dispatch_base_commit") or "").strip()
+        or str(fallback or "").strip()
+    )
+
+
+def writer_fanout_dispatch_base_commit(
+    task_items: list[dict[str, Any]],
+    *,
+    fallback: str = "",
+) -> str:
+    """Resolve the single candidate base shared by a writer fanout."""
+
+    task_bases = list(dict.fromkeys(
+        base
+        for item in task_items
+        if (base := task_map_successor_base_commit(item))
+    ))
+    if len(task_bases) > 1:
+        raise ValueError(
+            "writer fanout tasks declare conflicting base_commit values: "
+            + ", ".join(task_bases)
+        )
+    return task_bases[0] if task_bases else str(fallback or "").strip()
 
 
 def bind_writer_task_dispatch_owner(
@@ -192,6 +232,7 @@ def load_writer_task_map(
                 + "; ".join(task_map_validation.errors)
             )
     all_items = writer_task_items(data)
+    validate_writer_task_bases(all_items, project_root=project_root)
     policy_errors = writer_task_map_policy_errors(
         all_items,
         candidate_quality_source=candidate_quality_source,
@@ -200,7 +241,17 @@ def load_writer_task_map(
     if policy_errors:
         raise WriterTaskMapPolicyError(policy_errors, all_items)
     requested_task_ids = _string_list(payload.get("task_ids"))
+    completed_task_ids = _string_list(payload.get("completed_task_ids"))
     wave = _optional_int(payload.get("wave"))
+    event_resume_scope = str(payload.get("resume_scope") or "").strip()
+    task_map_resume_scope = str(data.get("resume_scope") or "").strip()
+    resume_scope = task_map_resume_scope or event_resume_scope
+    requested_task_ids = _canonical_replan_task_ids(
+        data=data,
+        task_items=all_items,
+        requested_task_ids=requested_task_ids,
+        resume_scope=resume_scope,
+    )
     items = all_items
     if requested_task_ids:
         allowed = set(requested_task_ids)
@@ -215,7 +266,6 @@ def load_writer_task_map(
     elif wave is not None:
         items = [item for item in all_items if _optional_int(item.get("wave")) == wave]
     validate_writer_task_items(items)
-    resume_scope = str(payload.get("resume_scope") or "").strip()
     if pipeline_spec is not None and not (
         resume_scope == "gap_tasks_only" and requested_task_ids
     ):
@@ -241,6 +291,12 @@ def load_writer_task_map(
     feature_id = str(payload.get("feature_id") or data.get("feature_id") or pdd_id or "").strip()
     source_refs = data.get("source_refs") if isinstance(data.get("source_refs"), dict) else {}
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    task_map_dispatch_base = str(
+        data.get("target_commit")
+        or metadata.get("target_commit")
+        or payload.get("dispatch_base_commit")
+        or ""
+    ).strip()
     return LoadedWriterTaskMap(
         task_items=items,
         task_map_ref=task_map_ref,
@@ -254,18 +310,17 @@ def load_writer_task_map(
         pdd_id=str(payload.get("pdd_id") or pdd_id or feature_id or "").strip(),
         wave=wave,
         requested_task_ids=requested_task_ids,
+        completed_task_ids=completed_task_ids,
         is_replan=bool(
             payload.get("rework_of")
             or payload.get("rework_attempt")
             or payload.get("replan")
             or payload.get("replan_classification")
         ),
-        dispatch_base_commit=str(
-            data.get("target_commit")
-            or metadata.get("target_commit")
-            or payload.get("dispatch_base_commit")
-            or ""
-        ).strip(),
+        dispatch_base_commit=writer_fanout_dispatch_base_commit(
+            items,
+            fallback=task_map_dispatch_base,
+        ),
         plan_artifact_package_id=str(
             payload.get("plan_artifact_package_id") or ""
         ).strip(),
@@ -533,6 +588,8 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             "source_keys": _source_refs_list(raw.get("source_keys")),
             "source_ref": str(raw.get("source_ref") or "").strip(),
             "source_refs": _source_refs_list(raw.get("source_refs")),
+            "base_commit": task_map_successor_base_commit(raw),
+            "supersedes_task_ids": task_map_supersedes_task_ids(raw),
             "source_excerpt": str(raw.get("source_excerpt") or "").strip(),
             "verification": verification,
             "validation": (
@@ -542,6 +599,38 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             "raw_task": dict(raw),
         })
     return _normalize_writer_task_items(items)
+
+
+def validate_writer_task_bases(
+    task_items: list[dict[str, Any]],
+    *,
+    project_root: Path,
+) -> None:
+    """Require every explicit task baseline to resolve to a local commit."""
+
+    for item in task_items:
+        task_id = str(item.get("task_id") or "<unknown>")
+        base_commit = str(item.get("base_commit") or "").strip()
+        if not base_commit:
+            continue
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{base_commit}^{{commit}}"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        full_commit = resolved.stdout.strip()
+        if resolved.returncode != 0 or not full_commit:
+            raise RuntimeError(
+                f"writer fanout task {task_id} base_commit "
+                f"{base_commit!r} is not a local commit"
+            )
+        if full_commit.lower() != base_commit.lower():
+            raise RuntimeError(
+                f"writer fanout task {task_id} base_commit must be "
+                "the full immutable commit id"
+            )
 
 
 def _normalize_writer_task_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -795,6 +884,55 @@ def _string_list(value: Any) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _canonical_replan_task_ids(
+    *,
+    data: dict[str, Any],
+    task_items: list[dict[str, Any]],
+    requested_task_ids: list[str],
+    resume_scope: str,
+) -> list[str]:
+    """Resolve stale feedback ids to an explicit gap-only successor map.
+
+    Candidate replan triggers retain the failed generation's task ids as
+    diagnosis context. A synth may replace that generation with new task ids;
+    those old ids must not become writer dispatch selectors. Only a task map
+    that explicitly declares ``gap_tasks_only`` may replace a stale selection,
+    and the replacement must either declare its ids or consist entirely of
+    mechanically anchored successor tasks. All other mismatches remain
+    fail-closed in ``load_writer_task_map``.
+    """
+
+    if not requested_task_ids or resume_scope != "gap_tasks_only":
+        return requested_task_ids
+    available_ids = {
+        str(item.get("task_id") or "").strip()
+        for item in task_items
+        if str(item.get("task_id") or "").strip()
+    }
+    if set(requested_task_ids) <= available_ids:
+        return requested_task_ids
+
+    map_task_ids = _string_list(data.get("task_ids")) or _string_list(
+        data.get("gap_task_ids")
+    )
+    if map_task_ids:
+        return (
+            map_task_ids
+            if set(map_task_ids) <= available_ids
+            else requested_task_ids
+        )
+
+    successor_ids = [
+        str(item.get("task_id") or "").strip()
+        for item in task_items
+        if str(item.get("task_id") or "").strip()
+        and task_map_supersedes_task_ids(item)
+    ]
+    if successor_ids and len(successor_ids) == len(task_items):
+        return successor_ids
+    return requested_task_ids
 
 
 def _source_refs_list(value: Any) -> list[str]:

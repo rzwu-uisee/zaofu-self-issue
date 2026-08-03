@@ -1,265 +1,177 @@
-# Web、观测与 E2E
+# Web Dashboard 使用指南
 
-> 适用对象: 需要在浏览器看 Kanban/runtime projection,或运行真实/脚本化 E2E 的操作者。
+[English](06-web-observability-e2e.en.md) · [手册首页](00-index.md)
 
-## 1. 启动 Web Dashboard
+> 面向使用 ZaoFu 管理 Project、Task、Workflow、Agent 和交付证据的操作者。
+> 浏览器测试、真实 Provider smoke 与发布验证已拆到[维护者验证指南](operations/web-maintainer-validation.md)。
 
-安装依赖:
+## 1. 启动与选择 Project
+
+安装依赖并使用 canonical launcher：
 
 ```bash
 uv sync --extra dev --extra web
+tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```
 
-本地访问:
+launcher 统一处理 Web build、action token、Workspace/provider 环境、Codex headless sandbox、
+tmux 和重启。只在可信网络为了容器或远程浏览器改用 `--host 0.0.0.0`。
 
-```bash
-tools/start-webkanban.sh \
-  --host 127.0.0.1 \
-  --port 8001
-```
-
-给 Docker Playwright 或局域网测试访问:
-
-```bash
-tools/start-webkanban.sh \
-  --host 0.0.0.0 \
-  --port 5175
-```
-
-`tools/start-webkanban.sh` 是可信本地 WebKanban 的 canonical launcher。它统一
-处理 Web build、action token、Workspace/provider 环境、Codex headless sandbox
-策略、tmux 和重启。只在可信网络使用 `0.0.0.0`。
-
-如果只需调试另一个 worktree 的 state，可以使用低层 `zf web` 入口:
-
-```bash
-uv run zf web \
-  --state-dir /tmp/zaofu-run/.zf \
-  --host 0.0.0.0 \
-  --port 5175
-```
-
-直接 `zf web` 只继承当前 shell 和目标 Project `.env`，不会自动采用 launcher
-的 trusted-local sandbox 默认值。需要运行 Channel / Kanban Agent 的真实 Codex
-时，优先使用 launcher；否则必须先修复宿主 sandbox，或显式配置
-`ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX`。
-
-### 1.1 从 Workspace 创建 Project
-
-需要创建或注册 Project 时，以 workspace shell 启动：
-
-```bash
-tools/start-webkanban.sh \
-  --host 127.0.0.1 \
-  --port 8001 \
-  --workspace-only
-```
-
-launcher 会复用或创建 action token，并在启动输出中给出 token。固定 token 可以写入
-未提交的仓库 `.env`，变量名为 `ZF_WEB_ACTION_TOKEN`。
-
-常用生命周期命令：
+常用生命周期：
 
 ```bash
 tools/start-webkanban.sh --port 8001 --status
-tools/start-webkanban.sh --port 8001 --stop
 tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
+tools/start-webkanban.sh --port 8001 --stop
 ```
 
-首次引导只完成 Provider、Environment、Access 和 Ready，不创建 Project。
-`Add Project` 先对服务端路径执行 Inspect，再按磁盘真相 open、register、
-initialize state、initialize Project 或 blocked。只有 initialize Project 显示
-Project Name、Project Brief、Stack、Primary Provider 和 Mixed team；不再选择 YAML、
-Controller、kind、lane 或 role。
+如果只需查看指定 state dir，可以使用低层入口：
 
-![Add/Open Project 当前创建表单](assets/project-add-open-current.png)
+```bash
+uv run zf web --state-dir /tmp/zf-run/.zf --host 127.0.0.1 --port 8002
+```
 
-Initialize 只创建/注册 Project，不会创建 Task 或启动 Workflow。完整边界与步骤见
-[20 Project 创建、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)。
+低层入口不会补齐 launcher 的 trusted-local provider 环境。需要 Channel/Kanban Agent 的真实
+Provider 操作时优先使用 launcher。
 
-## 2. 运行中观测
+页面顶部先选择 Project。Project 是所有 Task、Run、Channel 和 projection 的作用域；切换后
+确认 Project 名称、Live 状态和 URL query 同时变化，再开始操作。
 
-当前 Web/API 是 project-scoped dashboard。左侧主要入口包括:
+## 2. Workspace：完成日常操作
 
-| 页面 | 用途 |
+左侧 Workspace 是“我要处理什么”：
+
+| 页面 | 主要用途 | 关键判断 |
+|---|---|---|
+| Overview | Project 目标、任务流、成本和健康摘要 | 当前最重要的风险/进度是什么 |
+| Inbox | 需要 owner 裁决的 proposal、异常和通知 | 哪个项目语义或动作需要人决定 |
+| Tasks | Kanban、Task contract 和详情 | Goal/PRD/Issue/Refactor 现在在哪一步 |
+| Workflows | Needs decision、Active、History | 哪个 exact proposal 可批准，哪个 Run 在执行 |
+| Agents | role/provider/worker、usage、cost、skills、context | 谁在做什么，是否 stuck 或接近上下文边界 |
+| Automations | Daily/Weekly/Project Monitor 等计划任务 | 自动化何时触发、最近一次是否成功 |
+
+推荐操作顺序：Overview 识别状态 -> Inbox 处理必要裁决 -> Tasks 进入具体交付 -> Workflows
+确认启动或运行状态 -> Agents 只在需要定位执行者时下钻。
+
+## 3. Tasks：从看板读到证据
+
+Tasks 默认展示 Kanban。选择一张 Task 后，详情按以下层次阅读：
+
+| Tab | 查看内容 |
 |---|---|
-| Overview | 项目级摘要、任务流、关键健康指标 |
-| Inbox | 需要 operator 关注的消息/告警 |
-| Channels | channel 会话、成员和流式回复 |
-| Tasks | Kanban board 与 task inspector |
-| Agents | worker/role/provider 状态、上下文和 token 摘要 |
-| Automations | Daily Brief、Weekly Review、Project Monitor 等自动化 |
-| Delivery | feature/task delivery spine、stage、fanout 和 ship readiness |
-| Trace / Graph / Loop | 事件因果、执行图、autoresearch/cycle trace |
-| Observability | events、logs、runtime diagnostics、failed/blocked 投影 |
-| Settings | Web/runtime 设置和 action token 状态 |
+| Summary | objective、contract、owner、依赖、当前 stage/status |
+| Activity | Task timeline、attempt、dispatch、rework 和关键事件 |
+| Evidence | artifact refs、测试、git evidence、verdict 和完成依据 |
+| Advanced | 原始合同、诊断、引用和低层运行时信息 |
 
-Web 默认以读为主。创建 task、channel member、maintenance prepare、runtime resume 等写操作
-必须走 token/passcode/trusted-session gated controlled action path;它们会落审计事件,
-不能绕过 kernel helper 直接写业务真相。
+Task 卡片状态不是完成证明。至少把 Goal/Claim、当前 attempt、required artifacts、verification、
+terminal verdict 和 git evidence 串起来。需要全链路时从 Task 进入 Delivery 或执行：
 
-终端观测:
+```bash
+uv run zf kanban show TASK-ID
+uv run zf task trace TASK-ID
+uv run zf runs for-task TASK-ID
+```
+
+新建 Task、选择 Workflow、批准 proposal 是不同动作。Task 存在不代表 Workflow 已启动；
+Plan/route 选定也不等于 Approve。
+
+## 4. Workflows：只批准 exact proposal
+
+Workflows 将生命周期分为：
+
+- **Needs decision**：等待 operator 查看 objective、route、parameters 和风险；
+- **Active**：已批准的 Run、当前 stage 和等待原因；
+- **History**：已关闭、拒绝、失败或被替换的 proposal/Run。
+
+批准前核对 Task、route、objective、input refs 和参数是否与当前需求一致。Approve 只能绑定 exact
+proposal；修改任何语义后应生成新 proposal。外部副作用必须通过 action token/trusted session
+的受控路径，Provider Agent 不能接触 token。
+
+## 5. Delivery：读完整 Workflow
+
+Monitoring 下的 **Delivery** 以 Feature/交付为作用域，页内有三个 mode：
+
+| Mode | 回答的问题 |
+|---|---|
+| Overview | 当前 ship readiness、Task/Run/Loop 总览和主要 blocker 是什么 |
+| Runs | stage heatmap、Run graph、attempt、span 和 fanout/fan-in 如何推进 |
+| Graph | Goal、Task、stage、依赖和证据之间如何连接 |
+
+先选择正确 Feature，再看状态/ship/drift/replan 指标。Runs 中区分 transport delivery、Worker result、
+gate verdict 和 closure；它们不是同一件事。Graph 用来找断链，不用节点数量代替完成质量。
+
+Goal Dossier 把 Goal -> Claim -> Task -> Evidence -> Verdict 汇总为 owner 可验收结论。关闭交付前，
+重点查看 mandatory Claim 覆盖、terminal Task、缺失 evidence、最新 generation 和 owner decision。
+
+## 6. Loop 与 Observability
+
+**Loop** 展示系统如何围绕反馈收敛，而不只是事件列表。它可包括 plan/execute/verify/rework、
+GAN/critic、recovery、autoresearch 或 profile 定义的其他 loop。判断重点是每轮 gap 是否缩小、
+证据是否增加，以及是否命中 no-progress/budget/replan 边界。
+
+**Observability** 用于低层诊断：
+
+| Tab | 用途 |
+|---|---|
+| Traces | 按 Task/actor/type/status/duration 找因果链 |
+| Events | 查看 append-only occurrence 与 seq 窗口 |
+| Logs | 查看运行时和 Provider 日志投影 |
+| Runs / Fanouts | 检查 Run、child、barrier 和聚合状态 |
+| Candidates / Repair | 查看诊断候选与受控修复建议 |
+| Integration | 查看 Feishu/外部投影队列与失败 |
+| Raw | 必要时核对原始 projection payload |
+
+正常验收优先使用 Tasks、Delivery 和 Goal Dossier；Observability 用于解释“为什么没继续”或
+“哪个 projection/attempt 出了问题”。
+
+![同一 playgroud 交付在 Delivery、Graph、Loop 与 Observability 间的观测路径](assets/observe-delivery.webp)
+
+## 7. Channels：讨论不等于执行
+
+从 Project rail 的 Channel 入口打开群组协作。Channel 支持人、Provider Agent、persona、
+owner delegate 和 observer 在同一上下文中澄清模糊需求。
+
+- 普通消息保持 conversation，不自动 fanout；
+- 显式 Discuss 才进入 multi-lens relay/critique/synthesis；
+- Finalize 生成 draft/canonical candidate，Owner confirm 才成为 Task/PRD 来源；
+- 只有具备 `propose_workflow` 能力的 exact leader 可以提出 Workflow handoff；
+- handoff 仍需独立审批，不会因讨论结束自动执行。
+
+完整合同见 [Channel 协作](15-channel-collaboration.md)和
+[Channel 到 PRD](workflows/channel-to-prd.md)。
+
+## 8. Live、Degraded 与写操作
+
+Web 是读取投影和受控动作表面，不是 canonical state owner：
+
+- **Live**：SSE/轮询与当前 Project 正常同步；
+- **Reconnecting**：保留已知快照，等待补齐 gap；
+- **Degraded**：明确显示 projection/sidecar 缺失，不把旧数据伪装成实时；
+- freshness 不满足时，先执行 projection/refs/doctor，再决定是否恢复 Run。
+
+创建 Task、Channel member、Workflow apply、maintenance prepare、runtime resume 等写操作必须走
+token/passcode/trusted-session gated controlled action，并留下审计事件。UI 成功 toast 之后仍应从
+Task/Event/Workflow readback 确认动作已生效。
+
+## 9. 交付签收路线
+
+```text
+Tasks: contract and current state
+  -> Delivery: stages, attempts, and dependencies
+  -> Goal Dossier: Claim coverage and evidence
+  -> Inbox: unresolved owner decisions
+  -> Observability: only when diagnosis is needed
+```
+
+终端交叉核验：
 
 ```bash
 uv run zf kanban --board
-uv run zf events --last 50
-uv run zf watch --follow
-uv run zf status --workers
+uv run zf task trace TASK-ID
+uv run zf refs verify
 uv run zf metrics snapshot
+uv run zf doctor
 ```
 
-针对单个 task:
-
-```bash
-uv run zf kanban show <task_id>
-uv run zf task trace <task_id>
-uv run zf runs for-task <task_id>
-```
-
-## 3. Docker Playwright
-
-Web Playwright 测试默认用 Docker,不要在宿主机安装浏览器。先在宿主执行
-`npm --prefix web ci` 或确认 `web/node_modules` 已准备好；浏览器安装必须有超时：
-
-```bash
-docker run --rm --network host \
-  --user "$(id -u):$(id -g)" \
-  --entrypoint bash \
-  -v "$PWD:/work" \
-  -w /work/web \
-  -e PLAYWRIGHT_BROWSERS_PATH=0 \
-  -e ZF_WEB_BASE_URL=http://127.0.0.1:5175 \
-  mcp/playwright:latest \
-  -lc 'set -euo pipefail; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test --project=chromium --workers=1'
-```
-
-前置条件:
-
-- ZaoFu Web/API 已在 `0.0.0.0:5175` 或对应端口启动。
-- Docker 支持 `--network host`。
-- 当前 `$PWD` 是 ZaoFu repo 根目录。
-
-## 4. Scripted E2E
-
-脚本化 E2E 不调用真实 provider,用于验证 deterministic kernel 和 pipeline:
-
-```bash
-uv run python -m tests.e2e.robustness_suite --smoke
-uv run python -m tests.e2e.robustness_suite
-```
-
-也可以直接运行 pytest 子集:
-
-```bash
-uv run pytest \
-  tests/e2e/test_scripted_runner.py \
-  tests/e2e/test_robustness_suite.py \
-  tests/e2e/test_w5_phase_report.py \
-  -q
-```
-
-## 5. 真实 Codex Smoke
-
-真实 Codex smoke 会启动 provider、tmux 和实际 worker,会消耗预算。先确认:
-
-- `codex --version` 可用。
-- `codex login` 已完成。
-- `~/.codex/sessions` 可写。
-- `examples/dev-codex-backends.yaml` validate 通过。
-- 已设置预算和超时。
-
-推荐入口:
-
-```bash
-uv run python -m tests.e2e.robustness_suite \
-  --skip-unit \
-  --skip-dry-run \
-  --include-real codex \
-  --confirm-real
-```
-
-更底层的 runner:
-
-```bash
-uv run python -m tests.e2e.run_mixed \
-  --worktree /tmp/zaofu-codex-smoke \
-  --config examples/dev-codex-backends.yaml \
-  --seed-file tests/e2e/seeds/large_dev_split_3_tasks.txt \
-  --expected-done 1 \
-  --timeout 1800 \
-  --confirm
-```
-
-真实 run 完成后:
-
-```bash
-uv run python -m tests.e2e.mixed_phase_report \
-  --state-dir /tmp/zaofu-codex-smoke/.zf
-
-uv run python -m tests.e2e.verify_real_state_web \
-  --state-dir /tmp/zaofu-codex-smoke/.zf \
-  --base-url http://127.0.0.1:5175
-```
-
-## 6. Full-stack Validation Scorecard
-
-Full-stack validation scorecard 用于把真实 E2E 的证据收敛成可审计报告。它不会启动新的
-worker，只读取已有 state，检查 issue / PRD / refactor 三类任务入口、Web dashboard
-关键投影、New Task / Kanban Agent / Channel 三条入口、Task-bound fanout Workflow
-证据，以及真实 Codex hook / usage 证据。Channel 讨论本身不应被当作直接点火证据。
-
-推荐在真实 run 后执行:
-
-```bash
-PYTHONPATH=src python -m tests.e2e.full_stack_validation \
-  --state-dir /tmp/zaofu-codex-smoke/.zf \
-  --repo-root "$PWD" \
-  --require-real-codex \
-  --require-docker \
-  --preflight-output /tmp/zf-full/preflight.json \
-  --output /tmp/zf-full/scorecard.json \
-  --markdown /tmp/zf-full/report.md
-```
-
-也可以使用包装脚本:
-
-```bash
-tests/e2e/run_real_state_web_validation.sh \
-  /tmp/zaofu-codex-smoke/.zf \
-  /tmp/zf-full
-```
-
-报告重点看 `matrix`, `fanout_trace_chain`, `codex_hook_usage`, `summary.failed`。`--require-real-codex` 会在缺少真实 Codex CLI / session / usage 证据时失败,避免把 mock 或半成品 E2E 误判为通过。
-
-## 7. Run Archive
-
-归档 live state:
-
-```bash
-uv run zf archive-run \
-  --run-id "run-$(date -u +%Y%m%d%H%M%S)" \
-  --live-state-dir /tmp/zaofu-codex-smoke/.zf \
-  --status passed
-```
-
-查看归档:
-
-```bash
-uv run zf runs list
-uv run zf runs rebuild
-```
-
-## 8. L0-L5 评估层级
-
-鲁棒性评估可按以下层级推进:
-
-| 层级 | 目标 | 常用入口 |
-|---|---|---|
-| L0 | 静态配置、schema、skill、拓扑检查 | `zf validate`, `zf skills doctor` |
-| L1 | deterministic unit/integration | `pytest tests/...` |
-| L2 | 脚本化完整流程 | `tests.e2e.scripted_runner`, `robustness_suite --smoke` |
-| L3 | 单 provider 真实 smoke | `robustness_suite --include-real codex --confirm-real` |
-| L4 | 多 worker 压力和恢复 | `tests.e2e.run_mixed`, autoresearch scenarios |
-| L5 | Web/API projection 与人工观测 | `zf web`, Docker Playwright, `verify_real_state_web` |
-
-不要跳过 L0-L2 直接烧真实 provider。真实 run 失败后,先归档 evidence,再生成 backlog 和修复任务。
+浏览器功能验证和真实 E2E 见[Web 维护与 E2E 验证](operations/web-maintainer-validation.md)。

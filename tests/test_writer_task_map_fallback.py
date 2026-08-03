@@ -10,6 +10,7 @@ loader must fall back to the canonical pdd-scoped artifact.
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 from zf.core.events.model import ZfEvent
@@ -187,6 +188,71 @@ def test_gap_only_resume_loads_requested_task_from_full_task_map(tmp_path):
     )
 
     assert [item["task_id"] for item in loaded.task_items] == ["CANGJIE-GAP-001"]
+
+
+def test_gap_only_successor_map_rebinds_stale_rework_task_id(tmp_path):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    state_dir = tmp_path / ".zf"
+    path = state_dir / "artifacts" / "PRD" / "task_map.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "schema_version": "task-map.v1",
+            "feature_id": "PRD",
+            "resume_scope": "gap_tasks_only",
+            "tasks": [{
+                "task_id": "RELEASE-R7",
+                "title": "Continue verified release closure",
+                "allowed_paths": ["scripts/release/**"],
+                "supersedes_task_ids": ["RELEASE-R5"],
+                "base_commit": head,
+                "source_refs": [f"git:{head}"],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    event = ZfEvent(
+        type="task_map.ready",
+        payload={
+            "pdd_id": "PRD",
+            "task_map_ref": ".zf/artifacts/PRD/task_map.json",
+            "resume_scope": "failed_children_only",
+            "task_ids": ["RELEASE-R2"],
+            "rework_of": "evt-old-contract-blocker",
+        },
+    )
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map="${task_map_ref}"),
+        event=event,
+        pdd_id="PRD",
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    assert loaded.requested_task_ids == ["RELEASE-R7"]
+    assert [item["task_id"] for item in loaded.task_items] == ["RELEASE-R7"]
 
 
 def test_gap_only_resume_skips_global_lane_pipeline_root_owner_gate(tmp_path):

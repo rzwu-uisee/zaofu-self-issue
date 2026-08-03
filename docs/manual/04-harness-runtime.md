@@ -1,112 +1,132 @@
 # Harness 运行流程
 
-> 适用对象: 需要理解 ZaoFu 如何从用户目标推进到代码、review、test、judge 和 done 的操作者。
+> 适用对象：需要理解 ZaoFu 如何把已批准目标推进为任务、执行、证据和关闭结论的操作者。
+> 当前权威边界以代码、测试和本手册描述的 Product Flow / Legacy safe-team 合同为准。
 
-## 1. 三层架构
+## 1. 先区分事实层与执行模式
 
-ZaoFu 当前按三层运行:
+ZaoFu 不是“一个 Agent 指挥其他 Agent”的单层系统。当前运行时按事实责任分层：
 
-| 层 | 责任 | 示例 |
+| 层 | 负责什么 | 合法写入路径 |
 |---|---|---|
-| Layer 1 deterministic kernel | 解析事件、推进状态、执行门禁、生成 briefing、检测 stuck/orphan/recycle | `src/zf/runtime/`、`src/zf/core/` |
-| Layer 2 orchestrator agent | 拆解目标、分配任务、处理返工、选择下一步 | `roles: orchestrator` |
-| Layer 3 worker agents | 设计、实现、review、测试、最终判定 | `arch/dev/review/test/judge` |
+| 控制平面 | 拓扑、角色、策略、预算、`project.state_dir` | `zf.yaml` |
+| 发生账本 | occurrence、顺序、因果、判定、引用 | `EventWriter` / `EventLog` |
+| 当前状态 | Task、Feature、Session、RoleSession、TaskAttempt | 对应 Store 与 Kernel action |
+| 语义与证据 | plan、Task Map、矩阵、报告、大 payload | 原子 artifact/sidecar writer + ref/digest |
+| 查询投影 | SQLite、Web、Trace、Graph、Loop、摘要 | projector/read model；可诊断、可重建 |
 
-Kernel 管 truth 和机械状态转移;agent 通过事件和 CLI 表达意图。
+Worker 只能报告事实、证据或动作意图，不能直接修改 Kernel 管理的 canonical state。
+Web、Channel、Feishu 和 Kanban Agent 同样不能旁路这些入口。
 
-## 2. 任务链路
+ZaoFu 同时支持两种明确配置的编排模式：
 
-经典代码任务通常按以下链路推进:
+| 模式 | 快乐路径 owner | `orchestrator` role 的责任 |
+|---|---|---|
+| Product Flow | Kernel 根据 topology/profile 做机械调度 | 低频异常分诊、replan/proposal；不直接写状态 |
+| Legacy safe-team | Layer 2 Agent 可做语义拆解、合同合成和显式 assign | 兼容早期 team；必须由 profile 明确选择 |
+
+新建 Issue、PRD、Refactor 和长期交付流程默认按 Product Flow 理解。不要把 legacy safe-team
+中的 Layer 2 行为外推成全局规则，也不要把 Python `Orchestrator` 与配置中的
+`orchestrator` role Agent 混为一谈。
+
+## 2. Product Flow 的主链路
 
 ```text
-user.message
-  -> feature.created / task.created
-  -> task.assigned(dev)
-  -> dev.build.done
-  -> task.assigned(review)
-  -> review.approved 或 review.rejected
-  -> task.assigned(test)
-  -> test.passed 或 test.failed
-  -> task.assigned(judge)
-  -> judge.passed 或 judge.failed
-  -> discriminator.passed
-  -> task.status_changed(done)
+approved request / typed event / artifact
+  -> run admission
+  -> Kernel 解析 workflow topology 与当前 readiness
+  -> TaskAttempt / dispatch token 持久化
+  -> transport 投递 briefing
+  -> Worker 产出 result、artifact 和 evidence
+  -> Kernel 做 schema、状态、证据存在性和安全门禁
+  -> 下一 stage / fanout / barrier / bounded rework
+  -> terminal predicate + closure verdict
 ```
 
-失败事件会触发返工:
+这条链路有三个关键边界：
 
-| 失败事件 | 默认返工方向 |
-|---|---|
-| `review.rejected` | `dev` |
-| `test.failed` | `dev` |
-| `judge.failed` | `dev` |
-| `gate.failed` | `dev`,可由 `workflow.rework_routing` 覆盖 |
-| `discriminator.failed` | `dev`,可由 task contract 或 workflow 覆盖 |
+1. Agent/skill/prompt 决定项目语义、拆解方法、验收质量和方案判断。
+2. Kernel 决定已声明拓扑中的 readiness、WIP、lease、dispatch、机械 gate 和状态迁移。
+3. 异常中的语义判断先形成 proposal；只有 `ControlledActionService` 才能应用批准动作。
 
-设计评审场景可把 `gate.failed` 或 critic rejection 路由回 `arch`。
+![从 Project 到可验证交付与受控恢复的动态闭环](assets/concept-delivery-control-loop.webp)
 
-这条链不是唯一合法拓扑。当前实现支持 `workflow.stages` / `workflow.pipelines`、
-`static_gate.*`、`impl.child.*`、`verify.child.*`、fanout/fan-in、reader/writer 分工,
-以及 issue / PRD / refactor flow。实际阶段、terminal predicate 和返工路由以
-`zf.yaml` 与 `zf workflow inspect` 的推导结果为准。
+实际 stage、pipeline、fanout、terminal predicate 和返工路由，以 `zf.yaml` 及
+`zf workflow inspect` 的解析结果为准，不以某份手册中的固定 dev-review-test-judge 链为准。
 
-## 3. 防止提前宣告完成
+## 3. 启动、Watcher 与唤醒
 
-ZaoFu 不以 agent 口头说“完成”为终点。done 需要满足:
+`zf start` 加载 `zf.yaml` 和解析后的 `project.state_dir`，启动配置的 tmux/stream-json
+transport 与 sidecar，然后由 `EventWatcher` 跟随 `events.jsonl`：
 
-- task 已经历合法阶段事件链。
-- dev/verify/judge 或配置中的 terminal predicate 已满足。
-- 严格配置下通过 contract discriminator。
-- scope、architecture、promoted rule、quality gate 等已按配置通过。
-- task done evidence 可追溯到事件链和 git evidence。
-
-`zf kanban move <task_id> done` 也会检查前置事件。在经典链路下,缺少
-`judge.passed`、`test.passed`、`review.approved` 或 `discriminator.passed` 时会被拒绝
-并写入非法迁移事件。自定义 workflow 下,检查项按当前拓扑和 terminal predicate 收敛。
-
-## 4. Contract 与 Dispatch Token
-
-严格 harness 会要求 task contract:
-
-- `behavior`: 目标行为。
-- `verification`: 如何验证。
-- `quality`: 质量要求。
-- `out_of_scope`: 明确不做什么。
-- `rework_delta`: 返工时必须说明本轮相对上一轮改变了什么。
-- `dispatch_id`: worker briefing 中的调度 token。
-
-worker 完成事件必须能对上 dispatch token。这样可以避免旧 session、重复事件、手工事件或上下文漂移把任务误关。
-
-## 5. Watcher 与 Wake Patterns
-
-`zf start` 会启动 `EventWatcher`。它做两件事:
-
-- 新事件命中 wake pattern 时,调用 orchestrator 处理。
-- 即使没有事件,也周期性 tick,驱动 stuck/orphan/context recycle 扫描。
-
-这就是为什么真实长任务推荐保持 `zf start` 前台运行。`--foreground` 现在只是兼容旧命令的 no-op alias;
-只有 `--no-watch` 会明确选择不长期运行 watcher。只启动 tmux 而不运行 watcher,
-worker 可能完成了但 pipeline 不继续推进。
-
-可观察命令:
+- wake-worthy 事件触发 `Orchestrator.run_once()`；
+- 周期 tick 检查 stalled worker、orphan task、context pressure 和恢复请求；
+- projection/sidecar 按各自合同刷新，但不能成为第二控制面。
 
 ```bash
+uv run zf start
 uv run zf events --last 30
 uv run zf watch --follow
 uv run zf status --workers
 ```
 
-## 6. Stuck、Orphan 与 Recovery
+`--foreground` 是兼容旧命令的 no-op alias；`--no-watch` 才会明确关闭长期 watcher。
+只启动 tmux 而没有 watcher，Worker 即使已返回结果，后续 stage 也可能不会被消费。
 
-ZaoFu 处理三类长任务风险:
+## 4. Admission、Attempt 与 Dispatch Token
 
-| 风险 | 触发方式 | 处理方式 |
+调度前，Kernel 至少核对：
+
+- run 是否获准、当前任务依赖是否满足；
+- stage/role/worker 是否来自已解析拓扑；
+- WIP、预算、并发、workspace 和安全策略是否允许；
+- Task contract、required artifacts 和输入引用是否完整；
+- TaskAttempt/lease 是否已持久化，dispatch 是否仍有效。
+
+每次投递都有独立 `dispatch_id`。Worker 结果必须与当前 attempt/token 对齐，避免旧 session、
+重放事件或重复回调误关任务。Provider transport 成功不等于语义完成；attempt delivery、
+Worker result、gate verdict 和 task closure 是不同阶段。
+
+## 5. 证据门禁与完成定义
+
+ZaoFu 不以 Agent 的“已完成”文本作为终点。关闭至少需要：
+
+- 合法的 stage/attempt 事件链；
+- 当前 topology 的 terminal predicate 已满足；
+- required artifact、test result、git evidence 和 digest/ref 可解析；
+- mechanical gates 与配置的 discriminator 已通过；
+- Goal/Claim/Task/Evidence 覆盖可解释，没有未裁决 blocker。
+
+`quality_gates` 检查命令或机械事实；discriminator 检查合同证据是否足够。语义验收方法和
+产品 parity 应由 skill/prompt/Agent artifact 表达，不能为了某个项目硬编码进 runtime。
+
+直接执行 `zf kanban move <task_id> done` 也必须通过当前 topology 的 closure 检查。缺少证据时，
+Kernel 会拒绝迁移并记录可审计事件。
+
+## 6. Fanout、Barrier 与有界返工
+
+Product Flow 可以声明串行 stage、fanout/fan-in、lane、barrier、reader/writer 分工，以及
+Issue/PRD/Refactor 的自定义 topology。Kernel 只对声明后的机械依赖做调度。
+
+返工目的地按当前合同和 topology 推导，典型优先级为：
+
+1. 当前 Task contract 的合法 rework 指示；
+2. `workflow.rework_routing`；
+3. profile 的兼容默认值。
+
+`max_rework_attempts`、no-progress detector 和 budget gate 防止无限循环。超过边界后应进入
+owner-visible escalation、replan proposal 或受控恢复，而不是静默重复相同 prompt。
+
+## 7. 长任务恢复与上下文继承
+
+| 风险 | 运行时信号 | 处理方向 |
 |---|---|---|
-| worker stuck | pane/session 长时间无输出或无进展 | 写入 stuck 事件,尝试恢复/重启/重新投递 |
-| task orphan | task 已 in-progress 但长时间没有阶段完成事件 | warning 后 escalated,可 requeue |
-| context 过大 | provider 上下文使用超过阈值 | warning 先 checkpoint;compact 阈值后压缩/回收;hard cap 会阻止新 dispatch |
+| Worker 无进展 | stuck/silent-stall/no-progress | checkpoint、retry、requeue 或语义分诊 |
+| Task 已运行但无有效结果 | orphan/lease expiry | 校验 attempt 后恢复或升级 |
+| 上下文接近上限 | context warning/compact/hard-cap | 先写 artifact/StatePacket，再 compact 或换 session |
+| 当前计划不再适用 | goal gap/replan required | 产出 replan proposal，批准后受控应用 |
 
-相关 role 字段:
+常用 role 配置包括：
 
 ```yaml
 stuck_threshold_seconds: 180
@@ -116,65 +136,26 @@ context_window_tokens: 200000
 context_warning_threshold: ${ZF_CONTEXT_WARNING_THRESHOLD:-0.6}
 context_compact_threshold: ${ZF_CONTEXT_COMPACT_THRESHOLD:-0.7}
 context_hard_cap: ${ZF_CONTEXT_HARD_CAP:-0.9}
-drain_hold_seconds: 180
-```
-
-`zf.yaml` 仍是唯一控制面。`zf.yaml` 同目录 `.env` 只提供变量值,例如
-`ZF_CONTEXT_COMPACT_THRESHOLD=0.75`;未被 `zf.yaml` 引用的 `.env` 值不会改变
-runtime 行为。旧字段 `recycle_threshold` / `recycle_hard_cap` 仍兼容。
-
-## 7. Bounded Rework
-
-每个 role 可设置:
-
-```yaml
 max_rework_attempts: 3
 ```
 
-当同一 task 的 review/test/judge/gate/discriminator 失败超过上限,会产生 capped/escalation 类事件,避免无限循环。
+`.env` 只为 `zf.yaml` 中实际引用的变量提供值。旧字段是否兼容以 config loader 和
+`zf validate --cold-start` 为准。
 
-返工路由优先级:
+详细操作见[恢复长任务](operations/recover-long-running-run.md)和
+[上下文、交接与 Artifact](operations/context-handoff-artifacts.md)。
 
-1. task contract 中的 `rework_to`。
-2. `workflow.rework_routing`。
-3. 默认回 `dev`。
+## 8. 观测、Supervisor 与 Autoresearch
 
-## 8. Agent Telemetry
+- Provider transcript/session tailer 把工具调用、文本、usage 等转换为 `agent.*` 事件或 sidecar 引用。
+- Run Manager 管理可重试、可恢复的 run/attempt 语义；resident Agent 只能提出建议。
+- Supervisor 观察失败信号并形成 owner-visible decision，不直接 kill Worker 或手写状态。
+- Autoresearch 执行深度诊断或隔离修复候选；默认不直接应用到主线。
 
-启动时会为 provider 写入 hook settings:
+Codex/Claude hooks 只增强 telemetry，不拥有 task truth。Hooks 未授权会造成观测缺口，但不能
+据此推导代码未执行或任务已完成。
 
-- Claude: `.zf/hooks/settings.json`
-- Codex: `.codex/hooks.json`
-
-Session tailer 会把 provider session jsonl 中的工具调用、文本、usage 等转为 `agent.*` 事件,用于观测和指标统计,不需要 SDK headless 调用。
-
-如果 Codex 提示 hooks 需要 review,需要在 Codex 交互里完成 hook review,否则 hook telemetry 可能不会进入 `events.jsonl`。
-
-## 9. 质量门禁与 Discriminator
-
-`quality_gates` 是命令级 gate。`verification` 是 runtime discriminator。它们互补:
-
-- gate 检查“命令是否通过”。
-- discriminator 检查“证据是否足够、范围是否正确、是否满足 contract、是否违反架构/规则”。
-
-严格配置下,`judge.passed` 之后仍可能被 `discriminator.failed` 打回返工。这是预期行为,不是重复审核。
-
-## 10. Run Manager、Supervisor 与 Autoresearch
-
-当前 runtime tick 除了 watcher 推进,还会按配置/节流刷新若干控制面 projection:
-
-- **Run Manager**:维护 run / attempt / workflow spine 投影,做可重试、可恢复的 deterministic
-  run 管理。可选 resident agent 只能 emit 观察/建议事件,不直接改 kernel truth。
-- **Supervisor**:读取 events、kanban、role_sessions、failure signals、automation 等输入,
-  生成 supervisor projection,并可通过受控事件记录 decision、owner visible message、
-  autoresearch invocation request。它不是第二控制面,不直接 kill worker 或手写 state。
-- **Autoresearch invocation**:Supervisor/Run Manager 可以请求诊断或自修复候选。默认策略是
-  `proposal_only`、`sandbox_required: true`、`requires_owner_approval_for_apply: true`,
-  不允许直接 mainline apply。
-
-## 11. 结束一轮长任务的签收口径
-
-不要只看 agent 最后一段话。至少检查:
+## 9. 一轮交付的签收
 
 ```bash
 uv run zf kanban --board
@@ -184,10 +165,6 @@ uv run zf metrics snapshot
 uv run zf doctor
 ```
 
-签收条件:
-
-- 目标 task/feature 到达 done。
-- done 有 terminal evidence。
-- 没有未处理 fatal/blocker 事件。
-- git evidence 能定位 base/head/log/diff。
-- 必要测试和 Web/API projection 已验证。
+最终检查：Task/Feature 已按 terminal predicate 关闭；Goal Dossier 中 Claim 覆盖和证据可回读；
+没有未处理 fatal/blocker；git base/head/log/diff 可定位；必要测试、projection freshness 和
+外部副作用均有证据。Web 观察路径见[观察一次交付](operations/observe-delivery.md)。

@@ -5,10 +5,12 @@
 > Research, and delivery Workflows.
 >
 > This route was verified against the CLI, Web UI, event ledger, and real
-> browser E2E on 2026-07-30. Each animation and key screenshot is assembled
+> browser E2E on 2026-08-03. Each animation and key screenshot is assembled
 > from real Playwright interaction states; the acceptance checks also inspect
 > the API, Stores, and EventLog instead of treating screenshots as runtime
 > proof.
+> Channel currently defaults to the `conversation` product mode. Bounded
+> fanout/synthesis starts only after explicit `multi_lens` selection and Discuss.
 
 ## Completion Route
 
@@ -43,7 +45,7 @@ Prerequisites:
 Install from a source checkout and verify the CLI:
 
 ```bash
-git clone <zaofu-repository-url> /path/to/zaofu
+git clone https://github.com/uisee-ai/zaofu /path/to/zaofu
 cd /path/to/zaofu
 uv sync --extra dev --extra web --extra stream-json
 
@@ -161,7 +163,7 @@ durable tracking.
 |---|---:|---|
 | Analyze, modify code, or run tests | No | Work directly under current permission and Git rules |
 | Create a tracked work item only | No | Confirm a `Create Task` proposal |
-| Clarify or review with multiple roles | No | Choose a Channel setup Plan; ZaoFu creates and starts it |
+| Clarify or review with multiple roles | No | Choose a Channel setup Plan; creation enters natural conversation, while multi-lens work is explicit |
 | Run fixed-role deep research | Yes | Choose a Research route Plan, then Approve |
 | Run PRD/Issue/Refactor/Planning delivery | Yes | Choose an active route Plan, then Approve |
 
@@ -193,11 +195,12 @@ The canonical model behind the product term Channel Group is a runtime
 multi-role discussion:
 
 ```text
-Create a focused review Channel for the API authentication change and start the discussion.
+Create a focused review Channel for the API authentication change.
+Use natural conversation; do not fan out, create a Task, or start a Workflow automatically.
 ```
 
 The Kanban Agent returns a Channel setup Plan showing template, member roles,
-member count, and discussion rounds. Use `Chat about` to adjust the scope, then
+member count, and discussion mode. Use `Chat about` to adjust the scope, then
 select an option and click `Create & start`.
 
 ![Channel setup Plan inside the Kanban Agent](assets/quickstart-kanban-channel-plan.png)
@@ -211,11 +214,11 @@ Quick Change
   max_rounds: 4
 ```
 
-The displayed `4 rounds` is `overrides.budget.max_rounds`: the upper bound for
-automatic Channel discussion rounds. It does not guarantee four replies from
-each member, and it is not the Kanban Agent provider's `max_turns`. To change
-roles, member count, or `max_rounds`, select `Chat about`, state the new value,
-and apply the revised Plan returned by the Kanban Agent.
+The displayed `4 rounds` is `overrides.budget.max_rounds`. It limits an
+explicit bounded `multi_lens` discussion; it does not make the default
+`conversation` fan out automatically and is not the Kanban Agent provider's
+`max_turns`. To change roles, member count, mode, or budget, use `Chat about`
+and apply the revised Plan.
 
 One action then:
 
@@ -223,8 +226,9 @@ One action then:
 creates the Channel
 -> materializes template members, role context, skills, and write policy
 -> posts the original request
--> starts the template discussion mode
--> converges through the default responder/synthesizer
+-> initializes the declared product mode
+-> conversation waits for directed human/Leader interaction
+-> only explicit Discuss / multi_lens runs bounded multi-perspective work
 ```
 
 There is no second manual Channel, member invitation, or message-copying step.
@@ -265,9 +269,10 @@ and discussion state.
 ## 6. Discuss Inside the Channel Group (Recommended)
 
 A Channel thread preserves the original request, role replies, open questions,
-and synthesis. Templates can use `manual_mention`, `fanout_then_synthesis`, or
-another registered discussion mode. Role permissions, skills, and the default
-responder come from the materialized template.
+and synthesis. The product exposes `conversation`, `clarification`, and
+`multi_lens`; `manual_mention`, `mention_relay`, and
+`fanout_then_synthesis` are compatibility engine mappings. Role permissions,
+skills, Leader, and default responder come from the materialized template.
 
 ![Multi-role Channel discussion and continuation](assets/quickstart-channel-discussion.webp)
 
@@ -280,7 +285,7 @@ and write policy. The example has three members: `tech_leader`,
 After discussion:
 
 - a person can continue the same request or enter a new one in the Channel;
-- the default responder/synthesizer can produce a canonical PRD or summary;
+- explicit Finalize can produce a PRD draft; only an Owner-confirmed revision is the canonical PRD;
 - the Channel or Kanban Agent can propose `Create Task` from the result;
 - a person must confirm that Task proposal; the Channel cannot auto-create it;
 - PRD decomposition belongs to subsequent Workflow planning, not direct

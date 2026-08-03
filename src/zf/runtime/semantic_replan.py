@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from zf.core.config.schema import ZfConfig
@@ -61,6 +62,14 @@ _TASK_HANDOFF_KEYS = (
     "goal_claim_set_ref",
     "goal_claim_set_digest",
 )
+_PARTIAL_CONTINUATION_KEYS = (
+    "partial_head_commit",
+    "partial_source_branch",
+    "partial_worktree_clean",
+    "partial_dirty_files",
+    "continuation_commit",
+    "continuation_ref",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,13 @@ class SemanticReplanRoute:
     stage_id: str
     role: str
     flow_kind: str = ""
+
+
+def _action_failure_event_ids(action: dict[str, Any]) -> set[str]:
+    raw = action.get("failure_event_ids")
+    values = list(raw) if isinstance(raw, (list, tuple, set)) else [raw]
+    values.append(action.get("source_event_id"))
+    return {str(value) for value in values if value}
 
 
 def resolve_semantic_replan_route(config: ZfConfig) -> SemanticReplanRoute | None:
@@ -113,6 +129,7 @@ def enrich_semantic_replan_action(
     state_dir: Path,
     events: list[ZfEvent],
     config: ZfConfig,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Attach stage and current task-map anchors, or fall back to diagnosis."""
 
@@ -123,6 +140,8 @@ def enrich_semantic_replan_action(
         state_dir,
         events,
         task_id=str(action.get("task_id") or ""),
+        failure_event_ids=_action_failure_event_ids(action),
+        project_root=project_root,
     )
     if route is None or not anchor.get("task_map_ref") or not anchor.get("pdd_id"):
         reason = "semantic replan requires a declared gap-planning stage and current task-map anchor"
@@ -164,6 +183,8 @@ def _semantic_replan_anchor(
     events: list[ZfEvent],
     *,
     task_id: str,
+    failure_event_ids: set[str] | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     task = TaskStore(Path(state_dir) / "kanban.json").get(task_id) if task_id else None
     pdd_id = ""
@@ -262,13 +283,130 @@ def _semantic_replan_anchor(
                     if value not in (None, "", [], {}):
                         anchor[key] = value
             anchor.update(identity)
-    if anchor.get("candidate_head_commit") and anchor.get("candidate_ref"):
+            for event in reversed(events):
+                if event.type != "fanout.child.failed":
+                    continue
+                if failure_event_ids and not (
+                    event.id in failure_event_ids
+                    or str(event.causation_id or "") in failure_event_ids
+                ):
+                    continue
+                payload = event.payload if isinstance(event.payload, dict) else {}
+                event_task_id = str(event.task_id or payload.get("task_id") or "")
+                if event_task_id != task_id:
+                    continue
+                incoming_revision = str(payload.get("contract_revision") or "")
+                incoming_generation = str(payload.get("task_map_generation") or "")
+                if (
+                    incoming_revision
+                    and incoming_revision != identity["contract_revision"]
+                ):
+                    continue
+                if (
+                    incoming_generation
+                    and incoming_generation != identity["task_map_generation"]
+                ):
+                    continue
+                continuation_commit = str(
+                    payload.get("continuation_commit")
+                    or payload.get("partial_head_commit")
+                    or ""
+                ).strip()
+                if not continuation_commit:
+                    continue
+                previous_candidate_ref = str(anchor.get("candidate_ref") or "")
+                previous_candidate_head = str(
+                    anchor.get("candidate_head_commit") or ""
+                )
+                failed_base_commit = str(payload.get("base_commit") or "").strip()
+                if continuation_commit in {
+                    previous_candidate_head,
+                    failed_base_commit,
+                }:
+                    continue
+                for key in _PARTIAL_CONTINUATION_KEYS:
+                    value = payload.get(key)
+                    if value not in (None, "", [], {}):
+                        anchor[key] = value
+                continuation_ref = str(
+                    payload.get("continuation_ref")
+                    or payload.get("partial_source_branch")
+                    or payload.get("source_branch")
+                    or continuation_commit
+                ).strip()
+                anchor.update({
+                    "handoff_kind": "partial_task_continuation",
+                    "continuation_commit": continuation_commit,
+                    "continuation_ref": continuation_ref,
+                    "continuation_source_event_id": event.id,
+                    "previous_candidate_ref": previous_candidate_ref,
+                    "previous_candidate_head_commit": previous_candidate_head,
+                    "candidate_ref": continuation_ref,
+                    "candidate_head_commit": continuation_commit,
+                    "target_ref": continuation_commit,
+                })
+                break
+    if (
+        not anchor.get("continuation_commit")
+        and anchor.get("candidate_head_commit")
+        and anchor.get("candidate_ref")
+    ):
         # Parity discovery must inspect the delivered candidate. The task-map
         # baseline remains source_commit/candidate_base_commit provenance.
-        anchor["target_ref"] = anchor["candidate_ref"]
+        candidate_head = str(anchor.get("candidate_head_commit") or "").strip()
+        failed_base = str(anchor.get("base_commit") or "").strip()
+        candidate_contains_base = _git_commit_is_ancestor(
+            project_root or Path(state_dir).parent,
+            ancestor=failed_base,
+            descendant=candidate_head,
+        )
+        if failed_base and candidate_contains_base is False:
+            # A task may have started from a newer lane continuation than the
+            # last integrated candidate. Inspecting that stale candidate would
+            # rediscover already-delivered gaps and discard the task base.
+            anchor["previous_candidate_ref"] = str(anchor["candidate_ref"])
+            anchor["previous_candidate_head_commit"] = candidate_head
+            anchor["target_ref"] = failed_base
+            anchor["handoff_kind"] = "task_base_recovery"
+        else:
+            anchor["target_ref"] = anchor["candidate_ref"]
     anchor["supersedes_task_ids"] = [task_id] if task_id else []
     anchor["affected_task_ids"] = [task_id] if task_id else []
     return anchor
+
+
+def _git_commit_is_ancestor(
+    project_root: Path,
+    *,
+    ancestor: str,
+    descendant: str,
+) -> bool | None:
+    if not ancestor or not descendant:
+        return None
+    if ancestor == descendant:
+        return True
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    return None
 
 
 __all__ = [

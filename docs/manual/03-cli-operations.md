@@ -69,7 +69,7 @@ uv run zf doctor
 
 | 命令 | 用途 |
 |---|---|
-| `zf chat "..."` | 写入 `user.message`,唤醒 orchestrator |
+| `zf chat "..."` | 写入 `user.message` intent；由当前配置决定 consumer，不保证建 Task 或点火 |
 | `zf feature add <title>` | 创建 feature |
 | `zf feature list [--status STATUS]` | 列出 feature |
 | `zf feature show <feature_id>` | 查看 feature |

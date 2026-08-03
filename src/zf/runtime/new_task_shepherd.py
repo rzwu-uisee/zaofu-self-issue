@@ -74,7 +74,12 @@ def unclaimed_warnings(
     warned: set[str] = set()
     for event in events:
         etype = str(getattr(event, "type", "") or "")
-        task_id = str(getattr(event, "task_id", "") or "")
+        payload = getattr(event, "payload", {}) or {}
+        task_id = str(
+            getattr(event, "task_id", "")
+            or (payload.get("task_id") if isinstance(payload, dict) else "")
+            or ""
+        )
         if not task_id:
             continue
         if etype == "task.created":

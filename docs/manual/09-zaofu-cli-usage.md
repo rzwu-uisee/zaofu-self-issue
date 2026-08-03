@@ -1,8 +1,7 @@
 # ZaoFu CLI 使用手册
 
-> 定位: ZaoFu CLI 命令**全量参考**(reference)。命令面以
-> `uv run zf --help` / `src/zf/cli/main.py` 为准;本文按主题归类常用命令,
-> 新增命令可能先出现在 `--help` 再回填本文。
+> 定位：按任务解释 CLI 使用方法的深度参考。命令是否存在以
+> [`build_parser()` 生成目录](reference/cli-command-index.md)为准，本文不再手工复制全量命令面。
 
 只想快速启动先读 [01-quickstart.md](01-quickstart.md);日常操作流程见
 [03-cli-operations.md](03-cli-operations.md);整体架构见 [架构总览](architecture.md)。
@@ -23,9 +22,8 @@ ZaoFu 的 CLI 有三条边界:
 
 - `zf.yaml` 是唯一控制面配置。
 - 运行态目录来自 `project.state_dir`,默认是 `.zf/`;不要在代码里硬编码。
-- `events.jsonl`、`kanban.json`、`session.yaml`、`feature_list.json`、
-  `role_sessions.yaml` 是 kernel 管理的 canonical state,日常变更优先走
-  `zf` 命令,不要手工编辑。
+- `events.jsonl`、canonical Stores 与 required artifacts 按分层权威各自负责不同事实；
+  日常变更走 `zf` 命令或受控 action，不手工编辑运行态。
 
 常见参数:
 
@@ -146,9 +144,9 @@ Feature 是高层用户目标;Task 是可执行单元。不要引入第二套 ta
 
 ### 5.1 通过提示词提交任务
 
-最常用入口是 `zf chat`。它把自然语言 prompt 写成 `user.message` 事件,
-再由当前 workflow/orchestrator 决定是创建 task、补充 contract、请求澄清,
-还是进入 arch/critic/dev 等后续路径。
+`zf chat` 把自然语言 prompt 写成 `user.message` intent。后续 consumer 取决于当前配置：
+legacy safe-team 可以唤醒 Layer 2 Agent；Product Flow 不保证因此创建 Task 或启动 Workflow，
+应使用真实 Task 和受控 route proposal。
 
 一句话提交:
 
@@ -180,11 +178,11 @@ uv run zf kanban --board
 
 确认结果时看三处:
 
-- `zf events --last 20`: 是否有 `user.message`、`task.created` 或澄清事件。
+- `zf events --last 20`: `user.message` 是否落账，以及是否存在当前 profile 的合法 consumer。
 - `zf kanban --board`: 是否出现新 task 或状态变化。
 - `zf task trace <task_id>`: task 出现后查看从 prompt 到执行的因果链。
 
-如果你要的是**确定性地创建一个 task**,不要等 orchestrator 从自然语言推断,
+如果你要的是**确定性地创建一个 task**,不要等待某个 consumer 从自然语言推断,
 直接用 `zf kanban add`:
 
 ```bash
@@ -211,7 +209,7 @@ uv run zf kanban --board
 
 选择规则:
 
-- `zf chat`: 适合 operator 通过 prompt 给 harness 下达目标,保留 agent 判断空间。
+- `zf chat`: 适合记录通用 operator intent；是否有 Agent 消费由配置决定。
 - `zf kanban add`: 适合已经明确的单个 task,确定性写入 TaskStore。
 - `zf spec ingest`: 适合从长设计/PRD/任务提示词批量生成规范 task。
 
@@ -243,8 +241,8 @@ CLI/Kernel 会拒绝缺证据的终态推进。
 
 ## 6. 事件、Watch 与 Trace
 
-`zf emit` 是 worker / operator 向 append-only event log 上报事实的入口。
-优先发事件,让 Layer 1 projection 更新状态。
+`zf emit` 是 Worker/operator 向 append-only event ledger 上报事实或意图的入口。
+事件会由注册的 Kernel consumer/projector 处理；它不会把所有 canonical Store 自动降级为 projection。
 
 | 命令 | 用途 |
 |---|---|
@@ -430,40 +428,16 @@ Workspace 状态的入口同样需要 token/passcode/trusted session:
 这类命令通常会占用临时 worktree、tmux session 和预算。临时模拟请使用
 `/tmp/zf-<purpose>-<utc-timestamp>/`,并清理临时 session。
 
-## 13. 顶层命令目录
+## 13. 当前命令目录
 
-当前 `zf --help` 注册的顶层命令:
+完整顶层 family 和递归子命令由 argparse parser 生成：
 
-```text
-init, validate, status, emit, events, start, stop, restart, kanban, gate,
-cost, memory, handoff, presets, attach, logs, rules, check, cleanup, agents,
-watch, feature, chat, hook-recv, trace, doctor, workdir, refs, workflow,
-archive-run, runs, feishu, autopilot, skills, state, self-eval, panes,
-autoresearch, update, guard, artifact, metrics, task, web, spec,
-bug-fix-cycle, backlog, workspace, project
-```
+- [ZaoFu CLI 命令目录](reference/cli-command-index.md)
+- 重新生成：`uv run python scripts/manual-docs.py generate`
+- 检查漂移：`uv run python scripts/manual-docs.py check`
 
-常用子命令速查:
-
-| 命名空间 | 子命令 |
-|---|---|
-| `events` | `trace` |
-| `kanban` | `add`, `move`, `assign`, `show`, `ready`, `open`, `pending`, `export`, `health` |
-| `feature` | `add`, `list`, `show`, `update` |
-| `trace` | `show`, `record-fixture`, `replay-fixture`, `spans`, `operation`, `gantt` |
-| `workflow` | `render`, `audit` |
-| `runs` | `list`, `rebuild`, `reconcile`, `for-task` |
-| `feishu` | `handle`, `push`, `serve`, `send-test`, `live-smoke`, `init-targets`, `sync-automations`, `sync-automation-insights-table`, `sync-kanban-table`, `project-kanban`, `cron-template` |
-| `skills` | `list`, `doctor` |
-| `state` | `clean`, `reconcile` |
-| `autoresearch` | `run`, `discover-bugs`, `triggers`, `self-repair`, `loop`, `campaign` |
-| `guard` | `ownership` |
-| `artifact` | `manifest create` |
-| `metrics` | `snapshot`, `diagnose`, `decision-ratio` |
-| `spec` | `ingest`, `validate`, `prompt`, `merge` |
-| `backlog` | `audit`, `why-not-done`, `resume-packet`, `integration`, `workpad`, `retry-metadata`, `goal` |
-| `workspace providers openclaw` | `list`, `set` |
-| `project` | `review-spine` |
+不要在本文追加手写“全量命令表”。专题说明可以保留，但每个示例仍应通过
+`uv run zf <command> --help` 和 focused test 核实。
 
 ## 14. 排障顺序
 

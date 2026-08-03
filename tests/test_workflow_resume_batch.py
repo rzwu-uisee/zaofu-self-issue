@@ -126,6 +126,74 @@ def test_pre_task_reader_failure_is_owned_by_stage_replan(
     assert projection["batch_checkpoints"] == []
 
 
+def test_structured_discovery_gap_owns_resume_with_candidate_refs(
+    tmp_path: Path,
+) -> None:
+    fanout_id = "fanout-prd-post-verify-discovery"
+    projection = _projection(tmp_path, [
+        ZfEvent(
+            type="fanout.started",
+            id="evt-discovery-started",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "stage_id": "prd-post-verify-discovery",
+                "topology": "fanout_reader",
+            },
+        ),
+        ZfEvent(
+            type="fanout.aggregate.completed",
+            id="evt-discovery-aggregate",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "stage_id": "prd-post-verify-discovery",
+                "status": "failed",
+                "failure_event": "flow.discovery.failed",
+                "pdd_id": "PRD-1",
+                "task_map_ref": "artifacts/PRD-1/task_map.json",
+                "candidate_ref": "candidate/PRD-1",
+                "candidate_head_commit": "abc123",
+                "failed_children": ["flow-discovery"],
+            },
+        ),
+        ZfEvent(
+            type="flow.discovery.failed",
+            id="evt-discovery-failed",
+            causation_id="evt-discovery-aggregate",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "pdd_id": "PRD-1",
+                "task_map_ref": "artifacts/PRD-1/task_map.json",
+                "candidate_ref": "candidate/PRD-1",
+                "candidate_head_commit": "abc123",
+                "gap_tasks": [{"task_id": "PRD-1-ASSEMBLY-GAP"}],
+            },
+        ),
+        ZfEvent(
+            type="flow.gap_plan.ready",
+            id="evt-gap-plan",
+            causation_id="evt-discovery-failed",
+            correlation_id="workflow-1",
+            payload={"source_event_id": "evt-discovery-failed"},
+        ),
+        ZfEvent(
+            type="task_map.amend.failed",
+            id="evt-amend-failed",
+            causation_id="evt-amend-requested",
+            correlation_id="workflow-1",
+            payload={
+                "source_event_id": "evt-gap-plan",
+                "reason": "replacement lost root_owner_class",
+            },
+        ),
+    ])
+
+    assert projection["summary"]["batch_pending"] == 0
+    assert projection["batch_checkpoints"] == []
+
+
 def test_scheduler_queue_timeout_produces_gap_only_resume_checkpoint(
     tmp_path: Path,
 ) -> None:

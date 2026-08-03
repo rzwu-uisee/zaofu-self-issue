@@ -1,73 +1,87 @@
-# 08 New Task、Agent 与 Squad 使用手册
+# 08 创建 Task、Assignment Intent 与 Agent 协作
 
-ZaoFu 的 Web `New Task` 是 Project-scoped work request 入口。它提供
-Project 选择、issue/task contract 填写、assignee 选择三段式 work intake
-体验,但保持 ZaoFu 的内核边界:创建任务只写入当前 Project 的 `TaskStore`,
-选择 agent 或 squad 只记录 `assignment.intent.proposed`,不会直接启动
-headless worker。
+ZaoFu 当前不使用独立的 `New Task` 表单直接创建并派发 Worker。可追踪 Task 由
+Kanban Agent 或 Channel 中的 PRD 结论生成 exact `Create Task` proposal，经过人工确认
+后，通过受控 action 写入当前 Project。创建、分配意图和运行态派发是三个独立步骤。
 
-## 创建 Issue / Task
+## 创建可追踪 Task
 
-1. 先在 Web 左侧选择目标 Project。
-2. 打开 Board 的 `New Task`,填写 title、behavior、verification。
-3. 选择优先级和 assignee:
-   - `Unassigned`: 只进入 Kanban,等待后续人工或自动 triage。
-   - `Agent`: 指定一个当前 Project projection 中的 headless agent 实例。
-   - `Squad`: 指定一个 channel-backed squad,由后续 routing/owner 决定拆分。
-4. 点击 `Create Task`。
+1. 在 Web 左侧选择目标 Project。
+2. 打开 Kanban Agent，说明目标、范围、验收标准和优先级；也可以先在 Channel Group
+   中讨论，再从确认的 PRD 选择 `Create Task from PRD`。
+3. 信息不完整时继续对话，不要确认一个范围含糊的 proposal。
+4. 核对 `Create Task` proposal 中的 title、objective、acceptance criteria 和 priority，
+   然后人工确认创建。
+5. 回到 `Tasks` Board，按 Task ID 打开详情。
 
-提交后会先执行 `create-task`。如果选择了 agent 或 squad,Web 会紧接着提交
-`assignment-propose`,写入同一个 Project 的 `events.jsonl`:
+确认 proposal 只会通过受控 `create-task` action 更新当前 Project 的 TaskStore 和事件账本，
+不会因为聊天文本、Channel 结论或页面选择而直接启动 Agent。
+
+## 从一个 Task 读回完整上下文
+
+Task 详情将长期任务需要的状态分成四个视图：
+
+- `Summary`：当前 contract、依赖、assignee、handoff 和 assignment intent；
+- `Activity`：事件时间线、当前 route、运行 DAG 和等待原因；
+- `Evidence`：artifact ledger、最终 Task Map、Git refs 和测试证据；
+- `Advanced`：attempt/session、provider、context、skills 和更细的运行信息。
+
+`Agents` 页面补充展示 Worker health、context/token、provider、cost 和当前 Task。操作者应以
+Task/Run/attempt identity 关联两边信息，而不是只凭 Agent 名称判断执行状态。
+
+![Task 的上下文、活动、证据与 Agent 资源动态演示](assets/task-context-handoff.webp)
+
+## 提出 Assignment Intent
+
+在 Task 的 `Summary` 中找到 `Assignment Intent`，填写需要变更的字段：
+
+- `Role`：期望承担工作的角色或实例；
+- `Backend`：Codex、Claude Code 等已配置 backend；
+- `Channel`：需要关联的 Channel Group；
+- `Supervisor`：期望的监督入口；
+- `Reason`：本次分配意图的原因。
+
+点击 `Propose Assignment` 后，Web 追加 `assignment.intent.proposed`：
 
 ```json
 {
   "type": "assignment.intent.proposed",
   "payload": {
     "task_id": "TASK-...",
-    "assignee_type": "agent|squad",
-    "assignee_id": "...",
-    "assignee_label": "...",
+    "role": "dev-ui",
+    "backend": "codex",
+    "channel_id": "",
+    "supervisor": "",
+    "reason": "operator assignment intent",
     "dispatches": false
   }
 }
 ```
 
-`dispatches=false` 是硬约束:这条事件表达意图和审计线索,不是运行态派发。
+`dispatches=false` 是硬约束。这条事件记录可审计的分配意图，不改变当前 Worker，也不等于
+`task.dispatched`。真正启动工作仍需经过已批准的 Task-bound Workflow 或 Kernel 控制的
+dispatch action。
 
-## Agent、Kanban Agent、Squad
+## Agent、Kanban Agent 与 Channel Group
 
-- `Agent` 是可被 assignment intent 指向的 headless worker 实例,例如 Claude
-  Code 或 Codex headless 进程。它不是新的控制面。
-- `Kanban Agent` 是 Web/API 上的受控操作入口,负责把 operator 意图转换为
-  `create-task`、`update-task`、`assignment-propose` 等 deterministic actions。
-- `Squad` 在当前实现里映射为 channel-backed group。New Task 记录 squad
-  intent 后,后续由 channel owner、routing 或人工 operator 决定是否拆子任务、
-  分给哪个 agent、何时启动 headless worker。
+- `Agent` 是执行代码、测试、评审或研究工作的 Worker；其输出必须形成 artifact、evidence
+  或受控 action 请求。
+- `Kanban Agent` 是 Project 内的通用 Coding Agent 和操作入口；它澄清需求、生成 proposal，
+  但不绕过确认和 Kernel 状态机。
+- `Channel Group` 让人和多个角色 Agent 围绕模糊问题讨论并收敛 PRD；对话正文是协作上下文，
+  不是 Task truth。
 
-这三者的协作关系是:Kanban Agent 接收操作 -> kernel 追加事件/更新任务 ->
-Agent 或 Squad 通过后续受控运行路径消费这些事实。不要让 Web picker 直接写
-worker session、workdir、progress 或 memory。
-
-## ZaoFu 边界决策
-
-- 保留:work-intake 的三段式体验,即选择 Project、填写 issue/task contract、
-  选择 assignee。
-- 保留:assignee 使用 `assignee_type + assignee_id + assignee_label` 表达,
-  让 operator 能区分未分配、agent 和 squad。
-- 约束:直接 agent queue 在 ZaoFu 中改成
-  `assignment.intent.proposed`,由 kernel 后续受控路径决定是否 dispatch。
-- 约束:squad assignment 在 ZaoFu 中映射为 channel-backed group intent,leader 或
-  supervisor 是协调入口,不是新的调度器。
-- 不做:不新增 workspace-global issue table,不在 Web picker 里直接启动 worker,
-  不让 channel/squad transcript 成为 task truth。
+推荐协作顺序是：讨论与澄清 -> exact Task proposal -> 人工确认 -> Task contract ->
+assignment/workflow proposal -> 受控批准 -> Kernel 派发 -> evidence 回写。
 
 ## 验证要点
 
-- Project A 创建的 assignment intent 不能出现在 Project B 的 state dir。
-- Squad assignee 不应把 `TaskStore.assigned_to` 写成 channel id。
-- Agent assignee 可以设置 `TaskStore.assigned_to`,但仍不能产生 `task.dispatched`。
-- `assignment.intent.proposed` 必须通过 schema 校验,并保留原始 request 便于审计。
+- Project A 创建的 Task 或 assignment intent 不能出现在 Project B 的 state dir。
+- 未经人工确认的 `Create Task` proposal 不应产生 canonical Task。
+- `assignment.intent.proposed` 必须通过 schema 校验、保留原始 request，并固定
+  `dispatches=false`。
+- 提出 Assignment Intent 后，不应出现由该 proposal 直接产生的 `task.dispatched`。
+- Task 的 Summary、Activity、Evidence、Advanced 应能读回同一 Task/Run 的 current facts。
 
-真实 provider smoke 时,优先使用临时 Project 和临时 state dir。没有 Claude Code
-或 Codex headless 环境时,至少验证 Web/API action、事件、schema 和无直接 dispatch
-不变量。
+真实 provider smoke 优先使用临时 Project 和临时 state dir。没有可用 provider 时，至少验证
+Web/API action、事件 schema、Project 隔离和无直接 dispatch 不变量。

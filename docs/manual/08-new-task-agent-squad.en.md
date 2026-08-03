@@ -1,77 +1,101 @@
-# New Task, Agent, and Squad
+# Create Tasks, Assignment Intent, and Agent Collaboration
 
-ZaoFu Web's **New Task** is a project-scoped work-request entry point. It lets
-an operator choose a project, provide an issue/task contract, and select an
-assignee. The kernel boundary remains unchanged: creating a task writes only to
-that project's `TaskStore`; selecting an agent or squad records an
-`assignment.intent.proposed` event and does not directly launch a headless
-worker.
+ZaoFu does not use a standalone **New Task** form to create and immediately
+dispatch a Worker. A tracked Task starts as an exact **Create Task** proposal
+from Kanban Agent or from a confirmed Channel PRD. An operator approves that
+proposal before a controlled action writes it into the selected Project.
+Creation, assignment intent, and runtime dispatch are separate steps.
 
-## Create an Issue or Task
+## Create a Tracked Task
 
-1. Select the target project in the Web sidebar.
-2. Open **New Task** from the board and provide a title, behavior, and verification.
-3. Select a priority and assignee:
-   - **Unassigned** puts the task on Kanban for later manual or automated triage.
-   - **Agent** selects a headless agent instance projected in the current project.
-   - **Squad** selects a channel-backed group; later routing or its owner decides how to split work.
-4. Select **Create Task**.
+1. Select the target Project in the Web sidebar.
+2. Open Kanban Agent and state the objective, scope, acceptance criteria, and
+   priority. Alternatively, converge a requirement in a Channel Group and use
+   **Create Task from PRD**.
+3. Continue the conversation when inputs are incomplete; do not approve an
+   ambiguous proposal.
+4. Review the exact title, objective, acceptance criteria, and priority in the
+   **Create Task** proposal, then approve it.
+5. Return to the **Tasks** Board and open the resulting Task by ID.
 
-Web first invokes `create-task`. If an agent or squad was selected, it then
-invokes `assignment-propose`, appending an event to the same project's
-`events.jsonl`:
+Approval invokes the controlled `create-task` action for the current Project's
+TaskStore and event ledger. Chat text, a Channel conclusion, or a UI selection
+does not directly launch an Agent.
+
+## Read Complete Context from a Task
+
+Task detail separates long-running delivery state into four views:
+
+- **Summary** shows the current contract, dependencies, assignee, handoff, and
+  assignment intent;
+- **Activity** shows the event timeline, current route, execution DAG, and wait reason;
+- **Evidence** shows the artifact ledger, final Task Map, Git refs, and test evidence;
+- **Advanced** shows attempts, sessions, provider, context, skills, and deeper runtime data.
+
+The **Agents** page adds Worker health, context and token usage, provider, cost,
+and current Task. Correlate both views by Task, Run, and attempt identity rather
+than inferring execution state from an Agent name.
+
+![Animated Task context, activity, evidence, and Agent resources](assets/task-context-handoff.webp)
+
+## Propose Assignment Intent
+
+Open **Assignment Intent** in the Task's **Summary** view and provide only the
+fields that should change:
+
+- **Role** for the intended role or instance;
+- **Backend** for a configured Codex, Claude Code, or other backend;
+- **Channel** for a related Channel Group;
+- **Supervisor** for the intended observation surface;
+- **Reason** for the proposal.
+
+Selecting **Propose Assignment** appends `assignment.intent.proposed`:
 
 ```json
 {
   "type": "assignment.intent.proposed",
   "payload": {
     "task_id": "TASK-...",
-    "assignee_type": "agent|squad",
-    "assignee_id": "...",
-    "assignee_label": "...",
+    "role": "dev-ui",
+    "backend": "codex",
+    "channel_id": "",
+    "supervisor": "",
+    "reason": "operator assignment intent",
     "dispatches": false
   }
 }
 ```
 
-`dispatches=false` is an invariant. The event records intent and audit context;
-it is not a runtime dispatch.
+`dispatches=false` is an invariant. This event records auditable intent; it
+does not replace the current Worker and is not `task.dispatched`. Work starts
+only through an approved Task-bound Workflow or a kernel-controlled dispatch
+action.
 
-## Agent, Kanban Agent, and Squad
+## Agent, Kanban Agent, and Channel Group
 
-- An **Agent** is a headless worker instance that assignment intent can target,
-  such as Claude Code or Codex. It is not another control plane.
-- The **Kanban Agent** is a controlled Web/API operator surface. It converts
-  intent into deterministic actions such as `create-task`, `update-task`, and
-  `assignment-propose`.
-- A **Squad** currently maps to a channel-backed group. After New Task records
-  the squad intent, its owner, routing logic, or an operator decides whether to
-  create subtasks, select agents, and start headless workers.
+- An **Agent** performs implementation, testing, review, or research and reports
+  artifacts, evidence, or controlled-action requests.
+- **Kanban Agent** is the Project's general Coding Agent and operator surface. It
+  clarifies requests and prepares proposals without bypassing approval or the
+  kernel state machine.
+- A **Channel Group** lets people and multiple Agent roles turn an ambiguous
+  question into a confirmed PRD. Its transcript is collaboration context, not
+  Task truth.
 
-The flow is: Kanban Agent receives an operation, the kernel appends events and
-updates task truth, and an Agent or Squad later consumes those facts through a
-controlled runtime path. The Web selector must not directly write worker
-sessions, workdirs, progress, or memory.
-
-## ZaoFu Boundary Decisions
-
-- Keep the three-part intake: project selection, issue/task contract, assignee.
-- Represent assignees with `assignee_type`, `assignee_id`, and
-  `assignee_label`, distinguishing unassigned, agent, and squad.
-- Convert a direct agent queue operation into `assignment.intent.proposed`;
-  only a kernel-controlled path may decide to dispatch.
-- Map squad assignment to channel-backed group intent. A leader or Supervisor
-  is a coordination surface, not a new scheduler.
-- Do not add a workspace-global issue table, launch workers from the picker, or
-  treat channel/squad transcripts as task truth.
+The recommended flow is: discuss and clarify -> exact Task proposal -> operator
+approval -> Task contract -> assignment/workflow proposal -> controlled
+approval -> kernel dispatch -> evidence writeback.
 
 ## Verification Checklist
 
-- An assignment created in Project A must not appear in Project B's state directory.
-- A squad assignee must not write a channel ID into `TaskStore.assigned_to`.
-- An agent assignee may set `TaskStore.assigned_to`, but must not emit `task.dispatched`.
-- `assignment.intent.proposed` must pass schema validation and retain the original request for audit.
+- A Task or assignment intent created in Project A must not appear in Project B's state directory.
+- An unapproved **Create Task** proposal must not create a canonical Task.
+- `assignment.intent.proposed` must pass schema validation, retain the original
+  request, and keep `dispatches=false`.
+- The assignment proposal must not directly produce `task.dispatched`.
+- Summary, Activity, Evidence, and Advanced must resolve current facts for the
+  same Task and Run.
 
-For real-provider smoke tests, use a temporary project and state directory. If
-Claude Code or Codex headless is unavailable, at minimum verify the Web/API
-action, event schema, project isolation, and no-direct-dispatch invariant.
+Use a temporary Project and state directory for real-provider smoke tests. If
+no provider is available, at minimum verify the Web/API action, event schema,
+Project isolation, and no-direct-dispatch invariant.

@@ -70,6 +70,11 @@ test.passed
 judge.passed
 ```
 
+During a real run, use Web Delivery, Graph, Loop, and Observability together to
+cross-check fanout progress, dependencies, and closure signals:
+
+![Animated Product fanout views across Delivery, Graph, Loop, and Observability](assets/observe-delivery.webp)
+
 Summarize counts:
 
 ```bash

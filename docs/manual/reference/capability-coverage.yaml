@@ -1,0 +1,305 @@
+schema_version: zf-manual-capability-coverage.v1
+last_verified: 2026-08-03
+capabilities:
+  - id: project-bootstrap
+    name: Project 初始化与 Bootstrap
+    name_en: Project initialization and bootstrap
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/20-project-bootstrap-workflow-ignition.md
+      en:
+        - docs/manual/20-project-bootstrap-workflow-ignition.en.md
+    code:
+      - src/zf/cli/project.py
+      - src/zf/core/workspace/project_admission.py
+    tests:
+      - tests/test_cli_project_init_source.py
+      - tests/test_project_admission.py
+    release:
+      activation: Use Add Project or `zf project init`, then run bootstrap explicitly.
+      readback: Verify the Project registry, generated context, and cold-start validation.
+      rollback: Remove only the newly registered Project through sanctioned workspace actions; preserve its source tree and configured state for audit.
+      authority: Initialization creates Project/control-plane state only; it does not create a Task or start a Workflow.
+
+  - id: channel-to-prd
+    name: Channel 多 Agent 澄清到 PRD
+    name_en: Multi-Agent Channel clarification to PRD
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/workflows/channel-to-prd.md
+        - docs/manual/15-channel-collaboration.md
+      en:
+        - docs/manual/workflows/channel-to-prd.en.md
+        - docs/manual/15-channel-collaboration.en.md
+    code:
+      - src/zf/runtime/channel_contracts.py
+      - src/zf/runtime/channel_discussion.py
+    tests:
+      - tests/test_channel_templates.py
+      - tests/test_channel_discussion_driver.py
+    release:
+      activation: Create/select a Channel, add authorized members, and explicitly choose Discuss or Finalize.
+      readback: Confirm conversation mode, discussion rounds, draft generation, and exact Owner confirmation in Channel history.
+      rollback: Reject or supersede the draft before Owner confirmation; do not delete the conversation ledger.
+      authority: Ordinary messages do not auto-fanout; Finalize/Owner confirm publishes a PRD/Task source but never starts a Workflow.
+
+  - id: controlled-workflow-start
+    name: Task 绑定的受控 Workflow 启动
+    name_en: Task-bound controlled Workflow start
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/workflows/controlled-workflow-start.md
+      en:
+        - docs/manual/workflows/controlled-workflow-start.en.md
+    code:
+      - src/zf/runtime/workflow_start.py
+      - src/zf/cli/workflow.py
+    tests:
+      - tests/test_workflow_start_service.py
+    release:
+      activation: Query active Task routes, preview, propose, then apply the exact proposal with operator authorization.
+      readback: Confirm `workflow.invoke.requested` binds the same Task, route, objective, parameters, and proposal event.
+      rollback: Reject/supersede an unapplied proposal, or use the Run's sanctioned cancel/recovery action after admission.
+      authority: Plan and route selection are not approval; provider Agents never receive the action token.
+
+  - id: task-map-kernel-dispatch
+    name: Task Map 编译与 Kernel 调度
+    name_en: Task Map compilation and Kernel dispatch
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.md
+      en:
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.en.md
+    code:
+      - src/zf/runtime/task_map.py
+      - src/zf/runtime/product_delivery.py
+      - src/zf/runtime/orchestrator_dispatch.py
+    tests:
+      - tests/test_task_map.py
+      - tests/test_product_delivery.py
+    release:
+      activation: Publish an accepted artifact package with task-map/source-index/coverage, then admit its Run.
+      readback: Inspect canonical Task contracts, wave readiness, TaskAttempt, dispatch token, and evidence chain.
+      rollback: Produce a new artifact/task-map generation and controlled replan; never hand-edit existing canonical Tasks.
+      authority: Agents own semantic decomposition; the Kernel owns deterministic validation, readiness, dispatch, and transitions.
+
+  - id: bounded-agent-swarm
+    name: 受控多 Agent 蜂群与弹性 Worker
+    name_en: Bounded multi-Agent swarm and elastic Workers
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/architecture.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.md
+        - docs/manual/18-product-fanout-real-e2e.md
+      en:
+        - docs/manual/architecture.en.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.en.md
+        - docs/manual/18-product-fanout-real-e2e.en.md
+    code:
+      - src/zf/runtime/fanout.py
+      - src/zf/runtime/agent_view_runtime.py
+      - src/zf/runtime/role_lifecycle_runtime.py
+    tests:
+      - tests/test_reader_fanout_runtime.py
+      - tests/test_writer_fanout_runtime.py
+      - tests/test_role_lifecycle_runtime.py
+    release:
+      activation: Select an admitted fanout/lane topology and configure role replicas, autoscale bounds, or on-demand lifecycle in `zf.yaml`.
+      readback: Correlate fanout manifests, child attempts, isolated workdirs, aggregate results, Agent pool state, Graph, and Delivery evidence.
+      rollback: Pause or cancel through controlled Run actions, supersede the Task Map generation, and retire only idle autoscaled Workers with clean workdirs.
+      authority: The Kernel owns readiness, WIP, leases, dispatch, and aggregation; children report typed artifacts/evidence and cannot recursively create canonical Tasks or mutate topology.
+
+  - id: delivery-observability
+    name: Delivery、Runs、Graph、Loop 可观测性
+    name_en: Delivery, Runs, Graph, and Loop observability
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/operations/observe-delivery.md
+        - docs/manual/06-web-observability-e2e.md
+      en:
+        - docs/manual/operations/observe-delivery.en.md
+        - docs/manual/06-web-observability-e2e.en.md
+    code:
+      - src/zf/runtime/delivery_trace.py
+      - web/src/components/delivery-trace/DeliveryTracePage.tsx
+    tests:
+      - tests/test_delivery_trace.py
+      - tests/test_web_delivery_trace.py
+    release:
+      activation: Start Web against the intended Project/state and select a Feature under Delivery.
+      readback: Cross-check Overview, Runs, Graph, Loop, Goal Dossier, and Task trace against the event/store/artifact sources.
+      rollback: Rebuild or disable the affected read projection; do not mutate canonical state to make the UI look healthy.
+      authority: Web/SQLite/Trace/Graph/Loop are read projections and cannot become dispatch truth.
+
+  - id: goal-dossier
+    name: Goal Dossier 交付签收
+    name_en: Goal Dossier delivery sign-off
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/operations/observe-delivery.md
+      en:
+        - docs/manual/operations/observe-delivery.en.md
+    code:
+      - src/zf/runtime/goal_dossier.py
+      - src/zf/runtime/goal_dossier_delivery.py
+    tests:
+      - tests/test_goal_dossier.py
+      - tests/test_goal_dossier_owner_delivery.py
+    release:
+      activation: Open a Run's Goal Dossier after Goal Claims and evidence-producing Tasks exist.
+      readback: Verify mandatory Claim coverage, Task terminal state, evidence refs, verdicts, and current generation.
+      rollback: Rebuild the dossier projection or supersede stale evidence through a new generation; never edit the rendered dossier.
+      authority: Goal Dossier synthesizes owner-readable evidence but does not replace Task/Event/Artifact authorities.
+
+  - id: goal-coverage
+    name: Claim 中心的 Goal Coverage
+    name_en: Claim-centered Goal Coverage
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/operations/observe-delivery.md
+      en:
+        - docs/manual/operations/observe-delivery.en.md
+    code:
+      - src/zf/runtime/goal_coverage_graph.py
+      - src/zf/runtime/task_map_goal_coverage.py
+    tests:
+      - tests/test_goal_coverage_graph.py
+    release:
+      activation: Bind mandatory Goal Claims to Task Map tasks, verification producers, and verdict evidence.
+      readback: Inspect missing/orphan Claims, producer coverage, closure status, and generation freshness.
+      rollback: Correct the source Task Map/Claim generation and rebuild the graph projection.
+      authority: Coverage is derived from canonical contracts and evidence; a green visualization cannot waive missing mandatory proof.
+
+  - id: long-run-continuation
+    name: Long-Horizon Run Continuation 与恢复
+    name_en: Long-horizon Run continuation and recovery
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/operations/recover-long-running-run.md
+      en:
+        - docs/manual/operations/recover-long-running-run.en.md
+    code:
+      - src/zf/runtime/run_continuation.py
+      - src/zf/runtime/task_attempt_runtime.py
+    tests:
+      - tests/test_run_continuation.py
+      - tests/test_task_attempt_recovery.py
+    release:
+      activation: Enable the profile's continuation/recovery policy and run the normal watcher.
+      readback: Inspect continuation decisions, no-progress counters, checkpoints, attempts, and terminal convergence.
+      rollback: Pause/cancel through controlled Run actions or restore the prior policy generation; preserve checkpoints and evidence.
+      authority: Recovery may retry mechanics automatically, but semantic replan remains proposal/approval driven.
+
+  - id: artifact-query-handoff
+    name: Artifact 查询、Required Read 与 Agent Handoff
+    name_en: Artifact query, required read, and Agent handoff
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/operations/context-handoff-artifacts.md
+      en:
+        - docs/manual/operations/context-handoff-artifacts.en.md
+    code:
+      - src/zf/runtime/artifact_query/service.py
+      - src/zf/runtime/artifact_query/handoff.py
+    tests:
+      - tests/test_artifact_query_service.py
+      - tests/test_artifact_query_consumers.py
+    release:
+      activation: Publish required artifacts with refs/digests and request a Task/attempt-scoped catalog before work.
+      readback: Verify catalog lineage, required-read evidence, hydrated object content, and handoff currentness.
+      rollback: Rebuild the query index or publish a superseding artifact generation; never replace required bodies with event previews.
+      authority: The query store is rebuildable; artifact/sidecar bodies and canonical refs remain authoritative.
+
+  - id: autoresearch
+    name: Autoresearch 诊断与隔离修复
+    name_en: Autoresearch diagnosis and isolated repair
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/10-autoresearch-usage.md
+      en:
+        - docs/manual/10-autoresearch-usage.en.md
+    code:
+      - src/zf/autoresearch/orchestrator.py
+      - src/zf/autoresearch/self_repair.py
+    tests:
+      - tests/test_autoresearch_orchestrator.py
+      - tests/test_autoresearch_self_repair.py
+    release:
+      activation: Trigger a bounded scenario/campaign from a qualifying failure signal or explicit operator request.
+      readback: Inspect hypothesis, experiment, score, holdout, artifact refs, and repair proposal/validation.
+      rollback: Stop the campaign and remove only its isolated clean worktree after preserving reports; apply nothing without the owner gate.
+      authority: Autoresearch diagnoses or prepares candidates; default policy is proposal-only and cannot directly write mainline truth.
+
+  - id: feishu-ai-native
+    name: Feishu AI Native 协作闭环
+    name_en: Feishu AI-native collaboration loop
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/19-feishu-ai-native-direct-bridge.md
+      en:
+        - docs/manual/19-feishu-ai-native-direct-bridge.en.md
+    code:
+      - src/zf/integrations/feishu/lark_cli.py
+      - src/zf/runtime/feishu_projection_sidecar.py
+    tests:
+      - tests/test_feishu_ai_native_loop_e2e.py
+      - tests/test_feishu_projection_sidecar.py
+    release:
+      activation: Configure sanctioned Feishu targets/credentials and start the enabled projection/inbound sidecars.
+      readback: Verify outbound topic/thread projection, inbound identity/intent refs, queue status, and event causation.
+      rollback: Disable the integration or drain/retry its projection queue; do not delete canonical ZaoFu state.
+      authority: Feishu is an interaction/projection surface and must use EventWriter, controlled actions, and sanctioned sidecar writers.
+
+  - id: automations
+    name: Daily、Weekly 与 Project Automations
+    name_en: Daily, weekly, and Project automations
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/11-feishu-automation-kanban-sync.md
+      en:
+        - docs/manual/11-feishu-automation-kanban-sync.en.md
+    code:
+      - src/zf/runtime/automation_projection.py
+      - src/zf/integrations/feishu/automation_renderer.py
+    tests:
+      - tests/test_automation_projection.py
+      - tests/test_automation_metrics.py
+    release:
+      activation: Enable the selected schedule/target in `zf.yaml` and start the runtime/Feishu sidecar.
+      readback: Inspect Automations last/next run, generated report artifact, delivery target, and failure diagnostics.
+      rollback: Disable the schedule or target and retain prior run/report history for audit.
+      authority: Automations may publish reports or intents but cannot bypass canonical stores or controlled external effects.
+
+  - id: supervisor-inspection
+    name: Supervisor 观察与 Attention 分诊
+    name_en: Supervisor inspection and attention triage
+    status: implemented
+    manuals:
+      zh:
+        - docs/manual/12-supervisor-inspection-usage.md
+      en:
+        - docs/manual/12-supervisor-inspection-usage.en.md
+    code:
+      - src/zf/runtime/supervisor_inspection.py
+      - src/zf/runtime/supervisor_control_loop.py
+    tests:
+      - tests/test_supervisor_inspection.py
+      - tests/test_supervisor_control_loop.py
+    release:
+      activation: Enable Supervisor inspection/control-loop policy and run the watcher.
+      readback: Inspect findings, attention candidates, owner-visible decisions, and linked evidence.
+      rollback: Disable the observer loop or reject its proposal; preserve inspection history.
+      authority: Supervisor observes and proposes; it does not kill Workers, rewrite Tasks, or become a second control plane.

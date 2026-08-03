@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
@@ -55,6 +56,210 @@ PLAN_SYNTH_SEMANTIC_FIELDS = (
 
 class PlanSynthRuntimeMixin:
     """Dispatch selected plan synthesis through the profiled call protocol."""
+
+    def _recover_lost_fanout_synth_dispatches(
+        self,
+        events: list[ZfEvent],
+    ) -> bool:
+        """Re-send a synth briefing lost when its provider session restarted."""
+
+        event_index = {event.id: index for index, event in enumerate(events)}
+        dispatches: dict[str, list[ZfEvent]] = {}
+        terminal: set[str] = set()
+        lost_by_role: dict[str, list[tuple[int, ZfEvent]]] = {}
+        recovery_count: dict[str, int] = {}
+        for index, event in enumerate(events):
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if event.type == "fanout.synth.dispatched":
+                fanout_id = str(payload.get("fanout_id") or "")
+                if fanout_id:
+                    dispatches.setdefault(fanout_id, []).append(event)
+                continue
+            if event.type == "fanout.synth.completed":
+                fanout_id = str(payload.get("fanout_id") or "")
+                if fanout_id:
+                    terminal.add(fanout_id)
+                continue
+            if (
+                event.type == "fanout.child.dispatch_lost"
+                and str(payload.get("child_id") or "") == "synth"
+            ):
+                fanout_id = str(payload.get("fanout_id") or "")
+                if fanout_id:
+                    recovery_count[fanout_id] = recovery_count.get(fanout_id, 0) + 1
+                continue
+            role_instance = self._reader_dispatch_lost_role(event)
+            if role_instance:
+                lost_by_role.setdefault(role_instance, []).append((index, event))
+
+        fanout_root = self.state_dir / "fanouts"
+        if not fanout_root.exists():
+            return False
+        for manifest_path in fanout_root.glob("*/manifest.json"):
+            fanout_id = manifest_path.parent.name
+            if fanout_id in terminal:
+                continue
+            manifest = self._fanout_manifest(fanout_id)
+            if not manifest or manifest.get("topology") != "fanout_reader":
+                continue
+            stale_reason, _superseded_by = self._fanout_identity_stale_reason(
+                fanout_id,
+            )
+            if stale_reason:
+                continue
+            synth = manifest.get("synth")
+            if not isinstance(synth, dict) or synth.get("status") != "dispatched":
+                continue
+            role_instance = str(synth.get("role_instance") or "")
+            synth_dispatches = dispatches.get(fanout_id, [])
+            if not role_instance or not synth_dispatches:
+                continue
+            allowed_recoveries = max(
+                1,
+                int((manifest.get("aggregate_config") or {}).get("max_retries") or 0),
+            )
+            if recovery_count.get(fanout_id, 0) >= allowed_recoveries:
+                continue
+            latest_dispatch = synth_dispatches[-1]
+            latest_index = event_index.get(latest_dispatch.id, -1)
+            if latest_index < 0:
+                continue
+            lost_event = self._reader_dispatch_lost_event_after(
+                lost_by_role.get(role_instance, []),
+                latest_index,
+            )
+            if lost_event is None:
+                continue
+            lost_index = event_index.get(lost_event.id, latest_index)
+            activity_index = (
+                latest_index
+                if lost_event.type == "cost.usage.capture_miss"
+                else lost_index
+            )
+            if self._fanout_role_has_activity_after_signal(
+                events,
+                role_instance,
+                activity_index,
+            ):
+                continue
+            if self._redispatch_lost_fanout_synth(
+                manifest=manifest,
+                latest_dispatch=latest_dispatch,
+                lost_event=lost_event,
+                attempt=recovery_count.get(fanout_id, 0) + 1,
+            ):
+                return True
+        return False
+
+    def _redispatch_lost_fanout_synth(
+        self,
+        *,
+        manifest: dict,
+        latest_dispatch: ZfEvent,
+        lost_event: ZfEvent,
+        attempt: int,
+    ) -> bool:
+        payload = (
+            dict(latest_dispatch.payload)
+            if isinstance(latest_dispatch.payload, dict)
+            else {}
+        )
+        fanout_id = str(payload.get("fanout_id") or manifest.get("fanout_id") or "")
+        role_instance = str(payload.get("role_instance") or "")
+        run_id = str(payload.get("run_id") or f"run-{fanout_id}-synth")
+        trace_id = str(payload.get("trace_id") or manifest.get("trace_id") or "")
+        stage_id = str(payload.get("stage_id") or manifest.get("stage_id") or "")
+        briefing_path = Path(str(payload.get("briefing_path") or ""))
+        role = next(iter(self._fanout_roles([role_instance])), None)
+        if role is None or not briefing_path.is_file():
+            return False
+        self._set_worker_state(
+            role_instance,
+            "idle",
+            reason="fanout synth provider session replaced after dispatch",
+            force=True,
+        )
+        if not self._ensure_fanout_role_dispatchable(
+            role=role,
+            fanout_id=fanout_id,
+            stage_id=stage_id,
+            child_id="synth",
+            run_id=run_id,
+            trace_id=trace_id,
+            causation_id=lost_event.id,
+            prompt_kind="fanout_synth",
+            skip_send_window=True,
+            provider_session_replaced=True,
+        ):
+            return False
+        prompt = build_task_prompt(
+            role.instance_id,
+            briefing_path,
+            prompt_kind="fanout_synth",
+        )
+        dispatch_context = self._dispatch_context(
+            role=role,
+            briefing_path=briefing_path,
+            trace_id=trace_id,
+        )
+        try:
+            self._send_transport_task(
+                role.instance_id,
+                briefing_path,
+                prompt,
+                dispatch_context,
+            )
+        except Exception as exc:
+            self.event_writer.append(ZfEvent(
+                type="fanout.child.dispatch_deferred",
+                actor="zf-cli",
+                payload={
+                    "fanout_id": fanout_id,
+                    "trace_id": trace_id,
+                    "stage_id": stage_id,
+                    "child_id": "synth",
+                    "run_id": run_id,
+                    "role_instance": role.instance_id,
+                    "prompt_kind": "fanout_synth",
+                    "reason": f"synth recovery dispatch failed: {exc}",
+                },
+                causation_id=lost_event.id,
+                correlation_id=trace_id,
+            ))
+            return False
+        lost = self.event_writer.append(ZfEvent(
+            type="fanout.child.dispatch_lost",
+            actor="zf-cli",
+            payload={
+                "fanout_id": fanout_id,
+                "trace_id": trace_id,
+                "stage_id": stage_id,
+                "child_id": "synth",
+                "run_id": run_id,
+                "role_instance": role.instance_id,
+                "reason": "reader_synth_session_replaced_after_dispatch",
+                "lost_signal_event_id": lost_event.id,
+                "lost_signal_type": lost_event.type,
+                "semantic_attempt_consumed": False,
+            },
+            causation_id=lost_event.id,
+            correlation_id=trace_id,
+        ))
+        self._note_prompt_sent(role.instance_id, run_id)
+        self.event_writer.append(ZfEvent(
+            type="fanout.synth.dispatched",
+            actor="zf-cli",
+            payload={
+                **payload,
+                "attempt": attempt,
+                "retry_of_event_id": latest_dispatch.id,
+                "recovery_kind": "provider_session_replaced",
+                "semantic_attempt_consumed": False,
+            },
+            causation_id=lost.id,
+            correlation_id=trace_id,
+        ))
+        return True
 
     def _dispatch_fanout_synth(
         self,

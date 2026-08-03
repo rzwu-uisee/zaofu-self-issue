@@ -183,6 +183,15 @@ def build_gap_task_map_amend(
 
     out = dict(base_task_map)
     tasks = [dict(task) for task in _dict_list(base_task_map.get("tasks"))]
+    base_tasks_by_id = {
+        task_id: task
+        for task in tasks
+        if (task_id := _task_id(task))
+    }
+    gap_tasks = [
+        _inherit_replacement_mechanical_identity(task, base_tasks_by_id)
+        for task in gap_tasks
+    ]
     existing_ids = {_task_id(task) for task in tasks if _task_id(task)}
     superseded_task_ids = _superseded_task_ids(gap_tasks)
     unknown_superseded = sorted(set(superseded_task_ids) - existing_ids)
@@ -317,6 +326,36 @@ def _gap_task_to_task_map_item(raw: dict[str, Any], *, wave: int) -> dict[str, A
     root_owner_class = str(raw.get("root_owner_class") or "").strip()
     if root_owner_class:
         item["root_owner_class"] = root_owner_class
+    base_commit = str(raw.get("base_commit") or "").strip()
+    if base_commit:
+        item["base_commit"] = base_commit
+    return item
+
+
+def _inherit_replacement_mechanical_identity(
+    raw: dict[str, Any],
+    base_tasks_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve explicit parent ownership metadata across a replacement.
+
+    This does not infer whether a task is an assembly task. It only carries
+    forward mechanical identity from the task that the gap explicitly names
+    as its parent (or sole superseded task).
+    """
+
+    item = dict(raw)
+    parent_id = str(item.get("parent_task_id") or "").strip()
+    if not parent_id:
+        superseded = _string_list(item.get("supersedes_task_ids"))
+        if len(superseded) == 1:
+            parent_id = superseded[0]
+    parent = base_tasks_by_id.get(parent_id)
+    if parent is None:
+        return item
+    for key in ("root_owner_class", "affinity_tag", "context_group"):
+        value = str(parent.get(key) or "").strip()
+        if value:
+            item.setdefault(key, value)
     return item
 
 
@@ -362,7 +401,10 @@ def _enriched_gap_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     for task in tasks:
         item = dict(task)
         for key, value in inherited.items():
-            item.setdefault(key, value)
+            if key in {"goal_id", "goal_kind", "gap_category"}:
+                item[key] = value
+            else:
+                item.setdefault(key, value)
         for key, value in inherited_lists.items():
             item.setdefault(key, value)
         enriched.append(item)
@@ -419,7 +461,10 @@ def _gap_task_evidence_contract(
     }
     for key, value in fields.items():
         if value:
-            evidence.setdefault(key, value)
+            if key in {"goal_id", "goal_kind", "gap_category"}:
+                evidence[key] = value
+            else:
+                evidence.setdefault(key, value)
     return evidence
 
 

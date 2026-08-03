@@ -173,6 +173,37 @@ def test_admitted_plan_port_dependency_overrides_dev_yaml_route():
     assert result.recommended_action == "request_replan"
 
 
+def test_structured_contract_blocker_overrides_environment_text_and_yaml_route():
+    cfg = _config_with_routing({"dev.blocked": "dev-lane-1"})
+    event = ZfEvent(
+        type="dev.blocked",
+        actor="dev-lane-1",
+        task_id="TASK-ASSEMBLY",
+        payload={
+            "failure_class": "task_contract_unsatisfiable",
+            "recommended_action": "replan",
+            "reason": (
+                "the provided Python environment cannot import the package, "
+                "and an upstream script rejects the required profile"
+            ),
+            "blocker_task_ids": ["TASK-BACKEND"],
+            "required_paths": ["scripts/backend/run_smoke.py"],
+            "evidence_refs": [
+                "artifact:artifacts/contracts/assembly.json",
+                "command:ASSEMBLY-SMOKE",
+            ],
+        },
+    )
+
+    result = classify_rework_trigger(event, cfg)
+
+    assert result.classification == "design_issue"
+    assert result.suspected_owner == "planner"
+    assert result.recommended_action == "request_replan"
+    assert result.retryable is False
+    assert result.should_increment_retry is False
+
+
 def test_untrusted_dependency_marker_does_not_override_yaml_route():
     cfg = _config_with_routing({"test.failed": "dev-lane-0"})
     event = ZfEvent(

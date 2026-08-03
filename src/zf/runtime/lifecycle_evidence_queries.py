@@ -130,6 +130,7 @@ class LifecycleEvidenceQueriesMixin:
         if events is None:
             events = self._fanout_lifecycle_events()
         terminal_fanouts: set[str] = set()
+        stale_child_runs: set[tuple[str, str, str]] = set()
         for event in reversed(events):
             payload = event.payload if isinstance(event.payload, dict) else {}
             if event.type in {"fanout.cancelled", "fanout.timed_out"}:
@@ -142,6 +143,7 @@ class LifecycleEvidenceQueriesMixin:
                 "fanout.child.completed",
                 "fanout.child.failed",
                 "fanout.child.dispatch_lost",
+                "fanout.child.stale_completion",
             }:
                 continue
             if str(payload.get("role_instance") or "").strip() != instance_id:
@@ -151,9 +153,22 @@ class LifecycleEvidenceQueriesMixin:
             ).strip()
             if event_task_id != task_id:
                 continue
+            if event.type == "fanout.child.stale_completion":
+                key = self._fanout_child_key(payload)
+                if key[0] and key[1]:
+                    stale_child_runs.add(
+                        key if key[2] else (key[0], key[1], "")
+                    )
+                continue
             if event.type == "fanout.child.dispatch_lost":
                 return "terminal"
             if event.type == "fanout.child.dispatched":
+                key = self._fanout_child_key(payload)
+                if (
+                    key in stale_child_runs
+                    or (key[0], key[1], "") in stale_child_runs
+                ):
+                    return "terminal"
                 if str(payload.get("fanout_id") or "") in terminal_fanouts:
                     return "terminal"
                 return "active"
@@ -173,6 +188,13 @@ class LifecycleEvidenceQueriesMixin:
         terminal_fanouts: set[str] = set()
         for event in reversed(events):
             payload = event.payload if isinstance(event.payload, dict) else {}
+            if event.type == "fanout.child.stale_completion":
+                key = self._fanout_child_key(payload)
+                if key[0] and key[1]:
+                    terminal_children.add(
+                        key if key[2] else (key[0], key[1], "")
+                    )
+                continue
             if event.type in {
                 "fanout.child.completed",
                 "fanout.child.failed",
@@ -232,6 +254,7 @@ class LifecycleEvidenceQueriesMixin:
             "fanout.child.completed",
             "fanout.child.failed",
             "fanout.child.dispatch_lost",
+            "fanout.child.stale_completion",
             "fanout.synth.dispatched",
             "fanout.synth.completed",
             # fanout 级终局:cancelled 使全体 child 失效;timed_out 此前

@@ -544,16 +544,31 @@ def _reader_stage_replan_owns_failed_batch(
     """Avoid a task-map resume action for a pre-task reader failure."""
 
     payload = _payload(aggregate_event)
+    fanout_id = str(payload.get("fanout_id") or "").strip()
+    failure_event_type = str(payload.get("failure_event") or "").strip()
+    if not fanout_id or not failure_event_type:
+        return False
+    result_events = [
+        event
+        for event in events
+        if event.type == failure_event_type
+        and str(_payload(event).get("fanout_id") or "") == fanout_id
+    ]
+    if any(
+        isinstance(_payload(event).get("gap_tasks"), list)
+        and any(
+            isinstance(task, dict) and str(task.get("task_id") or "").strip()
+            for task in _payload(event).get("gap_tasks") or []
+        )
+        for event in result_events
+    ):
+        return True
     if (
         str(payload.get("task_map_ref") or "").strip()
         or _string_list(payload.get("completed_task_ids"))
         or str(payload.get("candidate_ref") or "").strip()
         or str(payload.get("candidate_head_commit") or "").strip()
     ):
-        return False
-    fanout_id = str(payload.get("fanout_id") or "").strip()
-    failure_event_type = str(payload.get("failure_event") or "").strip()
-    if not fanout_id or not failure_event_type:
         return False
     reader_started = any(
         event.type == "fanout.started"
@@ -563,11 +578,7 @@ def _reader_stage_replan_owns_failed_batch(
     )
     if not reader_started:
         return False
-    return any(
-        event.type == failure_event_type
-        and str(_payload(event).get("fanout_id") or "") == fanout_id
-        for event in events
-    )
+    return bool(result_events)
 
 
 def _task_ref_repair_checkpoint(

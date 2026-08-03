@@ -84,6 +84,23 @@ def _stage_flow_kind(stage: Any, trigger_type: str) -> str:
     return ""
 
 
+def _same_replan_scope(event: ZfEvent, failure_event: ZfEvent) -> bool:
+    failure_run_id = _event_run_id(failure_event)
+    if failure_run_id and _event_run_id(event) != failure_run_id:
+        return False
+    failure_payload = (
+        failure_event.payload if isinstance(failure_event.payload, dict) else {}
+    )
+    event_payload = event.payload if isinstance(event.payload, dict) else {}
+    failure_pdd = str(
+        failure_payload.get("pdd_id") or failure_payload.get("feature_id") or ""
+    ).strip()
+    event_pdd = str(
+        event_payload.get("pdd_id") or event_payload.get("feature_id") or ""
+    ).strip()
+    return not (failure_pdd and event_pdd and failure_pdd != event_pdd)
+
+
 def _canonical_run_flow_kind(
     events: list[ZfEvent],
     failure_event: ZfEvent,
@@ -229,7 +246,11 @@ def plan_reader_stage_replan(
         return None, "cross_flow_failure"
     origin_payload: dict[str, Any] = {}
     for event in events:
-        if event.type == trigger_type and isinstance(event.payload, dict):
+        if (
+            event.type == trigger_type
+            and isinstance(event.payload, dict)
+            and _same_replan_scope(event, failure_event)
+        ):
             origin_payload = dict(event.payload)
     lineage = reader_stage_lineage_payload(
         events,
@@ -263,7 +284,10 @@ def plan_reader_stage_replan(
     last_success_index = -1
     if success_event:
         for index, event in enumerate(events):
-            if event.type == success_event:
+            if (
+                event.type == success_event
+                and _same_replan_scope(event, failure_event)
+            ):
                 last_success_index = index
     prior_failures = 0
     failure_index = -1
@@ -273,6 +297,8 @@ def plan_reader_stage_replan(
         if index <= last_success_index:
             continue
         if event.type != failure_event.type:
+            continue
+        if not _same_replan_scope(event, failure_event):
             continue
         if event.id == failure_event.id:
             continue
@@ -297,6 +323,8 @@ def plan_reader_stage_replan(
     if not target_ref:
         for event in reversed(events):
             if not isinstance(event.payload, dict):
+                continue
+            if not _same_replan_scope(event, failure_event):
                 continue
             target_ref = _payload_target_ref(event.payload)
             if target_ref:

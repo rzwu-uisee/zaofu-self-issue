@@ -632,6 +632,79 @@ def test_terminal_run_dispatch_blocked_event_does_not_self_amplify(
     ) == before
 
 
+def test_goal_active_update_reopens_explicitly_blocked_run(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+    runtime.event_writer.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="run-manager",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={"run_id": "RUN-A", "workflow_run_id": "RUN-A"},
+    ))
+    assert run_dispatch_block_reason(
+        runtime,
+        task=runtime.task_store.get("TASK-A"),
+    ) == "run_terminal:blocked"
+
+    runtime.event_writer.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "run_id": "RUN-A",
+            "workflow_run_id": "RUN-A",
+            "status": "active",
+            "reason": "resume after repair",
+        },
+    ))
+
+    projection = build_run_admission_projection(log.read_all())
+    assert projection.runs["RUN-A"].status == "running"
+    assert projection.runs["RUN-A"].terminal is False
+    assert run_dispatch_block_reason(
+        runtime,
+        task=runtime.task_store.get("TASK-A"),
+    ) == ""
+
+
+@pytest.mark.parametrize(
+    "terminal_type",
+    ["run.goal.completed", "run.failed", "run.cancelled"],
+)
+def test_goal_active_update_does_not_reopen_irreversible_terminal_run(
+    tmp_path: Path,
+    terminal_type: str,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+    runtime.event_writer.append(ZfEvent(
+        type=terminal_type,
+        actor="run-manager",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={"run_id": "RUN-A", "workflow_run_id": "RUN-A"},
+    ))
+    runtime.event_writer.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "run_id": "RUN-A",
+            "workflow_run_id": "RUN-A",
+            "status": "active",
+        },
+    ))
+
+    entry = build_run_admission_projection(log.read_all()).runs["RUN-A"]
+    assert entry.terminal is True
+    assert entry.terminal_type == terminal_type
+
+
 def test_terminal_run_non_stage_event_does_not_emit_dispatch_block(
     tmp_path: Path,
 ) -> None:

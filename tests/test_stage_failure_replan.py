@@ -267,6 +267,92 @@ def test_cap_exhausted_escalates() -> None:
     assert replan is None and note == "cap_exhausted"
 
 
+def test_cap_ignores_failures_from_other_workflow_runs() -> None:
+    old_failures = [
+        ZfEvent(
+            type="issue.triage.failed",
+            correlation_id=f"old-run-{index}",
+            payload={"pdd_id": "PDD-1", "reason": "old failure"},
+        )
+        for index in range(STAGE_REPLAN_CAP)
+    ]
+    origin = ZfEvent(
+        type="issue.requested",
+        correlation_id="current-run",
+        payload={"pdd_id": "PDD-1", "issue_ref": "docs/issues/current.md"},
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id="current-run",
+        payload={
+            "pdd_id": "PDD-1",
+            "reason": "current admission failure",
+            "plan_admission_incident_id": "plan-admission-current",
+        },
+    )
+
+    replan, note = plan_reader_stage_replan(
+        _config(),
+        [*old_failures, origin, failure],
+        failure,
+    )
+
+    assert replan is not None and "issue-triage" in note
+    assert replan.payload["rework_attempt"] == 1
+    assert replan.payload["issue_ref"] == "docs/issues/current.md"
+    assert replan.payload["plan_admission_incident_id"] == (
+        "plan-admission-current"
+    )
+
+
+def test_same_run_admission_failure_remains_bounded() -> None:
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=[SimpleNamespace(
+        id="prd-post-verify-discovery",
+        topology="fanout_reader",
+        trigger="flow.discovery.requested",
+        failure_event="",
+        aggregate=SimpleNamespace(
+            success_event="flow.discovery.completed",
+            failure_event="flow.discovery.failed",
+        ),
+    )]))
+    origin = ZfEvent(
+        type="flow.discovery.requested",
+        correlation_id="current-run",
+        payload={"pdd_id": "PDD-1", "target_ref": "partial456"},
+    )
+    prior = ZfEvent(
+        type="flow.discovery.failed",
+        correlation_id="current-run",
+        payload={"pdd_id": "PDD-1", "reason": "bounded gap discovered"},
+    )
+    failure = ZfEvent(
+        type="flow.discovery.failed",
+        correlation_id="current-run",
+        payload={
+            "pdd_id": "PDD-1",
+            "reason": "gap task has 9 acceptance criteria, max is 8",
+            "plan_admission_incident_id": "plan-admission-current",
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        config,
+        [origin, prior, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.type == "flow.discovery.requested"
+    assert replan.payload["rework_attempt"] == 2
+    assert replan.payload["plan_admission_incident_id"] == (
+        "plan-admission-current"
+    )
+    assert "9 acceptance criteria" in (
+        replan.payload["rework_feedback"][0]["message"]
+    )
+
+
 def test_candidate_ready_stops_recursive_plan_replan() -> None:
     origin = ZfEvent(
         type="issue.requested",

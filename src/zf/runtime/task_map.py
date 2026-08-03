@@ -1,5 +1,4 @@
 """Task-map validation and projection helpers.
-
 ``task-map.json`` bridges human planning artifacts and executable kanban
 contracts. The orchestrator owns semantic decomposition; helpers here only
 perform deterministic schema/topology checks and lightweight summaries.
@@ -18,6 +17,7 @@ from typing import Any
 from zf.runtime import verification_command_safety
 from zf.runtime.task_map_goal_coverage import validate_goal_coverage
 from zf.runtime.task_map_required_ports import required_plan_port_errors
+from zf.runtime.task_map_successor import successor_base_errors
 from zf.runtime.task_contract_snapshot import acceptance_contract_errors
 from zf.runtime.verification_commands import (
     VerificationCommandError,
@@ -157,6 +157,7 @@ def validate_task_map_payload(
         task_count_by_wave[str(wave)] = task_count_by_wave.get(str(wave), 0) + 1
         owner_role = str(raw.get("owner_role") or "").strip()
         task_dependencies[task_id] = _string_list(raw.get("blocked_by"))
+        errors.extend(successor_base_errors(raw, task_id=task_id))
         if str(raw.get("root_owner_class") or "").strip().lower() == "assembly":
             if owner_role:
                 assembly_owner_roles[task_id] = owner_role

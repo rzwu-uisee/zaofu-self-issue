@@ -285,6 +285,21 @@ def classify_rework_trigger(
             "dependency",
         )
 
+    # A mechanically valid producer-owned contract blocker outranks broad
+    # text markers such as "environment" or "dependency". The helper requires
+    # an acknowledged failure class, a reason, and replayable evidence, so a
+    # free-form worker claim cannot bypass the normal YAML/text fallback.
+    if is_plan_level_task_contract_blocker(event):
+        return _result(
+            "design_issue",
+            gate or "task_contract",
+            "planner",
+            "request_replan",
+            "worker supplied reproducible evidence that the current task "
+            "contract or upstream slice makes the acceptance criteria "
+            "unsatisfiable inside allowed_paths",
+        )
+
     # K2: YAML event-type routing has priority over text heuristics, but not
     # over a producer-owned structured root cause.
     if config is not None:
@@ -346,17 +361,6 @@ def classify_rework_trigger(
             "dispatch_rework",
             "phase gate order violation — baseline contamination or plan-level"
             " gate placement conflict; arch must redesign plan order before retry",
-        )
-
-    if is_plan_level_task_contract_blocker(event):
-        return _result(
-            "design_issue",
-            gate or "task_contract",
-            "planner",
-            "request_replan",
-            "worker supplied reproducible evidence that the current task "
-            "contract or upstream slice makes the acceptance criteria "
-            "unsatisfiable inside allowed_paths",
         )
 
     if _evidence_gap(event, text, failed_d, payload):
@@ -515,7 +519,10 @@ def classify_rework_trigger(
 
 
 def should_increment_retry(result: ReworkTriageResult) -> bool:
-    return result.classification in REWORK_RETRY_CLASSIFICATIONS
+    return (
+        result.classification in REWORK_RETRY_CLASSIFICATIONS
+        and result.recommended_action != "request_replan"
+    )
 
 
 def triage_from_payload(payload: object) -> ReworkTriageResult | None:
@@ -546,7 +553,10 @@ def _result(
         gate_rule=gate_rule,
         suspected_owner=suspected_owner,
         recommended_action=recommended_action,
-        should_increment_retry=classification in REWORK_RETRY_CLASSIFICATIONS,
+        should_increment_retry=(
+            classification in REWORK_RETRY_CLASSIFICATIONS
+            and recommended_action != "request_replan"
+        ),
         notes=notes,
     )
 

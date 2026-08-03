@@ -1,321 +1,244 @@
-# Plan, Task Map, and Orchestrator Dispatch
+# Plan, Task Map, and Kernel Dispatch
 
-> Audience: operators who need to understand how ZaoFu turns a requirement
-> into a plan, splits it into tasks, and dispatches work by role, dependency,
-> and code scope.
+> For operators who need to understand how ZaoFu compiles a clarified goal into a verifiable task graph and executes it across Agents under control.
+> The filename remains for compatibility. In Product Flow, the Kernel owns happy-path dispatch, not a configured `orchestrator` role Agent.
 
-## 1. Core Conclusion
-
-ZaoFu has a working spine from `plan` to `task-map` to Kanban task contracts.
-Full and strict delivery configurations can separate arch, critic, dev, review,
-test, and judge responsibilities. A project's own `zf.yaml` remains its only
-control-plane configuration.
-
-`task-map` is not yet a mandatory entry point for every product-delivery task.
-Today it is enforced mainly through role skills, Orchestrator briefings, and the
-product-delivery manifest path. To make codemap-driven delivery the default,
-declare task-map production and consumption as an explicit workflow-stage
-contract.
-
-The closest canonical codemap carrier is `task-map.v1`. It combines code scope,
-file conflicts, dependencies, and worker ownership instead of acting as a
-standalone static code graph.
-
-## 2. Concept Mapping
-
-| Concept | Current carrier | Meaning |
-|---|---|---|
-| Requirement specification | `spec` artifact | Target behavior, scope, constraints, and acceptance |
-| Implementation plan | `implementation_plan` artifact | Approach, phases, risk, and affected files |
-| Backlog | `backlog_plan` artifact or `tasks/` | Executable task candidates |
-| Code map | Fields in `task-map.v1`; optionally a future `code_map` artifact | Structure, module boundaries, owners, tests, and risky files |
-| Task map | `task_map` artifact | Bridge from a plan to schedulable Kanban tasks |
-| Source index | `source_index` artifact | Provenance from `task_id` to the original plan section |
-| Coverage report | `coverage_report` artifact | Source coverage, unknowns, and no-invention diagnostics |
-| Kanban task contract | `TaskContract` | Runtime truth consumed by dispatch, briefings, and gates |
-
-Important boundaries:
-
-- The source plan document is not dispatch truth.
-- Architect artifacts are normally candidates, not final truth.
-- The critic reviews a candidate artifact package.
-- The Orchestrator accepts, merges, and relabels final artifacts and produces schedulable contracts.
-- Layer 1 validates and dispatches deterministically; it does not infer task decomposition from prose.
-
-## 3. Overall Flow
-
-```mermaid
-flowchart TD
-    U[user.message] --> O1[Layer 2 orchestrator intake]
-    O1 --> F[feature.created / design task]
-    F --> A[arch worker]
-    A --> P[spec / implementation_plan / backlog_plan]
-    P --> TM0[candidate task-map.v1<br/>source-index.v1<br/>coverage-report.v1]
-    TM0 --> M0[artifact.manifest.published<br/>status=draft/proposed]
-    A --> AP[arch.proposal.done]
-    AP --> C[critic worker]
-    C --> CV{design.critique.done}
-    CV -- reject --> AR[rework to arch]
-    CV -- approve --> O2[orchestrator Stage 4 synthesis]
-    O2 --> M1[accepted final manifest]
-    O2 --> TM1[final canonical delivery bundle]
-    TM1 --> K[ingest into Kanban task contracts]
-    K --> D[dispatcher]
-    D --> W[dev/review/test/judge workers]
-    W --> Done[terminal evidence + done]
-```
-
-## 4. How Planning Produces Artifacts
-
-Planning normally enters a design chain before code changes:
-
-1. `user.message` wakes the Orchestrator.
-2. The Orchestrator creates a feature and design task, usually assigned to `arch`.
-3. `arch` reads code, requirements, and relevant docs and produces `spec`, `implementation_plan`, `backlog_plan`, and optionally a candidate task map.
-4. `arch` publishes `artifact.manifest.published`, then `arch.proposal.done`.
-5. `critic` reviews artifact references and emits `design.critique.done`.
-6. After approval, Stage 4 synthesis compiles candidates into an accepted delivery bundle and executable task contracts.
-
-External method skills can help the architect with specification, planning,
-task breakdown, review, and testing. Role-gate skills provide team protocol,
-handoff, and evaluator constraints. ZaoFu's repository skills adapt those
-methods to events, manifests, contracts, and completion protocol. The final
-result must always return to ZaoFu artifacts and task contracts.
-
-## 5. Plan Readiness Gate
-
-A written plan is not automatically ready for execution. Before task-map
-synthesis, verify:
-
-| Check | Passing condition |
-|---|---|
-| Requirement clarity | Target behavior, user value, I/O, and boundaries are explicit |
-| Non-goals | Excluded scope prevents worker expansion |
-| Visible assumptions | Dependencies, unknowns, and risky assumptions are listed |
-| Executable acceptance | Commands, human checks, or evidence can verify each criterion |
-| Test strategy | Static, runtime, E2E, or manual-evidence paths are defined |
-| Code impact | Candidate modules, files, interfaces, data, or docs are named |
-| Decomposability | Tasks can have explicit owners and verification |
-
-Current readiness is primarily enforced by role protocols, artifact references,
-and manifest state rather than a complete Layer 1 hard gate. An unready plan
-should return to architecture or clarification, not create dev tasks. Hard
-runtime checks still occur in task-map validation, contract preflight, and
-dispatcher gates.
-
-## 6. Code Map and Task Map
-
-Short term, `task-map.v1` can carry both code scope and scheduling. A clearer
-long-term boundary is:
+## 1. The Model in One Flow
 
 ```text
-code_map
-  -> code structure, module boundaries, ownership, tests, and risky files
-  -> answers "how is this codebase divided?"
-
-task_map
-  -> tasks, dependencies, waves, workers, acceptance, and verification
-  -> answers "how will this requirement be executed?"
+Goal / Requirement
+  -> semantic plan and evidence contract
+  -> task-map.v1 + source-index.v1 + coverage-report.v1
+  -> deterministic validation and Task contract materialization
+  -> run admission + Kernel dispatch
+  -> Worker artifacts/evidence
+  -> verify, replan, and closure
 ```
 
-```mermaid
-flowchart LR
-    S[spec] --> P[implementation_plan]
-    CM[code_map] --> P
-    P --> TM[task-map.v1]
-    CM --> TM
-    TM --> TC[Kanban task contracts]
-    TC --> D[dispatcher]
-```
+The Kernel does not interpret prose and invent a task breakdown. Ownership is explicit:
 
-Until `code_map` becomes separate, each task should define:
+| Decision | Owner |
+|---|---|
+| requirement meaning, solution, task slices, acceptance quality, project constraints | Planner/Architect/domain Agent plus skills/prompts |
+| schema, refs, dependency, currentness, authorization, WIP, lease, dispatch | deterministic Kernel |
+| semantic exception triage and replan direction | Agent/Run Manager/Autoresearch proposal |
+| approved state changes and external effects | `ControlledActionService` / sanctioned CLI |
 
-- `scope`: expected code, docs, or configuration changes; used by scope ratchet.
-- `shared_files`: shared read-only context, not write permission.
-- `exclusive_files`: files or modules this task exclusively writes.
-- `owner_role`: executing role.
-- `blocked_by` and `wave`: dependencies and execution batch.
-- `verification`: executable validation entry point.
+Legacy safe-team may explicitly let a Layer 2 Orchestrator Agent decompose and assign work. That is a
+compatibility mode, not the default model for Issue/PRD/Refactor Product Flow.
 
-## 7. Split Work into Tasks
+## 2. From Requirement to Executable Run
 
-The canonical bundle combines `task-map.v1`, `source-index.v1`, and
-`coverage-report.v1`:
+### 2.1 Establish a Real Task
+
+An Idea, Issue, Refactor, or Channel discussion first converges into a traceable Task with:
+
+- Goal, Non-goals, and acceptance criteria;
+- inputs, outputs, risks, budget, and affected code scope;
+- test matrix, evidence producers, and closure boundary;
+- semantic decisions or external effects that need human approval.
+
+Channel Finalize/Owner confirm publishes a canonical PRD/Task source; it does not automatically start a
+Workflow. Use [Controlled Workflow Start](workflows/controlled-workflow-start.en.md) to select a route,
+preview, propose, and independently apply it.
+
+### 2.2 Planning Agents Produce Durable Artifacts
+
+A profile may use a planner, architect, researcher, critic, or other roles. Role names are not the
+contract; artifacts and evidence are. Common artifacts include:
+
+| Artifact | Question answered |
+|---|---|
+| requirement/spec | what must change and what is out of scope |
+| implementation plan | solution, phases, risks, and interface changes |
+| acceptance/test matrix | which check and evidence prove each Claim |
+| `task-map.v1` | how this delivery becomes a schedulable task graph |
+| `source-index.v1` | where each Task originated in the requirement/plan |
+| `coverage-report.v1` | covered source and unresolved unknowns |
+
+Artifacts are persisted atomically and bound through refs/digests. An event preview does not replace a
+required artifact body.
+
+### 2.3 Pass Readiness and Currentness
+
+An executable plan means at least:
+
+- Goal/Claims, Non-goals, inputs, outputs, and boundaries are explicit;
+- each blocking Claim has acceptance, a test method, and an evidence producer;
+- each task slice has an owner role, scope, dependencies, and independent verification;
+- source index covers Tasks and no blocking unknown remains unresolved in coverage;
+- artifacts are based on the current source revision and have not been invalidated by later facts.
+
+When these conditions fail, the Planner updates artifacts or asks for clarification. Workers do not guess,
+and the Kernel's mechanical checks do not replace domain judgment.
+
+## 3. The `task-map.v1` Contract
+
+`task-map.v1` bridges a plan and canonical Task contracts. It binds the scheduling graph to Goal coverage,
+code scope, and verification evidence. A reduced example:
 
 ```json
 {
   "schema_version": "task-map.v1",
   "feature_id": "FEATURE-123",
+  "goal_claims": [
+    {"goal_claim_id": "CLAIM-A", "text": "API behavior is preserved", "mandatory": true}
+  ],
   "source_refs": {
-    "spec_ref": "docs/specs/example.md",
-    "plan_ref": "docs/plans/example-plan.md",
-    "source_index_ref": ".zf/artifacts/FEATURE-123/v1/source_index.json",
-    "coverage_report_ref": ".zf/artifacts/FEATURE-123/v1/coverage_report.json",
-    "critic_event_id": "evt-critic",
-    "critic_gate_ref": "design.critique.done evt-critic approve"
+    "spec_ref": "docs/specs/feature.md",
+    "plan_ref": "docs/plans/feature.md",
+    "source_index_ref": ".zf/artifacts/FEATURE-123/source-index.json",
+    "coverage_report_ref": ".zf/artifacts/FEATURE-123/coverage-report.json"
   },
   "tasks": [
     {
       "task_id": "TASK-001",
-      "title": "product delivery ingest",
+      "title": "Implement the verified API slice",
       "owner_role": "dev",
-      "plan_section": "phase-1",
-      "blocked_by": [],
       "wave": 1,
-      "scope": ["src/zf/runtime/product_delivery.py"],
-      "shared_files": ["docs/specs/example.md"],
-      "exclusive_files": ["src/zf/runtime/product_delivery.py"],
-      "acceptance": ["accepted task maps create Kanban tasks"],
-      "verification": "uv run pytest tests/test_product_delivery.py",
-      "verification_tiers": ["static", "runtime"]
+      "blocked_by": [],
+      "scope": ["src/api/**", "tests/test_api.py"],
+      "exclusive_files": ["src/api/handler.py"],
+      "goal_claim_ids": ["CLAIM-A"],
+      "acceptance": ["the compatibility cases pass"],
+      "verification": "uv run pytest tests/test_api.py -q --no-cov",
+      "verification_tiers": ["runtime"]
     }
   ]
 }
 ```
 
-Decomposition rules:
+Common fields:
 
-- Every task must be independently verifiable.
-- Prefer vertical slices that produce observable behavior.
-- Put shared infrastructure, schemas, migrations, and public APIs in earlier waves.
-- Express dependencies with `blocked_by`.
-- Separate concurrent writers by module and `exclusive_files`.
-- Use role names such as `dev`, not random session IDs, in `owner_role`.
-- References in `blocked_by` must exist in the same map.
-- A path that may be written belongs in `exclusive_files`; consumers should depend on the writer.
-- Acceptance and verification cannot merely say "implementation complete".
-- Review, test, and judge consume contracts, artifact references, and Git evidence, not raw plans.
-- New product-delivery paths publish task map, source index, and coverage report together.
-
-## 8. Task-Map Readiness Gate
-
-An agent proposes decomposition, but deterministic helpers decide whether it is
-schedulable. Implemented hard checks include:
-
-| Check | Passing condition |
+| Field | Purpose |
 |---|---|
-| Schema | Version is empty or `task-map.v1`; tasks are a nonempty array |
-| Task IDs | Unique and nonempty |
-| Dependencies | `blocked_by` references tasks in the same map |
-| Waves | A task never depends on a later wave |
-| Exclusive files | Exact paths are not claimed by multiple tasks |
-| Source refs | When present, `source_refs` is an object |
-| Source index | Covers every task-map task ID |
-| Coverage | Unresolved unknowns block or require operator handling |
-| Acceptance | Every task has verification or acceptance |
-| Contract preflight | Behavior, verification tiers, role, and paths are valid |
-| Verification tiers | Only `static`, `runtime`, `e2e`, and `manual_evidence` |
-| Shared/exclusive | One task cannot list a path in both |
-| Scope ratchet | Scope snapshots can detect out-of-scope changes |
+| `goal_claims` / `goal_claim_ids` | establish Goal -> Claim -> Task coverage |
+| `blocked_by` / `wave` | express dependencies, batches, and fan-in waits |
+| `scope` / `allowed_paths` | declare expected changes for scope/evidence checks |
+| `exclusive_files` | prevent concurrent writers on the same path |
+| `shared_files` | shared read-only context, not write permission |
+| `verification` / tiers | executable verification entry and level |
+| source refs | trace a Task back to its Goal, plan, review, and coverage report |
 
-Recommended future hardening includes dependency-cycle detection, glob and
-directory-level file conflicts, sibling shared/exclusive conflicts, bounded
-scope, mandatory artifact provenance, and an optional separate code-map kind.
+Prefer independently verifiable vertical slices. A shared schema/API may be an early wave, but avoid
+splitting into “all schemas, all backend, all frontend” unless each slice has an observable completion rule.
 
-Malformed maps, uncovered source indexes, unresolved unknowns, dependency
-cycles, unresolved file conflicts, and missing verification should fail closed
-and return to architecture or Orchestrator correction.
+## 4. Deterministic Task Map Gate
 
-## 9. Dispatch Workers
+Agents can propose any decomposition. Execution requires deterministic validation, including:
 
-Layer 2 makes semantic decisions; the deterministic dispatcher makes mechanical
-scheduling decisions:
+- schema version, a non-empty Task list, and unique Task IDs;
+- existing `blocked_by` references with no dependency on a later wave;
+- verification/acceptance, command safety, and allowed scope;
+- `exclusive_files` conflicts, shared/exclusive conventions, and assembly ownership;
+- required plan ports, source refs, and workspace-root ownership requirements;
+- Goal Claim coverage, evidence producers, and topological order;
+- source-index, coverage/currentness, and product-delivery ingest requirements.
+
+Failures are fail-closed: update the artifact, adjust wave/scope, or request owner judgment. Never bypass
+the gate by editing `kanban.json`, deleting checks, or accepting a Worker's self-declaration.
+
+## 5. Materialize Task Contracts
+
+Product-delivery ingest turns a validated task map into canonical Tasks:
+
+```text
+accepted artifact package
+  -> validate task-map/source-index/coverage
+  -> create/update Feature projection
+  -> create Task contracts and task docs
+  -> emit task.created / wave-ready facts
+  -> wait for run admission and readiness
+```
+
+The original Markdown plan is not dispatch truth. Task contracts hold structured dispatch fields and link
+back through `spec_ref`, `plan_ref`, `source_index_ref`, and `task_map_ref`. `contract` is the only Task
+contract field; do not introduce a second `sprint_contract` or side schema.
+
+## 6. How the Kernel Dispatches
 
 ```mermaid
 flowchart TD
-    R[ready Kanban task] --> C1{contract preflight}
-    C1 -- fail --> E1[dispatch_failed / rework / hold]
-    C1 -- pass --> C2{global pause or budget?}
-    C2 -- blocked --> Hold[hold]
-    C2 -- ok --> C3{wave ready?}
-    C3 -- no --> WaitWave[wait for prior wave]
-    C3 -- yes --> C4{exclusive_files conflict?}
-    C4 -- conflict --> WaitFile[wait for reservation]
-    C4 -- clear --> C5{role WIP available?}
-    C5 -- no --> WaitRole[wait for role instance]
-    C5 -- yes --> Assign[resolve role to instance]
-    Assign --> Brief[generate worker briefing]
-    Brief --> Send[send through transport]
-    Send --> Event[task.dispatched]
+    R[ready Task] --> A{run admitted and current?}
+    A -- no --> H[hold with reason]
+    A -- yes --> C{contract and required refs valid?}
+    C -- no --> F[fail closed / replan request]
+    C -- yes --> D{dependencies, wave, barrier ready?}
+    D -- no --> W[wait]
+    D -- yes --> P{WIP, budget, path and worker available?}
+    P -- no --> Q[queue with visible reason]
+    P -- yes --> T[persist TaskAttempt and lease]
+    T --> B[render briefing with dispatch_id]
+    B --> S[send through transport]
+    S --> E[record dispatch/delivery occurrence]
 ```
 
-Dispatch checks contract completeness, role availability, waves, file
-reservations, global pause, budgets, circuit breakers, and dispatch tokens. A
-task assigned to role `dev` may resolve to an idle `dev-1` or `dev-2` instance.
+The Kernel can map a logical role such as `dev` to an available instance and execute declared fanout,
+lanes, barriers, reader/writer ownership, and bounded rework. It cannot invent product stages or decide
+which technical solution is best.
 
-For a scoped task, dispatch records a snapshot. The reactor can compare changed
-files on completion; fail-closed configurations emit `scope.violation` and
-route to rework instead of silently advancing.
+After transport delivery, Workers report artifacts/evidence through `zf emit` or sanctioned actions. A
+result must match the current TaskAttempt/dispatch token. Reviewers, tests, judges, and custom verifiers
+consume the Task contract, artifact refs, and Git evidence instead of reinterpreting the raw prompt.
 
-## 10. Replan and Remap During Execution
+## 7. Replanning During Execution
 
-Do not continue an invalid long-horizon plan:
+Re-evaluate the plan instead of mechanically replaying old work when:
 
-```mermaid
-flowchart TD
-    W[worker detects a plan issue] --> E[blocked / gate failure / Supervisor finding]
-    E --> O[Orchestrator triage]
-    O --> Need{replan required?}
-    Need -- no --> R[bounded rework or retry]
-    Need -- yes --> A[architecture revises plan]
-    A --> C[critic reviews revised artifacts]
-    C --> M[Orchestrator accepts revised task map]
-    M --> Q[replace or requeue unstarted tasks]
-    M --> I[checkpoint active tasks]
-    Q --> D[dispatcher resumes]
-    I --> D
+- planned files, interfaces, dependencies, or assumptions contradict repository facts;
+- repeated rework does not reduce the same Goal gap;
+- verification cannot run or its evidence cannot prove a Claim;
+- scope/file ownership makes the planned concurrency invalid;
+- a new requirement or external state invalidates artifact currentness.
+
+Recommended path:
+
+```text
+finding / no-progress / goal gap
+  -> checkpoint current attempt and evidence
+  -> semantic triage produces replan proposal
+  -> owner/control policy approves the exact change
+  -> ControlledActionService applies a new artifact/task-map generation
+  -> untouched Tasks continue; affected Tasks replace, pause, or requeue
 ```
 
-Typical triggers include nonexistent files or interfaces, impossible file
-parallelism, invalid verification, requirement-plan mismatch, broken provenance,
-and repeated rework pointing to the same planning defect.
+Never silently rewrite a completed Task. If a new plan invalidates its result, create a correction Task and
+a new evidence chain.
 
-Unstarted tasks may be replaced, canceled, or re-waved. Active tasks checkpoint
-before an Orchestrator decision. Completed tasks are never silently rewritten;
-if a revised plan invalidates them, create correction tasks. Workers cannot
-overwrite Kanban truth with a revised plan.
-
-## 11. Observable Codemap Signals
+## 8. Observe Whether the Plan Was Followed
 
 ```bash
-PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main events --last 80
-PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main kanban --board
-PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main task trace <task_id>
+uv run zf workflow inspect
+uv run zf kanban --board
+uv run zf task trace TASK-ID
+uv run zf events --last 80
+uv run zf refs verify
 ```
 
-Look for a durable manifest, an architecture proposal referencing it, a critic
-verdict on concrete artifact refs, an accepted task map, and task contracts
-containing plan/source refs, owner role, wave, file scopes, and verification.
-Then verify dispatch to the expected role instance and a complete chain of
-build, static gate, review, test, and judge evidence. Scoped tasks should expose
-any `scope.violation` and its rework or block outcome.
+Use Web Task, Delivery, Runs, Coverage, Work, and Goal Dossier views to check:
 
-Web task and trace panels should expose source section, source excerpts, wave,
-dependencies, owner and instance, file scopes, artifact provenance, wait reason,
-and replan history.
+- source, Goal Claims, wave/dependencies, and owner role;
+- current attempt, worker instance, dispatch ID, and wait reason;
+- scope/shared/exclusive files and the actual Git diff;
+- required artifacts, test evidence, verdicts, and currentness;
+- replan generation, replaced Tasks, and unresolved Goal gaps.
 
-## 12. Current Gaps
+![Animated observation path from Delivery and Graph to Loop and Observability](assets/observe-delivery.webp)
 
-To make codemap-driven execution the stable default:
+Agent prose, a running tmux pane, or a changed Kanban status alone does not prove Task Map execution.
 
-1. Require plan, backlog, and task-map artifacts in delivery workflows.
-2. Make product-delivery ingest the default business-delivery path.
-3. Decide whether code scope remains in `task-map.v1` or becomes `code_map`.
-4. Strengthen glob, directory, and ownership conflict detection.
-5. Promote readiness checks such as cycle detection and provenance to Layer 1 gates.
-6. Complete the execution-time replan/remap protocol.
-7. Make dependencies, waves, ownership, file scopes, provenance, and wait reasons prominent in Web.
+## 9. Code and Test Entry Points
 
-## 13. Code Entry Points
-
-| Path | Responsibility |
+| Location | Responsibility |
 |---|---|
-| `zf.yaml` | Roles, triggers, publications, and workflow control plane |
-| `src/zf/runtime/task_map.py` | Task-map schema and deterministic validation |
-| `src/zf/runtime/product_delivery.py` | Convert task maps into Kanban contracts |
-| `src/zf/runtime/orchestrator_reactor.py` | React to manifests, critic approval, and delivery ingest |
-| `src/zf/runtime/orchestrator_dispatch.py` | Dispatch ready tasks to worker instances |
-| `src/zf/runtime/injection.py` | Worker briefings and active-task protocol |
-| `src/zf/core/task/schema.py` | Canonical `TaskContract` |
-| `src/zf/core/task/contract_validation.py` | Strict pre-dispatch validation |
-| `src/zf/core/verification/scope_ratchet.py` | Scope snapshots and violations |
+| `src/zf/runtime/task_map.py` | deterministic task-map Goal/evidence/topology validation |
+| `src/zf/runtime/product_delivery.py` | accepted task map to canonical Task contracts |
+| `src/zf/runtime/orchestrator_dispatch.py` | mechanical dispatch from readiness to worker instance |
+| `src/zf/runtime/task_attempt_runtime.py` | attempt/lease/delivery lifecycle |
+| `src/zf/runtime/injection.py` | briefing, active-task pin, and Worker protocol |
+| `src/zf/core/task/contract_validation.py` | pre-dispatch Task contract checks |
+| `src/zf/core/verification/scope_ratchet.py` | scope snapshot, diff, and violation checks |
+| `tests/test_task_map.py`, `tests/test_product_delivery.py` | task-map and ingest regressions |
+
+Related: [Harness Runtime Flow](04-harness-runtime.en.md), [Delivery Control Model](concepts/delivery-control-model.en.md),
+and [Observe a Delivery](operations/observe-delivery.en.md).

@@ -4088,10 +4088,13 @@ class Orchestrator(
         )
 
         gap_event_type = event.type or "gap_plan.ready"
-        if self._has_bridge_output(event.id, {"task_map.amended"}):
+        if self._has_bridge_output(
+            event.id,
+            {"task_map.amended", "task_map.amend.failed"},
+        ):
             return OrchestratorDecision(
                 action="noop",
-                reason=f"{gap_event_type} already amended task_map",
+                reason=f"{gap_event_type} task_map amend already settled",
             )
 
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -4225,6 +4228,18 @@ class Orchestrator(
                 reason=f"task_map amend failed: {exc}",
             )
         gap_task_ids = list(amend.get("gap_task_ids") or [])
+        flow_kind = str(
+            payload.get("flow_kind") or payload.get("goal_kind") or ""
+        ).strip()
+        goal_kind = str(
+            payload.get("goal_kind") or payload.get("flow_kind") or ""
+        ).strip()
+        workflow_run_id = str(
+            payload.get("workflow_run_id") or trace_id
+        ).strip()
+        goal_id = str(
+            payload.get("goal_id") or feature_id or pdd_id
+        ).strip()
         amended = self.event_writer.append(ZfEvent(
             type="task_map.amended",
             actor="zf-cli",
@@ -4235,6 +4250,10 @@ class Orchestrator(
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
                 "trace_id": trace_id,
+                "workflow_run_id": workflow_run_id,
+                "goal_id": goal_id,
+                "goal_kind": goal_kind,
+                "flow_kind": flow_kind,
                 "task_map_ref": str(amend.get("task_map_ref") or ""),
                 "supersedes_task_map_ref": base_task_map_ref,
                 "gap_plan_ref": gap_plan_ref,
@@ -4256,6 +4275,10 @@ class Orchestrator(
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
                 "trace_id": trace_id,
+                "workflow_run_id": workflow_run_id,
+                "goal_id": goal_id,
+                "goal_kind": goal_kind,
+                "flow_kind": flow_kind,
                 "task_map_ref": str(amend.get("task_map_ref") or ""),
                 "source_index_ref": str(payload.get("source_index_ref") or ""),
                 "source_commit": str(payload.get("source_commit") or ""),

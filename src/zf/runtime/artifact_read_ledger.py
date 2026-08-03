@@ -22,13 +22,13 @@ from zf.runtime.sidecar_refs import (
     safe_sidecar_ref,
     sidecar_path,
 )
+from zf.runtime import semantic_replan_handoff
 
 
 SOURCE_MANIFEST_SCHEMA = "attempt-source-manifest.v1"
 ARTIFACT_READ_SCHEMA = "artifact-read.v1"
 READ_POLICY_SCHEMA = "input-consumption-policy.v1"
 READ_LEDGER_SCHEMA = "artifact-read-ledger.v1"
-
 _ATTEMPT_REF_RE = re.compile(
     r"^artifacts/attempts/(?P<attempt>[^/]+)/read-ledger\.active\.jsonl$"
 )
@@ -202,6 +202,9 @@ def source_manifest_from_payload(
                 "sha256": digest,
                 "allowed_paths": ["$"],
             })
+    sources.extend(semantic_replan_handoff.replan_sources(
+        state_dir, payload, attempt_id=attempt_id, source_event_id=source_event_id,
+    ))
     manifest_ref = str(payload.get("workflow_input_manifest_ref") or "").strip()
     if manifest_ref:
         source = _source_from_ref(
@@ -328,6 +331,7 @@ def canonical_required_reads(
 
     sources = manifest.get("sources")
     source_rows = sources if isinstance(sources, list) else []
+    required_paths.update(semantic_replan_handoff.required_read_paths(source_rows))
     for source in source_rows:
         if not isinstance(source, Mapping):
             continue

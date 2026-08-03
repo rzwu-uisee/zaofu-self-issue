@@ -67,6 +67,11 @@ test.passed
 judge.passed
 ```
 
+真实运行期间可在 Web 中沿 Delivery -> Graph -> Loop -> Observability 交叉核对
+fanout 进度、依赖和闭环信号：
+
+![Product fanout 的 Delivery、Graph、Loop 与 Observability 动态演示](assets/observe-delivery.webp)
+
 摘要命令:
 
 ```bash

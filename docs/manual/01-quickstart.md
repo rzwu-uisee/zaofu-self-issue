@@ -3,9 +3,11 @@
 > 适用对象：第一次安装 ZaoFu，并希望从 Web 完成 Bootstrap、创建或打开
 > Project，再通过 Kanban Agent 使用 Channel、Research 和交付 Workflow 的操作者。
 >
-> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-07-30。
+> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-08-03。
 > 本页动态图和关键截图由 Playwright 的真实交互状态组成；闭环结论同时检查对应 API、
 > Store 和 EventLog，不以截图代替运行态证据。
+> Channel 当前以 `conversation` 为默认产品模式；只有显式选择 `multi_lens` 并执行
+> Discuss 才进入有界 fanout/synthesis。
 
 ## 完成路线
 
@@ -37,7 +39,7 @@
 从 source checkout 安装并检查 CLI：
 
 ```bash
-git clone <zaofu-repository-url> /path/to/zaofu
+git clone https://github.com/uisee-ai/zaofu /path/to/zaofu
 cd /path/to/zaofu
 uv sync --extra dev --extra web --extra stream-json
 
@@ -144,7 +146,7 @@ Kanban Agent 是 Project 内的通用 Coding Agent，不只是创建 Task、查�
 |---|---:|---|
 | 普通分析、修改代码、运行测试 | 否 | 直接 Coding，受当前权限和 Git 规则约束 |
 | 只建立可追踪工作项 | 否 | `Create Task` proposal，确认后创建 Task |
-| 多角色澄清、评审或讨论 | 否 | Channel setup Plan，选择后自动建 Channel 并开始讨论 |
+| 多角色澄清、评审或讨论 | 否 | Channel setup Plan；创建后默认进入自然 conversation，多视角讨论需显式启动 |
 | 固定角色深度研究 | 是 | 对已有 Task 给出 Research route Plan，随后独立 Approve |
 | PRD/Issue/Refactor/Planning 交付 | 是 | 对已有 Task 推荐 active route，随后独立 Approve |
 
@@ -173,10 +175,11 @@ route。
 `zf.yaml` 中的静态配置块。向 Kanban Agent 明确要求多角色讨论，例如：
 
 ```text
-为 API authentication 变更创建一个聚焦的评审 Channel，并立即开始讨论。
+为 API authentication 变更创建一个聚焦的评审 Channel。
+使用自然 conversation，不要自动 fanout、创建 Task 或启动 Workflow。
 ```
 
-Kanban Agent 返回 Channel setup Plan。选项显示模板、成员角色、成员数和讨论轮次；
+Kanban Agent 返回 Channel setup Plan。选项显示模板、成员角色、成员数和 discussion mode；
 `Chat about` 允许先调整范围，选择完成后点击 `Create & start`。
 
 ![Kanban Agent 内的 Channel setup Plan](assets/quickstart-kanban-channel-plan.png)
@@ -190,10 +193,10 @@ Quick Change
   max_rounds: 4
 ```
 
-界面显示的 `4 rounds` 对应 `overrides.budget.max_rounds`，是 Channel 自动讨论的
-轮次预算上限，不表示每位成员一定回复 4 次，也不是 Kanban Agent provider 的
-`max_turns`。需要改变角色、成员数或 `max_rounds` 时，先点击 `Chat about` 说明新值，
-让 Kanban Agent 返回修订后的 Plan，再执行创建。
+界面显示的 `4 rounds` 对应 `overrides.budget.max_rounds`。它只在显式启动
+`multi_lens` 等有界多视角讨论时限制轮次；不会让默认 `conversation` 自动 fanout，
+也不是 Kanban Agent provider 的 `max_turns`。需要改变角色、成员数、mode 或预算时，
+先点击 `Chat about`，让 Kanban Agent 返回修订后的 Plan。
 
 系统一次完成：
 
@@ -201,8 +204,9 @@ Quick Change
 创建 Channel
 -> 物化模板成员、角色上下文、技能与写权限
 -> 把原始需求发到 Channel
--> 启动模板声明的讨论模式
--> 默认 responder/synthesizer 收敛结论
+-> 初始化模板声明的产品模式
+-> conversation 等待人/Leader 定向交互
+-> 只有显式 Discuss / multi_lens 才执行有界多视角讨论
 ```
 
 不需要再手工创建 Channel、邀请成员或复制第一条消息。创建 Channel 不会产生
@@ -237,9 +241,10 @@ Quick Change
 
 ## 6. 在 Channel Group 内讨论（推荐）
 
-Channel 以 thread 保存原始需求、角色回复、开放问题和收敛结论。模板可以使用
-`manual_mention`、`fanout_then_synthesis` 或其他已注册 discussion mode；角色权限、
-技能和默认 responder 来自模板物化结果。
+Channel 以 thread 保存原始需求、角色回复、开放问题和收敛结论。产品只暴露
+`conversation`、`clarification` 和 `multi_lens` 三种模式；底层
+`manual_mention`、`mention_relay`、`fanout_then_synthesis` 是兼容 engine 映射。
+角色权限、技能、Leader 和默认 responder 来自模板物化结果。
 
 ![Channel Group 多角色讨论与继续输入](assets/quickstart-channel-discussion.webp)
 
@@ -251,7 +256,7 @@ Project 全部 Agent 数，也不是后续 Workflow roles 数。点击图标可�
 讨论结束后：
 
 - 人可以在同一 Channel 继续输入新问题，或延续上一个需求；
-- 默认 responder/synthesizer 可以形成 canonical PRD 或总结；
+- 显式 Finalize 可以形成 PRD draft，只有 Owner confirm 的 revision 才是 canonical PRD；
 - Channel 和 Kanban Agent 都可以基于结论提出 `Create Task` proposal；
 - **Task proposal 必须由人确认，不能由 Channel 自动创建**；
 - PRD 拆分属于后续 Workflow planning，不由 Channel 或 Kanban Agent 直接改写

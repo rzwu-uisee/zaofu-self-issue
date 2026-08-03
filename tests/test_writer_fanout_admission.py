@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -264,6 +265,22 @@ def test_writer_task_items_preserves_lane_pipeline_contract_fields():
     assert item["acceptance_criteria"] == ["root build passes"]
 
 
+def test_writer_task_items_preserves_successor_base_and_identity():
+    base_commit = "a" * 40
+    items = writer_task_items({
+        "tasks": [{
+            "task_id": "TASK-R2",
+            "allowed_paths": ["src/**"],
+            "base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+            "payload": {"supersedes_task_ids": ["TASK-R1"]},
+        }],
+    })
+
+    assert items[0]["base_commit"] == base_commit
+    assert items[0]["supersedes_task_ids"] == ["TASK-R1"]
+
+
 def test_writer_task_items_normalizes_verification_command_list():
     items = writer_task_items({
         "tasks": [{
@@ -443,6 +460,153 @@ def test_load_writer_task_map_preserves_complete_plan_package_identity(tmp_path)
     assert loaded.plan_artifact_package_ref == "artifacts/plan-packages/abc.json"
     assert loaded.plan_artifact_package_digest == "abc"
     assert loaded.task_map_generation == "G-abc"
+
+
+def test_load_writer_task_map_rejects_unknown_successor_base(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    base_commit = "a" * 40
+    task_map = project_root / "task_map.json"
+    task_map.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R2",
+            "title": "continue checkpoint",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded continuation scope",
+            "verification": "git diff --check",
+            "base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+            "payload": {"supersedes_task_ids": ["TASK-R1"]},
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="base_commit.*not a local commit"):
+        load_writer_task_map(
+            stage=SimpleNamespace(task_map=""),
+            event=ZfEvent(
+                type="task_map.ready",
+                actor="kernel",
+                payload={"task_map_ref": str(task_map)},
+            ),
+            pdd_id="PDD-R2",
+            state_dir=project_root / ".zf",
+            project_root=project_root,
+        )
+
+
+def test_load_writer_task_map_accepts_source_bound_local_successor_base(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project_root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=project_root,
+        check=True,
+    )
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        text=True,
+    ).strip()
+    task_map = project_root / "task_map.json"
+    task_map.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R2",
+            "title": "continue checkpoint",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded continuation scope",
+            "verification": "git diff --check",
+            "base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+            "payload": {"supersedes_task_ids": ["TASK-R1"]},
+        }],
+    }), encoding="utf-8")
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map=""),
+        event=ZfEvent(
+            type="task_map.ready",
+            actor="kernel",
+            payload={"task_map_ref": str(task_map)},
+        ),
+        pdd_id="PDD-R2",
+        state_dir=project_root / ".zf",
+        project_root=project_root,
+    )
+
+    assert loaded.task_items[0]["base_commit"] == base_commit
+    assert loaded.task_items[0]["supersedes_task_ids"] == ["TASK-R1"]
+
+
+def test_load_writer_task_map_accepts_local_same_id_retry_base(tmp_path):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project_root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=project_root,
+        check=True,
+    )
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        text=True,
+    ).strip()
+    task_map = project_root / "task_map.json"
+    task_map.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-R1",
+            "title": "retry checkpoint",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "bounded retry scope",
+            "verification": "git diff --check",
+            "base_commit": base_commit,
+            "source_refs": [f"git:{base_commit}"],
+        }],
+    }), encoding="utf-8")
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map=""),
+        event=ZfEvent(
+            type="task_map.ready",
+            actor="kernel",
+            payload={"task_map_ref": str(task_map)},
+        ),
+        pdd_id="PDD-R1",
+        state_dir=project_root / ".zf",
+        project_root=project_root,
+    )
+
+    assert loaded.task_items[0]["base_commit"] == base_commit
+    assert loaded.task_items[0]["supersedes_task_ids"] == []
 
 
 def test_load_writer_task_map_requires_run_scoped_verification(tmp_path):

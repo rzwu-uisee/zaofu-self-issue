@@ -36,7 +36,7 @@ card.action.trigger
   -> approver identity gate
   -> ControlledAction
   -> plan.approved
-  -> Orchestrator fanout
+  -> Kernel fanout from the approved topology
 ```
 
 One Feishu application uses one WebSocket connection for all its groups and DMs.
@@ -173,7 +173,7 @@ groups, messages mentioning another bot are ignored.
 When `task_map.ready` arrives with plan approval enabled, writer fanout is held
 and an inline approval card lists tasks and scope. An identity-authorized button
 click goes through `ControlledAction`, emits operator-owned `plan.approved`, and
-allows the Orchestrator to fan out. The card does not depend on Web deep links.
+allows the Kernel to fan out from the approved topology. The card does not depend on Web deep links.
 Use `zf plan approve <plan_id>` as the offline CLI fallback when available in the
 current CLI.
 

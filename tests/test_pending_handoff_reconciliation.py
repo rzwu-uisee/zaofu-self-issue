@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.schema import (
     ContractDConfig,
     ProjectConfig,
@@ -264,8 +266,18 @@ def test_reconcile_routes_static_gate_passed_to_review(tmp_path: Path) -> None:
 
 def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     orch, store, log = _make_orchestrator(tmp_path)
+    monkeypatch.setattr(
+        orch,
+        "_writer_source_fanout_child",
+        lambda _payload, *, task_id: {
+            "task_id": task_id,
+            "dispatch_base_commit": "writer-fanout-base",
+            "workdir": str(tmp_path),
+        },
+    )
     orch.config.roles.append(RoleConfig(
         name="dev-lane-0",
         backend="mock",
@@ -290,7 +302,11 @@ def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
         type="dev.build.done",
         actor="dev-lane-0",
         task_id="T-REF",
-        payload={"dispatch_id": "disp-dev"},
+        payload={
+            "dispatch_id": "disp-dev",
+            "base_git_head": "writer-source-head",
+            "workdir": str(tmp_path),
+        },
     )
     log.append(dev_done)
     rejected = ZfEvent(
@@ -311,7 +327,9 @@ def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
         payload={
             "source_event_id": dev_done.id,
             "blocking_event_id": rejected.id,
-            "reason": "repair task ref handoff",
+            "reason": (
+                "stale task contract: expected current snapshot, got old snapshot"
+            ),
         },
         causation_id=dev_done.id,
     )
@@ -336,6 +354,7 @@ def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
         event.type == "task.dispatched"
         and event.payload.get("source") == "rework"
         and event.payload.get("trigger_event") == "task.ref.repair.requested"
+        and event.payload.get("base_git_head") == "writer-fanout-base"
         for event in events
     )
     briefing = (
@@ -346,10 +365,32 @@ def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
     assert "Do not put `git:<sha>`" in briefing
     assert "`.codex/hooks.json`" in briefing
     assert "source_event_id" in briefing
-    assert "operation/call-result identity" in briefing
+    assert "call identity" in briefing
+    assert (
+        "`impl_self_check.attempt_id` is scheduler TaskAttempt identity"
+        in briefing
+    )
+    assert "set it to the current `Runtime TaskAttempt Identity`" in briefing
+    assert "never copy the source completion's old scheduler attempt" in briefing
+    assert "Never copy the rejected stale contract snapshot" in briefing
     assert "requires a non-empty `summary`" in briefing
     assert "Do not run the bare completion command" in briefing
     assert "Do not commit, delete, add git excludes for" in briefing
+
+    lineage_instruction = orch._task_ref_repair_identity_instruction(  # type: ignore[attr-defined]
+        ZfEvent(
+            type="task.ref.repair.requested",
+            actor="zf-cli",
+            task_id="T-REF",
+            payload={"reason": "writer dispatch base lineage mismatch"},
+        )
+    )
+    assert "`impl_self_check.attempt_id` is scheduler TaskAttempt identity" in (
+        lineage_instruction
+    )
+    assert "never copy the source completion's old scheduler attempt" in (
+        lineage_instruction
+    )
 
 
 def test_reconcile_emits_task_ref_repair_request_after_rejection(
@@ -539,6 +580,9 @@ def test_task_ref_scope_rejection_requests_source_scope_repair(
     assert "Do not emit a metadata-only repair" in briefing
     assert "do not reuse the rejected `source_commit`" in briefing
     assert "packages/web-adapter/src/index.ts" in briefing
+    assert "emit `dev.blocked`" in briefing
+    assert "failure_class=task_contract_unsatisfiable" in briefing
+    assert "required work, emit `dev.failed`" not in briefing
 
 
 def test_task_ref_repair_uses_writer_lane_when_reader_currently_assigned(

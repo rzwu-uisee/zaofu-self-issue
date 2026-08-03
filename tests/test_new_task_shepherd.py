@@ -71,6 +71,29 @@ def test_unclaimed_sla_warning_and_idempotency():
     assert unclaimed_warnings(tasks, [created, dispatched], now_ts=now) == []
 
 
+def test_unclaimed_sla_accepts_fanout_dispatch_payload_task_id():
+    now = time.time()
+    from datetime import datetime, timezone
+
+    created = ZfEvent(type="task.created", actor="zf-cli", task_id="GAP-R2")
+    created.ts = datetime.fromtimestamp(
+        now - 700,
+        tz=timezone.utc,
+    ).isoformat()
+    dispatched = ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        payload={
+            "task_id": "GAP-R2",
+            "fanout_id": "fanout-impl-1",
+            "dispatch_id": "dispatch-gap-r2",
+        },
+    )
+    tasks = [SimpleNamespace(id="GAP-R2", status="in_progress")]
+
+    assert unclaimed_warnings(tasks, [created, dispatched], now_ts=now) == []
+
+
 def test_unclaimed_sla_skips_workflow_fanout_anchor():
     now = time.time()
     from datetime import datetime, timezone

@@ -348,6 +348,8 @@ Kanban Agent 的默认启动方式。
 
 ![Add/Open Project 当前创建表单](assets/project-add-open-current.png)
 
+![Add/Open Project 动态演示](assets/quickstart-project.webp)
+
 对话框不再要求选择 Existing/Create、YAML、preset、controller、kind、scale、lane
 或 role，也不接收初始 task prompt。Stack 只用于确认项目语言与命令，不决定 workflow。
 已有合法配置按其
@@ -377,7 +379,7 @@ Web greenfield、CLI `project init` 与 `tools/init-project.sh` 的 Project 容�
 |---|---:|---:|
 | Kanban Agent 普通 Coding | 否 | 否，按普通 provider session 工作 |
 | `Create Task` | 否 | 否，只创建可追踪 Task |
-| Channel setup/discussion | 否 | 否，只创建协作空间并开始讨论 |
+| Channel setup/discussion | 否 | 否，只创建协作空间；默认 conversation 等待定向交互 |
 | Research Workflow | 是 | Plan 后还需 Approve |
 | PRD/Issue/Refactor/Planning Workflow | 是 | Plan 后还需 Approve |
 
@@ -388,14 +390,16 @@ pattern、lane 或 role。
 ### 8.2 Channel 只形成协作产物
 
 Channel setup Plan 选择后可直接执行 `channel-create-and-start`，一次创建 Channel、
-模板 Members、投递原始需求并启动讨论：
+模板 Members、投递原始需求并初始化 discussion mode：
 
 ![Channel setup Plan](assets/kanban-channel-plan.png)
 
-这是 Plan direct-apply 的受控例外，不代表 Channel 可以点火 Workflow。
-Channel/Research synthesis、canonical PRD 或其他结论都不会自动创建 Task。人需要明确
-要求 `Create Task` proposal，并确认后才得到真实 Task。PRD 拆分、planning artifact
-和 `task_map` 在后续 Workflow planning 阶段生成。
+这是 Plan direct-apply 的受控例外，不代表 Channel 可以点火 Workflow。默认
+`conversation` 不自动 fanout；只有显式 Discuss / `multi_lens` 才运行有界多视角讨论。
+显式 Finalize 产生 PRD draft，只有 Owner confirm 的 revision 才是 canonical PRD。
+任何 synthesis 或 confirmed PRD 都不会自动创建 Task。人需要明确要求并确认
+`Create Task` proposal；PRD 拆分、planning artifact 和 `task_map` 在后续 Workflow
+planning 阶段生成。
 
 ### 8.3 Task-bound Workflow 是 Plan 与 Approve 两步
 
@@ -413,6 +417,8 @@ zf workflow routes --task TASK-ID
 ![Task-bound Workflow Plan](assets/kanban-task-workflow-plan.png)
 
 ![Workflow exact proposal Approve](assets/kanban-task-workflow-approve.png)
+
+![Task 创建、Workflow Plan、独立批准与点火动态演示](assets/quickstart-direct-workflow.webp)
 
 Plan 允许 `Chat about` 和 `Customize`，用于补齐 source/input refs、expected output、
 scope 或会改变 route 的参数。选择 route 只生成 proposal，不等于已经运行。

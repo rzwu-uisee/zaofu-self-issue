@@ -54,7 +54,7 @@ worktrees have been independently verified clean and disposable.
 
 | Command | Purpose |
 |---|---|
-| `zf chat <message>` | Submit a natural-language goal |
+| `zf chat <message>` | Append a natural-language intent; configured consumers may react, but Task creation/ignition is not guaranteed |
 | `zf feature add <title>` | Create a feature |
 | `zf feature list` | List features |
 | `zf kanban --board` | Display the board |

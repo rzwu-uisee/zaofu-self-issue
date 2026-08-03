@@ -1,277 +1,233 @@
-# Channel Collaboration
+# Channel Collaboration Guide
 
-> Audience: operators who want multiple agents to collaborate around one
-> requirement and continue the conversation in Web or Feishu.
+[中文](15-channel-collaboration.md) · [Shortest Channel-to-PRD path](workflows/channel-to-prd.en.md)
+
+> For operators who want people and multiple agents to discuss requirements,
+> produce an Owner-confirmed PRD, and continue through Web, Kanban Agent, or
+> Feishu.
 >
-> Status: Kanban Plan Channel creation, template members, original requirement
-> posting, `fanout_then_synthesis`, and continued conversation are implemented.
-> This manual reflects real E2E checked on 2026-07-28.
+> Current as of 2026-08-03 against code and tests.
+> The default Channel mode is `conversation`; creation does not automatically
+> fan out, and `multi_lens` must be started explicitly.
 
-## 0. Preflight Before Starting
+## 1. Preflight
 
-Start WebKanban for real Codex Channels through the canonical trusted-local
-launcher:
+Start real-provider Channels through the trusted-local canonical launcher:
 
 ```bash
 tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 tools/start-webkanban.sh --port 8001 --status
 ```
 
-Some Channel templates contain `artifact_writer`, `project_writer`, or
-`workspace_writer` members. Direct `zf web` without an explicit sandbox
-environment maps those members to Codex `workspace-write`; a host without
-namespace/bubblewrap support returns `sandbox_unsupported`. Trusted-local
-status should report `codex_headless_sandbox: danger-full-access`,
-`tmux: running`, and `api: ok`. Shared or untrusted hosts must repair normal
-sandbox support instead of relying on bypass. See
-[16 Real Codex Provider Preflight](16-real-codex-provider-preflight.en.md).
+Shared or untrusted hosts must use the normal sandbox. A trusted-local bypass
+does not give every Channel Member Project write permission. See
+[Real-provider preflight](16-real-codex-provider-preflight.en.md).
 
-## 1. Current Channel Group model
-
-The product may call the experience Channel Group. The kernel canonical model
-is:
+## 2. What A Channel Is
 
 ```text
 Channel
-├── Members (provider agent / runtime role / human / observer)
-├── Messages and threads
-├── Discussion policy
-├── Writer role and writer scope
-└── Synthesis artifacts and event refs
+├── Origin / Owner / Leader
+├── Members and provider bindings
+├── Messages, threads, ACK/NACK
+├── Discussion mode and explicit actions
+├── PRD draft / revision / owner confirmation
+└── Result and workflow receipts
 ```
 
-A Channel is a dynamic runtime object established by `channel.created` and
-subsequent `channel.*` events. There is no static `channel group` block in
-`zf.yaml`. The control plane still supplies provider, runtime-role, permission,
-and integration constraints.
+A Channel is a dynamic runtime object maintained through `channel.*` events,
+sanctioned sidecars, and Channel contracts. It is not a static group block in
+`zf.yaml`.
 
-Channel is independent from Workflow:
+Channel and Workflow are separate state machines:
 
-- creating or discussing in a Channel does not require a Task;
-- Channel supports clarification, review, debate, and consensus;
-- Channel output does not automatically create a Task;
-- Channel does not directly start Research or delivery;
-- to execute, confirm a `Create Task` proposal and then choose a Workflow for
-  that Task.
+- Channel creation does not require a Task;
+- Channel owns clarification, review, decisions, and PRD finalization;
+- Channel does not schedule Tasks, modify code, or decide delivery terminal state;
+- a confirmed PRD does not automatically create a Task;
+- only a controlled Task/Workflow proposal approved by a human enters Kernel Workflow;
+- Delivery receipts return read-only and do not let Channel own runtime state.
 
-## 2. Recommended entry: Kanban Agent creates the Channel
+## 3. Three Product Modes
 
-Do not start by selecting `New Channel`, inviting each member, or copying the
-first requirement. Tell Kanban Agent that the requirement needs collaboration:
+| Mode | Default trigger | Use case | Engine mapping |
+|---|---|---|---|
+| `conversation` | Default after creation | Natural chat, targeted mentions, continued discussion | `manual_mention` |
+| `clarification` | Explicit selection or template | Resolve open questions and missing decisions | `mention_relay` |
+| `multi_lens` | Explicit Discuss | Independent views, relay/critique, and synthesis | `fanout_then_synthesis` |
+
+Engine mappings are compatibility details, not additional product modes.
+`max_rounds` bounds explicit discussion; it does not make `conversation` wake
+every member automatically.
+
+## 4. Built-In Templates
+
+| Template | Required members | Default mode | Leader / Workflow proposal owner |
+|---|---|---|---|
+| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`; optional `security_reviewer` | `conversation` | `product_pm` |
+| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `conversation` | `researcher` |
+| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `multi_lens` | `arch` |
+| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `conversation` | `tech_leader` |
+| `incident-triage` | `tech_leader`, `qa_analyst`; optional `security_reviewer` | `clarification` | `tech_leader` |
+
+Templates fix required roles, skill refs, allowed overrides, and default writer
+scope. Every skill must resolve before creation, and non-writers default to
+read-only. Some templates retain scoped writer permissions for controlled
+operations, but normal messages and discussion do not trigger Project writes.
+
+## 5. Create Through Kanban Agent
 
 ```text
-Create a PRD clarification Channel for the login security change. Include
-product, architecture, critic, and security views, use at most 12 rounds, and
-produce a traceable synthesis.
+Create a PRD discussion Channel for the login-security change.
+Invite product, architecture, and security perspectives. Start with natural
+conversation and do not create a Task or start a Workflow automatically.
 ```
 
-Kanban Agent returns an action-bound Channel setup Plan. Each option binds:
+Review the action-bound setup Plan for:
 
-- `template_id`;
-- optional Channel name;
-- exact member roles and count;
-- optional provider/model overrides;
-- budget such as `max_rounds`;
-- writer role and restricted writer scope.
+- `template_id`, name, origin, and Owner;
+- required and optional members;
+- provider/model overrides;
+- product mode, budget, and optional roles;
+- Leader and `propose_workflow` authority;
+- source receipt target.
 
-![Channel setup Plan with template, members, and rounds](assets/kanban-channel-plan.png)
-
-Select an option and `Create & start`. One atomic action:
+`Create & start` atomically performs:
 
 ```text
 channel-create-and-start
--> creates the Channel
--> materializes Members, role context, skills, and permissions
--> posts the original requirement that triggered the Plan
--> starts discussion
--> fanout blind replies
--> relay / critique
--> synthesis
+  -> create Channel
+  -> materialize Members, skills, permissions, and profile binding
+  -> post the original request with durable ACK/NACK
+  -> initialize the product mode
+  -> conversation waits for directed interaction
 ```
 
-There is no second Approve card. Channel setup is the bounded direct-apply
-exception for Plan; the browser action session/token must still be valid. Other
-risky actions retain separate approval.
+The word `start` in the button does not imply automatic fanout. Bounded
+multi-perspective work runs only when the mode is already `multi_lens` or an
+explicit Discuss action follows.
 
-### `Chat about`
+`Chat about` returns additional context to the same Kanban Agent session and
+revises the Plan. It does not execute an option or require hand-edited JSON.
 
-`Chat about` does not apply or discard the Plan. It sends additional context to
-the same Kanban Agent session, allowing changes to:
+## 6. Natural And Multi-Lens Discussion
 
-- discussion rounds;
-- optional roles;
-- scope and expected output;
-- primary provider, model, or budget;
-- writer scope.
+In `conversation`:
 
-The agent should update the Plan rather than asking the operator to edit JSON.
+- people, the Leader, or authorized Members post messages;
+- mentions target only the needed Member;
+- the same thread continues without rebuilding the Channel;
+- reply deltas stream through SSE/sidecars while terminal bodies and refs persist;
+- provider failure remains diagnosable and does not automatically rerun every Member.
 
-## 3. Built-in Channel templates
-
-All current built-in templates use `fanout_then_synthesis`. Role context
-defines identity and stop rules; template `skill_refs` define the method for
-the current discussion:
-
-| Template | Default members | Writer | Method boundary |
-|---|---|---|---|
-| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`, optional `security_reviewer` | `product_pm`, normally limited to `docs/design/**` and `docs/impl/**` | participant question ledger plus synthesis; roles that translate owner intent load `grill` |
-| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `researcher`, limited to research artifacts | evidence-led discussion only; no Research trigger or Refactor task-map synthesis |
-| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `arch` | ZaoFu architecture, design-vs-implementation, security, and candidate gate methods |
-| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `tech_leader` | bounded change recommendation plus generic verification; browser E2E is on demand |
-| `incident-triage` | `tech_leader`, `qa_analyst`, optional `security_reviewer` | `tech_leader` | diagnosis and controlled-action proposal only; Run Manager/Kernel execute recovery |
-
-Templates are not arbitrary role-name collections. Required roles cannot be
-disabled. Only allowed optional roles, backend, model, writer, writer scope,
-and budget overrides are accepted. Non-writers normally remain read-only so
-every participant cannot modify the Project concurrently.
-
-A template role may bind multiple ordered `skill_refs`. Before Channel
-creation, every ref must resolve and materialize under
-`<project_root>/skills/<name>/SKILL.md`; a missing ref rejects before
-`channel.created`, preventing path-only members. In `grill`, atomic questioning
-means one decision per question. One blind-answer turn may still raise several
-independent questions.
-
-## 4. Discussion, synthesis, and continuation
-
-`fanout_then_synthesis` has three phases:
-
-1. `phase1_blind`: independent replies avoid anchoring;
-2. `phase2_relay`: participants relay, challenge, and add evidence;
-3. `phase3_synthesis`: the template synthesizer/default responder converges.
-
-The event chain covers Channel/Member creation, message posting, reply
-request/start/delta/complete, discussion phases, and synthesis refs. Observe it
-through Web, `zf events`, or Feishu projections.
-
-After synthesis the Channel remains interactive. A human can ask follow-up
-questions, add another requirement, or continue the original topic without
-recreating the Channel:
-
-![Channel after synthesis, ready for continuation](assets/kanban-channel-synthesis.png)
-
-PRD Clarification can produce a canonical PRD or requirement snapshot. It is
-still a collaboration artifact, not an execution Task. To proceed:
+When independent views are needed, run Discuss / `multi_lens` explicitly:
 
 ```text
-Create a Task proposal from the current synthesis. Do not start a Workflow yet.
+phase1 blind answers
+  -> phase2 relay / critique
+  -> phase3 synthesis
 ```
 
-After Task confirmation, enter the Task-bound Workflow Plan. PRD decomposition,
-the planning artifact, and `task_map` belong to the selected Workflow planning
-stage; Channel and Kanban Agent must not fabricate them early.
+This operation is bounded by rounds, members, and budget and links back to the
+normal conversation history. It is an explicit operation, not the permanent
+default state of a Channel.
 
-## 5. Channel versus Research Workflow
+![Natural discussion, directed replies, and multi-role convergence in a Channel Group](assets/quickstart-channel-discussion.webp)
 
-`research-review` is a Channel template for multi-role review or lightweight
-discussion around existing material. It does not implicitly start the fixed
-Research fanout.
+## 7. PRD Finalize And Owner Authority
 
-Research Workflow requires:
+```text
+conversation / clarification / multi_lens
+  -> explicit Finalize
+  -> PRD draft artifact
+  -> Continue | Revise | Owner confirm
+  -> channel.consensus.reached(ref, digest, revision)
+  -> exact-origin PRD receipt
+```
+
+Required invariants:
+
+- the complete PRD body lives in a sanctioned artifact/sidecar;
+- events carry identity, revision, digest, preview/ref, and causation;
+- revision updates use currentness/CAS so an old revision cannot replace a newer confirmed result;
+- only Owner confirm creates the canonical PRD;
+- the receipt returns to the exact origin and remains retryable without duplicate confirmation;
+- synthesis, an agent claim, or majority opinion does not replace Owner confirmation.
+
+## 8. Handoff From PRD To Workflow
+
+```text
+confirmed PRD
+  -> existing Task
+     or Create Task proposal -> human confirm
+  -> Task-bound Workflow Plan
+  -> exact workflow-start proposal
+  -> independent Approve
+  -> Kernel Workflow
+  -> Task/Run/Delivery receipt back to Channel
+```
+
+Only the exact `leader_member_id` with `propose_workflow` permission may create
+the handoff proposal. It cannot approve the proposal, read the operator token,
+or emit `workflow.invoke.requested` directly.
+
+See [Controlled Workflow start](workflows/controlled-workflow-start.en.md).
+
+## 9. Channel Versus Research Workflow
+
+`research-review` is a discussion template for existing material and defaults
+to conversation. A real Research Workflow requires:
 
 1. a real Task;
-2. an explicit Research fanout request;
-3. available `research:fixed` in the current Project's
-   `zf workflow routes`;
-4. a Kanban Plan route selection;
-5. separate approval of the exact proposal.
+2. an explicit Research request;
+3. an active Research route returned by `zf workflow routes --task TASK-ID`;
+4. route selection in Plan;
+5. independent approval of the exact proposal.
 
-The fixed roles are `source_researcher`, `product_analyst`,
-`technical_analyst`, `risk_critic`, and `synthesizer`:
+Research output is an auditable artifact and does not automatically become a
+PRD Workflow.
 
-![Fixed Research roles and request surface](assets/research-workflow-surface.png)
-
-Research returns a summary, evidence refs, open questions, and PRD/Refactor
-prompt inputs. The operator then decides whether to create a delivery Task.
-ZaoFu does not automatically convert the result into a PRD Workflow.
-
-## 6. Low-level CLI: post to an existing Channel
-
-The stable CLI command is `zf channel say`:
+## 10. CLI Message Entry
 
 ```bash
-zf channel say <channel_id> \
-  --text "Add failure scenarios and ask @critic to review." \
+zf channel say CHANNEL-ID \
+  --text "Add failure cases and ask @critic to verify them." \
   --member-id reviewer \
   --mention critic
 ```
 
-| Argument | Meaning | Default |
-|---|---|---|
-| `channel_id` | Target Channel | Required |
-| `--text` | Message body | Required |
-| `--member-id` | Sender member identity | `agent` |
-| `--mention` | Mentioned member, repeatable | Empty |
-| `--state-dir` | Explicit runtime state directory | Project context |
+This uses the `channel-post-message` ControlledAction and does not edit
+`events.jsonl`. Finalize, Owner confirmation, member authority, and Workflow
+handoff currently use Web, Kanban Agent, Feishu, or another token-gated action.
 
-The command runs the `channel-post-message` ControlledAction and appends
-`channel.message.posted`. It does not write `events.jsonl` directly or hold
-Feishu credentials.
+## 11. Feishu Binding
 
-`list`, `show`, `invite`, and `synth` are not stable Channel CLI subcommands.
-Creation, invitation, permission, discussion, and synthesis use Kanban Plan,
-Web APIs, or other ControlledAction surfaces.
+A Feishu chat can route into an existing Channel. Inbound messages retain their
+origin, and PRD/result receipts return to the same source. The Bridge publishes
+messages, intent, refs, or controlled-action requests; it does not modify Task,
+Workflow, or Run state directly. See the
+[Feishu AI-Native Bridge](19-feishu-ai-native-direct-bridge.en.md).
 
-## 7. Feishu association
-
-A Feishu group can target an existing Channel or an agent-direct session:
-
-```yaml
-integrations:
-  feishu_routing:
-    oc_<chat_id>:
-      target: channel
-      channel_id: ch-login-security
-```
-
-`target: agent` establishes an agent Channel session for that chat.
-`target: channel` posts into the selected multi-member Channel. Inbound intent,
-button approval, and outbound projection still close through events and
-ControlledAction; they do not mutate Task or Workflow canonical state.
-
-See [19 Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md).
-
-## 8. Member and permission values
-
-Common ControlledAction `member_type` values include:
-
-`provider_agent`, `runtime-role`, `human`, `observer`, `readonly-reviewer`,
-and `owner_delegate`.
-
-Common `channel_role` values include:
-
-`product_pm`, `arch`, `critic`, `synthesizer`, `researcher`,
-`security_reviewer`, `dev_reviewer`, `qa_analyst`, and `tech_leader`.
-
-Bind a role declared in `zf.yaml` with `runtime-role` and
-`workflow_role_binding: {"role": "<instance_id>"}`. Channel member
-`skill_refs` materialize literal skill paths and do not reuse Workflow-role
-skill-pool conflict resolution.
-
-Templates or token-gated actions validate permission, writer role, and scope.
-Starting the host with danger-full-access does not automatically grant every
-Channel member Project write access.
-
-## 9. Observation and diagnosis
+## 12. Observation And Diagnosis
 
 ```bash
-zf events --last 100 | grep channel.
+zf events --last 100
 zf status --workers
 ```
 
 Check:
 
-- `channel.created` and the expected template digest;
-- all required Members are added and connected;
-- the original requirement has exactly one `channel.message.posted`;
-- discussion reaches the expected phase;
-- the synthesis artifact/ref exists;
-- retries reuse the same Channel through idempotency;
-- provider login, budget, or writer scope is not blocking replies.
+- template digest, mode, Owner, Leader, and roster;
+- exactly-once origin admission with ACK/NACK;
+- no unexpected fanout in conversation mode;
+- member, round, budget, and terminal refs for a Discuss operation;
+- PRD draft/confirmed revision, digest, and exact-origin receipt;
+- exact-Leader handoff followed by independent Approve;
+- idempotent provider failure, retry, and result receipt;
+- fail-closed behavior for a missing required sidecar.
 
-## Related
+## Definition Of Done
 
-- [01 Quick Start](01-quickstart.en.md)
-- [20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
-- [19 Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md)
-- [`zf.yaml` Control Plane and Runtime State](02-zf-yaml-control-plane.en.md)
+A Channel is complete when it remains interactive, the Owner-confirmed PRD is
+traceable, and the source receipt succeeds. Software delivery completion belongs
+to Task, Workflow, Run, and Delivery, not Channel synthesis.

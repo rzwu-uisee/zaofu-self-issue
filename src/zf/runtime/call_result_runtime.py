@@ -67,6 +67,7 @@ def prepare_call_operation(
     stage_id: str,
     task_id: str,
     dispatch_id: str,
+    attempt_id_override: str = "",
     causation_id: str = "",
     correlation_id: str = "",
 ) -> PreparedCallOperation:
@@ -88,7 +89,13 @@ def prepare_call_operation(
     # 不信 payload 携带值;dispatch_id(本次派发)优先于继承 attempt_id;
     # rework_of 把返工重派限定为新 operation(140 裁决 10:rework 不是
     # replay)。同 dispatch 重放输入相同 → 派生结果相同,replay 语义不变。
-    attempt_id = str(dispatch_id or payload.get("attempt_id") or payload.get("run_id") or "")
+    attempt_id = str(
+        attempt_id_override
+        or dispatch_id
+        or payload.get("attempt_id")
+        or payload.get("run_id")
+        or ""
+    )
     trigger_payload = (
         payload.get("trigger_payload")
         if isinstance(payload.get("trigger_payload"), dict) else {}

@@ -1,8 +1,7 @@
 # ZaoFu CLI Reference
 
-> Scope: a thematic reference for the ZaoFu CLI. `uv run zf --help` and
-> `src/zf/cli/main.py` remain authoritative; newly added commands may appear in
-> `--help` before this document is updated.
+> Scope: a task-oriented detailed CLI reference. Command existence comes from the
+> [`build_parser()` generated inventory](reference/cli-command-index.en.md); this page no longer duplicates the full surface by hand.
 
 For a short setup path, read [Quick Start](01-quickstart.en.md). For routine
 operations, read [CLI Operations](03-cli-operations.en.md). For system context,
@@ -24,9 +23,8 @@ The CLI enforces three boundaries:
 
 - `zf.yaml` is the only control-plane configuration.
 - Runtime state comes from `project.state_dir`, which defaults to `.zf/`.
-- `events.jsonl`, `kanban.json`, `session.yaml`, `feature_list.json`, and
-  `role_sessions.yaml` are kernel-managed canonical state. Use CLI actions
-  instead of editing these files.
+- `events.jsonl`, canonical Stores, and required artifacts own different facts under the layered-authority model.
+  Use `zf` commands or controlled actions instead of editing runtime state by hand.
 
 Common options include `--state-dir PATH` for a specific run, `--json` or
 `--format json` for machine-readable output, `--dry-run` for preview, and
@@ -138,9 +136,9 @@ one canonical task contract.
 
 ### 5.1 Submit a Natural-Language Goal
 
-`zf chat` emits a `user.message`. The active workflow and Orchestrator decide
-whether to create a task, request clarification, complete a contract, or enter
-an architecture, critique, or development path.
+`zf chat` emits a `user.message` intent. Its consumer is configuration-dependent: legacy safe-team may
+wake a Layer 2 Agent, while Product Flow does not guarantee Task creation or Workflow ignition and should
+use a real Task plus a controlled route proposal.
 
 ```bash
 uv run zf chat "Add stable Web action-token configuration, docs, and tests"
@@ -154,8 +152,8 @@ uv run zf events --last 20
 uv run zf kanban --board
 ```
 
-Check `events` for `user.message`, task creation, or clarification; check the
-board for state changes; and use `task trace` after a task exists.
+Check `events` for the durable `user.message` and a legal consumer for the active profile; check the board
+for any resulting state changes; and use `task trace` only after a Task exists.
 
 For deterministic creation, use `kanban add` instead of waiting for semantic
 interpretation:
@@ -177,7 +175,7 @@ uv run zf spec validate /tmp/arch-channel-role.zf-spec.md --strict
 uv run zf spec ingest /tmp/arch-channel-role.zf-spec.md
 ```
 
-Use `chat` when agent judgment is desirable, `kanban add` for one known task,
+Use `chat` to record generic operator intent, `kanban add` for one known task,
 and `spec ingest` for a validated batch.
 
 ### 5.2 Task Commands
@@ -208,8 +206,8 @@ review, test, judge, or discriminator evidence is missing.
 
 ## 6. Events, Watch, and Trace
 
-`zf emit` appends worker or operator facts to the append-only event log. Layer 1
-then projects state from those facts.
+`zf emit` appends Worker/operator facts or intent to the append-only event ledger. Registered Kernel
+consumers/projectors may react; this does not make every canonical Store a projection.
 
 | Command | Purpose |
 |---|---|
@@ -369,21 +367,16 @@ documents live in `tasks/`.
 These commands may consume temporary worktrees, tmux sessions, and provider
 budget. Use `/tmp/zf-<purpose>-<utc-timestamp>/` and clean temporary resources.
 
-## 13. Top-Level Command Map
+## 13. Current Command Inventory
 
-Current command families include:
+The complete top-level families and recursive subcommands are generated from argparse:
 
-```text
-init, validate, status, emit, events, start, stop, restart, kanban, gate,
-cost, memory, handoff, presets, attach, logs, rules, check, cleanup, agents,
-watch, feature, chat, hook-recv, trace, doctor, workdir, refs, workflow,
-archive-run, runs, feishu, autopilot, skills, state, self-eval, panes,
-autoresearch, update, guard, artifact, metrics, task, web, spec,
-bug-fix-cycle, backlog, workspace, project
-```
+- [ZaoFu CLI command inventory](reference/cli-command-index.en.md)
+- Regenerate: `uv run python scripts/manual-docs.py generate`
+- Check drift: `uv run python scripts/manual-docs.py check`
 
-Always confirm a changing command surface with `uv run zf --help` and
-`uv run zf <command> --help`.
+Do not append another hand-maintained “complete command list” here. Focused explanations may remain, but
+each example must still be verified through `uv run zf <command> --help` and focused tests.
 
 ## 14. Diagnostic Order
 

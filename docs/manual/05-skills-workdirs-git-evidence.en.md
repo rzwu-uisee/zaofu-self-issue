@@ -108,6 +108,12 @@ This evidence detects false completion, stale resume context, wrong candidate
 selection, rework without a real delta, and terminal judgment without delivery
 proof.
 
+Use Web Task **Evidence** and **Advanced** together with **Agents** to correlate
+artifacts, Task Maps, sessions, context, tokens, and cost under the same Task
+identity:
+
+![Animated Task evidence, runtime context, and Agent resources](assets/task-context-handoff.webp)
+
 ## 7. Reviewing Git History
 
 - The developer reports base, head, changed paths, and tests.

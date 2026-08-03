@@ -1,212 +1,345 @@
 # ZaoFu 架构总览
 
-> 适用对象: 想理解 ZaoFu 如何把"一句目标"推进到"经过验证的交付"的所有人。
-> 本文是**自包含**的架构介绍 —— 读完即可理解后续操作手册里每条命令背后的模型,
-> 无需任何额外材料。新用户建议读完本文再进 [01 快速开始](01-quickstart.md)。
+[English](architecture.en.md) · [概念索引](concepts/README.md)
 
-## 1. ZaoFu 是什么
+> 面向需要理解运行边界的操作者和贡献者。第一次使用优先走
+> [首个可验证交付](getting-started/first-verified-delivery.md)。本文按当前代码和测试
+> 描述 Product Flow 与兼容模式，不把历史三层 safe-team 外推为全局事实。
 
-ZaoFu 是一个**多 agent 工程编排脚手架**:你给一个目标(一句话需求、一个 bug、一份 PRD),
-它用一组分工的 AI agent(设计 / 实现 / 验证 / 判定,也可以按 `zf.yaml` 自定义阶段)
-协作把它推进到**可验证的交付**,
-全过程的每一步都落成事件、可观测、可回放、可恢复。
+## 1. 产品定位
 
-它的设计目标不是"让 LLM 跑得快",而是**让长程多 agent 协作不失控**:不提前宣告完成、
-不偷改测试、不越权改文件、卡住能自愈、成本有上限。
+ZaoFu 是面向 long-horizon 软件交付的 AI Agent Delivery Control Plane / Coding
+Harness。它把 Goal、Task、Agent、代码、测试、证据、恢复和人工决定组织进同一个可观察、
+可恢复、可审计的交付系统。
 
-## 2. 三层架构
+ZaoFu 不替代 Codex、Claude Code 或其他 Provider Agent。Provider 继续负责语义理解、
+代码实现和工具执行；ZaoFu 管理确定性运行边界和团队交付状态。
 
-ZaoFu 把"确定性"和"智能"分开:机械、可验证的部分交给确定性内核(纯 Python,**不调 LLM**);
-需要判断的部分交给 LLM agent。
-
-| 层 | 角色 | 职责 | 关键特征 |
-|---|---|---|---|
-| **Layer 1 确定性内核** | zf-cli / runtime | 解析事件、推进状态机、执行门禁、生成 briefing、检测 stuck/orphan、签名事件 | 纯 Python,无 LLM,可单测,是"真相"的守护者 |
-| **Layer 2 编排 agent** | orchestrator | 拆解目标、分配任务、处理返工、选择下一步 | LLM,但只通过事件和 CLI 表达意图,不直接改状态 |
-| **Layer 3 worker agent** | arch / dev / review / test / judge | 设计、实现、评审、测试、最终判定 | LLM,在隔离工作区里干活,产出事件 + git evidence |
-
-```mermaid
-flowchart TD
-  U["用户目标<br/>(需求 / bug / PRD)"] --> O
-  subgraph L2["Layer 2 · 编排 agent (LLM)"]
-    O["orchestrator<br/>拆解 · 分配 · 返工决策"]
-  end
-  subgraph L1["Layer 1 · 确定性内核 (Python, 无 LLM)"]
-    K["状态机 · 门禁 · briefing<br/>stuck/orphan 检测 · 事件签名"]
-  end
-  subgraph L3["Layer 3 · worker agent (LLM)"]
-    A["arch"] --> D["dev"] --> R["review"] --> T["test"] --> J["judge"]
-  end
-  O -->|"写 briefing + dispatch"| K
-  K -->|"派发任务"| L3
-  L3 -->|"zf emit 事件"| K
-  K -->|"EventWatcher 唤醒"| O
+```text
+idea / PRD / issue / refactor
+  -> intake / confirmed goal
+  -> approved workflow / task map
+  -> contracted agent attempts
+  -> independent verification
+  -> goal closure / completion gate
+  -> owner delivery or bounded terminal blocker
 ```
 
-核心纪律:**agent 永远不直接写状态文件**,只 `zf emit` 事件;内核读事件、推进真相。
-这条边界是整个系统可审计、可恢复的根。
+![Project、Workflow、Delivery 与 Recovery Loop 动态总览](assets/concept-delivery-control-loop.webp)
 
-## 3. 两个支柱:事件真相 + 单一控制面
+## 2. 五个架构支柱
 
-### 3.1 Kernel truth/state —— 事件流 + 内核状态文件
+ZaoFu 的能力不是若干 Agent 的简单集合，而是五类工程机制共同组成的交付系统：
 
-所有发生的事都会进入 append-only 事件流(`events.jsonl`,每行一个 JSON,可带 HMAC 签名)。
-事件带**因果血缘**(谁触发了谁),所以一次交付的完整链路可以被追溯成一张图。
-
-但当前实现里,系统真相不是"只有 events.jsonl 一个文件"。内核还维护少数 canonical
-state 文件:`kanban.json`、`feature_list.json`、`session.yaml`、`role_sessions.yaml`。
-它们必须通过 `EventWriter`、`TaskStore`、`FeatureStore`、`SessionStore` 等 helper
-更新,不能手写。
-
-Web dashboard、Delivery/Trace/Loop、成本、skills、workdirs、diagnostics、run archive
-这类视图是可重建 projection。删掉 projection 可以重建;删改 canonical state 则会破坏运行态。
-
-### 3.2 `zf.yaml` —— 唯一控制面
-
-整个系统的行为由一个文件 `zf.yaml` 决定:有哪些角色、用什么后端(claude-code / codex)、
-每个角色订阅什么事件(triggers)/发布什么事件(publishes)、有哪些质量门禁、安全约束怎么配。
-**不存在第二个控制平面** —— 这是硬规则。运行态落在 `project.state_dir` 指向的目录
-(默认 `.zf/`),不进 git。canonical state 由内核管理,projection 可按需重建。
-
-## 4. 核心技术点
-
-### 4.1 事件溯源与可观测
-
-- **append-only**:事件只追加不修改,历史不可篡改。
-- **因果血缘**:每个事件记录关联/起因,可还原"为什么会发生这一步"。
-- **投影可重建**:Web 视图、Delivery/Trace/Loop、成本、skills、workdirs、diagnostics
-  等是 projection,坏了可按对应命令重建。
-- 命令:`zf events --last N`、`zf trace delivery <feature_id>`、`zf watch --follow`。
-
-### 4.2 任务模型:Kanban + Task Contract
-
-- **Kanban**:任务在 `kanban.json` 里走 backlog → in-progress → done,迁移受内核守护
-  (缺 `judge.passed` 等前置事件时,`zf kanban move ... done` 会被拒绝)。
-- **WIP=1**:每个角色实例同时只做一个任务,避免上下文混淆。
-- **Task Contract**:严格模式下每个任务带契约 —— `behavior`(要做什么)、`verification`
-  (怎么验证)、`quality`(质量要求)、`out_of_scope`(明确不做)、`rework_delta`
-  (返工时本轮相对上轮改了什么)、`dispatch_id`(调度令牌,防止旧会话/重复事件误关任务)。
-
-### 4.3 状态机与质量门禁
-
-经典代码任务通常走一条**阶段事件链**,每一步都是显式事件,内核据此推进:
-
-```
-dev.build.done → review.approved → test.passed → judge.passed → discriminator.passed → done
-```
-
-但这不是硬编码的唯一流程。当前代码支持 `workflow.stages` / `workflow.pipelines`、
-`static_gate.*`、`impl.child.*`、`verify.child.*`、fanout/fan-in、reader/writer 分工
-以及 issue / PRD / refactor flow。实际阶段链以 `zf.yaml` 和 `zf workflow inspect`
-推导结果为准。
-
-任一环失败(`review.rejected` / `test.failed` / `judge.failed`)按路由返工。两类门禁互补:
-
-- **quality_gates**(命令级):检查"命令是否通过"(lint、build、测试命令)。
-- **verification discriminator**(证据级):检查"证据是否足够、范围是否正确、是否满足契约、
-  是否违反架构/规则"。即使 `judge.passed`,严格配置下仍可能被 `discriminator.failed` 打回。
-
-这套机制专门**防止提前宣告完成** —— agent 嘴上说"做完了"不算数,必须有合法事件链 + 证据。
-
-### 4.4 约束与安全
-
-ZaoFu 用分层约束防止 agent 越权:
-
-- **Protected Paths**:`tests/**`、`specs/**`、`.zf/**`、`roles/**` 等任何 dev agent 不得修改
-  (防止改测试让测试通过、防止篡改自身约束),由路径守卫强制拦截。
-- **约束继承链**:有效约束 = 全局 ∪ 角色 ∪ 任务,**下层只能收窄不能放宽**。启动时校验一致性,
-  矛盾则拒绝启动。
-- **Tool Closure(工具权限闭包)**:防止 `deny: [Write]` 却 `allow: [Bash]` 用 bash 绕过写限制 ——
-  启动时算权限传递闭包,发现矛盾直接报错。
-- **Scope Ratchet**:turn 结束时比对实际改动,越界文件自动回滚并记 `scope.violation` 事件。
-- **事件签名**:`events.jsonl` 每行可 HMAC 签名(密钥在 `loop.lock` 的 session secret),配合
-  `nonces/` 防重放,保证事件不可伪造。
-
-> **诚实说明(生产前必读):** 上述安全特性大多是**可配置且出厂偏保守/默认关闭**的
-> (签名、scope 强制、权限闭包、脱敏需在 `zf.yaml` 的 `safety.*` 显式开启)。
-> ZaoFu 的信任模型在**全部开启时**才完整成立;对外/生产部署前请逐项开启并验证,
-> 不要假设开箱即处于最强约束。
-
-### 4.5 长任务韧性与恢复
-
-长程任务的三类风险,内核都有处理:
-
-| 风险 | 触发 | 处理 |
+| 支柱 | 解决的问题 | 当前边界 |
 |---|---|---|
-| worker stuck | pane/session 长时间无进展 | 写 stuck 事件,尝试恢复/重启/重投递 |
-| task orphan | 任务 in-progress 但久无阶段事件 | warning → escalate → 可 requeue |
-| context 过大 | provider 上下文超阈值 | warning 先 checkpoint;compact 阈值压缩;hard cap 阻止新派发 |
+| Goal Engineering | 把需求固定为 Goal、Claims、Acceptance、Non-goals 和完成定义 | Task done 不自动等于 Goal closed |
+| Graph Engineering | 把 Goal 编译为 Workflow、Task Map、依赖、wave、fanout、barrier 和 evidence producer | Agent 生成语义图，Kernel 只执行已准入图 |
+| Swarm Engineering | 让多个角色、Provider 和 Worker 并行研究、实现、验证与聚合 | 有界 fanout/fan-in；不允许无限递归招募或旁路状态机 |
+| Loop Engineering | 让交付在 verify、rework、replan、recovery 和 completion 中持续收敛 | 每个 loop 有 attempt、预算、证据和终止上限 |
+| Harness Engineering | 管理上下文、工具、worktree、事件、状态、artifact、安全和可观测性 | Provider Agent 不拥有 canonical state |
 
-加上 **Bounded Rework**(`max_rework_attempts`:同一任务返工超上限则升级,不无限循环)
-和 checkpoint / recovery,保证长任务**不会静默卡死,也不会无限烧钱**。
+这五个支柱共同回答“做什么、如何拆、由谁做、如何迭代、凭什么算完成”。其中
+Graph、Swarm 和 Loop 都运行在同一 Harness 权威边界内，不各自建立新的任务真相。
 
-### 4.6 编排与事件驱动唤醒
+## 3. 分层运行权威
 
-`zf start` 启动 workers 并在前台运行 `EventWatcher`:新事件命中 wake pattern 时唤醒 orchestrator;
-即使无事件也周期 tick,驱动 stuck/orphan/context 扫描。状态推进有两种:
+ZaoFu 不是纯 event-sourcing，也不是由一个 JSON 文件独占全部事实。
 
-- **Layer 1 机械转移**:确定的状态迁移(如 `dev.build.done` → 派发给 review)内核直接做,不唤醒 LLM。
-- **Layer 2 唤醒**:需要判断时(如返工选谁、异常处理)才唤醒 orchestrator —— 省成本。
+| 层 | 载体 | 权威范围 | 合法写入者 |
+|---|---|---|---|
+| 控制平面 | `zf.yaml` | topology、role、policy、budget、safety、`project.state_dir` | 人或受控配置工具 |
+| 发生账本 | `events.jsonl` + archive segments | occurrence、ordering、causation、verdict、ref | `EventWriter` / `EventLog` sanctioned path |
+| 当前状态 | Task、Feature、Session、RoleSession、TaskAttempt stores | 当前状态、assignment、lease、attempt | Kernel store/helper |
+| 完整语义 | artifacts、sidecars、accepted packages | plan、Task Map、result、evidence、大 payload | 原子 sanctioned writer |
+| 查询投影 | SQLite、Trace、Graph、Loop、Web summaries | 查询、聚合、可视化、freshness | projector/read-model builder |
+| 活跃传输 | SSE、LiveDeltaBus、provider stream | 短时 delta | transport/runtime |
 
-角色间通过 `triggers`(订阅)/ `publishes`(发布)在 `zf.yaml` 里声明耦合;
-outbound 常用 tmux transport 把 briefing 送给 agent;特定自动化/Layer 2 路径也可以使用
-`stream-json` transport。
+重要边界：
 
-### 4.7 隔离与证据
+- event 可以权威证明一次动作发生并引用结果，但完整正文可以在 sidecar；
+- TaskStore 回答当前 Task 状态，EventLog 回答某次 transition 是否发生及其因果；
+- required artifact 不是可丢弃 projection；
+- SQLite、Graph、Trace 和 Web 页面可以重建，但不能反向写调度 truth；
+- 当前并非所有 canonical stores 都能只靠 `events.jsonl` 完整重建。
 
-- **Skills 分层**:角色能用的技能按层组合,最小授权。
-- **Workdir 隔离**:`runtime.workdirs.mode: worktree` 让每个 writer 在独立 git worktree 干活,
-  并行不互踩。
-- **Git Evidence**:每次交付能定位 base / head / log / diff,证据可追溯到真实代码改动 ——
-  done 不只是"说做完了",而是"指得出改了哪几行"。
+## 4. 语义决策平面与确定性执行平面
 
-### 4.8 成本与指标
-
-每个 turn 的成本记到 `cost.jsonl`,累计物化到 `cost_state.json`;预算可设上限,
-超预算阻断新派发。`zf metrics snapshot` / `zf cost` 给出可审计的成本与吞吐视图。
-
-## 5. 一次任务的端到端生命周期
+ZaoFu 将 Agent 擅长的开放式判断与 Runtime 必须保证的可靠执行分开：
 
 ```mermaid
-flowchart LR
-  M["user.message"] --> F["feature.created /<br/>task.created"]
-  F --> AD["task.assigned(dev)"]
-  AD --> DB["dev.build.done"]
-  DB --> RV{"review"}
-  RV -->|approved| TS{"test"}
-  RV -->|rejected| AD
-  TS -->|passed| JG{"judge"}
-  TS -->|failed| AD
-  JG -->|passed| DC{"discriminator"}
-  JG -->|failed| AD
-  DC -->|passed| DN["task.status_changed(done)"]
-  DC -->|failed| AD
+flowchart TB
+  subgraph surface["交互与需求入口"]
+    direction LR
+    HUMAN["人 / Feishu / Channel / Kanban Agent"]
+    REQUEST["Requirement / PRD / Issue / Refactor"]
+    HUMAN --> REQUEST
+  end
+
+  subgraph semantic["Agent 语义决策平面"]
+    direction LR
+    GOAL["Goal / Claims / Acceptance"]
+    PLAN["Workflow Synthesis / Plan / Task Map"]
+    APPROVAL["Proposal Preview / 人工批准"]
+    GOAL --> PLAN --> APPROVAL
+  end
+  REQUEST --> GOAL
+
+  subgraph kernel["Kernel Admission + 确定性执行平面"]
+    direction LR
+    ADMIT["Schema / Identity / Currentness / Scope / Budget"]
+    ORCH["Python Orchestrator"]
+    OPS["WorkflowOperation / TaskAttempt / WIP / Lease"]
+    GRAPH["DAG Readiness / Fanout / Barrier / Dispatch"]
+    ADMIT --> ORCH --> OPS --> GRAPH
+  end
+  APPROVAL --> ADMIT
+
+  subgraph swarm["受控多 Agent 蜂群"]
+    direction LR
+    READERS["Reader Swarm<br/>Scan / Research / Critic"]
+    WRITERS["Writer Swarm<br/>Isolated Worktrees"]
+    VERIFY["Verifier Swarm<br/>Exact Candidate / Judge"]
+    READERS --> WRITERS --> VERIFY
+  end
+  GRAPH --> READERS
+
+  EVIDENCE["Typed Result / Artifact / Evidence"]
+  GATE["Gate / Goal Closure / Completion"]
+  DELIVERY["Web / CLI / Feishu Delivery"]
+  VERIFY --> EVIDENCE --> GATE --> DELIVERY
+  GATE -- "Gap / Semantic Failure" --> REPLAN["Critic / Verifier / Judge<br/>下一代 Replan Proposal"]
+
+  subgraph recovery["运行恢复闭环"]
+    direction LR
+    SUPERVISOR["Supervisor"]
+    RM["Run Manager"]
+    ACTION["Controlled Action<br/>新 attempt + post-verify"]
+    AUTO["Autoresearch<br/>diagnosis / repair proposal"]
+    SUPERVISOR --> RM --> ACTION
+    RM -- "复杂诊断" --> AUTO
+  end
+  GRAPH -- "Stall / Operational Failure" --> SUPERVISOR
+
+  subgraph truth["分层权威与可观测性"]
+    direction LR
+    EVENTS["EventLog"]
+    STORES["Canonical Stores"]
+    ARTIFACTS["Artifacts / Sidecars"]
+    PROJECTIONS["Trace / Graph / Loop / SQLite"]
+  end
+  CONFIG["zf.yaml Control Plane"]
+  CONFIG -. "control plane" .-> ADMIT
+  ORCH -.-> EVENTS
+  OPS -.-> STORES
+  EVIDENCE -.-> ARTIFACTS
+  EVENTS --> PROJECTIONS
+  STORES --> PROJECTIONS
+  ARTIFACTS --> PROJECTIONS
+  PROJECTIONS -.-> DELIVERY
 ```
 
-任何失败都按 task contract 或 `workflow.rework_routing` 路由,常见是回到 dev,
-也可回到 arch/plan/verify 等自定义阶段,受 `max_rework_attempts` 上限保护。
-
-## 6. 运行态目录 `project.state_dir`(默认 `.zf/`,不进 git)
-
-| 文件 | 内容 |
+| 组件 | 当前职责 |
 |---|---|
-| `events.jsonl` | append-only 事件流(每行可 HMAC 签名) |
-| `kanban.json` | active task canonical state; terminal task 会归档到 `kanban/` |
-| `feature_list.json` | active feature canonical state; terminal feature 会归档到 `feature_list/` |
-| `session.yaml` / `role_sessions.yaml` | harness session 与 role instance/provider session 绑定 |
-| `cost.jsonl` / `cost_state.json` | per-turn 成本与累计 projection |
-| `memory/` | 角色记忆(shared / arch / dev / review / test) |
-| `loop.lock` | 运行锁 + session secret(事件签名用) |
-| `logs/` | harness 与各 agent 日志 |
-| `artifacts/` / `fanouts/` / `runs/` / `projections/` | task-map、fanout、run archive、Web/trace/diagnostics projection |
-| `workdirs/` | worker 隔离 worktree / checkout |
+| Kernel / Python `Orchestrator` runtime | 配置加载、identity、机械 dispatch、schema/gate、replay、状态迁移和外部副作用 |
+| Worker Agents + Skills | 计划、实现、评审、验证、诊断和产品判断；只报告 typed 结果或意图 |
+| configured `orchestrator` role Agent | 稳定 session identity、异常语义分诊、replan/proposal；在当前 Product Flow 中不是全程 blocking 的 semantic run owner |
+| Supervisor | 观察、关联和 attention；不直接修复 |
+| Run Manager | 处理 operational liveness，选择有界恢复动作并要求 post-verification |
+| Autoresearch | 复现重复 harness fingerprint，产出隔离 diagnosis/repair proposal |
+| ControlledActionService | 应用已批准、可审计的确定性副作用 |
+| Web / CLI / Feishu | 读取 projection、提交 intent、请求 token-gated controlled action |
 
-`.zf/` 不该手工编辑。canonical state 一律通过 ZaoFu 命令或内核 helper 变更;
-projection 可通过对应 rebuild/refresh 命令恢复。
+确定性 Python `Orchestrator` 与名为 `orchestrator` 的 Agent role 是两个不同对象。当前代码
+仍以前者作为 Workflow 快乐路径执行协调器；候选设计中的 OA 全程 semantic-control 或
+blocking checkpoint 不能当作现行生产默认。
 
-## 下一步
+## 5. 两种编排模式
 
-- [01 快速开始](01-quickstart.md) — 装好就跑
-- [02 zf.yaml 控制面](02-zf-yaml-control-plane.md) — 把上面的概念落成配置
-- [04 Harness 运行流程](04-harness-runtime.md) — 任务链路与签收口径的操作细节
-- [03 CLI 操作手册](03-cli-operations.md) — 日常命令
+### Product Flow
+
+适用于 PRD、Issue、Refactor、Research 和长期产品交付：
+
+```text
+typed event/artifact
+  -> Kernel topology/profile route
+  -> deterministic WIP/role/worker dispatch
+  -> Worker result/evidence
+  -> mechanical gate/reducer
+  -> exceptional semantic triage/replan proposal
+  -> ControlledActionService applies an approved action
+```
+
+快乐路径由 Kernel 根据已批准 topology/profile 调度。Agent 决定项目语义、计划和方案；
+Kernel 不把 acceptance、scan 方法或产品判断硬编码进 Python。
+
+### Legacy safe-team
+
+显式兼容 profile 可以让 Layer 2 Agent 做目标拆解、合同合成和 assign，再由 Kernel 校验
+和执行机械转移。它适合兼容、教学或手工编排，不代表 Product Flow 的全局 ownership。
+
+文档、测试和扩展必须标明自己针对哪种模式。
+
+## 6. 受控多 Agent 与蜂群执行
+
+ZaoFu 支持“蜂群”，但这里的蜂群是 **bounded, typed, observable swarm**：多个 Agent
+可以并行工作、独立验证并聚合结果，每个 child/Task/attempt 都有身份、范围、预算、
+上下文和证据；Kernel 仍是唯一调度状态机。
+
+### 当前支持矩阵
+
+| 能力层次 | 当前状态 | 运行边界 |
+|---|---|---|
+| Channel Group 多角色讨论 | 已实现 | 人与多个 Agent 可自然讨论或显式 `multi_lens`，Owner 确认 PRD；讨论不自动创建 Task 或点火 Workflow |
+| Reader fanout/fan-in | 已实现 | 多个只读角色并行研究/扫描，按 `wait_for_all` 或 synth contract 聚合 |
+| Writer fanout | 已实现 | Task Map 中独立 Task 可进入隔离 branch/worktree，冲突、scope 和 candidate admission fail-closed |
+| Task Map wave/lane | 已实现 | Kernel 根据依赖、wave、WIP 和 currentness释放工作，不由主 Agent逐条手工派发 |
+| 静态 replicas 与兼容 role autoscale | 已实现、需配置 | `zf.yaml` 声明上下限；Runtime 按 ready Task、cooldown 和 worker health 扩缩，dirty workdir 阻止回收 |
+| On-demand Worker lifecycle | 已实现、需 Provider 支持 resume | dormant role 在 dispatch 前激活，settled/idle 后按准入条件 suspend |
+| 跨 Provider 协作 | 已实现 | Codex、Claude Code 等按 role/backend 组合，独立 verify 不复用实现者自述 |
+| Provider-native compound children | opt-in Research pilot | 仅 root 是 ZaoFu protocol actor；当前 pilot 最多 4 个、深度 1、只读 child，不能创建 canonical Task |
+| Task-centric 弹性 Stage Worker Pool | 尚未实现 | 逻辑 Task、attempt、session、worktree 与物理 placement 尚未完全解耦，不能把 generic autoscale 冒充弹性 lane pipeline |
+
+典型软件交付蜂群链路是：
+
+```mermaid
+flowchart TB
+  TASKMAP["Accepted Task Map"] --> RF["Reader Fanout"]
+  RF --> R1
+  RF --> R2
+  RF --> R3
+  R1["Reader / Scan"]
+  R2["Reader / Research"]
+  R3["Reader / Critic"]
+  R1 --> SYNTH["Plan Synthesis"]
+  R2 --> SYNTH
+  R3 --> SYNTH
+  SYNTH --> ADMISSION["Kernel Admission"]
+
+  ADMISSION --> WF["Writer Fanout"]
+  WF --> W1
+  WF --> W2
+  WF --> W3
+  W1["Writer / Task A<br/>isolated worktree"]
+  W2["Writer / Task B<br/>isolated worktree"]
+  W3["Writer / Task C<br/>isolated worktree"]
+  W1 --> INTEGRATE["Deterministic Candidate Integration"]
+  W2 --> INTEGRATE
+  W3 --> INTEGRATE
+
+  INTEGRATE --> VF["Verifier Fanout on Exact Target"]
+  VF --> V1
+  VF --> V2
+  VF --> V3
+  V1["Verifier / Tests<br/>Quality Gates"]
+  V2["Verifier / Coverage<br/>Parity"]
+  V3["Verifier / Thin Judge"]
+  V1 --> COMPLETE["Goal Completion Gate"]
+  V2 --> COMPLETE
+  V3 --> COMPLETE
+  COMPLETE --> DELIVER["Owner-visible Delivery"]
+  COMPLETE -- "Gap" --> REPLAN["Bounded Rework / Replan<br/>下一代 admitted generation"]
+```
+
+### 受控动态 Workflow
+
+动态不等于运行中任意改图。当前可发布路径是：
+
+```text
+Requirement
+  -> Agent/Skill synthesizes typed FlowSpec
+  -> graph/config diff + preflight
+  -> exact proposal approval
+  -> frozen effective config + Run Contract
+  -> Kernel executes registered operations and typed dependencies
+```
+
+Active Run 中的变化通过受控 replan、new generation 或已注册的只读 continuation 进入；
+Agent 不能热改 `zf.yaml`、发明任意 handler/event，或递归创建无上限的 Agent。高频 PRD、
+Issue、Refactor 使用稳定 controller，长尾场景使用 static-safe Generic Workflow。
+
+### 蜂群不变量
+
+- child 不能直接写 TaskStore、EventLog 文件或 Run terminal；只提交 sanctioned result/evidence；
+- fanout 必须有 parent/run/generation/child identity、聚合合同、timeout 和失败路由；
+- writer 必须使用明确 scope 和隔离 workdir，shared/exclusive file 冲突由 Kernel 串行化或拒绝；
+- Provider-native child 不成为新的 ZaoFu Agent/Task，也不能递归越过配置预算；
+- autoscale 只能在 `zf.yaml` 的 role policy 内增减兼容实例，不能修改 canonical topology；
+- aggregate、Verify 或 Judge 的文本不能绕过 Completion Gate 自行宣告 Goal 完成。
+
+## 7. 当前 Runtime 路径
+
+```text
+zf start
+  -> load zf.yaml + project.state_dir
+  -> start tmux and/or stream-json transports and sidecars
+  -> EventWatcher tails events.jsonl
+  -> wake-worthy event calls Orchestrator.run_once()
+  -> topology/profile selects mechanical next work
+  -> briefing + contract + required inputs reach worker
+  -> worker emits facts/results/evidence
+  -> reducers/gates update sanctioned state
+```
+
+Watcher 也周期 tick，用于 liveness、continuation、projection refresh 和恢复扫描。只启动
+tmux 而没有 watcher，长期 Workflow 可能不会继续推进。
+
+## 8. Task、Workflow 与 Run
+
+- Task 是带 `contract` 的 canonical 工作单元，包含行为、范围、验收、验证和 owner。
+- Workflow 是已注册 topology/route，不从聊天文本即时发明 Kernel 控制逻辑。
+- Task Map 连接 Goal Claims、Tasks、依赖、wave、scope 和 evidence producer。
+- 动态 Workflow 先形成 typed proposal；只有批准并冻结到 Run Contract 后才可执行。
+- TaskAttempt 在 transport 前持久化 identity/lease，迟到结果必须通过 currentness 校验。
+- Run 冻结本次 proposal/effective config/goal/generation，并收敛到排他 terminal。
+- `Task done` 不等于 Goal closed；Closure 和 Completion Gate 重新核对 mandatory Claims。
+
+## 9. 交付与恢复闭环
+
+| Loop | 形态 |
+|---|---|
+| Delivery | intake -> plan -> task map -> impl -> verify -> Thin Judge -> completion gate -> ship |
+| Quality | contract -> typed result -> evidence gate -> pass / negative handoff |
+| Recovery | failure/stall -> Supervisor -> Run Manager -> controlled action -> post-verify |
+| Harness improvement | repeated fingerprint -> Autoresearch -> isolated proposal -> verify/apply |
+| Human approval | Plan hold -> approve/reject -> execute、repair 或 stop |
+
+Run continuation 每次只选择零或一个 current operation。重复无进展达到上限后必须带证据
+收敛为 blocked，而不是长期 active 或无限重试。
+
+## 10. 安全与约束
+
+- Worker/Agent 只能通过 `zf emit`、受控 CLI、artifact 或 controlled action 报告事实/意图。
+- Integrations 和 Web 不直接写 canonical business state。
+- Protected paths、scope、tool closure、budget、nonce/signature 等按 `zf.yaml` 生效。
+- Provider CLI 能修改代码并花费预算，真实运行前必须 validate、preflight 和审核 scope。
+- Operator token 不进入 provider session。
+- Project-specific acceptance、parity 和 semantic gates 属于 skills/prompts/artifacts；Kernel 只做机械可验证边界。
+
+部分安全能力需要显式配置。不要把“代码支持”误写为“所有项目默认启用”。
+
+## 11. `project.state_dir`
+
+默认 `.zf/` 是运行态，不是源代码：
+
+| 内容 | 类型 |
+|---|---|
+| `events.jsonl` | append-only occurrence ledger |
+| `kanban.json`、`feature_list.json` | canonical current stores |
+| `task_attempts.json`、session stores | attempt/lease/session identity |
+| `artifacts/`、sidecars、accepted packages | 完整语义和证据 |
+| `projections/`、SQLite、Trace/Graph/Loop | 可重建读模型 |
+| `workdirs/` | 隔离 worktree/checkout |
+| `logs/`、transcripts | 运行日志和 provider payload |
+
+不得手工编辑这些 canonical 文件。使用 Store/helper、`zf` CLI 或 controlled action。
+
+## 12. 下一步
+
+- [从目标到可验证交付](concepts/delivery-control-model.md)
+- [Harness 运行流程](04-harness-runtime.md)
+- [Plan、Task Map 与调度](13-plan-task-map-orchestrator-dispatch.md)
+- [Product Fanout 真实 E2E](18-product-fanout-real-e2e.md)
+- [上下文、Artifact 与 Handoff](operations/context-handoff-artifacts.md)
+- [观察一次交付](operations/observe-delivery.md)
+- [恢复长期 Run](operations/recover-long-running-run.md)

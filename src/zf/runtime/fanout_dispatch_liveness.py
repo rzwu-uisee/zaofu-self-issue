@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import time
 
 from zf.core.config.schema import RoleConfig
@@ -51,6 +52,57 @@ class FanoutDispatchLivenessMixin:
                 ).strip()
         return ""
 
+    @staticmethod
+    def _fanout_role_has_activity_after_signal(
+        events: list[ZfEvent],
+        role_instance: str,
+        signal_index: int,
+    ) -> bool:
+        """Return whether a role produced fresh provider output after a signal.
+
+        Disk usage readers can append an old provider sample after a worker was
+        relaunched. Event ordering alone would then treat stale usage as proof
+        that the replacement session accepted the in-flight briefing.
+        """
+
+        activity_types = {
+            "agent.usage",
+            "agent.text",
+            "agent.tool.use",
+            "agent.tool.result",
+            "refactor.scan.completed",
+            "verify.child.completed",
+            "verify.child.failed",
+            "judge.passed",
+            "judge.failed",
+        }
+        signal_epoch = (
+            _iso_epoch(events[signal_index].ts)
+            if 0 <= signal_index < len(events)
+            else None
+        )
+        for index, event in enumerate(events):
+            if index <= signal_index or event.type not in activity_types:
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if event.type == "agent.usage" and str(
+                payload.get("source") or ""
+            ) == "disk_reader":
+                usage_epoch = _iso_epoch(payload.get("usage_timestamp"))
+                if (
+                    usage_epoch is None
+                    or signal_epoch is None
+                    or usage_epoch <= signal_epoch
+                ):
+                    continue
+            if str(event.actor or "").strip() == role_instance:
+                return True
+            if str(payload.get("role_instance") or "").strip() == role_instance:
+                return True
+            if str(payload.get("role") or "").strip() == role_instance:
+                return True
+        return False
+
     def _fanout_dispatch_deferred_recently(
         self,
         *,
@@ -96,6 +148,7 @@ class FanoutDispatchLivenessMixin:
         causation_id: str | None = None,
         prompt_kind: str = "fanout_child",
         skip_send_window: bool = False,
+        provider_session_replaced: bool = False,
     ) -> bool:
         """Return whether a fanout role can receive a prompt now."""
 
@@ -148,7 +201,10 @@ class FanoutDispatchLivenessMixin:
             alive = False
             alive_error = str(exc)
         if alive and dispatchable and not activation_error:
-            if self._fanout_role_has_active_provider_turn(role.instance_id):
+            if (
+                not provider_session_replaced
+                and self._fanout_role_has_active_provider_turn(role.instance_id)
+            ):
                 self._emit_fanout_dispatch_deferred_once(
                     fanout_id=fanout_id,
                     trace_id=trace_id,
@@ -325,3 +381,13 @@ class FanoutDispatchLivenessMixin:
 
 
 __all__ = ["FanoutDispatchLivenessMixin"]
+
+
+def _iso_epoch(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None

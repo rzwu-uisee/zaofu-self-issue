@@ -37,7 +37,7 @@ zf feishu bridge --watch  ──┐
 
 按钮点击(card.action.trigger 经同一长连接)
   ▼
-身份门(approver)→ ControlledAction → plan.approved → orchestrator 自动 fanout
+身份门(approver)→ ControlledAction → plan.approved → Kernel 按已批准 topology fanout
 ```
 
 一个飞书 app = 一条 WS 长连接 = 同时服务该 app 的**所有群 + 私聊**。
@@ -238,7 +238,7 @@ fanout,并推一张**审批卡到群**:
 ```
 
 你在飞书**点「✅ 批准」**(需 §2.2 卡片回调=长连接 + §3 你=approver)→ 经身份门 →
-ControlledAction → `plan.approved`(actor=operator)→ orchestrator daemon **自动** fanout →
+ControlledAction → `plan.approved`(actor=operator)→ Kernel 按已批准 topology **自动** fanout →
 agents 开干。审批卡内容直接 inline,**不依赖**任何 web 深链可达性。
 
 CLI 兜底:`zf plan approve <plan_id>`(断网/无飞书时同样能批)。

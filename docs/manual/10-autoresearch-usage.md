@@ -185,7 +185,7 @@ tmux attach -t zf-ar-supervisor-<run-id>
 
 ```bash
 uv run zf watch --follow --state-dir "$WT/.zf"
-uv run zf status --workers --state-dir "$WT/.zf"
+(cd "$WT" && uv run zf status --workers)
 uv run zf kanban --board --state-dir "$WT/.zf"
 ```
 
@@ -208,7 +208,7 @@ uv run zf task trace TASK-ABCDEF --state-dir "$WT/.zf"
 排查卡住时先看:
 
 ```bash
-uv run zf status --workers --state-dir "$WT/.zf"
+(cd "$WT" && uv run zf status --workers)
 uv run zf events --last 80 --state-dir "$WT/.zf"
 uv run zf backlog why-not-done TASK-ABCDEF --state-dir "$WT/.zf"
 ```
@@ -521,7 +521,7 @@ uv run zf autoresearch run \
 停止内层 harness:
 
 ```bash
-uv run zf stop --force --state-dir "$WT/.zf" 2>/dev/null || true
+(cd "$WT" && uv run zf stop --force) 2>/dev/null || true
 ```
 
 清理 tmux:

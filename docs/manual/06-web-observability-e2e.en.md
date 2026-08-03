@@ -1,274 +1,172 @@
-# Web, Observability, and E2E
+# Web Dashboard User Guide
 
-> Audience: operators who need to inspect Kanban/runtime projections in a browser or run scripted and real-provider E2E validation.
+[中文](06-web-observability-e2e.md) · [Manual home](00-index.en.md)
 
-## 1. Start the Web Dashboard
+> For operators who manage Projects, Tasks, Workflows, Agents, and delivery evidence in ZaoFu.
+> Browser tests, real-provider smoke, and release validation are in the [maintainer guide](operations/web-maintainer-validation.en.md).
 
-Install the Web dependencies:
+## 1. Start and Select a Project
+
+Install dependencies and use the canonical launcher:
 
 ```bash
 uv sync --extra dev --extra web
-```
-
-For local access:
-
-```bash
 tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```
 
-For Docker Playwright or trusted LAN access:
-
-```bash
-tools/start-webkanban.sh --host 0.0.0.0 --port 5175
-```
-
-`tools/start-webkanban.sh` is the canonical trusted-local WebKanban launcher.
-It owns the Web build, action token, Workspace/provider environment, Codex
-headless sandbox policy, tmux session, and restart behavior. Only bind to
-`0.0.0.0` on a trusted network.
-
-Use the low-level `zf web` entry point when only inspecting a state directory
-from another worktree or simulation:
-
-```bash
-uv run zf web \
-  --state-dir /tmp/zaofu-run/.zf \
-  --host 0.0.0.0 \
-  --port 5175
-```
-
-Direct `zf web` inherits only the current shell and target Project `.env`; it
-does not apply the launcher's trusted-local sandbox defaults. Prefer the
-launcher for real Channel or Kanban Agent Codex turns. Otherwise repair host
-sandbox support or explicitly configure
-`ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX` before launch.
-
-### 1.1 Create a Project from the Workspace shell
-
-For Project creation or registration, start the workspace shell through the
-launcher:
-
-```bash
-tools/start-webkanban.sh \
-  --host 127.0.0.1 \
-  --port 8001 \
-  --workspace-only
-```
-
-The launcher reuses or creates the action token and prints it at startup. To
-pin a token, set `ZF_WEB_ACTION_TOKEN` in the uncommitted repository `.env`.
-
-Common lifecycle commands:
+The launcher coordinates the Web build, action token, Workspace/provider environment, Codex headless
+sandbox policy, tmux, and restart behavior. Use `--host 0.0.0.0` only on a trusted network for a container
+or remote browser.
 
 ```bash
 tools/start-webkanban.sh --port 8001 --status
-tools/start-webkanban.sh --port 8001 --stop
 tools/start-webkanban.sh --host 127.0.0.1 --port 8001 --no-build
+tools/start-webkanban.sh --port 8001 --stop
 ```
 
-First-run onboarding configures Provider, Environment, Access, and Ready; it
-does not create a Project. `Add Project` inspects the server path and chooses
-open, register, initialize state, initialize Project, or blocked from disk
-truth. Only Project initialization shows Project Name, Project Brief, Stack,
-Primary Provider, and Mixed team. It no longer asks for YAML, Controller, kind,
-lane, or role.
+For a read-oriented view of a specific state directory, use the lower-level entry point:
 
-![Current Add/Open Project form](assets/project-add-open-current.png)
+```bash
+uv run zf web --state-dir /tmp/zf-run/.zf --host 127.0.0.1 --port 8002
+```
 
-Initialize creates and registers only the Project. It does not create a Task or
-ignite a Workflow. See
-[20 Project Creation, Bootstrap, and Workflow Ignition](20-project-bootstrap-workflow-ignition.en.md)
-for screenshots and the complete path.
+It does not supply the launcher's trusted-local provider environment. Prefer the launcher for real
+Channel/Kanban Agent provider operations.
 
-## 2. Observe a Running Harness
+Select the Project at the top. Project scopes every Task, Run, Channel, and projection. Before acting,
+confirm that the Project name, Live state, and URL query changed together.
 
-The Web application is a project-scoped dashboard. Its main pages are:
+## 2. Workspace: Daily Operations
 
-| Page | Purpose |
+Workspace answers “what do I need to do?”:
+
+| Page | Main use | Key question |
+|---|---|---|
+| Overview | Project goal, task flow, cost, and health summary | what is the most important progress or risk now |
+| Inbox | proposals, exceptions, and notices requiring owner judgment | what semantic or action decision needs a human |
+| Tasks | Kanban, Task contract, and detail | where is this Goal/PRD/Issue/Refactor now |
+| Workflows | Needs decision, Active, and History | which exact proposal can be approved and which Run is active |
+| Agents | role/provider/worker, usage, cost, skills, context | who is working and who is stuck or near a context boundary |
+| Automations | Daily/Weekly/Project Monitor schedules | when it runs and whether its last execution succeeded |
+
+A practical route is Overview -> Inbox -> Tasks -> Workflows, with Agents as an execution drill-down.
+
+## 3. Tasks: From Board to Evidence
+
+After selecting a Kanban Task, read its details in layers:
+
+| Tab | Content |
 |---|---|
-| Overview | Project summary, task flow, and key health signals |
-| Inbox | Messages and alerts that need operator attention |
-| Channels | Channel conversations, members, and streaming replies |
-| Tasks | Kanban board and task inspector |
-| Agents | Worker, role, provider, context, and token summaries |
-| Automations | Daily Brief, Weekly Review, Project Monitor, and related jobs |
-| Delivery | Feature/task delivery spine, stages, fanout, and ship readiness |
-| Trace / Graph / Loop | Event causality, execution graph, and autoresearch/cycle traces |
-| Observability | Events, logs, diagnostics, failed and blocked projections |
-| Settings | Web/runtime settings and action-token state |
+| Summary | objective, contract, owner, dependencies, current stage/status |
+| Activity | timeline, attempts, dispatch, rework, and key events |
+| Evidence | artifact refs, tests, Git evidence, verdict, and closure basis |
+| Advanced | raw contract, diagnostics, refs, and low-level runtime data |
 
-The Web UI is read-oriented by default. Task creation, channel membership,
-maintenance preparation, runtime resume, and similar writes must use a
-token-, passcode-, or trusted-session-gated controlled action. These actions
-emit audit events and must not bypass kernel helpers to edit truth files.
+A card state is not completion evidence. Connect Goal/Claims, current attempt, required artifacts,
+verification, terminal verdict, and Git evidence.
 
-Useful terminal views:
+```bash
+uv run zf kanban show TASK-ID
+uv run zf task trace TASK-ID
+uv run zf runs for-task TASK-ID
+```
+
+Creating a Task, choosing a Workflow, and approving a proposal are distinct actions. A Task does not mean
+a Workflow has started, and selecting a plan/route is not approval.
+
+## 4. Workflows: Approve the Exact Proposal
+
+- **Needs decision**: inspect objective, route, parameters, and risk.
+- **Active**: inspect admitted Runs, current stage, and wait reasons.
+- **History**: inspect closed, rejected, failed, and superseded proposals/Runs.
+
+Before approval, verify Task, route, objective, input refs, and parameters against the current requirement.
+Approval binds one exact proposal; any semantic change requires a new one. External effects use an action
+token/trusted-session controlled path, and provider Agents never receive that token.
+
+## 5. Delivery: Read the Whole Workflow
+
+Monitoring **Delivery** is Feature-scoped and has three modes:
+
+| Mode | Question answered |
+|---|---|
+| Overview | current ship readiness, Task/Run/Loop summary, and primary blocker |
+| Runs | stage heatmap, Run graph, attempts, spans, and fanout/fan-in progress |
+| Graph | connections among Goal, Task, stage, dependency, and evidence |
+
+Select the correct Feature, then inspect status/ship/drift/replan. In Runs, transport delivery, Worker
+result, gate verdict, and closure are separate lifecycle points. Graph reveals broken links; node count is
+not a quality measure.
+
+Goal Dossier summarizes Goal -> Claim -> Task -> Evidence -> Verdict. Before closure, inspect mandatory
+Claim coverage, terminal Tasks, missing evidence, current generation, and owner decisions.
+
+## 6. Loop and Observability
+
+**Loop** shows convergence through plan/execute/verify/rework, GAN/critic, recovery, autoresearch, or other
+profile-defined loops. Check whether each round reduces the gap, adds evidence, or crosses a no-progress,
+budget, or replan boundary.
+
+**Observability** is for low-level diagnosis:
+
+| Tab | Use |
+|---|---|
+| Traces | find causation by Task/actor/type/status/duration |
+| Events | inspect append-only occurrences and sequence windows |
+| Logs | inspect runtime and provider log projections |
+| Runs / Fanouts | inspect Run, child, barrier, and aggregation state |
+| Candidates / Repair | inspect diagnostic candidates and controlled repair proposals |
+| Integration | inspect Feishu/external projection queues and failures |
+| Raw | inspect source projection payload when needed |
+
+Use Tasks, Delivery, and Goal Dossier for normal acceptance. Use Observability to explain why execution did
+not continue or which attempt/projection failed.
+
+![Observe the same playgroud delivery across Delivery, Graph, Loop, and Observability](assets/observe-delivery.webp)
+
+## 7. Channels: Discussion Is Not Execution
+
+Open a Channel from the Project rail. Humans, provider Agents, personas, owner delegates, and observers can
+clarify an ambiguous requirement in shared context.
+
+- ordinary messages remain conversation and do not auto-fanout;
+- explicit Discuss enters multi-lens relay/critique/synthesis;
+- Finalize creates a draft/canonical candidate; Owner confirm makes it a Task/PRD source;
+- only an exact leader with `propose_workflow` may propose a Workflow handoff;
+- handoff still needs separate approval and never runs because discussion ended.
+
+See [Channel Collaboration](15-channel-collaboration.en.md) and
+[Channel to PRD](workflows/channel-to-prd.en.md).
+
+## 8. Live, Degraded, and Write Actions
+
+Web is a read projection plus controlled-action surface, not a canonical state owner:
+
+- **Live**: SSE/polling is synchronized to the current Project;
+- **Reconnecting**: the last known snapshot remains while a gap is recovered;
+- **Degraded**: missing projection/sidecar data is explicit rather than shown as fresh;
+- when freshness fails, inspect projection/refs/doctor before recovering a Run.
+
+Creating a Task or Channel member, applying a Workflow, maintenance prepare, and runtime resume all use
+token/passcode/trusted-session controlled actions and leave audit events. After a UI success message, read
+back Task/Event/Workflow state to confirm the effect.
+
+## 9. Delivery Sign-off Route
+
+```text
+Tasks: contract and current state
+  -> Delivery: stages, attempts, and dependencies
+  -> Goal Dossier: Claim coverage and evidence
+  -> Inbox: unresolved owner decisions
+  -> Observability: only when diagnosis is needed
+```
 
 ```bash
 uv run zf kanban --board
-uv run zf events --last 50
-uv run zf watch --follow
-uv run zf status --workers
+uv run zf task trace TASK-ID
+uv run zf refs verify
 uv run zf metrics snapshot
+uv run zf doctor
 ```
 
-For one task:
-
-```bash
-uv run zf kanban show <task_id>
-uv run zf task trace <task_id>
-uv run zf runs for-task <task_id>
-```
-
-## 3. Docker Playwright
-
-Run browser tests in Docker. Do not install browsers on the host unless that is
-an explicit requirement. Run `npm --prefix web ci` on the host, or otherwise
-prepare `web/node_modules`, before the container command. Browser installation
-must be bounded:
-
-```bash
-docker run --rm --network host \
-  --user "$(id -u):$(id -g)" \
-  --entrypoint bash \
-  -v "$PWD:/work" \
-  -w /work/web \
-  -e PLAYWRIGHT_BROWSERS_PATH=0 \
-  -e ZF_WEB_BASE_URL=http://127.0.0.1:5175 \
-  mcp/playwright:latest \
-  -lc 'set -euo pipefail; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test --project=chromium --workers=1'
-```
-
-Prerequisites:
-
-- The ZaoFu Web/API process is listening on `0.0.0.0:5175`, or the configured port.
-- Docker supports host networking.
-- `$PWD` is the ZaoFu repository root.
-
-## 4. Scripted E2E
-
-Scripted E2E does not call a real provider. It validates the deterministic
-kernel and pipeline:
-
-```bash
-uv run python -m tests.e2e.robustness_suite --smoke
-uv run python -m tests.e2e.robustness_suite
-```
-
-The focused pytest subset is:
-
-```bash
-uv run pytest \
-  tests/e2e/test_scripted_runner.py \
-  tests/e2e/test_robustness_suite.py \
-  tests/e2e/test_w5_phase_report.py \
-  -q
-```
-
-## 5. Real Codex Smoke
-
-A real Codex smoke starts provider processes, tmux, and actual workers, and it
-consumes provider budget. Before running it, confirm that:
-
-- `codex --version` succeeds.
-- `codex login` has completed.
-- `~/.codex/sessions` is writable.
-- `examples/dev-codex-backends.yaml` validates.
-- Explicit time and budget limits are set.
-
-Recommended entry point:
-
-```bash
-uv run python -m tests.e2e.robustness_suite \
-  --skip-unit \
-  --skip-dry-run \
-  --include-real codex \
-  --confirm-real
-```
-
-Lower-level runner:
-
-```bash
-uv run python -m tests.e2e.run_mixed \
-  --worktree /tmp/zaofu-codex-smoke \
-  --config examples/dev-codex-backends.yaml \
-  --seed-file tests/e2e/seeds/large_dev_split_3_tasks.txt \
-  --expected-done 1 \
-  --timeout 1800 \
-  --confirm
-```
-
-After the run:
-
-```bash
-uv run python -m tests.e2e.mixed_phase_report \
-  --state-dir /tmp/zaofu-codex-smoke/.zf
-
-uv run python -m tests.e2e.verify_real_state_web \
-  --state-dir /tmp/zaofu-codex-smoke/.zf \
-  --base-url http://127.0.0.1:5175
-```
-
-## 6. Full-Stack Validation Scorecard
-
-The scorecard condenses evidence from an existing real E2E run into an
-auditable report. It does not start workers. It checks issue, PRD, and refactor
-intake; key Web projections; New Task, Kanban Agent, and Channel entry points;
-Task-bound fanout Workflow evidence; and real Codex hook and usage evidence.
-Channel discussion itself is not direct Workflow-ignition proof.
-
-```bash
-PYTHONPATH=src python -m tests.e2e.full_stack_validation \
-  --state-dir /tmp/zaofu-codex-smoke/.zf \
-  --repo-root "$PWD" \
-  --require-real-codex \
-  --require-docker \
-  --preflight-output /tmp/zf-full/preflight.json \
-  --output /tmp/zf-full/scorecard.json \
-  --markdown /tmp/zf-full/report.md
-```
-
-Or use the wrapper:
-
-```bash
-tests/e2e/run_real_state_web_validation.sh \
-  /tmp/zaofu-codex-smoke/.zf \
-  /tmp/zf-full
-```
-
-Review `matrix`, `fanout_trace_chain`, `codex_hook_usage`, and
-`summary.failed`. `--require-real-codex` fails when real CLI, session, or usage
-evidence is missing, preventing a mock or partial run from being reported as a
-real-provider pass.
-
-## 7. Run Archive
-
-Archive live state:
-
-```bash
-uv run zf archive-run \
-  --run-id "run-$(date -u +%Y%m%d%H%M%S)" \
-  --live-state-dir /tmp/zaofu-codex-smoke/.zf \
-  --status passed
-```
-
-Inspect or rebuild archive projections:
-
-```bash
-uv run zf runs list
-uv run zf runs rebuild
-```
-
-## 8. L0-L5 Evaluation Levels
-
-| Level | Goal | Typical entry point |
-|---|---|---|
-| L0 | Static config, schema, skill, and topology checks | `zf validate`, `zf skills doctor` |
-| L1 | Deterministic unit and integration tests | `pytest tests/...` |
-| L2 | Complete scripted flow | `tests.e2e.scripted_runner`, `robustness_suite --smoke` |
-| L3 | Real smoke with one provider | `robustness_suite --include-real codex --confirm-real` |
-| L4 | Multi-worker stress and recovery | `tests.e2e.run_mixed`, autoresearch scenarios |
-| L5 | Web/API projections and operator inspection | `zf web`, Docker Playwright, `verify_real_state_web` |
-
-Do not skip L0-L2 and immediately spend real-provider budget. When a real run
-fails, archive its evidence before creating repair backlogs or tasks.
+For browser validation and real E2E, see [Web Maintenance and E2E Validation](operations/web-maintainer-validation.en.md).

@@ -129,7 +129,7 @@ class TaskAttemptStore:
         if not task_id or not dispatch_id:
             raise ValueError("TaskAttempt requires task_id and dispatch_id")
         run_id = run_id or "legacy"
-        attempt_id = _attempt_id(run_id, task_id, dispatch_id)
+        attempt_id = task_attempt_id(run_id, task_id, dispatch_id)
         lease_id = _lease_id(attempt_id)
         attempt_key = _attempt_key(
             run_id,
@@ -572,7 +572,9 @@ def _attempt_row_error(attempt_id: str, row: dict[str, Any]) -> str:
     return ""
 
 
-def _attempt_id(run_id: str, task_id: str, dispatch_id: str) -> str:
+def task_attempt_id(run_id: str, task_id: str, dispatch_id: str) -> str:
+    """Return the deterministic scheduler attempt identity for a dispatch."""
+
     digest = hashlib.sha256(
         f"{run_id}|{task_id}|{dispatch_id}".encode("utf-8")
     ).hexdigest()[:20]
@@ -604,4 +606,5 @@ __all__ = [
     "TaskAttemptLimitError",
     "TaskAttemptStore",
     "TaskAttemptStoreError",
+    "task_attempt_id",
 ]

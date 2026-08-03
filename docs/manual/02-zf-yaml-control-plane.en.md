@@ -28,7 +28,7 @@ Each Project therefore keeps one canonical `zf.yaml`. Use
 Controller or changing an existing control plane, with operator review before
 write. Do not put YAML selection back into normal Project admission.
 
-Minimal shape:
+Reduced low-level `ZfConfig` shape (without Flow document/profile expansion):
 
 ```yaml
 version: "1.0"
@@ -40,6 +40,11 @@ session:
 orchestrator:
   backend: claude-code
 roles:
+  - name: orchestrator
+    backend: claude-code
+    role_kind: reader
+    triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]
+    publishes: [orchestrator.rework.triage.recorded]
   - name: dev
     backend: claude-code
     permission_mode: bypass
@@ -54,8 +59,8 @@ roles:
 | `version` | Config version |
 | `project` | Project identity and `state_dir` |
 | `session` | tmux session and layout |
-| `orchestrator` | Layer 2 provider and turn policy |
-| `roles` | Worker roles and event contracts |
+| `orchestrator` | Python runtime loop plus compatibility Agent-wake backend/turn/timeout policy; it does not determine authority by itself |
+| `roles` | Worker roles and explicit exception-advisor roles |
 | `providers` | Provider-specific bindings |
 | `integrations` | Feishu and external adapters |
 | `skill_sources` | Read-only skill source roots |
@@ -70,6 +75,11 @@ roles:
 
 The current schema, loader, CLI help, and runtime callers define implemented
 behavior. Design documents may also contain future intent.
+
+In Product Flow, the Kernel mechanically dispatches from topology/profile and an explicit
+`orchestrator` role subscribes only to exceptional triage signals. Only Legacy safe-team lets a Layer 2
+Agent decompose and assign work. Treat the `orchestrator` config block, Python `Orchestrator` runtime, and
+same-named role Agent as three distinct objects.
 
 ## 3. Role Configuration
 
@@ -146,7 +156,7 @@ Recommended defaults:
 | review | reader | Reviews a pinned candidate |
 | test | reader | Verifies candidate state independently |
 | judge | reader | Evaluates terminal evidence |
-| orchestrator | auto | Coordinates rather than implementing |
+| orchestrator | reader / auto | A Product Flow exception advisor does not implement or own the happy-path state machine |
 
 ## 6. Quality Gates and Verification
 
@@ -187,11 +197,11 @@ The configured state directory typically contains:
 
 | Path | Classification |
 |---|---|
-| `events.jsonl` | append-only truth |
-| `kanban.json` | active task truth |
-| `feature_list.json` | active feature truth |
-| `session.yaml` | harness session truth |
-| `role_sessions.yaml` | role/provider session truth |
+| `events.jsonl` | append-only occurrence/order/causation/verdict/ref ledger |
+| `kanban.json` | canonical active Task current state |
+| `feature_list.json` | canonical active Feature current state |
+| `session.yaml` | canonical harness session current state |
+| `role_sessions.yaml` | canonical role/provider session mapping |
 | `cost.jsonl` | cost ledger/projection input |
 | `skills.lock.json` | rebuildable skill resolution record |
 | `instructions/` | generated role briefings/instructions |
@@ -200,7 +210,7 @@ The configured state directory typically contains:
 | `projections/` | rebuildable Web and diagnostic views |
 | `fanouts/` | fanout result sidecars and manifests |
 
-Do not hand-edit truth files. Use kernel stores and event helpers.
+Do not hand-edit canonical state or ledgers. Use Kernel stores, event helpers, artifact writers, and controlled actions.
 
 ## 8. Compatibility Guidance
 

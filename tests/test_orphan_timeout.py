@@ -127,6 +127,51 @@ class TestOrphanWarning:
 
 
 class TestOrphanEscalate:
+    def test_admitted_writer_completion_is_not_treated_as_orphaned(
+        self, state_dir, config, transport,
+    ):
+        orch = Orchestrator(state_dir, config, transport)
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="T1",
+            title="x",
+            status="in_progress",
+            assigned_to="dev",
+            active_dispatch_id="writer-run-1",
+        ))
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="fanout.child.dispatched",
+            actor="orchestrator",
+            task_id="T1",
+            payload={"run_id": "writer-run-1", "task_id": "T1"},
+        ))
+        log.append(ZfEvent(
+            type="fanout.child.completed",
+            actor="orchestrator",
+            task_id="T1",
+            payload={
+                "run_id": "writer-run-1",
+                "task_id": "T1",
+                "admitted_call_result_ref": {
+                    "ref": "artifacts/call-results/T1.json",
+                    "sha256": "a" * 64,
+                },
+            },
+        ))
+        orch._dispatch_epoch["T1"] = 0.0
+        orch._now = lambda: 2000.0
+
+        orch._check_orphaned_tasks()
+
+        task = store.get("T1")
+        assert task is not None
+        assert task.status == "in_progress"
+        assert "T1" not in orch._dispatch_epoch
+        events = log.read_all()
+        assert not any(event.type == "task.orphaned" for event in events)
+        assert not any(event.type == "human.escalate" for event in events)
+
     def test_past_escalate_threshold_unassigns_and_backlogs(
         self, state_dir, config, transport
     ):
