@@ -41,6 +41,7 @@ def validate_channel_contract(
             "assumptions",
             "out_of_scope",
             "acceptance_criteria",
+            "verification_commands",
             "open_questions",
             "risks",
             "source_refs",
@@ -68,6 +69,25 @@ def validate_channel_contract(
             dict,
         ):
             return "classification must be an object"
+        readiness = body.get("readiness")
+        if readiness is not None and not isinstance(readiness, dict):
+            return "readiness must be an object"
+        if isinstance(readiness, dict):
+            implementation_start = readiness.get("implementation_start")
+            if (
+                implementation_start is not None
+                and not isinstance(implementation_start, bool)
+            ):
+                return "readiness.implementation_start must be a boolean"
+            for field in ("gaps", "risks", "evidence_refs"):
+                value = readiness.get(field)
+                if value is not None and not isinstance(value, list):
+                    return f"readiness.{field} must be a list"
+            if (
+                implementation_start is True
+                and str(readiness.get("verdict") or "").strip() != "ready"
+            ):
+                return "readiness.implementation_start requires verdict=ready"
     return ""
 
 
@@ -183,6 +203,7 @@ def persist_channel_prd_readiness(
         "thread_id": thread_id,
         "revision": revision,
         "verdict": str(body.get("verdict") or "unassessed"),
+        "implementation_start": body.get("implementation_start") is True,
         "gaps": body.get("gaps") if isinstance(body.get("gaps"), list) else [],
         "risks": body.get("risks") if isinstance(body.get("risks"), list) else [],
         "evidence_refs": (

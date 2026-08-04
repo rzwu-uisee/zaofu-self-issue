@@ -43,7 +43,20 @@ def validate_task_contract(
         errors.append(
             f"{prefix}.owner_role {contract.owner_role!r} does not match a role"
         )
-    if not contract.owner_role and not contract.owner_instance and not task.assigned_to:
+    evidence_contract = (
+        contract.evidence_contract
+        if isinstance(contract.evidence_contract, dict)
+        else {}
+    )
+    workflow_owned = str(
+        evidence_contract.get("execution_owner") or ""
+    ).strip() == "workflow"
+    if (
+        not contract.owner_role
+        and not contract.owner_instance
+        and not task.assigned_to
+        and not workflow_owned
+    ):
         errors.append(f"{prefix}.owner_role or owner_instance is required")
 
     if contract.rework_to and contract.rework_to not in role_names:

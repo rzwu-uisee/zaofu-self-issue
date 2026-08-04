@@ -122,6 +122,9 @@ def persist_synthesis_prd_revision(
         "readiness_verdict": str(
             readiness_body.get("verdict") or "unassessed"
         ),
+        "implementation_start": (
+            readiness_body.get("implementation_start") is True
+        ),
         "conclusion_ref": str(conclusion["ref"]),
         "conclusion_digest": str(conclusion["sha256"]),
         "spec_path": artifact_ref.as_posix(),

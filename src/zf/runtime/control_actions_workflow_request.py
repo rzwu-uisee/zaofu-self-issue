@@ -84,6 +84,7 @@ class WorkflowRequestActionsMixin:
         preview = WorkflowStartService(
             self.state_dir,
             self.config,
+            project_root=self.project_root,
         ).preview(
             payload,
             require_bindings=True,

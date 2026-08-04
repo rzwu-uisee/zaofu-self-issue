@@ -533,6 +533,41 @@ def test_task_workflow_plan_normalizes_option_effects_and_route_details() -> Non
     assert gate["submit_payload"]["route_id"] == "research:fixed"
 
 
+def test_headless_plan_can_bind_an_existing_task_outside_task_panel() -> None:
+    config = load_config(ROOT / "zf.yaml")
+
+    draft, proposal = prepare_headless_plan_draft(
+        [],
+        answer=_task_workflow_answer(),
+        action_proposal=None,
+        project_id="zaofu",
+        conversation_id="kanban:zaofu",
+        thread_key="kanban:zaofu",
+        fallback_thread_id="kanban:zaofu",
+        turn_id="turn-workflow-existing-task",
+        backend="codex-headless",
+        provider_session_id="session-1",
+        originating_message_event_id="evt-workflow-request",
+        task_id=None,
+        task_binding_digests={
+            "TASK-PLAN": "sha256:canonical-task-binding",
+        },
+        correlation_id="trace-workflow-existing-task",
+        config=config,
+    )
+
+    assert proposal is None
+    assert draft is not None
+    assert draft.request["valid"] is True, draft.request["validation_error"]
+    assert draft.request["task_id"] == "TASK-PLAN"
+    assert draft.request["task_contract_digest"] == (
+        "sha256:canonical-task-binding"
+    )
+    assert draft.request["options"][0]["submit_payload"][
+        "task_contract_digest"
+    ] == "sha256:canonical-task-binding"
+
+
 def test_agent_task_workflow_plan_rejects_missing_route_parameters() -> None:
     config = load_config(ROOT / "zf.yaml")
     answer = json.loads(_task_workflow_answer())

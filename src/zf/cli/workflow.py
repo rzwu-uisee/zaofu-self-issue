@@ -237,6 +237,7 @@ def _run_routes(args: argparse.Namespace) -> int:
     result = WorkflowStartService(
         context.state_dir,
         context.config,
+        project_root=context.project_root,
     ).routes(task_id=args.task)
     _print_start_result(result, output_format=args.format)
     return 0 if result.get("ok") else 1
@@ -253,7 +254,11 @@ def _run_start(args: argparse.Namespace) -> int:
         print("Error: --parameters-json must be a JSON object", file=sys.stderr)
         return 2
 
-    service = WorkflowStartService(context.state_dir, context.config)
+    service = WorkflowStartService(
+        context.state_dir,
+        context.config,
+        project_root=context.project_root,
+    )
     if args.apply:
         result = _apply_workflow_start(
             context=context,

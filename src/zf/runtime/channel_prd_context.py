@@ -53,6 +53,17 @@ def canonical_channel_prd_context(
             )
             if synthesis is None:
                 continue
+            readiness_verdict = str(
+                synthesis.get("readiness_verdict")
+                or consensus.get("readiness_verdict")
+                or "unassessed"
+            ).strip()
+            implementation_start = synthesis.get(
+                "implementation_start",
+                consensus.get("implementation_start"),
+            )
+            if readiness_verdict != "ready" or implementation_start is not True:
+                continue
             source_refs = list(dict.fromkeys([
                 *(
                     str(item).strip()
@@ -80,6 +91,12 @@ def canonical_channel_prd_context(
                     synthesis.get("event_id") or ""
                 ),
                 "consensus_event_id": reached_event_id,
+                "readiness_ref": str(synthesis.get("readiness_ref") or ""),
+                "readiness_digest": str(
+                    synthesis.get("readiness_digest") or ""
+                ),
+                "readiness_verdict": readiness_verdict,
+                "implementation_start": True,
                 "source_refs": source_refs,
                 "updated_at": str(channel.get("updated_at") or ""),
             })

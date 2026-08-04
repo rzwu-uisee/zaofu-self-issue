@@ -4,6 +4,8 @@ export interface CanonicalChannelPrd {
   artifactDigest: string;
   artifactRef: string;
   consensusEventId: string;
+  implementationStart: boolean;
+  readinessVerdict: string;
   ready: boolean;
   sourceRefs: string[];
   synthesisEventId: string;
@@ -63,15 +65,29 @@ export function canonicalChannelPrd(
     && text(item.artifact_digest).replace(/^sha256:/, "")
       === artifactDigest.replace(/^sha256:/, "")
   ));
+  const readinessVerdict = text(
+    synthesis?.readiness_verdict ?? consensus.readiness_verdict,
+  ) || "unassessed";
+  const implementationStart = (
+    synthesis?.implementation_start ?? consensus.implementation_start
+  ) === true;
+  const openQuestions = Array.isArray(synthesis?.open_questions)
+    ? synthesis.open_questions.filter((item) => text(item))
+    : [];
   return {
     artifactDigest,
     artifactRef,
     consensusEventId,
+    implementationStart,
+    readinessVerdict,
     ready: Boolean(
       artifactRef
       && artifactDigest
       && consensusEventId
-      && synthesis,
+      && synthesis
+      && readinessVerdict === "ready"
+      && implementationStart
+      && openQuestions.length === 0
     ),
     sourceRefs: Array.isArray(synthesis?.source_refs)
       ? synthesis.source_refs.map((item) => text(item)).filter(Boolean)

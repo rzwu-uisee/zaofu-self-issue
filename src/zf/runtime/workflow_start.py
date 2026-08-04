@@ -9,6 +9,7 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter, ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.core.task.store import TaskStore
+from zf.core.task.contract_validation import validate_task_contract
 from zf.runtime.kanban_proposals import (
     PROPOSAL_EVENT,
     PROPOSAL_EVENT_TYPES,
@@ -48,9 +49,16 @@ class WorkflowStartService:
         self,
         state_dir: Path,
         config: ZfConfig | None,
+        *,
+        project_root: Path | None = None,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.config = config
+        self.project_root = (
+            Path(project_root)
+            if project_root is not None
+            else self.state_dir.parent
+        )
 
     def routes(self, *, task_id: str) -> dict[str, Any]:
         task = TaskStore(self.state_dir / "kanban.json").get(task_id)
@@ -272,6 +280,27 @@ class WorkflowStartService:
                 status_code=409,
                 task_id=task_id,
             )
+        if str(route.get("family") or "") == "delivery":
+            if self.config is None:
+                return _failure(
+                    "workflow_route_unavailable",
+                    "delivery workflow requires an active project config",
+                    status_code=409,
+                    task_id=task_id,
+                )
+            contract_errors = validate_task_contract(
+                task,
+                config=self.config,
+                project_root=self.project_root,
+            )
+            if contract_errors:
+                return _failure(
+                    "task_contract_invalid",
+                    "delivery workflow Task contract is incomplete: "
+                    + "; ".join(contract_errors),
+                    status_code=422,
+                    task_id=task_id,
+                )
 
         objective = str(
             payload.get("objective")

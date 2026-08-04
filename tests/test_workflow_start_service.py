@@ -194,6 +194,33 @@ def test_service_rejects_missing_route_and_stale_bindings(
     assert stale_config["status"] == "workflow_route_unavailable"
 
 
+def test_delivery_route_rejects_incomplete_task_contract_before_invoke(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir = _project(tmp_path)
+    config = load_config(project_root / "zf.yaml")
+    service = WorkflowStartService(
+        state_dir,
+        config,
+        project_root=project_root,
+    )
+
+    preview = service.preview(
+        {
+            "task_id": "TASK-WORKFLOW-START",
+            "route_id": "delivery:prd:standard",
+            "objective": "Deliver the incomplete Task.",
+        },
+        require_bindings=False,
+    )
+
+    assert preview["ok"] is False
+    assert preview["status"] == "task_contract_invalid"
+    assert "verification_tiers" in preview["reason"]
+    assert "owner_role or owner_instance" in preview["reason"]
+    assert EventLog(state_dir / "events.jsonl").read_all() == []
+
+
 def test_service_uses_request_origin_and_rejects_target_override(
     tmp_path: Path,
 ) -> None:

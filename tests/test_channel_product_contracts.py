@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +19,10 @@ from zf.core.events.log import EventLog
 from zf.core.security.redaction import redact_obj
 from zf.core.task.store import TaskStore
 from zf.runtime.channel_context import build_channel_context_pack
+from zf.runtime.channel_contract_artifacts import (
+    persist_channel_prd,
+    persist_channel_prd_readiness,
+)
 from zf.runtime.channel_adapter import dispatch_reply_request
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_workflow_authority import (
@@ -988,15 +993,75 @@ def _leader_plan_fixture(
             "idempotency_key": "leader-plan-r1",
         },
     )["ok"]
+    spec_ref = "channel-artifacts/ch-plan/spec-r1.md"
+    spec_path = state_dir / spec_ref
+    spec_path.parent.mkdir(parents=True)
+    spec_body = (
+        "# Plan PRD\n\n## Acceptance Criteria\n"
+        "- Delivery passes `python -m pytest -q`.\n"
+    )
+    spec_path.write_text(spec_body, encoding="utf-8")
+    spec_digest = hashlib.sha256(spec_body.encode("utf-8")).hexdigest()
+    readiness = persist_channel_prd_readiness(
+        state_dir,
+        channel_id="ch-plan",
+        thread_id="main",
+        revision=1,
+        body={
+            "verdict": "ready",
+            "implementation_start": True,
+            "gaps": [],
+        },
+        created_by="leader-1",
+        source_event_id="evt-plan-synthesis",
+    )
+    prd = persist_channel_prd(
+        state_dir,
+        channel_id="ch-plan",
+        thread_id="main",
+        revision=1,
+        previous_ref="",
+        previous_digest="",
+        body={
+            "summary": "Deliver the confirmed Channel PRD.",
+            "title": "Plan PRD",
+            "synthesis": {
+                "acceptance_criteria": ["The declared verification passes."],
+                "out_of_scope": ["Unconfirmed scope"],
+            },
+            "markdown": spec_body,
+            "spec_path": spec_ref,
+            "spec_digest": spec_digest,
+        },
+        readiness_descriptor=readiness,
+        created_by="leader-1",
+        source_event_id="evt-plan-synthesis",
+    )
     consensus_payload = {
         "channel_id": "ch-plan",
         "thread_id": "main",
-        "artifact_ref": "channels/ch-plan/prd/r1.json",
-        "artifact_digest": "a" * 64,
-        "prd_ref": "channels/ch-plan/prd/r1.json",
-        "prd_digest": "a" * 64,
+        "artifact_ref": prd["ref"],
+        "artifact_digest": prd["sha256"],
+        "prd_ref": prd["ref"],
+        "prd_digest": prd["sha256"],
         "prd_revision": 1,
+        "readiness_ref": readiness["ref"],
+        "readiness_digest": readiness["sha256"],
+        "readiness_verdict": "ready",
+        "implementation_start": True,
+        "spec_path": spec_ref,
+        "spec_digest": spec_digest,
     }
+    writer.emit(
+        "channel.synthesis.proposed",
+        actor="leader-1",
+        correlation_id="ch-plan",
+        payload={
+            **consensus_payload,
+            "summary": "Deliver the confirmed Channel PRD.",
+            "open_questions": [],
+        },
+    )
     writer.emit(
         "channel.consensus.proposed",
         actor="leader-1",
@@ -1015,8 +1080,8 @@ def _leader_plan_fixture(
         "channel_member_id": "leader-1",
         "leader_revision": 1,
         "prd_revision": 1,
-        "source_ref": "channels/ch-plan/prd/r1.json",
-        "source_digest": "a" * 64,
+        "source_ref": prd["ref"],
+        "source_digest": prd["sha256"],
     }
     return state_dir, writer, service, authority
 

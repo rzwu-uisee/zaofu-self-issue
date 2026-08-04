@@ -60,8 +60,17 @@ def fake_channel_reply_text(
             "channel_synthesis": {
                 "decision": "proceed",
                 "summary": summary,
+                "verification_commands": ["python -m pytest -q"],
                 "open_questions": [],
                 "risks": [],
+                "readiness": {
+                    "verdict": "ready",
+                    "implementation_start": True,
+                    "gaps": [],
+                    "risks": [],
+                    "evidence_refs": [],
+                    "reason": "deterministic test contract is complete",
+                },
                 "recommended_workflow": {},
                 "source_refs": [],
                 "evidence_refs": [],
@@ -117,13 +126,19 @@ def channel_reply_response_contract(
         return (
             "End with one JSON object named channel_synthesis containing "
             "title, decision, summary, decisions, assumptions, out_of_scope, "
-            "acceptance_criteria, open_questions, risks, "
+            "acceptance_criteria, verification_commands, open_questions, risks, "
             "recommended_workflow, source_refs, evidence_refs, "
             "consumed_contribution_refs, consumed_contribution_digests, "
-            "classification, dissent, and confidence. "
+            "classification, dissent, confidence, and readiness. "
             "recommended_workflow and classification must each be JSON "
-            "objects; use {} when no structured value applies. All plural "
-            "fields must be JSON arrays. Keep the preceding Markdown concise."
+            "objects; use {} when no structured value applies. readiness must "
+            "be an object containing verdict (ready, needs_owner, or "
+            "needs_multi_lens), implementation_start (boolean), gaps, risks, "
+            "evidence_refs, and reason. Set implementation_start=true only "
+            "when verdict=ready, open_questions and gaps are empty, acceptance "
+            "criteria are complete, and verification_commands contains at "
+            "least one pure executable shell command. All plural fields must "
+            "be JSON arrays. Keep the preceding Markdown concise."
         )
     thread_id = str(request.get("thread_id") or "main")
     sessions = channel.get("discussions")

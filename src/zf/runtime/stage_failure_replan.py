@@ -34,6 +34,41 @@ _RUN_FLOW_MARKER_EVENTS = frozenset({
     "flow.roles.activation.recovered",
     "task_map.ready",
 })
+_CANONICAL_INPUT_KEYS = (
+    "task_contract_digest",
+    "contract_snapshot_digest",
+    "requirement_spec_digest",
+    "source_digest",
+    "prd_digest",
+    "spec_digest",
+    "workflow_input_manifest_digest",
+    "source_workflow_input_manifest_digest",
+    "effective_config_digest",
+    "run_contract_digest",
+    "task_map_digest",
+    "plan_artifact_package_digest",
+    "source_revision",
+    "prd_revision",
+    "workflow_input_manifest_ref",
+    "source_ref",
+    "prd_ref",
+    "target_ref",
+)
+_SEMANTIC_FAILURE_CLASSES = frozenset({
+    "semantic_rejection",
+    "product_rejection",
+    "candidate_product_quality_failed",
+})
+_NON_SEMANTIC_FAILURE_CLASSES = frozenset({
+    "dependency_blocked",
+    "environment_failure",
+    "harness_failure",
+    "integration_failure",
+    "reader_execution_failure",
+    "reader_abstained",
+    "transport_delivery",
+    "verifier_execution_failure",
+})
 
 
 def _payload_target_ref(payload: dict[str, Any]) -> str:
@@ -82,6 +117,40 @@ def _stage_flow_kind(stage: Any, trigger_type: str) -> str:
     if trigger.startswith("zaofu.refactor."):
         return "refactor"
     return ""
+
+
+def _canonical_input_identity(payload: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (key, str(payload.get(key) or "").strip())
+        for key in _CANONICAL_INPUT_KEYS
+        if payload.get(key) not in (None, "", [], {})
+    )
+
+
+def _semantic_failure(payload: dict[str, Any]) -> bool:
+    failure_class = str(
+        payload.get("failure_class")
+        or payload.get("failure_classification")
+        or ""
+    ).strip()
+    if failure_class in _NON_SEMANTIC_FAILURE_CLASSES:
+        return False
+    if failure_class in _SEMANTIC_FAILURE_CLASSES:
+        return True
+    return str(payload.get("recommendation") or "").strip().lower() in {
+        "reject",
+        "rejected",
+        "needs_rework",
+    }
+
+
+def _requires_changed_scan_input(
+    stage: Any,
+    failure_event_type: str,
+) -> bool:
+    stage_id = str(getattr(stage, "id", "") or "").strip().lower()
+    event_type = str(failure_event_type or "").strip().lower()
+    return "scan" in stage_id or event_type.endswith(".scan.failed")
 
 
 def _same_replan_scope(event: ZfEvent, failure_event: ZfEvent) -> bool:
@@ -261,6 +330,21 @@ def plan_reader_stage_replan(
     failure_payload = (
         failure_event.payload if isinstance(failure_event.payload, dict) else {}
     )
+    if (
+        _requires_changed_scan_input(stage, failure_event.type)
+        and _semantic_failure(failure_payload)
+    ):
+        origin_identity = _canonical_input_identity(origin_payload)
+        current_identity = _canonical_input_identity({
+            **origin_payload,
+            **{
+                key: value
+                for key, value in failure_payload.items()
+                if value not in (None, "", [], {})
+            },
+        })
+        if origin_identity and current_identity == origin_identity:
+            return None, "input_unchanged"
     superseding_success = superseding_candidate_ready(
         events,
         rework_source=rework_source_from_payload(origin_payload),
@@ -340,6 +424,7 @@ def plan_reader_stage_replan(
             ),
         }]
     for key in (
+        *_CANONICAL_INPUT_KEYS,
         "target_ref",
         "source_refs",
         "workflow_prompt_ref",
@@ -352,7 +437,9 @@ def plan_reader_stage_replan(
         "evidence_refs",
     ):
         value = failure_payload.get(key)
-        if value not in (None, "", [], {}) and not origin_payload.get(key):
+        if value not in (None, "", [], {}) and (
+            key in _CANONICAL_INPUT_KEYS or not origin_payload.get(key)
+        ):
             origin_payload[key] = value
     if target_ref:
         origin_payload.setdefault("target_ref", target_ref)

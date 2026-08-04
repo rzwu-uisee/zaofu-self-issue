@@ -7602,6 +7602,12 @@ def _run_headless_kanban_agent_turn(
             if task is not None
             else ""
         ),
+        task_binding_digests={
+            candidate.id: task_workflow_binding_digest(candidate)
+            for candidate in TaskStore(
+                state_dir / "kanban.json"
+            ).list_all()
+        },
         workflow_context=workflow_context,
         correlation_id=user_message.correlation_id,
         config=config,

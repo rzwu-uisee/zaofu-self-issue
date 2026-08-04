@@ -127,6 +127,9 @@ def project_report_failure(
     report: dict[str, Any],
     diagnostics: list[str],
 ) -> list[dict[str, Any]]:
+    failure_class = str(report.get("failure_class") or "").strip()
+    if failure_class:
+        artifact_payload["failure_class"] = failure_class
     raw_findings = report.get("findings")
     findings = list(raw_findings) if isinstance(raw_findings, list) else []
     normalized_diagnostics = list(diagnostics)

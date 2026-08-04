@@ -28,6 +28,9 @@ const detail = {
     thread_id: "main",
     artifact_ref: "channel-artifacts/ch-prd/prd.md",
     artifact_digest: "sha256:canonical",
+    readiness_verdict: "ready",
+    implementation_start: true,
+    open_questions: [],
     source_refs: ["event:evt-requirement", "channel:ch-prd/main"],
   }],
   consensus: {
@@ -36,6 +39,8 @@ const detail = {
       artifact_digest: "canonical",
       reached_event_id: "evt-consensus",
       prd_revision: 7,
+      readiness_verdict: "ready",
+      implementation_start: true,
     },
   },
 } as ChannelDetail;
@@ -115,6 +120,24 @@ assertEqual(buildChannelWorkflowPlanningRequest({
   objective: "",
   taskId: "TASK-42",
 }), null, "unresolved consensus should block planning");
+
+const implementationBlocked = {
+  ...detail,
+  syntheses: [{
+    ...(detail.syntheses?.[0] ?? {}),
+    implementation_start: false,
+  }],
+} as ChannelDetail;
+assert(
+  !canonicalChannelPrd(implementationBlocked).ready,
+  "implementation_start=false must block Task/workflow planning",
+);
+assertEqual(buildChannelWorkflowPlanningRequest({
+  channelId: "ch-prd",
+  detail: implementationBlocked,
+  objective: "Do not start implementation.",
+  taskId: "",
+}), null, "non-ready PRD should not produce a Task-create request");
 
 assertEqual(resolveChannelWorkflowBackend({
   storedBackend: "claude-headless",

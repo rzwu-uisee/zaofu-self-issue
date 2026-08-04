@@ -862,6 +862,7 @@ def _render_prd_artifact(
     assumptions = _string_items(synthesis.get("assumptions"))
     out_of_scope = _string_items(synthesis.get("out_of_scope"))
     acceptance = _string_items(synthesis.get("acceptance_criteria"))
+    verification_commands = _string_items(synthesis.get("verification_commands"))
     risks = _string_items(synthesis.get("risks"))
     dissent = _string_items(synthesis.get("dissent"))
     open_questions = _reply_question_texts(synthesis)
@@ -907,6 +908,10 @@ def _render_prd_artifact(
         *section("Assumptions", assumptions),
         *section("Out of Scope", out_of_scope),
         *section("Acceptance Criteria", acceptance),
+        *section(
+            "Verification Commands",
+            [f"`{command}`" for command in verification_commands],
+        ),
         *section("Risks", risks),
         *section("Dissent", dissent),
         *section("Open Questions", open_questions),

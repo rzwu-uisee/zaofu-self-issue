@@ -29,6 +29,10 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
             "thread_id": "main",
             "artifact_ref": "channel-artifacts/ch-prd/prd.md",
             "artifact_digest": "sha256:canonical",
+            "readiness_ref": "channels/ch-prd/prd/r1-readiness.json",
+            "readiness_digest": "sha256:readiness",
+            "readiness_verdict": "ready",
+            "implementation_start": True,
             "source_refs": ["event:requirement"],
         },
     )
@@ -41,6 +45,10 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
             "thread_id": "main",
             "artifact_ref": "channel-artifacts/ch-prd/prd.md",
             "artifact_digest": "canonical",
+            "readiness_ref": "channels/ch-prd/prd/r1-readiness.json",
+            "readiness_digest": "readiness",
+            "readiness_verdict": "ready",
+            "implementation_start": True,
             "source_refs": ["channel:ch-prd/main"],
         },
     )
@@ -69,6 +77,10 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
         "source_ref": "channel:ch-prd/main",
         "synthesis_event_id": synthesis.id,
         "consensus_event_id": reached.id,
+        "readiness_ref": "channels/ch-prd/prd/r1-readiness.json",
+        "readiness_digest": "sha256:readiness",
+        "readiness_verdict": "ready",
+        "implementation_start": True,
         "source_refs": [
             "event:requirement",
             "channel:ch-prd/main",

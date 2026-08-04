@@ -2017,6 +2017,9 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "readiness_verdict": _payload_str(
                 payload, "readiness_verdict"
             ),
+            "implementation_start": (
+                payload.get("implementation_start") is True
+            ),
             "conclusion_ref": _payload_str(
                 payload, "conclusion_ref"
             ),
@@ -2129,6 +2132,9 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         "readiness_digest": _payload_str(payload, "readiness_digest"),
         "readiness_verdict": _payload_str(
             payload, "readiness_verdict"
+        ),
+        "implementation_start": (
+            payload.get("implementation_start") is True
         ),
         "conclusion_ref": _payload_str(payload, "conclusion_ref"),
         "conclusion_digest": _payload_str(

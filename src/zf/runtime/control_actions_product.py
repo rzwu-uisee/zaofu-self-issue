@@ -39,6 +39,13 @@ from zf.runtime.kanban_proposals import (
     PROPOSAL_EVENT_TYPES,
     PROPOSAL_RESOLVED_EVENT,
 )
+from zf.runtime.channel_prd_task_contract import (
+    ChannelPrdTaskContractError,
+    compile_channel_prd_task_payload,
+)
+from zf.runtime.channel_workflow_authority import (
+    channel_authority_context_from_submit_payload,
+)
 from zf.runtime.task_workflow_plans import (
     build_task_workflow_plan_request,
 )
@@ -138,6 +145,27 @@ class ProductActionsMixin:
                     status="stale_or_missing_request",
                 )
 
+        channel_authority = channel_authority_context_from_submit_payload(
+            payload
+        )
+        if channel_authority:
+            try:
+                payload = compile_channel_prd_task_payload(
+                    self.state_dir,
+                    payload,
+                )
+            except ChannelPrdTaskContractError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="channel_prd_not_ready",
+                )
+            execution_mode = str(payload.get("execution_mode") or "").strip()
+
         task = Task(
             id=task_id or Task().id,
             title=title,
@@ -166,6 +194,28 @@ class ProductActionsMixin:
                     ),
                 )
             task = workflow_candidate
+        if (
+            channel_authority
+            and self.config is not None
+            and self.project_root is not None
+        ):
+            from zf.core.task.contract_validation import validate_task_contract
+
+            contract_errors = validate_task_contract(
+                task,
+                config=self.config,
+                project_root=self.project_root,
+            )
+            if contract_errors:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task.id,
+                    reason="; ".join(contract_errors),
+                    status_code=422,
+                    status="task_contract_invalid",
+                )
         if raw_workflow_plan is not None:
             _workflow_preview, workflow_plan_warning = (
                 build_task_workflow_plan_request(

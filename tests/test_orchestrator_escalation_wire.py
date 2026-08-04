@@ -135,6 +135,36 @@ class TestDevBlockedTriggersEscalate:
         assert any(e.type == "human.escalate" for e in events)
 
 
+class TestReaderStageNoChangeEscalation:
+    def test_unchanged_semantic_scan_rejection_escalates(
+        self,
+        state_dir: Path,
+        legacy_config,
+        transport,
+        monkeypatch,
+    ) -> None:
+        failure = ZfEvent(
+            type="prd.scan.failed",
+            actor="zf-cli",
+            task_id="T1",
+            payload={"failure_class": "semantic_rejection"},
+        )
+        EventLog(state_dir / "events.jsonl").append(failure)
+        monkeypatch.setattr(
+            "zf.runtime.stage_failure_replan.plan_reader_stage_replan",
+            lambda *_args, **_kwargs: (None, "input_unchanged"),
+        )
+        orchestrator = Orchestrator(state_dir, legacy_config, transport)
+
+        decision = orchestrator._on_reader_stage_failure_replan(failure)
+
+        assert decision is not None
+        assert decision.action == "escalate"
+        assert "canonical input unchanged" in decision.reason
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert any(event.type == "human.escalate" for event in events)
+
+
 class TestHumanEscalateObservationalHandler:
     """0608: Layer 1 records human.escalate observationally; Layer 2 (woken
     via WAKE_PATTERNS) owns the autonomous follow-up action."""

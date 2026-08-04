@@ -468,11 +468,15 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         events = read_runtime_events(self.event_log, self.state_dir)
         replan_event, note = plan_reader_stage_replan(self.config, events, event)
         if replan_event is None:
-            if note == "cap_exhausted":
+            if note in {"cap_exhausted", "input_unchanged"}:
+                reason = (
+                    "canonical input unchanged after semantic scan rejection"
+                    if note == "input_unchanged"
+                    else "stage replan cap exhausted"
+                )
                 try:
                     self.escalation.escalate(
-                        f"{event.type}: stage replan cap exhausted; "
-                        "plan/triage output keeps failing admission",
+                        f"{event.type}: {reason}; owner action is required",
                         task_id=str(event.task_id or "") or None,
                     )
                 except Exception:
@@ -480,7 +484,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 return OrchestratorDecision(
                     action="escalate",
                     task_id=str(event.task_id or ""),
-                    reason=f"{event.type} → replan cap exhausted → human",
+                    reason=f"{event.type} → {reason} → human",
                 )
             return None
         self.event_writer.append(replan_event)

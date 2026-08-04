@@ -46,6 +46,83 @@ def test_replan_re_emits_trigger_with_feedback() -> None:
     assert replan.causation_id == failure.id
 
 
+def test_semantic_scan_rejection_requires_changed_canonical_input() -> None:
+    stage = SimpleNamespace(
+        id="prd-scan",
+        topology="fanout_reader",
+        trigger="prd.requested",
+        failure_event="",
+        aggregate=SimpleNamespace(failure_event="prd.scan.failed"),
+    )
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=[stage]))
+    origin = ZfEvent(
+        type="prd.requested",
+        correlation_id="prd-run",
+        payload={
+            "prd_ref": "channels/ch-prd/prd/r1.json",
+            "requirement_spec_digest": "digest-r1",
+            "task_contract_digest": "contract-r1",
+        },
+    )
+    failure = ZfEvent(
+        type="prd.scan.failed",
+        correlation_id="prd-run",
+        payload={
+            "recommendation": "needs_rework",
+            "failure_class": "semantic_rejection",
+            "reason": "implementation contract is incomplete",
+        },
+    )
+
+    replan, note = plan_reader_stage_replan(
+        config,
+        [origin, failure],
+        failure,
+    )
+
+    assert replan is None
+    assert note == "input_unchanged"
+
+
+def test_semantic_scan_rejection_replans_after_input_digest_changes() -> None:
+    stage = SimpleNamespace(
+        id="prd-scan",
+        topology="fanout_reader",
+        trigger="prd.requested",
+        failure_event="",
+        aggregate=SimpleNamespace(failure_event="prd.scan.failed"),
+    )
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=[stage]))
+    origin = ZfEvent(
+        type="prd.requested",
+        correlation_id="prd-run",
+        payload={
+            "prd_ref": "channels/ch-prd/prd/r1.json",
+            "requirement_spec_digest": "digest-r1",
+        },
+    )
+    failure = ZfEvent(
+        type="prd.scan.failed",
+        correlation_id="prd-run",
+        payload={
+            "recommendation": "needs_rework",
+            "failure_class": "semantic_rejection",
+            "requirement_spec_digest": "digest-r2",
+            "reason": "re-evaluate the revised PRD",
+        },
+    )
+
+    replan, note = plan_reader_stage_replan(
+        config,
+        [origin, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert "prd-scan" in note
+    assert replan.payload["requirement_spec_digest"] == "digest-r2"
+
+
 def test_contract_critic_finding_reaches_next_plan_rework_context(
     tmp_path,
 ) -> None:
