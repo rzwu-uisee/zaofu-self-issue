@@ -216,11 +216,6 @@ def plan_candidate_rework(
             and str(payload.get("mode") or "")
             == "candidate_rework_integration_only"
         )
-        semantic_replan_request = (
-            str(payload.get("schema_version") or "")
-            == "semantic-replan-request.v1"
-            and bool(str(payload.get("rework_of") or "").strip())
-        )
         if etype in (
             RETRIGGER_EVENT,
             REPLAN_EVENT,
@@ -228,7 +223,7 @@ def plan_candidate_rework(
             # 批B:微环注入 = 该拒收已被处理(并计入指纹 attempt,
             # 同指纹再拒时停滞判定正常工作)
             "task.rework.continuation_injected",
-        ) or integration_only_resume or semantic_replan_request:
+        ) or integration_only_resume:
             rework_of = str(
                 payload.get("rework_of")
                 or (payload.get("source_event_id") if integration_only_resume else "")

@@ -921,24 +921,11 @@ def build_run_manager_projection(
         )
         if (
             not _candidate_rework_shadowed_by_workflow(action, workflow_actions)
-            and not _candidate_rework_shadowed_by_triage(
-                action,
-                rework_triage_actions,
-                triage_owned_fanouts,
-                triage_owned_tasks,
+            and str(action.get("fanout_id") or "") not in triage_owned_fanouts
+            and not (
+                set(_string_list(action.get("failed_task_ids")))
+                & triage_owned_tasks
             )
-            and not _candidate_rework_shadowed_by_semantic_request(
-                action,
-                events,
-            )
-        )
-    ]
-    rework_triage_actions = [
-        action
-        for action in rework_triage_actions
-        if not _triage_action_shadowed_by_candidate_replan(
-            action,
-            candidate_actions,
         )
     ]
     workflow_actions = [
@@ -9431,116 +9418,6 @@ def _candidate_rework_shadowed_by_workflow(
             str(value) for value in workflow_action.get("source_event_ids") or []
             if str(value).strip()
         }:
-            return True
-    return False
-
-
-def _candidate_rework_shadowed_by_triage(
-    action: dict[str, Any],
-    triage_actions: list[dict[str, Any]],
-    triage_owned_fanouts: set[str],
-    triage_owned_tasks: set[str],
-) -> bool:
-    fanout_id = str(action.get("fanout_id") or "")
-    failed_task_ids = set(_string_list(action.get("failed_task_ids")))
-    scope_shadowed = (
-        bool(fanout_id and fanout_id in triage_owned_fanouts)
-        or bool(failed_task_ids & triage_owned_tasks)
-    )
-    if not scope_shadowed:
-        return False
-    if str(action.get("candidate_rework_action") or "") != "replan":
-        return True
-    return _semantic_replan_action_covers_candidate(action, triage_actions)
-
-
-def _semantic_replan_action_covers_candidate(
-    candidate_action: dict[str, Any],
-    triage_actions: list[dict[str, Any]],
-) -> bool:
-    candidate_sources = set(_string_list(candidate_action.get("source_event_ids")))
-    source_event_id = str(candidate_action.get("source_event_id") or "")
-    if source_event_id:
-        candidate_sources.add(source_event_id)
-    candidate_tasks = set(_string_list(candidate_action.get("failed_task_ids")))
-    for action in triage_actions:
-        if str(action.get("action") or "") != SEMANTIC_REPLAN_ACTION:
-            continue
-        if not str(action.get("semantic_replan_trigger") or ""):
-            continue
-        action_sources = set(_string_list(action.get("source_event_ids")))
-        action_sources.update(_string_list(action.get("failure_event_ids")))
-        action_source_id = str(action.get("source_event_id") or "")
-        if action_source_id:
-            action_sources.add(action_source_id)
-        if candidate_sources and candidate_sources & action_sources:
-            return True
-        task_id = str(action.get("task_id") or "")
-        if task_id and task_id in candidate_tasks:
-            return True
-    return False
-
-
-def _triage_action_shadowed_by_candidate_replan(
-    action: dict[str, Any],
-    candidate_actions: list[dict[str, Any]],
-) -> bool:
-    if str(action.get("action") or "") != "diagnose-attention":
-        return False
-    if str(action.get("failure_class") or "") != "semantic_replan_route_unavailable":
-        return False
-    action_sources = set(_string_list(action.get("source_event_ids")))
-    action_sources.update(_string_list(action.get("failure_event_ids")))
-    action_source_id = str(action.get("source_event_id") or "")
-    if action_source_id:
-        action_sources.add(action_source_id)
-    task_id = str(action.get("task_id") or "")
-    for candidate in candidate_actions:
-        if str(candidate.get("candidate_rework_action") or "") != "replan":
-            continue
-        candidate_sources = set(_string_list(candidate.get("source_event_ids")))
-        candidate_source_id = str(candidate.get("source_event_id") or "")
-        if candidate_source_id:
-            candidate_sources.add(candidate_source_id)
-        if action_sources and candidate_sources & action_sources:
-            return True
-        if task_id and task_id in set(_string_list(candidate.get("failed_task_ids"))):
-            return True
-    return False
-
-
-def _candidate_rework_shadowed_by_semantic_request(
-    action: dict[str, Any],
-    events: list[ZfEvent],
-) -> bool:
-    if str(action.get("candidate_rework_action") or "") != "replan":
-        return False
-    action_pdd = str(action.get("pdd_id") or action.get("feature_id") or "")
-    action_sources = set(_string_list(action.get("source_event_ids")))
-    source_event_id = str(action.get("source_event_id") or "")
-    if source_event_id:
-        action_sources.add(source_event_id)
-    action_tasks = set(_string_list(action.get("failed_task_ids")))
-    for event in events:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if str(payload.get("schema_version") or "") != "semantic-replan-request.v1":
-            continue
-        request_pdd = str(payload.get("pdd_id") or payload.get("feature_id") or "")
-        if action_pdd and request_pdd and action_pdd != request_pdd:
-            continue
-        request_sources = set(_string_list(payload.get("source_event_ids")))
-        request_sources.update(_string_list(payload.get("failure_event_ids")))
-        rework_of = str(payload.get("rework_of") or "")
-        if rework_of:
-            request_sources.add(rework_of)
-        if action_sources and action_sources & request_sources:
-            return True
-        request_tasks = set(_string_list(payload.get("supersedes_task_ids")))
-        request_tasks.update(_string_list(payload.get("affected_task_ids")))
-        task_id = str(payload.get("task_id") or "")
-        if task_id:
-            request_tasks.add(task_id)
-        if action_tasks and action_tasks & request_tasks:
             return True
     return False
 

@@ -75,76 +75,87 @@ Key boundaries:
 ZaoFu separates open-ended Agent judgment from reliable Runtime execution:
 
 ```mermaid
-flowchart TB
-  subgraph surface["Interaction And Requirement Intake"]
-    direction LR
-    HUMAN["Human / Feishu / Channel / Kanban Agent"]
-    REQUEST["Requirement / PRD / Issue / Refactor"]
-    HUMAN --> REQUEST
+flowchart LR
+  subgraph control["Control Plane + Admitted Semantics"]
+    direction TB
+    CONFIG["zf.yaml<br/>topology / roles / policy / budget / state_dir"]
+    PREFLIGHT["Load / Validate / Preflight<br/>Frozen Effective Config"]
+    SURFACE["CLI / Web / Feishu / Channel / Kanban Agent"]
+    INTENT["Requirement / PRD / Issue / Refactor"]
+    SEMANTIC["Agent + Skill<br/>Goal / Plan / FlowSpec / Task Map"]
+    PROPOSAL["Typed Proposal / Artifact"]
+    HOLD{"Approval<br/>required?"}
+    OWNER["Preview / Approve / Reject"]
+    ACCEPTED["Accepted Artifact<br/>Run Contract / Generation"]
+    CONFIG --> PREFLIGHT
+    SURFACE --> INTENT --> SEMANTIC --> PROPOSAL --> HOLD
+    HOLD -- "yes" --> OWNER
+    OWNER -- "approve" --> ACCEPTED
+    HOLD -- "no" --> ACCEPTED
   end
 
-  subgraph semantic["Agent Semantic Decision Plane"]
-    direction LR
-    GOAL["Goal / Claims / Acceptance"]
-    PLAN["Workflow Synthesis / Plan / Task Map"]
-    APPROVAL["Proposal Preview / Human Approval"]
-    GOAL --> PLAN --> APPROVAL
+  subgraph kernel["Deterministic Kernel Runtime"]
+    direction TB
+    EVENTS["EventWriter / EventLog<br/>append occurrence / causation / verdict / ref"]
+    WATCH["EventWatcher<br/>wake-worthy event / periodic tick"]
+    ORCH["Orchestrator.run_once()"]
+    ROUTE["Registered Topology / Profile<br/>dependency / readiness / WIP / barrier"]
+    ADMIT["Mechanical Admission<br/>schema / identity / currentness / scope / budget"]
+    ATTEMPT["WorkflowOperation / TaskAttempt<br/>generation / lease / dispatch"]
+    TERMINAL["Completion Gate<br/>or Bounded Terminal Disposition"]
+    EVENTS --> WATCH --> ORCH --> ROUTE
+    ROUTE -- "dispatch" --> ADMIT --> ATTEMPT
+    ROUTE -- "close / block" --> TERMINAL
   end
-  REQUEST --> GOAL
+  ACCEPTED -- "accepted event / ref" --> EVENTS
+  PREFLIGHT -- "effective config" --> ROUTE
 
-  subgraph kernel["Kernel Admission + Deterministic Execution Plane"]
-    direction LR
-    ADMIT["Schema / Identity / Currentness / Scope / Budget"]
-    ORCH["Python Orchestrator"]
-    OPS["WorkflowOperation / TaskAttempt / WIP / Lease"]
-    GRAPH["DAG Readiness / Fanout / Barrier / Dispatch"]
-    ADMIT --> ORCH --> OPS --> GRAPH
+  subgraph edge["Provider Execution Edge"]
+    direction TB
+    TRANSPORT["tmux / stream-json / Provider Transport"]
+    WORKER["Contracted Role Worker<br/>briefing + required context"]
+    RESULT["Typed Result / Evidence<br/>zf emit -> next EventLog occurrence"]
+    TRANSPORT --> WORKER --> RESULT
   end
-  APPROVAL --> ADMIT
+  ATTEMPT --> TRANSPORT
 
-  subgraph swarm["Controlled Multi-Agent Swarm"]
-    direction LR
-    READERS["Reader Swarm<br/>Scan / Research / Critic"]
-    WRITERS["Writer Swarm<br/>Isolated Worktrees"]
-    VERIFY["Verifier Swarm<br/>Exact Candidate / Judge"]
-    READERS --> WRITERS --> VERIFY
+  subgraph authority["State Authority And Rebuildable Projections"]
+    direction TB
+    STORES["Canonical Stores"]
+    ARTIFACTS["Artifacts / Sidecars"]
+    PROJECTIONS["Trace / Graph / Loop / SQLite"]
+    DELIVERY["Web / CLI / Feishu Delivery"]
+    STORES --> PROJECTIONS
+    ARTIFACTS --> PROJECTIONS
+    PROJECTIONS --> DELIVERY
   end
-  GRAPH --> READERS
+  ORCH -. "Store helpers" .-> STORES
+  RESULT -. "complete body / evidence" .-> ARTIFACTS
+  EVENTS --> PROJECTIONS
+  TERMINAL --> DELIVERY
 
-  EVIDENCE["Typed Result / Artifact / Evidence"]
-  GATE["Gate / Goal Closure / Completion"]
-  DELIVERY["Web / CLI / Feishu Delivery"]
-  VERIFY --> EVIDENCE --> GATE --> DELIVERY
-  GATE -- "Gap / Semantic Failure" --> REPLAN["Critic / Verifier / Judge<br/>Next-generation Replan Proposal"]
-
-  subgraph recovery["Operational Recovery Loop"]
-    direction LR
+  subgraph recovery["Exception And Recovery Side Path"]
+    direction TB
+    ADVISOR["Semantic Exception<br/>Agent triage / replan proposal<br/>re-enters after next-generation admission"]
     SUPERVISOR["Supervisor"]
     RM["Run Manager"]
-    ACTION["Controlled Action<br/>new attempt + post-verify"]
+    ACTION["ControlledActionService<br/>sanctioned event / new attempt / post-verify"]
     AUTO["Autoresearch<br/>diagnosis / repair proposal"]
     SUPERVISOR --> RM --> ACTION
     RM -- "Complex diagnosis" --> AUTO
   end
-  GRAPH -- "Stall / Operational Failure" --> SUPERVISOR
-
-  subgraph truth["Layered Authority And Observability"]
-    direction LR
-    EVENTS["EventLog"]
-    STORES["Canonical Stores"]
-    ARTIFACTS["Artifacts / Sidecars"]
-    PROJECTIONS["Trace / Graph / Loop / SQLite"]
-  end
-  CONFIG["zf.yaml Control Plane"]
-  CONFIG -. "control plane" .-> ADMIT
-  ORCH -.-> EVENTS
-  OPS -.-> STORES
-  EVIDENCE -.-> ARTIFACTS
-  EVENTS --> PROJECTIONS
-  STORES --> PROJECTIONS
-  ARTIFACTS --> PROJECTIONS
-  PROJECTIONS -.-> DELIVERY
+  ROUTE -. "semantic gap" .-> ADVISOR
+  EVENTS -. "stall / operational signal" .-> SUPERVISOR
 ```
+
+Human approval in this diagram is a profile/policy branch rather than a fixed
+stage in every Workflow. This page shows only the current `dev` path: the
+deterministic runtime is still the Python `Orchestrator`. The proposed
+`WorkflowRuntimeCoordinator` name, blocking OA semantic control, and a
+Task-centric Pipeline with reusable Stage Worker Slots are not presented as
+current capabilities. Worker results and approved recovery actions can re-enter
+the next EventWatcher reconciliation only through sanctioned event/artifact
+paths.
 
 | Actor | Current responsibility |
 |---|---|
@@ -212,46 +223,57 @@ evidence. The Kernel remains the only scheduling state machine.
 | Provider-native compound children | Opt-in Research pilot | Only the root is a ZaoFu protocol actor; the current pilot is read-only, depth one, and limited to four children that cannot create canonical Tasks |
 | Task-centric elastic Stage Worker Pool | Not implemented | Logical Task, attempt, session, worktree, and physical placement are not fully decoupled; generic autoscaling is not an elastic lane pipeline |
 
-A typical software-delivery swarm is:
+The current topology/profile can compose the following execution shapes as a
+DAG. They are not a fixed Reader -> Writer -> Verifier pipeline that every
+Workflow must traverse:
 
 ```mermaid
 flowchart TB
-  TASKMAP["Accepted Task Map"] --> RF["Reader Fanout"]
-  RF --> R1
-  RF --> R2
-  RF --> R3
-  R1["Reader / Scan"]
-  R2["Reader / Research"]
-  R3["Reader / Critic"]
-  R1 --> SYNTH["Plan Synthesis"]
-  R2 --> SYNTH
-  R3 --> SYNTH
-  SYNTH --> ADMISSION["Kernel Admission"]
+  READY["Kernel Ready Set<br/>admitted topology + dependency + WIP"] --> SHAPE{"Registered Stage Shape"}
 
-  ADMISSION --> WF["Writer Fanout"]
-  WF --> W1
-  WF --> W2
-  WF --> W3
-  W1["Writer / Task A<br/>isolated worktree"]
-  W2["Writer / Task B<br/>isolated worktree"]
-  W3["Writer / Task C<br/>isolated worktree"]
-  W1 --> INTEGRATE["Deterministic Candidate Integration"]
-  W2 --> INTEGRATE
-  W3 --> INTEGRATE
+  SHAPE --> SINGLE["Single Role Stage"]
+  SINGLE --> ONE["One Contracted Worker Attempt"]
 
-  INTEGRATE --> VF["Verifier Fanout on Exact Target"]
-  VF --> V1
-  VF --> V2
-  VF --> V3
-  V1["Verifier / Tests<br/>Quality Gates"]
-  V2["Verifier / Coverage<br/>Parity"]
-  V3["Verifier / Thin Judge"]
-  V1 --> COMPLETE["Goal Completion Gate"]
-  V2 --> COMPLETE
-  V3 --> COMPLETE
-  COMPLETE --> DELIVER["Owner-visible Delivery"]
-  COMPLETE -- "Gap" --> REPLAN["Bounded Rework / Replan<br/>next admitted generation"]
+  SHAPE --> RF["Reader Fanout"]
+  RF --> R1["Read-only Child A"]
+  RF --> R2["Read-only Child B"]
+  RF --> RN["Read-only Child N"]
+  R1 --> RS["wait_for_all / Synth Contract"]
+  R2 --> RS
+  RN --> RS
+
+  SHAPE --> WF["Scoped Writer Fanout"]
+  WF --> W1["Task A<br/>scope + isolated worktree"]
+  WF --> W2["Task B<br/>scope + isolated worktree"]
+  WF --> WN["Task N<br/>scope + isolated worktree"]
+  W1 --> CANDIDATE["Candidate Assembly<br/>scope / conflict / currentness admission"]
+  W2 --> CANDIDATE
+  WN --> CANDIDATE
+
+  SHAPE --> VF["Verifier / Judge Fanout"]
+  VF --> V1["Tests on Exact Target"]
+  VF --> V2["Coverage / Parity Evidence"]
+  VF --> VN["Independent Thin Judge"]
+  V1 --> VA["Evidence Aggregate"]
+  V2 --> VA
+  VN --> VA
+
+  ONE --> OUTCOME["Typed Outcome + Artifact Refs"]
+  RS --> OUTCOME
+  CANDIDATE --> OUTCOME
+  VA --> OUTCOME
+  OUTCOME --> REDUCER["Kernel Reducer / Barrier / Gate"]
+  REDUCER -- "continue" --> NEXT["Next Ready Operation<br/>returns to Kernel Ready Set"]
+  REDUCER -- "semantic gap" --> REPLAN["Bounded Rework / Replan<br/>returns as new admitted generation"]
+  REDUCER -- "Goal Claims satisfied" --> COMPLETE["Completion Gate / Delivery"]
+  REDUCER -- "bounded terminal failure" --> BLOCKED["Owner-visible Blocker"]
 ```
+
+One profile may feed a Reader aggregate into the next Stage or let a Candidate
+trigger exact-target verification. That ordering comes from the admitted DAG,
+not from a hard-coded global barrier in this diagram. Current Writer fanout also
+does not imply a persistent Task Pipeline identity or a Worker Slot reusable
+across Stages.
 
 ### Controlled Dynamic Workflows
 
