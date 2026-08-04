@@ -9,7 +9,7 @@
 [English README](README.md) · [产品演示](#产品演示) · [快速开始](#快速开始) ·
 [核心能力](#核心能力) · [工作原理](#工作原理) ·
 [产品入口与操作面](#产品入口与操作面) · [文档](#文档) ·
-[版本记录](CHANGELOG.md)
+[社区交流](#社区交流) · [版本记录](CHANGELOG.md)
 
 ZaoFu 把孤立的 coding-agent session 组织成一支可治理的交付团队。它不替代
 Codex、Claude Code 或其他 provider CLI，而是为它们提供角色、任务契约、运行
@@ -220,6 +220,17 @@ repair proposal 或 backlog candidate。
 | 故障诊断 | [故障排查](docs/manual/07-troubleshooting.md) |
 | Harness 评估与修复 | [Autoresearch](docs/manual/10-autoresearch-usage.md) |
 | 全部主题 | [使用手册索引](docs/manual/00-index.md) |
+
+## 社区交流
+
+欢迎加入 ZaoFu 技术交流群，讨论 coding harness、long-horizon 交付、
+multi-agent workflow 与工程落地实践。
+
+| 飞书群 | 微信群 |
+|:---:|:---:|
+| <img src="assets/readme/zaofu-feishu-group.jpg" alt="扫码加入 ZaoFu 飞书技术交流群" width="280"> | <img src="assets/readme/zaofu-wechat-group.jpg" alt="扫码加入 ZaoFu 微信技术交流群" width="280"> |
+
+群二维码可能定期更新。如二维码失效，请通过仓库 Issue 反馈。
 
 ## 安全边界
 

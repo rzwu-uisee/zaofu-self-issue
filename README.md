@@ -10,7 +10,7 @@
 [Quick Start](#quick-start) ·
 [Capabilities](#core-capabilities) · [How It Works](#how-it-works) ·
 [Product Surfaces](#product-surfaces) · [Documentation](#documentation) ·
-[Changelog](CHANGELOG.md)
+[Community](#community) · [Changelog](CHANGELOG.md)
 
 ZaoFu turns isolated coding-agent sessions into a governed delivery team. It
 does not replace Codex, Claude Code, or other provider CLIs. It gives them
@@ -239,6 +239,18 @@ apply remains human- or token-gated. See the
 | Failure diagnosis | [Troubleshooting](docs/manual/07-troubleshooting.en.md) |
 | Harness evaluation and repair | [Autoresearch](docs/manual/10-autoresearch-usage.en.md) |
 | All topics | [User Manual Index](docs/manual/00-index.en.md) |
+
+## Community
+
+Join the ZaoFu community to discuss coding harnesses, long-horizon delivery,
+multi-agent workflows, and practical adoption.
+
+| Feishu group | WeChat group |
+|:---:|:---:|
+| <img src="assets/readme/zaofu-feishu-group.jpg" alt="Scan to join the ZaoFu Feishu group" width="280"> | <img src="assets/readme/zaofu-wechat-group.jpg" alt="Scan to join the ZaoFu WeChat group" width="280"> |
+
+Group QR codes may be renewed periodically. If one has expired, please report
+it through the repository issues.
 
 ## Safety and Boundaries
 
