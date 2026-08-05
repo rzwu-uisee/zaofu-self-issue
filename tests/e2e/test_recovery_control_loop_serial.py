@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from zf.core.config.schema import (
     FanoutAggregateConfig,
@@ -174,6 +175,29 @@ def _first_index(events: list[ZfEvent], event_type: str) -> int:
 
 
 def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    base_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        text=True,
+    ).strip()
     state_dir, log, writer, store = _state(tmp_path)
     store.add(
         Task(
@@ -297,10 +321,14 @@ def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> 
                     "task_id": NEW_TASK_ID,
                     "parent_task_id": OLD_TASK_ID,
                     "owner_role": "dev",
+                    "base_commit": base_commit,
                     "claim_paths": ["src/core/**", "tests/test_core.py"],
                     "acceptance": ["expiry core behavior works"],
                     "verify_commands": ["uv run pytest tests/test_core.py"],
-                    "source_refs": ["docs/issues/serial-recovery.md"],
+                    "source_refs": [
+                        "docs/issues/serial-recovery.md",
+                        f"git:{base_commit}",
+                    ],
                 }
             ],
         },

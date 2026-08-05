@@ -32,6 +32,7 @@ _CANONICAL_TASK_CONTRACT_SOURCES = frozenset({
     "workflow_task_map_adoption",
     "refactor_replan_adoption",
     "task_map_contract_refresh",
+    "writer_dispatch_owner_binding",
 })
 
 
@@ -599,6 +600,18 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         return
     contract_data = event.payload.get("contract") or {}
     existing = task.contract or TaskContract()
+    if not contract_data:
+        # Some kernel-owned task.contract.update events are audit metadata for
+        # a canonical write that already happened at the state boundary.  A
+        # metadata-only replay must never rebuild the existing contract through
+        # the legacy partial-update adapter: doing so coerces structured fields
+        # and changes the effective contract revision after dispatch.
+        if "blocked_by" in event.payload:
+            store.update(
+                event.task_id,
+                blocked_by=_coerce_contract_list(event.payload.get("blocked_by")),
+            )
+        return
     if event.actor == "zf-cli" and event.payload.get(
         "source"
     ) in _CANONICAL_TASK_CONTRACT_SOURCES:
@@ -608,8 +621,6 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         # acceptance/claim fields. Old metadata-only events are audit records;
         # treating them as contract bodies would degrade current TaskStore
         # state, so leave them as a no-op.
-        if not contract_data:
-            return
         try:
             materialized = TaskContract(**dict(contract_data))
         except (TypeError, ValueError):
@@ -838,7 +849,7 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         # + evidence dict. Contract-update events can carry these
         # directly under contract.acceptance_criteria /
         # contract.acceptance_evidence.
-        acceptance_criteria=_coerce_contract_list(
+        acceptance_criteria=_coerce_acceptance_criteria(
             contract_data.get(
                 "acceptance_criteria", existing.acceptance_criteria,
             ),
@@ -1138,6 +1149,18 @@ def _first_contract_text(data: dict, *keys: str) -> str:
 def _coerce_contract_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return []
+
+
+def _coerce_acceptance_criteria(value: object) -> list[object]:
+    if isinstance(value, list):
+        return [
+            dict(item) if isinstance(item, dict) else str(item).strip()
+            for item in value
+            if isinstance(item, dict) or str(item).strip()
+        ]
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     return []

@@ -201,3 +201,45 @@ def test_hydrate_pinned_goal_claim_set_preserves_immutable_body(tmp_path) -> Non
 
     assert hydrated == claim_set
     assert all(claim["mandatory"] for claim in claim_set["claims"])
+
+
+def test_hydrate_pinned_goal_claim_set_accepts_equivalent_generation_encodings(
+    tmp_path,
+) -> None:
+    generation = "536e8b2e05d5acd499e79694e96973276da40d031bf62632b3d7395e360a1760"
+    shortened = f"task-map-{generation[:20]}"
+    task_map = tmp_path / "artifacts" / "task-map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"tasks":[{"task_id":"TASK-1","acceptance_criteria":'
+        '["AC-PINNED: pinned acceptance"]}]}',
+        encoding="utf-8",
+    )
+    claim_set, descriptor = pin_goal_claim_set_from_task_map(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        task_map_ref="artifacts/task-map.json",
+        workflow_run_id="run-1",
+        goal_id="GOAL-1",
+        task_map_generation=generation,
+    )
+    event = ZfEvent(
+        type="goal.claim_set.pinned",
+        payload={
+            "workflow_run_id": "run-1",
+            "goal_id": "GOAL-1",
+            "task_map_generation": shortened,
+            "goal_claim_set_ref": descriptor["ref"],
+            "goal_claim_set_digest": descriptor["sha256"],
+        },
+    )
+
+    hydrated = hydrate_pinned_goal_claim_set(
+        state_dir=tmp_path / ".zf",
+        events=[event],
+        workflow_run_id="run-1",
+        goal_id="GOAL-1",
+        task_map_generation=shortened,
+    )
+
+    assert hydrated == claim_set

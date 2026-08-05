@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Mapping
 
+from zf.runtime.candidate_result_binding import same_task_map_generation
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_map import load_task_map, resolve_artifact_file
@@ -212,7 +213,11 @@ def hydrate_pinned_goal_claim_set(
         mismatched = False
         for field, wanted in expected:
             actual = str(payload.get(field) or "").strip()
-            if actual and wanted and actual != wanted:
+            if (
+                actual
+                and wanted
+                and not _identity_value_matches(field, actual, wanted)
+            ):
                 mismatched = True
                 break
         if mismatched:
@@ -266,7 +271,8 @@ def validate_goal_claim_set(
         ("task_map_generation", task_map_generation),
     )
     for field, wanted in expected:
-        if wanted and str(body.get(field) or "").strip() != wanted:
+        actual = str(body.get(field) or "").strip()
+        if wanted and not _identity_value_matches(field, actual, wanted):
             raise GoalClaimSetError(f"goal claim set identity mismatch: {field}")
     claimed_digest = str(body.get("claim_set_digest") or "").strip()
     actual_digest = _digest({
@@ -277,6 +283,12 @@ def validate_goal_claim_set(
     if not claimed_digest or claimed_digest != actual_digest:
         raise GoalClaimSetError("goal claim set content digest mismatch")
     return body
+
+
+def _identity_value_matches(field: str, actual: str, expected: str) -> bool:
+    if field == "task_map_generation":
+        return same_task_map_generation(actual, expected)
+    return actual == expected
 
 
 def _explicit_goal_claims(task_map: Mapping[str, Any]) -> list[dict[str, Any]]:

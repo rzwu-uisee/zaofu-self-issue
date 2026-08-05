@@ -1153,6 +1153,7 @@ def _criterion_text(value: Any) -> str:
     if isinstance(value, dict):
         return str(
             value.get("text")
+            or value.get("statement")
             or value.get("criterion")
             or value.get("description")
             or value.get("acceptance")

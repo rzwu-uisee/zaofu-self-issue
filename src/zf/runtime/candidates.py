@@ -597,6 +597,8 @@ class CandidateRebuilder:
             "dependency_tasks": dependency_task_payloads,
             "included_tasks": [asdict(task) for task in tasks],
             "skipped_tasks": [],
+            "commit_lineage_schema_version": "candidate-commit-lineage.v1",
+            "commit_lineage": [],
             "started_at": started_at,
             "manifest_path": str(manifest_path),
             "merger_worktree": str(worktree),
@@ -646,8 +648,10 @@ class CandidateRebuilder:
             self._prepare_worktree(pdd_id, base_ref)
             included_tasks: list[dict[str, Any]] = []
             skipped_tasks: list[dict[str, Any]] = []
+            commit_lineage: list[dict[str, str]] = []
             manifest_base["included_tasks"] = included_tasks
             manifest_base["skipped_tasks"] = skipped_tasks
+            manifest_base["commit_lineage"] = commit_lineage
             seen_source_commits: set[str] = set()
             for task in tasks:
                 declared_files = self._candidate_task_scope_files(base_ref, task)
@@ -675,6 +679,7 @@ class CandidateRebuilder:
                     commit for commit in task_commits if commit not in seen_source_commits
                 ]
                 applied_commits: list[str] = []
+                task_commit_lineage: list[dict[str, str]] = []
                 skipped_commits: list[str] = [
                     *scope_skipped_commits,
                     *duplicate_skipped_commits,
@@ -688,6 +693,19 @@ class CandidateRebuilder:
                         )
                         if status == "applied":
                             applied_commits.append(commit)
+                            candidate_commit = self._git(worktree, "rev-parse", "HEAD")
+                            lineage_entry = {
+                                "task_id": task.task_id,
+                                "task_ref": task.task_ref,
+                                "source_commit": commit,
+                                "candidate_commit": candidate_commit,
+                                "relation": (
+                                    "scoped_projection"
+                                    if declared_files else "cherry_pick"
+                                ),
+                            }
+                            task_commit_lineage.append(lineage_entry)
+                            commit_lineage.append(lineage_entry)
                         else:
                             skipped_commits.append(commit)
                 except RuntimeError as exc:
@@ -728,6 +746,7 @@ class CandidateRebuilder:
                             "commit": commit_after_task,
                             "task_commits": task_commits,
                             "applied_commits": applied_commits,
+                            "commit_lineage": task_commit_lineage,
                             "skipped_commits": skipped_commits,
                             "scope_skipped_commits": scope_skipped_commits,
                             "duplicate_skipped_commits": duplicate_skipped_commits,

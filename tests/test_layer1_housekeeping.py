@@ -196,6 +196,76 @@ def test_materialized_full_contract_update_is_lossless(state_dir: Path):
     assert projected.goal_claim_ids == ["claim-result"]
 
 
+def test_metadata_only_contract_update_does_not_rewrite_structured_contract(
+    state_dir: Path,
+) -> None:
+    ts = TaskStore(state_dir / "kanban.json")
+    contract = TaskContract(
+        behavior="deliver editor",
+        verification="node --test tests/lab.test.js",
+        validation={
+            "commands": [{
+                "id": "WRL-T2-CMD1",
+                "command": "node --test tests/lab.test.js",
+                "acceptance_ids": ["WRL-T2-AC1"],
+                "owner": "task_verify",
+                "tier": "runtime",
+            }],
+        },
+        acceptance_criteria=[{
+            "id": "WRL-T2-AC1",
+            "statement": "Grid conflicts are atomic.",
+            "mandatory": True,
+            "verification_owner": "task_verify",
+            "verification_tier": "runtime",
+            "verification_command_ids": ["WRL-T2-CMD1"],
+        }],
+    )
+    ts.add(Task(id="WRL-EDITOR-002", title="editor", contract=contract))
+
+    apply_task_contract_event(ts, ZfEvent(
+        type="task.contract.update",
+        actor="zf-cli",
+        task_id="WRL-EDITOR-002",
+        payload={
+            "source": "writer_dispatch_owner_binding",
+            "owner_role": "prd-dev-lane-1",
+            "owner_instance": "prd-dev-lane-1",
+        },
+    ))
+
+    assert asdict(ts.get("WRL-EDITOR-002").contract) == asdict(contract)
+
+
+def test_partial_contract_update_preserves_structured_acceptance_criteria(
+    state_dir: Path,
+) -> None:
+    ts = TaskStore(state_dir / "kanban.json")
+    criterion = {
+        "id": "AC-1",
+        "statement": "Structured criterion survives partial updates.",
+        "mandatory": True,
+    }
+    ts.add(Task(
+        id="T1",
+        title="x",
+        contract=TaskContract(
+            behavior="before",
+            verification="pytest",
+            acceptance_criteria=[criterion],
+        ),
+    ))
+
+    apply_task_contract_event(ts, ZfEvent(
+        type="task.contract.update",
+        actor="orchestrator",
+        task_id="T1",
+        payload={"contract": {"behavior": "after"}},
+    ))
+
+    assert ts.get("T1").contract.acceptance_criteria == [criterion]
+
+
 def test_sprint_contract_event_preserves_env_prefixed_absolute_python_command(
     state_dir: Path,
 ):

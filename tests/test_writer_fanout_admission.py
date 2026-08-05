@@ -12,16 +12,53 @@ from zf.core.config.schema import (
     WorkflowSplitQualityConfig,
     WorkflowWorkUnitsConfig,
 )
+from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
+from zf.core.task.schema import Task, TaskContract
 from zf.core.workflow.lane_pipeline import (
     parse_lane_pipeline,
     validate_lane_pipeline_admission,
 )
 from zf.runtime.writer_fanout_admission import (
+    bind_writer_task_dispatch_owner,
     load_writer_task_map,
     validate_writer_task_items,
     writer_task_items,
 )
+
+
+def test_dispatch_owner_binding_emits_replayable_full_contract(tmp_path):
+    event_writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    task = Task(
+        id="WRL-EDITOR-002",
+        title="editor",
+        contract=TaskContract(
+            behavior="deliver editor",
+            verification="node --test tests/lab.test.js",
+            acceptance_criteria=[{
+                "id": "WRL-T2-AC1",
+                "statement": "Grid conflicts are atomic.",
+            }],
+        ),
+    )
+
+    bound = bind_writer_task_dispatch_owner(
+        task=task,
+        role=SimpleNamespace(name="dev", instance_id="prd-dev-lane-1"),
+        config=SimpleNamespace(),
+        event_writer=event_writer,
+    )
+
+    event = EventLog(tmp_path / "events.jsonl").read_all()[-1]
+    assert bound.owner_instance == "prd-dev-lane-1"
+    assert event.payload["contract"]["owner_instance"] == "prd-dev-lane-1"
+    assert event.payload["contract"]["acceptance_criteria"] == [
+        {
+            "id": "WRL-T2-AC1",
+            "statement": "Grid conflicts are atomic.",
+        }
+    ]
 
 
 def _item(task_id: str, allowed: list[str], scope: str | None = None) -> dict:
@@ -263,6 +300,23 @@ def test_writer_task_items_preserves_lane_pipeline_contract_fields():
     assert item["verification_tiers"] == ["static", "manual_evidence"]
     assert item["raw_verification_tiers"] == ["static", "judge"]
     assert item["acceptance_criteria"] == ["root build passes"]
+
+
+def test_writer_task_items_preserves_statement_acceptance_criteria():
+    criterion = {
+        "id": "WRL-T2-AC1",
+        "statement": "Grid conflicts are atomic.",
+        "mandatory": True,
+    }
+    items = writer_task_items({
+        "tasks": [{
+            "task_id": "editor",
+            "allowed_paths": ["src/lab.js"],
+            "acceptance_criteria": [criterion],
+        }],
+    })
+
+    assert items[0]["acceptance_criteria"] == [criterion]
 
 
 def test_writer_task_items_preserves_successor_base_and_identity():

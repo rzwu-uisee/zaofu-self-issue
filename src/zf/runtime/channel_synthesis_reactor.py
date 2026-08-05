@@ -123,6 +123,13 @@ def react_channel_question_dedup_requested(
             break
     thread_id = str(payload.get("thread_id") or "main")
     if message is None:
+        repair_reason = str(payload.get("repair_reason") or "").strip()
+        repair_instruction = (
+            f" The prior merge plan was rejected: {repair_reason}. Repair "
+            "that contract error against the current ledger."
+            if repair_reason
+            else ""
+        )
         message_payload = channel_message_event_payload(
             host.state_dir,
             {
@@ -136,6 +143,7 @@ def react_channel_question_dedup_requested(
                     f"@{target_member_id} Deduplicate the complete question "
                     "ledger in the bound context pack. Preserve the strongest "
                     "canonical question in each semantic group."
+                    f"{repair_instruction}"
                 ),
                 "mentions": [target_member_id],
                 "refs": {
@@ -143,6 +151,13 @@ def react_channel_question_dedup_requested(
                     "question_ledger_digest": str(
                         payload.get("ledger_digest") or ""
                     ),
+                    "question_dedup_generation": int(
+                        payload.get("generation") or 1
+                    ),
+                    "question_dedup_prior_request_id": str(
+                        payload.get("prior_request_id") or ""
+                    ),
+                    "question_dedup_repair_reason": repair_reason,
                 },
             },
             created_by="channel-question-dedup:runtime",

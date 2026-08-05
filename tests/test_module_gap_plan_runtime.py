@@ -655,6 +655,83 @@ def test_prd_discovery_waits_for_candidate_then_resumes(tmp_path: Path) -> None:
     assert [sent[0] for sent in transport.sent] == ["flow-discovery"]
 
 
+def test_prd_candidate_ready_ignores_verification_from_prior_generation(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, transport, orch = _flow_discovery_state(
+        tmp_path,
+        flow_kind="prd",
+        discovery_profile="product_completeness",
+        with_discovery_stage=True,
+    )
+    stale = ZfEvent(
+        id="prd-test-passed-prior-generation",
+        type="test.passed",
+        actor="zf-cli",
+        correlation_id="trace-prd",
+        payload={
+            "workflow_run_id": "run-prd-1",
+            "pdd_id": "PRD-1",
+            "feature_id": "PRD-1",
+            "trace_id": "trace-prd",
+            "status": "completed",
+            "task_map_ref": ".zf/artifacts/PRD-1/task-map-r11.json",
+            "task_map_generation": "generation-prd-r11",
+            "candidate_ref": "candidate/PRD-1",
+            "candidate_head_commit": "",
+        },
+    )
+    log.append(stale)
+    ready = ZfEvent(
+        id="prd-candidate-ready-r14",
+        type="candidate.ready",
+        actor="zf-cli",
+        correlation_id="trace-prd",
+        payload={
+            "workflow_run_id": "run-prd-1",
+            "pdd_id": "PRD-1",
+            "feature_id": "PRD-1",
+            "trace_id": "trace-prd",
+            "status": "completed",
+            "task_map_ref": ".zf/artifacts/PRD-1/task-map-r14.json",
+            "task_map_generation": "generation-prd-r14",
+            "candidate_ref": "candidate/PRD-1",
+            "candidate_head_commit": "candidate-prd-r14",
+        },
+    )
+
+    decisions = orch.run_once(events=[ready])
+
+    assert all(decision.action != "bridge" for decision in decisions)
+    assert not [
+        event for event in log.read_all()
+        if event.type == "flow.discovery.requested"
+    ]
+    assert transport.sent == []
+
+    current = ZfEvent(
+        id="prd-test-passed-r14",
+        type="test.passed",
+        actor="zf-cli",
+        correlation_id="trace-prd",
+        payload={
+            **ready.payload,
+            "candidate_head_commit": "candidate-prd-r14",
+        },
+    )
+    resumed = orch.run_once(events=[current])
+
+    requested = [
+        event for event in log.read_all()
+        if event.type == "flow.discovery.requested"
+    ]
+    assert any(decision.action == "bridge" for decision in resumed)
+    assert len(requested) == 1
+    assert requested[0].payload["source_event_id"] == current.id
+    assert requested[0].payload["source"] == "post_verify_flow_discovery_bridge"
+    assert [sent[0] for sent in transport.sent] == ["flow-discovery"]
+
+
 def test_prd_discovery_uses_candidate_materialized_before_test_passed(
     tmp_path: Path,
 ) -> None:

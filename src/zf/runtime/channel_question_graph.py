@@ -40,6 +40,11 @@ def normalize_question_payload(
     target_member_id = str(
         raw.get("target_member_id") or "owner"
     ).strip()
+    if (
+        kind in OWNER_QUESTION_KINDS
+        and target_member_id in {"operator", "owner:operator"}
+    ):
+        target_member_id = "owner"
     known_members = {
         str(member_id).strip()
         for member_id in member_ids
@@ -52,6 +57,8 @@ def normalize_question_payload(
         and target_member_id not in known_members
     ):
         return {}, f"unknown_question_target:{target_member_id}"
+    if kind == "fact" and target_member_id == "owner":
+        return {}, "fact_question_requires_member_target"
     raw_dependencies = raw.get("depends_on")
     if raw_dependencies in (None, ""):
         raw_dependencies = []
@@ -60,6 +67,9 @@ def normalize_question_payload(
     depends_on = _string_list(raw_dependencies, limit=16)
     if len(depends_on) != len(raw_dependencies):
         return {}, "question_dependencies_must_be_non_empty_strings"
+    options, option_error = _normalize_question_options(raw.get("options"))
+    if option_error:
+        return {}, option_error
     normalized = {
         "question_id": str(question_id).strip(),
         "question": str(question).strip(),
@@ -71,6 +81,8 @@ def normalize_question_payload(
         "recommended_answer": str(
             raw.get("recommended_answer") or ""
         ).strip(),
+        "options": options,
+        "allow_other": bool(raw.get("allow_other", True)),
         "target_member_id": target_member_id or "owner",
         "asked_by": str(asked_by).strip(),
     }
@@ -242,6 +254,48 @@ def _string_list(value: object, *, limit: int) -> list[str]:
         for item in value
         if isinstance(item, str) and str(item).strip()
     ))[:limit]
+
+
+def _normalize_question_options(
+    value: object,
+) -> tuple[list[dict[str, Any]], str]:
+    if value in (None, "", []):
+        return [], ""
+    if not isinstance(value, list):
+        return [], "question_options_must_be_a_list"
+    if not 2 <= len(value) <= 3:
+        return [], "question_options_require_two_or_three_items"
+    options: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value, 1):
+        if not isinstance(raw, dict):
+            return [], "question_options_must_be_objects"
+        option_id = str(raw.get("id") or f"option-{index}").strip()
+        label = str(raw.get("label") or "").strip()
+        if not option_id or not label:
+            return [], "question_options_require_id_and_label"
+        if option_id == "other" or option_id in seen_ids:
+            return [], f"invalid_question_option_id:{option_id}"
+        seen_ids.add(option_id)
+        options.append({
+            "id": option_id,
+            "label": label,
+            "description": str(raw.get("description") or "").strip(),
+            "recommended": bool(raw.get("recommended"))
+            or "(recommended)" in label.lower()
+            or "(推荐)" in label,
+        })
+    recommended = [
+        index for index, option in enumerate(options)
+        if option["recommended"]
+    ]
+    if len(recommended) > 1:
+        return [], "question_options_allow_one_recommendation"
+    if not recommended:
+        options[0]["recommended"] = True
+    elif recommended[0] != 0:
+        options.insert(0, options.pop(recommended[0]))
+    return options, ""
 
 
 __all__ = [

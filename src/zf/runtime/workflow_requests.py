@@ -22,17 +22,23 @@ from zf.runtime.workflow_origin import (
     workflow_origin_from_manifest,
     workflow_origin_from_request,
 )
+from zf.runtime.workflow_request_concurrency import (
+    WorkflowRequestConflict,
+    WorkflowRequestError,
+    check_workflow_request_preconditions,
+)
 from zf.runtime.workflow_request_io import (
     now_iso as _now_iso,
     read_json as _read_json,
     safe_id as _safe_id,
     strings as _strings,
 )
-
-
-class WorkflowRequestError(ValueError):
-    pass
-
+from zf.runtime.workflow_requirement_specs import (
+    build_requirement_spec,
+    merge_clarification_answers,
+    normalize_clarification_answers,
+    normalize_requirement_spec,
+)
 
 _REQUEST_STATUSES = {
     "draft",
@@ -297,7 +303,7 @@ def register_workflow_intake(
         return projection
 
     intake = _read_json(Path(str(manifest.get("intake_json_ref") or "")))
-    spec = _requirement_spec(
+    spec = build_requirement_spec(
         manifest,
         intake,
         revision=1,
@@ -352,7 +358,10 @@ def revise_workflow_request(
     acceptance: list[str] | None = None,
     constraints: list[str] | None = None,
     open_questions: list[str] | None = None,
+    clarification_answers: list[dict[str, str]] | None = None,
     confirm: bool = False,
+    expected_revision: int | None = None,
+    expected_requirement_digest: str = "",
     revision_reason: str = "requirement_update",
     source_event_id: str = "",
     writer: EventWriter | None = None,
@@ -379,6 +388,11 @@ def revise_workflow_request(
             actor=actor,
             writer=writer,
         )
+    check_workflow_request_preconditions(
+        prior,
+        expected_revision=expected_revision,
+        expected_requirement_digest=expected_requirement_digest,
+    )
     current = _read_json(Path(str(prior.get("requirement_spec_ref") or "")))
     if not current:
         raise WorkflowRequestError("current requirement spec is missing")
@@ -397,11 +411,16 @@ def revise_workflow_request(
     for key, value in updates.items():
         if value is not None:
             spec[key] = value
+    if clarification_answers is not None:
+        spec["clarification_answers"] = merge_clarification_answers(
+            spec.get("clarification_answers"),
+            clarification_answers,
+        )
     if confirm:
         spec["confirmed"] = True
         spec["confirmed_at"] = _now_iso()
         spec["confirmed_by"] = actor
-    spec = _normalize_spec(spec)
+    spec = normalize_requirement_spec(spec)
     spec_ref, digest = _write_requirement_spec(state_dir, spec)
     projection = _projection(
         manifest,
@@ -764,39 +783,6 @@ def request_readiness_blockers(projection: dict[str, Any]) -> list[dict[str, Any
     return blockers
 
 
-def _requirement_spec(
-    manifest: dict[str, Any],
-    intake: dict[str, Any],
-    *,
-    revision: int,
-    confirmed: bool,
-) -> dict[str, Any]:
-    return _normalize_spec({
-        "schema_version": "requirement-spec.v1",
-        "request_id": str(manifest.get("request_id") or ""),
-        "project_id": str(manifest.get("project_id") or ""),
-        "kind": str(manifest.get("kind") or intake.get("effective_kind") or "issue"),
-        "revision": revision,
-        "objective": str(manifest.get("objective") or intake.get("objective") or ""),
-        "source_ref": str(manifest.get("source_ref") or ""),
-        "source_root": str(manifest.get("source_root") or intake.get("source_root") or ""),
-        "target_root": str(manifest.get("target_root") or intake.get("target_root") or ""),
-        "acceptance": _strings(intake.get("acceptance") or manifest.get("acceptance")),
-        "constraints": _strings(intake.get("constraints") or manifest.get("constraints")),
-        "open_questions": _strings(intake.get("open_questions") or manifest.get("open_questions")),
-        "confirmed": confirmed,
-        "created_at": str(manifest.get("created_at") or _now_iso()),
-        "updated_at": _now_iso(),
-    })
-
-
-def _normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    out = dict(spec)
-    for key in ("acceptance", "constraints", "open_questions"):
-        out[key] = _strings(out.get(key))
-    return out
-
-
 def _projection(
     manifest: dict[str, Any],
     spec: dict[str, Any],
@@ -840,6 +826,9 @@ def _projection(
         ),
         "missing_required_fields": missing,
         "open_questions": questions,
+        "clarification_answer_count": len(
+            normalize_clarification_answers(spec.get("clarification_answers"))
+        ),
         "confirmed": confirmed,
         "run_id": str(prior.get("run_id") or ""),
         "created_at": str(prior.get("created_at") or manifest.get("created_at") or _now_iso()),
@@ -886,6 +875,9 @@ def _bind_effective_manifest(
         "acceptance": _strings(spec.get("acceptance")),
         "constraints": _strings(spec.get("constraints")),
         "open_questions": _strings(spec.get("open_questions")),
+        "clarification_answers": normalize_clarification_answers(
+            spec.get("clarification_answers")
+        ),
         "missing_required_fields": list(projection.get("missing_required_fields") or []),
         "requirement_spec_ref": projection["requirement_spec_ref"],
         "requirement_spec_digest": projection["requirement_spec_digest"],
@@ -957,6 +949,9 @@ def _emit(
         "requirement_spec_digest": str(projection.get("requirement_spec_digest") or ""),
         "missing_required_fields": list(projection.get("missing_required_fields") or []),
         "open_questions": list(projection.get("open_questions") or []),
+        "clarification_answer_count": int(
+            projection.get("clarification_answer_count") or 0
+        ),
         "origin_binding": dict(projection.get("origin_binding") or {}),
         **(extra or {}),
     }
@@ -978,6 +973,7 @@ def _manifest_origin_binding(manifest: dict[str, Any]) -> dict[str, str]:
 
 
 __all__ = [
+    "WorkflowRequestConflict",
     "WorkflowRequestError",
     "adopt_workflow_research_result",
     "bind_workflow_synthesis_operation",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from zf.runtime.channel_question_graph import (
+    normalize_question_payload,
     owner_questionnaire,
     question_frontier,
     question_graph_digest,
@@ -78,3 +79,72 @@ def test_question_graph_rejects_unknown_self_and_cycles() -> None:
             "depends_on": ["q-a"],
         },
     ]).startswith("question_dependency_cycle:")
+
+
+def test_question_payload_normalizes_enumerable_owner_options() -> None:
+    normalized, error = normalize_question_payload(
+        {
+            "kind": "tradeoff",
+            "options": [
+                {
+                    "id": "safe",
+                    "label": "Safe rollout",
+                    "description": "Keep the compatibility window.",
+                },
+                {
+                    "id": "fast",
+                    "label": "Fast rollout (Recommended)",
+                    "description": "Prefer speed over compatibility.",
+                },
+            ],
+            "allow_other": False,
+        },
+        question_id="q-rollout",
+        question="Which rollout should ship?",
+        asked_by="arch",
+    )
+
+    assert error == ""
+    assert [item["id"] for item in normalized["options"]] == [
+        "fast",
+        "safe",
+    ]
+    assert normalized["options"][0]["recommended"] is True
+    assert normalized["allow_other"] is False
+
+
+def test_question_payload_rejects_ambiguous_option_contract() -> None:
+    _normalized, error = normalize_question_payload(
+        {
+            "options": [
+                {"id": "a", "label": "A", "recommended": True},
+                {"id": "b", "label": "B", "recommended": True},
+            ],
+        },
+        question_id="q-ambiguous",
+        question="Which answer?",
+        asked_by="arch",
+    )
+
+    assert error == "question_options_allow_one_recommendation"
+
+
+def test_owner_aliases_do_not_turn_fact_questions_into_owner_decisions() -> None:
+    owner, owner_error = normalize_question_payload(
+        {"kind": "owner_decision", "target_member_id": "operator"},
+        question_id="q-owner",
+        question="Should this ship?",
+        asked_by="pm",
+        member_ids={"arch"},
+    )
+    _fact, fact_error = normalize_question_payload(
+        {"kind": "fact", "target_member_id": "operator"},
+        question_id="q-fact",
+        question="Which API exists?",
+        asked_by="pm",
+        member_ids={"arch"},
+    )
+
+    assert owner_error == ""
+    assert owner["target_member_id"] == "owner"
+    assert fact_error == "unknown_question_target:operator"

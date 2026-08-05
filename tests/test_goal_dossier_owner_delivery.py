@@ -317,6 +317,119 @@ def test_completed_terminal_materializes_receipt_and_owner_request_once(
     assert rebuilt["freshness"]["last_event_id"] == "evt-completed"
 
 
+def test_completed_dossier_keeps_superseded_generation_as_history_only(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-OLD",
+        title="Superseded task",
+        status="blocked",
+        assigned_to="dev-old",
+    ))
+    events = _completion_events(state_dir)
+    events[1:1] = [
+        ZfEvent(
+            id="evt-old-failed",
+            type="dev.failed",
+            task_id="TASK-OLD",
+            correlation_id=RUN_ID,
+            payload={
+                "workflow_run_id": RUN_ID,
+                "task_id": "TASK-OLD",
+                "task_map_generation": "generation-1",
+                "reason": "superseded implementation failed",
+            },
+        ),
+        ZfEvent(
+            id="evt-old-rework",
+            type="task.rework.requested",
+            task_id="TASK-OLD",
+            correlation_id=RUN_ID,
+            payload={
+                "workflow_run_id": RUN_ID,
+                "task_id": "TASK-OLD",
+                "task_map_generation": "generation-1",
+                "contract_revision": "old-revision",
+                "dispatch_id": "old-dispatch",
+                "attempt": 1,
+                "finding_ids": ["finding-old"],
+            },
+        ),
+    ]
+    for event in events:
+        log.append(event)
+
+    result = materialize_terminal_goal_deliveries(
+        state_dir=state_dir,
+        event_log=log,
+        writer=writer,
+        project_id="demo",
+    )
+    dossier = build_goal_dossier(state_dir, RUN_ID)
+
+    assert result.requested == 1
+    assert dossier["delivery_readiness"]["status"] == "ready"
+    assert dossier["state"]["task_counts"] == {
+        "total": 1,
+        "terminal": 1,
+        "open": 0,
+    }
+    assert [task["id"] for task in dossier["state"]["tasks"]] == ["TASK-1"]
+    assert any(
+        task["id"] == "TASK-OLD"
+        for task in dossier["state"]["historical_tasks"]
+    )
+    assert dossier["state"]["handoff"]["open_feedback_count"] == 0
+    assert dossier["state"]["handoff"]["pending_handoff_count"] == 0
+    assert dossier["state"]["handoff"]["historical_open_feedback_count"] == 1
+    assert dossier["state"]["handoff"]["historical_pending_handoff_count"] == 1
+    assert dossier["goal"]["open_feedback_count"] == 0
+    assert dossier["goal"]["pending_handoff_count"] == 0
+    assert dossier["goal"]["historical_open_feedback_count"] == 1
+    assert dossier["goal"]["historical_pending_handoff_count"] == 1
+    assert dossier["gaps"] == []
+    assert dossier["claim_to_evidence"]["summary"]["closed_claims"] == 1
+
+
+def test_completed_dossier_does_not_hide_current_generation_feedback(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    events = _completion_events(state_dir)
+    events.insert(-1, ZfEvent(
+        id="evt-current-rework",
+        type="task.rework.requested",
+        task_id="TASK-1",
+        correlation_id=RUN_ID,
+        payload={
+            "workflow_run_id": RUN_ID,
+            "task_id": "TASK-1",
+            "task_map_generation": "generation-2",
+            "contract_revision": "current-revision",
+            "dispatch_id": "current-dispatch",
+            "attempt": 1,
+            "finding_ids": ["finding-current"],
+        },
+    ))
+    for event in events:
+        log.append(event)
+
+    result = materialize_terminal_goal_deliveries(
+        state_dir=state_dir,
+        event_log=log,
+        writer=writer,
+    )
+    dossier = build_goal_dossier(state_dir, RUN_ID)
+
+    assert result.failed == 1
+    assert result.requested == 0
+    assert dossier["state"]["handoff"]["open_feedback_count"] == 1
+    assert dossier["state"]["handoff"]["pending_handoff_count"] == 1
+    assert {gap["type"] for gap in dossier["gaps"]} == {"open_feedback"}
+    assert dossier["delivery_readiness"]["status"] == "incomplete"
+
+
 def test_inconsistent_completed_dossier_suppresses_owner_until_rebuilt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

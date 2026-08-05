@@ -393,6 +393,62 @@ def test_candidate_verify_operation_requires_current_contract_target_and_self_ch
     }
 
 
+def test_runtime_admission_uses_output_profile_from_pinned_operation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    payload = {
+        "workflow_run_id": "run-rescan",
+        "fanout_id": "fanout-rescan",
+        "child_id": "flow-discovery",
+        "stage_id": "post-verify-discovery",
+        "role_instance": "flow-discovery",
+        "output_profile_id": "global-rescan",
+        "output_profile_revision": "1",
+    }
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="flow-discovery",
+        stage_id="post-verify-discovery",
+        task_id="",
+        dispatch_id="run-rescan-discovery",
+    )
+    captured: dict = {}
+
+    class _Admission:
+        def report_legacy_result(self, _event, **kwargs):  # noqa: ANN001
+            captured.update(kwargs["operation"])
+            return CallResultAdmissionOutcome(status="admitted", mode="blocking")
+
+    monkeypatch.setattr(
+        "zf.runtime.call_result_adapters.hydrate_profiled_control_result_event",
+        lambda _state_dir, event: event,
+    )
+    monkeypatch.setattr(
+        "zf.runtime.call_result_runtime.call_result_admission_service",
+        lambda _runtime: _Admission(),
+    )
+    event = ZfEvent(
+        type="flow.discovery.child.failed",
+        actor="flow-discovery",
+        payload={
+            "operation_id": prepared.operation_id,
+            "request_hash": prepared.request_hash,
+            "workflow_run_id": prepared.workflow_run_id,
+            "report": {"status": "failed", "recommendation": "reject"},
+        },
+    )
+
+    outcome = admit_runtime_call_result(runtime, event, mode="blocking")
+
+    assert outcome.admitted
+    assert captured["output_profile_id"] == "global-rescan"
+    assert captured["output_profile_revision"] == "1"
+
+
 def _prepared_plan_synth(tmp_path: Path):
     runtime = _runtime(tmp_path)
     report_path = runtime.state_dir / "fanouts" / "F-PLAN" / "children" / "planner" / "report.json"

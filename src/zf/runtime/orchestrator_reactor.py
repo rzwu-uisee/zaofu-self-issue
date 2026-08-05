@@ -167,6 +167,11 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("channel.question.merged", "_on_channel_discussion_event"),
     ("channel.question.updated", "_on_channel_discussion_event"),
     ("channel.question.dedup.applied", "_on_channel_discussion_event"),
+    ("channel.question.dedup.rejected", "_on_channel_discussion_event"),
+    (
+        "channel.question.dedup.remediation.exhausted",
+        "_on_channel_discussion_event",
+    ),
     ("channel.cross_review.completed", "_on_channel_discussion_event"),
     ("channel.cross_review.rejected", "_on_channel_discussion_event"),
     ("channel.questions.frozen", "_on_channel_discussion_event"),

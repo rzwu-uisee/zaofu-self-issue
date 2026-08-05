@@ -206,6 +206,7 @@ def build_workflow_request_router(
             )
         from zf.cli.flow import _load_manifest_for_intake
         from zf.runtime.workflow_requests import (
+            WorkflowRequestConflict,
             load_workflow_request,
             revise_workflow_request,
         )
@@ -234,40 +235,90 @@ def build_workflow_request_router(
                 },
                 status_code=404,
             )
+        expected_revision: int | None = None
+        if "expected_revision" in payload:
+            try:
+                expected_revision = int(payload["expected_revision"])
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "status": "invalid_payload",
+                        "reason": "expected_revision must be an integer",
+                    },
+                    status_code=422,
+                )
+            if expected_revision <= 0:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "status": "invalid_payload",
+                        "reason": "expected_revision must be positive",
+                    },
+                    status_code=422,
+                )
         writer = EventWriter(event_log_from_project(context.state_dir, config=context.config))
-        result = revise_workflow_request(
-            context.state_dir,
-            manifest_path,
-            actor=str(payload.get("actor") or payload.get("requested_by") or "web"),
-            objective=str(payload["objective"]) if "objective" in payload else None,
-            source_root=str(payload["source_root"]) if "source_root" in payload else None,
-            target_root=(
-                str(payload.get("target_root") or payload.get("target") or "")
-                if "target_root" in payload or "target" in payload
-                else None
-            ),
-            acceptance=(
-                workflow_request_strings(payload.get("acceptance"))
-                if "acceptance" in payload
-                else None
-            ),
-            constraints=(
-                workflow_request_strings(payload.get("constraints"))
-                if "constraints" in payload
-                else None
-            ),
-            open_questions=(
-                workflow_request_strings(payload.get("open_questions"))
-                if "open_questions" in payload
-                else None
-            ),
-            confirm=bool(payload.get("confirm")),
-            writer=writer,
-        )
+        try:
+            result = revise_workflow_request(
+                context.state_dir,
+                manifest_path,
+                actor=str(payload.get("actor") or payload.get("requested_by") or "web"),
+                objective=str(payload["objective"]) if "objective" in payload else None,
+                source_root=str(payload["source_root"]) if "source_root" in payload else None,
+                target_root=(
+                    str(payload.get("target_root") or payload.get("target") or "")
+                    if "target_root" in payload or "target" in payload
+                    else None
+                ),
+                acceptance=(
+                    workflow_request_strings(payload.get("acceptance"))
+                    if "acceptance" in payload
+                    else None
+                ),
+                constraints=(
+                    workflow_request_strings(payload.get("constraints"))
+                    if "constraints" in payload
+                    else None
+                ),
+                open_questions=(
+                    workflow_request_strings(payload.get("open_questions"))
+                    if "open_questions" in payload
+                    else None
+                ),
+                clarification_answers=(
+                    [
+                        dict(item)
+                        for item in payload.get("clarification_answers") or []
+                        if isinstance(item, dict)
+                    ]
+                    if "clarification_answers" in payload
+                    else None
+                ),
+                confirm=bool(payload.get("confirm")),
+                expected_revision=expected_revision,
+                expected_requirement_digest=str(
+                    payload.get("expected_requirement_digest") or ""
+                ),
+                writer=writer,
+            )
+        except WorkflowRequestConflict as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status": "stale_workflow_request",
+                    "reason": str(exc),
+                    "request_id": request_id,
+                    "current_revision": int(current.get("revision") or 0),
+                    "current_requirement_digest": str(
+                        current.get("requirement_spec_digest") or ""
+                    ),
+                },
+                status_code=409,
+            )
         status = str(result.get("status") or "")
         return JSONResponse(
-            {"ok": status != "clarifying", "status": status, "result": result},
-            status_code=200 if status != "clarifying" else 409,
+            {"ok": True, "status": status, "result": result},
+            status_code=200,
         )
 
     @router.get("/api/projects/{project_id}/workflow-requests/{request_id}")

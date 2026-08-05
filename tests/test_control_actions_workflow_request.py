@@ -115,6 +115,52 @@ def test_request_is_proposed_before_explicit_submit(tmp_path: Path) -> None:
     ]) == 1
 
 
+def test_terminal_workflow_request_replay_fails_closed(tmp_path: Path) -> None:
+    service, log = _service(tmp_path)
+    proposed = _execute(service, "workflow-request", {
+        "kind": "issue",
+        "objective": "Fix session expiry and add a regression test",
+        "backend": "mock",
+        "allow_missing_env": True,
+    })
+    submit_payload = {
+        "intake_ref": proposed["intake_ref"],
+        "request_id": proposed["request_id"],
+        "proposal_ref": proposed["proposal_ref"],
+        "proposal_digest": proposed["proposal_digest"],
+        "kind": "issue",
+        "allow_missing_env": True,
+    }
+    assert _execute(service, "workflow-submit", submit_payload)["ok"] is True
+    invoke = next(
+        event for event in log.read_all()
+        if event.type == "workflow.invoke.requested"
+    )
+    EventWriter(log).append(ZfEvent(
+        type="run.goal.blocked",
+        actor="orchestrator",
+        task_id=invoke.task_id,
+        correlation_id=proposed["request_id"],
+        payload={
+            "run_id": proposed["request_id"],
+            "workflow_run_id": proposed["request_id"],
+            "request_id": proposed["request_id"],
+            "reason": "stage replan cap exhausted",
+        },
+    ))
+
+    replay = _execute(service, "workflow-submit", submit_payload)
+
+    assert replay["ok"] is False
+    assert replay["status"] == "STOP"
+    assert replay["workflow_invoke_status"] == "terminal"
+    assert replay["blockers"][0]["kind"] == "workflow_request_run_terminal"
+    assert sum(
+        event.type == "workflow.invoke.requested"
+        for event in log.read_all()
+    ) == 1
+
+
 def test_channel_workflow_request_pins_canonical_origin(
     tmp_path: Path,
 ) -> None:

@@ -209,3 +209,13 @@ def test_recovery_closeout_contract_report_is_complete_for_goal_gap() -> None:
     assert entry["owner_route"] == "run_manager"
     assert entry["attempt_cap"] >= 1
     assert entry["expected_downstream_events"]
+
+
+def test_recovery_closeout_ignores_kernel_consumed_context_warning() -> None:
+    report = recovery_closeout_contract_report(
+        event_types={"worker.context.warning"},
+    )
+
+    assert report["ok"] is True
+    assert report["summary"] == {"checked": 0, "errors": 0, "warnings": 0}
+    assert report["entries"] == []

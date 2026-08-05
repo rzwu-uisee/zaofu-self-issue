@@ -380,6 +380,11 @@ def _collaboration_contract(
         ),
         "allowed_template_ids": sorted(CHANNEL_TEMPLATES),
         "discussion_phase": str(session.get("state") or "idle"),
+        "canonical_synthesis_availability": (
+            "available_for_review"
+            if str(session.get("state") or "idle") == "phase3_synthesis"
+            else "not_created_until_phase3"
+        ),
         "discussion_started_event_id": str(
             session.get("started_event_id") or ""
         ),

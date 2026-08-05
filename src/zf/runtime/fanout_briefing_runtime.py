@@ -461,7 +461,6 @@ class FanoutBriefingMixin:
                 "risk_register": [],
                 "backlog_candidates": [],
                 "evidence_refs": [],
-                "plan_ports": [],
             })
             failure_payload["reason"] = (
                 "Unable to produce a plan artifact from the review artifact."
@@ -713,7 +712,6 @@ class FanoutBriefingMixin:
                 "backlog_ref": "",
                 "source_index_ref": "",
                 "evidence_refs": [],
-                "plan_ports": [],
             })
             result_guidance.extend(self._plan_artifact_contract_lines())
             result_guidance.extend(

@@ -513,6 +513,7 @@ def test_candidate_rebuild_rejects_stale_task_index_entry(tmp_path: Path):
 def test_candidate_rebuild_cherry_picks_approved_task_refs(tmp_path: Path):
     _init_repo(tmp_path)
     state_dir, config, log = _state(tmp_path)
+    source_commits: dict[str, str] = {}
     for task_id, file_name in (("TASK-1", "a.txt"), ("TASK-2", "b.txt")):
         branch = f"worker/{task_id}"
         commit = _task_commit(
@@ -522,6 +523,7 @@ def test_candidate_rebuild_cherry_picks_approved_task_refs(tmp_path: Path):
             content=f"{task_id}\n",
             message=task_id,
         )
+        source_commits[task_id] = commit
         _record_task_ref(
             tmp_path,
             state_dir,
@@ -551,12 +553,31 @@ def test_candidate_rebuild_cherry_picks_approved_task_refs(tmp_path: Path):
         "TASK-1",
         "TASK-2",
     ]
+    assert manifest["commit_lineage_schema_version"] == "candidate-commit-lineage.v1"
+    assert [entry["task_id"] for entry in manifest["commit_lineage"]] == [
+        "TASK-1",
+        "TASK-2",
+    ]
+    candidate_history = set(_git(
+        tmp_path,
+        "rev-list",
+        "candidate/F-11111111",
+    ).splitlines())
+    for entry in manifest["commit_lineage"]:
+        assert entry["source_commit"] == source_commits[entry["task_id"]]
+        assert entry["candidate_commit"] in candidate_history
+        assert entry["relation"] == "cherry_pick"
     event_types = [event.type for event in log.read_all()]
     assert "candidate.started" in event_types
     assert "candidate.integration.started" in event_types
     assert "candidate.task_ref.applied" in event_types
     assert "candidate.updated" in event_types
     assert "candidate.integration.completed" in event_types
+    applied = [
+        event for event in log.read_all()
+        if event.type == "candidate.task_ref.applied"
+    ]
+    assert all(event.payload.get("commit_lineage") for event in applied)
 
 
 def test_candidate_subset_rebuild_preserves_existing_candidate_base(tmp_path: Path):

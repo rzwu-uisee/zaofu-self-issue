@@ -4,6 +4,13 @@ import {
   resolveChannelWorkflowBackend,
 } from "../components/channel/workflowPlanning";
 import {
+  clearHistoryPayload,
+  discussionModePayload,
+  ownerReportPayload,
+  startDiscussionPayload,
+  synthesisRequestPayload,
+} from "../components/channel/channelControlActions";
+import {
   defaultKanbanThreadKey,
   kanbanAgentConversationId,
   kanbanAgentProjectId,
@@ -27,6 +34,61 @@ interface ChannelActionAdapterArgs {
 
 export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
   const channelId = () => args.selectedChannelId || "ch-zaofu";
+
+  async function setDiscussionMode(
+    threadId: string,
+    mode: string,
+    defaultResponderId?: string,
+  ) {
+    await args.submitAction(
+      "channel-discussion-mode",
+      discussionModePayload(
+        channelId(),
+        threadId,
+        mode,
+        defaultResponderId
+          ?? String(args.channelDetail?.discussion?.default_responder_id ?? ""),
+      ),
+    );
+  }
+
+  async function requestSynthesis(
+    threadId: string,
+    targetMemberId?: string,
+  ) {
+    await args.submitAction(
+      "channel.synthesis.request",
+      synthesisRequestPayload(channelId(), threadId, targetMemberId),
+    );
+  }
+
+  async function generateOwnerReport(threadId: string) {
+    await args.submitAction(
+      "channel.owner_report.request",
+      ownerReportPayload(channelId(), threadId),
+    );
+  }
+
+  async function clearHistory(threadId: string) {
+    await args.submitAction(
+      "channel-clear-history",
+      clearHistoryPayload(channelId(), threadId),
+    );
+  }
+
+  async function startDiscussion(
+    threadId: string,
+    message: string,
+    messageId: string,
+    mode: string,
+  ) {
+    await args.submitAction(
+      "channel-discussion-start",
+      startDiscussionPayload(
+        channelId(), threadId, message, messageId, mode,
+      ),
+    );
+  }
 
   async function resolveQuestion(
     questionId: string,
@@ -144,8 +206,13 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
 
   return {
     adoptResearchResult,
+    clearHistory,
     decideConsensus,
+    generateOwnerReport,
+    requestSynthesis,
     resolveQuestion,
+    setDiscussionMode,
+    startDiscussion,
     submitWorkflowRequest,
   };
 }

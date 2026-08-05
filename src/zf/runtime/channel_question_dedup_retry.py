@@ -1,0 +1,103 @@
+"""Bounded mechanical retry for rejected Channel question dedup plans."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from zf.core.events import EventWriter
+from zf.runtime.channel_question_dedup import (
+    MAX_QUESTION_DEDUP_ATTEMPTS,
+    question_ledger,
+    question_ledger_digest,
+    stable_question_dedup_request_id,
+)
+
+
+def repair_rejected_question_dedup(
+    writer: EventWriter,
+    channel: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    actor: str,
+    source: str,
+    channel_id: str,
+    thread_id: str,
+) -> list[str]:
+    requests = [
+        item
+        for item in channel.get("question_dedup_requests") or []
+        if isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+    ]
+    if not requests or any(
+        str(item.get("status") or "") == "applied"
+        for item in requests
+    ):
+        return []
+    latest = requests[-1]
+    if str(latest.get("status") or "") != "rejected":
+        return []
+    generation = max(
+        int(item.get("generation") or index)
+        for index, item in enumerate(requests, 1)
+    )
+    prior_request_id = str(latest.get("request_id") or "")
+    repair_reason = str(latest.get("reason") or "dedup_rejected")
+    causation_id = str(latest.get("result_event_id") or "") or None
+    if generation >= MAX_QUESTION_DEDUP_ATTEMPTS:
+        writer.emit(
+            "channel.question.dedup.remediation.exhausted",
+            actor=actor,
+            causation_id=causation_id,
+            correlation_id=channel_id,
+            payload={
+                "schema_version": "channel.question.dedup.v1",
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "request_id": prior_request_id,
+                "attempts": generation,
+                "reason": repair_reason,
+                "source": source,
+            },
+        )
+        return ["channel.question.dedup.remediation.exhausted"]
+
+    next_generation = generation + 1
+    request_id = stable_question_dedup_request_id(
+        channel_id,
+        thread_id,
+        str(session.get("started_event_id") or ""),
+        generation=next_generation,
+    )
+    if any(
+        str(item.get("request_id") or "") == request_id
+        for item in requests
+    ):
+        return []
+    ledger = question_ledger(channel, thread_id=thread_id)
+    writer.emit(
+        "channel.question.dedup.requested",
+        actor=actor,
+        causation_id=causation_id,
+        correlation_id=channel_id,
+        payload={
+            "schema_version": "channel.question.dedup.v1",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "request_id": request_id,
+            "target_member_id": str(session.get("synthesizer") or ""),
+            "ledger_digest": question_ledger_digest(
+                channel,
+                thread_id=thread_id,
+            ),
+            "question_count": len(ledger),
+            "generation": next_generation,
+            "prior_request_id": prior_request_id,
+            "repair_reason": repair_reason,
+            "source": source,
+        },
+    )
+    return ["channel.question.dedup.requested"]
+
+
+__all__ = ["repair_rejected_question_dedup"]

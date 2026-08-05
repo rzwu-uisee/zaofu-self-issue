@@ -93,6 +93,40 @@ def test_zero_state_loops_and_companions_absent(tmp_path: Path) -> None:
     assert view["faults"] == []
 
 
+def test_recovery_only_scope_keeps_delivery_idle_and_ignores_chat_noise(
+    tmp_path: Path,
+) -> None:
+    log = _log(tmp_path)
+    log.append(ZfEvent(type="user.message", payload={}))
+    log.append(ZfEvent(type="web.action.requested", payload={}))
+    log.append(ZfEvent(type="runtime.action.failed", payload={}))
+    log.append(ZfEvent(type="run.manager.autoresearch.requested", payload={}))
+
+    view = build_loop_view(_sd(tmp_path))
+
+    assert view["scope"] == {
+        "kind": "project_recovery",
+        "business_delivery_active": False,
+        "reason": "no business delivery run evidence",
+    }
+    assert view["loops"]["delivery"]["health"] == "idle"
+    assert view["loops"]["delivery"]["arc"]["state"] == "idle"
+    assert "human" not in view["companions"]
+
+
+def test_delivery_scope_activates_only_on_delivery_evidence(tmp_path: Path) -> None:
+    log = _log(tmp_path)
+    log.append(ZfEvent(
+        type="workflow.invoke.requested",
+        payload={"route_id": "delivery:prd:standard"},
+    ))
+
+    view = build_loop_view(_sd(tmp_path))
+
+    assert view["scope"]["kind"] == "business_delivery"
+    assert view["loops"]["delivery"]["health"] == "converging"
+
+
 def test_flow_shapes_differ_without_code_branches(tmp_path: Path) -> None:
     """issue 与 refactor 夹具:阶段链与业务环在场集合不同,同一函数消费。"""
     issue = tmp_path / "issue"

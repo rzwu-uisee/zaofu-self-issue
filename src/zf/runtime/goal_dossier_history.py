@@ -72,6 +72,7 @@ def build_goal_dossier_history(
     """Build historical tasks, current overlay, claims and instruction refs."""
 
     diagnostics: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
     terminal = _latest_terminal(events)
     artifact_delivery = _is_artifact_delivery_run(events)
     task_map, task_map_binding, task_map_diagnostics = _hydrate_task_map(
@@ -89,7 +90,6 @@ def build_goal_dossier_history(
         }
     diagnostics.extend(task_map_diagnostics)
     contracts, contract_diagnostics = _hydrate_task_contracts(state_dir, events)
-    diagnostics.extend(contract_diagnostics)
     historical_tasks = _historical_task_rows(
         events=events,
         task_map=task_map,
@@ -98,24 +98,42 @@ def build_goal_dossier_history(
         terminal=terminal,
         excluded_task_ids=excluded_task_ids,
     )
-    current_overlay = _current_overlay(
+    authoritative_tasks = _authoritative_task_rows(
         historical_tasks=historical_tasks,
+        task_map=task_map,
+        terminal=terminal,
+    )
+    authoritative_task_ids = {
+        str(item.get("id") or "")
+        for item in authoritative_tasks
+        if str(item.get("id") or "")
+    }
+    for item in contract_diagnostics:
+        if str(item.get("task_id") or "") in authoritative_task_ids:
+            diagnostics.append(item)
+        else:
+            advisories.append(item)
+    current_overlay = _current_overlay(
+        historical_tasks=authoritative_tasks,
         current_tasks=current_tasks,
     )
     instruction_context = _instruction_context(events)
     claim_matrix = _claim_matrix(
         state_dir=state_dir,
         task_map=task_map,
-        tasks=historical_tasks,
+        tasks=authoritative_tasks,
         events=events,
         project_id=project_id,
         goal_id=goal_id,
         task_map_ref=str(task_map_binding.get("ref") or ""),
+        authority=terminal,
     )
     if claim_matrix.get("status") == "incomplete":
         diagnostics.extend(claim_matrix.get("diagnostics") or [])
+    advisories.extend(claim_matrix.get("advisories") or [])
     return redact_obj({
         "terminal": terminal,
+        "authoritative_tasks": authoritative_tasks,
         "historical_tasks": historical_tasks,
         "current_overlay": current_overlay,
         "task_contracts": contracts,
@@ -132,6 +150,7 @@ def build_goal_dossier_history(
         "instruction_context": instruction_context,
         "claim_to_evidence": claim_matrix,
         "diagnostics": diagnostics,
+        "advisories": advisories,
     })
 
 
@@ -158,6 +177,31 @@ def _latest_terminal(events: list[ZfEvent]) -> dict[str, Any]:
                 or ""
             ),
             "completed_task_ids": _strings(payload.get("completed_task_ids")),
+            "workflow_run_id": str(
+                payload.get("workflow_run_id")
+                or payload.get("run_id")
+                or event.correlation_id
+                or ""
+            ),
+            "task_map_generation": str(
+                payload.get("task_map_generation")
+                or payload.get("workflow_generation")
+                or ""
+            ),
+            "task_map_ref": str(
+                payload.get("task_map_snapshot_ref")
+                or payload.get("task_map_ref")
+                or ""
+            ),
+            "task_map_digest": str(
+                payload.get("task_map_snapshot_digest")
+                or payload.get("task_map_digest")
+                or ""
+            ),
+            "goal_claim_set_ref": str(payload.get("goal_claim_set_ref") or ""),
+            "goal_claim_set_digest": str(
+                payload.get("goal_claim_set_digest") or ""
+            ),
             "target_commit": str(
                 payload.get("verified_target_commit")
                 or payload.get("target_commit")
@@ -455,6 +499,54 @@ def _historical_task_rows(
     return rows
 
 
+def _authoritative_task_rows(
+    *,
+    historical_tasks: list[dict[str, Any]],
+    task_map: Mapping[str, Any],
+    terminal: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Project terminal currentness without erasing the full run history."""
+
+    if not terminal:
+        return historical_tasks
+    planned = task_map.get("tasks") if isinstance(task_map.get("tasks"), list) else []
+    planned_ids = [
+        str(item.get("task_id") or item.get("id") or "")
+        for item in planned
+        if isinstance(item, Mapping)
+        and str(item.get("task_id") or item.get("id") or "")
+    ]
+    completed_ids = _strings(terminal.get("completed_task_ids"))
+    authoritative_ids = list(dict.fromkeys([*planned_ids, *completed_ids]))
+    if not authoritative_ids:
+        return historical_tasks
+    historical_by_id = {
+        str(item.get("id") or ""): dict(item)
+        for item in historical_tasks
+        if str(item.get("id") or "")
+    }
+    completed = set(completed_ids)
+    rows: list[dict[str, Any]] = []
+    for task_id in authoritative_ids:
+        row = dict(historical_by_id.get(task_id) or {
+            "id": task_id,
+            "title": task_id,
+            "status": "unknown",
+            "status_source": "terminal_without_task_fact",
+            "assigned_to": "",
+            "blocked_by": [],
+            "contract": {},
+            "task_ref": "",
+            "contract_snapshot_ref": "",
+            "contract_snapshot_digest": "",
+        })
+        if task_id in completed:
+            row["status"] = "done"
+            row["status_source"] = "run_terminal"
+        rows.append(row)
+    return rows
+
+
 def _current_overlay(
     *,
     historical_tasks: list[dict[str, Any]],
@@ -519,9 +611,22 @@ def _claim_matrix(
     project_id: str,
     goal_id: str,
     task_map_ref: str,
+    authority: Mapping[str, Any],
 ) -> dict[str, Any]:
     task_lookup = {str(item.get("id") or ""): item for item in tasks}
     coverage_task_map = dict(task_map)
+    for field in (
+        "workflow_run_id",
+        "task_map_generation",
+        "task_map_ref",
+        "task_map_digest",
+        "goal_claim_set_ref",
+        "goal_claim_set_digest",
+        "target_commit",
+    ):
+        value = authority.get(field)
+        if str(value or "").strip():
+            coverage_task_map[field] = value
     if goal_id:
         # A run-scoped Dossier is keyed by the pinned Goal identity. A task-map
         # feature alias must not hide an admitted closure for that Goal.
@@ -536,6 +641,9 @@ def _claim_matrix(
                 or ""
             ),
             goal_id=goal_id,
+            task_map_generation=str(
+                coverage_task_map.get("task_map_generation") or ""
+            ),
         )
         graph = build_goal_coverage_graph(
             task_map=coverage_task_map,
@@ -589,10 +697,35 @@ def _claim_matrix(
         if str(row.get("verdict") or "") == "closed"
         and row.get("evidence_refs")
     }
+    current_result_tasks = {
+        str(item.get("task_id") or "")
+        for item in graph.get("nodes") or []
+        if isinstance(item, Mapping)
+        and item.get("kind") == "verification_result"
+        and bool(item.get("current"))
+        and str(item.get("task_id") or "")
+    }
+    has_current_closure = any(
+        isinstance(item, Mapping) and item.get("kind") == "goal_closure"
+        for item in graph.get("nodes") or []
+    )
+    superseded_diagnostics = [
+        item
+        for item in graph_diagnostics
+        if (
+            str(item.get("code") or "") == "stale_goal_closure_result"
+            and has_current_closure
+        )
+        or (
+            str(item.get("code") or "") == "stale_verification_result"
+            and str(item.get("task_id") or "") in current_result_tasks
+        )
+    ]
     blocking_diagnostics = [
         item
         for item in graph_diagnostics
-        if not (
+        if item not in superseded_diagnostics
+        and not (
             str(item.get("code") or "") == "mandatory_claim_uncovered"
             and str(item.get("goal_claim_id") or "") in closed_with_evidence
         )

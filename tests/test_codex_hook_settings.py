@@ -142,9 +142,14 @@ _REAL_HASHES = {
 
 
 @pytest.mark.parametrize(("state_dir", "label"), list(_REAL_HASHES.keys()))
-def test_codex_hook_hash_matches_real_codex_values(state_dir: str, label: str):
+def test_codex_hook_hash_matches_real_codex_values(
+    state_dir: str,
+    label: str,
+    monkeypatch,
+):
     from zf.runtime.codex_hooks import codex_hook_hash
 
+    monkeypatch.setenv("ZF_CLI_CMD", "zf")
     engine_name, zf_event = _EVENT_META[label]
     assert codex_hook_hash(Path(state_dir), engine_name, zf_event) == \
         _REAL_HASHES[(state_dir, label)]

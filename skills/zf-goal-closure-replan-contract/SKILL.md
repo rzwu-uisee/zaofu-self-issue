@@ -32,7 +32,10 @@ Do not re-derive a gap from chat or a one-line reason when a typed result exists
 2. Use `zf-gap-task-synth` to create the smallest additional task set that can
    close the verified gap.
 3. Give every task explicit ownership, allowed paths, source anchors,
-   acceptance criteria, verification owner/tier, and dependencies.
+   acceptance criteria, verification owner/tier, and dependencies. When a
+   command reads stable repository paths outside the writable claim, declare
+   them in `verification_read_paths`; never enlarge `allowed_paths` merely to
+   make admission pass.
 4. Reuse stable task identity where the contract is unchanged; mint a revised
    contract/task only when the required behavior or ownership changed.
 5. Record what changed from the prior plan and which old attempt/task is
@@ -57,7 +60,9 @@ Do not re-derive a gap from chat or a one-line reason when a typed result exists
    hashes. Candidate identity comes from the later kernel event/manifest;
    cross-check the patch/tree, owned paths, digests, task ref, and receipts.
    Every command intended for candidate quality must also be valid in a
-   reconstructed cherry-picked candidate checkout.
+   reconstructed cherry-picked candidate checkout. Mechanically reconcile its
+   path references against write scope, live-plan sibling scope, and explicit
+   read-only verification scope before submission.
 8. Persist the gap plan at the path supplied by the briefing, then use
    `zf-verify-gap-producer-contract` for the exact canonical submission.
 

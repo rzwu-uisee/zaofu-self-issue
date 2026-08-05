@@ -147,12 +147,50 @@ function fixturePlan(
   };
 }
 
+function fixtureMultiPlan(): AgentSessionPlanRequest {
+  const questions = [
+    {
+      id: "route",
+      header: "Delivery route",
+      question: "How should the work be delivered?",
+      options: [
+        { id: "direct", label: "Direct (Recommended)", recommended: true },
+        { id: "workflow", label: "Workflow" },
+      ],
+      allowOther: true,
+    },
+    {
+      id: "evidence",
+      header: "Evidence depth",
+      question: "How much verification evidence is required?",
+      options: [
+        { id: "focused", label: "Focused (Recommended)", recommended: true },
+        { id: "broad", label: "Broad" },
+      ],
+      allowOther: true,
+    },
+  ];
+  return {
+    ...fixturePlan("task_create"),
+    requestEventId: "evt-multi-clarification",
+    requestId: "request-multi-clarification",
+    header: "Clarify delivery",
+    subjectType: "clarification",
+    questionId: questions[0].id,
+    question: questions[0].question,
+    options: questions[0].options,
+    questions,
+  };
+}
+
 export function AgentSessionFixturePage() {
   const [interrupted, setInterrupted] = useState("");
   const [taskPlanResponse, setTaskPlanResponse] = useState<AgentSessionPlanResponse>();
   const [workflowPlanResponse, setWorkflowPlanResponse] = useState<AgentSessionPlanResponse>();
+  const [multiPlanResponse, setMultiPlanResponse] = useState<AgentSessionPlanResponse>();
   const taskPlan = fixturePlan("task_create");
   const workflowPlan = fixturePlan("task_workflow");
+  const multiPlan = fixtureMultiPlan();
   return (
     <div style={{ padding: 24, maxWidth: 980, margin: "0 auto" }}>
       <h2>AgentSessionTimeline fixture</h2>
@@ -186,6 +224,15 @@ export function AgentSessionFixturePage() {
         <PlanInteractionForm
           request={{ ...workflowPlan, response: workflowPlanResponse }}
           onSubmit={setWorkflowPlanResponse}
+        />
+      </div>
+
+      <h3 style={{ marginTop: 24 }}>Plan options - Multiple questions</h3>
+      <div data-testid="fx-multi-plan-options">
+        <PlanInteractionForm
+          request={{ ...multiPlan, response: multiPlanResponse }}
+          onChatAbout={() => setInterrupted("plan discussion")}
+          onSubmit={setMultiPlanResponse}
         />
       </div>
 

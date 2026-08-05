@@ -62,18 +62,21 @@ def _zf_imports_from_this_repo() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _real_workspace_registry_untouched() -> None:
-    """Fail the session if any test wrote to the REAL user workspace registry.
+def _real_workspace_registry_untouched(tmp_path_factory) -> None:
+    """Isolate tests from the real workspace and verify it stays untouched.
 
     2026-07-02: three pytest runs of test_web_profile.py (init endpoints
     without ZF_WORKSPACE_HOME isolation) leaked 9 ghost projects with dead
     /tmp roots into ~/.zaofu/workspaces/default/projects.json, which the web
-    project picker then showed as duplicates. Tests must isolate
-    ZF_WORKSPACE_HOME; this tripwire catches the next leak at the source."""
+    project picker then showed as duplicates. Web app construction also starts
+    background prewarming, so read isolation is required: otherwise the suite
+    scans large projects from the operator's real registry and pollutes shared
+    projection caches."""
     import hashlib
     import os
 
-    real_home = Path(os.environ.get("ZF_WORKSPACE_HOME", "") or Path.home() / ".zaofu")
+    original_home = os.environ.get("ZF_WORKSPACE_HOME")
+    real_home = Path(original_home or Path.home() / ".zaofu")
     registry = real_home / "workspaces" / "default" / "projects.json"
 
     def digest() -> str:
@@ -83,7 +86,15 @@ def _real_workspace_registry_untouched() -> None:
             return "absent"
 
     before = digest()
-    yield
+    isolated_home = tmp_path_factory.mktemp("zf-workspace-home")
+    os.environ["ZF_WORKSPACE_HOME"] = str(isolated_home)
+    try:
+        yield
+    finally:
+        if original_home is None:
+            os.environ.pop("ZF_WORKSPACE_HOME", None)
+        else:
+            os.environ["ZF_WORKSPACE_HOME"] = original_home
     after = digest()
     assert before == after, (
         f"a test wrote to the real workspace registry ({registry}): "

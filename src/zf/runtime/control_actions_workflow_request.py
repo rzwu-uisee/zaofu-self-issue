@@ -733,6 +733,11 @@ class WorkflowRequestActionsMixin:
             "requested_action": requested_action,
             "request_id": str((result.get("payload") or {}).get("request_id") or ""),
             "workflow_invoke_event_id": str(result.get("workflow_invoke_event_id") or ""),
+            "workflow_invoke_status": str(
+                result.get("workflow_invoke_status") or ""
+            ),
+            "next_action": str(result.get("next_action") or ""),
+            "idempotent_replay": bool(result.get("idempotent_replay")),
             "event_ids": list(result.get("event_ids") or []),
             "blockers": list(result.get("blockers") or []),
         }

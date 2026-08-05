@@ -435,6 +435,10 @@ def test_web_clarification_prepares_current_prd_request_without_agent_roundtrip(
             "intake_ref": detail["links"]["intake_ref"],
             "target_root": str(tmp_path),
             "open_questions": [],
+            "clarification_answers": [{
+                "question": "Which target should receive the product?",
+                "answer": str(tmp_path),
+            }],
             "confirm": True,
             "requested_by": "web",
         },
@@ -442,6 +446,13 @@ def test_web_clarification_prepares_current_prd_request_without_agent_roundtrip(
 
     assert clarified.status_code == 200, clarified.text
     assert clarified.json()["status"] == "ready"
+    clarified_detail = client.get(
+        "/api/projects/default/workflow-requests/REQ-WEB-CLARIFY"
+    ).json()
+    assert clarified_detail["requirement"]["clarification_answers"] == [{
+        "question": "Which target should receive the product?",
+        "answer": str(tmp_path),
+    }]
     prepared = client.post(
         "/api/projects/default/workflow-submit",
         headers=headers,
@@ -463,6 +474,76 @@ def test_web_clarification_prepares_current_prd_request_without_agent_roundtrip(
     assert projection["status"] == "proposed"
     assert projection["proposal_ref"]["ref"]
     assert projection["proposal_digest"]
+
+
+def test_web_partial_clarification_is_a_successful_persisted_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _state_dir = _prd_client(tmp_path, monkeypatch)
+    headers = {"x-zf-web-token": "test-token"}
+    created = client.post(
+        "/api/projects/default/workflow-intake",
+        headers=headers,
+        json={
+            "request_id": "REQ-WEB-PARTIAL-CLARIFY",
+            "kind": "prd",
+            "from": "docs/prd/request.md",
+            "objective": "Build the confirmed product.",
+            "backend": "mock",
+        },
+    )
+    assert created.status_code == 200, created.text
+    detail = client.get(
+        "/api/projects/default/workflow-requests/REQ-WEB-PARTIAL-CLARIFY"
+    ).json()
+
+    clarification_payload = {
+        "request_id": "REQ-WEB-PARTIAL-CLARIFY",
+        "intake_ref": detail["links"]["intake_ref"],
+        "target_root": str(tmp_path),
+        "open_questions": ["Who approves the final proposal?"],
+        "clarification_answers": [{
+            "question": "Which target should receive the product?",
+            "answer": str(tmp_path),
+        }],
+        "confirm": False,
+        "requested_by": "web",
+        "expected_revision": detail["result"]["revision"],
+        "expected_requirement_digest": detail["result"][
+            "requirement_spec_digest"
+        ],
+    }
+    clarified = client.post(
+        "/api/projects/default/workflow-clarify",
+        headers=headers,
+        json=clarification_payload,
+    )
+
+    assert clarified.status_code == 200, clarified.text
+    body = clarified.json()
+    assert body["ok"] is True
+    assert body["status"] == "clarifying"
+    assert body["result"]["revision"] == 2
+    assert body["result"]["clarification_answer_count"] == 1
+    assert body["result"]["open_questions"] == [
+        "Who approves the final proposal?"
+    ]
+    stale = client.post(
+        "/api/projects/default/workflow-clarify",
+        headers=headers,
+        json=clarification_payload,
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["status"] == "stale_workflow_request"
+    current = client.get(
+        "/api/projects/default/workflow-requests/REQ-WEB-PARTIAL-CLARIFY"
+    ).json()
+    assert current["result"]["revision"] == 2
+    assert current["requirement"]["clarification_answers"] == [{
+        "question": "Which target should receive the product?",
+        "answer": str(tmp_path),
+    }]
 
 
 def test_request_list_and_detail_share_run_admission_projection(

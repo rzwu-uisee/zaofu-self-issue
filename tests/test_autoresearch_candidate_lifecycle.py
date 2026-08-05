@@ -190,6 +190,52 @@ def test_run_manager_does_not_turn_plan_revision_attention_into_diagnosis(
     assert _pending_attention_diagnostic_actions(state_dir, []) == []
 
 
+def test_run_manager_does_not_diagnose_human_owned_attention(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state_dir(tmp_path)
+    projection_path = state_dir / "projections" / "supervisor" / "snapshot.json"
+    projection_path.parent.mkdir(parents=True)
+    projection_path.write_text(json.dumps({
+        "attention_items": [{
+            "attention_id": "attn-owner",
+            "fingerprint": "owner-decision:question-1",
+            "status": "open",
+            "suggested_route": "human",
+            "owner_route": "owner_notify",
+            "human_action_required": True,
+            "source_event_ids": ["evt-owner"],
+        }],
+    }), encoding="utf-8")
+
+    assert _pending_attention_diagnostic_actions(state_dir, []) == []
+
+
+def test_channel_reply_exhaustion_has_one_diagnosis_owner(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state_dir(tmp_path)
+    projection_path = state_dir / "projections" / "supervisor" / "snapshot.json"
+    projection_path.parent.mkdir(parents=True)
+    projection_path.write_text(json.dumps({
+        "attention_items": [{
+            "attention_id": "attn-channel-reply",
+            "status": "open",
+            "suggested_route": "run_manager_recovery",
+            "source_event_ids": ["evt-channel-exhausted"],
+        }],
+    }), encoding="utf-8")
+    exhausted = ZfEvent(
+        id="evt-channel-exhausted",
+        type="channel.agent.reply.remediation.exhausted",
+        payload={"channel_id": "ch-1", "request_id": "reply-1"},
+    )
+
+    assert _pending_attention_diagnostic_actions(
+        state_dir, [exhausted],
+    ) == []
+
+
 def test_same_recovery_case_bridges_only_one_autoresearch_invocation() -> None:
     first_request = _request("rmar-first", "rcase-shared")
     first_invocation = build_invocation_request_from_run_manager_event(

@@ -733,6 +733,8 @@ def test_semantic_replan_prefers_failed_task_committed_continuation(
     assert payload["candidate_ref"] == "worker/dev-1"
     assert payload["candidate_head_commit"] == "partial456"
     assert payload["target_ref"] == "partial456"
+    assert payload["output_profile_id"] == "global-rescan"
+    assert payload["output_profile_revision"] == "1"
     assert payload["source_commit"] == "base123"
     assert payload["candidate_base_commit"] == "base123"
 

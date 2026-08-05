@@ -215,6 +215,8 @@ _DURABLE_CALL_TRIGGER_KEYS = tuple(dict.fromkeys((
     "required_reads",
     "result_protocol_mode",
     "durable_operation",
+    "output_profile_id",
+    "output_profile_revision",
     "contract_snapshot_ref",
     "contract_snapshot_digest",
     "plan_artifact_package_id",
@@ -865,6 +867,7 @@ class FanoutCoordinationMixin(
                     child=child,
                     previous_dispatch=latest_dispatch,
                     attempt=len(child_dispatches),
+                    provider_session_replaced=True,
                 )
                 return True
         return False
@@ -6856,6 +6859,7 @@ class FanoutCoordinationMixin(
         child: dict,
         previous_dispatch: ZfEvent,
         attempt: int,
+        provider_session_replaced: bool = False,
     ) -> None:
         fanout_id = str(manifest.get("fanout_id") or "")
         child_id = str(child.get("child_id") or "")
@@ -6900,6 +6904,7 @@ class FanoutCoordinationMixin(
             task_id=str(child.get("task_id") or "") or None,
             causation_id=previous_dispatch.id,
             prompt_kind="fanout_child",
+            provider_session_replaced=provider_session_replaced,
         ):
             return
         briefing_path = self._write_fanout_retry_briefing(
@@ -8111,6 +8116,7 @@ class FanoutCoordinationMixin(
         if workflow_scope_refs.get("source_refs"):
             scope_contract["workflow_source_refs"] = workflow_scope_refs["source_refs"]
         briefing_text = "\n".join([
+                f"Active task: {task_id}",
                 f"# Fanout Writer Child: {task_id}",
                 "",
                 f"- fanout_id: `{context.fanout_id}`",

@@ -1094,7 +1094,13 @@ def channel_event_schema_rules() -> dict[str, dict[str, Any]]:
                 "target_member_id",
                 "ledger_digest",
             ],
-            "optional": ["schema_version", "question_count"],
+            "optional": [
+                "schema_version",
+                "question_count",
+                "generation",
+                "prior_request_id",
+                "repair_reason",
+            ],
         },
         "channel.question.dedup.applied": {
             "required": [
@@ -1114,6 +1120,10 @@ def channel_event_schema_rules() -> dict[str, dict[str, Any]]:
         "channel.question.dedup.rejected": {
             "required": [*base, "request_id", "reason"],
             "optional": ["schema_version", "details"],
+        },
+        "channel.question.dedup.remediation.exhausted": {
+            "required": [*base, "request_id", "attempts", "reason"],
+            "optional": ["schema_version"],
         },
         "channel.question.updated": {
             "required": [*base, "question_id", "question", "asked_by"],

@@ -8,6 +8,7 @@ import pytest
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
 from zf.runtime.workflow_requests import (
+    WorkflowRequestConflict,
     WorkflowRequestError,
     load_workflow_request,
     mark_workflow_request,
@@ -15,6 +16,7 @@ from zf.runtime.workflow_requests import (
     request_readiness_blockers,
     revise_workflow_request,
 )
+from zf.runtime.workflow_requirement_specs import merge_clarification_answers
 
 
 def _request_fixture(tmp_path: Path) -> tuple[Path, Path, EventWriter]:
@@ -50,6 +52,23 @@ def _request_fixture(tmp_path: Path) -> tuple[Path, Path, EventWriter]:
     return state_dir, manifest_ref, EventWriter(EventLog(state_dir / "events.jsonl"))
 
 
+def test_clarification_answers_are_bounded_and_latest_answer_wins() -> None:
+    current = [
+        {"question": f"question-{index}", "answer": f"answer-{index}"}
+        for index in range(32)
+    ]
+
+    merged = merge_clarification_answers(current, [
+        {"question": "question-0", "answer": "revised"},
+        {"question": "question-overflow", "answer": "ignored"},
+        {"question": "", "answer": "invalid"},
+    ])
+
+    assert len(merged) == 32
+    assert merged[0] == {"question": "question-0", "answer": "revised"}
+    assert all(item["question"] != "question-overflow" for item in merged)
+
+
 def test_workflow_request_revision_reaches_ready_with_versioned_spec(tmp_path: Path) -> None:
     state_dir, manifest_ref, writer = _request_fixture(tmp_path)
     source_manifest = manifest_ref.read_bytes()
@@ -73,6 +92,10 @@ def test_workflow_request_revision_reaches_ready_with_versioned_spec(tmp_path: P
         target_root="/repo/target",
         acceptance=["all public commands retain parity"],
         open_questions=[],
+        clarification_answers=[{
+            "question": "which source tree is canonical?",
+            "answer": "/repo/source",
+        }],
         confirm=True,
         writer=writer,
     )
@@ -91,10 +114,18 @@ def test_workflow_request_revision_reaches_ready_with_versioned_spec(tmp_path: P
     assert effective["request_revision"] == 2
     assert effective["source_workflow_input_manifest_ref"] == str(manifest_ref)
     assert effective["source_workflow_input_manifest_digest"]
+    assert effective["clarification_answers"] == [{
+        "question": "which source tree is canonical?",
+        "answer": "/repo/source",
+    }]
     spec = json.loads(Path(ready["requirement_spec_ref"]).read_text(encoding="utf-8"))
     assert spec["schema_version"] == "requirement-spec.v1"
     assert spec["revision"] == 2
     assert spec["acceptance"] == ["all public commands retain parity"]
+    assert spec["clarification_answers"] == effective[
+        "clarification_answers"
+    ]
+    assert ready["clarification_answer_count"] == 1
     assert load_workflow_request(state_dir, "REQ-1")["requirement_spec_digest"]
     types = [event.type for event in writer.event_log.read_all()]
     assert types == [
@@ -103,6 +134,46 @@ def test_workflow_request_revision_reaches_ready_with_versioned_spec(tmp_path: P
         "workflow.request.updated",
         "workflow.intake.ready",
     ]
+
+
+def test_workflow_request_revision_precondition_rejects_stale_replay(
+    tmp_path: Path,
+) -> None:
+    state_dir, manifest_ref, writer = _request_fixture(tmp_path)
+    initial = register_workflow_intake(
+        state_dir,
+        manifest_ref,
+        actor="test",
+        writer=writer,
+    )
+    current = revise_workflow_request(
+        state_dir,
+        manifest_ref,
+        actor="owner",
+        source_root="/repo/source",
+        expected_revision=initial["revision"],
+        expected_requirement_digest=initial["requirement_spec_digest"],
+        writer=writer,
+    )
+    event_count = len(writer.event_log.read_all())
+
+    with pytest.raises(WorkflowRequestConflict, match="stale workflow request revision"):
+        revise_workflow_request(
+            state_dir,
+            manifest_ref,
+            actor="stale-owner",
+            target_root="/wrong/target",
+            expected_revision=initial["revision"],
+            expected_requirement_digest=initial["requirement_spec_digest"],
+            writer=writer,
+        )
+
+    persisted = load_workflow_request(state_dir, "REQ-1")
+    assert persisted["revision"] == current["revision"]
+    assert persisted["requirement_spec_digest"] == current[
+        "requirement_spec_digest"
+    ]
+    assert len(writer.event_log.read_all()) == event_count
 
 
 def test_existing_legacy_request_is_migrated_to_origin_binding(

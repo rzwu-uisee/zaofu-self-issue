@@ -168,22 +168,58 @@ def test_channel_route_blocked_never_unknown_actionable() -> None:
     assert _pending_semantic_event_actions([event]) == []
 
 
-def test_channel_question_dedup_rejection_routes_to_run_manager_first() -> None:
+def test_failure_envelopes_do_not_create_recovery_actions() -> None:
+    from zf.core.events.model import ZfEvent
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    events = [
+        ZfEvent(type="runtime.action.attempt.failed", payload={
+            "attempt_id": "attempt-1", "action": "question-resolve",
+        }),
+        ZfEvent(type="runtime.action.failed", payload={
+            "action": "question-resolve",
+        }),
+        ZfEvent(type="web.action.failed", payload={
+            "action": "question-resolve",
+        }),
+        ZfEvent(type="agent.session.run.failed", payload={
+            "run_id": "provider-run-1",
+        }),
+    ]
+
+    assert _pending_semantic_event_actions(events) == []
+    assert all(
+        spec_for_event(event.type).event_class == "projection_only"
+        for event in events
+    )
+
+
+def test_channel_question_dedup_rejection_stays_with_bounded_kernel_retry() -> None:
     spec = spec_for_event("channel.question.dedup.rejected")
 
     assert spec is not None
-    assert spec.event_class == "expected_negative"
+    assert spec.event_class == "projection_only"
     assert spec.problem_class == "contract"
     assert spec.owner_route == "run_manager"
-    assert spec.run_manager_semantics == ("pending_action",)
+    assert spec.run_manager_semantics == ()
     assert spec.autoresearch_eligible is False
-    assert spec.effective_notification_policy == "run_manager_first"
-    assert spec.effective_recovery_policy == "run_manager"
+    assert spec.effective_notification_policy == "trace_only"
+    assert spec.effective_recovery_policy == "none"
     assert spec.dedupe_key_fields == (
         "channel_id",
         "thread_id",
         "request_id",
     )
+
+
+def test_channel_question_dedup_exhaustion_routes_to_run_manager_once() -> None:
+    spec = spec_for_event("channel.question.dedup.remediation.exhausted")
+
+    assert spec is not None
+    assert spec.event_class == "abnormal"
+    assert spec.run_manager_semantics == ("pending_action",)
+    assert spec.autoresearch_eligible is False
+    assert spec.effective_recovery_policy == "run_manager"
 
 
 def test_channel_result_receipt_failure_stays_with_bounded_reconciler() -> None:

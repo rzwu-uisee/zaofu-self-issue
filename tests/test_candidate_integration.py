@@ -185,6 +185,45 @@ def test_candidate_identity_and_failure_fingerprint_ignore_volatile_npm_logs() -
     assert triage.suspected_owner == "planner"
 
 
+def test_source_commit_ancestry_gate_routes_to_contract_replan() -> None:
+    candidate = {
+        "status": "quality_failed",
+        "base_commit": "base-1",
+        "commit": "candidate-1",
+        "included_tasks": [{
+            "task_id": "T1",
+            "task_ref": "refs/heads/worker/T1",
+            "source_commit": "source-1",
+        }],
+        "quality": {
+            "status": "failed",
+            "gate_source": "task_contract",
+            "gates_failed": ["task_contract:T1:lineage"],
+            "gate_checks": {
+                "task_contract:T1:lineage": [{
+                    "command": "git merge-base --is-ancestor source-1 HEAD",
+                    "exit_code": 1,
+                    "stderr_tail": "",
+                }],
+            },
+        },
+    }
+
+    envelope = candidate_failure_envelope(candidate, failed_children=[])
+
+    assert envelope["failure_class"] == "candidate_quality_gate_contract_mismatch"
+    assert envelope["failure_scope"] == "candidate"
+    assert envelope["diagnostic_class"] == "candidate_lineage_contract_mismatch"
+    assert "source-branch commit ancestry" in envelope["primary_failure_reason"]
+    triage = classify_rework_trigger(ZfEvent(
+        type="integration.failed",
+        payload=envelope,
+    ))
+    assert triage.classification == "design_issue"
+    assert triage.suspected_owner == "planner"
+    assert triage.recommended_action == "request_replan"
+
+
 def test_precommit_block_is_not_classified_as_integration_conflict() -> None:
     envelope = candidate_failure_envelope({
         "status": "conflict",

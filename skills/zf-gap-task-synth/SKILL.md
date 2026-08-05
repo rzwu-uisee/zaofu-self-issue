@@ -20,6 +20,8 @@ Each generated gap task must be a normal task-map task with:
 - `owner_role` and `affinity_tag`;
 - `parent_task_id` when it patches a previous task;
 - `claim_paths` / `allowed_paths`;
+- `verification_read_paths` when focused verification reads stable tests,
+  scripts, fixtures, or manifests outside the task's writable claim;
 - explicit acceptance criteria;
 - focused verification commands;
 - `source_refs` 优先锚定 verify report 的 `gap_findings` 条目(`finding_id` /
@@ -34,6 +36,27 @@ Each generated gap task must be a normal task-map task with:
 
 Do not synthesize vague tasks such as "finish web UI" without precise source
 anchors and verification.
+
+Treat `allowed_paths` as write authority. Do not widen it merely to admit a
+verification command. Before emit, extract every repository path referenced by
+the final commands and prove that each is covered by the task write scope, a
+live sibling task's scope, or explicit `verification_read_paths`. The read-only
+field does not grant the worker permission to modify those paths.
+
+Classify command paths before emitting the plan:
+
+- an absolute command executable and the value of `--state-dir` are host/runtime
+  context, not repository read claims;
+- every repository test, script, fixture, manifest, or imported helper named by
+  a command still belongs in write scope, a live sibling scope, or
+  `verification_read_paths`;
+- mechanically compute
+  `repo_paths(verify_commands) - writable_scope - live_sibling_scope` and copy
+  the complete remainder into `verification_read_paths` before emitting
+  `flow.gap_plan.ready`;
+- after an admission rejection, preserve the original semantic gap and correct
+  only the rejected task-map shape. Do not rerun broad discovery merely to add
+  a missing read claim.
 
 ## Split-quality Preflight
 

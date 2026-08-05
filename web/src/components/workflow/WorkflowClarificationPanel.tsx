@@ -1,7 +1,11 @@
 import { Check, FileDiff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { asStringArray, textValue } from "../../app/shared";
+import { asRecordArray, asStringArray, textValue } from "../../app/shared";
+import {
+  AskUserQuestion,
+  type AskUserQuestionAnswer,
+} from "../common/AskUserQuestion";
 import { StatusBadge } from "./WorkflowProposalParts";
 
 export function WorkflowClarificationPanel({
@@ -15,6 +19,7 @@ export function WorkflowClarificationPanel({
   requestId,
   requestStatus,
   requirement,
+  requirementDigest,
 }: {
   actionReady: boolean;
   actionState: string;
@@ -26,18 +31,34 @@ export function WorkflowClarificationPanel({
   requestId: string;
   requestStatus: string;
   requirement: Record<string, unknown>;
+  requirementDigest: string;
 }) {
   const [objective, setObjective] = useState(textValue(requirement.objective));
   const [sourceRoot, setSourceRoot] = useState(textValue(requirement.source_root));
   const [targetRoot, setTargetRoot] = useState(textValue(requirement.target_root));
   const [acceptance, setAcceptance] = useState(asStringArray(requirement.acceptance).join("\n"));
   const [constraints, setConstraints] = useState(asStringArray(requirement.constraints).join("\n"));
-  const [openQuestions, setOpenQuestions] = useState(asStringArray(requirement.open_questions).join("\n"));
+  useEffect(() => {
+    setObjective(textValue(requirement.objective));
+    setSourceRoot(textValue(requirement.source_root));
+    setTargetRoot(textValue(requirement.target_root));
+    setAcceptance(asStringArray(requirement.acceptance).join("\n"));
+    setConstraints(asStringArray(requirement.constraints).join("\n"));
+  }, [requestId, requirement.revision]);
+  const openQuestions = asStringArray(requirement.open_questions);
+  const questionBatch = openQuestions.slice(0, 3);
+  const remainingOpenQuestions = openQuestions.slice(3);
+  const clarificationAnswerCount = asRecordArray(
+    requirement.clarification_answers,
+  ).length;
+  const requirementRevision = Number(requirement.revision || 0);
   const preparePayload = {
     request_id: requestId,
     intake_ref: intakeRef,
     kind: requestKind,
     allow_missing_env: true,
+    expected_revision: requirementRevision,
+    expected_requirement_digest: requirementDigest,
   };
 
   if (requestStatus === "ready") {
@@ -71,8 +92,6 @@ export function WorkflowClarificationPanel({
     target_root: targetRoot,
     acceptance: multilineValues(acceptance),
     constraints: multilineValues(constraints),
-    open_questions: multilineValues(openQuestions),
-    confirm: true,
     requested_by: "web",
   };
   return (
@@ -130,30 +149,62 @@ export function WorkflowClarificationPanel({
           />
         </label>
       </div>
-      {asStringArray(requirement.open_questions).length ? (
-        <label>
-          <span>Open questions</span>
-          <textarea
-            rows={3}
-            value={openQuestions}
-            onChange={(event) => setOpenQuestions(event.target.value)}
-          />
-        </label>
-      ) : null}
-      <div className="workflow-clarification-actions">
-        <button
-          className="icon-button primary"
-          disabled={!actionReady || busyAction !== "" || !objective.trim()}
-          title={!actionReady ? actionState : "Save the revision and prepare its proposal"}
-          type="button"
-          onClick={() => onClarify(clarificationPayload)}
-        >
-          <Check aria-hidden="true" size={16} />
-          {busyAction === "workflow-clarify" || busyAction === "workflow-prepare"
-            ? "Preparing"
+      {questionBatch.length ? (
+        <AskUserQuestion
+          busy={busyAction !== ""}
+          disabled={!actionReady || !objective.trim()}
+          onSubmit={(answers: AskUserQuestionAnswer[]) => onClarify({
+            ...clarificationPayload,
+            open_questions: remainingOpenQuestions,
+            clarification_answers: answers
+              .filter((answer) => !answer.skipped)
+              .map((answer) => ({
+                question: questionBatch.find((_, index) => (
+                  `workflow-question-${index + 1}` === answer.questionId
+                )) || "",
+                answer: answer.answer,
+              })),
+            confirm: remainingOpenQuestions.length === 0,
+          })}
+          questions={questionBatch.map((question, index) => ({
+            id: `workflow-question-${index + 1}`,
+            header: "Clarification",
+            question,
+            inputPlaceholder: "Type a concrete answer.",
+            required: true,
+          }))}
+          requestId={[
+            requestId,
+            String(requirement.revision || ""),
+            openQuestions.join("|"),
+          ].join(":")}
+          submitLabel={remainingOpenQuestions.length
+            ? "Save answers"
             : "Save & prepare proposal"}
-        </button>
-      </div>
+        />
+      ) : (
+        <div className="workflow-clarification-actions">
+          {clarificationAnswerCount ? (
+            <span>{clarificationAnswerCount} decisions recorded</span>
+          ) : null}
+          <button
+            className="icon-button primary"
+            disabled={!actionReady || busyAction !== "" || !objective.trim()}
+            title={!actionReady ? actionState : "Save the revision and prepare its proposal"}
+            type="button"
+            onClick={() => onClarify({
+              ...clarificationPayload,
+              open_questions: [],
+              confirm: true,
+            })}
+          >
+            <Check aria-hidden="true" size={16} />
+            {busyAction === "workflow-clarify" || busyAction === "workflow-prepare"
+              ? "Preparing"
+              : "Save & prepare proposal"}
+          </button>
+        </div>
+      )}
     </section>
   );
 }

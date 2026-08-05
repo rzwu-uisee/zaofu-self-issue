@@ -25,6 +25,7 @@ from zf.runtime.verification_commands import (
     task_map_verification_command_fields,
     task_map_verification_commands as task_verification_commands,
 )
+from zf.runtime.verification_path_refs import command_path_refs as _command_path_refs
 
 
 @dataclass(frozen=True)
@@ -792,8 +793,8 @@ def _verification_scope_errors(
     scope_paths = [
         *_string_list(raw.get("allowed_paths")),
         *_string_list(raw.get("exclusive_files")),
-        # verification commands run tests read-only; allow any test/file owned by
-        # a sibling task in the same plan (cross-task verification).
+        *_string_list(raw.get("verification_read_paths")),
+        # Allow tests/files owned by live sibling tasks (cross-task verification).
         *(plan_scope_paths or []),
     ]
     if not scope_paths:
@@ -806,90 +807,10 @@ def _verification_scope_errors(
             relative_roots=relative_roots,
         ):
             out.append(
-                "references path outside allowed_paths/exclusive_files: "
+                "references path outside allowed_paths/exclusive_files/verification_read_paths: "
                 f"{path_ref!r}"
             )
     return out
-
-
-_CODE_ARGUMENT_FLAGS = {
-    "-c",
-    "-e",
-    "-ec",
-    "-lc",
-    "-lec",
-    "--command",
-    "--eval",
-}
-
-
-def _command_path_refs(command: str) -> list[str]:
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return []
-    refs: list[str] = []
-    skip_code_argument = False
-    for token in tokens:
-        if skip_code_argument:
-            skip_code_argument = False
-            continue
-        if str(token).strip().lower() in _CODE_ARGUMENT_FLAGS:
-            skip_code_argument = True
-            continue
-        for cleaned in _path_ref_candidates_from_shell_token(token):
-            # A pytest node-id (path::test_name, optionally path::Class::test) is a
-            # test target, not a separate file. Validate only the file part so an
-            # in-scope test file is not rejected for naming a specific node — e.g.
-            # `pytest tests/test_x.py::test_case` must match allowed path
-            # `tests/test_x.py`, not the literal `tests/test_x.py::test_case`.
-            if "::" in cleaned:
-                cleaned = cleaned.split("::", 1)[0]
-            if not _looks_like_path_ref(cleaned):
-                continue
-            refs.append(cleaned)
-    return list(dict.fromkeys(refs))
-
-
-def _path_ref_candidates_from_shell_token(token: str) -> list[str]:
-    cleaned = _clean_path_ref_token(token)
-    if not cleaned or cleaned.startswith("-") or "://" in cleaned:
-        return []
-    if cleaned.startswith("$("):
-        inner = cleaned[2:].strip()
-        if inner.endswith(")"):
-            inner = inner[:-1].strip()
-        try:
-            inner_tokens = shlex.split(inner)
-        except ValueError:
-            inner_tokens = inner.split()
-        out: list[str] = []
-        for inner_token in inner_tokens:
-            out.extend(_path_ref_candidates_from_shell_token(inner_token))
-        return out
-    if any(ch.isspace() for ch in cleaned):
-        return []
-    if "=" in cleaned and not cleaned.startswith(("./", "../", "/")):
-        cleaned = cleaned.rsplit("=", 1)[-1]
-    cleaned = _clean_path_ref_token(cleaned)
-    return [cleaned] if cleaned else []
-
-
-def _clean_path_ref_token(token: str) -> str:
-    cleaned = str(token or "").strip().strip("'\"")
-    # Path refs often appear in generated acceptance/prose as
-    # ``tests/foo.py.`` or ``src/app.ts)``. Treat sentence punctuation as
-    # prose, not as part of the path, while leaving real internal path
-    # characters untouched.
-    return cleaned.rstrip(".,;:)]}，。；：、）】》")
-
-
-def _looks_like_path_ref(token: str) -> bool:
-    if token in {".", ".."}:
-        return False
-    if token.startswith(("./", "../", "/")):
-        return True
-    return "/" in token and not token.startswith("-")
 
 
 def _path_ref_covered(

@@ -283,7 +283,7 @@ def test_config_rendered_controller_yaml_preserves_affinity_assignment(
     capsys.readouterr()
 
 
-def test_config_inspect_classifies_flow_discovery_bridge_trigger(capsys):
+def test_config_inspect_recognizes_flow_discovery_bridge_producer(capsys):
     rc = main([
         "config",
         "inspect",
@@ -296,17 +296,12 @@ def test_config_inspect_classifies_flow_discovery_bridge_trigger(capsys):
 
     assert rc == 0
     report = json.loads(capsys.readouterr().out)
-    expected_triggers = [
-        item for item in report["diagnostics"]
-        if item["kind"] == "expected_trigger_without_producer"
-    ]
-    assert any(
-        item["event"] == "flow.discovery.requested"
-        for item in expected_triggers
-    )
     assert not [
         item for item in report["diagnostics"]
-        if item["kind"] == "trigger_without_producer"
+        if item["kind"] in {
+            "expected_trigger_without_producer",
+            "trigger_without_producer",
+        }
         and item["event"] == "flow.discovery.requested"
     ]
 

@@ -14,6 +14,8 @@ from zf.core.task.store import TaskStore
 
 SEMANTIC_REPLAN_ACTION = "semantic-replan-request"
 SEMANTIC_REPLAN_SAFE_ACTION = "request_semantic_replan"
+_SEMANTIC_REPLAN_OUTPUT_PROFILE_ID = "global-rescan"
+_SEMANTIC_REPLAN_OUTPUT_PROFILE_REVISION = "1"
 
 _PREFERRED_TRIGGER_ORDER = (
     "flow.discovery.requested",
@@ -170,6 +172,8 @@ def enrich_semantic_replan_action(
         "semantic_replan_role": route.role,
         "flow_kind": route.flow_kind,
         "stage_id": route.stage_id,
+        "output_profile_id": _SEMANTIC_REPLAN_OUTPUT_PROFILE_ID,
+        "output_profile_revision": _SEMANTIC_REPLAN_OUTPUT_PROFILE_REVISION,
         "action_policy": "auto_decide",
         "owner_route": "run_manager",
         "intervention_class": "semantic_replan",

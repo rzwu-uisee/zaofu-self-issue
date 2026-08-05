@@ -60,6 +60,19 @@ def test_workflow_inspection_reports_go_for_complete_handoff(tmp_path: Path) -> 
     assert report["handoff"]["terminal_policy"]["success_events"] == ["judge.passed"]
 
 
+def test_workflow_inspection_accepts_kernel_flow_discovery_bridge() -> None:
+    diagnostics = _graph_diagnostics(
+        [{
+            "kind": "trigger_without_producer",
+            "stage_id": "prd-post-verify-discovery",
+            "event": "flow.discovery.requested",
+        }],
+        event_consumers={},
+    )
+
+    assert diagnostics == []
+
+
 def test_workflow_inspection_fails_closed_for_reserved_event_and_missing_skill(
     tmp_path: Path,
 ) -> None:

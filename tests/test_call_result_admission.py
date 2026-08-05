@@ -3,10 +3,20 @@ from pathlib import Path
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.task.schema import Task, TaskContract
+from zf.core.task.store import TaskStore
 from zf.runtime.call_result_admission import CallResultAdmissionService
+from zf.runtime.call_result_adapters import AdaptedControlResult
 from zf.runtime.call_result_envelope import (
     normalize_call_result_envelope,
     write_immutable_json_sidecar,
+)
+from zf.runtime.task_contract_snapshot import (
+    build_target_snapshot,
+    build_task_contract_snapshot,
+    current_task_contract_identity,
+    write_target_snapshot,
+    write_task_contract_snapshot,
 )
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
@@ -1000,3 +1010,92 @@ def test_plan_synthesis_result_is_not_bound_to_previous_plan_package(
             implementation_envelope,
         )
     } == {"stale_plan_artifact_package"}
+
+
+def test_global_rescan_uses_pinned_target_without_weakening_candidate_verify(
+    tmp_path: Path,
+) -> None:
+    admission, operations = _runtime(tmp_path)
+    task = Task(
+        id="T-rescan",
+        title="Audit continuation",
+        status="in_progress",
+        contract=TaskContract(
+            behavior="audit one reusable checkpoint",
+            verification="pytest -q",
+            acceptance_criteria=["report remaining gaps"],
+            evidence_contract={
+                "source_refs": {
+                    "task_map_generation": "generation-checkpoint",
+                    "task_map_ref": "artifacts/task-maps/checkpoint.json",
+                },
+            },
+        ),
+    )
+    TaskStore(tmp_path / "kanban.json").add(task)
+    current = current_task_contract_identity(task)
+    contract = build_task_contract_snapshot(
+        task,
+        workflow_run_id="run-rescan",
+        task_map_generation_id=current["task_map_generation"],
+        base_commit="base-checkpoint",
+        task_ref="refs/zf/tasks/T-rescan",
+    )
+    contract_ref = write_task_contract_snapshot(tmp_path, contract)
+    checkpoint_commit = "a" * 40
+    target_ref = write_target_snapshot(
+        tmp_path,
+        build_target_snapshot(
+            contract_ref,
+            target_commit=checkpoint_commit,
+            contract_snapshot=contract,
+        ),
+    )
+    operations.event_log.append(ZfEvent(
+        type="candidate.ready",
+        correlation_id="run-rescan",
+        payload={
+            "workflow_run_id": "run-rescan",
+            "task_map_generation": "generation-current-candidate",
+            "candidate_head_commit": "c" * 40,
+        },
+    ))
+    identity = {
+        **current,
+        "workflow_run_id": "run-rescan",
+        "base_commit": "base-checkpoint",
+        "task_ref": "refs/zf/tasks/T-rescan",
+        "contract_snapshot_ref": contract_ref["ref"],
+        "contract_snapshot_digest": contract_ref["sha256"],
+        "target_snapshot_ref": target_ref["ref"],
+        "target_snapshot_digest": target_ref["sha256"],
+        "target_commit": checkpoint_commit,
+    }
+    envelope = {"identity": identity}
+    adapted = AdaptedControlResult(
+        adapter_id="verification-result-v1-explicit",
+        schema_version="verification-result.v1",
+        payload=dict(identity),
+        descriptor={},
+    )
+
+    assert admission._task_result_currentness_issues(
+        envelope,
+        adapted,
+        {
+            "output_profile_id": "global-rescan",
+            "output_profile_revision": "1",
+        },
+    ) == []
+    strict_codes = {
+        issue["code"]
+        for issue in admission._task_result_currentness_issues(
+            envelope,
+            adapted,
+            {
+                "output_profile_id": "candidate-verify",
+                "output_profile_revision": "1",
+            },
+        )
+    }
+    assert strict_codes == {"stale_task_map_generation", "stale_target_commit"}

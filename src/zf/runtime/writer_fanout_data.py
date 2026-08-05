@@ -16,6 +16,7 @@ from zf.runtime.fanout_payload_data import (
     payload_ref_value,
 )
 from zf.runtime.fanout_parent_identity import parent_flow_identity
+from zf.runtime.plan_port_projection import first_normalized_plan_ports
 from zf.runtime.task_contract_snapshot import criterion_text
 
 from zf.core.config.schema import RoleConfig
@@ -190,6 +191,8 @@ class WriterFanoutDataMixin:
             "`{\"logical_name\": \"acceptance_matrix\", \"schema_version\": "
             "\"acceptance-matrix.v1\", \"body\": {...}}`; do not use a "
             "`{logical_name: body}` object map.",
+            "Return `plan_ports` once at the top level of the success payload; "
+            "do not duplicate the matrix bodies inside `report`.",
             "Every required matrix body must set top-level `status: ready` and "
             "`metadata.enrichment_contract.status: fulfilled`; do not overwrite "
             "kernel state or claim an unadapted draft as ready.",
@@ -250,20 +253,9 @@ class WriterFanoutDataMixin:
             payload["input_result_refs"] = self._dedupe_strings(
                 admitted_input_refs
             )
-        for source in payloads:
-            plan_ports = source.get("plan_ports")
-            if not isinstance(plan_ports, list):
-                synthesis = source.get("plan_synthesis_result")
-                plan_ports = (
-                    synthesis.get("plan_ports")
-                    if isinstance(synthesis, dict)
-                    else None
-                )
-            if isinstance(plan_ports, list):
-                payload["plan_ports"] = [
-                    dict(item) for item in plan_ports if isinstance(item, dict)
-                ]
-                break
+        plan_ports = first_normalized_plan_ports(payloads)
+        if plan_ports:
+            payload["plan_ports"] = plan_ports
         if inventory_refs:
             payload["inventory_refs"] = self._dedupe_strings(inventory_refs)
         # E3-2(审计 D3 dead-end 修复):quality-floor 词表键必须随聚合

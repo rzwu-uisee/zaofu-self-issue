@@ -1491,6 +1491,9 @@ export interface ChannelSummary {
   routes?: Array<Record<string, unknown>>;
   discussions?: Record<string, Record<string, unknown>>;
   open_questions?: Array<Record<string, unknown>> | Record<string, Record<string, unknown>>;
+  question_frontiers?: Record<string, Array<Record<string, unknown>>>;
+  owner_questionnaires?: Record<string, Array<Record<string, unknown>>>;
+  question_graph_digests?: Record<string, string>;
   consensus?: Record<string, Record<string, unknown>>;
   reply_requests?: Array<Record<string, unknown>>;
   provider_runs?: Array<Record<string, unknown>>;
@@ -2498,7 +2501,7 @@ export interface LoopViewLoop {
   shape: string[];
   closure_edge: [string, string] | string[];
   counts: Record<string, number>;
-  arc: { state: "flow" | "active" | "broken"; label: string };
+  arc: { state: "flow" | "active" | "broken" | "idle"; label: string };
   health: string;
   members?: Array<{ kind: string; id: string; note: string }>;
   node_stats?: Record<string, Record<string, number>>;
@@ -2509,6 +2512,11 @@ export interface LoopViewProjection {
   schema_version: string;
   generated_at: string;
   project_id: string;
+  scope: {
+    kind: "business_delivery" | "project_recovery" | string;
+    business_delivery_active: boolean;
+    reason: string;
+  };
   run: {
     event_count: number;
     semantic_event_count: number;

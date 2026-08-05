@@ -39,7 +39,10 @@ from zf.runtime.event_problem_registry import (
     looks_actionable_event,
     spec_for_event,
 )
-from zf.runtime.channel_reply_remediation import pending_channel_reply_exhausted_actions
+from zf.runtime.channel_reply_remediation import (
+    CHANNEL_REPLY_EXHAUSTED_EVENT,
+    pending_channel_reply_exhausted_actions,
+)
 from zf.runtime.autoresearch_invocation import recovery_case_id_from_payload
 from zf.autoresearch.self_repair import (
     candidate_from_dict,
@@ -2064,6 +2067,7 @@ def build_run_goal_projection(
     source_event_id = ""
     blockers: Counter[str] = Counter()
     last_blocker: dict[str, Any] = {}
+    terminal_event: ZfEvent | None = None
     for event in scoped_events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.type == "run.goal.started":
@@ -2082,10 +2086,12 @@ def build_run_goal_projection(
             status = "complete"
             active_run_id = str(payload.get("run_id") or active_run_id)
             source_event_id = event.id
+            terminal_event = event
         elif event.type == "run.goal.blocked":
             status = "blocked"
             active_run_id = str(payload.get("run_id") or active_run_id)
             source_event_id = event.id
+            terminal_event = event
         if event.type in {
             RUN_MANAGER_ACTION_VERIFY_FAILED,
             RUN_MANAGER_ACTION_BLOCKED,
@@ -2114,6 +2120,28 @@ def build_run_goal_projection(
         scoped_events,
         workflow_run_id=selected_run_id,
     )
+    if terminal_event is not None:
+        from zf.runtime.goal_completion_authority import scope_handoff_snapshot
+
+        terminal_payload = (
+            terminal_event.payload
+            if isinstance(terminal_event.payload, dict)
+            else {}
+        )
+        handoff = scope_handoff_snapshot(
+            handoff,
+            task_map_generation=str(
+                terminal_payload.get("task_map_generation") or ""
+            ),
+            candidate_task_ids=[
+                str(item)
+                for item in terminal_payload.get("completed_task_ids") or []
+                if str(item).strip()
+            ],
+        )
+    historical_last_blocker = last_blocker if status == "complete" else {}
+    if status == "complete":
+        last_blocker = {}
     completion_gate_status = "not_claimed"
     for event in scoped_events:
         if event.type == RUN_GOAL_COMPLETION_CLAIMED:
@@ -2133,10 +2161,17 @@ def build_run_goal_projection(
         "blocked_ready": blocked_ready,
         "blocker_threshold": blocker_threshold,
         "last_blocker": last_blocker,
+        "historical_last_blocker": historical_last_blocker,
         "source_event_id": source_event_id,
         "delivery_phase": handoff["delivery_phase"],
         "open_feedback_count": handoff["open_feedback_count"],
         "pending_handoff_count": handoff["pending_handoff_count"],
+        "historical_open_feedback_count": int(
+            handoff.get("historical_open_feedback_count") or 0
+        ),
+        "historical_pending_handoff_count": int(
+            handoff.get("historical_pending_handoff_count") or 0
+        ),
         "completion_gate_status": completion_gate_status,
         "attempt_handoff_schema_version": handoff["schema_version"],
     }
@@ -2374,10 +2409,22 @@ def run_goal_completion_gate_event(
         return None
 
     from zf.runtime.attempt_handoff_reducer import reduce_attempt_handoffs
+    from zf.runtime.goal_completion_authority import (
+        active_fanout_ids_for_authority,
+        scope_handoff_snapshot,
+    )
 
-    handoff = reduce_attempt_handoffs(
+    candidate_task_ids = _candidate_completed_task_ids_for_claim(
         scoped_events,
-        workflow_run_id=run_id,
+        claim_payload=claim_payload,
+    )
+    handoff = scope_handoff_snapshot(
+        reduce_attempt_handoffs(
+            scoped_events,
+            workflow_run_id=run_id,
+        ),
+        task_map_generation=str(claim_payload.get("task_map_generation") or ""),
+        candidate_task_ids=sorted(candidate_task_ids),
     )
     blockers: list[str] = []
     if int(handoff.get("open_feedback_count") or 0):
@@ -2400,10 +2447,6 @@ def run_goal_completion_gate_event(
         for item in handoff.get("active_attempts") or []
         if isinstance(item, dict) and item.get("status") == "active"
     ]
-    candidate_task_ids = _candidate_completed_task_ids_for_claim(
-        scoped_events,
-        claim_payload=claim_payload,
-    )
     if candidate_task_ids:
         active_attempts = [
             item
@@ -2412,7 +2455,14 @@ def run_goal_completion_gate_event(
         ]
     if active_attempts:
         blockers.append("active_attempt")
-    active_fanout_ids = _active_fanout_ids(scoped_events)
+    active_fanout_ids, historical_active_fanout_ids = (
+        active_fanout_ids_for_authority(
+            scoped_events,
+            task_map_generation=str(
+                claim_payload.get("task_map_generation") or ""
+            ),
+        )
+    )
     if active_fanout_ids:
         blockers.append("active_fanout")
     pending_effect_ids, failed_effect_ids = _unresolved_action_effects(scoped_events)
@@ -2558,7 +2608,14 @@ def run_goal_completion_gate_event(
         "delivery_phase": str(handoff.get("delivery_phase") or ""),
         "open_feedback_count": int(handoff.get("open_feedback_count") or 0),
         "pending_handoff_count": int(handoff.get("pending_handoff_count") or 0),
+        "historical_open_feedback_count": int(
+            handoff.get("historical_open_feedback_count") or 0
+        ),
+        "historical_pending_handoff_count": int(
+            handoff.get("historical_pending_handoff_count") or 0
+        ),
         "active_fanout_ids": active_fanout_ids,
+        "historical_active_fanout_ids": historical_active_fanout_ids,
         "pending_action_effect_ids": pending_effect_ids,
         "failed_action_effect_ids": failed_effect_ids,
         "required_operation_ids": list(dict.fromkeys(required_operation_ids)),
@@ -2719,25 +2776,6 @@ def run_goal_completion_gate_event(
             "reason": "completion claim passed deterministic gate",
         },
     )
-
-
-def _active_fanout_ids(events: list[ZfEvent]) -> list[str]:
-    started = {
-        str((event.payload or {}).get("fanout_id") or "")
-        for event in events
-        if event.type == "fanout.started" and isinstance(event.payload, dict)
-    }
-    settled = {
-        str((event.payload or {}).get("fanout_id") or "")
-        for event in events
-        if event.type in {
-            "fanout.aggregate.completed",
-            "fanout.cancelled",
-            "fanout.timed_out",
-        }
-        and isinstance(event.payload, dict)
-    }
-    return sorted(fanout_id for fanout_id in started - settled if fanout_id)
 
 
 def _unresolved_action_effects(events: list[ZfEvent]) -> tuple[list[str], list[str]]:
@@ -3011,6 +3049,9 @@ def _completion_blocker_fingerprint(
         "blockers": sorted(set(blockers)),
         "open_feedback_count": int(shared.get("open_feedback_count") or 0),
         "pending_handoff_count": int(shared.get("pending_handoff_count") or 0),
+        "active_fanout_ids": sorted(
+            str(item) for item in shared.get("active_fanout_ids", [])
+        ),
         "unsettled_required_operation_ids": sorted(
             str(item) for item in shared.get("unsettled_required_operation_ids", [])
         ),
@@ -3380,18 +3421,31 @@ def build_run_completion_profile(
     repair_ledger: dict[str, Any],
     repair_merge_queue: dict[str, Any],
 ) -> dict[str, Any]:
-    pending_human = _pending_human_decisions(events)
+    completion_events = events
+    completion_repair_merge_queue = repair_merge_queue
+    current_run_id = str(goal.get("run_id") or "").strip()
+    if current_run_id:
+        from zf.runtime.run_scope import events_for_run
+
+        completion_events = events_for_run(events, run_id=current_run_id)
+        completion_repair_merge_queue = build_repair_merge_queue(
+            completion_events
+        )
+    pending_human = _pending_human_decisions(completion_events)
     blocking_human = [
         item for item in pending_human
         if _is_blocking_human_decision(item)
     ]
-    failed_verifications = _open_verify_failures(events)
+    failed_verifications = _open_verify_failures(completion_events)
     _ = repair_ledger
-    repair_blockers = _blocking_repair_merge_counts(events, repair_merge_queue)
+    repair_blockers = _blocking_repair_merge_counts(
+        completion_events,
+        completion_repair_merge_queue,
+    )
     closeout_required = repair_blockers["closeout_required"]
     merge_pending = repair_blockers["pending"]
     blockers = []
-    terminal_signal = _current_terminal_signal(events)
+    terminal_signal = _current_terminal_signal(completion_events)
     terminal_payload = (
         terminal_signal.payload
         if terminal_signal is not None and isinstance(terminal_signal.payload, dict)
@@ -5291,6 +5345,10 @@ def _execute_semantic_replan_request(
         correlation_id=str(action.get("request_id") or "") or None,
         payload={
             "schema_version": "semantic-replan-request.v1",
+            "output_profile_id": str(action.get("output_profile_id") or ""),
+            "output_profile_revision": str(
+                action.get("output_profile_revision") or ""
+            ),
             "request_id": str(action.get("request_id") or ""),
             "checkpoint_id": str(action.get("checkpoint_id") or ""),
             "pdd_id": pdd_id,
@@ -8963,12 +9021,57 @@ def _pending_attention_diagnostic_actions(
     items = supervisor.get("attention_items") if isinstance(supervisor, dict) else []
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    events_by_id = {event.id: event for event in events if event.id}
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
         if str(item.get("status") or "open") not in {"", "open", "unacknowledged"}:
             continue
         route = str(item.get("suggested_route") or item.get("recommended_route") or "")
+        owner_route = str(item.get("owner_route") or "")
+        action_policy = str(item.get("action_policy") or "")
+        if action_policy in {"informational", "kernel_consumed"}:
+            # The item remains observable in Supervisor/Monitor, but its
+            # producer-side deterministic owner has already consumed it.
+            # Turning it into diagnose-attention would create a competing
+            # state machine and can falsely terminal-block a healthy run.
+            continue
+        if (
+            bool(item.get("human_action_required"))
+            or route in {
+                "human",
+                "human_decision",
+                "owner",
+                "owner_notify",
+                "owner_question",
+                "run_manager_human_decision",
+            }
+            or owner_route in {"human", "owner", "owner_notify"}
+            or action_policy in {"human_escalate", "needs_approval"}
+        ):
+            continue
+        source_event_ids = _string_list(item.get("source_event_ids"))
+        if str(item.get("source_event_id") or ""):
+            source_event_ids.append(str(item.get("source_event_id") or ""))
+        if any(
+            events_by_id.get(event_id) is not None
+            and events_by_id[event_id].type == "worker.context.warning"
+            for event_id in source_event_ids
+        ):
+            # Supervisor snapshots can outlive a registry upgrade. The
+            # append-only source event remains authoritative: an ordinary
+            # warning is consumed by the Kernel context lifecycle even when a
+            # stale attention item still advertises auto_decide.
+            continue
+        if any(
+            events_by_id.get(event_id) is not None
+            and events_by_id[event_id].type == CHANNEL_REPLY_EXHAUSTED_EVENT
+            for event_id in source_event_ids
+        ):
+            # The dedicated bounded-reply recovery path already owns this
+            # exact source event. Supervisor attention remains visible, but
+            # must not create a second diagnosis.
+            continue
         if route in {"plan_revision", "l2_orchestrator"} or str(
             item.get("failure_scope") or ""
         ) == "plan_admission":
@@ -9655,6 +9758,10 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
         "semantic_replan_trigger": str(action.get("semantic_replan_trigger") or ""),
         "semantic_replan_stage_id": str(action.get("semantic_replan_stage_id") or ""),
         "semantic_replan_role": str(action.get("semantic_replan_role") or ""),
+        "output_profile_id": str(action.get("output_profile_id") or ""),
+        "output_profile_revision": str(
+            action.get("output_profile_revision") or ""
+        ),
         "affected_task_ids": _string_list(action.get("affected_task_ids")),
         "supersedes_task_ids": _string_list(action.get("supersedes_task_ids")),
         "recovery_context_ref": (
@@ -9887,15 +9994,10 @@ def _is_blocking_human_decision(ref: Any) -> bool:
     if not isinstance(ref, dict):
         return True
     scope = str(ref.get("blocking_scope") or "run").strip().lower().replace("-", "_")
-    return scope in {
-        "",
-        "run",
-        "workflow",
-        "main",
-        "main_flow",
-        "main_flow_blocking",
-        "blocking",
-    }
+    # ``side`` is the only sanctioned non-blocking scope.  Unknown values must
+    # fail closed: an agent-authored ``release``/task scope or a typo cannot
+    # silently turn an owner gate into advisory background work.
+    return scope != "side"
 
 
 def _event_by_id(events: list[ZfEvent], event_id: str) -> ZfEvent | None:

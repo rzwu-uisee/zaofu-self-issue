@@ -36,6 +36,9 @@ from zf.runtime.channel_question_dedup import (
     question_ledger_digest,
     stable_question_dedup_request_id,
 )
+from zf.runtime.channel_question_dedup_retry import (
+    repair_rejected_question_dedup,
+)
 
 RELAY_MODES = {"mention_relay", "fanout_then_synthesis"}
 DEFAULT_MAX_RELAY_DEPTH = 4
@@ -447,6 +450,7 @@ def advance_discussion(
                                 thread_id=thread_id,
                             ),
                             "question_count": len(ledger),
+                            "generation": 1,
                             "source": source,
                         },
                     )
@@ -454,6 +458,17 @@ def advance_discussion(
         return emitted
 
     if state == "phase2_relay":
+        dedup_repair = repair_rejected_question_dedup(
+            writer,
+            channel,
+            session,
+            actor=actor,
+            source=source,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        if dedup_repair:
+            return dedup_repair
         emitted.extend(_reject_invalid_resolutions(
             writer, channel, actor=actor, source=source,
             channel_id=channel_id, thread_id=thread_id,

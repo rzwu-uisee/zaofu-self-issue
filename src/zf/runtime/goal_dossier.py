@@ -26,6 +26,7 @@ from zf.runtime.goal_dossier_consistency import (
     evaluate_goal_dossier_delivery_readiness,
 )
 from zf.runtime.goal_dossier_history import build_goal_dossier_history
+from zf.runtime.goal_completion_authority import scope_handoff_snapshot
 from zf.runtime.operation_projection import project_task_operations
 from zf.runtime.plan_artifact_package import (
     hydrate_plan_artifact_package,
@@ -109,10 +110,11 @@ def build_goal_dossier(
     )
     terminal = history.get("terminal")
     terminal = terminal if isinstance(terminal, dict) else {}
+    authoritative_tasks = history.get("authoritative_tasks")
     historical_tasks = history.get("historical_tasks")
     tasks = (
-        list(historical_tasks)
-        if terminal and isinstance(historical_tasks, list)
+        list(authoritative_tasks)
+        if terminal and isinstance(authoritative_tasks, list)
         else current_tasks
     )
     task_ids = [str(task.get("id") or "") for task in tasks]
@@ -129,6 +131,12 @@ def build_goal_dossier(
         scoped_events,
         workflow_run_id=canonical_run_id,
     )
+    if terminal:
+        handoff = scope_handoff_snapshot(
+            handoff,
+            task_map_generation=str(terminal.get("task_map_generation") or ""),
+            candidate_task_ids=task_ids,
+        )
     operations = _operations(state_dir, task_ids, scoped_events)
     closure = build_goal_closure_loop(
         {},
@@ -211,6 +219,16 @@ def build_goal_dossier(
         "state": {
             "task_counts": task_counts,
             "tasks": tasks,
+            "historical_task_counts": _task_counts(
+                list(historical_tasks)
+                if isinstance(historical_tasks, list)
+                else tasks
+            ),
+            "historical_tasks": (
+                list(historical_tasks)
+                if isinstance(historical_tasks, list)
+                else tasks
+            ),
             "current_overlay": history.get("current_overlay") or {},
             "progress": progress,
             "handoff": handoff,
@@ -218,6 +236,7 @@ def build_goal_dossier(
         "task_contracts": history.get("task_contracts") or {},
         "claim_to_evidence": history.get("claim_to_evidence") or {},
         "instruction_context": history.get("instruction_context") or [],
+        "history_advisories": history.get("advisories") or [],
         "evidence_index": _evidence_index(scoped_events),
         "gaps": gaps,
         "incident_history": incident_history,

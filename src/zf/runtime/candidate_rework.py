@@ -452,11 +452,20 @@ def plan_candidate_rework(
         failed_task_ids = tuple(sorted(failed_task_ids_by_trace.get(trace, set())))
         gap_tasks = tuple(_dedupe_gap_tasks(gap_tasks_by_trace.get(trace, [])))
         source_attempts = attempts_by_pdd_source.get((pdd, source_event_type), set())
+        task_contract_blocker = any(
+            line.startswith("task-contract-blocker ")
+            for line in feedback
+        )
         ineffective_rejection = False
         current_fp = _rejection_fingerprint(payload)
-        if fingerprint_on:
+        if fingerprint_on or task_contract_blocker:
             # U2:同 findings 指纹才计满(doom-loop 形态);findings 在
             # 前进 → 新预算,不误报 escalate(r6.1 续跑 6 次误报实弹)。
+            # Task-contract blockers always use this rule, even when the
+            # workflow-wide fingerprint switch is off. A newly discovered
+            # unsatisfiable contract must not inherit unrelated historical
+            # integration failures, while the same blocker still remains
+            # bounded by max_attempts.
             source_attempts = {
                 rework_id for rework_id in source_attempts
                 if rejection_fp_by_id.get(rework_id) == current_fp
@@ -496,10 +505,8 @@ def plan_candidate_rework(
             and attempt >= 1
             and bool(CONTRACT_REPLAN_CATEGORIES & set(failure_categories))
         )
-        task_contract_blocker = any(
-            line.startswith("task-contract-blocker ")
-            for line in feedback
-        )
+        if task_contract_blocker:
+            classification = "design_issue"
         if fingerprint_on and ineffective_rejection:
             attempt = 0
             repeated_contract_verify = False
@@ -525,7 +532,6 @@ def plan_candidate_rework(
             # erase an evidence-backed dev.blocked contract diagnosis from the
             # same generation. Re-running the same task map cannot satisfy an
             # unsatisfiable contract, so return it to plan synthesis directly.
-            classification = "design_issue"
             action = "replan"
         elif repeated_contract_verify:
             classification = "contract_freeze_gap"

@@ -433,6 +433,26 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
     assert gate["submit_payload"] == quick["submit_payload"]
 
 
+def test_channel_plan_defaults_missing_presentation_header() -> None:
+    request = extract_plan_request(
+        _channel_setup_answer().replace(
+            '    "header": "Channel setup",\n',
+            "",
+        ),
+        plan_context={
+            "project_id": "project-a",
+            "conversation_id": "kanban:project-a",
+            "thread_key": "main",
+        },
+    )
+
+    assert request is not None
+    assert request["valid"] is True
+    assert request["validation_error"] == ""
+    assert request["header"] == "Channel setup"
+    assert request["questions"][0]["header"] == "Channel setup"
+
+
 def test_action_bound_plan_rejects_other_and_hidden_payload_fields() -> None:
     other = extract_plan_request(
         _channel_setup_answer().replace(

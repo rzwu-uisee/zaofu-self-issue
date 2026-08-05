@@ -57,7 +57,7 @@ def test_control_loop_routes_low_severity_actionable_attention() -> None:
     assert decisions[0].payload["outcome"] == "run_manager_triage_first"
 
 
-def test_idle_context_warning_routes_to_run_manager_without_owner_message() -> None:
+def test_idle_context_warning_remains_observable_without_control_action() -> None:
     items = build_attention_items(
         events=[],
         automation={"items": [{
@@ -81,13 +81,10 @@ def test_idle_context_warning_routes_to_run_manager_without_owner_message() -> N
         projection_ref={},
     )
 
-    decisions = [event for event in out if event.type == "supervisor.decision.recorded"]
-    messages = [event for event in out if event.type == "owner.visible_message.requested"]
-    assert len(decisions) == 1
-    assert decisions[0].payload["route"] == "run_manager_recovery"
-    assert decisions[0].payload["outcome"] == "run_manager_triage_first"
-    assert decisions[0].payload["notification_policy"] == "run_manager_first"
-    assert messages == []
+    assert len(items) == 1
+    assert items[0]["action_policy"] == "kernel_consumed"
+    assert items[0]["suggested_route"] == "observe_only"
+    assert out == []
 
 
 def test_critical_context_warning_can_escalate_owner_visible() -> None:

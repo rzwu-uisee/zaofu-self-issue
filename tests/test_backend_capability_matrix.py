@@ -148,6 +148,9 @@ def test_provider_capability_projection_is_stable() -> None:
     assert rows["claude-headless"]["streaming"] is True
     assert rows["claude-headless"]["resume"] is True
     assert rows["claude-headless"]["interrupt"] is True
+    assert rows["claude-headless"]["interactive_input"] == "durable_next_turn"
+    assert rows["codex-headless"]["native_same_turn_input"] is False
+    assert rows["codex"]["interactive_input"] == "provider_managed"
     assert rows["codex-headless"]["availability"] == "missing_command"
 
 

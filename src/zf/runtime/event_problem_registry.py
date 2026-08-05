@@ -356,9 +356,64 @@ def _kernel_projection(
     )
 
 
+def _failure_envelope(
+    event_type: str,
+    *,
+    title: str,
+    source: str,
+    producer_kind: str,
+    required_scope_any: tuple[str, ...],
+) -> EventProblemSpec:
+    return EventProblemSpec(
+        event_type=event_type,
+        event_class="projection_only",
+        problem_class="failure_envelope",
+        failure_class=event_type.replace(".", "_"),
+        source=source,
+        severity="low",
+        title=title,
+        owner_route="run_manager",
+        action_policy="informational",
+        supervisor_attention="none",
+        autoresearch_eligible=False,
+        producer_kind=producer_kind,
+        required_scope_any=required_scope_any,
+        notification_policy="trace_only",
+        recovery_policy="none",
+    )
+
+
 EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
     spec.event_type: spec
     for spec in (
+        _failure_envelope(
+            "runtime.action.attempt.failed",
+            title="Controlled action attempt failed",
+            source="controlled_action",
+            producer_kind="kernel",
+            required_scope_any=("attempt_id", "action"),
+        ),
+        _failure_envelope(
+            "runtime.action.failed",
+            title="Runtime action result failed",
+            source="controlled_action",
+            producer_kind="kernel",
+            required_scope_any=("action",),
+        ),
+        _failure_envelope(
+            "web.action.failed",
+            title="Web action result failed",
+            source="web_action",
+            producer_kind="integration",
+            required_scope_any=("action",),
+        ),
+        _failure_envelope(
+            "agent.session.run.failed",
+            title="Provider session envelope failed",
+            source="agent_session",
+            producer_kind="provider_adapter",
+            required_scope_any=("run_id", "provider_run_id"),
+        ),
         _candidate_quality_expected("static_gate.failed"),
         _candidate_quality_expected("review.rejected"),
         _candidate_quality_expected("test.failed"),
@@ -1231,18 +1286,37 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
         ),
         EventProblemSpec(
             event_type="channel.question.dedup.rejected",
-            event_class="expected_negative",
+            event_class="projection_only",
             problem_class="contract",
             failure_class="channel_question_dedup_rejected",
             source="channel_contract",
-            severity="medium",
+            severity="low",
             title="Channel question dedup contract rejected",
+            owner_route="run_manager",
+            action_policy="informational",
+            suggested_action_kind="bounded_kernel_retry",
+            supervisor_attention="none",
+            autoresearch_eligible=False,
+            producer_kind="kernel",
+            required_scope_any=("request_id", "channel_id", "thread_id"),
+            notification_policy="trace_only",
+            recovery_policy="none",
+            dedupe_key_fields=("channel_id", "thread_id", "request_id"),
+        ),
+        EventProblemSpec(
+            event_type="channel.question.dedup.remediation.exhausted",
+            event_class="abnormal",
+            problem_class="contract",
+            failure_class="channel_question_dedup_exhausted",
+            source="channel_contract",
+            severity="high",
+            title="Channel question dedup retries exhausted",
             owner_route="run_manager",
             action_policy="needs_diagnosis",
             intervention_class="diagnose",
             suggested_route="run_manager_recovery",
             suggested_action_kind="diagnose_channel_question_dedup",
-            supervisor_attention="on_repeated",
+            supervisor_attention="on_single",
             run_manager_semantics=("pending_action",),
             autoresearch_eligible=False,
             producer_kind="kernel",
@@ -1796,17 +1870,20 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             severity="medium",
             title="worker.context.warning",
             owner_route="run_manager",
-            action_policy="auto_decide",
+            # The deterministic context lifecycle consumes this signal in the
+            # same kernel tick and owns checkpoint/compact/recycle.  Run
+            # Manager may observe it, but must not start a second recovery
+            # state machine or generic diagnosis.
+            action_policy="kernel_consumed",
             intervention_class="auto_recover",
-            suggested_route="run_manager_recovery",
+            suggested_route="observe_only",
             suggested_action_kind="checkpoint_or_compact_worker_context",
             supervisor_attention="on_single",
-            run_manager_semantics=("pending_action",),
             autoresearch_eligible=False,
             producer_kind="kernel",
             required_scope_any=("task_id", "role", "role_instance", "worker_id"),
-            notification_policy="run_manager_first",
-            recovery_policy="run_manager",
+            notification_policy="trace_only",
+            recovery_policy="none",
             dedupe_key_fields=("task_id", "role_instance"),
         ),
         EventProblemSpec(

@@ -105,6 +105,50 @@ def test_workflow_read_profile_preserves_complete_report(tmp_path: Path) -> None
     assert adapted.payload["summary"] == "scan complete"
 
 
+def test_workflow_read_profile_preserves_top_level_plan_handoff(
+    tmp_path: Path,
+) -> None:
+    plan_ports = [{
+        "logical_name": "test_matrix",
+        "schema_version": "test-matrix.v1",
+        "body": {
+            "schema_version": "test-matrix.v1",
+            "status": "ready",
+            "metadata": {
+                "enrichment_contract": {"status": "fulfilled"},
+            },
+            "tests": [{"id": "TEST-FULL-SUITE", "command": "npm test"}],
+        },
+    }]
+    adapted = ControlResultAdapterRegistry().adapt(
+        tmp_path,
+        ZfEvent(
+            type="prd.plan.child.completed",
+            payload={
+                "output_profile_id": "workflow-read",
+                "canonical_success_event": "prd.plan.child.completed",
+                "canonical_failure_event": "prd.plan.child.failed",
+                "plan_ports": plan_ports,
+                "artifact_refs": ["artifacts/plan/test_matrix.json"],
+                "task_map_ref": "artifacts/plan/task_map.json",
+                "report": {
+                    "status": "passed",
+                    "summary": "plan ready",
+                    "recommendation": "approve",
+                    "findings": [],
+                    "plan_ports": [],
+                },
+            },
+        ),
+    )
+
+    assert adapted.payload["plan_ports"] == plan_ports
+    assert adapted.payload["artifact_refs"] == [
+        "artifacts/plan/test_matrix.json"
+    ]
+    assert adapted.payload["task_map_ref"] == "artifacts/plan/task_map.json"
+
+
 def test_workflow_read_profile_accepts_registered_product_child_event(
     tmp_path: Path,
 ) -> None:

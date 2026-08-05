@@ -334,6 +334,53 @@ def test_idempotent_per_failure_event() -> None:
     assert replan is None and note == "already_replanned"
 
 
+def test_causal_gap_plan_settles_reader_stage_replan() -> None:
+    origin = ZfEvent(type="issue.requested", payload={})
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id="semantic-replan-child",
+        payload={
+            "workflow_run_id": "workflow-1",
+            "pdd_id": "PDD-1",
+            "reason": "task_map rejected",
+        },
+    )
+    gap_plan = ZfEvent(
+        type="flow.gap_plan.ready",
+        correlation_id="workflow-1",
+        causation_id=failure.id,
+        payload={
+            "trace_id": "workflow-1",
+            "pdd_id": "PDD-1",
+            "source_event_id": failure.id,
+        },
+    )
+
+    replan, note = plan_reader_stage_replan(
+        _config(), [origin, failure, gap_plan], failure,
+    )
+
+    assert replan is None
+    assert note == "handled_by_gap_plan"
+
+
+def test_unrelated_gap_plan_does_not_settle_reader_stage_replan() -> None:
+    origin = ZfEvent(type="issue.requested", payload={})
+    failure = _failure()
+    unrelated = ZfEvent(
+        type="flow.gap_plan.ready",
+        causation_id="different-failure",
+        payload={"source_event_id": "different-failure"},
+    )
+
+    replan, note = plan_reader_stage_replan(
+        _config(), [origin, failure, unrelated], failure,
+    )
+
+    assert replan is not None
+    assert "issue-triage" in note
+
+
 def test_cap_exhausted_escalates() -> None:
     origin = ZfEvent(type="issue.requested", payload={})
     priors = [_failure() for _ in range(STAGE_REPLAN_CAP)]

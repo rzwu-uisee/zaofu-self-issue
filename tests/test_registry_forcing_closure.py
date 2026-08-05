@@ -86,7 +86,6 @@ def test_f_batch_events_registered_with_sane_specs() -> None:
 # **只许缩小**——KNOWN_EVENT_TYPES 新增 actionable 形状事件必须带 spec。
 KNOWN_TYPES_UNREGISTERED: frozenset[str] = frozenset({
     "agent.session.part.failed",
-    "agent.session.run.failed",
     "artifact.manifest.rejected",
     "artifact.promote.blocked",
     "automation.proposal.failed",
@@ -126,11 +125,8 @@ KNOWN_TYPES_UNREGISTERED: frozenset[str] = frozenset({
     "run.manager.repair.blocked",
     "run.manager.repair.rejected",
     "run.manager.tick.failed",
-    "runtime.action.attempt.failed",
-    "runtime.action.failed",
     "runtime.action.rejected",
     "task.doc.ingest.rejected",
-    "web.action.failed",
     "worker.drain.failed",
     "worker.recovery.blocked",
     "worker.reply.failed",

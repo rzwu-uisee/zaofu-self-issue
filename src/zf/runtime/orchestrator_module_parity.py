@@ -5,6 +5,9 @@ from __future__ import annotations
 from zf.core.events.model import ZfEvent
 from zf.runtime.goal_closure_bridge import GoalClosureBridgeMixin
 from zf.runtime.flow_discovery_context import build_flow_discovery_context
+from zf.runtime.flow_verification_identity import (
+    latest_flow_verification_for_candidate,
+)
 from zf.runtime.module_parity_identity import module_parity_identity_payload
 from zf.runtime.orchestrator_types import OrchestratorDecision
 
@@ -223,41 +226,10 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
         self,
         event: ZfEvent,
     ) -> ZfEvent | None:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        workflow_run_id = str(
-            payload.get("workflow_run_id") or payload.get("run_id") or ""
-        ).strip()
-        pdd_id = str(payload.get("pdd_id") or payload.get("feature_id") or "").strip()
-        for candidate in reversed(self.event_log.read_all()):
-            if candidate.type not in {"verify.passed", "test.passed"}:
-                continue
-            if candidate.task_id:
-                continue
-            candidate_payload = (
-                candidate.payload if isinstance(candidate.payload, dict) else {}
-            )
-            candidate_run_id = str(
-                candidate_payload.get("workflow_run_id")
-                or candidate_payload.get("run_id")
-                or ""
-            ).strip()
-            candidate_pdd_id = str(
-                candidate_payload.get("pdd_id")
-                or candidate_payload.get("feature_id")
-                or ""
-            ).strip()
-            if workflow_run_id:
-                if candidate_run_id != workflow_run_id:
-                    continue
-            elif pdd_id and candidate_pdd_id != pdd_id:
-                continue
-            if str(candidate_payload.get("status") or "completed") not in {
-                "completed",
-                "passed",
-            }:
-                continue
-            return candidate
-        return None
+        return latest_flow_verification_for_candidate(
+            self.event_log.read_all(),
+            candidate_event=event,
+        )
 
     def _bridge_verify_passed_to_parity_scan(
         self,

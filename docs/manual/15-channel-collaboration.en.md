@@ -62,18 +62,40 @@ every member automatically.
 
 ## 4. Built-In Templates
 
-| Template | Required members | Default mode | Leader / Workflow proposal owner |
-|---|---|---|---|
-| `prd-clarification` | `product_pm`, `arch`, `critic`, `synthesizer`; optional `security_reviewer` | `conversation` | `product_pm` |
-| `research-review` | `researcher`, `arch`, `critic`, `synthesizer` | `conversation` | `researcher` |
-| `architecture-review` | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `multi_lens` | `arch` |
-| `quick-change` | `tech_leader`, `dev_reviewer`, `qa_analyst` | `conversation` | `tech_leader` |
-| `incident-triage` | `tech_leader`, `qa_analyst`; optional `security_reviewer` | `clarification` | `tech_leader` |
+The code contains five versioned templates at version `2026-07-31.1`:
 
-Templates fix required roles, skill refs, allowed overrides, and default writer
-scope. Every skill must resolve before creation, and non-writers default to
-read-only. Some templates retain scoped writer permissions for controlled
-operations, but normal messages and discussion do not trigger Project writes.
+| Template | Intended use | Required members | Default mode | Leader / default responder | Default budget ceiling |
+|---|---|---|---|---|---|
+| `prd-clarification` | Converge PRD scope, scenarios, and acceptance | `product_pm`, `arch`, `critic`, `synthesizer`; optional `security_reviewer` | `conversation` | `product_pm` / `synthesizer` | 20 rounds, parallel 5 |
+| `research-review` | Verify sources, grade evidence, and compare approaches | `researcher`, `arch`, `critic`, `synthesizer` | `conversation` | `researcher` / `synthesizer` | 16 rounds, parallel 4 |
+| `architecture-review` | Review architecture, implementation parity, security, and candidate gates | `arch`, `security_reviewer`, `dev_reviewer`, `critic` | `multi_lens` | `arch` / `arch` | 16 rounds, parallel 4 |
+| `quick-change` | Handle a frozen small feature or defect | `tech_leader`, `dev_reviewer`, `qa_analyst` | `conversation` | `tech_leader` / `tech_leader` | 12 rounds, parallel 3 |
+| `incident-triage` | Gather incident evidence, assess impact, and recommend recovery | `tech_leader`, `qa_analyst`; optional `security_reviewer` | `clarification` | `tech_leader` / `tech_leader` | 12 rounds, parallel 3 |
+
+Budgets are ceilings, not required conversation lengths. A Kanban Agent Plan
+may tighten a request through `budget.max_rounds`, `max_parallel_replies`, and
+phase deadlines.
+
+Templates fix required roles, skill refs, allowed overrides, and writer scope;
+an override cannot add arbitrary roles. Every skill ref must resolve before
+creation. Materialization starts every Member with a `read_only` permission
+profile and ceiling. The Leader additionally receives `propose_workflow`.
+`writer_role` and `writer_scope` describe artifact responsibility and a
+controlled write boundary; they do not grant filesystem write permission.
+
+Template boundaries are:
+
+- `prd-clarification` owns the question ledger, Owner clarification, and the
+  PRD/requirement snapshot without bypassing Create Task or Workflow approval;
+- `research-review` discusses evidence without implicitly starting Research;
+- `architecture-review` produces multi-lens findings and Workflow suggestions,
+  not implementation;
+- `quick-change` is only for a frozen, bounded change;
+- `incident-triage` diagnoses and proposes controlled actions while Kernel or
+  an approved action performs recovery.
+
+Messages without an explicit mention route to the default responder. An
+explicit `@role` always takes precedence.
 
 ## 5. Create Through Kanban Agent
 
@@ -98,7 +120,7 @@ Review the action-bound setup Plan for:
 channel-create-and-start
   -> create Channel
   -> materialize Members, skills, permissions, and profile binding
-  -> post the original request with durable ACK/NACK
+  -> post the clean business requirement without control instructions, with durable ACK/NACK
   -> initialize the product mode
   -> conversation waits for directed interaction
 ```
@@ -131,6 +153,15 @@ phase1 blind answers
 This operation is bounded by rounds, members, and budget and links back to the
 normal conversation history. It is an explicit operation, not the permanent
 default state of a Channel.
+
+After convergence the Channel remains interactive. People can ask follow-up
+questions, add requirements, or explicitly reopen multi-lens discussion without
+recreating the Channel. When the projection has an Owner-question frontier,
+Web presents at most the current first three questions in sequence. Enumerable
+questions use two or three mutually exclusive options and one recommendation;
+open questions use free text. Submission still records individual resolved
+facts in the `channel.question.*` ledger, so the component does not become a
+second question state machine.
 
 ![Natural discussion, directed replies, and multi-role convergence in a Channel Group](assets/quickstart-channel-discussion.webp)
 

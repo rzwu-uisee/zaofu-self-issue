@@ -36,6 +36,17 @@ FANOUT_AGGREGATE_RESULT_SCHEMA = "fanout-aggregate-result.v1"
 WORKFLOW_READ_RESULT_SCHEMA = "workflow-read-result.v1"
 WORKFLOW_READ_PROFILE_ID = "workflow-read"
 WORKFLOW_READ_PROFILE_REVISION = "1"
+_WORKFLOW_READ_TOP_LEVEL_HANDOFF_FIELDS = (
+    "artifact_refs",
+    "evidence_refs",
+    "plan_ports",
+    "plan_artifact_ref",
+    "plan_ref",
+    "task_map_ref",
+    "source_index_ref",
+    "backlog_ref",
+    "scan_quality_audit_ref",
+)
 
 
 class ControlResultAdapterError(ValueError):
@@ -643,6 +654,13 @@ def _normalize_workflow_read(
     payload = event.payload if isinstance(event.payload, dict) else {}
     raw = payload.get("report")
     report = dict(raw) if isinstance(raw, Mapping) else {}
+    for field in _WORKFLOW_READ_TOP_LEVEL_HANDOFF_FIELDS:
+        payload_value = payload.get(field)
+        report_value = report.get(field)
+        if _empty_handoff_value(report_value) and not _empty_handoff_value(
+            payload_value
+        ):
+            report[field] = payload_value
     status = str(report.get("status") or payload.get("status") or "").lower()
     recommendation = str(
         report.get("recommendation")
@@ -697,6 +715,10 @@ def _normalize_workflow_read(
             "message": "findings must be an array",
         })
     return report, issues
+
+
+def _empty_handoff_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
 
 
 def _legacy_verification_result(event: ZfEvent) -> dict[str, Any]:

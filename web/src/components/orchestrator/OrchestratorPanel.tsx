@@ -1510,7 +1510,9 @@ export function OrchestratorPanel({
               onApproveProposal={(proposal, cardId) => void runHeadlessProposal(proposal, cardId)}
               onRejectProposal={(proposal, cardId) => void rejectHeadlessProposal(proposal, cardId)}
               onReviseProposal={(proposal) => reviseHeadlessProposal(proposal)}
-              onSubmitPlan={(request, response, cardId) => void submitPlanResponse(request, response, cardId)}
+              onSubmitPlan={canUseAction("kanban-plan-apply")
+                ? (request, response, cardId) => void submitPlanResponse(request, response, cardId)
+                : undefined}
               onChatAboutPlan={(request) => chatAboutPlan(request)}
               onCancelQueued={(cardId) => setHeadlessQueue((current) => current.filter((item) => item.id !== cardId))}
               onCancelRun={(runId) => void cancelHeadlessRun(runId)}

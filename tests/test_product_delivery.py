@@ -201,6 +201,34 @@ def test_ingest_task_map_to_kanban_creates_contract_tasks(tmp_path: Path) -> Non
     assert wave_ready.payload["task_ids"] == ["TASK-PROD-A"]
 
 
+def test_ingest_preserves_statement_acceptance_criteria(tmp_path: Path) -> None:
+    state_dir = _state_dir(tmp_path)
+    criterion = {
+        "id": "AC-EDITOR-1",
+        "statement": "Grid conflicts are atomic.",
+        "mandatory": True,
+    }
+    task_map = {
+        "schema_version": "task-map.v1",
+        "feature_id": "F-EDITOR",
+        "tasks": [{
+            "task_id": "TASK-EDITOR",
+            "title": "editor",
+            "owner_role": "dev",
+            "scope": ["src/lab.js"],
+            "verification": "node --test tests/lab.test.js",
+            "verification_tiers": ["runtime"],
+            "acceptance_criteria": [criterion],
+        }],
+    }
+
+    result = ingest_task_map_to_kanban(state_dir, task_map)
+
+    assert result.passed is True
+    task = TaskStore(state_dir / "kanban.json").get("TASK-EDITOR")
+    assert task.contract.acceptance_criteria == [criterion]
+
+
 def test_ingest_normalizes_refactor_lane_contract_fields(tmp_path: Path) -> None:
     state_dir = _state_dir(tmp_path)
     task_map = {

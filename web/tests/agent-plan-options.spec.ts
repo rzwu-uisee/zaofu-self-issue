@@ -21,3 +21,41 @@ for (const [fixtureId, option] of CASES) {
     await expect(plan).toContainText(option);
   });
 }
+
+test("Multiple Plan questions advance one at a time and submit atomically", async ({ page }) => {
+  await page.goto("/?fixture=agent-session");
+  const plan = page.getByTestId("fx-multi-plan-options");
+
+  await expect(plan).toContainText("1 of 2");
+  await expect(plan).toContainText("Customize");
+  await expect(plan).not.toContainText("Other");
+  await expect(plan.getByRole("button", { name: "Chat about" })).toBeEnabled();
+  await plan.getByRole("button", { name: "Chat about" }).click();
+  await expect(plan.getByTestId("ask-user-question")).toBeVisible();
+  await expect(plan.getByTestId("ask-user-question")).toHaveAttribute(
+    "data-request-id",
+    "evt-multi-clarification:1",
+  );
+  await plan.getByLabel("Direct (Recommended)").check();
+  await plan.getByRole("button", { name: "Next question" }).click();
+  await expect(plan).toContainText("2 of 2");
+  await plan.getByLabel("Focused (Recommended)").check();
+  await plan.getByRole("button", { name: "Continue" }).click();
+
+  await expect(plan).toContainText("Plan summary");
+  await expect(plan).toContainText("Direct (Recommended)");
+  await expect(plan).toContainText("Focused (Recommended)");
+});
+
+test("Plan option cards use radio indicators instead of ordinal numbers", async ({ page }) => {
+  await page.goto("/?fixture=agent-session");
+  const plan = page.getByTestId("fx-task-plan-options");
+  const firstCard = plan.locator(".ask-user-option").first();
+  const indicator = firstCard.locator(".ask-user-option-index");
+
+  await expect(indicator).toHaveText("");
+  await expect(firstCard.locator('input[type="radio"]')).toHaveCount(1);
+  await expect(firstCard.locator(".ask-user-option-arrow")).toHaveCount(0);
+  await firstCard.click();
+  await expect(firstCard.locator('input[type="radio"]')).toBeChecked();
+});

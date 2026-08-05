@@ -258,6 +258,41 @@ def _fake_codex_patch_approval_script(tmp_path: Path) -> Path:
     return script
 
 
+def _fake_codex_user_input_request_script(tmp_path: Path) -> Path:
+    script = tmp_path / "fake_codex_user_input_request.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json, sys",
+                "for line in sys.stdin:",
+                "    if not line.strip():",
+                "        continue",
+                "    msg = json.loads(line)",
+                "    method = msg.get('method')",
+                "    req_id = msg.get('id')",
+                "    if req_id == 99 and not method:",
+                "        error = msg.get('error', {})",
+                "        assert error.get('code') == -32601, msg",
+                "        assert 'plan_request' in error.get('message', ''), msg",
+                "        print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':'input rejected safely'}}), flush=True)",
+                "        print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'status':'completed'}}}), flush=True)",
+                "    elif req_id and method == 'initialize':",
+                "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'serverInfo':{'name':'fake-codex'}}}), flush=True)",
+                "    elif method == 'initialized':",
+                "        pass",
+                "    elif req_id and method == 'thread/start':",
+                "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'threadId':'codex-thread-1'}}), flush=True)",
+                "    elif req_id and method == 'turn/start':",
+                "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'turnId':'turn-1'}}), flush=True)",
+                "        params = {'questions':[{'id':'route','question':'Which route?','options':[{'label':'A'},{'label':'B'}]}]}",
+                "        print(json.dumps({'jsonrpc':'2.0','id':99,'method':'item/tool/requestUserInput','params':params}), flush=True)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return script
+
+
 def _wait_for_event_type(state_dir: Path, event_type: str, timeout_s: float = 3.0):
     deadline = time.monotonic() + timeout_s
     events = []
@@ -931,6 +966,28 @@ def test_codex_headless_v2_file_change_uses_accept_decline_decision(
     )
 
     assert result.ok is True
+
+
+def test_codex_headless_rejects_native_user_input_with_protocol_error(
+    tmp_path: Path,
+) -> None:
+    script = _fake_codex_user_input_request_script(tmp_path)
+    codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
+
+    result = codex.run_turn(
+        prompt="ask for the route",
+        cwd=tmp_path,
+        system_prompt="system",
+        thread_id="zf-thread",
+        provider_session_id="",
+        on_session_id=lambda _: None,
+        on_message=None,
+        timeout_s=5,
+        permission_profile="read_only",
+    )
+
+    assert result.ok is True
+    assert result.reply == "input rejected safely"
 
 
 @pytest.mark.parametrize(

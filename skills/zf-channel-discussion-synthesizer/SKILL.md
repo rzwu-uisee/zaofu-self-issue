@@ -54,6 +54,13 @@ merge，并只向指定成员派发 cross review。相同事实冲突才发定�
 讨论重新 `@all`。对每个 owner-facing 问题给 priority、why、推荐答案，确保
 question frontier 是可逐项回答的，而不是一份混杂问卷。
 
+每个保留的 `fact` 必须定向给真实 channel member，并至少有一个
+`cross_review_requests` 取得 evidence。`owner` / `operator` 只承接 owner decision；
+如果问题要求尚未生成的 canonical PRD/artifact/version/digest，应将其判定为过早的
+未来输出依赖，以当前 requirement/context digest 完成核验，不得让它循环阻塞首次
+synthesis。若请求携带上一次 rejection reason，必须基于最新 ledger 修正该错误，
+不得原样重放。
+
 ## 收到 synthesis 请求时(channel.synthesis.requested 指向你)
 
 问题依赖已满足、定向质询完成且 owner frontier 已清零后，产出综合 artifact：

@@ -436,19 +436,26 @@ test("KBA-PLAN multiple clarification questions submit atomically", async ({
     page,
     `${marker} clarify the route and evidence depth before continuing`,
   );
-  const plan = page.locator(".agent-stack-card.plan").filter({
+  const initialPlan = page.locator(".agent-stack-card.plan").filter({
     hasText: marker,
   }).last();
-  await expect(plan).toBeVisible({ timeout: 30_000 });
+  await expect(initialPlan).toBeVisible({ timeout: 30_000 });
+  const planRequestId = await initialPlan.getAttribute("data-plan-request-id");
+  expect(planRequestId).toBeTruthy();
+  const plan = page.locator(
+    `.agent-stack-card.plan[data-plan-request-id="${planRequestId}"]`,
+  ).last();
   await expect(plan).toContainText("1 of 2");
-  await expect(plan).toContainText("2 of 2");
-  await expect(plan.locator(".agent-plan-recommended")).toHaveCount(2);
-  const continueButton = plan.getByRole("button", { name: "Continue" });
-  await expect(continueButton).toBeDisabled();
+  await expect(plan).not.toContainText("2 of 2");
+  await expect(plan.locator(".agent-plan-recommended")).toHaveCount(1);
   await captureAgent(page, "08-multi-question-plan");
   await plan.getByLabel("Direct").check();
-  await expect(continueButton).toBeDisabled();
+  const nextButton = plan.getByRole("button", { name: "Next question" });
+  await expect(nextButton).toBeEnabled();
+  await nextButton.click();
+  await expect(plan).toContainText("2 of 2");
   await plan.getByLabel("Focused").check();
+  const continueButton = plan.getByRole("button", { name: "Continue" });
   await expect(continueButton).toBeEnabled();
 
   await continueButton.click();
@@ -485,6 +492,7 @@ test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", asy
   const channelRequest = (
     "Create a focused collaboration Channel for an API authentication review and start it."
   );
+  const channelDiscussionSeed = "Review the API authentication change.";
 
   await page.setViewportSize({ width: 1440, height: 960 });
   await openKanbanAgent(page, id);
@@ -543,7 +551,7 @@ test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", asy
   await channelButton.click();
   const channelPage = page.locator(".channel-page");
   await expect(channelPage).toContainText("API authentication review", { timeout: 30_000 });
-  await expect(channelPage).toContainText(channelRequest, { timeout: 30_000 });
+  await expect(channelPage).toContainText(channelDiscussionSeed, { timeout: 30_000 });
   await expect(channelPage).toContainText(channelId);
   await page.getByTitle("Members").click();
   const memberDrawer = page.locator(".channel-drawer");

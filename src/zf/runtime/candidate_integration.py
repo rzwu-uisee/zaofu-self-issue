@@ -68,6 +68,10 @@ def candidate_failure_envelope(
     command = str(evidence.get("command") or "")
     exit_code = evidence.get("exit_code")
     diagnostics = _diagnostic_summary(evidence, quality, failed_children)
+    failure_context = "\n".join(
+        part for part in (command, diagnostics) if part.strip()
+    )
+    diagnostic_class = _diagnostic_class(failure_context)
 
     if status == "conflict" and _is_candidate_merge_conflict(candidate_payload):
         failure_class = "candidate_integration_conflict"
@@ -78,13 +82,19 @@ def candidate_failure_envelope(
     ):
         failure_class = "candidate_environment_setup_failed"
         reason = str(environment.get("detail") or "candidate environment setup failed")
-    elif _looks_like_gate_contract_mismatch(diagnostics):
+    elif _looks_like_candidate_lineage_contract_mismatch(failure_context):
+        failure_class = "candidate_quality_gate_contract_mismatch"
+        reason = (
+            "candidate quality gate requires source-branch commit ancestry "
+            "after patch-equivalent candidate integration"
+        )
+    elif _looks_like_gate_contract_mismatch(failure_context):
         failure_class = "candidate_quality_gate_contract_mismatch"
         reason = (
             "candidate quality gate is not declared by the integrated project: "
             f"{command or _failed_gate_names(quality)}"
         )
-    elif _looks_like_missing_dependency(diagnostics):
+    elif _looks_like_missing_dependency(failure_context):
         failure_class = "candidate_dependency_missing"
         reason = f"candidate dependency unavailable while running {command or 'quality gate'}"
     elif status == "stale":
@@ -105,7 +115,7 @@ def candidate_failure_envelope(
         "primary_failure_reason": reason,
         "failing_command": command,
         "exit_code": exit_code,
-        "diagnostic_class": _diagnostic_class(diagnostics),
+        "diagnostic_class": diagnostic_class,
         "candidate_environment_digest": stable_payload_digest(
             _environment_identity_payload(environment),
         ),
@@ -122,6 +132,7 @@ def candidate_failure_envelope(
         "failure_scope": "candidate",
         "primary_failure_reason": reason,
         "diagnostic_summary": diagnostics,
+        "diagnostic_class": diagnostic_class,
         "failing_command": command,
         "exit_code": exit_code,
         "setup_script_digest": str(environment.get("setup_script_digest") or ""),
@@ -343,7 +354,28 @@ def _looks_like_gate_contract_mismatch(text: str) -> bool:
     ))
 
 
+def _looks_like_candidate_lineage_contract_mismatch(text: str) -> bool:
+    """Detect a task gate that is invalid after candidate reconstruction.
+
+    Candidate integration intentionally rewrites commit identities through
+    cherry-pick or scoped projection. A failed gate that requires an exact
+    source-branch commit to be an ancestor of the candidate cannot be fixed by
+    re-running the implementation lane; the task contract must be replanned to
+    use patch/tree/evidence identity instead.
+    """
+
+    lowered = text.lower()
+    return any(marker in lowered for marker in (
+        "merge-base --is-ancestor",
+        "merge-base', '--is-ancestor",
+        'merge-base", "--is-ancestor',
+        "is not an ancestor of",
+    ))
+
+
 def _diagnostic_class(text: str) -> str:
+    if _looks_like_candidate_lineage_contract_mismatch(text):
+        return "candidate_lineage_contract_mismatch"
     if _looks_like_gate_contract_mismatch(text):
         return "quality_gate_contract_mismatch"
     if _looks_like_missing_dependency(text):

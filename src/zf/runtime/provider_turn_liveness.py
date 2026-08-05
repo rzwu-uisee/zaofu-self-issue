@@ -29,6 +29,14 @@ def active_codex_turn(
             active.clear()
             recycling_turns = None
             continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            event.type == "worker.launch_artifact.written"
+            and str(payload.get("instance_id") or "") == instance_id
+        ):
+            active.clear()
+            recycling_turns = None
+            continue
         if event.actor != instance_id:
             continue
         if event.type not in {
@@ -50,7 +58,6 @@ def active_codex_turn(
                     active.pop(key, None)
             recycling_turns = None
             continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
         session_id = str(payload.get("session_id") or "").strip()
         turn_id = str(payload.get("turn_id") or "").strip()
         if event.type == "provider.turn.closed":

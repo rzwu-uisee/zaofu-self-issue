@@ -41,6 +41,32 @@ GENERIC_PROMISE_CHAIN = (
 )
 _PROMISE_ALIASES = {"verify.child.completed": ("test.passed", "verify.passed")}
 
+_DELIVERY_ACTIVITY_TYPES = frozenset({
+    "plan.approved",
+    "task_map.ready",
+    "run.goal.started",
+    "run.completed",
+    "dev.build.done",
+    "verify.passed",
+    "verify.failed",
+    "verify.child.completed",
+    "judge.passed",
+    "judge.failed",
+    "candidate.ready",
+    "integration.completed",
+    "integration.failed",
+})
+
+_HUMAN_DECISION_TYPES = frozenset({
+    "human.escalate",
+    "human.escalation.acknowledged",
+    "plan.approved",
+    "channel.question.resolved",
+    "operator.action.resolved",
+    "run.manager.human_decision.applied",
+    "run.manager.human_decision.rejected",
+})
+
 # 业务环注册表(README §Main Business Loops)。shape/closure 是结构常量,
 # 在场性与全部数字来自数据;此表只登记"环长什么样、成员怎么认"。
 LOOP_REGISTRY: dict[str, dict[str, Any]] = {
@@ -360,6 +386,22 @@ def _loop_entry(loop_id: str, spec: dict[str, Any], ctx: dict[str, Any]) -> dict
         for t in sorted(tasks, key=lambda t: -t["fails"])
     ]
     if loop_id == "delivery":
+        if not ctx["business_delivery_active"]:
+            entry["counts"] = {"tasks": 0, "attempts": 0, "rejects": 0}
+            entry["arc"] = {
+                "state": "idle",
+                "label": "no active delivery run",
+            }
+            entry["node_stats"] = {
+                "plan": {"approved": 0},
+                "task-map": {"ready": 0},
+                "impl": {"attempts": 0, "rejects": 0},
+                "verify": {"failed": 0, "passed": 0},
+                "ship": {"latched": 0, "outstanding": 0},
+            }
+            entry["health"] = "idle"
+            entry["members"] = []
+            return entry
         entry["counts"] = {
             "tasks": len(tasks),
             "attempts": sum(len(t["attempts"]) for t in tasks),
@@ -475,14 +517,30 @@ def _companions(counts: dict[str, int]) -> dict[str, Any]:
     if any(ty.startswith("run.manager.action.") for ty in counts):
         out["repair"] = {"post_verified": counts.get("run.manager.action.verify.passed", 0),
                          "blocked": counts.get("run.manager.action.blocked", 0)}
-    human = counts.get("human.escalate", 0) + counts.get("plan.approved", 0) \
-        + counts.get("web.action.requested", 0) + counts.get("user.message", 0)
+    human = sum(counts.get(event_type, 0) for event_type in _HUMAN_DECISION_TYPES)
     if human:
         out["human"] = {"signals": human, "escalations": counts.get("human.escalate", 0)}
     lease = counts.get("task.attempt.retry_scheduled", 0)
     if lease:
         out["lease"] = {"retry_scheduled": lease}
     return out
+
+
+def _has_business_delivery(
+    events: list[tuple[int, ZfEvent]],
+) -> bool:
+    for _seq, event in events:
+        if event.type in _DELIVERY_ACTIVITY_TYPES:
+            return True
+        if event.type == "workflow.invoke.requested":
+            payload = _payload(event)
+            route_id = str(payload.get("route_id") or "")
+            pattern_id = str(payload.get("pattern_id") or "")
+            if route_id.startswith("delivery:") or pattern_id.startswith((
+                "issue-", "prd-", "refactor-",
+            )):
+                return True
+    return False
 
 
 # ---------------- entry point ----------------
@@ -506,7 +564,13 @@ def build_loop_view(
     tasks = _attempts_from_spine(spine_attempts) if spine_attempts and spine_attempts.get("tasks") \
         else _attempts_from_events(events)
     promise = _promise(events, project_root)
-    ctx = {"counts": counts, "tasks": tasks, "promise": promise}
+    business_delivery_active = _has_business_delivery(events)
+    ctx = {
+        "counts": counts,
+        "tasks": tasks,
+        "promise": promise,
+        "business_delivery_active": business_delivery_active,
+    }
     loops = {loop_id: _loop_entry(loop_id, spec, ctx)
              for loop_id, spec in LOOP_REGISTRY.items() if _present(spec, counts)}
 
@@ -516,6 +580,19 @@ def build_loop_view(
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
         "project_id": project_id,
+        "scope": {
+            "kind": (
+                "business_delivery"
+                if business_delivery_active
+                else "project_recovery"
+            ),
+            "business_delivery_active": business_delivery_active,
+            "reason": (
+                "delivery evidence present"
+                if business_delivery_active
+                else "no business delivery run evidence"
+            ),
+        },
         "run": {
             "event_count": len(events),
             "semantic_event_count": len(semantic),

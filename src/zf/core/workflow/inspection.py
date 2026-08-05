@@ -361,13 +361,14 @@ def _explicit_rework_route_diagnostics(
 # candidate rework sweep. The refactor goal loop also has deterministic runtime
 # bridges: lane handoff emits the candidate-level ``test.passed``; verify
 # completion emits ``verify.parity_scan.requested``; module parity closeout
-# emits ``module.parity.closed``. Static graph inspection must recognize these
-# producer paths without forcing users to model kernel internals as reader
-# stages.
+# emits ``module.parity.closed``; issue/PRD post-verify bridging emits
+# ``flow.discovery.requested``. Static graph inspection must recognize these
+# producer paths without forcing users to model kernel internals as reader stages.
 _KERNEL_PRODUCED_EXTERNAL_TRIGGERS = frozenset({
     "task_map.ready",
     "test.passed",
     "verify.parity_scan.requested",
+    "flow.discovery.requested",
     "flow.goal.closed",
     "module.parity.closed",
     # Token-gated ControlledActionService / `zf flow submit` ingress. It is

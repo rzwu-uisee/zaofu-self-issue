@@ -59,17 +59,34 @@ Engine mapping 是兼容实现细节，不是额外产品 mode。`max_rounds` �
 
 ## 4. 内置模板
 
-| Template | Required members | 默认 mode | Leader / Workflow proposal owner |
-|---|---|---|---|
-| `prd-clarification` | `product_pm`、`arch`、`critic`、`synthesizer`；可选 `security_reviewer` | `conversation` | `product_pm` |
-| `research-review` | `researcher`、`arch`、`critic`、`synthesizer` | `conversation` | `researcher` |
-| `architecture-review` | `arch`、`security_reviewer`、`dev_reviewer`、`critic` | `multi_lens` | `arch` |
-| `quick-change` | `tech_leader`、`dev_reviewer`、`qa_analyst` | `conversation` | `tech_leader` |
-| `incident-triage` | `tech_leader`、`qa_analyst`；可选 `security_reviewer` | `clarification` | `tech_leader` |
+当前代码内置 5 个版本化模板，版本为 `2026-07-31.1`：
 
-模板固定 required role、skill refs、允许的 override 和默认 writer scope。创建前所有
-skills 必须可解析；非 writer 默认 read-only。当前模板仍保留部分 scoped writer
-permission 以兼容受控操作，但普通消息和讨论不会自动触发 Project 写入。
+| Template | 适用场景 | Required members | 默认 mode | Leader / 默认回复者 | 默认预算上限 |
+|---|---|---|---|---|---|
+| `prd-clarification` | 收敛 PRD、范围、用户场景和验收标准 | `product_pm`、`arch`、`critic`、`synthesizer`；可选 `security_reviewer` | `conversation` | `product_pm` / `synthesizer` | 20 轮、并发 5 |
+| `research-review` | 来源核验、证据分级和方案比较 | `researcher`、`arch`、`critic`、`synthesizer` | `conversation` | `researcher` / `synthesizer` | 16 轮、并发 4 |
+| `architecture-review` | 架构、实现一致性、安全和候选门禁评审 | `arch`、`security_reviewer`、`dev_reviewer`、`critic` | `multi_lens` | `arch` / `arch` | 16 轮、并发 4 |
+| `quick-change` | 范围明确的小功能或缺陷修复 | `tech_leader`、`dev_reviewer`、`qa_analyst` | `conversation` | `tech_leader` / `tech_leader` | 12 轮、并发 3 |
+| `incident-triage` | 故障证据、影响、根因和恢复建议 | `tech_leader`、`qa_analyst`；可选 `security_reviewer` | `clarification` | `tech_leader` / `tech_leader` | 12 轮、并发 3 |
+
+预算是默认上限，不要求跑满。Kanban Agent Plan 可通过 `budget.max_rounds`、
+`max_parallel_replies` 和阶段 deadline 收紧具体请求。
+
+模板固定 required role、skill refs、允许的 override 和 writer scope；override 不能新增
+任意角色。创建前所有 skill ref 必须解析成功。物化时所有 Member 都以 `read_only`
+permission profile/ceiling 启动，Leader 额外取得 `propose_workflow`；`writer_role` 和
+`writer_scope` 只描述产物责任与受控写入边界，不自动授予文件写权限。
+
+模板边界如下：
+
+- `prd-clarification` 维护问题台账、Owner 澄清和 PRD/需求快照，不绕过 Create Task 与
+  Workflow 审批；
+- `research-review` 只做证据讨论，不隐式启动 Research Workflow；
+- `architecture-review` 输出多视角结论和 Workflow 建议，不直接实施；
+- `quick-change` 只适用于范围已经冻结的小改动；
+- `incident-triage` 只诊断并建议 controlled action，恢复仍由 Kernel 或获批动作执行。
+
+没有显式 mention 的消息发给默认回复者；显式 `@role` 始终优先。
 
 ## 5. 通过 Kanban Agent 创建
 
@@ -93,7 +110,7 @@ Kanban Agent 返回 action-bound Channel setup Plan。审核：
 channel-create-and-start
   -> 创建 Channel
   -> 物化 Members、skills、permissions 和 profile binding
-  -> 投递原始需求并写 durable ACK/NACK
+  -> 投递去掉控制语句后的 clean business requirement 并写 durable ACK/NACK
   -> 初始化 product mode
   -> conversation 等待定向交互
 ```
@@ -124,6 +141,11 @@ phase1 blind answers
 
 这一流程受 round/member/budget 约束，并与普通 conversation history 关联。它是一次显式
 讨论操作，不是 Channel 的永久默认状态。
+
+讨论收敛后 Channel 仍保持可交互；人可以继续追问、补充需求或显式重开多视角讨论，
+不需要重建 Channel。若 projection 中存在 Owner 问题 frontier，Web 最多逐题展示当前
+前三题：可枚举问题使用 2--3 个互斥选项和单推荐项，开放问题使用自由文本；提交后仍由
+`channel.question.*` ledger 保存逐项 resolved fact，组件本身不成为第二套问题状态机。
 
 ![Channel Group 中自然讨论、定向回复与多角色收敛](assets/quickstart-channel-discussion.webp)
 

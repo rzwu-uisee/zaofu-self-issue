@@ -379,6 +379,7 @@ def test_each_executable_task_workflow_option_requires_approve_then_starts(
         "contract": {
             "behavior": "Compare the model with current runtime behavior.",
             "verification": "Verify a research run can start.",
+            "verification_tiers": ["runtime"],
         },
         "workflow_plan": workflow_plan,
         "project_id": "zaofu",
@@ -538,6 +539,8 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         contract=TaskContract(
             behavior="Implement the selected route.",
             verification="Run deterministic tests.",
+            verification_tiers=["runtime"],
+            evidence_contract={"execution_owner": "workflow"},
         ),
     )
     TaskStore(state_dir / "kanban.json").add(task)

@@ -1,20 +1,16 @@
-import { Check, MessageCircle, PencilLine, X } from "lucide-react";
-import { useState } from "react";
+import { Check, PencilLine, X } from "lucide-react";
+import {
+  AskUserQuestion,
+  type AskUserQuestionAnswer,
+} from "../common/AskUserQuestion";
 import type {
   AgentSessionActionProposal,
-  AgentSessionPlanAnswer,
   AgentSessionPlanOption,
   AgentSessionPlanQuestion,
   AgentSessionPlanRequest,
   AgentSessionPlanResponse,
 } from "./types";
 import { actionPresentation } from "./actionPresentation";
-
-function displayPlanOptionLabel(label: string): string {
-  return label
-    .replace(/\s*\((?:Recommended|推荐)\)\s*$/i, "")
-    .trim();
-}
 
 function planOptionDetails(option?: AgentSessionPlanOption): string {
   const details = option?.submitDetails;
@@ -122,27 +118,47 @@ export function PlanInteractionForm({
   request: AgentSessionPlanRequest;
 }) {
   const questions = planQuestions(request);
-  const [selected, setSelected] = useState<Record<string, string>>({});
-  const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({});
   if (request.response) {
     return <PlanSummary request={request} />;
   }
-
-  const answers = questions.flatMap((question): AgentSessionPlanAnswer[] => {
-    const optionId = selected[question.id] || "";
-    if (!optionId) return [];
-    const answer = optionId === "other"
-      ? (otherAnswers[question.id] || "").trim()
-      : question.options.find((option) => option.id === optionId)?.label || "";
-    return answer ? [{ questionId: question.id, optionId, answer }] : [];
-  });
-  const canSubmit = Boolean(
-    request.valid
-    && answers.length === questions.length
-    && onSubmit
-    && !busy
-    && !disabled,
+  return (
+    <AskUserQuestion
+      busy={busy}
+      collapseOnDiscuss={false}
+      disabled={disabled || !request.valid}
+      discussLabel="Chat about"
+      invalidMessage={request.validationError}
+      onDiscuss={onChatAbout ? () => onChatAbout() : undefined}
+      onSubmit={onSubmit
+        ? (answers) => submitPlanAnswers(request, answers, onSubmit)
+        : undefined}
+      questions={questions.map((question) => ({
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        allowOther: question.allowOther,
+        required: true,
+        options: question.options.map((option) => ({
+          id: option.id,
+          label: option.label,
+          description: option.description,
+          recommended: option.recommended,
+          detail: planOptionDetails(option),
+        })),
+      }))}
+      requestId={`${request.requestEventId}:${request.revision}`}
+      otherDescription=""
+      otherLabel="Customize"
+      submitLabel={(answers) => planSubmitLabel(request, questions, answers)}
+    />
   );
+}
+
+function planSubmitLabel(
+  request: AgentSessionPlanRequest,
+  questions: AgentSessionPlanQuestion[],
+  answers: AskUserQuestionAnswer[],
+): string {
   const selectedOption = answers.flatMap((answer) => (
     questions
       .find((question) => question.id === answer.questionId)
@@ -151,123 +167,25 @@ export function PlanInteractionForm({
     option.submitMode === "apply" || option.submitMode === "propose"
   ));
   const selectedMode = selectedOption?.submitMode || request.submitMode;
-  const submitLabel = (
-    selectedMode === "apply"
-      ? request.submitLabel || "Apply"
-      : "Continue"
-  );
-  return (
-    <div aria-busy={busy} className="agent-plan-form">
-      {questions.map((question, questionIndex) => (
-        <fieldset
-          className="agent-plan-question"
-          disabled={busy || disabled || !request.valid}
-          key={question.id}
-        >
-          <legend>
-            {questions.length > 1 ? (
-              <small>{questionIndex + 1} of {questions.length}</small>
-            ) : null}
-            {question.question}
-          </legend>
-          <div className="agent-plan-options">
-            {question.options.map((option) => {
-              const detailText = planOptionDetails(option);
-              return (
-                <label className="agent-plan-option" key={option.id}>
-                  <input
-                    aria-label={option.label}
-                    checked={selected[question.id] === option.id}
-                    name={`plan-${request.requestEventId}-${question.id}`}
-                    type="radio"
-                    value={option.id}
-                    onChange={() => setSelected((current) => ({
-                      ...current,
-                      [question.id]: option.id,
-                    }))}
-                  />
-                  <span>
-                    <span className="agent-plan-option-heading">
-                      <strong>{displayPlanOptionLabel(option.label)}</strong>
-                      {option.recommended ? (
-                        <small className="agent-plan-recommended">Recommended</small>
-                      ) : null}
-                    </span>
-                    {option.description ? <small>{option.description}</small> : null}
-                    {detailText ? <small className="agent-plan-option-details">{detailText}</small> : null}
-                  </span>
-                </label>
-              );
-            })}
-            {question.allowOther ? (
-              <label className="agent-plan-option other">
-                <input
-                  checked={selected[question.id] === "other"}
-                  name={`plan-${request.requestEventId}-${question.id}`}
-                  type="radio"
-                  value="other"
-                  onChange={() => setSelected((current) => ({
-                    ...current,
-                    [question.id]: "other",
-                  }))}
-                />
-                <span>
-                  <strong>Customize</strong>
-                  {selected[question.id] === "other" ? (
-                    <textarea
-                      aria-label={`Custom answer for ${question.question}`}
-                      autoFocus
-                      rows={2}
-                      value={otherAnswers[question.id] || ""}
-                      onChange={(event) => setOtherAnswers((current) => ({
-                        ...current,
-                        [question.id]: event.target.value,
-                      }))}
-                    />
-                  ) : null}
-                </span>
-              </label>
-            ) : null}
-          </div>
-        </fieldset>
-      ))}
-      {request.validationError ? (
-        <p className="agent-action-warning">{request.validationError}</p>
-      ) : null}
-      <div className="agent-plan-actions">
-        <button
-          className="agent-inline-button"
-          disabled={busy || disabled || !onChatAbout}
-          type="button"
-          onClick={onChatAbout}
-        >
-          <MessageCircle aria-hidden="true" size={14} />
-          Chat about
-        </button>
-        <button
-          className="agent-inline-button primary"
-          disabled={!canSubmit}
-          type="button"
-          onClick={() => {
-            const primary = answers[0];
-            if (!primary) return;
-            onSubmit?.({
-              requestEventId: request.requestEventId,
-              requestId: request.requestId,
-              revision: request.revision,
-              questionId: primary.questionId,
-              optionId: primary.optionId,
-              answer: primary.answer,
-              answers,
-            });
-          }}
-        >
-          <Check aria-hidden="true" size={14} />
-          {busy ? (selectedMode === "apply" ? "Applying" : "Continuing") : submitLabel}
-        </button>
-      </div>
-    </div>
-  );
+  return selectedMode === "apply" ? request.submitLabel || "Apply" : "Continue";
+}
+
+function submitPlanAnswers(
+  request: AgentSessionPlanRequest,
+  answers: AskUserQuestionAnswer[],
+  onSubmit?: (response: AgentSessionPlanResponse) => void,
+) {
+  const primary = answers[0];
+  if (!primary) return;
+  onSubmit?.({
+    requestEventId: request.requestEventId,
+    requestId: request.requestId,
+    revision: request.revision,
+    questionId: primary.questionId,
+    optionId: primary.optionId,
+    answer: primary.answer,
+    answers,
+  });
 }
 
 export function ApproveInteractionActions({

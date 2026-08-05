@@ -161,7 +161,12 @@ def write_fanout_retry_briefing(
             shlex.quote(json.dumps(payload, ensure_ascii=False)),
         ])
 
-    lines = [
+    lines: list[str] = []
+    if manifest.get("topology") == "fanout_writer_scoped":
+        task_id = str(child.get("task_id") or "")
+        if task_id:
+            lines.append(f"Active task: {task_id}")
+    lines.extend([
         f"# Fanout Retry: {child_id}",
         "",
         f"- fanout_id: `{fanout_id}`",
@@ -171,7 +176,7 @@ def write_fanout_retry_briefing(
         f"- target_ref: `{manifest.get('target_ref', '')}`",
         "",
         "This is a retry of the same fanout child. Keep the same child_id and use the new run_id.",
-    ]
+    ])
     if manifest.get("topology") == "fanout_writer_scoped":
         lines.extend([
             f"- task_id: `{child.get('task_id', '')}`",

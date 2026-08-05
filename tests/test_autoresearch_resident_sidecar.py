@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from zf.core.config.schema import (
     RuntimeAutoresearchResidentConfig,
@@ -101,8 +103,12 @@ def test_autoresearch_resident_sidecar_starts_authorized_and_stops(
         return FakeProcess()
 
     monkeypatch.setattr(
-        "zf.runtime.autoresearch_resident_sidecar.subprocess.Popen",
-        fake_popen,
+        "zf.runtime.autoresearch_resident_sidecar.subprocess",
+        SimpleNamespace(
+            Popen=fake_popen,
+            STDOUT=subprocess.STDOUT,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
     )
     cfg = ZfConfig(
         runtime=RuntimeConfig(

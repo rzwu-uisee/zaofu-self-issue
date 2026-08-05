@@ -68,6 +68,8 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "channel.synthesis.requested",
     "channel.question.dedup.requested",
     "channel.question.dedup.applied",
+    "channel.question.dedup.rejected",
+    "channel.question.dedup.remediation.exhausted",
     "channel.cross_review.requested",
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",

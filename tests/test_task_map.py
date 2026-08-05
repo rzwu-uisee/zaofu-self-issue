@@ -452,6 +452,117 @@ def test_task_map_validation_accepts_verification_path_inside_allowed_paths() ->
     assert result.summary["tasks_missing_allowed_paths_reason"] == []
 
 
+def test_task_map_validation_accepts_explicit_verification_read_paths() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "RELEASE-EVIDENCE-R11",
+                "title": "Refresh release evidence",
+                "wave": 1,
+                "allowed_paths": ["evidence/release/**"],
+                "allowed_paths_reason": "Owns generated release evidence only.",
+                "verification_read_paths": [
+                    "scripts/release/release_gate.py",
+                    "tests/release/test_plan_admission_successor.py",
+                    "tests/release/test_release_contract.py",
+                ],
+                "verification": [
+                    "python scripts/release/release_gate.py --check",
+                    (
+                        "python -m pytest "
+                        "tests/release/test_plan_admission_successor.py "
+                        "tests/release/test_release_contract.py -q"
+                    ),
+                ],
+            },
+        ],
+    })
+
+    assert result.passed is True, result.errors
+
+
+def test_task_map_verification_read_paths_do_not_allow_unlisted_refs() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "RELEASE-EVIDENCE-R11",
+                "title": "Refresh release evidence",
+                "wave": 1,
+                "allowed_paths": ["evidence/release/**"],
+                "allowed_paths_reason": "Owns generated release evidence only.",
+                "verification_read_paths": ["scripts/release/release_gate.py"],
+                "verification": (
+                    "python -m pytest tests/release/test_unlisted_contract.py -q"
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is False
+    assert any(
+        "references path outside allowed_paths" in error
+        and "test_unlisted_contract.py" in error
+        for error in result.errors
+    )
+
+
+def test_task_map_ignores_external_executable_and_runtime_state_dir() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "RELEASE-EVIDENCE-R12",
+                "title": "Refresh release evidence",
+                "wave": 1,
+                "allowed_paths": ["evidence/release/**"],
+                "allowed_paths_reason": "Owns generated release evidence only.",
+                "verification_read_paths": [
+                    "scripts/release/release_gate.py",
+                    "tests/release/test_release_contract.py",
+                ],
+                "verification": [
+                    (
+                        "/opt/zaofu/bin/zf events --state-dir "
+                        "/tmp/project/.zf-runtime trace evt-authority"
+                    ),
+                    (
+                        "uv run python -m pytest "
+                        "tests/release/test_release_contract.py -q"
+                    ),
+                    "python scripts/release/release_gate.py --check",
+                ],
+            },
+        ],
+    })
+
+    assert result.passed is True, result.errors
+
+
+def test_external_executable_does_not_hide_other_absolute_path_arguments() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "RELEASE-EVIDENCE-R12",
+                "title": "Refresh release evidence",
+                "wave": 1,
+                "allowed_paths": ["evidence/release/**"],
+                "allowed_paths_reason": "Owns generated release evidence only.",
+                "verification": "/bin/cat /tmp/unowned-release-evidence.json",
+            },
+        ],
+    })
+
+    assert result.passed is False
+    assert any(
+        "references path outside allowed_paths" in error
+        and "/tmp/unowned-release-evidence.json" in error
+        for error in result.errors
+    )
+
+
 def test_task_map_validation_accepts_package_root_relative_node_commands() -> None:
     result = validate_task_map_payload({
         "schema_version": "task-map.v1",

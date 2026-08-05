@@ -796,6 +796,8 @@ def recovery_closeout_contract_report(
 def _spec_needs_recovery_closeout(spec: Any) -> bool:
     if getattr(spec, "owner_route", "") == "kernel_aggregate":
         return False
+    if getattr(spec, "action_policy", "") in {"informational", "kernel_consumed"}:
+        return False
     semantics = tuple(getattr(spec, "run_manager_semantics", ()) or ())
     return (
         "pending_action" in semantics

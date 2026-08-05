@@ -119,8 +119,11 @@ def channel_reply_response_contract(
             "It must contain the exact ledger_digest from the context and "
             "groups. Each group contains canonical_question_id, "
             "merge_question_ids, and reason. It may also contain "
-            "question_updates and bounded cross_review_requests. Do not emit "
-            "merge or cross-review events."
+            "question_updates and bounded cross_review_requests. Every "
+            "surviving fact must target a real channel member and have an "
+            "evidence-bound cross review; owner/operator aliases are only "
+            "valid for owner decisions. Repair any rejection reason carried "
+            "by the request refs. Do not emit merge or cross-review events."
         )
     if refs.get("synthesis_request_id"):
         return (
@@ -159,9 +162,19 @@ def channel_reply_response_contract(
             "End with one JSON object named channel_contribution containing "
             "summary, questions (a list of explicit clarification questions), "
             "where each question may carry kind, depends_on, priority, "
-            "why_it_matters, recommended_answer, and target_member_id; "
+            "why_it_matters, recommended_answer, and target_member_id. When "
+            "the answer space is enumerable, a question may also carry "
+            "options (two or three mutually exclusive objects with id, "
+            "label, description, and recommended; put the single recommended "
+            "option first) plus allow_other. Leave options absent for a "
+            "genuinely free-form answer; "
             "findings, contradictions, risks, source_refs, evidence_refs, "
-            "and freeze=true when your contribution is complete."
+            "and freeze=true when your contribution is complete. This blind "
+            "phase precedes canonical synthesis: do not open a blocking "
+            "question that requires the PRD/artifact/version/digest this "
+            "discussion will create later. Review the current requirement "
+            "and context digest instead; record missing future output as a "
+            "finding or assumption."
         )
     return ""
 

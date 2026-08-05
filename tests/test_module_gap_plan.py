@@ -128,6 +128,54 @@ def test_semantic_replan_replaces_superseded_task_in_amended_map() -> None:
     assert validate_task_map_payload(amended).passed is True
 
 
+def test_gap_amend_preserves_read_only_verification_scope() -> None:
+    base_commit = "c" * 40
+    base = {
+        "schema_version": "task-map.v1",
+        "feature_id": "RELEASE",
+        "tasks": [{
+            "task_id": "RELEASE-EVIDENCE-R10",
+            "title": "release evidence",
+            "owner_role": "dev",
+            "wave": 1,
+            "allowed_paths": ["evidence/release/**"],
+            "allowed_paths_reason": "release evidence owner",
+            "acceptance": ["release evidence exists"],
+        }],
+    }
+    replacement = {
+        "task_id": "RELEASE-EVIDENCE-R11",
+        "parent_task_id": "RELEASE-EVIDENCE-R10",
+        "claim_paths": ["evidence/release/**"],
+        "verification_read_paths": [
+            "scripts/release/release_gate.py",
+            "tests/release/test_release_contract.py",
+        ],
+        "acceptance": ["release port evidence is current"],
+        "verify_commands": [
+            "python scripts/release/release_gate.py --check",
+            "python -m pytest tests/release/test_release_contract.py -q",
+        ],
+        "base_commit": base_commit,
+        "source_refs": ["reports/release-gap.json", f"git:{base_commit}"],
+        "supersedes_task_ids": ["RELEASE-EVIDENCE-R10"],
+    }
+
+    amended = build_gap_task_map_amend(
+        base,
+        gap_tasks=[replacement],
+        supersedes_task_map_ref="artifacts/RELEASE/task_map.json",
+    )
+
+    task = amended["tasks"][0]
+    assert task["allowed_paths"] == ["evidence/release/**"]
+    assert task["verification_read_paths"] == [
+        "scripts/release/release_gate.py",
+        "tests/release/test_release_contract.py",
+    ]
+    assert validate_task_map_payload(amended).passed is True
+
+
 def test_assembly_replacement_inherits_parent_mechanical_owner_class() -> None:
     base_commit = "b" * 40
     base = {

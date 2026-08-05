@@ -15,6 +15,11 @@ import type { ChannelPermissionProfile } from "../../app/sharedTypes";
 import { TablePage, agentConversationScrollSignature, asRecordArray, asStringArray, channelIdOf, channelNameOf, recordString, recordValue, scrollElementToBottom, textValue } from "../../app/shared";
 import { previewItemsFromRefs } from "../agent-session/previewRegistry";
 import { canonicalChannelPrd } from "./workflowPlanning";
+import { openOwnerQuestionnaire } from "./channelQuestionnaire";
+import {
+  AskUserQuestion,
+  type AskUserQuestionAnswer,
+} from "../common/AskUserQuestion";
 
 const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((module) => ({
   default: module.ChannelEmojiPicker,
@@ -401,6 +406,7 @@ export function ChannelPage({
   onSetMemberPermission,
   onSearchHistory,
   onSetDiscussionMode,
+  onStartDiscussion,
   onConsensusDecision,
   onWorkflowRequest,
   selectedChannelId,
@@ -414,10 +420,10 @@ export function ChannelPage({
   events?: RecentEvent[];
   loadError: string | null;
   onAddAgent: () => void;
-  onClearHistory: () => Promise<void>;
+  onClearHistory: (threadId: string) => Promise<void>;
   onDeleteChannel: () => Promise<void>;
   onDrainReplies: () => Promise<void>;
-  onGenerateOwnerReport: () => Promise<void>;
+  onGenerateOwnerReport: (threadId: string) => Promise<void>;
   onMarkRead: (threadId: string) => Promise<void>;
   onPinMessage: (
     messageId: string,
@@ -433,11 +439,12 @@ export function ChannelPage({
   ) => Promise<void>;
   onRemoveMember: (memberId: string) => Promise<void>;
   onResearchAdopt: (payload: Record<string, unknown>) => Promise<void>;
-  onRequestSynthesis: (targetMemberId?: string) => Promise<void>;
+  onRequestSynthesis: (threadId: string, targetMemberId?: string) => Promise<void>;
   onResolveQuestion: (questionId: string, threadId: string, resolution: string, answer: string) => Promise<void>;
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
   onSearchHistory: (query: string, threadId?: string) => Promise<ChannelHistorySearchResult>;
-  onSetDiscussionMode: (mode: string, defaultResponderId?: string) => Promise<void>;
+  onSetDiscussionMode: (threadId: string, mode: string, defaultResponderId?: string) => Promise<void>;
+  onStartDiscussion: (threadId: string, message: string, messageId: string, mode: string) => Promise<void>;
   onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string) => Promise<void>;
   onWorkflowRequest: (taskId: string, reason: string, threadId: string) => Promise<void>;
   selectedChannelId: string;
@@ -447,7 +454,6 @@ export function ChannelPage({
   const [postingCount, setPostingCount] = useState(0);
   const [composerError, setComposerError] = useState("");
   const [workflowDraft, setWorkflowDraft] = useState({ taskId: "", reason: "" });
-  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const [consensusBlocker, setConsensusBlocker] = useState("");
   const [controlsBusy, setControlsBusy] = useState(false);
   const [researchActionBusyId, setResearchActionBusyId] = useState("");
@@ -568,10 +574,12 @@ export function ChannelPage({
       )) ? activeChannelThreadId : questionThreadId)
       || activeChannelThreadId
       || "main";
-    const openQuestions = questions
+    const threadQuestions = questions.filter((item) => (
+      String(item.thread_id || "main") === threadId
+    ));
+    const openQuestions = threadQuestions
       .filter((item) => (
         String(item.status || "") === "open"
-        && String(item.thread_id || "main") === threadId
       ))
       .map((item) => ({
         id: String(item.question_id || ""),
@@ -581,6 +589,49 @@ export function ChannelPage({
         askedBy: String(item.asked_by || ""),
       }))
       .filter((item) => item.text);
+    const ownerQuestions = openOwnerQuestionnaire(detail, threadId)
+      .slice(0, 3)
+      .flatMap((item) => {
+        const id = String(item.question_id || "").trim();
+        const text = String(item.question || "").trim();
+        if (!id || !text) return [];
+        const options = asRecordArray(item.options).flatMap((option) => {
+          const optionId = textValue(option.id).trim();
+          const label = textValue(option.label).trim();
+          if (!optionId || !label) return [];
+          return [{
+            id: optionId,
+            label,
+            description: textValue(option.description),
+            recommended: option.recommended === true,
+          }];
+        });
+        const recommendedAnswer = String(item.recommended_answer || "").trim();
+        const whyItMatters = String(item.why_it_matters || "").trim();
+        const askedBy = String(item.asked_by || "").trim();
+        return [{
+          id,
+          header: [
+            String(item.priority || "p1").toUpperCase(),
+            String(item.kind || "owner decision").replaceAll("_", " "),
+          ].join(" / "),
+          question: text,
+          description: [
+            whyItMatters,
+            !options.length && recommendedAnswer
+              ? `Recommended: ${recommendedAnswer}`
+              : "",
+            askedBy ? `Asked by ${askedBy}` : "",
+          ].filter(Boolean).join(" "),
+          options,
+          allowOther: item.allow_other !== false,
+          inputPlaceholder: recommendedAnswer
+            ? `Recommended: ${recommendedAnswer}`
+            : "Answer this owner decision.",
+          required: false,
+          skipLabel: "Out of scope",
+        }];
+      });
     if (!active && !openQuestions.length) return null;
     const phase = String(active?.state || "");
     const phaseNum = phase === "phase1_blind" ? 1
@@ -614,8 +665,10 @@ export function ChannelPage({
       quietMinutes: Math.max(1, Math.round(quietMs / 60000)),
       roster: Array.isArray(active?.roster) ? (active?.roster as unknown[]) : [],
       openQuestions,
-      totalCount: questions.length,
-      resolvedCount: questions.length - openQuestions.length,
+      ownerQuestions,
+      questionGraphDigest: detail?.question_graph_digests?.[threadId] || "",
+      totalCount: threadQuestions.length,
+      resolvedCount: threadQuestions.length - openQuestions.length,
     };
   }, [activeChannelThreadId, detail]);
   function quoteDiscussionQuestion(text: string) {
@@ -712,7 +765,7 @@ export function ChannelPage({
   );
   const messages = detail?.messages ?? detail?.recent_messages ?? [];
   const syntheses = detail?.syntheses ?? [];
-  const controlThreadId = discussionBand?.threadId || activeChannelThreadId || "main";
+  const controlThreadId = activeChannelThreadId || discussionBand?.threadId || "main";
   const canonicalPrd = canonicalChannelPrd(detail, controlThreadId);
   const threadConsensus = detail?.consensus?.[controlThreadId] ?? {};
   const workflowRequests = detail?.workflow_requests ?? [];
@@ -724,6 +777,28 @@ export function ChannelPage({
   const automationReports = detail?.automation_reports ?? [];
   const resultReceipts = detail?.result_receipts ?? [];
   const discussionMode = recordString(detail?.discussion ?? {}, "mode", "conversation");
+  const latestThreadRequirement = [...messages]
+    .reverse()
+    .map((message) => message as unknown as Record<string, unknown>)
+    .find((message) => (
+    recordString(message, "thread_id", "main") === controlThreadId
+    && (
+      recordString(message, "role") === "user"
+      || recordString(message, "member_id") === "operator"
+    )
+    && Boolean(channelMessageText(message))
+    ));
+  const latestThreadRequirementText = latestThreadRequirement
+    ? channelMessageText(latestThreadRequirement)
+    : "";
+  const latestThreadRequirementId = latestThreadRequirement
+    ? recordString(latestThreadRequirement, "message_id")
+    : "";
+  const currentDiscussionState = recordString(
+    detail?.discussions?.[controlThreadId] ?? {},
+    "state",
+    "idle",
+  );
   const defaultResponderId = recordString(detail?.discussion ?? {}, "default_responder_id");
   const replyCapableMembers = members.filter((member) => {
     const status = recordString(member, "status");
@@ -790,7 +865,6 @@ export function ChannelPage({
     setMentionOpen(false);
     setMentionQuery("");
     setHistorySearchOpen(false);
-    setQuestionAnswers({});
     setConsensusBlocker("");
   }, [selectedChannelId]);
   function toggleDrawer(nextDrawer: ChannelDrawerKey) {
@@ -1862,7 +1936,7 @@ export function ChannelPage({
                 value={discussionMode}
                 onChange={(event) => {
                   const mode = event.target.value;
-                  void runControl(() => onSetDiscussionMode(mode, defaultResponderId));
+                  void runControl(() => onSetDiscussionMode(controlThreadId, mode, defaultResponderId));
                 }}
               >
                 <option value="conversation">conversation</option>
@@ -1881,7 +1955,7 @@ export function ChannelPage({
                 value={defaultResponderId}
                 onChange={(event) => {
                   const memberId = event.target.value;
-                  void runControl(() => onSetDiscussionMode(discussionMode, memberId));
+                  void runControl(() => onSetDiscussionMode(controlThreadId, discussionMode, memberId));
                 }}
               >
                 <option value="">no default responder</option>
@@ -1893,10 +1967,29 @@ export function ChannelPage({
             </label>
           </div>
           <div className="channel-control-actions">
+            <button
+              className="icon-button"
+              disabled={
+                !actionReady
+                || controlsBusy
+                || !latestThreadRequirementText
+                || currentDiscussionState !== "idle"
+              }
+              type="button"
+              onClick={() => void runControl(() => onStartDiscussion(
+                controlThreadId,
+                latestThreadRequirementText,
+                latestThreadRequirementId,
+                discussionMode,
+              ))}
+            >
+              <PlayCircle size={16} />
+              Start discussion
+            </button>
             <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onDrainReplies)}>
               Drain Replies
             </button>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onRequestSynthesis(defaultResponderId || undefined))}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onRequestSynthesis(controlThreadId, defaultResponderId || undefined))}>
               <FileText size={16} />
               Synthesize
             </button>
@@ -1912,7 +2005,7 @@ export function ChannelPage({
               <strong>Brief</strong>
               <small>Generate an owner-visible channel report.</small>
             </span>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onGenerateOwnerReport)}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onGenerateOwnerReport(controlThreadId))}>
               <FileText size={16} />
               Report
             </button>
@@ -2007,7 +2100,7 @@ export function ChannelPage({
               <h3>Owner</h3>
               <span className="muted">{ownerReports.length} reports</span>
             </div>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onGenerateOwnerReport)}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onGenerateOwnerReport(controlThreadId))}>
               <FileText size={16} />
               Report
             </button>
@@ -2083,7 +2176,7 @@ export function ChannelPage({
             value={discussionMode}
             onChange={(event) => {
               const mode = event.target.value;
-              void runControl(() => onSetDiscussionMode(mode, defaultResponderId));
+              void runControl(() => onSetDiscussionMode(controlThreadId, mode, defaultResponderId));
             }}
           >
             <option value="conversation">conversation</option>
@@ -2096,7 +2189,7 @@ export function ChannelPage({
             value={defaultResponderId}
             onChange={(event) => {
               const memberId = event.target.value;
-              void runControl(() => onSetDiscussionMode(discussionMode, memberId));
+              void runControl(() => onSetDiscussionMode(controlThreadId, discussionMode, memberId));
             }}
           >
             <option value="">no default responder</option>
@@ -2105,13 +2198,32 @@ export function ChannelPage({
               return <option key={memberId} value={memberId}>{memberDisplayName(member)}</option>;
             })}
           </select>
+          <button
+            className="icon-button"
+            disabled={
+              !actionReady
+              || controlsBusy
+              || !latestThreadRequirementText
+              || currentDiscussionState !== "idle"
+            }
+            type="button"
+            onClick={() => void runControl(() => onStartDiscussion(
+              controlThreadId,
+              latestThreadRequirementText,
+              latestThreadRequirementId,
+              discussionMode,
+            ))}
+          >
+            <PlayCircle size={16} />
+            Start discussion
+          </button>
         </div>
         <div className="channel-control-panel">
           <div className="inline-heading">
             <h3>Danger Zone</h3>
             <span className="muted">event gated</span>
           </div>
-          <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onClearHistory)}>
+          <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onClearHistory(controlThreadId))}>
             <Archive size={16} />
             Clear History
           </button>
@@ -2332,64 +2444,6 @@ export function ChannelPage({
                       </span>
                     ) : null}
                   </div>
-                  {discussionBand.openQuestions.length ? (
-                    <ul className="channel-discussion-questions">
-                      {discussionBand.openQuestions.map((q) => (
-                        <li key={q.id}>
-                          <div className="channel-discussion-question-main">
-                            {q.category ? (
-                              <span className={`channel-discussion-cat cat-${q.category}`}>
-                                {q.category.replace("_", " ")}
-                              </span>
-                            ) : null}
-                            <span className="channel-discussion-qtext">{q.text}</span>
-                            {q.askedBy ? <small>{q.askedBy}</small> : null}
-                            <button
-                              className="channel-question-icon"
-                              title="Quote into composer"
-                              type="button"
-                              onClick={() => quoteDiscussionQuestion(q.text)}
-                            >
-                              <Quote size={14} />
-                            </button>
-                          </div>
-                          <div className="channel-discussion-answer">
-                            <input
-                              className="filter-input"
-                              placeholder="Answer"
-                              value={questionAnswers[`${q.threadId}:${q.id}`] ?? ""}
-                              onChange={(event) => setQuestionAnswers({
-                                ...questionAnswers,
-                                [`${q.threadId}:${q.id}`]: event.target.value,
-                              })}
-                            />
-                            <button
-                              className="icon-button primary"
-                              disabled={!actionReady || controlsBusy || !(questionAnswers[`${q.threadId}:${q.id}`] ?? "").trim()}
-                              type="button"
-                              onClick={() => void runControl(async () => {
-                                const answerKey = `${q.threadId}:${q.id}`;
-                                await onResolveQuestion(q.id, q.threadId, "answered", (questionAnswers[answerKey] ?? "").trim());
-                                setQuestionAnswers((current) => ({ ...current, [answerKey]: "" }));
-                              })}
-                            >
-                              <Send size={14} />
-                              Answer
-                            </button>
-                            <button
-                              className="icon-button"
-                              disabled={!actionReady || controlsBusy}
-                              type="button"
-                              onClick={() => void runControl(() => onResolveQuestion(q.id, q.threadId, "out_of_scope", ""))}
-                            >
-                              <Archive size={14} />
-                              Out of scope
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
                   {recordString(threadConsensus, "artifact_ref") && !recordString(threadConsensus, "reached_event_id") ? (
                     <div className="channel-consensus-control">
                       <span className="channel-discussion-qtext">
@@ -2494,6 +2548,38 @@ export function ChannelPage({
                   <ChevronDown size={15} />
                   New messages
                 </button>
+              ) : null}
+              {discussionBand?.ownerQuestions.length ? (
+                <AskUserQuestion
+                  busy={controlsBusy}
+                  disabled={!actionReady}
+                  onDiscuss={(question) => {
+                    quoteDiscussionQuestion(question.question);
+                    window.setTimeout(() => focusComposer(), 0);
+                  }}
+                  onSubmit={(answers: AskUserQuestionAnswer[]) => {
+                    void runControl(async () => {
+                      for (const answer of answers) {
+                        await onResolveQuestion(
+                          answer.questionId,
+                          discussionBand.threadId,
+                          answer.skipped ? "out_of_scope" : "answered",
+                          answer.answer,
+                        );
+                      }
+                    });
+                  }}
+                  questions={discussionBand.ownerQuestions}
+                  requestId={[
+                    selectedChannelId,
+                    discussionBand.threadId,
+                    discussionBand.questionGraphDigest,
+                  ].join(":")}
+                  submitLabel={(answers) => (
+                    answers.length > 1 ? "Submit answers" : "Answer"
+                  )}
+                  variant="shelf"
+                />
               ) : null}
               <form
                 className="channel-composer"

@@ -31,6 +31,7 @@ class CallResultAuthorityMixin:
         self,
         envelope: Mapping[str, Any],
         adapted: AdaptedControlResult,
+        operation: Mapping[str, Any],
     ) -> list[dict[str, str]]:
         if adapted.schema_version not in {
             "implementation-result.v1",
@@ -150,6 +151,15 @@ class CallResultAuthorityMixin:
                 "stale_target_snapshot",
                 str(exc),
             ))
+            return issues
+
+        # A global rescan audits the immutable continuation target pinned by
+        # its operation. It is not a verdict on the latest canonical candidate.
+        # TaskStore and both immutable snapshots above remain authoritative.
+        if (
+            str(operation.get("output_profile_id") or "") == "global-rescan"
+            and str(operation.get("output_profile_revision") or "") == "1"
+        ):
             return issues
 
         current_candidate = self._latest_candidate_for_run(

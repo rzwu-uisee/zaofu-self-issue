@@ -582,8 +582,10 @@ def _current_target_commit(
                 continue
             if (
                 task_map_generation
-                and str(result.get("task_map_generation") or "")
-                != task_map_generation
+                and not same_task_map_generation(
+                    str(result.get("task_map_generation") or ""),
+                    task_map_generation,
+                )
             ):
                 continue
             target_commit = str(result.get("target_commit") or "").strip()
@@ -805,12 +807,20 @@ def _goal_claim_set_binding(
         if event.type != "goal.claim_set.pinned":
             continue
         payload = event.payload if isinstance(event.payload, Mapping) else {}
-        identities = (
-            (str(payload.get("workflow_run_id") or ""), workflow_run_id),
-            (str(payload.get("goal_id") or ""), goal_id),
-            (str(payload.get("task_map_generation") or ""), task_map_generation),
-        )
-        if any(expected and actual != expected for actual, expected in identities):
+        event_run_id = str(payload.get("workflow_run_id") or "")
+        event_goal_id = str(payload.get("goal_id") or "")
+        event_generation = str(payload.get("task_map_generation") or "")
+        if (
+            (workflow_run_id and event_run_id != workflow_run_id)
+            or (goal_id and event_goal_id != goal_id)
+            or (
+                task_map_generation
+                and not same_task_map_generation(
+                    event_generation,
+                    task_map_generation,
+                )
+            )
+        ):
             continue
         ref = str(payload.get("goal_claim_set_ref") or ref)
         digest = str(payload.get("goal_claim_set_digest") or digest)

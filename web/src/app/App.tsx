@@ -1583,27 +1583,6 @@ export function App() {
     submitAction,
   });
 
-  async function submitChannelDiscussionMode(mode: string, defaultResponderId?: string) {
-    await submitAction("channel-discussion-mode", {
-      channel_id: selectedChannelId || "ch-zaofu",
-      thread_id: "main",
-      mode,
-      max_rounds: 6,
-      default_responder_id: defaultResponderId ?? recordString(channelDetail?.discussion ?? {}, "default_responder_id"),
-      source: "web-channel-discussion",
-    });
-  }
-
-  async function requestChannelSynthesis(targetMemberId?: string) {
-    await submitAction("channel.synthesis.request", {
-      channel_id: selectedChannelId || "ch-zaofu",
-      thread_id: "main",
-      target_member_id: targetMemberId || undefined,
-      reason: "operator requested channel synthesis",
-      source: "web-channel-synthesis",
-    });
-  }
-
   async function drainChannelReplies() {
     await submitAction("channel-drain-replies", {
       channel_id: selectedChannelId || "ch-zaofu",
@@ -1612,27 +1591,10 @@ export function App() {
     });
   }
 
-  async function generateChannelOwnerReport() {
-    await submitAction("channel.owner_report.request", {
-      channel_id: selectedChannelId || "ch-zaofu",
-      thread_id: "main",
-      owner_id: "owner:operator",
-      member_id: "operator",
-      period: "current",
-      reason: "generated from channel detail",
-      source: "web-channel-owner-report",
-    });
-  }
-
-  async function clearChannelHistory() {
+  async function clearChannelHistory(threadId: string) {
     const channelId = selectedChannelId || "ch-zaofu";
     if (!window.confirm(`Clear visible history for ${channelId}?`)) return;
-    await submitAction("channel-clear-history", {
-      channel_id: channelId,
-      thread_id: "main",
-      reason: "cleared from channel settings",
-      source: "web-channel-settings",
-    });
+    await channelActions.clearHistory(threadId);
   }
 
   async function runChannelHistorySearch(q: string, threadId?: string): Promise<ChannelHistorySearchResult> {
@@ -2042,17 +2004,18 @@ export function App() {
                 onOpenChannel={openChannel}
                 onPostMessage={(text, refs, ingress) => submitChannelMessage(text, refs, ingress)}
                 onDrainReplies={() => drainChannelReplies()}
-                onGenerateOwnerReport={() => generateChannelOwnerReport()}
-                onClearHistory={() => clearChannelHistory()}
+                onGenerateOwnerReport={(threadId) => channelActions.generateOwnerReport(threadId)}
+                onClearHistory={(threadId) => clearChannelHistory(threadId)}
                 onDeleteChannel={() => deleteChannel()}
                 onMarkRead={(threadId) => markChannelRead(threadId)}
                 onPinMessage={(messageId, threadId, pinned) => (
                   pinChannelMessage(messageId, threadId, pinned)
                 )}
                 onSearchHistory={(query, threadId) => runChannelHistorySearch(query, threadId)}
-                onRequestSynthesis={(targetMemberId) => requestChannelSynthesis(targetMemberId)}
+                onRequestSynthesis={(threadId, targetMemberId) => channelActions.requestSynthesis(threadId, targetMemberId)}
                 onResolveQuestion={channelActions.resolveQuestion}
-                onSetDiscussionMode={(mode, defaultResponderId) => submitChannelDiscussionMode(mode, defaultResponderId)}
+                onSetDiscussionMode={(threadId, mode, defaultResponderId) => channelActions.setDiscussionMode(threadId, mode, defaultResponderId)}
+                onStartDiscussion={(threadId, message, messageId, mode) => channelActions.startDiscussion(threadId, message, messageId, mode)}
                 onConsensusDecision={channelActions.decideConsensus}
                 onRemoveMember={(memberId) => removeChannelMember(memberId)}
                 onResearchAdopt={channelActions.adoptResearchResult}

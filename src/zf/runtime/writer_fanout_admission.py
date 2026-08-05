@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict, dataclass, field
 import json
 import subprocess
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +161,7 @@ def bind_writer_task_dispatch_owner(
                 "flow_kind": flow_kind,
                 "owner_role": role.name,
                 "owner_instance": role.instance_id,
+                "contract": asdict(contract),
             },
         ))
     return contract
@@ -963,6 +964,7 @@ def _acceptance_criteria_list(value: Any) -> list[Any]:
         if isinstance(item, dict):
             text = str(
                 item.get("text")
+                or item.get("statement")
                 or item.get("criterion")
                 or item.get("description")
                 or item.get("acceptance")

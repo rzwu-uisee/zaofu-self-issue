@@ -94,6 +94,36 @@ def test_admitted_plan_port_dependency_plans_replan_not_dev_retrigger():
     assert plans[0].failed_task_ids == ("TASK-1",)
 
 
+def test_candidate_lineage_contract_mismatch_replans_without_impl_retry() -> None:
+    event = ZfEvent(
+        id="integration-lineage",
+        type="integration.failed",
+        actor="zf-cli",
+        origin="kernel",
+        correlation_id="trace-lineage",
+        payload={
+            "pdd_id": "PRD-LINEAGE",
+            "target_ref": "candidate/PRD-LINEAGE",
+            "trace_id": "trace-lineage",
+            "failure_scope": "candidate",
+            "failure_class": "candidate_quality_gate_contract_mismatch",
+            "diagnostic_class": "candidate_lineage_contract_mismatch",
+            "primary_failure_reason": (
+                "candidate quality gate requires source-branch commit ancestry "
+                "after patch-equivalent candidate integration"
+            ),
+            "failed_task_ids": ["TASK-RELEASE"],
+        },
+    )
+
+    plans = plan_candidate_rework([event], max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "replan"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].failed_task_ids == ("TASK-RELEASE",)
+
+
 def test_admitted_non_plan_dependency_escalates_without_retry():
     event = ZfEvent(
         id="tf-dependency",
@@ -189,6 +219,163 @@ def test_contract_blocker_survives_downstream_integration_aggregate() -> None:
     assert plan.source_event_id == "integration-config"
     assert plan.failed_task_ids == ("SIM-CONFIG-001",)
     assert "task-contract-blocker SIM-CONFIG-001" in plan.feedback[0]
+
+
+def test_new_contract_blocker_does_not_inherit_unrelated_integration_cap() -> None:
+    events = [
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "findings": [{"message": "old candidate lineage mismatch"}],
+            },
+            eid="integration-old-1",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "orchestrator.replan_requested",
+            {
+                "pdd_id": "SIM1-1",
+                "rework_of": "integration-old-1",
+                "rework_source": "integration.failed",
+            },
+            eid="replan-old-1",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "findings": [{"message": "old candidate evidence mismatch"}],
+            },
+            eid="integration-old-2",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "orchestrator.replan_requested",
+            {
+                "pdd_id": "SIM1-1",
+                "rework_of": "integration-old-2",
+                "rework_source": "integration.failed",
+            },
+            eid="replan-old-2",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "dev.blocked",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "task_contract_unsatisfiable",
+                "reason": "digest command conflicts with the immutable sidecar reader",
+                "evidence_refs": ["git:checkpoint-current"],
+            },
+            task_id="SIM-RELEASE-003",
+            eid="blocked-current",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "candidate_integration_failure",
+                "findings": [{
+                    "task_id": "SIM-RELEASE-003",
+                    "message": "digest command conflicts with the immutable sidecar reader",
+                }],
+            },
+            eid="integration-current",
+            corr="trace-sim1",
+        ),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].source_event_id == "integration-current"
+    assert plans[0].action == "replan"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].attempt == 1
+
+
+def test_same_contract_blocker_still_honors_attempt_cap() -> None:
+    message = "digest command conflicts with the immutable sidecar reader"
+    events = []
+    for attempt in (1, 2):
+        blocker_id = f"blocked-{attempt}"
+        failure_id = f"integration-{attempt}"
+        events.extend([
+            _ev(
+                "dev.blocked",
+                {
+                    "pdd_id": "SIM1-1",
+                    "trace_id": "trace-sim1",
+                    "failure_class": "task_contract_unsatisfiable",
+                    "reason": message,
+                    "evidence_refs": [f"git:checkpoint-{attempt}"],
+                },
+                task_id="SIM-RELEASE-003",
+                eid=blocker_id,
+                corr="trace-sim1",
+            ),
+            _ev(
+                "integration.failed",
+                {
+                    "pdd_id": "SIM1-1",
+                    "trace_id": "trace-sim1",
+                    "failure_class": "candidate_integration_failure",
+                    "findings": [{"task_id": "SIM-RELEASE-003", "message": message}],
+                },
+                eid=failure_id,
+                corr="trace-sim1",
+            ),
+            _ev(
+                "orchestrator.replan_requested",
+                {
+                    "pdd_id": "SIM1-1",
+                    "rework_of": failure_id,
+                    "rework_source": "integration.failed",
+                },
+                eid=f"replan-{attempt}",
+                corr="trace-sim1",
+            ),
+        ])
+    events.extend([
+        _ev(
+            "dev.blocked",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "task_contract_unsatisfiable",
+                "reason": message,
+                "evidence_refs": ["git:checkpoint-3"],
+            },
+            task_id="SIM-RELEASE-003",
+            eid="blocked-3",
+            corr="trace-sim1",
+        ),
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "SIM1-1",
+                "trace_id": "trace-sim1",
+                "failure_class": "candidate_integration_failure",
+                "findings": [{"task_id": "SIM-RELEASE-003", "message": message}],
+            },
+            eid="integration-3",
+            corr="trace-sim1",
+        ),
+    ])
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "escalate"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].attempt == 3
 
 
 def test_module_parity_closure_supersedes_task_contract_blocker() -> None:

@@ -16,6 +16,7 @@ from zf.runtime.channel_question_graph import (
 
 
 QUESTION_DEDUP_SCHEMA_VERSION = "channel.question.dedup.v1"
+MAX_QUESTION_DEDUP_ATTEMPTS = 3
 
 
 def question_ledger(
@@ -51,6 +52,17 @@ def question_ledger(
                 "recommended_answer": str(
                     item.get("recommended_answer") or ""
                 ),
+                "options": [
+                    {
+                        "id": str(option.get("id") or ""),
+                        "label": str(option.get("label") or ""),
+                        "description": str(option.get("description") or ""),
+                        "recommended": bool(option.get("recommended")),
+                    }
+                    for option in item.get("options") or []
+                    if isinstance(option, dict)
+                ],
+                "allow_other": bool(item.get("allow_other", True)),
                 "target_member_id": str(
                     item.get("target_member_id") or "owner"
                 ),
@@ -90,11 +102,14 @@ def stable_question_dedup_request_id(
     channel_id: str,
     thread_id: str,
     discussion_started_event_id: str,
+    *,
+    generation: int = 1,
 ) -> str:
+    generation_suffix = "" if generation <= 1 else f":generation:{generation}"
     digest = hashlib.sha1(
         (
             f"{channel_id}:{thread_id}:{discussion_started_event_id}:"
-            "question-dedup"
+            f"question-dedup{generation_suffix}"
         ).encode("utf-8")
     ).hexdigest()[:16]
     return f"dedup-{digest}"
@@ -388,6 +403,57 @@ def apply_question_dedup_reply(
         )
 
     cross_review_requests = payload.get("cross_review_requests") or []
+    if not isinstance(cross_review_requests, list):
+        return _reject(
+            writer=writer,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            request_id=request_id,
+            actor=actor,
+            source=source,
+            causation_id=causation_id,
+            task_id=task_id,
+            reason="cross_review_requests_must_be_a_list",
+        )
+    cross_review_requests = list(cross_review_requests)
+    covered_fact_ids = {
+        str(item.get("question_id") or "").strip()
+        for item in cross_review_requests
+        if isinstance(item, dict)
+    }
+    surviving_ids = sorted(open_ids - set(merge_map))
+    for question_id in surviving_ids:
+        proposed = proposed_ledger[question_id]
+        if str(proposed.get("kind") or "owner_decision") != "fact":
+            continue
+        target_member_id = str(
+            proposed.get("target_member_id") or ""
+        ).strip()
+        if target_member_id not in member_ids:
+            return _reject(
+                writer=writer,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                request_id=request_id,
+                actor=actor,
+                source=source,
+                causation_id=causation_id,
+                task_id=task_id,
+                reason=f"fact_question_requires_member_target:{question_id}",
+            )
+        if question_id in covered_fact_ids:
+            continue
+        cross_review_requests.append({
+            "question_id": question_id,
+            "target_member_ids": [target_member_id],
+            "prompt": (
+                "Verify this fact against available evidence and report the "
+                "strongest counterexample. If the referenced future artifact "
+                "does not exist yet, state that explicitly with evidence."
+            ),
+            "reason": "Every surviving fact requires evidence-bound review.",
+            "source_refs": [f"question:{question_id}"],
+        })
     normalized_cross_reviews, cross_review_error = _normalize_cross_reviews(
         cross_review_requests,
         open_ids=open_ids,

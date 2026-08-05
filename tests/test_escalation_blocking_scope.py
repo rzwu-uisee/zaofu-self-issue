@@ -73,6 +73,18 @@ def test_run_scope_and_legacy_decisions_still_block() -> None:
     assert _explain(legacy)["blocking"] is True
 
 
+def test_release_and_unknown_scopes_fail_closed() -> None:
+    for scope in ("release", "task", "stage", "lane", "relese"):
+        result = _explain([{
+            "decision_token": f"hdec-{scope}",
+            "blocking_scope": scope,
+        }])
+        assert result["blocking"] is True
+        assert result["next_auto_action"] == "wait_for_human_decision"
+        assert len(result["blocking_refs"]) == 1
+        assert result["side_blocking_refs"] == []
+
+
 def test_direct_owner_action_auto_acknowledges_escalation(tmp_path: Path) -> None:
     """FIX-4(bizsim r4 F3):直调 failure-closeout-activate 成功后自动补发
     human.escalation.acknowledged,checkpoint lease 随决议消费释放。"""

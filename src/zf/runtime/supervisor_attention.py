@@ -136,6 +136,8 @@ def severity_rank(item: dict[str, Any]) -> int:
 def is_actionable_attention(item: dict[str, Any]) -> bool:
     """Return whether an attention item has a concrete owner/action route."""
 
+    if str(item.get("action_policy") or "") in {"informational", "kernel_consumed"}:
+        return False
     route = str(item.get("suggested_route") or item.get("recommended_route") or "")
     source = str(item.get("source") or "")
     action = item.get("suggested_action")

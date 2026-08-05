@@ -161,8 +161,11 @@ def test_structured_discovery_gap_owns_resume_with_candidate_refs(
             type="flow.discovery.failed",
             id="evt-discovery-failed",
             causation_id="evt-discovery-aggregate",
-            correlation_id="workflow-1",
+            correlation_id="semantic-replan-child",
             payload={
+                "workflow_run_id": "workflow-1",
+                "run_id": "workflow-1",
+                "trace_id": "workflow-1",
                 "fanout_id": fanout_id,
                 "pdd_id": "PRD-1",
                 "task_map_ref": "artifacts/PRD-1/task_map.json",
@@ -192,6 +195,7 @@ def test_structured_discovery_gap_owns_resume_with_candidate_refs(
 
     assert projection["summary"]["batch_pending"] == 0
     assert projection["batch_checkpoints"] == []
+    assert projection["checkpoints"] == []
 
 
 def test_scheduler_queue_timeout_produces_gap_only_resume_checkpoint(

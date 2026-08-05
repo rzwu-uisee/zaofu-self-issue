@@ -106,6 +106,7 @@ CHANNEL_EVENT_TYPES = {
     "channel.question.dedup.requested",
     "channel.question.dedup.applied",
     "channel.question.dedup.rejected",
+    "channel.question.dedup.remediation.exhausted",
     "channel.question.resolve.rejected",
     "channel.questions.frozen",
     "channel.cross_review.requested",
@@ -1938,6 +1939,9 @@ def _apply_question_dedup(
             "target_member_id": _payload_str(payload, "target_member_id"),
             "ledger_digest": _payload_str(payload, "ledger_digest"),
             "question_count": payload.get("question_count") or 0,
+            "generation": payload.get("generation") or 1,
+            "prior_request_id": _payload_str(payload, "prior_request_id"),
+            "repair_reason": _payload_str(payload, "repair_reason"),
             "status": "requested",
             "source": _payload_str(payload, "source"),
             "ts": event.ts,
@@ -1951,11 +1955,11 @@ def _apply_question_dedup(
         channel["question_dedup_requests"].append(existing)
     existing.update(redact_obj({
         "result_event_id": event.id,
-        "status": (
-            "applied"
-            if event.type == "channel.question.dedup.applied"
-            else "rejected"
-        ),
+        "status": {
+            "channel.question.dedup.applied": "applied",
+            "channel.question.dedup.rejected": "rejected",
+            "channel.question.dedup.remediation.exhausted": "exhausted",
+        }.get(event.type, "rejected"),
         "reason": _payload_str(payload, "reason"),
         "input_ledger_digest": _payload_str(
             payload,

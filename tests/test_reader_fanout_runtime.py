@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1352,6 +1353,21 @@ def test_reader_semantic_replan_trigger_is_required_immutable_input(
         ),
     )
     orch = Orchestrator(state_dir, config, transport)  # type: ignore[arg-type]
+    writer = EventWriter(log)
+    current_candidate = writer.emit(
+        "candidate.ready",
+        actor="zf-cli",
+        correlation_id="workflow-1",
+        payload={
+            "workflow_run_id": "workflow-1",
+            "pdd_id": "PRD-1",
+            "candidate_ref": "candidate/PRD-1",
+            "candidate_head_commit": "candidate123",
+            "candidate_base_commit": "base123",
+            "completed_task_ids": ["GAP-CURRENT"],
+            "task_map_generation": "generation-1",
+        },
+    )
     trigger = ZfEvent(
         type="flow.discovery.requested",
         actor="run-manager",
@@ -1363,6 +1379,9 @@ def test_reader_semantic_replan_trigger_is_required_immutable_input(
             "pdd_id": "PRD-1",
             "task_id": "GAP-CURRENT",
             "task_map_ref": "artifacts/plan/task-map.json",
+            "task_map_generation": "generation-1",
+            "contract_revision": "contract-revision-1",
+            "task_ref": "task/GAP-CURRENT",
             "rework_of": "blocked-current",
             "recommended_action": "replan",
             "guidance": "Create a new task id and supersede only GAP-CURRENT.",
@@ -1373,6 +1392,9 @@ def test_reader_semantic_replan_trigger_is_required_immutable_input(
             "candidate_ref": "worker/dev-1",
             "candidate_head_commit": "partial456",
             "target_ref": "partial456",
+            "candidate_event_id": current_candidate.id,
+            "output_profile_id": "global-rescan",
+            "output_profile_revision": "1",
         },
     )
 
@@ -1383,6 +1405,13 @@ def test_reader_semantic_replan_trigger_is_required_immutable_input(
         if event.type == "fanout.child.dispatched"
     )
     child_payload = dict(dispatched.payload["payload"])
+    assert child_payload["output_profile_id"] == "global-rescan"
+    assert child_payload["output_profile_revision"] == "1"
+    assert not any(
+        event.type == "fanout.child.failed"
+        and "preregistration failed" in str(event.payload.get("reason") or "")
+        for event in log.read_all()
+    )
     manifest = hydrate_sidecar_ref(
         state_dir,
         child_payload["attempt_source_manifest"],
@@ -3315,7 +3344,7 @@ def test_issue_triage_briefing_is_a_plan_port_producer(tmp_path: Path):
     assert str(state_dir / "artifacts" / "task_map.json") not in briefing
 
 
-def test_refactor_plan_briefing_prefills_plan_ports_in_event_and_report(
+def test_refactor_plan_briefing_prefills_plan_ports_once(
     tmp_path: Path,
 ):
     state_dir = tmp_path / ".zf-refactor"
@@ -3358,9 +3387,10 @@ def test_refactor_plan_briefing_prefills_plan_ports_in_event_and_report(
     )
 
     briefing = path.read_text(encoding="utf-8")
-    assert briefing.count('"plan_ports": []') >= 2
+    assert briefing.count('"plan_ports": []') == 1
     assert "inline plan_ports required by this briefing" in briefing
     assert "`plan_ports` MUST be a JSON array of descriptor objects" in briefing
+    assert "do not duplicate the matrix bodies inside `report`" in briefing
     assert '"plan_artifact_ref": "docs/plans/fanout-refactor-plan.md"' in briefing
     assert (
         '"task_map_ref": "artifacts/fanout-refactor-plan/task_map.json"'
@@ -3370,6 +3400,33 @@ def test_refactor_plan_briefing_prefills_plan_ports_in_event_and_report(
     assert "Never write the configured state dir or root project directly" in briefing
     assert "Kernel relocates admitted refs" in briefing
     assert str(state_dir / "artifacts" / "fanout-refactor-plan") not in briefing
+
+
+def test_generic_fanout_synth_empty_ports_preserve_child_handoff(
+    tmp_path: Path,
+) -> None:
+    _state_dir, _log, _transport, orch = _state(tmp_path)
+    child_ports = [{
+        "logical_name": "acceptance_matrix",
+        "schema_version": "acceptance-matrix.v1",
+        "body": {"schema_version": "acceptance-matrix.v1", "status": "ready"},
+    }]
+    orch._fanout_child_payloads = lambda _manifest: [  # type: ignore[method-assign]
+        {"child_id": "planner", "plan_ports": child_ports}
+    ]
+
+    projected = orch._generic_fanout_success_payload(
+        manifest={
+            "fanout_id": "fanout-plan",
+            "trace_id": "workflow-1",
+            "stage_id": "plan",
+            "children": [{"child_id": "planner"}],
+        },
+        success_event="task_map.ready",
+        extra_payloads=[{"child_id": "synth", "plan_ports": []}],
+    )
+
+    assert projected["plan_ports"] == child_ports
 
 
 def test_refactor_plan_critic_submits_only_verdict_delta(tmp_path: Path):
@@ -5556,6 +5613,9 @@ def test_reader_fanout_retries_lost_dispatched_child_after_worker_session_replac
             "reason": "session file not found for review-a",
         },
     ))
+    # The hook ledger can still expose the replaced session's open Codex turn.
+    # That stale projection must not consume the only infrastructure recovery.
+    orch._active_provider_turn = lambda _role: {"turn_id": "stale-turn"}  # type: ignore[method-assign]
 
     orch.run_once(events=[])
 
@@ -5582,6 +5642,13 @@ def test_reader_fanout_retries_lost_dispatched_child_after_worker_session_replac
     assert child["status"] == "dispatched"
     assert child["run_id"] == retry_run_id
     assert [sent[0] for sent in transport.sent][-1] == "review-a"
+    assert not any(
+        event.type == "fanout.child.dispatch_deferred"
+        and event.payload.get("fanout_id") == fanout_id
+        and event.payload.get("child_id") == "review-a"
+        and event.payload.get("reason") == "provider_turn_active"
+        for event in events
+    )
 
 
 def test_reader_fanout_retries_after_worker_relaunch_even_with_prior_activity(
@@ -5660,10 +5727,12 @@ def test_reader_fanout_redispatches_synth_lost_by_worker_relaunch(
         and event.payload.get("fanout_id") == fanout_id
     )
     first_send_count = len(transport.sent)
+    launch_ts = datetime.now(timezone.utc) - timedelta(minutes=1)
+    stale_usage_ts = launch_ts - timedelta(minutes=30)
     log.append(ZfEvent(
         type="worker.launch_artifact.written",
         actor="zf-cli",
-        ts="2026-08-03T06:53:17+00:00",
+        ts=launch_ts.isoformat(),
         payload={
             "instance_id": "review-synth",
             "role": "review-synth",
@@ -5675,11 +5744,11 @@ def test_reader_fanout_redispatches_synth_lost_by_worker_relaunch(
     log.append(ZfEvent(
         type="agent.usage",
         actor="review-synth",
-        ts="2026-08-03T06:54:24+00:00",
+        ts=datetime.now(timezone.utc).isoformat(),
         payload={
             "role": "review-synth",
             "source": "disk_reader",
-            "usage_timestamp": "2026-08-03T06:27:05Z",
+            "usage_timestamp": stale_usage_ts.isoformat(),
         },
     ))
     orch._active_provider_turn = lambda _role: {"turn_id": "stale-turn"}  # type: ignore[method-assign]

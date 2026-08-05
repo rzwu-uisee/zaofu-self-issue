@@ -1779,6 +1779,20 @@ class _CodexRpcClient:
         if request_id is None:
             return
         method = str(item.get("method") or "")
+        if not _is_codex_approval_method(method):
+            message = (
+                "Codex request_user_input is unavailable on the durable "
+                "headless bridge; emit plan_request and wait for the next "
+                "provider turn."
+                if method.endswith("item/tool/requestUserInput")
+                else f"unsupported Codex server request: {method or '<empty>'}"
+            )
+            self._write({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": message},
+            })
+            return
         decision = self._approval_decision(method, item.get("params"))
         self._write({
             "jsonrpc": "2.0",
@@ -1817,6 +1831,16 @@ class _CodexRpcClient:
                 "item/commandExecution/requestApproval"
             )
         return False
+
+
+def _is_codex_approval_method(method: str) -> bool:
+    return method in {"applyPatchApproval", "execCommandApproval"} or any(
+        method.endswith(suffix)
+        for suffix in (
+            "item/fileChange/requestApproval",
+            "item/commandExecution/requestApproval",
+        )
+    )
 
 
 def _codex_decision_for_method(method: str, *, allow: bool, raw: str = "") -> str:

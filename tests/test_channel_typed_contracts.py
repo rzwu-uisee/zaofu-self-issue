@@ -512,6 +512,20 @@ def test_typed_contribution_preserves_question_dependencies_and_frontier(
                     "priority": "p0",
                     "why_it_matters": "It constrains the rollout.",
                     "recommended_answer": "Preserve the current API.",
+                    "options": [
+                        {
+                            "id": "preserve",
+                            "label": "Preserve API (Recommended)",
+                            "description": "Retain the compatibility surface.",
+                            "recommended": True,
+                        },
+                        {
+                            "id": "break",
+                            "label": "Allow breaking changes",
+                            "description": "Optimize for the new contract.",
+                        },
+                    ],
+                    "allow_other": False,
                     "target_member_id": "owner",
                 },
                 {
@@ -537,6 +551,8 @@ def test_typed_contribution_preserves_question_dependencies_and_frontier(
         item["question_id"]
         for item in detail["owner_questionnaires"]["main"]
     ] == [policy["question_id"]]
+    assert policy["options"][0]["id"] == "preserve"
+    assert policy["allow_other"] is False
 
 
 def test_consensus_review_is_digest_bound_and_preserves_blocker(

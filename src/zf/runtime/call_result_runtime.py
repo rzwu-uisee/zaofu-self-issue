@@ -571,6 +571,10 @@ def admit_runtime_call_result(
             "operation_id": str(payload.get("operation_id") or ""),
             "request_hash": str(payload.get("request_hash") or ""),
             "result_identity": operation_result_identity,
+            "output_profile_id": str(operation_request.get("output_profile_id") or ""),
+            "output_profile_revision": str(
+                operation_request.get("output_profile_revision") or ""
+            ),
         },
         require_semantic_submit=require_semantic_submit,
         semantic_submit=semantic_submit,

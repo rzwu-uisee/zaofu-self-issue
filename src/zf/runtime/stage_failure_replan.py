@@ -34,6 +34,11 @@ _RUN_FLOW_MARKER_EVENTS = frozenset({
     "flow.roles.activation.recovered",
     "task_map.ready",
 })
+_GAP_PLAN_READY_EVENTS = frozenset({
+    "gap_plan.ready",
+    "flow.gap_plan.ready",
+    "goal.gap_plan.ready",
+})
 _CANONICAL_INPUT_KEYS = (
     "task_contract_digest",
     "contract_snapshot_digest",
@@ -98,10 +103,10 @@ def rework_source_from_payload(payload: dict[str, Any]) -> str:
 def _event_run_id(event: ZfEvent) -> str:
     payload = event.payload if isinstance(event.payload, dict) else {}
     return str(
-        event.correlation_id
-        or payload.get("workflow_run_id")
+        payload.get("workflow_run_id")
         or payload.get("run_id")
         or payload.get("trace_id")
+        or event.correlation_id
         or ""
     ).strip()
 
@@ -359,6 +364,19 @@ def plan_reader_stage_replan(
     )
     if superseding_success is not None:
         return None, "superseded_by_candidate_ready"
+    failure_seen = False
+    for event in events:
+        if event.id == failure_event.id:
+            failure_seen = True
+            continue
+        if not failure_seen or event.type not in _GAP_PLAN_READY_EVENTS:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            str(event.causation_id or "") == failure_event.id
+            or str(payload.get("source_event_id") or "") == failure_event.id
+        ) and _same_replan_scope(event, failure_event):
+            return None, "handled_by_gap_plan"
     # E4(prd-goal e2e finding-8):cap 曾数全量历史,后续 admission
     # 成功也不清零 → 每周期回声 escalate。只计"最近一次 stage 成功
     # 之后"的失败——成功即翻篇。

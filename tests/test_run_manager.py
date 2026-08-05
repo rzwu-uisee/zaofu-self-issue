@@ -3629,7 +3629,7 @@ def test_completion_profile_blocks_terminal_success_on_pending_human_decision(
         payload={
             "decision_token": "blocking-decision",
             "reason": "owner approval required for destructive action",
-            "blocking_scope": "run",
+            "blocking_scope": "release",
             "action": "destructive-controlled-action",
         },
     )
@@ -3919,17 +3919,21 @@ def test_completion_profile_ignores_stale_terminal_signal_after_new_work(
     log.append(ZfEvent(
         type="human.escalate",
         payload={
+            "run_id": "R-OLD",
             "decision_token": "hdec-old",
             "checkpoint_id": "old-human",
             "reason": "old candidate review escalation",
         },
+        correlation_id="R-OLD",
     ))
     log.append(ZfEvent(
         type="run.manager.action.verify.failed",
         payload={
+            "run_id": "R-OLD",
             "checkpoint_id": "old-verify",
             "reason": "expected downstream event not observed",
         },
+        correlation_id="R-OLD",
     ))
     log.append(ZfEvent(
         type="judge.passed",
@@ -3955,7 +3959,69 @@ def test_completion_profile_ignores_stale_terminal_signal_after_new_work(
 
     assert projection["completion_profile"]["status"] == "active"
     assert projection["completion_profile"]["terminal_signal"] == {}
+    assert projection["completion_profile"]["pending_human_decisions"] == []
+    assert projection["completion_profile"]["open_verify_failures"] == []
+    assert "pending_human_decision" not in projection["completion_profile"]["blockers"]
     assert projection["status_explain"]["completion_status"] == "active"
+
+
+def test_completion_profile_only_blocks_on_current_run_human_decision(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    log.append(ZfEvent(
+        type="run.goal.started",
+        payload={"run_id": "R-OLD", "objective": "old run"},
+        correlation_id="R-OLD",
+    ))
+    log.append(ZfEvent(
+        type="human.escalate",
+        payload={
+            "run_id": "R-OLD",
+            "decision_token": "hdec-old",
+            "reason": "old owner decision",
+            "blocking_scope": "run",
+        },
+        correlation_id="R-OLD",
+    ))
+    log.append(ZfEvent(
+        type="run.goal.started",
+        payload={"run_id": "R-NEW", "objective": "new run"},
+        correlation_id="R-NEW",
+    ))
+    log.append(ZfEvent(
+        type="run.goal.completed",
+        payload={"run_id": "R-NEW"},
+        correlation_id="R-NEW",
+    ))
+    log.append(ZfEvent(
+        type="human.escalate",
+        payload={
+            "run_id": "R-NEW",
+            "decision_token": "hdec-new",
+            "reason": "current owner decision",
+            "blocking_scope": "run",
+        },
+        correlation_id="R-NEW",
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    completion = projection["completion_profile"]
+    assert completion["status"] == "blocked"
+    assert [
+        item["decision_token"]
+        for item in completion["pending_human_decisions"]
+    ] == ["[REDACTED_SECRET]"]
+    assert [
+        item["reason"]
+        for item in completion["pending_human_decisions"]
+    ] == ["current owner decision"]
+    assert "pending_human_decision" in completion["blockers"]
 
 
 def test_completion_profile_ignores_repair_blockers_superseded_by_verify_success(
@@ -5368,7 +5434,7 @@ def test_run_goal_completion_gate_blocks_on_blocking_human_decision() -> None:
             type="human.escalate",
             payload={
                 "decision_token": "decision-1",
-                "blocking_scope": "run",
+                "blocking_scope": "release",
                 "reason": "owner approval required",
             },
         ),
@@ -5905,6 +5971,77 @@ def test_run_manager_ignores_shadow_plan_package_rejection() -> None:
     actions = _pending_semantic_event_actions([blocking])
     assert len(actions) == 1
     assert actions[0]["failure_class"] == "plan_artifact_package_rejected"
+
+
+def test_run_manager_does_not_diagnose_kernel_consumed_context_warning(
+    tmp_path: Path,
+) -> None:
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    state_dir, log, writer = _state(tmp_path)
+    warning = ZfEvent(
+        id="context-warning-1",
+        type="worker.context.warning",
+        actor="dev-lane-0",
+        task_id="TASK-CONTEXT",
+        payload={
+            "task_id": "TASK-CONTEXT",
+            "instance_id": "dev-lane-0",
+            "context_usage_ratio": 0.61,
+            "reason": "recycle_threshold_exceeded",
+        },
+    )
+    log.append(warning)
+    assert _pending_semantic_event_actions([warning]) == []
+
+    supervisor_dir = state_dir / "projections" / "supervisor"
+    supervisor_dir.mkdir(parents=True)
+    (supervisor_dir / "snapshot.json").write_text(
+        json.dumps({
+            "schema_version": "supervisor.snapshot.v1",
+            "attention_items": [{
+                "attention_id": "attn-context-1",
+                "status": "open",
+                "fingerprint": "automation:alerts:worker.context.warning:TASK-CONTEXT",
+                "severity": "medium",
+                "title": "worker.context.warning",
+                "task_id": "TASK-CONTEXT",
+                "source_event_ids": ["context-warning-1"],
+                "suggested_route": "observe_only",
+                "suggested_action": {
+                    "kind": "checkpoint_or_compact_worker_context",
+                },
+                # Compatibility fixture: this is how snapshots persisted by
+                # the pre-fix registry described an ordinary warning.
+                "action_policy": "auto_decide",
+                "intervention_class": "auto_recover",
+            }],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+    assert not any(
+        action.get("failure_class") == "worker_context_warning"
+        for action in projection["pending_actions"]
+    )
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        event_log=log,
+        spawn_repairs=False,
+    )
+    assert result.autoresearch_requested == 0
+    assert not any(
+        event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+        for event in log.read_all()
+    )
 
 
 def test_run_manager_classifies_goal_completion_handoff_and_human_blockers() -> None:

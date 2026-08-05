@@ -705,6 +705,7 @@ function WorkflowProposalDetail({
         requestId={requestId}
         requestStatus={requestStatus}
         requirement={requirement}
+        requirementDigest={textValue(request.requirement_spec_digest)}
       />
 
       {expectedOutputs.length ? (
@@ -864,12 +865,16 @@ function workflowRequestFeedback(
 ): ActionResponse {
   const result = asRecord(response.result);
   const blockers = asRecordArray(result.blockers);
+  const status = textValue(response.status);
+  const remainingQuestions = asStringArray(result.open_questions).length;
   const reason = textValue(response.reason)
     || blockers.map((item) => textValue(item.message) || textValue(item.title)).filter(Boolean).join("; ")
-    || (response.ok === true ? "Proposal prepared." : "Request still needs clarification.");
+    || (action === "workflow-clarify" && status === "clarifying"
+      ? `Answers saved. ${remainingQuestions} clarification question${remainingQuestions === 1 ? "" : "s"} remain.`
+      : response.ok === true ? "Proposal prepared." : "Request still needs clarification.");
   return {
     ok: response.ok === true,
-    status: textValue(response.status) || (response.ok === true ? "completed" : "failed"),
+    status: status || (response.ok === true ? "completed" : "failed"),
     action,
     reason,
     result,

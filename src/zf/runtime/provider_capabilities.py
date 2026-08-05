@@ -87,6 +87,7 @@ def provider_capability_for_backend(backend: str) -> dict[str, Any]:
             tools=True,
             cost=True,
             context_usage=True,
+            interactive_input="durable_next_turn",
             confidence="configured_provider",
         )
     return _static_capability(
@@ -120,6 +121,10 @@ def _adapter_capability(backend: str, caps: BackendCapabilities) -> dict[str, An
             tools=not test_mode,
             cost=bool(caps.context_usage_reader and not test_mode),
             context_usage=caps.context_usage_reader,
+            interactive_input=(
+                "none" if test_mode else "provider_managed"
+            ),
+            native_same_turn_input=not test_mode,
             test_mode=test_mode,
             confidence="adapter_static",
         ),
@@ -152,6 +157,8 @@ def _static_capability(
     tools: bool = False,
     cost: bool = False,
     context_usage: bool = False,
+    interactive_input: str = "none",
+    native_same_turn_input: bool = False,
     test_mode: bool = False,
     available: bool | None = None,
     confidence: str = "conservative",
@@ -178,6 +185,8 @@ def _static_capability(
         "tools": tools,
         "cost": cost,
         "context_usage": context_usage,
+        "interactive_input": interactive_input,
+        "native_same_turn_input": native_same_turn_input,
         "context": "provider_usage" if context_usage else "unknown",
         "workdir": "project",
         "test_mode": test_mode,

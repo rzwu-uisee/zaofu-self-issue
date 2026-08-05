@@ -34,8 +34,12 @@ state or rebuild the plan itself.
 3. When new or revised task-map work is required, load
    `zf-goal-closure-replan-contract` and `zf-gap-task-synth` to produce bounded
    gap tasks that preserve completed work.
-4. Persist the gap report/plan at the exact path named by the briefing.
-5. Submit once through the current runtime-provided gap output profile or
+4. Before persistence, reconcile every verification command path. Keep writable
+   claims in `claim_paths`; put stable read-only tests/scripts outside those
+   claims in `verification_read_paths`. An unclassified path is a producer
+   error, not permission to widen the task's write ownership.
+5. Persist the gap report/plan at the exact path named by the briefing.
+6. Submit once through the current runtime-provided gap output profile or
    bridge command. Do not infer payload fields from this Skill or emit task-map
    truth directly.
 

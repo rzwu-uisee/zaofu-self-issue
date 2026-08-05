@@ -122,6 +122,17 @@ def test_question_dedup_events_have_canonical_schema_contracts() -> None:
         "payload.input_ledger_digest",
         "payload.output_ledger_digest",
     }
+    assert registry.validate(ZfEvent(
+        type="channel.question.dedup.remediation.exhausted",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "dedup-3",
+            "attempts": 3,
+            "reason": "unknown_question_target:operator",
+            "source": "test",
+        },
+    )) == []
 
 
 def test_question_dedup_applies_groups_once_and_preserves_canonical_questions(
@@ -431,6 +442,150 @@ def test_dedup_applies_question_graph_and_targeted_cross_reviews_once(
 
     assert _apply(state_dir, writer, payload) == (True, "already_applied")
     assert len(writer.event_log.read_all()) == event_count
+
+
+def test_dedup_mechanically_routes_each_surviving_fact_for_review(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _invite(writer, "arch")
+    _open(writer, "q-fact")
+    digest = question_ledger_digest(
+        project_channel(state_dir, CHANNEL_ID),
+        thread_id="main",
+    )
+
+    assert _apply(state_dir, writer, {
+        "ledger_digest": digest,
+        "groups": [],
+        "question_updates": [{
+            "question_id": "q-fact",
+            "kind": "fact",
+            "target_member_id": "arch",
+        }],
+    }) == (True, "applied")
+
+    detail = project_channel(state_dir, CHANNEL_ID)
+    assert len(detail["cross_reviews"]) == 1
+    assert detail["cross_reviews"][0]["question_id"] == "q-fact"
+    assert detail["cross_reviews"][0]["target_member_id"] == "arch"
+
+
+def test_rejected_dedup_retries_twice_then_emits_one_exhaustion(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    started = writer.emit(
+        "channel.discussion.started",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "roster": ["arch", "critic"],
+            "synthesizer": "arch",
+            "requirement_message_id": "msg-requirement",
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.discussion.phase.changed",
+        actor="runtime",
+        causation_id=started.id,
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "phase": "phase2_relay",
+            "source": "test",
+        },
+    )
+    _open(writer, "q-0")
+    digest = question_ledger_digest(
+        project_channel(state_dir, CHANNEL_ID),
+        thread_id="main",
+    )
+    writer.emit(
+        "channel.question.dedup.requested",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "dedup-initial",
+            "target_member_id": "arch",
+            "ledger_digest": digest,
+            "generation": 1,
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.question.dedup.rejected",
+        actor="arch",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "dedup-initial",
+            "reason": "unknown_question_target:operator",
+            "source": "test",
+        },
+    )
+
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == ["channel.question.dedup.requested"]
+    requests = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.question.dedup.requested"
+    ]
+    second = requests[-1]
+    assert second.payload["generation"] == 2
+    assert second.payload["prior_request_id"] == "dedup-initial"
+    writer.emit(
+        "channel.question.dedup.rejected",
+        actor="arch",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": second.payload["request_id"],
+            "reason": "stale_ledger_digest",
+            "source": "test",
+        },
+    )
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == ["channel.question.dedup.requested"]
+    third = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.question.dedup.requested"
+    ][-1]
+    assert third.payload["generation"] == 3
+    writer.emit(
+        "channel.question.dedup.rejected",
+        actor="arch",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": third.payload["request_id"],
+            "reason": "question_dependency_cycle:q-0",
+            "source": "test",
+        },
+    )
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == ["channel.question.dedup.remediation.exhausted"]
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == []
+    exhausted = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.question.dedup.remediation.exhausted"
+    ]
+    assert len(exhausted) == 1
+    assert exhausted[0].payload["attempts"] == 3
 
 
 def test_dedup_rejects_invalid_question_graph_and_target_without_updates(

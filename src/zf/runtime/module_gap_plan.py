@@ -260,6 +260,7 @@ def _gap_task_to_task_map_item(raw: dict[str, Any], *, wave: int) -> dict[str, A
     claim_paths = _claim_paths(raw)
     acceptance = _acceptance(raw)
     verification = _verification(raw)
+    verification_read_paths = _string_list(raw.get("verification_read_paths"))
     source_refs = _string_list(raw.get("source_refs"))
     title = str(
         raw.get("title")
@@ -305,6 +306,7 @@ def _gap_task_to_task_map_item(raw: dict[str, Any], *, wave: int) -> dict[str, A
         "acceptance_criteria": acceptance,
         "verification": verification,
         "verify_commands": verification,
+        "verification_read_paths": verification_read_paths,
         "inventory_ids": _string_list(raw.get("inventory_ids")),
         "source_inventory_ids": _string_list(raw.get("source_inventory_ids")),
         "non_smoke_test_required": raw.get("non_smoke_test_required", True),

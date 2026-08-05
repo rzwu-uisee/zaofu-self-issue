@@ -91,8 +91,6 @@ def normalize_plan_request(
         or raw.get("question")
         or ""
     ).strip()
-    if not request_header:
-        validation_errors.append("header is required")
     if not question_text:
         validation_errors.append("question is required")
     if bool(question.get("isSecret") or question.get("is_secret")):
@@ -174,6 +172,10 @@ def normalize_plan_request(
             "subject_type must be channel_setup, clarification, "
             "task_create, or task_workflow"
         )
+    if not request_header:
+        request_header = _default_plan_header(subject_type)
+    if not question_header:
+        question_header = request_header
     discussion_seed = str(raw.get("discussion_seed") or "").strip()
     if subject_type == "channel_setup" and not discussion_seed:
         validation_errors.append(
@@ -379,7 +381,7 @@ def normalize_plan_request(
         normalized_question = _normalize_clarification_question(
             extra_question,
             index=index,
-            fallback_header=str(raw.get("header") or ""),
+            fallback_header=request_header,
             fallback_allow_other=bool(raw.get("allow_other", True)),
             validation_errors=validation_errors,
         )
@@ -868,6 +870,15 @@ def _plan_subject_type(
     if submit_action == "create-task":
         return "task_create"
     return "clarification"
+
+
+def _default_plan_header(subject_type: str) -> str:
+    return {
+        "channel_setup": "Channel setup",
+        "clarification": "Clarification",
+        "task_create": "Create task",
+        "task_workflow": "Workflow",
+    }.get(subject_type, "Plan")
 
 
 def _subject_action_error(

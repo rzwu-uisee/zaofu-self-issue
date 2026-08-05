@@ -1154,6 +1154,40 @@ def test_writer_briefing_forbids_out_of_scope_layout(tmp_path: Path):
     assert "Materialized runtime files" in briefing
 
 
+def test_writer_briefing_pins_active_task_on_first_line(tmp_path: Path):
+    state_dir, _log, transport, orch = _state(tmp_path, synthesize_canonical=True)
+    _start(orch)
+
+    briefing = transport.sent[0][1].read_text(encoding="utf-8")
+
+    assert briefing.splitlines()[0] == "Active task: TASK-1"
+
+
+def test_writer_retry_briefing_pins_active_task_on_first_line(tmp_path: Path):
+    _state_dir, _log, _transport, orch = _state(tmp_path)
+    role = next(role for role in orch.config.roles if role.instance_id == "dev-1")
+
+    path = orch._write_fanout_retry_briefing(  # type: ignore[attr-defined]
+        role=role,
+        manifest={
+            "fanout_id": "fanout-retry",
+            "stage_id": "impl",
+            "topology": "fanout_writer_scoped",
+            "target_ref": "main",
+            "aggregate_config": {},
+        },
+        child={
+            "child_id": "dev-1-TASK-1",
+            "task_id": "TASK-1",
+            "workdir": str(tmp_path),
+            "source_branch": "worker/dev-1",
+        },
+        run_id="run-retry",
+    )
+
+    assert path.read_text(encoding="utf-8").splitlines()[0] == "Active task: TASK-1"
+
+
 def test_writer_briefing_preserves_verified_partial_work_before_blocking(
     tmp_path: Path,
 ):
@@ -2964,7 +2998,7 @@ def test_repeated_verify_contract_gap_resynthes_plan_trigger(tmp_path: Path):
     assert transport.sent == []
 
 
-def test_evidenced_task_contract_blocker_resynthes_plan_without_human(
+def test_evidenced_task_contract_blocker_routes_to_declared_gap_planner(
     tmp_path: Path,
 ):
     state_dir, log, _transport, orch = _state(
@@ -2972,6 +3006,19 @@ def test_evidenced_task_contract_blocker_resynthes_plan_without_human(
         synthesize_canonical=True,
         resynth_trigger="prd.scan.completed",
     )
+    orch.config.roles.append(RoleConfig(
+        name="flow-discovery",
+        backend="mock",
+        role_kind="reader",
+        skills=["zf-gap-task-synth"],
+    ))
+    orch.config.workflow.stages.append(WorkflowStageConfig(
+        id="prd-post-impl-discovery",
+        trigger="flow.discovery.requested",
+        topology="fanout_reader",
+        roles=["flow-discovery"],
+        flow_kind="prd",
+    ))
     log.append(ZfEvent(
         id="scan-ready",
         type="prd.scan.completed",
@@ -3028,31 +3075,25 @@ def test_evidenced_task_contract_blocker_resynthes_plan_without_human(
 
     events = log.read_all()
     assert not any(event.type == "human.escalate" for event in events)
+    assert not any(
+        event.type == "run.manager.autoresearch.requested"
+        for event in events
+    )
     requested = [
         event for event in events
-        if event.type == "orchestrator.replan_requested"
+        if event.type == "flow.discovery.requested"
         and event.payload.get("rework_of") == "task-contract-blocked"
     ]
     assert requested
-    assert requested[-1].payload["failed_task_ids"] == ["TASK-0", "TASK-1"]
-    assert requested[-1].payload["task_ids"] == ["TASK-0", "TASK-1", "TASK-2"]
-    assert requested[-1].payload["downstream_task_ids"] == ["TASK-2"]
-    assert requested[-1].payload["resume_scope"] == (
-        "failed_children_and_downstream"
-    )
-    resynth = [
-        event for event in events
-        if event.type == "prd.scan.completed"
-        and event.payload.get("rework_of") == "task-contract-blocked"
-    ]
-    assert resynth
-    assert resynth[-1].payload["replan_classification"] == "design_issue"
-    assert resynth[-1].payload["source_index_ref"] == "artifacts/scan/source-index.json"
-    assert resynth[-1].payload["failed_task_ids"] == ["TASK-0", "TASK-1"]
-    assert resynth[-1].payload["task_ids"] == ["TASK-0", "TASK-1", "TASK-2"]
-    assert resynth[-1].payload["downstream_task_ids"] == ["TASK-2"]
-    assert resynth[-1].payload["resume_scope"] == "failed_children_and_downstream"
-    assert any("outside allowed_paths" in item for item in resynth[-1].payload["rework_feedback"])
+    payload = requested[-1].payload
+    assert payload["task_id"] == "TASK-1"
+    assert payload["affected_task_ids"] == ["TASK-1"]
+    assert payload["supersedes_task_ids"] == ["TASK-1"]
+    assert payload["failure_event_ids"] == ["task-contract-blocked"]
+    assert payload["semantic_replan_stage_id"] == "prd-post-impl-discovery"
+    assert payload["semantic_replan_role"] == "flow-discovery"
+    assert payload["task_map_ref"].endswith("artifacts/F-11111111/task_map.json")
+    assert payload["recovery_context_ref"]["kind"] == "recovery_context"
 
 
 def test_candidate_rework_sweep_uses_archived_runtime_events_after_rotation(

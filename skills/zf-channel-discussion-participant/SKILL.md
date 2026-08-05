@@ -19,6 +19,9 @@ description: "Use for every active lens in a ZaoFu fanout-then-synthesis Channel
 - 主动检查反例、失败场景、术语歧义、范围边界和证据缺口。
 - 不同意时保留具体 dissent，不用“少数服从多数”抹掉重要风险。
 - 具体 lens 由同一角色加载的领域 Skill 定义；本 Skill 不硬编码项目语义。
+- Phase 1/2 尚未生成 canonical PRD 或 synthesis artifact。不得把本讨论后续才会
+  生成的 artifact、版本或 digest 当作前置阻塞问题；应以当前 requirement、context
+  pack 与其 digest 为审查基线，把“未来输出尚不存在”记录为 finding/assumption。
 
 ## Phase 1 盲答(收到需求简报时)
 

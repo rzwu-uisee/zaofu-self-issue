@@ -28,6 +28,9 @@ from zf.runtime.workflow_submission_binding import (
 from zf.runtime.workflow_submission_binding import (
     pin_submitted_run_contract as _pin_submitted_run_contract,
 )
+from zf.runtime.workflow_delivery_replay import (
+    submitted_request_replay_result as _submitted_request_replay_result,
+)
 
 def build_flow_submit_preview(
     *,
@@ -738,72 +741,6 @@ def apply_flow_submit(
         "next_action": invoke_visibility["next_action"],
         "event_ids": event_ids,
         "state_dir": str(state_dir),
-    }
-
-def _submitted_request_replay_result(
-    *,
-    config: Any,
-    state_dir: Path,
-    projection: dict[str, Any],
-    events: list[ZfEvent],
-) -> dict[str, Any]:
-    """Return an idempotent submit result without emitting a second Run."""
-
-    request_id = str(projection.get("request_id") or "")
-    from zf.runtime.light_flow import light_flow_metadata
-
-    light_metadata = light_flow_metadata(
-        config,
-        flow_kind=str(projection.get("kind") or ""),
-    )
-    entry_trigger = (
-        str(light_metadata.get("light_entry_trigger") or "prd.requested")
-        if light_metadata is not None else ""
-    )
-    related_types = {"workflow.submit.accepted", "workflow.invoke.requested"}
-    if entry_trigger:
-        related_types.add(entry_trigger)
-    related = [
-        event for event in events
-        if str(event.correlation_id or "") == request_id
-        and event.type in related_types
-    ]
-    invoked = next(
-        (event for event in reversed(related) if event.type == "workflow.invoke.requested"),
-        None,
-    )
-    light_entry = next(
-        (event for event in reversed(related) if event.type == entry_trigger),
-        None,
-    )
-    if invoked is not None:
-        invoke_status = "already_requested"
-        next_action = "workflow request is already running"
-    elif light_entry is not None:
-        invoke_status = "already_requested"
-        next_action = "light topology entry is already running"
-    else:
-        invoke_status = "already_submitted"
-        next_action = "inspect/resume the submitted request; duplicate ignition was suppressed"
-    return {
-        "schema_version": "workflow.submit.apply.v1",
-        "status": "accepted",
-        "dry_run": False,
-        "event_type": "workflow.submit.accepted",
-        "payload": {
-            "request_id": request_id,
-            "run_id": str(projection.get("run_id") or request_id),
-            "kind": str(projection.get("kind") or ""),
-        },
-        "request": projection,
-        "idempotent_replay": True,
-        "workflow_invoke_event_id": str(invoked.id if invoked is not None else ""),
-        "workflow_entry_event_id": str(light_entry.id if light_entry is not None else ""),
-        "workflow_invoke_status": invoke_status,
-        "next_action": next_action,
-        "event_ids": [event.id for event in related],
-        "state_dir": str(state_dir),
-        "blockers": [],
     }
 
 def _request_id_from_path(path: Path) -> str:

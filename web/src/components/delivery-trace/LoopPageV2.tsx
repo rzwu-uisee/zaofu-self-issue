@@ -243,6 +243,7 @@ function LoopChain({ loop }: { loop: LoopViewLoop }) {
 
 const HEALTH_TONE: Record<string, string> = {
   closed: TONE.ok, converging: TONE.ok, diverging: TONE.warn, broken: TONE.err,
+  idle: TONE.muted,
 };
 
 export function LoopPageV2({ projectId }: Props) {
@@ -324,6 +325,15 @@ export function LoopPageV2({ projectId }: Props) {
           <span className="muted">convergence, rework, and recovery</span>
         </div>
       </div>
+
+      {view.scope.kind === "project_recovery" ? (
+        <div style={card} data-testid="loop-project-recovery-scope">
+          <div style={h3}>Project recovery</div>
+          <div style={{ color: TONE.muted, fontSize: 12, marginTop: 6 }}>
+            No business delivery run is active. Recovery and operator activity remain observable below.
+          </div>
+        </div>
+      ) : null}
 
       {/* completion promise */}
       <div style={card} data-testid="loop-promise">

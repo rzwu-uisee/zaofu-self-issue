@@ -388,6 +388,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "channel.question.resolve.rejected", "channel.question.merged",
     "channel.question.dedup.requested", "channel.question.dedup.applied",
     "channel.question.dedup.rejected",
+    "channel.question.dedup.remediation.exhausted",
     "channel.cross_review.requested", "channel.cross_review.completed",
     "channel.cross_review.rejected",
     "channel.questions.frozen", "channel.consensus.proposed",

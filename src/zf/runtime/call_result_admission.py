@@ -181,10 +181,9 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             operation or {},
         )
         currentness_issues.extend(self._plan_package_currentness_issues(envelope))
-        currentness_issues.extend(self._task_result_currentness_issues(
-            envelope,
-            adapted,
-        ))
+        currentness_issues.extend(
+            self._task_result_currentness_issues(envelope, adapted, operation or {})
+        )
         issues.extend(currentness_issues)
         if adapted.schema_version == "goal-closure-result.v1":
             issues.extend(self._goal_closure_issues(adapted.payload))

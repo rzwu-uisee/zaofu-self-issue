@@ -29,6 +29,13 @@ def _emit(state_dir: Path, etype: str, payload: dict, task_id: str = "T1") -> No
     log.append(ZfEvent(type=etype, actor="test", task_id=task_id, payload=payload))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_event_caches():
+    _clear_event_caches()
+    yield
+    _clear_event_caches()
+
+
 @pytest.fixture()
 def state_dir(tmp_path: Path) -> Path:
     sd = tmp_path / ".zf"
