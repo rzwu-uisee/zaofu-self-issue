@@ -271,28 +271,43 @@ def _run_impl(args: argparse.Namespace) -> int:
 
 
 def _stage_failure_event_collisions(config) -> list[str]:
-    """ZF-E2E-PRDCTL-P2-7-1:stage failure_event 撞名 → FAIL。
+    """Reject ambiguous failure events while permitting scoped Flow reuse.
 
-    深水轮无界付费环三层根之一:两个 stage 复用同一 failure_event,kernel
-    failure→stage 映射先到先得,admission 拒绝被翻译成"重跑上游 critic",
-    每圈 ~12 分钟无封顶。
+    Multi-kind fanout stages keep canonical event names. Their kernel-authored
+    result carries ``stage_id`` and ``flow_kind``, so distinct flow scopes are
+    unambiguous. Same-flow or non-fanout reuse remains invalid.
     """
-    seen: dict[str, str] = {}
+    seen: dict[str, list[object]] = {}
     out: list[str] = []
     for stage in getattr(getattr(config, "workflow", None), "stages", None) or []:
         aggregate = getattr(stage, "aggregate", None)
         failure_event = str(getattr(aggregate, "failure_event", "") or "").strip()
-        stage_id = str(getattr(stage, "id", "") or "")
         if not failure_event:
             continue
-        if failure_event in seen:
-            out.append(
-                f"stages {seen[failure_event]!r} and {stage_id!r} share "
-                f"failure_event {failure_event!r}; kernel failure-to-stage "
-                "mapping is first-wins and will misroute replans"
-            )
-        else:
-            seen[failure_event] = stage_id
+        seen.setdefault(failure_event, []).append(stage)
+    for failure_event, stages in seen.items():
+        if len(stages) < 2:
+            continue
+        flow_kinds = [
+            str(getattr(stage, "flow_kind", "") or "").strip().lower()
+            for stage in stages
+        ]
+        topologies = [
+            str(getattr(stage, "topology", "") or "").strip()
+            for stage in stages
+        ]
+        if (
+            all(flow_kinds)
+            and len(set(flow_kinds)) == len(flow_kinds)
+            and all(topology.startswith("fanout_") for topology in topologies)
+        ):
+            continue
+        stage_ids = [str(getattr(stage, "id", "") or "") for stage in stages]
+        out.append(
+            f"stages {stage_ids!r} share failure_event {failure_event!r} "
+            "without distinct fanout flow_kind scopes; routing would be "
+            "ambiguous"
+        )
     return out
 
 
@@ -447,6 +462,26 @@ def _run_cold_start(config_path: Path) -> int:
     capability_errors = _print_backend_capability_matrix(config)
     if capability_errors:
         handoff_fatal.extend(capability_errors)
+
+    from zf.runtime.research_templates import (
+        RESEARCH_TEMPLATES,
+        research_stage_contract_error,
+    )
+
+    stages = list(getattr(getattr(config, "workflow", None), "stages", []) or [])
+    stage_by_id = {
+        str(getattr(stage, "id", "") or ""): stage
+        for stage in stages
+    }
+    for template in RESEARCH_TEMPLATES:
+        stage = stage_by_id.get(template.pattern_id)
+        if stage is None:
+            continue
+        contract_error = research_stage_contract_error(stage, template)
+        if contract_error:
+            handoff_fatal.append(
+                f"research_route_contract={contract_error}"
+            )
 
     provider_results = run_preflight_checks(config, check_provider_auth=True)
     provider_failures = [
@@ -716,7 +751,10 @@ def _filter_expected_graph_diagnostics(config, diagnostics: list[dict]) -> list[
     classified = _classify_expected_event_sinks(config, normalized)
     keep: list[dict] = []
     for original, item in zip(diagnostics, classified, strict=False):
-        if str(item.get("kind") or "") == "expected_event_without_consumer":
+        if str(item.get("kind") or "") in {
+            "expected_event_without_consumer",
+            "expected_trigger_without_producer",
+        }:
             continue
         keep.append(original)
     return keep

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from tests.e2e.generic_workflow_complex_support import (
@@ -68,6 +70,9 @@ def run_generic_workflow_complex_scenario(
     *,
     provider_verifier: ProviderVerifier | None = None,
     provider_backend: str = "mock",
+    objective: str = (
+        "Research the delivery question and provide a verified report."
+    ),
 ) -> dict[str, Any]:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -81,7 +86,7 @@ def run_generic_workflow_complex_scenario(
     writer = EventWriter(log)
     intake = build_flow_intake(
         kind="workflow",
-        objective="Research the delivery question and provide a verified report.",
+        objective=objective,
         backend="mock",
         project_id="generic-complex-mock",
         request_id=REQUEST_ID,
@@ -897,24 +902,64 @@ def run_generic_workflow_complex_scenario(
         writer=writer,
     )
     assert simulation is not None
+    final_request = load_workflow_request(state_dir, REQUEST_ID)
+    final_requirement = json.loads(
+        Path(final_request["requirement_spec_ref"]).read_text(encoding="utf-8")
+    )
     return {
         "schema_version": "generic-workflow-complex-scenario.v1",
         "workflow_run_id": REQUEST_ID,
         "workflow_generation": generation_v2,
+        "effective_config_digest": proposal_v2["effective_config_ref"][
+            "sha256"
+        ],
+        "run_contract_digest": run_contract_v2["contract_digest"],
+        "completion_profile": "artifact_delivery",
+        "objective": final_requirement["objective"],
+        "stage_graph": [
+            "scope",
+            "collect-a",
+            "collect-b",
+            "synthesize",
+            "verify",
+        ],
         "request_revision": request_v2["revision"],
         "terminal_event_id": terminal.id,
         "simulation_event_id": simulation.id,
         "semantic_replan_count": len(semantic_replans),
         "protocol_repair_count": len(protocol_repairs),
+        "oa": {
+            "checkpoint_requested": sum(
+                event.type == "orchestrator.semantic.checkpoint.requested"
+                for event in final_events
+            ),
+            "decision_observed": sum(
+                event.type == "orchestrator.semantic.decision.observed"
+                for event in final_events
+            ),
+            "decision_applied": sum(
+                event.type == "orchestrator.semantic.decision.applied"
+                for event in final_events
+            ),
+            "provider_turns": sum(
+                event.type == "workflow.operation.started"
+                and str(event.payload.get("operation_id") or "")
+                in {
+                    str(candidate.payload.get("operation_id") or "")
+                    for candidate in final_events
+                    if candidate.type == "workflow.operation.requested"
+                    and candidate.payload.get("operation_type")
+                    == "orchestrator_agent_semantic"
+                }
+                for event in final_events
+            ),
+        },
         "required_artifact_refs": [
             item["ref"]
             for item in receipt["artifact_delivery"]["required_artifacts"]
         ],
         "dossier_status": dossier["delivery_readiness"]["status"],
-        "request_status": load_workflow_request(
-            state_dir,
-            REQUEST_ID,
-        )["status"],
+        "request_status": final_request["status"],
     }
 
 
@@ -927,3 +972,38 @@ def test_generic_workflow_replans_once_and_closes_after_restart(
     assert result["protocol_repair_count"] == 1
     assert result["dossier_status"] == "ready"
     assert result["request_status"] == "running"
+    assert result["oa"] == {
+        "checkpoint_requested": 0,
+        "decision_observed": 0,
+        "decision_applied": 0,
+        "provider_turns": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "objective",
+    [
+        "Compare two independent delivery records and publish a verified report.",
+        "比较两条独立交付记录，并发布一份经过验证的报告。",
+    ],
+    ids=["english", "chinese"],
+)
+def test_generic_workflow_preserves_bilingual_goal_across_parallel_lanes(
+    tmp_path: Path,
+    objective: str,
+) -> None:
+    result = run_generic_workflow_complex_scenario(
+        tmp_path,
+        objective=objective,
+    )
+
+    assert result["objective"] == objective
+    assert result["stage_graph"] == [
+        "scope",
+        "collect-a",
+        "collect-b",
+        "synthesize",
+        "verify",
+    ]
+    assert result["semantic_replan_count"] == 1
+    assert result["dossier_status"] == "ready"

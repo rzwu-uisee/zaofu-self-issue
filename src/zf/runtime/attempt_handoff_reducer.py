@@ -12,7 +12,7 @@ import hashlib
 from typing import Any, Mapping
 
 from zf.core.events.model import ZfEvent
-from zf.runtime.candidate_result_binding import candidate_task_source_commits
+from zf.runtime.candidate_result_binding import candidate_task_integrated_commits
 
 
 SCHEMA_VERSION = "attempt-handoff-snapshot.v1"
@@ -50,6 +50,12 @@ def reduce_attempt_handoffs(
 ) -> dict[str, Any]:
     """Derive a replay-stable shadow snapshot from canonical events."""
 
+    ledger_events = events
+    ledger_event_indexes = {
+        event.id: index
+        for index, event in enumerate(ledger_events)
+        if event.id
+    }
     if workflow_run_id:
         from zf.runtime.run_scope import events_for_run
 
@@ -88,12 +94,13 @@ def reduce_attempt_handoffs(
                     prior["task_id"] == task_id
                     and prior["status"] in _HANDOFF_OPEN
                     and _new_rework_supersedes(
-                        prior,
-                        finding_ids=finding_ids,
-                        failure_fingerprint=failure_fingerprint,
-                        contract_revision=contract_revision,
-                        attempt=attempt,
-                    )
+                    prior,
+                    finding_ids=finding_ids,
+                    failure_fingerprint=failure_fingerprint,
+                    contract_revision=contract_revision,
+                    task_map_generation=generation,
+                    attempt=attempt,
+                )
                 ):
                     prior["status"] = "superseded"
                     prior["last_event_id"] = event.id
@@ -234,16 +241,22 @@ def reduce_attempt_handoffs(
                 or workflow_run_id
                 or ""
             ).strip()
-            source_commits = (
-                candidate_task_source_commits(
-                    event_prefix,
+            ledger_event_index = ledger_event_indexes.get(event.id)
+            binding_event_prefix = (
+                ledger_events[: ledger_event_index + 1]
+                if ledger_event_index is not None
+                else event_prefix
+            )
+            integrated_commits = (
+                candidate_task_integrated_commits(
+                    binding_event_prefix,
                     workflow_run_id=workflow_id,
                     candidate_head_commit=target_commit,
                 )
                 if target_commit and workflow_id
                 else {}
             )
-            verified_task_ids.update(source_commits)
+            verified_task_ids.update(integrated_commits)
             for verified_task_id in sorted(verified_task_ids):
                 matching = [
                     handoff
@@ -252,14 +265,9 @@ def reduce_attempt_handoffs(
                     and handoff["status"] == "resolution_claimed"
                 ]
                 for handoff in matching:
-                    valid_targets = {
-                        value
-                        for value in (
-                            target_commit,
-                            source_commits.get(verified_task_id, ""),
-                        )
-                        if value
-                    }
+                    valid_targets = set(integrated_commits.get(verified_task_id, set()))
+                    if target_commit:
+                        valid_targets.add(target_commit)
                     if (
                         not valid_targets
                         or handoff["target_commit"] not in valid_targets
@@ -270,7 +278,11 @@ def reduce_attempt_handoffs(
                             handoff,
                             "verification_target_mismatch",
                         )
-                    elif not _identity_matches(handoff, payload):
+                    elif not _identity_matches(
+                        handoff,
+                        payload,
+                        require_dispatch=False,
+                    ):
                         _record_stale(
                             stale_claims,
                             event,
@@ -353,6 +365,7 @@ def _new_rework_supersedes(
     finding_ids: list[str],
     failure_fingerprint: str,
     contract_revision: str,
+    task_map_generation: str,
     attempt: int,
 ) -> bool:
     if set(prior.get("finding_ids") or []) & set(finding_ids):
@@ -362,6 +375,21 @@ def _new_rework_supersedes(
         failure_fingerprint
         and prior_fingerprint
         and failure_fingerprint == prior_fingerprint
+    ):
+        return True
+    if (
+        task_map_generation
+        and not str(prior.get("task_map_generation") or "").strip()
+        and not any(
+            str(prior.get(key) or "").strip()
+            for key in (
+                "contract_revision",
+                "failure_fingerprint",
+                "feedback_id",
+                "feedback_ref",
+                "feedback_digest",
+            )
+        )
     ):
         return True
     return (
@@ -491,7 +519,12 @@ def _record_stale(
     })
 
 
-def _identity_matches(handoff: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+def _identity_matches(
+    handoff: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    require_dispatch: bool = True,
+) -> bool:
     for key in ("workflow_run_id", "contract_revision", "task_map_generation"):
         expected = str(handoff.get(key) or "").strip()
         actual = str(payload.get(key) or "").strip()
@@ -502,6 +535,8 @@ def _identity_matches(handoff: Mapping[str, Any], payload: Mapping[str, Any]) ->
             continue
         if expected and actual and expected != actual:
             return False
+    if not require_dispatch:
+        return True
     expected_dispatch = str(handoff.get("dispatch_id") or "").strip()
     actual_dispatch = str(payload.get("dispatch_id") or "").strip()
     return not (expected_dispatch and actual_dispatch and expected_dispatch != actual_dispatch)

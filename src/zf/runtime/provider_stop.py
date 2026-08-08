@@ -21,6 +21,7 @@ KNOWN_STOP_REASONS = frozenset({
     "hook_review_required",
     "timeout",
     "manual_interrupt",
+    "provider_policy_rejected",
     "transport_error",
 })
 
@@ -48,6 +49,10 @@ def classify_provider_stop(payload: dict[str, Any] | None = None, *, status: str
         return "auth_error"
     if "context" in text and ("limit" in text or "length" in text or "window" in text):
         return "context_limit"
+    if "high risk" in text or (
+        "policy" in text and ("reject" in text or "block" in text)
+    ):
+        return "provider_policy_rejected"
     if "permission" in text or "deny" in text or "blocked" in text:
         return "tool_permission_blocked"
     if "hook" in text and ("review" in text or "approve" in text or "trust" in text):

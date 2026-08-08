@@ -90,7 +90,7 @@ def test_delivery_trace_cache_version_ignores_legacy_payload(
     assert source_seq > 0
     read_model.set_cached_projection(
         state_dir,
-        "delivery-trace:default:F-1:-",
+        "delivery-trace:v2:default:F-1:-",
         kind="delivery-trace",
         source_seq=source_seq,
         payload={

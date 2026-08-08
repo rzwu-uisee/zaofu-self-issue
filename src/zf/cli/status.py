@@ -161,16 +161,6 @@ def _print_workers(
         print("(no worker instances configured)")
         return 0
 
-    # Fold the recent event tail to find each instance's current state
-    # + last transition time + last transition reason.
-    current_state: dict[str, str] = {iid: "idle" for iid in instances}
-    last_ts: dict[str, str] = {iid: "-" for iid in instances}
-    last_reason: dict[str, str] = {iid: "-" for iid in instances}
-
-    try:
-        events = event_log.read_all()
-    except Exception:
-        events = []
     from zf.core.state.role_sessions import RoleSessionRegistry
     from zf.runtime.flow_role_activation import (
         flow_role_activation_projection,
@@ -180,10 +170,33 @@ def _print_workers(
         state_dir / "role_sessions.yaml",
         project_root=str(context.project_root) if context is not None else "",
     )
+    active_instance_ids = set(session_registry.all())
+    roles_by_instance = {role.instance_id: role for role in cfg.roles}
+
+    # A generated multi-kind role has no registration event before its Flow is
+    # activated. Its configured lifecycle is still enough to distinguish an
+    # intentionally dormant worker from an eager worker whose first state is
+    # idle. A real state event below remains authoritative.
+    current_state: dict[str, str] = {
+        iid: (
+            "dormant"
+            if roles_by_instance[iid].lifecycle.mode == "on_demand"
+            and iid not in active_instance_ids
+            else "idle"
+        )
+        for iid in instances
+    }
+    last_ts: dict[str, str] = {iid: "-" for iid in instances}
+    last_reason: dict[str, str] = {iid: "-" for iid in instances}
+
+    try:
+        events = event_log.read_all()
+    except Exception:
+        events = []
     activation_by_instance = flow_role_activation_projection(
         cfg,
         events,
-        active_instance_ids=set(session_registry.all()),
+        active_instance_ids=active_instance_ids,
     )
     for event in events:
         if event.type != "worker.state.changed":

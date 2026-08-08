@@ -32,10 +32,23 @@ def goal_briefing_section(
     if not objective:
         return []
     identity = " ".join((role, stage, output_profile)).lower()
+    evidence_clause = [
+        "Ground-truth 纪律:",
+        "- 以 workdir 当前状态与外部实物为权威;先前对话结论仅作线索,",
+        "  依赖前先核当前状态;不得以对早期工作的记忆作为完成证明。",
+        "- 完成审计:把完成当作未证明——对每条验收标准找到当前状态下",
+        "  的权威证据(文件/命令输出/测试结果/运行时行为)后方可声称;",
+        "  不确定或间接证据 = 未完成,继续工作或收集更强证据。",
+    ]
     if any(token in identity for token in ("judge", "goal-closure", "closure")):
+        evidence_clause = [
+            "Judge 证据纪律:",
+            "- 仅以已准入结果、closure facts 与 waiver refs 为证据；",
+            "  缺失或矛盾即如实裁决，不读取 workdir 或运行测试补证。",
+        ]
         role_clause = [
             "Judge 职责:",
-            "- 只消费已准入结果、closure facts 与 waiver refs，综合 Goal closure。",
+            "- 按 Goal/AC 综合证据并产出 Goal closure。",
             "- 不运行测试、不扫描源码、不修改产品代码、不 commit，也不发起 replan。",
         ]
     elif any(token in identity for token in ("verify", "review", "critic")):
@@ -76,12 +89,7 @@ def goal_briefing_section(
         "本 goal 跨轮持续;结束本轮不需要缩小 objective,也不得把成功",
         "重定义为更小更容易的任务。",
         "",
-        "Ground-truth 纪律:",
-        "- 以 workdir 当前状态与外部实物为权威;先前对话结论仅作线索,",
-        "  依赖前先核当前状态;不得以对早期工作的记忆作为完成证明。",
-        "- 完成审计:把完成当作未证明——对每条验收标准找到当前状态下",
-        "  的权威证据(文件/命令输出/测试结果/运行时行为)后方可声称;",
-        "  不确定或间接证据 = 未完成,继续工作或收集更强证据。",
+        *evidence_clause,
         "",
         *role_clause,
         "",

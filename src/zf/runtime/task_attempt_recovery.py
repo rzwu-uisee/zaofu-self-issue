@@ -182,10 +182,13 @@ def _canonical_expired_lease_action(
         "briefing_ref": str(row.get("briefing_ref") or ""),
         "attempt_key": str(row.get("attempt_key") or ""),
         "workflow_run_id": str(row.get("run_id") or ""),
+        "operation_id": str(row.get("operation_id") or ""),
         "attempt_id": str(row.get("attempt_id") or ""),
         "lease_id": str(row.get("lease_id") or ""),
         "lease_token": str(row.get("lease_id") or ""),
         "dispatch_id": str(row.get("dispatch_id") or ""),
+        "identity_version": str(row.get("identity_version") or ""),
+        "placement_epoch": int(row.get("placement_epoch") or 0),
         "source_event_ids": _source_event_ids(row),
         "source_refs": [_canonical_source_ref(row)],
         "reason": f"task attempt lease expired after {int(age_s)}s",
@@ -198,6 +201,8 @@ def _canonical_expired_lease_action(
         ),
         "verify_condition": "expected_downstream_event:worker.respawn.requested",
         "route_registry": "task-attempt-recovery.v1",
+        "recovery_decision_owner": "run_manager",
+        "recovery_effect_owner": "workflow_runtime_coordinator",
     }
     action["preflight"] = preflight_action(
         action="worker-lifecycle-recover",

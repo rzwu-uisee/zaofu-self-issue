@@ -619,6 +619,8 @@ class TestFanoutChildRecycle:
         assert transport.sent
         assert transport.sent[-1][0] == "dev"
         assert transport.sent[-1][1] == briefing_path
+        assert "Read the fanout child briefing" in transport.sent[-1][2]
+        assert "follow its Read Order" not in transport.sent[-1][2]
         events = EventLog(state_dir / "events.jsonl").read_all()
         types = [event.type for event in events]
         assert "worker.recovery.injected" in types

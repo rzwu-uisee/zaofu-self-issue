@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from zf.cli.start import _record_dormant_worker_state
 from zf.core.config.schema import (
@@ -14,9 +17,10 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.core.state.session import SessionStore
-from zf.core.task.schema import Task
+from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.core.events.writer import EventWriter
+from zf.core.state.git_state import GitState
 from zf.runtime.call_result_admission import CallResultAdmissionService
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.session_tailer import claude_session_path
@@ -34,6 +38,7 @@ class RecordingTransport:
         self.spawned: list[tuple[str, list[str], Path | None]] = []
         self.sent: list[str] = []
         self.terminated: list[str] = []
+        self.ready = True
 
     def spawn(self, role, argv, *, cwd=None) -> None:  # noqa: ANN001
         self.alive.add(role.instance_id)
@@ -43,7 +48,19 @@ class RecordingTransport:
         return role_name in self.alive
 
     def wait_ready(self, role_name: str, pattern: str, timeout: float) -> bool:
-        return role_name in self.alive
+        return self.ready and role_name in self.alive
+
+    def readiness_diagnostics(self, role_name: str) -> dict:
+        return {
+            "failure_class": "provider_launch_not_submitted",
+            "pane_alive": role_name in self.alive,
+            "current_command": "bash",
+            "process_probe": {"available": True, "processes": []},
+            "last_screen_excerpt": "codex --enable hooks",
+            "launch_attempts": 2,
+            "requested_timeout_seconds": 240.0,
+            "effective_timeout_seconds": 20.0,
+        }
 
     def send_task(self, role_name, briefing_path, prompt, *, context=None) -> None:  # noqa: ANN001
         assert role_name in self.alive
@@ -187,6 +204,203 @@ def test_fanout_liveness_activates_on_demand_role_before_watchdog(
     assert not [event for event in events if event.type == "worker.respawned"]
 
 
+def _seed_reader_fanout_context(
+    orchestrator: Orchestrator,
+    role: RoleConfig,
+    transport: RecordingTransport,
+    *,
+    task_id: str,
+    trace_id: str,
+    terminal: bool = True,
+) -> None:
+    role.backend = "codex"
+    role.role_kind = "reader"
+    registry = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(orchestrator.project_root),
+    )
+    registry.mark_backend(role.instance_id, role.backend)
+    registry.bind_codex_session(
+        role.instance_id,
+        "00000000-0000-4000-8000-000000000001",
+    )
+    registry.mark_spawned(role.instance_id)
+    registry.update_instance_meta(
+        role.instance_id,
+        lifecycle_state="active",
+    )
+    transport.alive.add(role.instance_id)
+    orchestrator._set_worker_state(role.instance_id, "idle", force=True)
+    payload = {
+        "fanout_id": f"fanout-{task_id.lower()}",
+        "stage_id": "plan",
+        "child_id": role.instance_id,
+        "run_id": f"run-{task_id.lower()}",
+        "role_instance": role.instance_id,
+        "task_id": task_id,
+        "trace_id": trace_id,
+        "workflow_run_id": trace_id,
+    }
+    orchestrator.event_writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id=task_id,
+        payload=payload,
+        correlation_id=trace_id,
+    ))
+    if terminal:
+        orchestrator.event_writer.append(ZfEvent(
+            type="fanout.child.completed",
+            actor=role.instance_id,
+            task_id=task_id,
+            payload=payload,
+            correlation_id=trace_id,
+        ))
+
+
+@pytest.mark.parametrize(
+    ("task_id", "trace_id"),
+    [
+        ("TASK-NEW", "workflow-new-task"),
+        ("TASK-OLD", "workflow-new-run"),
+    ],
+)
+def test_reader_fanout_new_root_scope_uses_fresh_provider_context(
+    tmp_path: Path,
+    task_id: str,
+    trace_id: str,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    _seed_reader_fanout_context(
+        orchestrator,
+        role,
+        transport,
+        task_id="TASK-OLD",
+        trace_id="workflow-old",
+    )
+
+    assert orchestrator._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-new",
+        stage_id="plan",
+        child_id=role.instance_id,
+        run_id="run-new",
+        trace_id=trace_id,
+        task_id=task_id,
+    )
+
+    assert transport.terminated == [role.instance_id]
+    assert [item[0] for item in transport.spawned] == [role.instance_id]
+    registry = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    meta = registry.instance_meta()[role.instance_id]
+    assert meta["fanout_context_task_id"] == task_id
+    assert meta["fanout_context_trace_id"] == trace_id
+    recycled = [
+        event
+        for event in orchestrator.event_log.read_all()
+        if event.type == "worker.recycled"
+    ]
+    assert recycled[-1].payload["reason"] == "reader_root_context_changed"
+    assert recycled[-1].payload["previous_task_id"] == "TASK-OLD"
+    assert recycled[-1].payload["session_strategy"] == (
+        "reader_task_boundary_clear_codex"
+    )
+
+
+def test_reader_fanout_same_root_reuses_provider_context(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    _seed_reader_fanout_context(
+        orchestrator,
+        role,
+        transport,
+        task_id="TASK-SAME",
+        trace_id="workflow-same",
+    )
+
+    assert orchestrator._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-rework",
+        stage_id="plan",
+        child_id=role.instance_id,
+        run_id="run-rework",
+        trace_id="workflow-same",
+        task_id="TASK-SAME",
+    )
+
+    assert transport.terminated == []
+    assert transport.spawned == []
+    assert not [
+        event
+        for event in orchestrator.event_log.read_all()
+        if event.type == "worker.recycled"
+    ]
+
+
+def test_reader_fanout_context_switch_waits_for_active_child(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    _seed_reader_fanout_context(
+        orchestrator,
+        role,
+        transport,
+        task_id="TASK-ACTIVE",
+        trace_id="workflow-active",
+        terminal=False,
+    )
+
+    assert not orchestrator._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-next",
+        stage_id="plan",
+        child_id=role.instance_id,
+        run_id="run-next",
+        trace_id="workflow-next",
+        task_id="TASK-NEXT",
+    )
+
+    assert transport.terminated == []
+    assert transport.spawned == []
+    deferred = [
+        event
+        for event in orchestrator.event_log.read_all()
+        if event.type == "fanout.child.dispatch_deferred"
+    ]
+    assert "fanout_child_active" in deferred[-1].payload["reason"]
+
+
+def test_writer_fanout_does_not_rotate_at_reader_context_boundary(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    _seed_reader_fanout_context(
+        orchestrator,
+        role,
+        transport,
+        task_id="TASK-OLD",
+        trace_id="workflow-old",
+    )
+    role.role_kind = "writer"
+
+    assert orchestrator._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-writer",
+        stage_id="impl",
+        child_id=role.instance_id,
+        run_id="run-writer",
+        trace_id="workflow-writer",
+        task_id="TASK-WRITER",
+    )
+
+    assert transport.terminated == []
+    assert transport.spawned == []
+
+
 def test_fanout_activation_failure_does_not_bypass_lifecycle_with_respawn(
     tmp_path: Path,
     monkeypatch,
@@ -259,6 +473,28 @@ def test_activation_failure_does_not_claim_task(
     assert failed[-1].payload["stage"] == "role_activation"
 
 
+def test_on_demand_ready_failure_emits_structured_transport_diagnostics(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    transport.ready = False
+
+    with pytest.raises(Exception, match="provider readiness failed"):
+        orchestrator._ensure_role_active(role, task_id="TASK-READY-FAIL")
+
+    failed = next(
+        event
+        for event in reversed(orchestrator.event_log.read_all())
+        if event.type == "role.lifecycle.activation.failed"
+    )
+    assert failed.payload["failure_class"] == "provider_launch_not_submitted"
+    assert failed.payload["pane_alive"] is True
+    assert failed.payload["current_command"] == "bash"
+    assert failed.payload["launch_attempts"] == 2
+    assert failed.payload["effective_timeout_seconds"] == 20.0
+    assert failed.payload["last_screen_excerpt"] == "codex --enable hooks"
+
+
 def test_active_workflow_operation_prevents_hibernation(
     tmp_path: Path,
 ) -> None:
@@ -293,7 +529,236 @@ def test_active_workflow_operation_prevents_hibernation(
         for event in orchestrator.event_log.read_all()
         if event.type == "role.lifecycle.suspend.rejected"
     ]
-    assert rejected[-1].payload["reason"] == "provider_operation_active"
+    assert rejected == []
+
+
+def test_terminal_run_operation_does_not_prevent_hibernation(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-OLD")
+    run_id = "run-terminal-operation"
+    operation = {
+        "workflow_run_id": run_id,
+        "operation_id": "wop-terminal-operation",
+        "operation_type": "agent",
+        "request_hash": "a" * 64,
+        "role_instance": role.instance_id,
+        "task_id": "TASK-OLD",
+    }
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.requested",
+        actor="zf-cli",
+        task_id="TASK-OLD",
+        payload=operation,
+        correlation_id=run_id,
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.started",
+        actor="zf-cli",
+        task_id="TASK-OLD",
+        payload=operation,
+        correlation_id=run_id,
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="kernel",
+        task_id="TASK-OLD",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id not in transport.alive
+    assert role.instance_id in transport.terminated
+
+
+def test_uncheckpointed_source_change_prevents_hibernation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-DIRTY")
+    workdir = (
+        orchestrator.state_dir / "workdirs" / role.instance_id / "project"
+    )
+    workdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "zf.runtime.role_lifecycle_runtime.capture_git_state",
+        lambda _path: GitState(dirty_files=["src/app.py"]),
+    )
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id in transport.alive
+    rejected = [
+        event
+        for event in orchestrator.event_log.read_all()
+        if event.type == "role.lifecycle.suspend.rejected"
+    ]
+    assert rejected[-1].payload["reason"] == "workdir_dirty_without_checkpoint"
+    assert rejected[-1].payload["dirty_files"] == ["src/app.py"]
+
+
+def test_materialized_skill_projection_does_not_prevent_hibernation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-SKILL")
+    workdir = (
+        orchestrator.state_dir / "workdirs" / role.instance_id / "project"
+    )
+    workdir.mkdir(parents=True, exist_ok=True)
+    manifest = (
+        orchestrator.state_dir
+        / "workdirs"
+        / role.instance_id
+        / "runtime"
+        / "skills-manifest.json"
+    )
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps({
+            "instance_id": role.instance_id,
+            "skills": [{
+                "materialized_to": str(
+                    workdir / ".claude" / "skills" / "verify-review"
+                ),
+            }],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "zf.runtime.role_lifecycle_runtime.capture_git_state",
+        lambda _path: GitState(
+            dirty_files=[".claude/skills/verify-review/SKILL.md"]
+        ),
+    )
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id not in transport.alive
+    assert role.instance_id in transport.terminated
+
+
+def test_admitted_terminal_operation_checkpoints_preserved_dirty_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-PLAN")
+    workdir = (
+        orchestrator.state_dir / "workdirs" / role.instance_id / "project"
+    )
+    workdir.mkdir(parents=True, exist_ok=True)
+    operation_id = "wop-plan-admitted"
+    common_payload = {
+        "workflow_run_id": orchestrator._current_run_id(),
+        "operation_id": operation_id,
+        "task_id": "TASK-PLAN",
+        "role_instance": role.instance_id,
+    }
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.requested",
+        actor="zf-cli",
+        task_id="TASK-PLAN",
+        payload={
+            **common_payload,
+            "operation_type": "agent",
+            "request_hash": "b" * 64,
+        },
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.started",
+        actor="zf-cli",
+        task_id="TASK-PLAN",
+        payload=common_payload,
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.settled",
+        actor="zf-cli",
+        task_id="TASK-PLAN",
+        payload={
+            **common_payload,
+            "admitted_call_result_ref": {
+                "ref": "artifacts/call-results/plan.json",
+                "sha256": "c" * 64,
+            },
+        },
+    ))
+    monkeypatch.setattr(
+        "zf.runtime.role_lifecycle_runtime.capture_git_state",
+        lambda _path: GitState(
+            dirty_files=["docs/plans/issue-plan.md", "artifacts/plan/task_map.json"]
+        ),
+    )
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+        "operation_id": operation_id,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id not in transport.alive
+    assert role.instance_id in transport.terminated
+
+
+def test_workflow_fanout_anchor_is_not_generic_runnable_role_work(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-ROOT")
+    orchestrator.task_store.add(Task(
+        id="TASK-ROOT",
+        title="workflow root anchor",
+        status="backlog",
+        contract=TaskContract(evidence_contract={
+            "workflow_fanout_anchor": True,
+        }),
+    ))
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id not in transport.alive
+    assert role.instance_id in transport.terminated
+    assert not any(
+        event.type == "role.lifecycle.suspend.rejected"
+        for event in orchestrator.event_log.read_all()
+    )
 
 
 def test_ready_task_for_other_role_does_not_prevent_hibernation(
@@ -375,6 +840,44 @@ def test_hibernate_preserves_session_and_next_activation_resumes(
         orchestrator.state_dir / "role_sessions.yaml",
         project_root=str(tmp_path),
     ).get(role.instance_id) == session_id
+
+
+def test_codex_task_stage_spawn_can_reactivate_in_role_workdir(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    role.backend = "codex"
+    role.role_kind = "reader"
+    orchestrator.config.runtime.workdirs.enabled = True
+    orchestrator.config.runtime.workdirs.mode = "dry-run"
+    task_workspace = tmp_path / "task-stage-workspace"
+    task_workspace.mkdir()
+
+    orchestrator._ensure_role_active(
+        role,
+        task_id="TASK-VERIFY",
+        spawn_cwd=task_workspace,
+    )
+
+    role_root = orchestrator.state_dir / "workdirs" / role.instance_id
+    marker = role_root / ".zf-workdir-owner.json"
+    assert json.loads(marker.read_text(encoding="utf-8"))["instance_id"] == (
+        role.instance_id
+    )
+
+    transport.terminate(role.instance_id)
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).update_instance_meta(role.instance_id, lifecycle_state="suspended")
+
+    orchestrator._ensure_role_active(role, task_id="ROOT-CANDIDATE-VERIFY")
+
+    assert [item[0] for item in transport.spawned] == [
+        role.instance_id,
+        role.instance_id,
+    ]
+    assert (role_root / "meta.json").is_file()
 
 
 def test_mock_e2e_dormant_operation_settlement_suspend_and_same_lane_resume(

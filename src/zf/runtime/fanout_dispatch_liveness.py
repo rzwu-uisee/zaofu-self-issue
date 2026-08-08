@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 
 from zf.core.config.schema import RoleConfig
@@ -10,6 +10,275 @@ from zf.core.events.model import ZfEvent
 
 
 class FanoutDispatchLivenessMixin:
+    def _reader_fanout_context_scope(
+        self,
+        role_instance: str,
+    ) -> tuple[str, str]:
+        """Return the workflow/task scope bound to a reader provider context."""
+
+        try:
+            meta = self._role_lifecycle_registry().instance_meta().get(
+                role_instance,
+                {},
+            )
+        except Exception:
+            meta = {}
+        bound_task_id = str(meta.get("fanout_context_task_id") or "").strip()
+        bound_trace_id = str(meta.get("fanout_context_trace_id") or "").strip()
+        if bound_task_id or bound_trace_id:
+            return bound_task_id, bound_trace_id
+
+        try:
+            events = self._fanout_lifecycle_events()
+        except Exception:
+            return "", ""
+        for event in reversed(events):
+            if event.type not in {
+                "fanout.child.dispatched",
+                "fanout.synth.dispatched",
+            }:
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if str(payload.get("role_instance") or "").strip() != role_instance:
+                continue
+            task_id = str(event.task_id or payload.get("task_id") or "").strip()
+            trace_id = str(
+                payload.get("workflow_run_id")
+                or payload.get("trace_id")
+                or event.correlation_id
+                or ""
+            ).strip()
+            if task_id or trace_id:
+                return task_id, trace_id
+        return "", ""
+
+    @staticmethod
+    def _reader_fanout_context_matches(
+        previous: tuple[str, str],
+        current: tuple[str, str],
+    ) -> bool:
+        previous_task_id, previous_trace_id = previous
+        task_id, trace_id = current
+        if previous_task_id != task_id:
+            return False
+        return not (
+            previous_trace_id
+            and trace_id
+            and previous_trace_id != trace_id
+        )
+
+    def _prepare_reader_fanout_context(
+        self,
+        *,
+        role: RoleConfig,
+        task_id: str,
+        trace_id: str,
+        state: str,
+        provider_session_replaced: bool,
+    ) -> tuple[bool, dict[str, str]]:
+        """Rotate an idle reader before it crosses a root workflow boundary."""
+
+        if (
+            role.role_kind != "reader"
+            or not self._role_is_on_demand(role)
+            or not task_id
+        ):
+            return True, {}
+        registry = self._role_lifecycle_registry()
+        current = (task_id, trace_id)
+        previous = self._reader_fanout_context_scope(role.instance_id)
+        if provider_session_replaced or not any(previous):
+            registry.update_instance_meta(
+                role.instance_id,
+                fanout_context_task_id=task_id,
+                fanout_context_trace_id=trace_id,
+            )
+            return True, {}
+        if self._reader_fanout_context_matches(previous, current):
+            return True, {}
+
+        blockers: list[str] = []
+        if self._fanout_role_has_active_provider_turn(role.instance_id):
+            blockers.append("provider_turn_active")
+        if self._active_fanout_child_for_instance(role.instance_id) is not None:
+            blockers.append("fanout_child_active")
+        active_task = self._active_task_for_instance(role.instance_id)
+        if active_task is not None:
+            blockers.append(f"task_active:{active_task.id}")
+        if state in {
+            "blocked_human",
+            "busy",
+            "pending_recycle",
+            "recycling",
+            "respawning",
+        }:
+            blockers.append(f"worker_state:{state}")
+        if blockers:
+            return False, {
+                "defer_reason": "reader_context_switch_waiting_for_settlement:"
+                + ",".join(blockers),
+            }
+
+        old_session = registry.get(role.instance_id)
+        rotation = {
+            "previous_task_id": previous[0],
+            "previous_trace_id": previous[1],
+            "task_id": task_id,
+            "trace_id": trace_id,
+            "old_session": str(old_session) if old_session else "",
+        }
+        self.event_writer.append(ZfEvent(
+            type="worker.recycling",
+            actor=role.instance_id,
+            task_id=task_id,
+            payload={
+                "role": role.name,
+                "instance_id": role.instance_id,
+                "backend": role.backend,
+                "reason": "reader_root_context_changed",
+                **rotation,
+            },
+            correlation_id=trace_id or None,
+        ))
+        try:
+            if self.transport.is_alive(role.instance_id):
+                self.transport.terminate(role.instance_id)
+        except Exception as exc:  # noqa: BLE001
+            self.event_writer.append(ZfEvent(
+                type="worker.recycle.failed",
+                actor=role.instance_id,
+                task_id=task_id,
+                payload={
+                    "role": role.name,
+                    "instance_id": role.instance_id,
+                    "reason": "reader_root_context_changed",
+                    "error": str(exc)[:500],
+                    **rotation,
+                },
+                correlation_id=trace_id or None,
+            ))
+            return False, {
+                "defer_reason": f"reader_context_switch_terminate_failed:{exc}",
+            }
+
+        if role.backend == "codex":
+            registry.clear(role.instance_id)
+            session_strategy = "reader_task_boundary_clear_codex"
+            new_session = ""
+        else:
+            new_session = str(registry.rotate(role.instance_id))
+            session_strategy = "reader_task_boundary_rotate_session"
+        now = datetime.fromtimestamp(self._now(), tz=timezone.utc).isoformat()
+        registry.update_instance_meta(
+            role.instance_id,
+            fanout_context_task_id=task_id,
+            fanout_context_trace_id=trace_id,
+            fanout_context_previous_task_id=previous[0],
+            fanout_context_previous_trace_id=previous[1],
+            fanout_context_rotated_at=now,
+            lifecycle_state="suspended",
+            lifecycle_transition_at=now,
+            lifecycle_suspended_at=now,
+            lifecycle_last_error="",
+        )
+        self._set_worker_state(
+            role.instance_id,
+            "suspended",
+            reason="reader provider context rotated for a new root workflow",
+            task_id=task_id,
+            force=True,
+        )
+        return True, {
+            **rotation,
+            "new_session": new_session,
+            "session_strategy": session_strategy,
+        }
+
+    @staticmethod
+    def _reader_dispatch_lost_event_after(
+        role_events: list[tuple[int, ZfEvent]],
+        dispatch_index: int,
+    ) -> ZfEvent | None:
+        for index, event in reversed(role_events):
+            if index > dispatch_index:
+                return event
+        return None
+
+    @staticmethod
+    def _fanout_dispatch_has_authoritative_result(
+        events: list[ZfEvent],
+        dispatch_event: ZfEvent,
+    ) -> bool:
+        """Return whether durable call-result truth already settled a dispatch."""
+
+        dispatch_payload = (
+            dispatch_event.payload
+            if isinstance(dispatch_event.payload, dict)
+            else {}
+        )
+        operation_id = str(dispatch_payload.get("operation_id") or "").strip()
+        request_hash = str(dispatch_payload.get("request_hash") or "").strip()
+        if not operation_id:
+            return False
+        for event in events:
+            if event.type not in {
+                "workflow.call.result.admitted",
+                "workflow.operation.settled",
+            }:
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if str(payload.get("operation_id") or "").strip() != operation_id:
+                continue
+            result_hash = str(payload.get("request_hash") or "").strip()
+            if request_hash and result_hash and result_hash != request_hash:
+                continue
+            if event.type == "workflow.call.result.admitted":
+                return True
+            result_ref = payload.get("admitted_call_result_ref")
+            if isinstance(result_ref, dict) and str(
+                result_ref.get("ref") or ""
+            ).strip():
+                return True
+        return False
+
+    def _defer_fanout_retry_dispatch(
+        self,
+        manifest: dict,
+        child: dict,
+        role: RoleConfig,
+        run_id: str,
+        attempt: int,
+        previous_dispatch: ZfEvent,
+        reason: str,
+    ) -> None:
+        """Record an admission-blocked retry without failing the child."""
+
+        trace_id = str(manifest.get("trace_id") or "")
+        payload = {
+            "fanout_id": str(manifest.get("fanout_id") or ""),
+            "trace_id": trace_id,
+            "stage_id": str(manifest.get("stage_id") or ""),
+            "child_id": str(child.get("child_id") or ""),
+            "run_id": run_id,
+            "role_instance": role.instance_id,
+            "task_id": str(child.get("task_id") or ""),
+            "retry_of_run_id": str(
+                previous_dispatch.payload.get("run_id") or ""
+            ),
+            "attempt": attempt + 1,
+            "reason": reason,
+            "failure_kind": "run_dispatch_blocked",
+        }
+        self._copy_fanout_assignment_metadata(payload, child)
+        self.event_writer.append(ZfEvent(
+            type="fanout.child.dispatch_deferred",
+            actor="zf-cli",
+            task_id=payload["task_id"] or None,
+            payload=payload,
+            causation_id=previous_dispatch.id,
+            correlation_id=trace_id,
+        ))
+
     def _fanout_role_has_active_provider_turn(
         self,
         role_instance: str,
@@ -22,6 +291,17 @@ class FanoutDispatchLivenessMixin:
     @staticmethod
     def _reader_dispatch_lost_role(event: ZfEvent) -> str:
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            event.type == "provider.turn.closed"
+            and str(payload.get("backend") or "").strip() == "codex"
+            and str(payload.get("turn_id") or "").strip()
+        ):
+            return str(
+                payload.get("instance_id")
+                or payload.get("role")
+                or event.actor
+                or ""
+            ).strip()
         if event.type == "worker.refresh.triggered":
             reason = str(payload.get("reason") or "").strip().lower()
             if reason in {"drift", "context_pressure", "task_complete"}:
@@ -135,6 +415,49 @@ class FanoutDispatchLivenessMixin:
                 return True
         return False
 
+    def _fail_exhausted_reader_fanout_dispatch(
+        self,
+        *,
+        manifest: dict,
+        child: dict,
+        lost_event: ZfEvent,
+        loss_reason: str,
+    ) -> None:
+        fanout_id = str(manifest.get("fanout_id") or "")
+        child_id = str(child.get("child_id") or "")
+        role_instance = str(child.get("role_instance") or "")
+        run_id = str(child.get("run_id") or "")
+        task_id = str(child.get("task_id") or "")
+        trace_id = str(manifest.get("trace_id") or "")
+        self.event_writer.append(ZfEvent(
+            type="fanout.child.failed",
+            actor="zf-cli",
+            task_id=task_id or None,
+            payload={
+                "fanout_id": fanout_id,
+                "trace_id": trace_id,
+                "stage_id": str(manifest.get("stage_id") or ""),
+                "child_id": child_id,
+                "run_id": run_id,
+                "role_instance": role_instance,
+                "task_id": task_id,
+                "reason": f"{loss_reason}_recovery_exhausted",
+                "failure_class": "worker_noop_or_terminal_missing",
+                "lost_signal_event_id": lost_event.id,
+                "lost_signal_type": lost_event.type,
+            },
+            causation_id=lost_event.id,
+            correlation_id=trace_id,
+        ))
+        self._release_fanout_worker_if_terminal(
+            role_instance=role_instance,
+            fanout_id=fanout_id,
+            child_id=child_id,
+            run_id=run_id,
+            task_id=task_id,
+        )
+        self._evaluate_reader_fanout(fanout_id)
+
     def _ensure_fanout_role_dispatchable(
         self,
         *,
@@ -151,13 +474,6 @@ class FanoutDispatchLivenessMixin:
         provider_session_replaced: bool = False,
     ) -> bool:
         """Return whether a fanout role can receive a prompt now."""
-
-        activation_error = ""
-        if self._role_is_on_demand(role):
-            try:
-                self._ensure_role_active(role, task_id=task_id)
-            except Exception as exc:  # noqa: BLE001
-                activation_error = str(exc)
 
         state = getattr(self, "_last_worker_state", {}).get(role.instance_id, "idle")
         if state == "busy":
@@ -189,6 +505,70 @@ class FanoutDispatchLivenessMixin:
                     force=True,
                 )
                 state = "idle"
+
+        context_ready, context_rotation = self._prepare_reader_fanout_context(
+            role=role,
+            task_id=str(task_id or "").strip(),
+            trace_id=str(trace_id or "").strip(),
+            state=state,
+            provider_session_replaced=provider_session_replaced,
+        )
+        if not context_ready:
+            try:
+                context_transport_alive = bool(
+                    self.transport.is_alive(role.instance_id)
+                )
+            except Exception:
+                context_transport_alive = False
+            self._emit_fanout_dispatch_deferred_once(
+                fanout_id=fanout_id,
+                trace_id=trace_id,
+                stage_id=stage_id,
+                child_id=child_id,
+                run_id=run_id,
+                role_instance=role.instance_id,
+                prompt_kind=prompt_kind,
+                reason=str(
+                    context_rotation.get("defer_reason")
+                    or "reader_context_switch_deferred"
+                ),
+                state=state,
+                alive=context_transport_alive,
+                dispatchable=False,
+                causation_id=causation_id,
+            )
+            return False
+
+        activation_error = ""
+        if self._role_is_on_demand(role):
+            try:
+                self._ensure_role_active(role, task_id=task_id)
+            except Exception as exc:  # noqa: BLE001
+                activation_error = str(exc)
+        if context_rotation and not activation_error:
+            registry = self._role_lifecycle_registry()
+            observed_session = registry.get(role.instance_id)
+            self.event_writer.append(ZfEvent(
+                type="worker.recycled",
+                actor=role.instance_id,
+                task_id=task_id,
+                payload={
+                    "role": role.name,
+                    "instance_id": role.instance_id,
+                    "backend": role.backend,
+                    "reason": "reader_root_context_changed",
+                    **context_rotation,
+                    "new_session": (
+                        str(observed_session)
+                        if observed_session
+                        else context_rotation.get("new_session", "")
+                    ),
+                },
+                correlation_id=trace_id or None,
+            ))
+            getattr(self, "_instance_state", {})[role.instance_id] = "healthy"
+            provider_session_replaced = True
+        state = getattr(self, "_last_worker_state", {}).get(role.instance_id, state)
         try:
             dispatchable = bool(self._worker_dispatchable(role.instance_id))
         except Exception:

@@ -308,6 +308,38 @@ def test_candidate_quality_failure_routes_to_rework_not_candidate_reemit(
     assert projection["batch_checkpoints"][0]["safe_resume_action"] == "trigger_rework"
 
 
+def test_candidate_dependency_failure_does_not_reopen_quality_gate_owners(
+    tmp_path: Path,
+) -> None:
+    projection = _projection(tmp_path, [
+        ZfEvent(
+            type="integration.failed",
+            id="evt-integration-dependency",
+            actor="zf-cli",
+            correlation_id="trace-dependency",
+            payload={
+                "fanout_id": "fanout-impl",
+                "stage_id": "prd-lanes-impl",
+                "pdd_id": "PRD-DEPENDENCY",
+                "task_map_ref": ".zf/artifacts/PRD-DEPENDENCY/task_map.json",
+                "candidate_ref": "candidate/PRD-DEPENDENCY",
+                "candidate_base_commit": "base123",
+                "candidate_head_commit": "head456",
+                "completed_task_ids": ["WU-01", "WU-02"],
+                "failed_task_ids": ["WU-01", "WU-02"],
+                "failed_children": [],
+                "failure_scope": "candidate",
+                "failure_class": "candidate_dependency_missing",
+            },
+        ),
+    ])
+
+    assert projection["summary"]["batch_pending"] == 1
+    checkpoint = projection["batch_checkpoints"][0]
+    assert checkpoint["safe_resume_action"] == "trigger_rework"
+    assert checkpoint["failed_children"] == []
+
+
 def test_failed_child_identity_prefers_manifest_task_id_over_transport_suffix(
     tmp_path: Path,
 ) -> None:

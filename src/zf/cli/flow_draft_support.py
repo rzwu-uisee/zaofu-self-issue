@@ -8,6 +8,57 @@ from pathlib import Path
 from typing import Any
 
 
+SEMANTIC_CONTROL_CHECKPOINTS = (
+    "plan_candidate",
+)
+
+
+def orchestration_spec(*, tier: str) -> dict[str, Any]:
+    """Return a route-sized OA policy for generated projects."""
+
+    if tier == "full":
+        policy = {
+            **_semantic_control_policy(),
+            "flow_policies": {
+                "research": _exception_advisor_policy(),
+                "workflow": _exception_advisor_policy(),
+            },
+        }
+    elif tier == "light":
+        policy = _exception_advisor_policy()
+    elif tier == "multi":
+        policy = {
+            **_exception_advisor_policy(),
+            "flow_policies": {
+                "issue": _exception_advisor_policy(),
+                "prd": _semantic_control_policy(include_limits=False),
+                "refactor": _semantic_control_policy(include_limits=False),
+                "workflow": _exception_advisor_policy(),
+                "research": _exception_advisor_policy(),
+            },
+        }
+    else:
+        raise ValueError(f"unsupported orchestration tier {tier!r}")
+    return {"workflow": {"orchestration": policy}}
+
+
+def _semantic_control_policy(*, include_limits: bool = True) -> dict[str, Any]:
+    policy: dict[str, Any] = {
+        "mode": "semantic_control",
+        "checkpoints": list(SEMANTIC_CONTROL_CHECKPOINTS),
+        "checkpoint_policies": {
+            "plan_candidate": "shadow",
+        },
+    }
+    if include_limits:
+        policy.update({"max_plan_revisions": 2, "no_progress_limit": 2})
+    return policy
+
+
+def _exception_advisor_policy() -> dict[str, Any]:
+    return {"mode": "exception_advisor"}
+
+
 def default_tmux_session(project: str) -> str:
     slug = re.sub(
         r"[^a-zA-Z0-9_-]+",
@@ -18,7 +69,17 @@ def default_tmux_session(project: str) -> str:
     return f"zf-{slug}"
 
 
-def explicit_orchestrator_spec(backend: str) -> dict[str, Any]:
+def explicit_orchestrator_spec(
+    backend: str,
+    *,
+    semantic_control: bool = False,
+) -> dict[str, Any]:
+    triggers = [
+        "dispatch.silent_stall",
+        "orchestrator.rework.triage.requested",
+    ]
+    if semantic_control:
+        triggers.append("orchestrator.semantic.checkpoint.requested")
     return {
         "orchestrator": {
             "backend": backend,
@@ -33,10 +94,7 @@ def explicit_orchestrator_spec(backend: str) -> dict[str, Any]:
             "transport": "tmux",
             "stuck_threshold_seconds": 900,
             "spawn_ready_timeout_seconds": 240,
-            "triggers": [
-                "dispatch.silent_stall",
-                "orchestrator.rework.triage.requested",
-            ],
+            "triggers": triggers,
             "publishes": ["orchestrator.rework.triage.recorded"],
             "skills": [
                 "zf-yoke-orchestrator-role-context",
@@ -175,5 +233,6 @@ __all__ = [
     "draft_runtime_profile_doc",
     "explicit_orchestrator_spec",
     "non_empty_mapping",
+    "orchestration_spec",
     "skill_sources_from_adapter_plan",
 ]

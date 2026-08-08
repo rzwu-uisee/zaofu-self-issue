@@ -7,6 +7,7 @@ import pytest
 from zf.core.task.schema import Task, TaskContract
 from zf.runtime.impl_self_check import (
     ImplSelfCheckError,
+    completion_payload_template,
     hydrate_impl_self_check,
     normalize_impl_self_check,
     reusable_command_receipts,
@@ -135,6 +136,28 @@ def test_verification_commands_remain_independent_and_identified() -> None:
     assert commands[0]["command_digest"] == command_digest(commands[0]["command"])
 
 
+def test_verification_commands_preserve_explicit_rolling_smoke_marker() -> None:
+    commands = normalize_verification_commands([{
+        "id": "focused-tests",
+        "command": "pytest -q tests/test_a.py",
+        "tier": "runtime",
+        "rolling_smoke": True,
+    }])
+
+    assert commands[0]["rolling_smoke"] is True
+
+
+def test_verification_commands_preserve_declared_producer_paths() -> None:
+    commands = normalize_verification_commands([{
+        "id": "browser-e2e",
+        "command": "npm run test:e2e",
+        "acceptance_ids": ["AC-10"],
+        "producer_paths": ["artifacts/e2e/results.json"],
+    }])
+
+    assert commands[0]["producer_paths"] == ["artifacts/e2e/results.json"]
+
+
 def test_impl_self_check_round_trip_and_exact_target_reuse(tmp_path: Path) -> None:
     contract, target = _snapshots(tmp_path)
     body = normalize_impl_self_check(
@@ -170,6 +193,56 @@ def test_impl_self_check_round_trip_and_exact_target_reuse(tmp_path: Path) -> No
     ) == []
 
 
+def test_impl_self_check_requires_only_impl_owned_command_subset(
+    tmp_path: Path,
+) -> None:
+    contract, target = _snapshots(tmp_path)
+    candidate_command = "npm run test:e2e"
+    contract["verification_commands"].append({
+        "command_id": "candidate-e2e",
+        "command": candidate_command,
+        "command_digest": command_digest(candidate_command),
+        "acceptance_ids": ["AC-1"],
+        "owner": "candidate_verify",
+        "tier": "real_e2e",
+        "deterministic": True,
+        "reusable": False,
+        "timeout_seconds": 900,
+    })
+    contract["acceptance_criteria"][0]["verification_command_ids"].append(
+        "candidate-e2e"
+    )
+
+    body = normalize_impl_self_check(
+        _payload(contract, target),
+        contract_snapshot=contract,
+        target_snapshot=target,
+        expected_attempt_id="attempt-1",
+    )
+    template = completion_payload_template(
+        contract_snapshot=contract,
+        task_item={
+            "attempt_id": "attempt-1",
+            "contract_snapshot_ref": target["contract_snapshot_ref"],
+            "contract_snapshot_digest": target["contract_snapshot_digest"],
+        },
+        task_id=contract["task_id"],
+        run_id=contract["workflow_run_id"],
+        child_id="child-1",
+    )
+
+    assert [
+        item["command_id"] for item in body["command_receipts"]
+    ] == ["unit-focused"]
+    assert [
+        item["command_id"]
+        for item in template["impl_self_check"]["command_receipts"]
+    ] == ["unit-focused"]
+    assert template["impl_self_check"]["acceptance_results"][0][
+        "command_receipt_ids"
+    ] == ["receipt-unit-focused"]
+
+
 @pytest.mark.parametrize(
     "mutation",
     ["missing_ac", "failed_ac", "failed_receipt", "bad_digest", "bad_target"],
@@ -200,6 +273,29 @@ def test_impl_self_check_rejects_incomplete_or_stale_evidence(
             target_snapshot=target,
             expected_attempt_id="attempt-1",
         )
+
+
+def test_impl_self_check_binds_omitted_receipt_identity(
+    tmp_path: Path,
+) -> None:
+    contract, target = _snapshots(tmp_path)
+    payload = _payload(contract, target)
+    receipt = payload["impl_self_check"]["command_receipts"][0]
+    receipt.pop("command_digest")
+    receipt.pop("target_commit")
+
+    body = normalize_impl_self_check(
+        payload,
+        contract_snapshot=contract,
+        target_snapshot=target,
+        expected_attempt_id="attempt-1",
+    )
+
+    normalized = body["command_receipts"][0]
+    assert normalized["command_digest"] == (
+        contract["verification_commands"][0]["command_digest"]
+    )
+    assert normalized["target_commit"] == target["target_commit"]
 
 
 def test_strict_rejection_requires_exact_rework_items(tmp_path: Path) -> None:

@@ -542,11 +542,17 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
                 }],
             }
             workflow_node_runs = {}
+    task_pipeline, pipeline_nodes, pipeline_edges = _task_pipeline_overlay(
+        state_dir,
+        config=config,
+        role_node_by_ref=role_node_by_ref,
+    )
     result = {
-        "nodes": stage_nodes + role_nodes + aggregate_nodes,
-        "edges": edges,
+        "nodes": stage_nodes + role_nodes + aggregate_nodes + pipeline_nodes,
+        "edges": edges + pipeline_edges,
         "compiled_graph": compiled_graph_projection,
         "workflow_node_runs": workflow_node_runs,
+        "task_pipeline": task_pipeline,
         "overlays": {
             "fanouts": [asdict(redact_event(event)) for event in fanout_events],
             "runs": [asdict(redact_event(event)) for event in run_events],
@@ -558,6 +564,10 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
             "fanout_events": len(fanout_events),
             "run_events": len(run_events),
             "active_tasks": len(active_tasks),
+            "task_pipeline_tasks": len(task_pipeline.get("tasks") or []),
+            "task_pipeline_operations": len(
+                task_pipeline.get("operations") or []
+            ),
         },
         "projection": {
             "source": "read_model.sqlite",
@@ -581,6 +591,118 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
         except Exception:
             pass
     return result
+
+
+def _task_pipeline_overlay(
+    state_dir: Path,
+    *,
+    config: ZfConfig | None,
+    role_node_by_ref: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    from zf.runtime.task_pipeline_reconciler import task_pipeline_policies
+
+    if config is None or not task_pipeline_policies(config):
+        return {}, [], []
+    try:
+        from zf.runtime.task_pipeline_projection import (
+            read_task_pipeline_projection,
+        )
+
+        projection = read_task_pipeline_projection(
+            state_dir,
+            project_root=state_dir.parent,
+            config=config,
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "task-pipeline-graph-overlay.v1",
+            "status": "unavailable",
+            "reason": str(exc),
+        }, [], []
+
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    for generation in projection.get("generations", []):
+        generation_id = str(generation.get("generation_id") or "")
+        node_id = f"task-pipeline-generation:{generation_id}"
+        nodes.append({
+            "id": node_id,
+            "label": generation_id,
+            "kind": "task_pipeline_generation",
+            "workflow_run_id": str(
+                generation.get("workflow_run_id") or ""
+            ),
+            "task_map_generation": str(
+                generation.get("task_map_generation") or ""
+            ),
+            "candidate_freeze": dict(
+                generation.get("candidate_freeze") or {}
+            ),
+        })
+        for task_id in generation.get("task_ids", []):
+            edges.append({
+                "from": node_id,
+                "to": f"task-pipeline-task:{task_id}",
+                "kind": "generation_task",
+            })
+    for task in projection.get("tasks", []):
+        task_id = str(task.get("task_id") or "")
+        nodes.append({
+            "id": f"task-pipeline-task:{task_id}",
+            "label": str(task.get("title") or task_id),
+            "kind": "task_pipeline_task",
+            "task_id": task_id,
+            "status": str(task.get("task_status") or ""),
+            "pipeline_stage": str(task.get("pipeline_stage") or ""),
+            "current_worker": str(task.get("current_worker") or ""),
+            "current_worker_source": str(
+                task.get("current_worker_source") or ""
+            ),
+        })
+    for operation in projection.get("operations", []):
+        operation_id = str(operation.get("operation_id") or "")
+        task_id = str(operation.get("task_id") or "")
+        operation_node = f"task-pipeline-operation:{operation_id}"
+        nodes.append({
+            "id": operation_node,
+            "label": f"{operation.get('stage') or 'stage'} g{operation.get('operation_generation') or 0}",
+            "kind": "task_pipeline_operation",
+            **dict(operation),
+        })
+        edges.append({
+            "from": f"task-pipeline-task:{task_id}",
+            "to": operation_node,
+            "kind": "task_stage_operation",
+        })
+        role_instance = str(operation.get("role_instance") or "")
+        role_node = role_node_by_ref.get(role_instance)
+        if role_node:
+            edges.append({
+                "from": operation_node,
+                "to": role_node,
+                "kind": (
+                    "current_placement"
+                    if operation.get("current_worker")
+                    else "historical_placement"
+                ),
+                "placement_epoch": int(
+                    operation.get("placement_epoch") or 0
+                ),
+            })
+    overlay = {
+        "schema_version": "task-pipeline-graph-overlay.v1",
+        "projection_digest": str(projection.get("projection_digest") or ""),
+        "mode": str(projection.get("mode") or ""),
+        "summary": dict(projection.get("summary") or {}),
+        "queues": dict(projection.get("queues") or {}),
+        "capacity": dict(projection.get("capacity") or {}),
+        "closure": dict(projection.get("closure") or {}),
+        "generations": list(projection.get("generations") or []),
+        "tasks": list(projection.get("tasks") or []),
+        "operations": list(projection.get("operations") or []),
+        "sessions": list(projection.get("sessions") or []),
+    }
+    return overlay, nodes, edges
 
 
 def _workflow_graph_events(
@@ -661,6 +783,9 @@ def _workflow_config_signature(
 ) -> dict[str, Any]:
     if config is None:
         return {"configured": False}
+    from zf.runtime.task_pipeline_reconciler import task_pipeline_policies
+
+    policies = task_pipeline_policies(config)
     return {
         "configured": True,
         "stages": [
@@ -689,4 +814,11 @@ def _workflow_config_signature(
             }
             for role in roles
         ],
+        "task_pipeline_profile_digest": str(
+            ",".join(sorted(
+                str(policy.get("profile_digest") or "")
+                for policy in policies
+                if str(policy.get("profile_digest") or "")
+            ))
+        ),
     }

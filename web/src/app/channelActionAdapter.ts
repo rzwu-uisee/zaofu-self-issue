@@ -81,11 +81,12 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     message: string,
     messageId: string,
     mode: string,
+    restart = false,
   ) {
     await args.submitAction(
       "channel-discussion-start",
       startDiscussionPayload(
-        channelId(), threadId, message, messageId, mode,
+        channelId(), threadId, message, messageId, mode, restart,
       ),
     );
   }

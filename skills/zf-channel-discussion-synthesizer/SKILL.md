@@ -1,6 +1,7 @@
 ---
 name: zf-channel-discussion-synthesizer
 description: "Use for the designated synthesizer in a ZaoFu fanout-then-synthesis Channel. Defines typed question-graph normalization, targeted cross-review, owner frontier, evidence-bound synthesis, dissent preservation, and all-role sign-off."
+dependencies: [zf-browser-e2e-contract]
 ---
 
 # Channel 需求澄清讨论 — Synthesizer 协议
@@ -84,6 +85,22 @@ synthesis。若请求携带上一次 rejection reason，必须基于最新 ledge
    `recommended_workflow`、`source_refs`、`dissent` 和 `confidence`。Runtime 负责
    `channel.synthesis.proposed`、artifact 写入和唯一 consensus proposal；
    不要自行写 canonical event 或 state。
+
+   `verification_commands` 必须覆盖每条 mandatory acceptance 的真实证据方法，
+   每条 acceptance 使用稳定 `id`；每条 command 使用稳定 `id`、与 acceptance
+   对齐的 canonical `acceptance_ids` 和 `producer_paths`，不要把
+   `acceptance_ids` 改名为 `covers`；同时显式声明 `owner`、`tier`、
+   `deterministic`、`reusable` 和 `timeout_seconds`，不依赖下游默认值。
+   `summary` 只描述长期有效的产品行为，签收、
+   Owner 确认和执行授权等瞬时状态只写入 `readiness`，避免 immutable PRD 在签收后
+   生成自相矛盾的 Task behavior。
+
+   这些 command 不能只给 build/unit 命令却把 viewport、pointer、network、storage、refresh、
+   screenshot 等浏览器行为留给下游猜测。浏览器场景加载
+   `zf-browser-e2e-contract`，写入可从 repo root 原样执行的 Docker Playwright
+   命令；对应 runner/config/test/evidence 路径须在后续 Task handoff 的 scope 中
+   可写。实施前截图/trace 尚不存在不构成 readiness blocker；缺少可执行 runner
+   方法才是 blocker。
 
 3. 保留 material dissent：记录异议角色、异议内容、采用/不采用理由和能改变结论
    的证据。不要用多数意见覆盖少数但高风险的反例。

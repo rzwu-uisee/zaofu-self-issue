@@ -6,7 +6,7 @@ from typing import Any
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.session_mutex import SessionLock, SessionLockBusy
 
 
@@ -31,7 +31,7 @@ def respawn_instance_with_lock(
     *,
     recovery_reason: str,
     inject_idle_prompt: bool,
-) -> OrchestratorDecision:
+) -> WorkflowRuntimeDecision:
     active_task = runtime._active_task_for_instance(role.instance_id)
     lock_dir = runtime.state_dir / "locks" / "respawns"
     try:
@@ -56,7 +56,7 @@ def respawn_instance_with_lock(
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="respawn_in_progress",
             role=role.instance_id,
             task_id=active_task.id if active_task is not None else "",

@@ -36,7 +36,7 @@ from zf.runtime.injection import (
 )
 from zf.runtime.cli_command import zf_cli_cmd
 from zf.core.workflow.topology import WorkflowEventSets
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.pause_lifecycle import is_dispatch_paused
 from zf.runtime.recovery_sufficiency import build_artifact_recovery_refs
 from zf.runtime.rework_triage import REWORK_RETRY_CLASSIFICATIONS
@@ -49,9 +49,13 @@ from zf.runtime.task_ref_repair_operation import (
     task_ref_repair_dispatch_id,
 )
 from zf.runtime.transport import transport_error_diagnostics
+from zf.runtime.orchestrator_agent_rework import (
+    admit_semantic_rework_target,
+    semantic_rework_target_role,
+)
 from zf.runtime.workflow_anchor import (
     is_workflow_dispatch_managed_task,
-    is_workflow_fanout_anchor_task,
+    is_workflow_fanout_anchor_task, legacy_pending_handoff_tasks,
 )
 from zf.runtime.workflow_inputs import render_workflow_input_briefing_section
 from zf.runtime.canonical_recovery import (
@@ -603,7 +607,7 @@ class DispatchMixin(
         except Exception:
             return False
 
-    def _dispatch_ready(self) -> list[OrchestratorDecision]:
+    def _dispatch_ready(self) -> list[WorkflowRuntimeDecision]:
         """Dispatch ready tasks to available workers.
 
         In Layer 2 mode (orchestrator role configured), only tasks that
@@ -623,10 +627,18 @@ class DispatchMixin(
             the latest task.dispatched.assignee per task — if they
             differ, the new assignee hasn't received the briefing yet.
         """
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         layer2_active = self._find_role_by_name("orchestrator") is not None
         candidates = list(self.task_store.ready())
+        from zf.runtime.task_pipeline_runtime import (
+            prepare_task_pipeline_dispatch,
+        )
 
+        pipeline_decisions, task_pipeline_managed = prepare_task_pipeline_dispatch(
+            self,
+            candidate_task_ids=(task.id for task in candidates),
+        )
+        decisions.extend(pipeline_decisions)
         # R-TASK-STATE-AXIS-01 (2026-04-27): compute latest_dispatched
         # once per cycle and thread it through every WIP check below.
         # Replaces the legacy `assigned_to + status==in_progress` count
@@ -676,6 +688,8 @@ class DispatchMixin(
 
         for task in candidates:
             if task.status in {"done", "cancelled", "blocked"}:
+                continue
+            if task.id in task_pipeline_managed:
                 continue
             if is_workflow_dispatch_managed_task(task):
                 continue
@@ -872,7 +886,7 @@ class DispatchMixin(
             for path in self._task_exclusive_files(task):
                 exclusive_reservations.setdefault(path, task.id)
 
-            decisions.append(OrchestratorDecision(
+            decisions.append(WorkflowRuntimeDecision(
                 action="dispatch",
                 task_id=task.id,
                 role=role.instance_id,
@@ -883,7 +897,7 @@ class DispatchMixin(
 
         return decisions
 
-    def _reconcile_pending_handoffs(self) -> list[OrchestratorDecision]:
+    def _reconcile_pending_handoffs(self) -> list[WorkflowRuntimeDecision]:
         """Repair missed mechanical handoffs in Layer 2 mode.
 
         Semantic decisions such as task decomposition, rejection reason, and
@@ -908,7 +922,6 @@ class DispatchMixin(
             graph_decisions = graph_resync(events)
             if graph_decisions:
                 return graph_decisions
-
         latest_progress: dict[str, tuple[int, ZfEvent]] = {}
         latest_assigned: dict[str, tuple[int, str]] = {}
         latest_dispatched: dict[str, tuple[int, str]] = {}
@@ -1019,8 +1032,8 @@ class DispatchMixin(
                     if trigger_event_id:
                         latest_rework_capped[trigger_event_id] = idx
 
-        decisions: list[OrchestratorDecision] = []
-        for task in self.task_store.list_all():
+        decisions: list[WorkflowRuntimeDecision] = []
+        for task in legacy_pending_handoff_tasks(self, events):
             progress = latest_progress.get(task.id)
             late_terminal_success = False
             if progress is not None:
@@ -1098,7 +1111,7 @@ class DispatchMixin(
                             repair_event,
                         )
                         if wait_reason:
-                            decisions.append(OrchestratorDecision(
+                            decisions.append(WorkflowRuntimeDecision(
                                 action="wait",
                                 task_id=task.id,
                                 reason=(
@@ -1107,7 +1120,7 @@ class DispatchMixin(
                                 ),
                             ))
                         else:
-                            decisions.append(OrchestratorDecision(
+                            decisions.append(WorkflowRuntimeDecision(
                                 action="block",
                                 task_id=task.id,
                                 reason=(
@@ -1116,7 +1129,7 @@ class DispatchMixin(
                                 ),
                             ))
                     else:
-                        decisions.append(OrchestratorDecision(
+                        decisions.append(WorkflowRuntimeDecision(
                             action="dispatch",
                             task_id=task.id,
                             role=dispatched_role,
@@ -1219,7 +1232,7 @@ class DispatchMixin(
                 self._processed_event_ids.add(progress_event.id)
                 continue
             if self._ignore_design_handoff_for_lane_task(task, progress_event):
-                decisions.append(OrchestratorDecision(
+                decisions.append(WorkflowRuntimeDecision(
                     action="wait",
                     task_id=task.id,
                     reason=(
@@ -1312,7 +1325,7 @@ class DispatchMixin(
                         # cooldown gate (_dispatch_recent_failure_cooldown_active)
                         # park the task after N rejected in the window.
                         self._record_dispatch_failure(task.id)
-                    decisions.append(OrchestratorDecision(
+                    decisions.append(WorkflowRuntimeDecision(
                         action="block",
                         task_id=task.id,
                         reason=(
@@ -1333,7 +1346,7 @@ class DispatchMixin(
                 if not self._is_configured_terminal_success(progress_event.type):
                     continue
                 if not self._evaluate_terminal_done(progress_event, task):
-                    decisions.append(OrchestratorDecision(
+                    decisions.append(WorkflowRuntimeDecision(
                         action="block",
                         task_id=task.id,
                         reason=(
@@ -1346,7 +1359,7 @@ class DispatchMixin(
                     task.id, "done", trigger_event=progress_event.type,
                 ):
                     continue
-                decisions.append(OrchestratorDecision(
+                decisions.append(WorkflowRuntimeDecision(
                     action="move",
                     task_id=task.id,
                     reason=(
@@ -1383,7 +1396,7 @@ class DispatchMixin(
                     ),
                 },
             ))
-            decisions.append(OrchestratorDecision(
+            decisions.append(WorkflowRuntimeDecision(
                 action="assign",
                 task_id=task.id,
                 role=target,
@@ -3408,6 +3421,9 @@ class DispatchMixin(
         Returns None if resolution points at a role that doesn't exist
         in the config (caller emits dispatch.rework.unresolvable).
         """
+        if trigger_event.type == "orchestrator.semantic.rework.requested":
+            target = semantic_rework_target_role(trigger_event)
+            return self._find_role_by_instance(target) if target else None
         if trigger_event.type == "task.completion.stale_rejected":
             assigned_to = str(getattr(task, "assigned_to", "") or "")
             if assigned_to:
@@ -3428,7 +3444,7 @@ class DispatchMixin(
         # Layer 2: stage-level backedge (fires only when the stage declares
         # an on_fail/on_reject for this event — see the None guard in
         # _resolve_backedge_same_lane_role).
-        backedge = self._workflow_stage_backedge_for_event(trigger_event.type)
+        backedge = self._workflow_stage_backedge_for_event(trigger_event)
         if not candidate:
             same_lane_role = self._resolve_backedge_same_lane_role(
                 task,
@@ -3569,17 +3585,10 @@ class DispatchMixin(
                 return parts[idx + 1]
         return ""
 
-    def _workflow_stage_backedge_for_event(self, event_type: str):
-        if not event_type:
-            return None
-        for stage in getattr(self.config.workflow, "stages", []) or []:
-            for backedge in (
-                getattr(stage, "on_reject", None),
-                getattr(stage, "on_fail", None),
-            ):
-                if backedge is not None and getattr(backedge, "event", "") == event_type:
-                    return backedge
-        return None
+    def _workflow_stage_backedge_for_event(self, trigger_event: ZfEvent | str):
+        from zf.runtime.workflow_stage_backedge import backedge_for_event
+
+        return backedge_for_event(self.config, trigger_event)
 
     def _resolve_backedge_same_lane_role(
         self,
@@ -3803,7 +3812,7 @@ class DispatchMixin(
 
         Returns the role.name actually dispatched to, or None if
         skipped (unresolvable target / rework cap exceeded). Reactor
-        handlers use this to populate OrchestratorDecision.role so the
+        handlers use this to populate WorkflowRuntimeDecision.role so the
         decision trail reflects the real routing, not a hardcoded "dev".
 
         LH-0.T1: guards against infinite rework. The housekeeping path
@@ -3823,6 +3832,8 @@ class DispatchMixin(
         backlog instead of requeueing the original. The original stays
         ``done`` — failure doesn't discard completed work.
         """
+        if not admit_semantic_rework_target(self, task, trigger_event):
+            return None
         # β-4: fix-task short-circuit. Falls through when payload
         # lacks severity/scope/affected_task_ids fields (the
         # current cangjie events).
@@ -3900,7 +3911,7 @@ class DispatchMixin(
             except Exception:
                 pass
             return None
-        backedge = self._workflow_stage_backedge_for_event(trigger_event.type)
+        backedge = self._workflow_stage_backedge_for_event(trigger_event)
 
         # LH-0.T1 rework cap.
         backedge_max_attempts = int(getattr(backedge, "max_attempts", 0) or 0)
@@ -4473,7 +4484,7 @@ class DispatchMixin(
         trigger_event: ZfEvent,
         *,
         reason: str,
-    ) -> OrchestratorDecision:
+    ) -> WorkflowRuntimeDecision:
         """失败路由主枢纽 —— K3 相 1 决策表(2026-06-11 审计 Q1 收敛)。
 
         事件 → 分支 → cap 全映射(本表是唯一权威;reactor 的
@@ -4498,19 +4509,19 @@ class DispatchMixin(
         shadow 事件并行发射,零执行;分歧即 bug 线索,切换前必须零分歧。
         """
         if classify_recovery_scope(trigger_event) != "task":
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="ignore",
                 task_id=task.id,
                 reason=f"{reason}: candidate/gap recovery owned by candidate sweep",
             )
         if not self._rework_trigger_valid_for_task_state(task, trigger_event):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="ignore",
                 task_id=task.id,
                 reason=f"{reason}: invalid task state {task.status}",
             )
         if self._fanout_scoped_stage_progress_event(trigger_event):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="ignore",
                 task_id=task.id,
                 reason=f"{reason}: fanout-scoped progress owned by fanout runtime",
@@ -4531,17 +4542,17 @@ class DispatchMixin(
             if dispatched_role is None:
                 wait_reason = self._rework_defer_reason(task, trigger_event)
                 if wait_reason:
-                    return OrchestratorDecision(
+                    return WorkflowRuntimeDecision(
                         action="wait",
                         task_id=task.id,
                         reason=f"{reason}: rework deferred ({wait_reason})",
                     )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason=f"{reason}: rework unavailable or capped",
                 )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="dispatch",
                 task_id=task.id,
                 role=dispatched_role,
@@ -4555,12 +4566,12 @@ class DispatchMixin(
                 triage,
             )
             if dispatched_role is None:
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason=f"{reason}: evidence reissue target unavailable",
                 )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="dispatch",
                 task_id=task.id,
                 role=dispatched_role,
@@ -4568,7 +4579,7 @@ class DispatchMixin(
             )
 
         self._block_rework_for_triage(task, trigger_event, triage)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=task.id,
             role=triage.suspected_owner,

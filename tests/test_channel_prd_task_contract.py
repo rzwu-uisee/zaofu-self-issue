@@ -14,6 +14,8 @@ from zf.runtime.channel_contract_artifacts import (
 )
 from zf.runtime.channel_reply_prompt import channel_reply_response_contract
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.task_contract_snapshot import build_task_contract_snapshot
+from zf.web.proposal_extraction import default_validate_payload
 
 
 def _execute(
@@ -39,6 +41,9 @@ def _ready_prd_fixture(
     tmp_path: Path,
     *,
     implementation_start: bool,
+    readiness_verdict: str = "ready",
+    readiness_gaps: list[str] | None = None,
+    risk_accepted: bool = False,
 ) -> tuple[Path, EventWriter, ControlledActionService, dict[str, object]]:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -91,9 +96,9 @@ def _ready_prd_fixture(
         thread_id="main",
         revision=1,
         body={
-            "verdict": "ready",
+            "verdict": readiness_verdict,
             "implementation_start": implementation_start,
-            "gaps": [],
+            "gaps": list(readiness_gaps or []),
             "risks": [],
             "evidence_refs": ["event:requirement"],
         },
@@ -103,7 +108,22 @@ def _ready_prd_fixture(
     semantic = {
         "summary": "Implement strict JSON output from the confirmed PRD.",
         "acceptance_criteria": [
-            "Strict JSON behavior passes the declared verification command.",
+            {
+                "id": "AC-01",
+                "criterion": (
+                    "Strict JSON behavior passes the declared verification command."
+                ),
+                "verification_command_refs": ["VC-01"],
+                "producer_paths": ["tests/test_strict_json.py"],
+            },
+        ],
+        "verification_commands": [
+            {
+                "id": "VC-01",
+                "command": "python -m pytest -q",
+                "covers": ["AC-01"],
+                "producer_paths": ["tests/test_strict_json.py"],
+            },
         ],
         "out_of_scope": ["YAML output"],
         "scope": ["src/**", "tests/**"],
@@ -154,7 +174,7 @@ def _ready_prd_fixture(
         "prd_revision": 1,
         "readiness_ref": readiness["ref"],
         "readiness_digest": readiness["sha256"],
-        "readiness_verdict": "ready",
+        "readiness_verdict": readiness_verdict,
         "implementation_start": implementation_start,
         "conclusion_ref": conclusion["ref"],
         "conclusion_digest": conclusion["sha256"],
@@ -178,11 +198,26 @@ def _ready_prd_fixture(
             "proposed_by": "leader-1",
         },
     )
+    if risk_accepted:
+        writer.emit(
+            "channel.consensus.signed",
+            actor="web",
+            correlation_id="ch-prd-task",
+            payload={
+                **artifact_payload,
+                "member_id": "web",
+                "risk_accepted": True,
+            },
+        )
     writer.emit(
         "channel.consensus.reached",
         actor="web",
         correlation_id="ch-prd-task",
-        payload={**artifact_payload, "confirmed_by": "web"},
+        payload={
+            **artifact_payload,
+            "confirmed_by": "web",
+            "risk_accepted": risk_accepted,
+        },
     )
     authority: dict[str, object] = {
         "channel_id": "ch-prd-task",
@@ -221,6 +256,39 @@ def _task_payload(authority: dict[str, object]) -> dict:
     }
 
 
+def test_web_preflight_defers_exact_channel_prd_contract_to_compiler() -> None:
+    authority = {
+        "channel_id": "ch-prd-task",
+        "thread_id": "main",
+        "channel_member_id": "leader-1",
+        "leader_revision": 1,
+        "prd_revision": 3,
+        "source_ref": "channels/ch-prd-task/prd/r3.json",
+        "source_digest": "a" * 64,
+    }
+    payload = _task_payload(authority)
+    payload["source_artifact"] = {
+        "kind": "channel_prd",
+        "ref": authority["source_ref"],
+        "digest": authority["source_digest"],
+        "revision": authority["prd_revision"],
+    }
+
+    assert default_validate_payload("create-task", payload) == ""
+
+
+def test_web_preflight_keeps_plain_workflow_contract_strict() -> None:
+    error = default_validate_payload("create-task", {
+        "title": "Incomplete workflow Task",
+        "execution_mode": "workflow",
+        "contract": {"behavior": "Implement the requested behavior."},
+    })
+
+    assert error == (
+        "contract.verification_tiers is required for workflow execution"
+    )
+
+
 def test_non_ready_channel_prd_cannot_create_task(tmp_path: Path) -> None:
     state_dir, writer, service, authority = _ready_prd_fixture(
         tmp_path,
@@ -248,6 +316,7 @@ def test_ready_channel_prd_compiles_strict_workflow_parent_contract(
     )
     payload = _task_payload(authority)
     payload.pop("execution_mode")
+    payload["contract"]["verification"] = "echo untrusted-override"
 
     result = _execute(service, writer, "create-task", payload)
 
@@ -259,6 +328,15 @@ def test_ready_channel_prd_compiles_strict_workflow_parent_contract(
     assert task.contract.validation["commands"][0]["command"] == (
         "python -m pytest -q"
     )
+    assert task.contract.validation["commands"][0]["acceptance_ids"] == [
+        "AC-01"
+    ]
+    assert task.contract.validation["commands"][0]["producer_paths"] == [
+        "tests/test_strict_json.py"
+    ]
+    criterion = task.contract.acceptance_criteria[0]
+    assert criterion["verification_command_ids"] == ["VC-01"]
+    assert criterion["producer_paths"] == ["tests/test_strict_json.py"]
     assert task.contract.verification_tiers == ["runtime"]
     assert task.contract.product_contract_ref == authority["source_ref"]
     assert task.contract.spec_ref.endswith("spec-r1.md")
@@ -274,6 +352,44 @@ def test_ready_channel_prd_compiles_strict_workflow_parent_contract(
         config=service.config,
         project_root=tmp_path,
     ) == []
+    snapshot = build_task_contract_snapshot(
+        task,
+        workflow_run_id="workflow-channel-prd",
+        task_map_generation_id="task-map-channel-prd",
+        base_commit="abc123",
+        task_ref="tasks/TASK-CHANNEL-PRD.json",
+    )
+    assert snapshot["acceptance_criteria"][0]["verification_command_ids"] == [
+        "VC-01"
+    ]
+    assert snapshot["verification_commands"][0]["producer_paths"] == [
+        "tests/test_strict_json.py"
+    ]
+    assert snapshot["required_source_outputs"] == ["tests/test_strict_json.py"]
+
+
+def test_exact_owner_readiness_risk_acceptance_authorizes_task(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service, authority = _ready_prd_fixture(
+        tmp_path,
+        implementation_start=False,
+        readiness_verdict="needs_multi_lens",
+        readiness_gaps=["Canonical multi-lens review was pending."],
+        risk_accepted=True,
+    )
+
+    result = _execute(service, writer, "create-task", _task_payload(authority))
+
+    assert result["ok"] is True, result
+    task = TaskStore(state_dir / "kanban.json").get("TASK-CHANNEL-PRD")
+    assert task is not None
+    evidence = task.contract.evidence_contract
+    assert evidence["readiness_verdict"] == "needs_multi_lens"
+    assert evidence["declared_implementation_start"] is False
+    assert evidence["implementation_start"] is True
+    assert evidence["readiness_risk_accepted"] is True
+    assert evidence["readiness_risk_confirmed_by"] == "web"
 
 
 def test_channel_synthesis_prompt_requires_readiness_and_verification() -> None:
@@ -286,3 +402,8 @@ def test_channel_synthesis_prompt_requires_readiness_and_verification() -> None:
     assert "verification_commands" in prompt
     assert "readiness" in prompt
     assert "implementation_start=true only" in prompt
+    assert "Docker Playwright" in prompt
+    assert "Missing future screenshots or traces" in prompt
+    assert "summary must describe only durable product behavior" in prompt
+    assert "acceptance_ids matching those criterion ids" in prompt
+    assert "instead of relying on downstream defaults" in prompt

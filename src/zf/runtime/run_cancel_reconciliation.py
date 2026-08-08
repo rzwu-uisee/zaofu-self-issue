@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
@@ -29,7 +29,7 @@ def reconcile_cancelled_run_resources(
     runtime: Any,
     *,
     trigger_event: ZfEvent | None = None,
-) -> list[OrchestratorDecision]:
+) -> list[WorkflowRuntimeDecision]:
     """Close fanouts, operations, tasks, and worker bindings for run cancel."""
 
     if trigger_event is not None and trigger_event.type != "run.cancelled":
@@ -54,7 +54,7 @@ def reconcile_cancelled_run_resources(
         else [event for event in events if event.type == "run.cancelled"]
     )
     aliases = run_aliases(events)
-    decisions: list[OrchestratorDecision] = []
+    decisions: list[WorkflowRuntimeDecision] = []
     for cancellation in cancellations:
         run_id = _cancelled_run_id(cancellation, aliases)
         if not run_id:
@@ -67,7 +67,7 @@ def reconcile_cancelled_run_resources(
             events=events,
         )
         if changed:
-            decisions.append(OrchestratorDecision(
+            decisions.append(WorkflowRuntimeDecision(
                 action="cancel",
                 task_id=str(cancellation.task_id or ""),
                 reason=f"run.cancelled closed runtime resources for {run_id}",

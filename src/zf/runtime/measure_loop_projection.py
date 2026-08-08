@@ -94,6 +94,20 @@ def build_measure_loop_projection(
         "feature_id": feature_id,
     }
     metrics, stages, graph = _lens_payload(lens, ctx)
+    task_pipeline = _task_pipeline_summary(
+        state_dir,
+        config=config,
+        project_root=project_root,
+        scoped_task_ids={task.id for task in scoped_tasks},
+    )
+    source_projection_refs = [
+        "TaskStore",
+        "EventLog",
+        "dispatch-diagnostics.v1",
+        "loop.v1",
+    ]
+    if task_pipeline:
+        source_projection_refs.append("task-pipeline-projection.v1")
     result = {
         "schema_version": "measure-loop.v1",
         "generated_at": generated_at,
@@ -107,14 +121,62 @@ def build_measure_loop_projection(
         "graph": graph,
         "feed": _feed(ctx["events"], lens),
         "diagnostics": _diagnostics(ctx),
-        "source_projection_refs": [
-            "TaskStore",
-            "EventLog",
-            "dispatch-diagnostics.v1",
-            "loop.v1",
-        ],
+        "task_pipeline": task_pipeline,
+        "source_projection_refs": source_projection_refs,
     }
     return redact_obj(result)
+
+
+def _task_pipeline_summary(
+    state_dir: Path,
+    *,
+    config: Any | None,
+    project_root: Path | None,
+    scoped_task_ids: set[str],
+) -> dict[str, Any]:
+    from zf.runtime.task_pipeline_reconciler import task_pipeline_policies
+
+    if config is None or not task_pipeline_policies(config):
+        return {}
+    try:
+        from zf.runtime.task_pipeline_projection import (
+            read_task_pipeline_projection,
+        )
+
+        projection = read_task_pipeline_projection(
+            state_dir,
+            project_root=project_root or state_dir.parent,
+            config=config,
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "task-pipeline-loop-overlay.v1",
+            "status": "unavailable",
+            "reason": str(exc),
+        }
+    tasks = [
+        row for row in projection.get("tasks", [])
+        if not scoped_task_ids
+        or str(row.get("task_id") or "") in scoped_task_ids
+    ]
+    task_ids = {str(row.get("task_id") or "") for row in tasks}
+    operations = [
+        row for row in projection.get("operations", [])
+        if str(row.get("task_id") or "") in task_ids
+    ]
+    return {
+        "schema_version": "task-pipeline-loop-overlay.v1",
+        "projection_digest": str(projection.get("projection_digest") or ""),
+        "mode": str(projection.get("mode") or ""),
+        "summary": dict(projection.get("summary") or {}),
+        "closure": dict(projection.get("closure") or {}),
+        "task_ids": sorted(task_ids),
+        "operation_ids": sorted(
+            str(row.get("operation_id") or "") for row in operations
+        ),
+        "tasks": tasks,
+        "operations": operations,
+    }
 
 
 def _read_events(state_dir: Path, *, config: Any | None) -> list[tuple[int, ZfEvent]]:

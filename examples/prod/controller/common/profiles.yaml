@@ -24,6 +24,9 @@ spec:
         permission_mode: bypass
         stuck_threshold_seconds: 900
         spawn_ready_timeout_seconds: 240
+        execution:
+          default_profile: bounded-direct-v1
+          profile_allowlist: [bounded-direct-v1]
         lifecycle:
           mode: on_demand
       roleSkillBundles:
@@ -76,6 +79,18 @@ spec:
       mode: blocking
     report_evidence_gate: fail_closed
   workflow:
+    execution_profiles:
+      bounded-direct-v1:
+        strategy: direct
+        limits:
+          timeout_seconds: 900
+          max_usage_samples: 60
+          token_budget: 1500000
+          cost_budget_usd: 8
+    run_limits:
+      timeout_seconds: 3000
+      token_budget: 10000000
+      cost_budget_usd: 40
     candidate_quality_source: task_contract_required
     impl_self_check_required: true
     strict_triggers:
@@ -219,6 +234,9 @@ spec:
         permission_mode: bypass
         stuck_threshold_seconds: 900
         spawn_ready_timeout_seconds: 240
+        execution:
+          default_profile: bounded-direct-v1
+          profile_allowlist: [bounded-direct-v1]
         lifecycle:
           mode: on_demand
       roleSkillBundles:
@@ -259,6 +277,18 @@ spec:
       mode: blocking
     report_evidence_gate: fail_closed
   workflow:
+    execution_profiles:
+      bounded-direct-v1:
+        strategy: direct
+        limits:
+          timeout_seconds: 900
+          max_usage_samples: 60
+          token_budget: 1500000
+          cost_budget_usd: 8
+    run_limits:
+      timeout_seconds: 3000
+      token_budget: 10000000
+      cost_budget_usd: 40
     plan_approval: false
     candidate_quality_source: task_contract_required
     impl_self_check_required: true

@@ -92,6 +92,34 @@ def test_prod_controller_prd_accepts_lane_terminal_child_alias() -> None:
     )
 
 
+def test_prod_controller_general_has_config_owned_failure_consumers() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    path = repo_root / "examples/prod/controller/general-workflow-v3.yaml"
+
+    report = build_event_contract_report(load_config(path))
+
+    assert report["ok"], report["errors"]
+
+
+def test_generic_stage_failures_use_config_local_replan_consumer() -> None:
+    # The production General controller is the stable Generic Workflow fixture;
+    # loading it proves compiled stage metadata, not an arbitrary event suffix.
+    repo_root = Path(__file__).resolve().parents[1]
+    config = load_config(
+        repo_root / "examples/prod/controller/general-workflow-v3.yaml"
+    )
+
+    report = build_event_contract_report(config)
+
+    assert report["ok"] is True
+    assert not {
+        "scope.failed",
+        "collect-a.failed",
+        "collect-b.failed",
+        "synthesize.failed",
+    } & {item["event_type"] for item in report["errors"]}
+
+
 def test_event_contract_report_flags_custom_actionable_stage_failure(
     tmp_path: Path,
 ) -> None:

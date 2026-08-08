@@ -135,11 +135,38 @@ def candidate_failure_envelope(
         "diagnostic_class": diagnostic_class,
         "failing_command": command,
         "exit_code": exit_code,
+        "failed_task_ids": candidate_failed_task_ids(candidate_payload),
         "setup_script_digest": str(environment.get("setup_script_digest") or ""),
         "failure_fingerprint": "candidate-failure-" + stable_payload_digest(
             fingerprint_body,
         )[:24],
     }
+
+
+def candidate_failed_task_ids(
+    candidate_payload: Mapping[str, Any],
+) -> list[str]:
+    """Resolve task owners from explicit fields or task-contract gate names."""
+
+    quality = _mapping(candidate_payload.get("quality"))
+    task_ids: set[str] = set()
+    for value in (
+        candidate_payload.get("failed_task_ids"),
+        quality.get("failed_task_ids"),
+    ):
+        if not isinstance(value, list):
+            continue
+        task_ids.update(
+            str(item).strip()
+            for item in value
+            if str(item or "").strip()
+        )
+    gates = quality.get("gates_failed")
+    for gate in gates if isinstance(gates, list) else []:
+        parts = str(gate or "").split(":", 2)
+        if len(parts) == 3 and parts[0] == "task_contract" and parts[1]:
+            task_ids.add(parts[1])
+    return sorted(task_ids)
 
 
 def prepare_candidate_integration_attempt(
@@ -475,6 +502,7 @@ def _quality_identity_payload(quality: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "candidate_failed_task_ids",
     "candidate_failure_envelope",
     "candidate_aggregate_event_payload",
     "candidate_integration_identity",

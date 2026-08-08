@@ -9,18 +9,25 @@ a headless agent. Idempotent + events-derived (a dispatched present → not pend
 """
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.runtime.repair_dispatch import RepairRequest, write_repair_contract
 from zf.runtime.self_repair_runner import (
     CLOSEOUT_REQUIRED,
     DISPATCH_BLOCKED,
+    REPAIR_TERMINATED,
     dispatch_pending_self_repairs,
     emit_self_repair_closeouts,
 )
+from zf.runtime.sidecar_refs import sidecar_path
 
 
 def _dispatch_requested(fp: str = "stall:X", attempt: int = 0) -> ZfEvent:
@@ -69,6 +76,12 @@ def test_pending_dispatch_emits_dispatched_and_spawns(tmp_path):
     assert dispatched, "must emit autoresearch.repair.dispatched (closes the dead-end)"
     assert dispatched[0].payload["fingerprint"] == "stall:X"
     assert dispatched[0].payload["skill"] == "zf-self-repair"
+    assert dispatched[0].payload["repair_contract_ref"]["ref"].startswith(
+        "artifacts/self-repair/contracts/"
+    )
+    assert dispatched[0].payload["repair_contract_digest"] == (
+        dispatched[0].payload["repair_contract_ref"]["sha256"]
+    )
     mpopen.assert_called_once()  # headless self-repair agent spawned
 
 
@@ -86,7 +99,15 @@ def test_claude_code_backend_uses_claude_cli_spawn_command(tmp_path):
             tmp_root=str(tmp_path),
         )
     assert n == 1
-    command = mpopen.call_args.args[0]
+    spawned = next(
+        event for event in log.read_all()
+        if event.type == "autoresearch.repair.spawned"
+    )
+    launch = json.loads(sidecar_path(
+        tmp_path,
+        spawned.payload["launch_ref"]["ref"],
+    ).read_text(encoding="utf-8"))
+    command = launch["argv"]
     assert command[:3] == ["claude", "--dangerously-skip-permissions", "-p"]
 
 
@@ -104,7 +125,15 @@ def test_codex_backend_uses_codex_exec_spawn_command(tmp_path):
             tmp_root=str(tmp_path),
         )
     assert n == 1
-    command = mpopen.call_args.args[0]
+    spawned = next(
+        event for event in log.read_all()
+        if event.type == "autoresearch.repair.spawned"
+    )
+    launch = json.loads(sidecar_path(
+        tmp_path,
+        spawned.payload["launch_ref"]["ref"],
+    ).read_text(encoding="utf-8"))
+    command = launch["argv"]
     assert command[:4] == [
         "codex",
         "exec",
@@ -212,6 +241,27 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
     _git(worktree, "add", "fix.txt")
     _git(worktree, "commit", "-q", "-m", "fix: repair stall")
     log, writer = _writer(tmp_path)
+    repair_contract, repair_contract_ref = write_repair_contract(
+        tmp_path,
+        RepairRequest(
+            fingerprint="stall:X",
+            attempt=0,
+            candidate_id="C-1",
+            candidate_path="/x/cand.md",
+            repair_task_payload={
+                "contract": {
+                    "scope": ["src/zf/**"],
+                    "verification": "pytest x",
+                },
+                "continuation": {
+                    "checkpoint_id": "checkpoint-1",
+                    "safe_resume_action": "needs_stage_dispatch",
+                },
+            },
+        ),
+        base_commit=base_commit,
+        created_by="test",
+    )
     dispatched = ZfEvent(
         type="autoresearch.repair.dispatched",
         payload={
@@ -221,10 +271,9 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
             "branch": branch,
             "worktree": str(worktree),
             "base_commit": base_commit,
-            "continuation": {
-                "checkpoint_id": "checkpoint-1",
-                "safe_resume_action": "needs_stage_dispatch",
-            },
+            "continuation": repair_contract["continuation"],
+            "repair_contract_ref": repair_contract_ref,
+            "repair_contract_digest": repair_contract_ref["sha256"],
         },
     )
 
@@ -249,6 +298,8 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
     assert closeout.payload["risk_classification"]["human_approval_required"] is True
     assert closeout.payload["changed_files"] == ["fix.txt"]
     assert closeout.payload["verification_plan"][0]["command"] == "git diff --check"
+    assert closeout.payload["verification_plan"][1]["command"] == "pytest x"
+    assert closeout.payload["repair_contract_digest"] == repair_contract_ref["sha256"]
     assert closeout.payload["continuation"]["resume_original_workflow"] is True
     assert closeout.payload["continuation"]["checkpoint_id"] == "checkpoint-1"
     assert (
@@ -267,3 +318,167 @@ def test_closeout_required_emitted_when_repair_worktree_has_commit(tmp_path):
         root=str(root),
     )
     assert second == 0
+
+
+def test_closeout_missing_immutable_contract_is_terminal_blocked(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "init")
+    log, writer = _writer(tmp_path)
+    dispatched = ZfEvent(
+        type="autoresearch.repair.dispatched",
+        payload={
+            "fingerprint": "stall:missing-contract",
+            "attempt": 0,
+            "candidate_id": "C-MISSING",
+            "worktree": str(root),
+            "base_commit": _git(root, "rev-parse", "HEAD"),
+        },
+    )
+
+    assert emit_self_repair_closeouts([dispatched], writer, root=str(root)) == 0
+
+    terminal = next(
+        event for event in log.read_all() if event.type == REPAIR_TERMINATED
+    )
+    assert terminal.payload["status"] == "blocked"
+    assert terminal.payload["reason"] == "repair_contract_missing"
+
+
+def test_spawned_repair_success_without_commit_is_terminal(tmp_path):
+    root, worktree, base_commit = _repair_worktree(tmp_path)
+    log, writer = _writer(tmp_path)
+    dispatched, spawned = _repair_process_events(
+        tmp_path,
+        worktree=worktree,
+        base_commit=base_commit,
+        status="completed",
+        returncode=0,
+    )
+
+    assert emit_self_repair_closeouts(
+        [dispatched, spawned], writer, root=str(root)
+    ) == 0
+
+    terminal = next(
+        event for event in log.read_all() if event.type == REPAIR_TERMINATED
+    )
+    assert terminal.payload["status"] == "no_commit"
+    assert terminal.payload["process_result"]["returncode"] == 0
+
+
+@pytest.mark.parametrize(
+    ("process_status", "returncode", "expected_status"),
+    [("failed", 3, "failed"), ("timeout", 124, "timeout")],
+)
+def test_spawned_repair_failure_has_terminal_fact(
+    tmp_path,
+    process_status,
+    returncode,
+    expected_status,
+):
+    root, worktree, base_commit = _repair_worktree(tmp_path)
+    log, writer = _writer(tmp_path)
+    dispatched, spawned = _repair_process_events(
+        tmp_path,
+        worktree=worktree,
+        base_commit=base_commit,
+        status=process_status,
+        returncode=returncode,
+    )
+
+    assert emit_self_repair_closeouts(
+        [dispatched, spawned], writer, root=str(root)
+    ) == 0
+
+    terminal = next(
+        event for event in log.read_all() if event.type == REPAIR_TERMINATED
+    )
+    assert terminal.payload["status"] == expected_status
+    assert terminal.payload["process_result"]["returncode"] == returncode
+
+
+def _repair_worktree(tmp_path: Path) -> tuple[Path, Path, str]:
+    root = tmp_path / "root"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test User")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "README.md")
+    _git(root, "commit", "-q", "-m", "init")
+    base_commit = _git(root, "rev-parse", "HEAD")
+    worktree = tmp_path / "worktree"
+    _git(root, "worktree", "add", "-B", "self-repair/test", str(worktree), "HEAD")
+    return root, worktree, base_commit
+
+
+def _repair_process_events(
+    state_dir: Path,
+    *,
+    worktree: Path,
+    base_commit: str,
+    status: str,
+    returncode: int,
+) -> tuple[ZfEvent, ZfEvent]:
+    contract, descriptor = write_repair_contract(
+        state_dir,
+        RepairRequest(
+            fingerprint="stall:process",
+            attempt=0,
+            candidate_id="C-PROCESS",
+            candidate_path="/x/candidate.md",
+            repair_task_payload={
+                "contract": {
+                    "scope": ["src/zf/**"],
+                    "verification_commands": ["git diff --check"],
+                },
+            },
+        ),
+        base_commit=base_commit,
+        created_by="test",
+    )
+    dispatched = ZfEvent(
+        type="autoresearch.repair.dispatched",
+        payload={
+            "fingerprint": contract["fingerprint"],
+            "attempt": contract["attempt"],
+            "candidate_id": contract["candidate_id"],
+            "worktree": str(worktree),
+            "base_commit": base_commit,
+            "repair_contract_ref": descriptor,
+            "repair_contract_digest": descriptor["sha256"],
+        },
+    )
+    operation_id = "self-repair-test-operation"
+    result_ref = f"operator/self-repair/processes/{operation_id}.json"
+    result_path = sidecar_path(state_dir, result_ref)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps({
+        "schema_version": "self-repair.process-result.v1",
+        "operation_id": operation_id,
+        "repair_contract_digest": descriptor["sha256"],
+        "status": status,
+        "returncode": returncode,
+        "reason": "provider_timeout" if status == "timeout" else "",
+    }) + "\n", encoding="utf-8")
+    spawned = ZfEvent(
+        type="autoresearch.repair.spawned",
+        payload={
+            "fingerprint": contract["fingerprint"],
+            "attempt": contract["attempt"],
+            "candidate_id": contract["candidate_id"],
+            "operation_id": operation_id,
+            "provider_operation_id": operation_id,
+            "result_ref": result_ref,
+            "repair_contract_digest": descriptor["sha256"],
+            "timeout_seconds": 60,
+            "supervisor_pid": 0,
+        },
+    )
+    return dispatched, spawned

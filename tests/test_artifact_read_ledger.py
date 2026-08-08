@@ -60,6 +60,67 @@ def test_stage_profiles_declare_only_their_canonical_required_inputs() -> None:
     assert all(row["source_id"] != "notes" for row in verify)
 
 
+@pytest.mark.parametrize(
+    "stage_id",
+    ["post-verify-discovery", "verify-bridge", "module-parity-scan"],
+)
+def test_dependency_reader_stages_require_every_manifest_source(
+    stage_id: str,
+) -> None:
+    manifest = build_attempt_source_manifest(
+        workflow_run_id="run-reader",
+        task_id="T-reader",
+        attempt_id="attempt-reader",
+        dispatch_id="dispatch-reader",
+        sources=[
+            {
+                "source_id": "plan-package",
+                "artifact_id": "plan.json",
+                "ref": "artifacts/plan.json",
+                "sha256": "a" * 64,
+            },
+            {
+                "source_id": "verification-result",
+                "artifact_id": "verify.json",
+                "ref": "artifacts/verify.json",
+                "sha256": "b" * 64,
+            },
+        ],
+        metadata={
+            "handoff_authority_contract": {"stage_id": stage_id},
+        },
+    )
+
+    required = canonical_required_reads(
+        manifest,
+        output_profile_id="workflow-read",
+    )
+
+    assert {(row["source_id"], row["json_path"]) for row in required} == {
+        ("plan-package", "$"),
+        ("verification-result", "$"),
+    }
+
+
+def test_dependency_reader_stage_without_sources_fails_closed() -> None:
+    manifest = build_attempt_source_manifest(
+        workflow_run_id="run-reader",
+        task_id="T-reader",
+        attempt_id="attempt-reader",
+        dispatch_id="dispatch-reader",
+        sources=[],
+        metadata={
+            "handoff_authority_contract": {"stage_id": "module-parity-scan"},
+        },
+    )
+
+    with pytest.raises(ArtifactReadError, match="requires at least one"):
+        canonical_required_reads(
+            manifest,
+            output_profile_id="workflow-read",
+        )
+
+
 def test_impl_and_verify_require_every_injected_plan_port() -> None:
     manifest = build_attempt_source_manifest(
         workflow_run_id="run-ports",
@@ -133,6 +194,24 @@ def test_attempt_source_briefing_renders_literal_runtime_cli(monkeypatch) -> Non
     assert f"`{command} artifact list --attempt <attempt-id>`" in briefing
     assert "Run one literal command per tool call" in briefing
     assert "loops, pipes, redirections" in briefing
+
+
+def test_attempt_source_briefing_shell_quotes_json_path(monkeypatch) -> None:
+    monkeypatch.setenv("ZF_CLI_CMD", "zf")
+
+    briefing = render_attempt_source_briefing({
+        "attempt_source_manifest_ref": "artifacts/attempts/a/source.json",
+        "attempt_id": "attempt-1",
+        "required_reads": [{
+            "source_id": "contract",
+            "artifact_id": "contract.json",
+            "json_path": "$",
+            "artifact_sha256": "a" * 64,
+        }],
+    })
+
+    assert "--json-path '$'`" in briefing
+    assert "--json-path $`" not in briefing
 
 
 def test_required_read_records_and_seals_attempt_ledger(tmp_path: Path) -> None:

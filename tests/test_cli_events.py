@@ -320,6 +320,85 @@ def test_emit_task_autofills_current_attempt_identity(
     assert event.payload["lease_id"].startswith("lease-")
 
 
+def test_emit_rejects_stale_actor_before_binding_new_task_attempt(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    _init(tmp_path, monkeypatch)
+    TaskAttemptStore(tmp_path / ".zf" / "task_attempts.json").ensure_for_dispatch(
+        run_id="RUN-1",
+        task_id="T1",
+        dispatch_id="disp-verify",
+        role="verify",
+        instance_id="verify-lane-0",
+        operation_id="op-verify",
+        briefing_ref=".zf/briefings/verify-T1.md",
+        created_at="2026-07-26T00:00:00+00:00",
+        lease_expires_at="2026-07-27T00:00:00+00:00",
+        max_attempts=3,
+    )
+
+    result = main([
+        "emit",
+        "dev.build.done",
+        "--task",
+        "T1",
+        "--actor",
+        "dev-lane-0",
+    ])
+
+    assert result == 2
+    assert "owned by verify, verify-lane-0" in capsys.readouterr().err
+    assert not any(
+        event.type == "dev.build.done"
+        for event in EventLog(tmp_path / ".zf" / "events.jsonl").read_all()
+    )
+
+
+def test_emit_rejects_duplicate_result_for_terminal_task_attempt(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    _init(tmp_path, monkeypatch)
+    store = TaskAttemptStore(tmp_path / ".zf" / "task_attempts.json")
+    attempt = store.ensure_for_dispatch(
+        run_id="RUN-1",
+        task_id="T1",
+        dispatch_id="disp-dev",
+        role="dev-lane-0",
+        instance_id="dev-lane-0",
+        operation_id="op-dev",
+        briefing_ref=".zf/briefings/dev-T1.md",
+        created_at="2026-07-26T00:00:00+00:00",
+        lease_expires_at="2026-07-27T00:00:00+00:00",
+        max_attempts=3,
+    ).attempt
+    store.update(
+        attempt["attempt_id"],
+        status="succeeded",
+        updated_at="2026-07-26T00:01:00+00:00",
+        terminal_event_id="evt-result",
+    )
+
+    result = main([
+        "emit",
+        "dev.build.done",
+        "--task",
+        "T1",
+        "--actor",
+        "dev-lane-0",
+    ])
+
+    assert result == 2
+    assert "already terminal (status=succeeded)" in capsys.readouterr().err
+    assert not any(
+        event.type == "dev.build.done"
+        for event in EventLog(tmp_path / ".zf" / "events.jsonl").read_all()
+    )
+
+
 def test_emit_dispatch_id_selects_one_of_multiple_current_attempt_lanes(
     tmp_path: Path,
     monkeypatch,

@@ -11,10 +11,17 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
-from zf.runtime.plan_synth_handoff import render_plan_synth_completion_command
-from zf.runtime.plan_synth_handoff import build_plan_synth_call_payload
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
+from zf.runtime.artifact_read_ledger import source_manifest_from_payload
+from zf.runtime.plan_synth_handoff import (
+    build_plan_candidate_input_refs,
+    build_plan_handoff_input_refs,
+    build_plan_synth_call_payload,
+    render_plan_synth_completion_command,
+)
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.stage_execution_card import (
+    compact_fanout_stage_context,
     compact_stage_context,
     prepare_result_file_command,
 )
@@ -54,9 +61,8 @@ def test_plan_synth_completion_command_round_trips_shell_sensitive_json(
     )
     assert parsed.returncode == 0, parsed.stderr
     argv = shlex.split(command)
-    assert argv[-2] == "--result-file"
+    assert argv[-1] == "--scratch"
     scratch = tmp_path / ".zf" / payload["result_scratch_ref"]
-    assert Path(argv[-1]) == scratch
     assert json.loads(scratch.read_text(encoding="utf-8")) == payload
 
 
@@ -115,6 +121,28 @@ def test_compact_stage_context_excludes_copied_semantic_bodies() -> None:
     }
 
 
+def test_compact_fanout_context_omits_elsewhere_pinned_identity() -> None:
+    compact = compact_fanout_stage_context({
+        "workflow_run_id": "run-1",
+        "task_id": "T1",
+        "fanout_id": "fanout-1",
+        "stage_id": "verify",
+        "child_id": "verify-1",
+        "run_id": "child-run-1",
+        "attempt_id": "attempt-1",
+        "operation_id": "operation-1",
+        "task_map_generation": "generation-1",
+        "goal_claim_set_ref": "artifacts/claims.json",
+        "target_commit": "abc123",
+    })
+
+    assert compact == {
+        "task_map_generation": "generation-1",
+        "goal_claim_set_ref": "artifacts/claims.json",
+        "target_commit": "abc123",
+    }
+
+
 def test_plan_synth_handoff_pins_requirement_and_rework_context(
     tmp_path: Path,
 ) -> None:
@@ -128,6 +156,14 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
             "objective": "Preserve behavior.",
             "acceptance": ["Canonical acceptance text."],
         }),
+        encoding="utf-8",
+    )
+    diagnostics = state_dir / "artifacts" / "plan" / "diagnostics.json"
+    diagnostics.parent.mkdir(parents=True)
+    diagnostics.write_text(
+        json.dumps([
+            "allowed_paths overlap: app/server.mjs is owned by two tasks",
+        ]),
         encoding="utf-8",
     )
 
@@ -147,6 +183,9 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
                 "rework_feedback": [
                     "Keep the canonical acceptance text unchanged.",
                 ],
+                "diagnostics_ref": str(diagnostics),
+                "plan_compile_gate": "failed",
+                "artifact_gate": "failed",
                 "rework_categories": ["goal_claim_identity_drift"],
                 "replan_classification": "design_issue",
             },
@@ -163,12 +202,21 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
         source["source_id"]: source
         for source in payload["input_refs"]
     }
-    assert {"requirement", "plan-rework-context"} <= sources.keys()
+    assert {
+        "requirement",
+        "plan-diagnostics",
+        "plan-rework-context",
+    } <= sources.keys()
     requirement_body = hydrate_sidecar_ref(
         state_dir,
         sources["requirement"],
     ).payload
     assert requirement_body["acceptance"] == ["Canonical acceptance text."]
+    diagnostics_body = hydrate_sidecar_ref(
+        state_dir,
+        sources["plan-diagnostics"],
+    ).payload
+    assert "app/server.mjs" in diagnostics_body[0]
     rework_body = hydrate_sidecar_ref(
         state_dir,
         sources["plan-rework-context"],
@@ -181,9 +229,210 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
         "rework_feedback": [
             "Keep the canonical acceptance text unchanged.",
         ],
+        "diagnostics_ref": str(diagnostics),
+        "plan_compile_gate": "failed",
+        "artifact_gate": "failed",
         "rework_categories": ["goal_claim_identity_drift"],
         "replan_classification": "design_issue",
     }
+
+
+def test_plan_synth_handoff_pins_file_target_as_exact_requirement(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    state_dir.mkdir(parents=True)
+    authority = state_dir / "channels" / "confirmed" / "prd" / "r7.json"
+    authority.parent.mkdir(parents=True)
+    authority.write_text(
+        json.dumps({
+            "revision": 7,
+            "decision_map": {
+                "task_ids": ["T-01", "T-02", "T-03", "T-04"],
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    payload = build_plan_synth_call_payload(
+        state_dir=state_dir,
+        project_root=project_root,
+        manifest={
+            "fanout_id": "fanout-prd-plan",
+            "trace_id": "run-prd-plan",
+            "stage_id": "prd-plan",
+            "trigger_event_id": "evt-prd-plan",
+            "target_ref": str(authority),
+        },
+        reports=[{
+            "child_id": "planner",
+            "report": {"status": "passed"},
+        }],
+        run_id="run-fanout-prd-plan-synth",
+        role_instance="prd-plan-critic",
+    )
+
+    exact = [
+        source for source in payload["input_refs"]
+        if source["source_id"] == "requirement"
+        and source["artifact_id"] == "r7.json"
+    ]
+    assert len(exact) == 1
+    assert hydrate_sidecar_ref(state_dir, exact[0]).payload["decision_map"] == {
+        "task_ids": ["T-01", "T-02", "T-03", "T-04"],
+    }
+    source_manifest, _ = source_manifest_from_payload(
+        state_dir=state_dir,
+        project_root=project_root,
+        payload=payload,
+        workflow_run_id=payload["workflow_run_id"],
+        task_id="prd-plan",
+        attempt_id="attempt-prd-plan-synth",
+        dispatch_id="dispatch-prd-plan-synth",
+    )
+    authority_sections = [
+        section for section in source_manifest["context_sections"]
+        if section["source_id"] == "requirement"
+        and section["artifact_id"] == "r7.json"
+    ]
+    assert len(authority_sections) == 1
+    assert authority_sections[0]["required"] is True
+
+
+def test_plan_rework_pins_complete_previous_candidate_refs(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    state_dir.mkdir(parents=True)
+    plan = project_root / "docs" / "plans" / "issue.md"
+    task_map = project_root / "artifacts" / "plan" / "task_map.json"
+    source_index = project_root / "artifacts" / "plan" / "source-index.json"
+    plan.parent.mkdir(parents=True)
+    task_map.parent.mkdir(parents=True)
+    plan.write_text("# Plan\n", encoding="utf-8")
+    task_map.write_text('{"schema_version":"task-map.v1"}\n', encoding="utf-8")
+    source_index.write_text(
+        '{"schema_version":"source-index.v1"}\n',
+        encoding="utf-8",
+    )
+    admitted = write_immutable_json_sidecar(
+        state_dir,
+        {"schema_version": "call-result-envelope.v1"},
+        root="call-results/admitted",
+        kind="call_result_envelope",
+        schema_version="call-result-envelope.v1",
+        created_by="test",
+    )
+    control = write_immutable_json_sidecar(
+        state_dir,
+        {"schema_version": "workflow-read-result.v1"},
+        root="call-results/control",
+        kind="workflow_read_result",
+        schema_version="workflow-read-result.v1",
+        created_by="test",
+    )
+    candidate_refs, _ = build_plan_candidate_input_refs(
+        state_dir=state_dir,
+        project_root=project_root,
+        reports=[{
+            "child_id": "planner",
+            "admitted_call_result_ref": admitted,
+            "control_result_ref": control,
+            "report": {
+                "plan_artifact_ref": "docs/plans/issue.md",
+                "task_map_ref": "artifacts/plan/task_map.json",
+                "source_index_ref": "artifacts/plan/source-index.json",
+                "artifact_refs": [
+                    "docs/plans/issue.md",
+                    "artifacts/plan/task_map.json",
+                    "artifacts/plan/source-index.json",
+                ],
+            },
+        }],
+    )
+
+    refs = build_plan_handoff_input_refs(
+        state_dir=state_dir,
+        project_root=project_root,
+        payload={
+            "rework_of": "evt-plan-failed",
+            "rework_attempt": 1,
+            "previous_plan_candidate_refs": candidate_refs,
+        },
+        source_event_id="evt-replan",
+    )
+
+    previous = [
+        item for item in refs
+        if item["source_id"].startswith("previous-plan-candidate-")
+    ]
+    assert len(previous) == len(candidate_refs)
+    assert {
+        item["kind"] for item in previous
+    } >= {
+        "fanout_child_result",
+        "call_result_envelope",
+        "workflow_read_result",
+        "fanout_child_artifact",
+    }
+    context_ref = next(
+        item for item in refs
+        if item["source_id"] == "plan-rework-context"
+    )
+    context = hydrate_sidecar_ref(state_dir, context_ref).payload
+    assert context["previous_plan_candidate_refs"] == candidate_refs
+
+
+def test_plan_rework_rejects_previous_candidate_digest_drift(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    state_dir.mkdir(parents=True)
+    artifact = project_root / "candidate.json"
+    artifact.write_text('{"version":1}\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="candidate digest mismatch"):
+        build_plan_handoff_input_refs(
+            state_dir=state_dir,
+            project_root=project_root,
+            payload={
+                "rework_of": "evt-plan-failed",
+                "previous_plan_candidate_refs": [{
+                    "ref": "candidate.json",
+                    "sha256": "0" * 64,
+                    "kind": "fanout_child_result",
+                }],
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "candidate.json",
+        {"sha256": "a" * 64},
+        {"ref": "candidate.json"},
+    ],
+)
+def test_plan_rework_rejects_incomplete_previous_candidate_descriptor(
+    tmp_path: Path,
+    descriptor: object,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+
+    with pytest.raises(ValueError, match="previous Plan candidate descriptor"):
+        build_plan_handoff_input_refs(
+            state_dir=state_dir,
+            project_root=tmp_path,
+            payload={
+                "rework_of": "evt-plan-failed",
+                "previous_plan_candidate_refs": [descriptor],
+            },
+        )
 
 
 def test_plan_rework_context_pins_current_task_and_delivery_checkpoint(

@@ -70,6 +70,7 @@ def workflow_route_missing_parameters(
 
     if str(route.get("start_adapter") or "") not in {
         "delivery_request_submit",
+        "light_delivery_request_submit",
         "registered_general",
     }:
         return []

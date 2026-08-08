@@ -56,10 +56,9 @@ def parent_flow_identity(
             identity.get("feature_id"),
             parent_pdd_id,
         )
-        identity["goal_id"] = _first_nonempty(
-            identity.get("goal_id"),
-            parent_pdd_id,
-        )
+        # Product-flow Goal identity is the parent PDD/feature identity.
+        # A correlation/run alias or child report must not replace it.
+        identity["goal_id"] = parent_pdd_id
 
     conflicts: list[dict[str, object]] = []
     for key, parent_value in identity.items():

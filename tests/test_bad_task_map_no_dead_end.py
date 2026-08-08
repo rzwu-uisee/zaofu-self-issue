@@ -82,7 +82,12 @@ def test_plan_admission_failure_emits_canonical_failure_before_raw_cancel(
     probe = _Probe(tmp_path, [_plan_stage("task_map.ready", "prd.plan.failed")])
     trigger = ZfEvent(
         type="task_map.ready",
-        payload={"task_map_ref": "docs/p.md"},
+        payload={
+            "task_map_ref": "docs/p.md",
+            "plan_artifact_package_id": "planpkg-current",
+            "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+            "plan_artifact_package_digest": "package-digest",
+        },
     )
 
     emit_plan_admission_cancel(
@@ -104,6 +109,13 @@ def test_plan_admission_failure_emits_canonical_failure_before_raw_cancel(
         failure.payload["plan_admission_incident_id"]
         == cancelled.payload["plan_admission_incident_id"]
     )
+    for key in (
+        "plan_artifact_package_id",
+        "plan_artifact_package_ref",
+        "plan_artifact_package_digest",
+    ):
+        assert failure.payload[key] == trigger.payload[key]
+        assert cancelled.payload[key] == trigger.payload[key]
     assert cancelled.payload["canonical_failure_event_id"] == failure.id
 
 

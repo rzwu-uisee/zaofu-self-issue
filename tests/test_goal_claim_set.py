@@ -8,8 +8,49 @@ from zf.runtime.goal_claim_set import (
     build_goal_claim_set,
     canonical_task_map_generation,
     hydrate_pinned_goal_claim_set,
+    mandatory_claim_continuity,
     pin_goal_claim_set_from_task_map,
 )
+
+
+def test_mandatory_claim_continuity_rejects_loss_and_accepts_additions() -> None:
+    previous = {"claims": [
+        {"goal_claim_id": "CLAIM-A", "text": "Keep A", "mandatory": True},
+    ]}
+
+    rejected = mandatory_claim_continuity(previous, {"claims": []})
+    preserved = mandatory_claim_continuity(previous, {"claims": [
+        {"goal_claim_id": "CLAIM-A", "text": "Keep A", "mandatory": True},
+        {"goal_claim_id": "CLAIM-B", "text": "Add B", "mandatory": True},
+    ]})
+
+    assert rejected["status"] == "rejected"
+    assert rejected["findings"][0]["code"] == "mandatory_claim_removed"
+    assert preserved["status"] == "passed"
+
+
+def test_mandatory_claim_continuity_requires_active_explicit_waiver() -> None:
+    previous = {"claims": [
+        {"goal_claim_id": "CLAIM-A", "text": "Keep A", "mandatory": True},
+    ]}
+    current = {"claims": []}
+
+    stale = mandatory_claim_continuity(
+        previous,
+        current,
+        claim_waivers={"CLAIM-A": "waiver:claim-a"},
+        active_waiver_refs=[],
+    )
+    active = mandatory_claim_continuity(
+        previous,
+        current,
+        claim_waivers={"CLAIM-A": "waiver:claim-a"},
+        active_waiver_refs=["waiver:claim-a"],
+    )
+
+    assert stale["status"] == "rejected"
+    assert active["status"] == "passed"
+    assert active["waived"][0]["goal_claim_id"] == "CLAIM-A"
 
 
 def test_canonical_task_map_generation_preserves_explicit_and_normalizes_legacy() -> None:

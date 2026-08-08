@@ -15,6 +15,23 @@ from zf.runtime.refactor_artifacts import (
 from zf.runtime.task_map_history import build_task_map_history
 
 
+def test_refactor_plan_skill_does_not_require_unemitted_kernel_ports() -> None:
+    skill = (
+        Path(__file__).resolve().parents[1]
+        / "skills"
+        / "zf-refactor-plan-synth"
+        / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Kernel/profile-required ports" in skill
+    assert "Do not redeclare a" in skill
+    assert "Kernel-derived port unless this Plan result" in skill
+    assert (
+        "including the requirement/contract ref, Goal Claim Set, Task Map, "
+        "planning result"
+    ) not in skill
+
+
 def _projection(plan_ref: str, task_map_ref: str) -> dict:
     return {
         "plan_artifact_ref": plan_ref,

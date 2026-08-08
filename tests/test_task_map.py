@@ -297,6 +297,32 @@ def test_task_map_validation_rejects_unknown_dependency_and_file_overlap() -> No
     assert any("exclusive_files overlap" in error for error in result.errors)
 
 
+def test_task_map_validation_rejects_file_overlap_even_when_tasks_are_serialized() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "TASK-A",
+                "wave": 1,
+                "verification": "pytest tests/a.py",
+                "exclusive_files": ["src/shared.py"],
+            },
+            {
+                "task_id": "TASK-B",
+                "blocked_by": ["TASK-A"],
+                "wave": 2,
+                "verification": "pytest tests/b.py",
+                "exclusive_files": ["src/shared.py"],
+            },
+        ],
+    })
+
+    assert result.passed is False
+    assert result.errors == [
+        "exclusive_files overlap 'src/shared.py': TASK-A and TASK-B",
+    ]
+
+
 def test_task_map_validation_rejects_prose_tail_in_verification_command() -> None:
     result = validate_task_map_payload({
         "schema_version": "task-map.v1",
@@ -410,6 +436,52 @@ def test_task_map_validation_rejects_unquoted_path_glob() -> None:
 
     assert result.passed is False
     assert any("must quote shell glob path arguments" in error for error in result.errors)
+
+
+def test_task_map_validation_accepts_unquoted_case_path_pattern() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "BROWSER-SNAPSHOT-001",
+                "title": "browser snapshot",
+                "wave": 1,
+                "verification": (
+                    'snapshot="/tmp/warehouse-route-e2e.abc123"; '
+                    'case "$snapshot" in '
+                    '/tmp/warehouse-route-e2e.*) ;; *) exit 1 ;; esac'
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is True
+
+
+def test_task_map_validation_rejects_unquoted_path_glob_in_case_body() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "BROWSER-SNAPSHOT-001",
+                "title": "browser snapshot",
+                "wave": 1,
+                "verification": (
+                    'snapshot="/tmp/warehouse-route-e2e.abc123"; '
+                    'case "$snapshot" in '
+                    '/tmp/warehouse-route-e2e.*) test -d ./packages/** ;; '
+                    '*) exit 1 ;; esac'
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is False
+    assert any(
+        "./packages/**" in error
+        for error in result.errors
+        if "must quote shell glob path arguments" in error
+    )
 
 
 def test_task_map_validation_rejects_verification_path_outside_allowed_paths() -> None:
@@ -561,6 +633,28 @@ def test_external_executable_does_not_hide_other_absolute_path_arguments() -> No
         and "/tmp/unowned-release-evidence.json" in error
         for error in result.errors
     )
+
+
+def test_pinned_oci_image_ref_is_not_treated_as_repository_path() -> None:
+    digest = "6cfb1e2f2ba7ace93882e692df6a4b68825bdbfb40d649b39878157acfd2d6d8"
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "BROWSER-E2E-RUNNER",
+                "title": "Run browser acceptance",
+                "wave": 1,
+                "allowed_paths": ["artifacts/e2e/**"],
+                "allowed_paths_reason": "Owns browser evidence only.",
+                "verification": (
+                    "docker run --rm --pull=never "
+                    f"mcp/playwright@sha256:{digest}"
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is True, result.errors
 
 
 def test_task_map_validation_accepts_package_root_relative_node_commands() -> None:
@@ -842,6 +936,23 @@ def test_task_map_validation_allows_single_owner_serial_plan_without_assembly() 
         "tasks": [
             _task("TASK-A", "dev-core", wave=1),
             _task("TASK-B", "dev-core", wave=2, blocked_by=["TASK-A"]),
+        ],
+    })
+
+    assert result.passed is True
+
+
+def test_task_map_validation_allows_distinct_owner_serial_plan_without_assembly() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            _task("TASK-SCAFFOLD", "dev-runtime", wave=1),
+            _task(
+                "TASK-HTTP",
+                "dev-web",
+                wave=2,
+                blocked_by=["TASK-SCAFFOLD"],
+            ),
         ],
     })
 

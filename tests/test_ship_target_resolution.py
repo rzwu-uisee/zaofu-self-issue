@@ -163,3 +163,31 @@ def test_explicit_existing_branch_unchanged_behavior(tmp_path):
     completed = [e for e in _events(writer) if e.type == "ship.completed"]
     assert completed[-1].payload["target_branch"] == "main"
     assert completed[-1].payload["target_resolved_from"] == "config"
+
+
+def test_accepts_fully_qualified_candidate_head_ref(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _init_repo(root, "main")
+    candidate = _candidate(root, "main")
+    service, writer = _service(root, tmp_path, ship_target_branch="main")
+    writer.event_log.append(ZfEvent(
+        type="candidate.ready",
+        actor="zf-cli",
+        payload={
+            "pdd_id": "PDD-X",
+            "candidate_ref": f"refs/heads/{candidate}",
+            "status": "frozen",
+        },
+    ))
+
+    result = service.ship(
+        target_ref=f"refs/heads/{candidate}",
+        pdd_id="PDD-X",
+        event_writer=writer,
+    )
+
+    assert result.status == "completed"
+    assert result.payload["target_ref"] == candidate
+    assert result.payload["pdd_id"] == "PDD-X"
+    assert _git(root, "show", "main:app.py")

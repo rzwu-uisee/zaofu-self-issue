@@ -8,6 +8,7 @@ or mutating the main worktree.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -161,6 +162,19 @@ def _trusted_invocation(command: str) -> dict[str, Any] | None:
         command = command[len(prefix):].strip()
     argv = shlex.split(command)
     if len(argv) >= 4 and argv[:3] == ["uv", "run", "pytest"]:
+        return {"argv": argv, "env": env}
+    if (
+        len(argv) == 5
+        and argv[0] in {"python", "python3"}
+        and argv[1] == "scripts/dev-verify.py"
+        and argv[2] in {"plan", "run"}
+        and argv[3] == "--base"
+        and re.fullmatch(r"[A-Za-z0-9._/-]+", argv[4])
+    ):
+        return {"argv": argv, "env": env}
+    if argv == ["bash", "scripts/dev-premerge-gate.sh"]:
+        return {"argv": argv, "env": env}
+    if argv == ["bash", "scripts/run-flow-smoke.sh"]:
         return {"argv": argv, "env": env}
     return None
 

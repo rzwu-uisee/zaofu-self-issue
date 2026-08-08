@@ -27,6 +27,7 @@ from zf.core.workspace.project_resolver import ProjectResolver, clear_project_re
 from zf.core.workspace.registry import WorkspaceRegistry, legacy_project_id
 from zf.runtime.automation_projection import project_automations
 from zf.web.server import create_app
+from zf.web.projections.workspace import _project_action_envelope
 
 
 def _make_project(
@@ -55,6 +56,37 @@ def _make_project(
         ZfEvent(type="session.started", actor="zf-cli"),
     )
     return state_dir
+
+
+def test_project_action_envelope_preserves_valid_canonical_project_id() -> None:
+    envelope = _project_action_envelope(
+        "workspace-project-123",
+        {
+            "project_id": "workspace-project-123",
+            "payload": {
+                "project_id": "canonical-project",
+                "request_id": "workflow-1",
+            },
+        },
+        canonical_project_id="canonical-project",
+    )
+
+    assert envelope["ok"] is True
+    assert envelope["payload"]["project_id"] == "canonical-project"
+
+
+def test_project_action_envelope_rejects_unrelated_payload_project_id() -> None:
+    envelope = _project_action_envelope(
+        "workspace-project-123",
+        {
+            "project_id": "workspace-project-123",
+            "payload": {"project_id": "another-project"},
+        },
+        canonical_project_id="canonical-project",
+    )
+
+    assert envelope["ok"] is False
+    assert envelope["status"] == "project_mismatch"
 
 
 def test_workspace_registry_resolver_reloads_state_dir_hint(

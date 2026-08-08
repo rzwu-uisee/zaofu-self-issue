@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.runtime import channel_adapter
 from zf.runtime.channel_adapter import dispatch_pending_replies
+from zf.runtime.channel_dispatch_claim import (
+    ChannelDispatchResult,
+    with_channel_reply_dispatch_claim,
+)
 
 CH = "ch-par"
 
@@ -109,6 +114,46 @@ def test_single_candidate_stays_inline(tmp_path: Path, monkeypatch) -> None:
     assert result.dispatched == ["req-0"]
     assert not threads[0].startswith("zf-channel-dispatch-"), \
         "single reply must not pay thread-pool overhead"
+
+
+def test_same_reply_request_has_one_cross_process_dispatch_claim(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _seed(tmp_path, members=1)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    @with_channel_reply_dispatch_claim
+    def slow_dispatch(**kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.2)
+        return ChannelDispatchResult(
+            dispatched=[str(kwargs.get("request_id"))],
+        )
+
+    kwargs = {
+        "state_dir": state_dir,
+        "writer": writer,
+        "channel_id": CH,
+        "request_id": "req-0",
+        "actor": "test",
+        "source": "test",
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _: slow_dispatch(**kwargs),
+            range(2),
+        ))
+
+    assert calls == 1
+    assert sum(bool(result.dispatched) for result in results) == 1
+    assert any(
+        item.get("reason") == "dispatch_claim_busy"
+        for result in results
+        for item in result.skipped
+    )
 
 
 def test_parallel_limit_caps_running_but_drains_every_target(

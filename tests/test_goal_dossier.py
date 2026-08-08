@@ -532,6 +532,13 @@ def test_terminal_dossier_uses_terminal_plan_and_ignores_superseded_plan_ids(
             },
         ),
         ZfEvent(
+            id="evt-stale-task-result",
+            type="dev.build.done",
+            task_id="TASK-SUPERSEDED",
+            correlation_id=run_id,
+            payload={"workflow_run_id": run_id},
+        ),
+        ZfEvent(
             id="evt-claim-set",
             type="goal.claim_set.pinned",
             correlation_id=run_id,
@@ -598,7 +605,13 @@ def test_terminal_dossier_uses_terminal_plan_and_ignores_superseded_plan_ids(
     assert history["task_map"]["ref"] == final_task_map["ref"]
     assert [
         task["id"] for task in history["historical_tasks"]
+    ] == ["TASK-FINAL", "TASK-SUPERSEDED"]
+    assert [
+        task["id"] for task in history["current_generation_tasks"]
     ] == ["TASK-FINAL"]
+    assert [
+        task["id"] for task in history["superseded_tasks"]
+    ] == ["TASK-SUPERSEDED"]
     matrix = history["claim_to_evidence"]
     assert matrix["status"] == "ready"
     assert matrix["diagnostics"] == []

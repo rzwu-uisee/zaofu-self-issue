@@ -112,6 +112,7 @@ def build_execution_graph(
     evidence_by_task = _evidence_by_task(events)
     fanout_by_task = _fanout_ids_by_task(events)  # doc 69 S-d
     instances_by_task = _dispatch_instances_by_task(events)  # doc 69 S-h §14.3
+    pipeline_stages_by_task = _task_pipeline_stages_by_task(events)
     timing_by_task = _timing_by_task(events)  # §14.7
     trace_by_task = _trace_by_task(events)  # §14.8
 
@@ -145,6 +146,7 @@ def build_execution_graph(
                          fanout_by_task.get(task_id, []))
         _enrich_actual(actual, task, planned["planned"],
                        instances_by_task.get(task_id, []),
+                       pipeline_stages_by_task.get(task_id, []),
                        timing_by_task.get(task_id, {}),
                        trace_by_task.get(task_id, ""),
                        events)
@@ -196,6 +198,7 @@ def build_superseded_nodes(
     evidence_by_task = _evidence_by_task(events)
     fanout_by_task = _fanout_ids_by_task(events)
     instances_by_task = _dispatch_instances_by_task(events)
+    pipeline_stages_by_task = _task_pipeline_stages_by_task(events)
     timing_by_task = _timing_by_task(events)
     trace_by_task = _trace_by_task(events)
     out: list[dict[str, Any]] = []
@@ -205,6 +208,7 @@ def build_superseded_nodes(
         actual = _actual(task, evidence_by_task.get(task_id, []),
                          fanout_by_task.get(task_id, []))
         _enrich_actual(actual, task, {}, instances_by_task.get(task_id, []),
+                       pipeline_stages_by_task.get(task_id, []),
                        timing_by_task.get(task_id, {}),
                        trace_by_task.get(task_id, ""), events)
         out.append({
@@ -308,11 +312,12 @@ def _fanout_ids_by_task(events: EventSlice) -> dict[str, list[str]]:
 
 
 def _enrich_actual(actual: dict, task: Task | None, planned: dict,
-                   instances: list[str], timing: dict, trace_id: str,
+                   instances: list[str], pipeline_stages: list[str],
+                   timing: dict, trace_id: str,
                    events: EventSlice = ()) -> None:
     """doc 69 S-h: add affinity / time / trace_id / agent_summary / changed_files
     / health onto a node's actual block."""
-    actual["affinity"] = _affinity(task, planned, instances)
+    actual["affinity"] = _affinity(task, planned, instances, pipeline_stages)
     started = timing.get("started_at", "") or actual.get("started_at", "")
     completed = timing.get("completed_at", "") or actual.get("completed_at", "")
     actual["started_at"] = started
@@ -389,7 +394,33 @@ def _dispatch_instances_by_task(events: EventSlice) -> dict[str, list[str]]:
     return by_task
 
 
-def _affinity(task: Task | None, planned: dict, instances: list[str]) -> dict[str, Any]:
+def _task_pipeline_stages_by_task(events: EventSlice) -> dict[str, list[str]]:
+    """Task Pipeline dispatch stages by task, preserving first-seen order."""
+    by_task: dict[str, list[str]] = {}
+    for _seq, event in events:
+        if event.type not in {"task.dispatched", "task.pipeline.stage.dispatched"}:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if not str(payload.get("pipeline_key") or "").strip():
+            continue
+        task_id = str(event.task_id or payload.get("task_id") or "").strip()
+        stage = str(
+            payload.get("task_pipeline_stage") or payload.get("stage_id") or ""
+        ).strip()
+        if not task_id or not stage:
+            continue
+        stages = by_task.setdefault(task_id, [])
+        if stage not in stages:
+            stages.append(stage)
+    return by_task
+
+
+def _affinity(
+    task: Task | None,
+    planned: dict,
+    instances: list[str],
+    pipeline_stages: list[str],
+) -> dict[str, Any]:
     """doc 69 §14.3: planned owner vs actual + cross-dispatch instance drift."""
     planned_owner = str(planned.get("owner_instance") or "").strip()
     planned_role = str(planned.get("owner_role") or "").strip()
@@ -400,19 +431,25 @@ def _affinity(task: Task | None, planned: dict, instances: list[str]) -> dict[st
     planned_role_prefix = _role_prefix(planned_role)
     actual_owner_prefix = _role_prefix(actual_owner)
     history_role_prefixes = {_role_prefix(item) for item in instances if item}
-    stage_handoff = (
+    pooled_dispatch = bool(pipeline_stages)
+    legacy_stage_handoff = (
         len(distinct) > 1
         and planned_role_prefix
         and planned_role_prefix in history_role_prefixes
         and actual_owner_prefix
         and actual_owner_prefix != planned_role_prefix
     )
-    if stage_handoff:
+    stage_handoff = legacy_stage_handoff or (
+        pooled_dispatch
+        and len(distinct) > 1
+        and len(set(pipeline_stages)) > 1
+    )
+    if planned_owner and actual_owner and planned_owner != actual_owner:
+        drift_kind = "owner_mismatch"
+    elif stage_handoff or pooled_dispatch:
         drift_kind = "none"
     elif len(distinct) > 1:
         drift_kind = "multi_instance"
-    elif planned_owner and actual_owner and planned_owner != actual_owner:
-        drift_kind = "owner_mismatch"
     else:
         drift_kind = "none"
     return {
@@ -420,6 +457,8 @@ def _affinity(task: Task | None, planned: dict, instances: list[str]) -> dict[st
         "planned_role": planned_role,
         "actual_owner": actual_owner,
         "instances_history": instances,
+        "pipeline_stages": pipeline_stages,
+        "pooled_dispatch": pooled_dispatch,
         "stage_handoff": stage_handoff,
         "drifted": drift_kind != "none",
         "drift_kind": drift_kind,

@@ -200,6 +200,35 @@ workflow: {}
     assert blocked["diagnostics"][0]["kind"] == "run_contract_drift"
 
 
+def test_submit_binding_allows_distinct_run_after_prior_terminal() -> None:
+    previous = {
+        "contract_digest": "old",
+        "workflow": {"strictness": "strict"},
+        "refs": {"workflow_input_manifest": ["old.json"]},
+        "digests": {"workflow_input_manifest[0]": "old-manifest"},
+    }
+    current = {
+        "contract_digest": "new",
+        "workflow": {"strictness": "strict"},
+        "refs": {"workflow_input_manifest": ["new.json"]},
+        "digests": {"workflow_input_manifest[0]": "new-manifest"},
+    }
+
+    binding = evaluate_run_contract_submit_binding(
+        previous,
+        current,
+        bootstrap=current,
+        strict=True,
+        prior_terminal_rotation=True,
+    )
+
+    assert binding["status"] == "PASS"
+    assert binding["strict"] is True
+    assert binding["prior_terminal_rotation"] is True
+    assert binding["comparison_basis"] == "prior_terminal_rotation"
+    assert binding["diagnostics"] == []
+
+
 def test_run_contract_resume_preserves_bound_workflow_manifest(tmp_path):
     config_path = tmp_path / "zf.yaml"
     config_path.write_text("""\

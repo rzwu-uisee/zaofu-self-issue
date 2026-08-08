@@ -4,7 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from zf.core.config.loader import load_config
+from zf.core.config.schema import FanoutChildConfig
 from zf.runtime.workflow_route_catalog import (
+    delivery_route_contracts_for_kind,
     resolve_workflow_route,
     workflow_route_catalog,
 )
@@ -51,6 +53,30 @@ def test_root_catalog_projects_delivery_and_registered_research_routes() -> None
     assert adaptive["roles"] == ["research_root"]
     assert adaptive["writer_roles"] == []
     assert adaptive["rollout"] == "opt_in_pilot"
+
+
+def test_catalog_hides_registered_research_stage_with_wrong_role_contract() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    stage = next(
+        item
+        for item in config.workflow.stages
+        if item.id == "research-fanout"
+    )
+    stage.children = [
+        FanoutChildConfig(role_instance="research-source"),
+        FanoutChildConfig(role_instance="research-product"),
+        FanoutChildConfig(role_instance="research-technical"),
+        FanoutChildConfig(role_instance="research-risk-critic"),
+    ]
+
+    route_ids = {
+        route["route_id"]
+        for route in workflow_route_catalog(config)["routes"]
+    }
+
+    assert "research:fixed" not in route_ids
+    assert "general:research-fanout" not in route_ids
+    assert "research:adaptive-pilot" in route_ids
 
 
 def test_catalog_only_exposes_registered_reader_general_entries() -> None:
@@ -134,11 +160,12 @@ def test_catalog_does_not_duplicate_delivery_route_for_kind_alias() -> None:
                 "prd": canonical_route,
             },
             affinity_lanes={},
+            dag=SimpleNamespace(external_triggers=["prd.requested"]),
             stages=[
                 SimpleNamespace(
                     id="prd-scan",
-                    trigger="workflow.invoke.requested",
-                    topology="single_reader",
+                    trigger="prd.requested",
+                    topology="fanout_reader",
                     roles=["planner"],
                     flow_kind="prd",
                 ),
@@ -152,3 +179,85 @@ def test_catalog_does_not_duplicate_delivery_route_for_kind_alias() -> None:
     ]
 
     assert route_ids == ["delivery:prd:default"]
+
+
+def test_catalog_hides_blocking_delivery_writer_entry() -> None:
+    config = SimpleNamespace(
+        roles=[SimpleNamespace(
+            name="writer",
+            instance_id="writer",
+            role_kind="writer",
+        )],
+        workflow=SimpleNamespace(
+            kind_routes={
+                "issue": SimpleNamespace(
+                    alias="",
+                    default_tier="default",
+                    pattern_id="issue-lanes-impl",
+                    tier_routes={},
+                ),
+            },
+            flow_metadata_by_kind={"issue": {}},
+            flow_metadata={},
+            affinity_lanes={},
+            dag=SimpleNamespace(external_triggers=["issue.requested"]),
+            stages=[SimpleNamespace(
+                id="issue-lanes-impl",
+                trigger="task_map.ready",
+                topology="fanout_writer_scoped",
+                roles=["writer"],
+                flow_kind="issue",
+            )],
+        ),
+    )
+
+    contracts = delivery_route_contracts_for_kind(config, "issue")
+
+    assert len(contracts) == 1
+    assert contracts[0]["ok"] is False
+    assert "fanout_reader" in contracts[0]["error"]
+    assert workflow_route_catalog(config)["routes"] == []
+
+
+def test_catalog_exposes_light_writer_entry_through_light_adapter() -> None:
+    config = SimpleNamespace(
+        roles=[SimpleNamespace(
+            name="writer",
+            instance_id="writer",
+            role_kind="writer",
+        )],
+        workflow=SimpleNamespace(
+            kind_routes={
+                "issue": SimpleNamespace(
+                    alias="",
+                    default_tier="default",
+                    pattern_id="issue-lanes-impl",
+                    tier_routes={},
+                ),
+            },
+            flow_metadata_by_kind={
+                "issue": {
+                    "topology": "light",
+                    "light_entry_trigger": "issue.requested",
+                },
+            },
+            flow_metadata={},
+            affinity_lanes={},
+            dag=SimpleNamespace(
+                external_triggers=["issue.requested", "task_map.ready"],
+            ),
+            stages=[SimpleNamespace(
+                id="issue-lanes-impl",
+                trigger="task_map.ready",
+                topology="fanout_writer_scoped",
+                roles=["writer"],
+                flow_kind="issue",
+            )],
+        ),
+    )
+
+    route = workflow_route_catalog(config)["routes"][0]
+
+    assert route["entry_class"] == "light_adapter"
+    assert route["entry_trigger"] == "issue.requested"
+    assert route["start_adapter"] == "light_delivery_request_submit"

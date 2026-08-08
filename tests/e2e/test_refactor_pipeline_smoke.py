@@ -404,6 +404,7 @@ def _complete_plan_synth(
     briefing = Path(dispatched.payload["briefing_path"]).read_text(encoding="utf-8")
     assert "Child reports:\n```json" not in briefing
     assert "canonical required inputs" in briefing
+    assert "never delete, add, move, or recreate that path" in briefing
     command = briefing.split(
         "When finished, emit exactly one fanout.synth.completed event with "
         "the runtime state dir explicitly:\n```bash\n",
@@ -411,9 +412,8 @@ def _complete_plan_synth(
     )[1].split("\n```", 1)[0]
     command_argv = shlex.split(command)
     assert command_argv[1:3] == ["result", "submit"]
-    result_file = Path(
-        command_argv[command_argv.index("--result-file") + 1]
-    )
+    assert "--scratch" in command_argv
+    result_file = state_dir / dispatched.payload["result_scratch_ref"]
     semantic_result = json.loads(result_file.read_text(encoding="utf-8"))
     assert semantic_result["child_id"] == "synth"
     _consume_synth_required_reads(state_dir, dispatched)

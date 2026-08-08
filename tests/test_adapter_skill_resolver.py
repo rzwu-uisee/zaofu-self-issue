@@ -164,6 +164,9 @@ def test_common_workflow_adaptation_skill_is_bound_by_kind(tmp_path: Path) -> No
     assert "zf-project-adapter-matrix-enrichment" in {
         item["name"] for item in issue_plan["loaded_skills"]
     }
+    assert "zf-browser-e2e-contract" in {
+        item["name"] for item in issue_plan["loaded_skills"]
+    }
     assert "zf-verify-gap-producer-contract" in {
         item["name"] for item in issue_plan["loaded_skills"]
     }
@@ -177,6 +180,10 @@ def test_common_workflow_adaptation_skill_is_bound_by_kind(tmp_path: Path) -> No
     assert "zf-project-adapter-matrix-enrichment" in prd_plan["roleSkillBundles"]["scan"]
     assert "zf-workflow-adaptation-boundary" in prd_plan["roleSkillBundles"]["planner"]
     assert "zf-project-adapter-matrix-enrichment" in prd_plan["roleSkillBundles"]["planner"]
+    loaded = {item["name"]: item for item in prd_plan["loaded_skills"]}
+    assert loaded["zf-project-adapter-matrix-enrichment"]["dependencies"] == [
+        "zf-browser-e2e-contract"
+    ]
     assert "zf-verify-gap-producer-contract" not in prd_plan["roleSkillBundles"]["verify"]
     assert "zf-goal-closure-replan-contract" in prd_plan["roleSkillBundles"]["discovery"]
 

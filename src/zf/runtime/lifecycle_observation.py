@@ -44,6 +44,7 @@ def _disk_usage_sample_id(
     model_context_window: int,
     usage_timestamp: object,
     usage: dict,
+    usage_series_id: str = "",
 ) -> str:
     payload = {
         "actor": actor,
@@ -52,6 +53,7 @@ def _disk_usage_sample_id(
         "model_context_window": model_context_window,
         "source": "disk_reader",
         "usage": usage,
+        "usage_series_id": usage_series_id,
         "usage_timestamp": usage_timestamp,
     }
     data = json.dumps(
@@ -111,9 +113,9 @@ class LifecycleObservationMixin:
     def _recent_drift_refresh_scope(self) -> tuple[set[str], bool]:
         """Return actionable role-scoped drift refresh targets.
 
-        Historical drift events had no affected_role, so keep them global.
-        Low-confidence observations such as node_skip must not become refresh
-        actions merely because they appear in the drift ledger.
+        Refresh is fail-closed to an explicit role or ``scope=global``.
+        Low-confidence and legacy unscoped observations must not become
+        broadcast refresh actions merely because they appear in the ledger.
         """
         roles: set[str] = set()
         global_drift = False
@@ -136,7 +138,7 @@ class LifecycleObservationMixin:
             affected_role = str(payload.get("affected_role") or "").strip()
             if affected_role:
                 roles.add(affected_role)
-            else:
+            elif str(payload.get("scope") or "").strip().lower() == "global":
                 global_drift = True
         return roles, global_drift
 
@@ -316,7 +318,21 @@ class LifecycleObservationMixin:
         recycle can otherwise immediately put the fresh worker back into
         pending_recycle before it has produced a new turn.
         """
-        key = (role.instance_id, usage.timestamp)
+        usage_semantics = str(
+            getattr(usage, "usage_semantics", "incremental") or "incremental"
+        )
+        report_series_id = str(getattr(usage, "usage_series_id", "") or "")
+        usage_series_id = (
+            ":".join((
+                "disk_reader",
+                role.instance_id,
+                role.backend,
+                report_series_id or usage.model or "default",
+            ))
+            if usage_semantics == "cumulative"
+            else ""
+        )
+        key = (role.instance_id, usage_series_id, str(usage.timestamp))
         if key in self._synth_usage_seen:
             return False
         self._synth_usage_seen.add(key)
@@ -328,11 +344,26 @@ class LifecycleObservationMixin:
             "cache_read_input_tokens": raw.get("cache_read_input_tokens", 0),
             "cache_creation_input_tokens": raw.get("cache_creation_input_tokens", 0),
         }
-        attempt_identity, attempt_lookup_complete = (
-            self._active_task_attempt_identity_for_usage_role(role)
-        )
-        task_id = str(attempt_identity.get("task_id") or "")
-        if not task_id and attempt_lookup_complete:
+        if str(getattr(role, "name", "") or "") == "orchestrator":
+            attempt_identity, attempt_lookup_complete = {}, True
+        else:
+            attempt_identity, attempt_lookup_complete = (
+                self._active_task_attempt_identity_for_usage_role(role)
+            )
+        operation_identity: dict[str, str] = {}
+        operation_lookup_complete = True
+        if not attempt_identity and attempt_lookup_complete:
+            operation_identity, operation_lookup_complete = (
+                self._active_workflow_operation_identity_for_usage_role(role)
+            )
+        usage_identity = attempt_identity or operation_identity
+        task_id = str(usage_identity.get("task_id") or "")
+        if (
+            not task_id
+            and not operation_identity
+            and attempt_lookup_complete
+            and operation_lookup_complete
+        ):
             task_id = self._active_task_id_for_usage_role(role)
         sample_id = _disk_usage_sample_id(
             actor=role.instance_id,
@@ -341,30 +372,35 @@ class LifecycleObservationMixin:
             model_context_window=usage.model_context_window,
             usage_timestamp=usage.timestamp,
             usage=normalised,
+            usage_series_id=usage_series_id,
         )
+        payload = {
+            **usage_identity,
+            "task_id": task_id,
+            "usage": normalised,
+            "source": "disk_reader",
+            "usage_semantics": usage_semantics,
+            "context_usage_ratio": round(usage.ratio, 4),
+            "ratio": round(usage.ratio, 4),
+            "model_context_window": usage.model_context_window,
+            # B-COST-01: carry the model id so the cost tracker can pick
+            # a per-model rate (disk-reader path has no provider cost).
+            "model": usage.model,
+            # B-1203-02: tag backend so events.jsonl consumers can
+            # split per-backend without a second lookup.
+            "backend": role.backend,
+            "usage_timestamp": usage.timestamp,
+            "usage_sample_id": sample_id,
+        }
+        if usage_series_id:
+            payload["usage_series_id"] = usage_series_id
         event = ZfEvent(
             type="agent.usage",
             actor=role.instance_id,
             task_id=task_id or None,
-            payload={
-                **attempt_identity,
-                "task_id": task_id,
-                "usage": normalised,
-                "source": "disk_reader",
-                "context_usage_ratio": round(usage.ratio, 4),
-                "ratio": round(usage.ratio, 4),
-                "model_context_window": usage.model_context_window,
-                # B-COST-01: carry the model id so the cost tracker can pick
-                # a per-model rate (disk-reader path has no provider cost).
-                "model": usage.model,
-                # B-1203-02: tag backend so events.jsonl consumers can
-                # split per-backend without a second lookup.
-                "backend": role.backend,
-                "usage_timestamp": usage.timestamp,
-                "usage_sample_id": sample_id,
-            },
+            payload=payload,
             correlation_id=(
-                str(attempt_identity.get("workflow_run_id") or "") or None
+                str(usage_identity.get("workflow_run_id") or "") or None
             ),
         )
         try:
@@ -410,6 +446,39 @@ class LifecycleObservationMixin:
             return {}, False
         return {}, True
 
+    def _active_workflow_operation_identity_for_usage_role(
+        self,
+        role: "RoleConfig",
+    ) -> tuple[dict[str, str], bool]:
+        """Resolve one running durable operation for resident usage attribution."""
+
+        try:
+            from zf.runtime.workflow_operation import reduce_workflow_operations
+
+            operations = reduce_workflow_operations(self.event_log.read_all())
+        except Exception:
+            return {}, False
+        instance_id = str(getattr(role, "instance_id", "") or "")
+        role_name = str(getattr(role, "name", "") or "")
+        active = [
+            operation
+            for operation in operations.values()
+            if str(operation.get("status") or "") == "running"
+            and str(operation.get("role_instance") or "")
+            in {instance_id, role_name}
+        ]
+        if len(active) != 1:
+            return ({}, not active)
+        operation = active[0]
+        return ({
+            "workflow_run_id": str(operation.get("workflow_run_id") or ""),
+            "operation_id": str(operation.get("operation_id") or ""),
+            "attempt_id": str(operation.get("active_attempt_id") or ""),
+            "lease_id": str(operation.get("lease_id") or ""),
+            "dispatch_id": str(operation.get("dispatch_id") or ""),
+            "task_id": str(operation.get("task_id") or ""),
+        }, True)
+
     def _note_usage_capture_miss(
         self, role: "RoleConfig", usage_cwd: str, session_id: str
     ) -> None:
@@ -450,6 +519,35 @@ class LifecycleObservationMixin:
             self.event_writer.append(event)
         except Exception:
             pass
+
+    def _usage_capture_expected(self, role: "RoleConfig") -> bool:
+        """Return whether a missing transcript can currently hide usage.
+
+        Session rotation reserves a fresh UUID before the next provider
+        operation starts.  An idle/on-demand role therefore has no transcript
+        by design; only an active TaskAttempt, workflow operation, or legacy
+        task makes a missing file an observable cost-capture failure.
+        """
+        for resolver_name in (
+            "_active_task_attempt_identity_for_usage_role",
+            "_active_workflow_operation_identity_for_usage_role",
+        ):
+            resolver = getattr(self, resolver_name, None)
+            if not callable(resolver):
+                continue
+            try:
+                identity, lookup_complete = resolver(role)
+            except Exception:
+                return True
+            if identity or not lookup_complete:
+                return True
+        task_resolver = getattr(self, "_active_task_id_for_usage_role", None)
+        if not callable(task_resolver):
+            return False
+        try:
+            return bool(task_resolver(role))
+        except Exception:
+            return True
 
     def _active_task_id_for_usage_role(self, role: "RoleConfig") -> str:
         """Best-effort attribution for disk-reader usage samples."""

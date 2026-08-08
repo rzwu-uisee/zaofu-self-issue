@@ -489,7 +489,7 @@ def test_prd_verify_passed_flow_discovery_can_start_reader_fanout(tmp_path: Path
 def test_issue_flow_discovery_blocking_call_stays_candidate_scoped(
     tmp_path: Path,
 ) -> None:
-    _state_dir, log, transport, orch = _flow_discovery_state(
+    state_dir, log, transport, orch = _flow_discovery_state(
         tmp_path,
         flow_kind="issue",
         discovery_profile="regression_impact",
@@ -498,6 +498,12 @@ def test_issue_flow_discovery_blocking_call_stays_candidate_scoped(
             "result_protocol": {"mode": "blocking"},
             "artifact_package": {"mode": "blocking"},
         },
+    )
+    task_map = state_dir / "artifacts/ISSUE-BLOCKING/task_map.json"
+    task_map.parent.mkdir(parents=True, exist_ok=True)
+    task_map.write_text(
+        json.dumps({"schema_version": "task-map.v1", "tasks": []}),
+        encoding="utf-8",
     )
 
     orch.run_once(events=[ZfEvent(
@@ -525,6 +531,9 @@ def test_issue_flow_discovery_blocking_call_stays_candidate_scoped(
     child_payload = dispatched.payload["payload"]
     assert child_payload["output_profile_id"] == "workflow-read"
     assert child_payload.get("task_id", "") == ""
+    assert {
+        row["source_id"] for row in child_payload["required_reads"]
+    } == {"reader-task-map"}
     assert any(
         event.type == "workflow.operation.started"
         for event in events
@@ -751,7 +760,7 @@ def test_prd_discovery_uses_candidate_materialized_before_test_passed(
             "pdd_id": "PRD-1",
             "feature_id": "PRD-1",
             "trace_id": "trace-prd",
-            "status": "completed",
+            "status": "frozen",
             "task_map_ref": ".zf/artifacts/PRD-1/task_map.json",
             "candidate_ref": "candidate/PRD-1",
             "candidate_head_commit": "candidate-prd-1",
@@ -955,6 +964,7 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
     tmp_path: Path,
 ) -> None:
     state_dir, log, transport, orch = _state(tmp_path)
+    orch.config.workflow.stages[0].flow_kind = "prd"
     task_map_ref = _write_base_task_map(state_dir)
     orch.config.workflow.stages[0].flow_kind = "prd"
     orch.config.workflow.stages.append(WorkflowStageConfig(
@@ -983,6 +993,7 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
             "feature_id": "CANGJIE",
             "goal_id": "CANGJIE",
             "flow_kind": "prd",
+            "workflow_run_id": "prd-run-1",
             "discovery_profile": "product_completeness",
             "gap_category": "acceptance_gap",
             "trace_id": "trace-prd-gap",
@@ -1016,8 +1027,8 @@ def test_flow_discovery_completed_with_prd_gaps_amends_task_map(
     assert gap_ready.payload["dispatch_base_commit"] == "candidate-head-123"
     assert ready.payload["gap_event_type"] == "flow.gap_plan.ready"
     assert ready.payload["flow_kind"] == "prd"
+    assert ready.payload["workflow_run_id"] == "prd-run-1"
     assert ready.payload["goal_kind"] == "prd"
-    assert ready.payload["workflow_run_id"] == "trace-prd-gap"
     assert ready.payload["goal_id"] == "CANGJIE"
     assert ready.payload["dispatch_base_commit"] == "candidate-head-123"
     assert ready.payload["resume_scope"] == "gap_tasks_only"
@@ -1531,6 +1542,7 @@ def test_verify_bridge_preserves_scope_and_plan_package_identity(
         "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
         "plan_artifact_package_digest": "package-digest",
     }
+    _write_base_task_map(state_dir)
     log.append(ZfEvent(
         id="plan-package-current",
         type="plan.artifact_package.admitted",
@@ -1611,6 +1623,10 @@ def test_verify_bridge_preserves_scope_and_plan_package_identity(
             == candidate_head_commit
         )
         assert child.payload["payload"]["target_commit"] == candidate_head_commit
+        assert {
+            row["source_id"]
+            for row in child.payload["payload"]["required_reads"]
+        } == {"reader-task-map"}
     operations = [
         event for event in events
         if event.type == "workflow.operation.requested"

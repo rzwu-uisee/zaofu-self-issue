@@ -86,3 +86,59 @@ def test_non_admitted_verification_body_cannot_select_rework_owner(
     }
 
     assert fanout_failure_recovery(_Owner(log, payload), manifest) == {}
+
+
+def test_canonical_plan_handoff_failure_routes_only_to_plan(tmp_path: Path) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    payload = {
+        "fanout_id": "fanout-impl",
+        "child_id": "impl-TASK-1",
+        "task_id": "TASK-1",
+        "failure_scope": "plan_contract",
+        "handoff_failure_fingerprint": "writer-handoff-plan",
+        "redispatch_allowed": False,
+    }
+    manifest = {
+        "fanout_id": "fanout-impl",
+        "children": [{
+            "child_id": "impl-TASK-1",
+            "task_id": "TASK-1",
+            "status": "failed",
+        }],
+    }
+
+    recovery = fanout_failure_recovery(_Owner(log, payload), manifest)
+
+    assert recovery["recovery_action"] == "return_to_plan"
+    assert recovery["recovery_owner"] == "planner"
+    assert recovery["redispatch_allowed"] is False
+
+
+def test_repeated_worker_handoff_projects_bounded_safe_halt(tmp_path: Path) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    payload = {
+        "fanout_id": "fanout-impl",
+        "child_id": "impl-TASK-1",
+        "task_id": "TASK-1",
+        "failure_scope": "worker_result",
+        "handoff_failure_fingerprint": "writer-handoff-worker",
+        "redispatch_allowed": False,
+        "no_progress": True,
+    }
+    manifest = {
+        "fanout_id": "fanout-impl",
+        "children": [{
+            "child_id": "impl-TASK-1",
+            "task_id": "TASK-1",
+            "status": "failed",
+        }],
+    }
+
+    recovery = fanout_failure_recovery(_Owner(log, payload), manifest)
+
+    assert recovery["no_progress"] is True
+    assert recovery["redispatch_allowed"] is False
+    assert recovery["bounded_recovery_decision"]["status"] == "safe_halt"
+    assert recovery["bounded_recovery_decision"][
+        "max_additional_writer_attempts"
+    ] == 0

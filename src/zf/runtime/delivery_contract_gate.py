@@ -290,7 +290,17 @@ def _iter_rows(data: Any) -> list[dict[str, Any]]:
         return out
     if not isinstance(data, dict):
         return out
-    for key in ("rows", "items", "capabilities", "acceptance", "acceptances", "tests", "tasks", "matrix"):
+    for key in (
+        "rows",
+        "items",
+        "capabilities",
+        "acceptance",
+        "acceptances",
+        "commands",
+        "tests",
+        "tasks",
+        "matrix",
+    ):
         value = data.get(key)
         if isinstance(value, list | dict):
             out.extend(_iter_rows(value))
@@ -353,7 +363,15 @@ def _priority_set(value: Any) -> set[str]:
 
 
 def _row_id(row: Mapping[str, Any]) -> str:
-    for key in ("id", "capability_id", "capability", "test_id", "acceptance_id", "name"):
+    for key in (
+        "id",
+        "capability_id",
+        "capability",
+        "command_id",
+        "test_id",
+        "acceptance_id",
+        "name",
+    ):
         value = str(row.get(key) or "").strip()
         if value:
             return value
@@ -372,6 +390,7 @@ def _looks_like_row(data: Mapping[str, Any]) -> bool:
             "surface",
             "task_id",
             "acceptance_id",
+            "command_id",
             "test_id",
         )
     )

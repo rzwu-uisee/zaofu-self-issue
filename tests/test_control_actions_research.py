@@ -21,6 +21,12 @@ from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.research_generation import (
+    reconcile_stale_research_generations,
+    research_generation_binding_error,
+)
+from zf.runtime.run_admission import build_run_admission_projection
+from zf.runtime.run_contract import load_run_contract_snapshot
 from zf.runtime.workflow_anchor import (
     bind_workflow_request_to_task,
     mark_workflow_managed_task,
@@ -169,6 +175,32 @@ def test_research_start_invokes_fixed_template(tmp_path: Path) -> None:
     )
     assert invoke.payload["source_refs"]["template_id"] == "research-fanout.fixed.v1"
     assert invoke.payload["source_refs"]["topic"] == "Kanban collaboration closure"
+    assert invoke.payload["prompt_kind"] == "research"
+    assert invoke.payload["request_kind"] == "research"
+    assert invoke.payload["route_id"] == "research:fixed"
+    assert len(invoke.payload["workflow_generation"]) == 64
+    assert invoke.payload["expected_generation"] == invoke.payload["workflow_generation"]
+    assert invoke.payload["effective_config_digest"]
+    assert invoke.payload["run_contract_digest"]
+    assert invoke.payload["workflow_prompt_ref"].startswith(
+        "artifacts/workflow-inputs/"
+    )
+    task = TaskStore(_state_dir / "kanban.json").get("TASK-RESEARCH")
+    assert task is not None
+    assert research_generation_binding_error(
+        _state_dir,
+        config=service.config,
+        task=task,
+        payload=invoke.payload,
+    ) == ""
+    snapshot = load_run_contract_snapshot(
+        _state_dir,
+        invoke.payload["research_generation_contract_ref"],
+    )
+    generation = snapshot["contract"]["research_generation"]
+    assert generation["workflow_generation"] == invoke.payload["workflow_generation"]
+    assert generation["prompt_ref"]["sha256"]
+    assert len(generation["role_bindings"]) == 5
 
 
 def test_research_start_explicitly_invokes_adaptive_pilot(
@@ -589,6 +621,105 @@ def test_research_start_fails_before_event_when_stage_is_missing(tmp_path: Path)
         event.type == "workflow.invoke.requested"
         for event in writer.event_log.read_all()
     )
+
+
+def test_research_config_drift_cancels_old_generation_before_dispatch_and_restarts_fresh(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+    first = _execute(service, writer, "research-start", {
+        "task_id": "TASK-RESEARCH",
+        "topic": "Generation freshness",
+    })
+    assert first["ok"] is True
+    first_invoke = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "workflow.invoke.requested"
+    )
+
+    source_role = next(
+        role
+        for role in service.config.roles
+        if role.name == "source_researcher"
+    )
+    source_role.model = "replacement-model"
+    cancelled = reconcile_stale_research_generations(
+        config=service.config,
+        state_dir=state_dir,
+        writer=writer,
+    )
+
+    assert cancelled == [first["workflow_run_id"]]
+    events = writer.event_log.read_all()
+    superseded = next(
+        event for event in events
+        if event.type == "workflow.generation.superseded"
+    )
+    assert superseded.payload["safe_resume_action"] == "restart_from_admission"
+    assert superseded.payload["restart_boundary"] == "workflow_start"
+    cancellation = next(event for event in events if event.type == "run.cancelled")
+    assert cancellation.task_id is None
+    assert cancellation.payload["root_task_id"] == "TASK-RESEARCH"
+    assert TaskStore(state_dir / "kanban.json").get("TASK-RESEARCH").status == (
+        "in_progress"
+    )
+    assert reconcile_stale_research_generations(
+        config=service.config,
+        state_dir=state_dir,
+        writer=writer,
+    ) == []
+
+    class _AliveTransport:
+        def is_alive(self, _role_name: str) -> bool:
+            return True
+
+    orchestrator = Orchestrator(
+        state_dir,
+        service.config,
+        _AliveTransport(),
+        project_root=tmp_path,
+    )
+    orchestrator._try_start_declared_workflow_fanout = (
+        lambda *args, **kwargs: True
+    )
+    before = sum(
+        event.type == "task.fanout.requested"
+        for event in writer.event_log.read_all()
+    )
+    stale_decision = orchestrator._on_workflow_invoke_requested(first_invoke)
+    assert stale_decision is not None
+    assert stale_decision.action == "block"
+    assert sum(
+        event.type == "task.fanout.requested"
+        for event in writer.event_log.read_all()
+    ) == before
+
+    second = _execute(service, writer, "research-start", {
+        "task_id": "TASK-RESEARCH",
+        "topic": "Generation freshness",
+    })
+    assert second["ok"] is True
+    assert second["workflow_run_id"] != first["workflow_run_id"]
+    assert second["workflow_generation"] != first["workflow_generation"]
+    second_invoke = [
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "workflow.invoke.requested"
+    ][-1]
+    decision = orchestrator._on_workflow_invoke_requested(second_invoke)
+    assert decision is not None
+    assert decision.action == "workflow_invoke"
+    events = writer.event_log.read_all()
+    admissions = [
+        event for event in events
+        if event.type == "run.admission.admitted"
+    ]
+    assert len(admissions) == 1
+    assert admissions[0].payload["workflow_run_id"] == second["workflow_run_id"]
+    assert isinstance(admissions[0].payload["budget_snapshot"], dict)
+    projection = build_run_admission_projection(events)
+    assert projection.active_run_ids == [second["workflow_run_id"]]
 
 
 def test_research_adoption_verifies_digest_revision_and_is_idempotent(

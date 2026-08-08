@@ -56,8 +56,10 @@ Prefer one or two vertical fixes:
 - `dev-web` for dashboard/browser-visible changes.
 
 Each task needs `allowed_paths`, expected behavior, verification command, and
-handoff evidence for verify agents. Avoid duplicate ownership of the same
-exclusive file unless the tasks are serialized by dependency.
+handoff evidence for verify agents. One exclusive file must have exactly one
+task owner across the map. Dependency serialization does not permit duplicate
+`exclusive_files`; merge those changes into one owner task or mark a truly
+shared/read-only path as non-exclusive.
 
 ## Completion Check
 
@@ -68,6 +70,8 @@ Before emitting success:
    verification.
 3. Every task has direct source anchors or is mapped by `source_index_ref`.
 4. The success payload has top-level `task_map_ref`.
+5. When matrix plan ports are required, apply the full id-set closure check in
+   `zf-project-adapter-matrix-enrichment` to the final serialized payload.
 
 ## Goal Closure Loop
 

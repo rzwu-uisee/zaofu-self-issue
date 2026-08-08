@@ -45,9 +45,11 @@ from zf.cli.hook_workdir_guard import (
     evaluate_workdir_write_guard as _evaluate_workdir_write_guard,
     is_authorized_result_scratch_target as _is_authorized_result_scratch_target,
     tool_input_digest as _tool_input_digest,
+    write_target_operations as _write_target_operations,
     write_target_paths as _write_target_paths,
 )
 from zf.runtime.provider_stop import classify_provider_stop
+from zf.runtime.result_submit import authorized_operation_workdir_write_scopes as _operation_write_scopes
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -690,8 +692,8 @@ def _evaluate_allowed_paths_guard(
     a dev agent that builds ``app/src/api.js`` when the task scopes ``app/server.js``
     is stopped at write time (recoverable — the advice steers the retry) instead of
     only being caught post-hoc at verify/quality after the fanout is already spent.
-    Fails open on any ambiguity (no worker task, empty scope, unparseable target) —
-    a false block would break a legitimately-working worker.
+    Task contract paths and kernel-pinned operation artifact paths are combined.
+    Fails open only when neither source defines a scope or targets cannot be parsed.
     """
     if not event_type.endswith(".pre_tool_use"):
         return 0
@@ -701,28 +703,36 @@ def _evaluate_allowed_paths_guard(
     if not isinstance(tool_input, dict):
         return 0
     tool_name = str(event_payload.get("tool_name") or "").strip()
-    targets = _write_target_paths(tool_name, tool_input)
-    if not targets:
+    operations = _write_target_operations(tool_name, tool_input)
+    if not operations:
         return 0
     task_id = _active_task_id_for_actor(event_log, actor)
-    if not task_id:
-        return 0
-    scope = _active_task_scope(state_dir, task_id)
+    task_scope = _active_task_scope(state_dir, task_id) if task_id else []
+    operation_scope = _operation_write_scopes(
+        state_dir, event_log, role_instance=actor, task_id=task_id,
+    )
+    scope = list(dict.fromkeys([*task_scope, *operation_scope]))
     if not scope:
         return 0
 
     from zf.runtime.task_refs import _path_allowed_by_scope
 
+    scratch_update_operations = {
+        "update", "write", "edit", "multiedit", "notebookedit",
+    }
     offending = sorted({
         target
-        for target in targets
+        for operation, target in operations
         if not _path_allowed_by_scope(_to_scope_frame(target), scope)
-        and not _is_authorized_result_scratch_target(
-            state_dir,
-            event_log=event_log,
-            actor=actor,
-            target=target,
-            cwd=str(event_payload.get("cwd") or ""),
+        and not (
+            operation in scratch_update_operations
+            and _is_authorized_result_scratch_target(
+                state_dir,
+                event_log=event_log,
+                actor=actor,
+                target=target,
+                cwd=str(event_payload.get("cwd") or ""),
+            )
         )
     })
     if not offending:
@@ -752,7 +762,7 @@ def _evaluate_allowed_paths_guard(
     print(
         "ZaoFu blocked this write: "
         + ", ".join(offending[:5])
-        + f" is outside task {task_id} allowed_paths. Write ONLY within: "
+        + f" is outside task {task_id or 'operation'} allowed_paths. Write ONLY within: "
         + ", ".join(scope[:20])
         + ". Follow the task file-structure contract exactly.",
         file=sys.stderr,

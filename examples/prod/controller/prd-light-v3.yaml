@@ -12,6 +12,7 @@ spec:
   backend: codex
   roleDefaults:
     # Light flows trade process reuse for low startup latency.
+    model_reasoning_effort: high
     lifecycle:
       mode: eager
   prdRef: docs/prd/TODO.md
@@ -55,11 +56,17 @@ spec:
       instance_id: orchestrator
       role_kind: reader
       backend: codex
+      model_reasoning_effort: high
       permission_mode: bypass
       transport: tmux
+      execution:
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
       stuck_threshold_seconds: 900
       spawn_ready_timeout_seconds: 240
-      triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
       publishes: [orchestrator.rework.triage.recorded]
       skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
   goal:
@@ -81,6 +88,8 @@ spec:
   #       - "TODO: 单测命令(如 cd app && python -m pytest -q)"
   #     on_fail: "candidate tree failed static gate — 修复后重触发集成"
   workflow:
+    orchestration:
+      mode: exception_advisor
     # 分级声明(doc133 tier;141 §19.5):intake/submit 链路的
     # workflow_tier 缺省值。micro/light/standard/full 之外的值
     # 会被 schema fail-closed 拒绝。

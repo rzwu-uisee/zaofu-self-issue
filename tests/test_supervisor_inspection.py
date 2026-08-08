@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from zf.core.config.schema import RoleConfig, SessionConfig, ZfConfig
@@ -242,6 +243,234 @@ def test_plan_integrity_requires_evidence_after_implementation(
 
     kinds = {finding["kind"] for finding in projection["findings"]}
     assert "acceptance-without-evidence" in kinds
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "impl.self_check.completed",
+            {"impl_self_check_ref": "artifacts/impl-self-check/result.json"},
+        ),
+        (
+            "task.pipeline.verify.completed",
+            {
+                "report": {
+                    "status": "failed",
+                    "recommendation": "reject",
+                    "evidence_refs": ["artifacts/verify/report.json"],
+                },
+            },
+        ),
+    ],
+)
+def test_plan_integrity_recognizes_task_pipeline_evidence_events(
+    tmp_path: Path,
+    event_type: str,
+    payload: dict[str, object],
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task = Task(
+        id="TASK-PIPELINE-EVIDENCE",
+        title="task pipeline evidence",
+        status="in_progress",
+        contract=TaskContract(
+            acceptance_criteria=["AC1: behavior works"],
+            product_contract_ref=".zf/artifacts/default/task_map.json",
+        ),
+    )
+    events = [
+        ZfEvent(
+            type="dev.build.done",
+            task_id=task.id,
+            payload={"task_id": task.id},
+        ),
+        ZfEvent(
+            type=event_type,
+            task_id=task.id,
+            payload={"task_id": task.id, **payload},
+        ),
+    ]
+
+    projection = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+        tasks=[task],
+        events=events,
+    )
+
+    kinds = {finding["kind"] for finding in projection["findings"]}
+    assert "acceptance-without-evidence" not in kinds
+
+
+def test_plan_integrity_does_not_mask_unresolved_upstream_failure(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task = Task(
+        id="TASK-FAILED",
+        title="implementation failed before verification",
+        status="in_progress",
+        contract=TaskContract(
+            acceptance_criteria=["TASK-FAILED-AC1: behavior works"],
+            product_contract_ref=".zf/artifacts/default/task_map.json",
+        ),
+    )
+    events = [
+        ZfEvent(
+            type="dev.build.done",
+            task_id=task.id,
+            payload={"task_id": task.id},
+        ),
+        ZfEvent(
+            type="fanout.child.failed",
+            task_id=task.id,
+            payload={
+                "task_id": task.id,
+                "fanout_id": "fanout-impl",
+                "child_id": "impl-TASK-FAILED",
+                "reason": "writer handoff failed",
+            },
+        ),
+    ]
+
+    projection = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+        tasks=[task],
+        events=events,
+    )
+
+    kinds = {finding["kind"] for finding in projection["findings"]}
+    assert "acceptance-without-evidence" not in kinds
+
+
+def test_plan_integrity_waits_while_task_verify_is_active(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task = Task(
+        id="TASK-VERIFYING",
+        title="verification in progress",
+        status="in_progress",
+        contract=TaskContract(
+            acceptance_criteria=["TASK-VERIFYING-AC1: behavior works"],
+            product_contract_ref=".zf/artifacts/default/task_map.json",
+        ),
+    )
+    operation_id = "wop-verify-TASK-VERIFYING"
+    events = [
+        ZfEvent(
+            type="dev.build.done",
+            task_id=task.id,
+            payload={"task_id": task.id},
+        ),
+        ZfEvent(
+            type="workflow.operation.requested",
+            task_id=task.id,
+            payload={
+                "operation_id": operation_id,
+                "workflow_run_id": "run-1",
+                "task_id": task.id,
+                "task_pipeline_stage": "verify",
+            },
+        ),
+        ZfEvent(
+            type="workflow.operation.started",
+            task_id=task.id,
+            payload={
+                "operation_id": operation_id,
+                "workflow_run_id": "run-1",
+                "task_id": task.id,
+            },
+        ),
+    ]
+
+    projection = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+        tasks=[task],
+        events=events,
+    )
+
+    kinds = {finding["kind"] for finding in projection["findings"]}
+    assert "acceptance-without-evidence" not in kinds
+
+    events.append(ZfEvent(
+        type="workflow.operation.settled",
+        task_id=task.id,
+        payload={
+            "operation_id": operation_id,
+            "workflow_run_id": "run-1",
+            "task_id": task.id,
+        },
+    ))
+    settled = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+        tasks=[task],
+        events=events,
+    )
+    settled_kinds = {finding["kind"] for finding in settled["findings"]}
+    assert "acceptance-without-evidence" in settled_kinds
+
+
+def test_plan_integrity_recognizes_legacy_fanout_verify_operation(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task = Task(
+        id="TASK-LEGACY-VERIFY",
+        title="legacy fanout verification in progress",
+        status="in_progress",
+        contract=TaskContract(
+            acceptance_criteria=["TASK-LEGACY-VERIFY-AC1: behavior works"],
+            product_contract_ref=".zf/artifacts/default/task_map.json",
+        ),
+    )
+    operation_id = "wop-issue-lanes-verify-core"
+    events = [
+        ZfEvent(
+            type="dev.build.done",
+            task_id=task.id,
+            payload={"task_id": task.id},
+        ),
+        ZfEvent(
+            type="workflow.operation.requested",
+            task_id=task.id,
+            payload={
+                "operation_id": operation_id,
+                "workflow_run_id": "run-legacy",
+                "task_id": task.id,
+                "parent_stage_id": "issue-lanes-verify",
+                "role_instance": "verify-lane-0",
+            },
+        ),
+        ZfEvent(
+            type="workflow.operation.started",
+            task_id=task.id,
+            payload={
+                "operation_id": operation_id,
+                "workflow_run_id": "run-legacy",
+                "task_id": task.id,
+                "role_instance": "verify-lane-0",
+            },
+        ),
+    ]
+
+    projection = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+        tasks=[task],
+        events=events,
+    )
+
+    kinds = {finding["kind"] for finding in projection["findings"]}
+    assert "acceptance-without-evidence" not in kinds
 
 
 def test_plan_integrity_accepts_generated_task_source_refs(

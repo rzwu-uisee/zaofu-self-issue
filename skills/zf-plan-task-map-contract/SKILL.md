@@ -19,6 +19,42 @@ do not copy an older example when they differ. Runtime owns schema/admission,
 while the planner owns task meaning, slicing, acceptance, dependencies, and
 source traceability.
 
+## Mechanical Closure Before Output
+
+Before emitting a plan result, reconcile the final serialized artifacts as
+sets. Do this after all prose edits and before the success event:
+
+1. `task_map.tasks[].task_id` must equal the task ids covered by
+   `source_index.tasks[]` / `task_sources[]`; capability and dependency
+   `task_ids` must all exist in that same Task set.
+2. Every mandatory acceptance criterion must have one stable id and its
+   capability/requirement mapping must resolve to the owning Task.
+3. For each acceptance id, `verification_command_ids` must exactly equal the
+   global canonical `validation.commands[].id` values whose `acceptance_ids`
+   include that id. At least one linked command `owner` must equal the
+   criterion's `verification_owner`; additional linked commands may belong to
+   a later layer such as `candidate_verify`.
+4. Acceptance matrix, test matrix, real-E2E matrix, and Task-local verification
+   lists must reference the same canonical command registry. Their command ids,
+   acceptance-id sets, owners, tiers, and literal command bodies may not drift.
+5. Every Task must map to its declared capabilities and every capability
+   `task_id` must map back to an existing Task; compare both directions.
+6. If the briefing provides a local validator or admission command, run it on
+   the final files and repair every finding before submission. Do not invent a
+   validator command or substitute an equivalent command for the one supplied.
+
+Do not submit a knowingly inconsistent first draft and rely on a rework turn
+to discover these set mismatches. This preflight is mechanical closure; it does
+not replace critic judgment or product acceptance.
+
+Keep `task_map.json`, `source_index.json`, and each `plan_ports` JSON body
+pretty-printed and structurally formatted while authoring them. Never serialize
+a mutable candidate as one compact line. Parse the complete result once before
+invoking the supplied validator. When validation returns multiple findings,
+repair the full diagnostic set in one edit and parse once before the next
+validation. Repeated comma, quoting, path, or one-finding-at-a-time validator
+turns consume the workflow operation budget without adding planning evidence.
+
 ## Product Boundary
 
 ZaoFu plan stages have two output layers:
@@ -43,6 +79,22 @@ Include these paths in `artifact_refs` / `evidence_refs` as appropriate.
 All output refs are workdir-relative. Do not write `.zf/` or another absolute
 state path directly; the Kernel relocates admitted refs and computes canonical
 digests.
+
+When a result returns more than one Task Map representation, the inline
+`task_map`, file resolved by `task_map_ref`, and `task_map` body/ref in
+`plan_ports` must be the same JSON document. Runtime compares canonical
+digests across every producer and returns `task_map_producer_mismatch` on any
+stale copy. Correct every representation before pre-submit validation; never
+rely on producer precedence.
+
+Default to exactly one Task Map producer: the complete JSON file referenced by
+top-level `task_map_ref`. That ref satisfies the logical `task_map` Plan port
+when the active result profile supports derivation. Do not add a descriptor,
+summary, `ref`, or `producer_task_ids` placeholder as `plan_ports.task_map`;
+it is a second, different Task Map producer. Emit a `task_map` Plan-port body
+only when the output contract explicitly requires another complete
+representation, and then copy the exact canonical JSON document byte-for-byte
+in meaning before validation.
 
 ## Plan Artifact Ports
 
@@ -76,13 +128,15 @@ Every dispatchable task must be traceable back to the plan, scan, PRD, issue,
 or research evidence that caused it. Strict/release workflows fail closed when
 per-task provenance is missing.
 
-Use at least one of these accepted task-level fields on each task:
+Every task must include these singular task-level anchors:
 
 - `source_key`: one stable anchor string.
-- `source_keys`: one or more stable anchor strings.
 - `source_ref`: one file/section reference.
-- `source_refs`: one or more file/section references.
 - `source_excerpt`: a short evidence excerpt tied to the task.
+
+`source_keys` and `source_refs` may add supporting evidence, but they do not
+replace the singular primary anchor. Keep `source_key` and `source_ref`
+semantically paired: both must identify the same primary fact or plan section.
 
 If the task itself is intentionally compact, `source_index.json` must map every
 `task_id` through `tasks[]` or `task_sources[]`:
@@ -93,6 +147,9 @@ If the task itself is intentionally compact, `source_index.json` must map every
   "tasks": [
     {
       "task_id": "PDD-CORE-001",
+      "source_key": "prd.md#acceptance-realtime-sync",
+      "source_ref": "docs/plans/example-prd.md#acceptance",
+      "source_excerpt": "Realtime sync is a mandatory owner acceptance.",
       "source_keys": ["prd.md#acceptance-realtime-sync"],
       "source_refs": ["docs/plans/example-prd.md#acceptance"]
     }
@@ -197,6 +254,23 @@ subdirectory's package scaffold (for example `app/pyproject.toml`) as the
 project scaffold owner and list it in both `allowed_paths` and
 `shared_conventions.packaging_file`.
 
+Every path in `exclusive_files` has exactly one owner across the entire Task
+Map. A dependency edge, later wave, or serialized execution does not permit a
+second exclusive owner. If two planned changes need the same file, combine
+them under one owner task (often assembly) or keep a truly read-only/shared
+path out of `exclusive_files` and describe that boundary explicitly.
+
+Writer `allowed_paths` are exclusive writable capabilities, not a read
+manifest, and must not overlap across tasks, including tasks separated by
+dependency edges or waves. When two proposed tasks both need to change one
+integration file, combine them under one task or assign that file to one
+integration owner and keep the other task's work independent. Do not add a
+sibling-owned file to another task's `allowed_paths` merely because its tests
+read that file; plan-wide verification may read sibling-owned paths without
+copying them into the current task. Pre-submit validation applies the same path
+ownership evaluator as writer fanout admission and reports
+`writer_fanout_task_map_invalid` before submission.
+
 Do not make a scaffold task own or verify a placeholder file (`.gitkeep`,
 `.keep`, `.placeholder`) below a subtree owned by another task such as
 `app/static/**`. The admission layer delegates that placeholder to the subtree
@@ -227,6 +301,19 @@ Do not invent a `setup`, `browser`, or `real-e2e` tier. Runtime normalizes a
 small compatibility alias set, but unknown tiers fail closed before writer
 dispatch.
 
+When the active v4 Task Pipeline profile requires rolling smoke, mark at least
+one cheap command per task with JSON boolean `rolling_smoke: true`. The marked
+command must be deterministic, reusable, and use the `static` or `runtime`
+tier. `rolling_smoke` selects a command from the canonical registry; it is not
+a fifth verification tier.
+
+A `reference_only` row, `command_refs`, or `rolling_smoke_command_ids` entry
+without an executable `command` in that task does not satisfy this gate. When
+a task does not own a suitable acceptance command, define one unique
+task-local smoke id (for example `TS-<task>-smoke`) with an executable command,
+`acceptance_ids: []`, one producer task, and `rolling_smoke: true`. Do not copy
+another task's canonical VC definition merely to satisfy rolling smoke.
+
 **Canonical command identity rule (Refactor R2, 2026-07-29):** downstream
 Impl, Candidate, and Verify execute the stored `command` as-is. A Planner must
 not prove a rewritten, re-escaped, or merely "equivalent" command and then
@@ -235,6 +322,32 @@ programs such as nested regular expressions in `node -e` / `python -c`;
 put the assertion in a repository test or script owned by the same vertical
 slice, then declare the stable test/script command. Before emitting, inspect
 the final serialized command string, not an unescaped source-language draft.
+For a contract-bound passed Verify result, every mandatory acceptance command
+must have an exact-target passing receipt. Preserve the registry's
+`command_id`, literal `command`, and `command_digest`, bind it to the exact
+`target_commit`, and report `status: passed` plus `exit_code: 0`. A generic
+probe or output from a substituted command is supplemental evidence only and
+does not satisfy canonical command coverage.
+
+The corresponding Test Matrix has one and only one command registry:
+`test_matrix.commands[]`. Repeat each Task Map command there with the same id,
+exact command string, and `acceptance_ids`. Do not define a second command
+under `test_matrix.tests[]`; other matrix rows reference command ids.
+
+Each command id has exactly one producer Task in the immutable Task Map.
+Acceptance criteria in any Task may reference that global id directly. Do not
+copy the definition into consumer tasks: Product Delivery and Writer
+materialize referenced definitions into derived Task Contracts without
+changing the Task Map or Plan-port digest.
+
+**Candidate composition monotonicity rule:** every task-contract command runs
+again after all task refs are integrated. A focused task command must therefore
+remain valid when later tasks add files or tests. Target the exact owned test
+file or stable script; do not combine broad test auto-discovery with a name
+filter whose behavior depends on which unrelated files happen to exist. Put
+candidate-wide discovery commands under `candidate_verify` ownership. Before
+emitting, check the command against the planned final file set, not only the
+task's pre-integration worktree.
 
 Structured `acceptance_criteria[]` must use one of the four canonical
 `verification_owner` values consumed by Task Contract snapshots:
@@ -249,6 +362,13 @@ Do not use role labels such as `dev`, `verify`, `review`, `contract`, or
 `judge` as `verification_owner`. Runtime retains bounded compatibility aliases
 for older plans, but new task maps must emit the canonical values so plan
 admission and durable operation preregistration consume the same contract.
+
+For every mandatory acceptance criterion, at least one linked canonical
+`validation.commands[]` entry must have an `owner` equal to that criterion's
+`verification_owner`. Keep this owner binding identical in the task map,
+acceptance matrix, test matrix, and real-E2E matrix. A command owned only by
+`candidate_verify` cannot satisfy a criterion owned by `task_verify`, even when
+the command text would exercise the same behavior.
 
 Give every acceptance entry a stable id by prefixing the string (e.g.
 `PDD-CORE-001-AC1: ...`; the kernel accepts `acceptance_criteria` as an
@@ -276,6 +396,27 @@ are rejected by admission. If a command changes directory, still keep
 `target_root` repo-relative; for example `cd app && python -m pytest tests -q`
 is valid only when the task owns `app/tests/...` and the map declares
 `target_root: "app"`.
+
+A path is part of this check even when the Planner expects the command to read
+it without changing it. Before emitting the task map, inventory every literal
+repo-relative file or directory operand in every verification command. Bind
+each operand through this task's `allowed_paths`, this task's
+`exclusive_files`, or a sibling task's declared paths. For an existing
+validation-only regression file, assign it once to the task that owns that
+verification boundary, omit it from every other task's write scope, and state
+in `explicit_non_goals` that it must not be modified. Never duplicate a
+read-only operand across task scopes; sibling ownership satisfies the read
+contract without creating overlapping writers.
+
+When a verification command also names legitimate host, temporary, container,
+or other read-only paths that no writer task owns, declare those exact operands
+in `verification_read_paths` at the **task object level**, as a sibling of
+`allowed_paths`, `exclusive_files`, and `validation`. Do not place
+`verification_read_paths` inside `validation`; the Task Map schema ignores it
+there. Do not use `*`/`**` as a blanket escape and do not rewrite an
+owner-provided verification command into a wrapper merely to evade path
+admission. Preserve the command, copy the validator-reported read operands into
+the top-level list, then run the local pre-submit validator again.
 
 **Verification execution-context rule (ZF-E2E-RACING-P2, 2026-07-11)**: the
 structured `verification` command is machine-executed from the repository

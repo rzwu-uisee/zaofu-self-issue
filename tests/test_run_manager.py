@@ -27,6 +27,10 @@ from zf.core.events.known_types import KNOWN_EVENT_TYPES
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.state.task_attempts import (
+    TASK_ATTEMPT_IDENTITY_OPERATION_V2,
+    TaskAttemptStore,
+)
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
@@ -60,6 +64,7 @@ from zf.runtime.run_manager import (
     write_run_manager_projections,
     _candidate_rework_shadowed_by_workflow,
     _action_seen,
+    _emit_autoresearch_request,
     _emit_no_progress_run_terminal,
     _execute_repair_closeout_apply,
     _outcome_no_progress_break,
@@ -1028,6 +1033,110 @@ def test_run_manager_executes_reader_stage_replan_resume(
         for event in events
     )
     assert any(event.type == RUN_MANAGER_ACTION_VERIFY_PASSED for event in events)
+
+
+def test_latest_run_ignores_older_run_stage_replan_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    cfg = ZfConfig(
+        project=ProjectConfig(name="run-manager-multi-run"),
+        session=SessionConfig(tmux_session="run-manager-multi-run"),
+        workflow=WorkflowConfig(stages=[
+            WorkflowStageConfig(
+                id="prd-plan",
+                trigger="prd.scan.completed",
+                topology="fanout_reader",
+                aggregate=FanoutAggregateConfig(
+                    success_event="task_map.ready",
+                    failure_event="prd.plan.failed",
+                ),
+            ),
+        ]),
+    )
+    log.append(ZfEvent(
+        type="workflow.invoke.requested",
+        correlation_id="run-old",
+        payload={"workflow_run_id": "run-old"},
+    ))
+    log.append(ZfEvent(
+        type="prd.scan.completed",
+        correlation_id="run-old",
+        payload={"workflow_run_id": "run-old", "target_ref": "HEAD"},
+    ))
+    log.append(ZfEvent(
+        type="prd.plan.failed",
+        correlation_id="run-old",
+        payload={
+            "workflow_run_id": "run-old",
+            "pdd_id": "TASK-OLD",
+            "feature_id": "TASK-OLD",
+            "reason": "old plan failed",
+        },
+    ))
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "objective": "ship current"},
+    ))
+    log.append(ZfEvent(
+        type="run.goal.completed",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "status": "passed"},
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=cfg,
+    )
+
+    assert projection["goal"]["run_id"] == "run-current"
+    assert projection["completion_profile"]["status"] == "complete"
+    assert not [
+        action for action in projection["pending_actions"]
+        if action.get("safe_resume_action") == "needs_stage_replan"
+    ]
+
+
+def test_latest_run_completion_ignores_older_run_human_escalation(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id="run-old",
+        payload={"run_id": "run-old", "objective": "old"},
+    ))
+    log.append(ZfEvent(
+        type="human.escalate",
+        correlation_id="run-old",
+        payload={
+            "decision_token": "old-token",
+            "reason": "prd.plan.failed: stage replan cap exhausted",
+            "blocking_scope": "run",
+        },
+    ))
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "objective": "current"},
+    ))
+    log.append(ZfEvent(
+        type="run.goal.completed",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "status": "passed"},
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    assert projection["completion_profile"]["status"] == "complete"
+    assert projection["completion_profile"]["blocking_human_decisions"] == []
+    assert projection["monitor"]["state"] == "complete"
 
 
 def test_run_manager_fails_post_verify_when_gate_resume_checkpoint_remains(
@@ -2341,6 +2450,56 @@ def test_run_manager_tick_requests_autoresearch_once_for_attention_diagnosis(
     assert "replay_worker_briefing" in requests[0].payload["recommended_actions"]
 
 
+def test_run_manager_does_not_diagnose_informational_attention(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    supervisor_dir = state_dir / "projections" / "supervisor"
+    supervisor_dir.mkdir(parents=True)
+    (supervisor_dir / "snapshot.json").write_text(
+        json.dumps({
+            "attention_items": [{
+                "attention_id": "attn-context-warning",
+                "status": "open",
+                "fingerprint": "automation:worker.context.warning:plan",
+                "action_policy": "informational",
+                "intervention_class": "observe",
+                "recovery_policy": "none",
+                "source_event_ids": ["evt-context-warning"],
+                "suggested_route": "kernel_lifecycle",
+                "problem_envelope": {
+                    "action_policy": "informational",
+                    "intervention_class": "observe",
+                },
+            }],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        event_log=log,
+        spawn_repairs=False,
+    )
+
+    assert not any(
+        action.get("fingerprint") == "automation:worker.context.warning:plan"
+        for action in projection["pending_actions"]
+    )
+    assert result.autoresearch_requested == 0
+    assert not any(
+        event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+        for event in log.read_all()
+    )
+
+
 def test_run_manager_marks_stale_autoresearch_diagnosis_as_failed(
     tmp_path: Path,
 ) -> None:
@@ -3405,6 +3564,202 @@ def test_failure_closeout_activation_deferred_while_worker_active(
     )
 
 
+def test_failure_closeout_activation_waits_for_active_autoresearch(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    manifest = _write_failure_closeout_manifest(tmp_path)
+    writer.emit(
+        "failure.closeout.materialized",
+        actor="zf-runtime",
+        payload={
+            "schema_version": "failure-closeout.event.v1",
+            "manifest_ref": str(manifest),
+            "materialized_count": 1,
+        },
+    )
+    stale = _stale_runtime_ts(seconds=600)
+    log.append(ZfEvent(
+        type=RUN_MANAGER_AUTORESEARCH_REQUESTED,
+        id="evt-rmar-active",
+        ts=stale,
+        actor="run-manager",
+        payload={
+            "request_id": "rmar-active",
+            "checkpoint_id": "diagnose-active",
+            "fingerprint": "provider-stop-active",
+        },
+    ))
+    log.append(ZfEvent(
+        type="autoresearch.loop.started",
+        id="evt-ar-active",
+        ts=stale,
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": "rmar-active"},
+    ))
+
+    active = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+    assert not any(
+        action.get("action") == "failure-closeout-activate"
+        for action in active["pending_actions"]
+    )
+
+    log.append(ZfEvent(
+        type="autoresearch.loop.failed",
+        id="evt-ar-failed",
+        ts=_stale_runtime_ts(seconds=590),
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": "rmar-active"},
+    ))
+    terminal = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+    assert any(
+        action.get("action") == "failure-closeout-activate"
+        for action in terminal["pending_actions"]
+    )
+
+
+def test_active_autoresearch_serializes_distinct_diagnosis_requests(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    first_action = {
+        "action": "diagnose-attention",
+        "safe_resume_action": "diagnose_attention",
+        "checkpoint_id": "diagnose-provider-stop-1",
+        "fingerprint": "provider-stop-1",
+        "failure_class": "provider_stop",
+        "source_event_ids": ["evt-provider-stop-1"],
+        "summary": "first provider stop",
+    }
+    assert _emit_autoresearch_request(
+        state_dir=state_dir,
+        writer=writer,
+        action=first_action,
+        projection={},
+        project_root=tmp_path,
+        causation_id="evt-tick-1",
+    ) is True
+    first_request = [
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+    ][-1]
+    first_request_id = str(first_request.payload["request_id"])
+    writer.emit(
+        "autoresearch.loop.started",
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": first_request_id},
+    )
+    second_action = {
+        **first_action,
+        "checkpoint_id": "diagnose-provider-stop-2",
+        "fingerprint": "provider-stop-2",
+        "source_event_ids": ["evt-provider-stop-2"],
+        "summary": "second provider stop",
+    }
+
+    assert _emit_autoresearch_request(
+        state_dir=state_dir,
+        writer=writer,
+        action=second_action,
+        projection={},
+        project_root=tmp_path,
+        causation_id="evt-tick-2",
+    ) is False
+    assert len([
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+    ]) == 1
+
+    writer.emit(
+        "autoresearch.loop.failed",
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": first_request_id},
+    )
+    assert _emit_autoresearch_request(
+        state_dir=state_dir,
+        writer=writer,
+        action=second_action,
+        projection={},
+        project_root=tmp_path,
+        causation_id="evt-tick-3",
+    ) is True
+
+
+def test_operation_v2_retryable_failure_keeps_mechanical_recovery_owner(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    attempts = TaskAttemptStore(state_dir / "task_attempts.json")
+    attempt = attempts.ensure_for_dispatch(
+        run_id="RUN-1",
+        task_id="TASK-1",
+        dispatch_id="dispatch-1",
+        role="verify-lane-0",
+        instance_id="verify-lane-0",
+        operation_id="op-verify-1",
+        briefing_ref="briefings/verify.md",
+        created_at="2026-08-03T00:00:00+00:00",
+        lease_expires_at="2026-08-03T00:01:00+00:00",
+        max_attempts=3,
+        identity_version=TASK_ATTEMPT_IDENTITY_OPERATION_V2,
+        placement_epoch=1,
+    ).attempt
+    attempt_id = str(attempt["attempt_id"])
+    attempts.update(
+        attempt_id,
+        status="expired",
+        updated_at="2026-08-03T00:02:00+00:00",
+        failure_reason="provider_stop:pending_todos",
+        failure_class="task_pipeline_provider_stop",
+        retryable=True,
+        recovery_owner="run_manager",
+    )
+    failed = ZfEvent(
+        type="task.attempt.failed",
+        actor="orchestrator",
+        task_id="TASK-1",
+        payload={
+            "identity_version": "operation-v2",
+            "workflow_run_id": "RUN-1",
+            "operation_id": "op-verify-1",
+            "attempt_id": attempt_id,
+            "retryable": True,
+            "recovery_owner": "run_manager",
+            "failure_class": "task_pipeline_provider_stop",
+            "reason": "provider_stop:pending_todos",
+        },
+    )
+    log.append(failed)
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+
+    assert any(
+        action.get("action") == "worker-lifecycle-recover"
+        and action.get("attempt_id") == attempt_id
+        for action in projection["pending_actions"]
+    )
+    assert not any(
+        failed.id in action.get("source_event_ids", [])
+        and action.get("action") == "diagnose-attention"
+        for action in projection["pending_actions"]
+    )
+
+
 def test_run_manager_projects_failure_closeout_activation_for_owner_approval(
     tmp_path: Path,
 ) -> None:
@@ -3669,6 +4024,52 @@ def test_run_monitor_reports_blocked_when_completion_has_nonhuman_blockers(
 
     assert monitor["state"] == "blocked"
     assert monitor["in_flight_tasks"][0]["task_id"] == "TASK-A"
+
+
+def test_run_monitor_includes_open_workflow_attempt_and_plan_phase(
+    tmp_path: Path,
+) -> None:
+    state_dir, _log, _writer = _state(tmp_path)
+    projections_dir = state_dir / "projections"
+    projections_dir.mkdir(parents=True)
+    (projections_dir / "task_attempts.json").write_text(
+        json.dumps({
+            "schema_version": "shadow-spine.v1",
+            "tasks": {
+                "FLOW-PLAN-1": {
+                    "latest_state": "running",
+                    "current_owner": "refactor-plan-synth",
+                    "open_attempts": 1,
+                    "attempts": [{
+                        "attempt_key": "attempt-plan-1",
+                        "state": "running",
+                        "role": "refactor-plan-synth",
+                        "lease_state": "held",
+                    }],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    monitor = build_run_monitor_projection(
+        state_dir,
+        events=[ZfEvent(
+            type="fanout.child.dispatched",
+            payload={"stage_id": "flow-plan"},
+        )],
+        pending_actions=[],
+    )
+
+    assert monitor["current_phase"] == "plan"
+    assert monitor["in_flight_tasks"] == [{
+        "task_id": "FLOW-PLAN-1",
+        "status": "running",
+        "assigned_to": "refactor-plan-synth",
+        "title": "",
+        "source_ref": "projections/task_attempts.json#tasks.FLOW-PLAN-1",
+    }]
+    assert monitor["lane_occupancy"] == {"refactor-plan-synth": 1}
 
 
 def test_run_manager_monitor_keeps_blocking_when_monitor_blocked_with_auto_action(
@@ -4562,6 +4963,61 @@ def test_verified_checkpoint_apply_fails_closed_when_continuation_is_stale(
     assert blocked.payload["continuation_stale_reason"] == "already_applied"
 
 
+def test_verified_checkpoint_apply_records_blocked_receipt_as_blocked(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    action = {
+        "action": "repair-closeout-apply",
+        "checkpoint_id": "repair-apply-blocked",
+        "queue_id": "C-APPLY-BLOCKED",
+        "candidate_id": "C-APPLY-BLOCKED",
+        "worktree_path": str(tmp_path / "repair"),
+        "base_commit": "base-1",
+        "repair_commit": "repair-2",
+        "validation_event_id": "evt-validation-passed",
+        "continuation_checkpoint_id": "wfres-original",
+        "continuation_safe_resume_action": "needs_stage_dispatch",
+        "allow_paths": ["src/zf/**", "tests/**"],
+        "deny_paths": [".env"],
+    }
+
+    with patch(
+        "zf.runtime.self_repair_runner.harness_root",
+        return_value=tmp_path / "harness",
+    ), patch(
+        "zf.runtime.source_repair_apply.apply_verified_checkpoint_repair",
+        return_value={
+            "ok": False,
+            "status": "blocked",
+            "reason": "repair_commit_count_invalid",
+            "commit_count": 2,
+        },
+    ):
+        status = _execute_repair_closeout_apply(
+            state_dir=state_dir,
+            writer=writer,
+            project_root=tmp_path,
+            action=action,
+            causation_id="evt-cause",
+        )
+
+    assert status == "blocked"
+    events = log.read_all()
+    blocked = next(
+        event for event in events
+        if event.type == RUN_MANAGER_ACTION_BLOCKED
+        and event.payload.get("action") == "repair-closeout-apply"
+    )
+    assert blocked.payload["reason"] == "repair_commit_count_invalid"
+    assert blocked.payload["apply_receipt"]["status"] == "blocked"
+    assert not any(
+        event.type == RUN_MANAGER_ACTION_FAILED
+        and event.payload.get("action") == "repair-closeout-apply"
+        for event in events
+    )
+
+
 def test_verified_checkpoint_apply_emits_receipt_restart_and_waits_for_rebind(
     tmp_path: Path,
 ) -> None:
@@ -4790,6 +5246,87 @@ def test_goal_identity_failure_uses_one_aggregate_rebuild_before_autoresearch(
     )
 
 
+def test_goal_closure_schema_discriminator_routes_to_aggregate_rebuild(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    fanout_id = "fanout-goal-closure"
+    manifest_path = state_dir / "fanouts" / fanout_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({
+        "fanout_id": fanout_id,
+        "aggregate_config": {
+            "success_event": "goal.closure.synthesized",
+        },
+        "children": [{"child_id": "judge", "status": "completed"}],
+    }), encoding="utf-8")
+    blocked = writer.emit(
+        "discriminator.failed",
+        correlation_id="run-goal-schema",
+        payload={
+            "workflow_run_id": "run-goal-schema",
+            "goal_id": "GOAL-SCHEMA",
+            "fanout_id": fanout_id,
+            "failed_d": ["EventSchemaD"],
+            "blocked_event_id": "evt-blocked-goal-closure",
+            "blocked_event_type": "goal.closure.synthesized",
+            "blocked_event_payload": {
+                "workflow_run_id": "run-goal-schema",
+                "goal_id": "GOAL-SCHEMA",
+                "fanout_id": fanout_id,
+            },
+        },
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+        project_root=tmp_path,
+    )
+    rebuilds = [
+        item for item in projection["pending_actions"]
+        if item.get("action") == "fanout-aggregate-rebuild"
+    ]
+
+    assert len(rebuilds) == 1
+    assert rebuilds[0]["source_event_id"] == blocked.id
+    assert rebuilds[0]["failure_class"] == (
+        "goal_closure_aggregate_schema_failed"
+    )
+    assert rebuilds[0]["policy_decision"]["decision"] == "auto_decide"
+
+    tick = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        project_root=tmp_path,
+        spawn_repairs=False,
+        action_filter={"fanout-aggregate-rebuild"},
+    )
+
+    assert tick.actions_applied == 1
+    request = next(
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    )
+    assert request.payload["source_event_id"] == blocked.id
+    assert request.payload["expected_success_event"] == (
+        "goal.closure.synthesized"
+    )
+    effect = next(
+        event for event in log.read_all()
+        if event.type == "run.manager.action.effect.pending"
+    )
+    assert effect.payload["expected_event_types"] == [
+        "goal.closure.synthesized"
+    ]
+    assert not any(
+        event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+        for event in log.read_all()
+    )
+
+
 def test_goal_identity_rebuild_is_not_starved_by_diagnostic_noise(
     tmp_path: Path,
 ) -> None:
@@ -4878,6 +5415,44 @@ def test_legacy_goal_rebuild_effect_settles_without_terminal_deadlock(
     )
     assert passed.payload["observed_event_id"] == goal_closed.id
     assert passed.payload["observed_event_type"] == "flow.goal.closed"
+
+
+def test_legacy_goal_schema_rebuild_effect_settles_on_synthesized_result(
+    tmp_path: Path,
+) -> None:
+    from zf.runtime.run_manager import _settle_pending_action_effects
+
+    _state_dir, log, writer = _state(tmp_path)
+    writer.emit(
+        "run.manager.action.effect.pending",
+        correlation_id="run-goal-schema-legacy",
+        payload={
+            "schema_version": "run-manager.action.effect.v1",
+            "action": "fanout-aggregate-rebuild",
+            "failure_class": "goal_closure_aggregate_schema_failed",
+            "workflow_run_id": "run-goal-schema-legacy",
+            "effect_id": "effect-legacy-schema-rebuild",
+            "expected_event_types": ["flow.goal.closed"],
+            "failure_event_types": ["goal.closure.synthesis.failed"],
+            "required_sequence": [],
+            "status": "pending",
+        },
+    )
+    synthesized = writer.emit(
+        "goal.closure.synthesized",
+        correlation_id="run-goal-schema-legacy",
+        payload={"workflow_run_id": "run-goal-schema-legacy"},
+    )
+
+    assert _settle_pending_action_effects(log.read_all(), writer) == 1
+    passed = next(
+        event for event in log.read_all()
+        if event.type == "run.manager.action.effect.passed"
+    )
+    assert passed.payload["observed_event_id"] == synthesized.id
+    assert passed.payload["observed_event_type"] == (
+        "goal.closure.synthesized"
+    )
 
 
 def test_run_manager_tick_executes_only_continuation_next_operation(
@@ -5210,6 +5785,28 @@ def test_run_goal_completion_claim_is_blocked_while_feedback_is_open() -> None:
     assert blocked.payload["blockers"] == ["open_feedback", "pending_handoff"]
 
 
+def test_run_goal_completion_claim_rejects_explicit_non_passed_closure() -> None:
+    from zf.runtime.run_manager import run_goal_completion_claim_event
+
+    run_id = "R-NON-PASSED-CLOSURE"
+    events = [ZfEvent(type="run.goal.started", payload={"run_id": run_id})]
+    for verdict in ("blocked", "rejected"):
+        cause = ZfEvent(
+            id=f"closure-{verdict}",
+            type="goal.closure.synthesized",
+            correlation_id=run_id,
+            payload={
+                "goal_closure_result": {
+                    "workflow_run_id": run_id,
+                    "goal_id": run_id,
+                    "verdict": verdict,
+                },
+            },
+        )
+
+        assert run_goal_completion_claim_event(events, cause=cause) is None
+
+
 def test_run_goal_completion_gate_closes_once_after_independent_verify() -> None:
     from zf.runtime.run_manager import (
         run_goal_completion_claim_event,
@@ -5266,6 +5863,125 @@ def test_run_goal_completion_gate_closes_once_after_independent_verify() -> None
     assert projection["delivery_phase"] == "goal_completed"
     assert projection["open_feedback_count"] == 0
     assert projection["pending_handoff_count"] == 0
+
+
+def test_goal_gate_uses_unscoped_candidate_commit_stack_in_shared_state() -> None:
+    from zf.runtime.run_manager import run_goal_completion_gate_event
+
+    run_id = "R-CANDIDATE"
+    repaired_commit = "b" * 40
+    task_tip = "d" * 40
+    candidate_commit = "c" * 40
+    claim = ZfEvent(
+        id="claim-candidate",
+        type="run.goal.completion.claimed",
+        correlation_id=run_id,
+        payload={"run_id": run_id, "claim_id": "claim-candidate"},
+    )
+    events = [
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id=run_id,
+            payload={"run_id": run_id},
+        ),
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="R-OTHER",
+            payload={"run_id": "R-OTHER"},
+        ),
+        ZfEvent(
+            type="task.rework.requested",
+            id="rework-candidate",
+            task_id="T-1",
+            correlation_id=run_id,
+            payload={
+                "task_id": "T-1",
+                "workflow_run_id": run_id,
+                "contract_revision": "rev-1",
+                "task_map_generation": "gen-1",
+                "dispatch_id": "impl-dispatch",
+                "finding_ids": ["finding-1"],
+            },
+        ),
+        ZfEvent(
+            type="task.dispatched",
+            task_id="T-1",
+            correlation_id=run_id,
+            causation_id="rework-candidate",
+            payload={
+                "task_id": "T-1",
+                "workflow_run_id": run_id,
+                "dispatch_id": "impl-dispatch",
+                "rework_request_event_id": "rework-candidate",
+            },
+        ),
+        ZfEvent(
+            type="dev.build.done",
+            task_id="T-1",
+            correlation_id=run_id,
+            payload={
+                "task_id": "T-1",
+                "workflow_run_id": run_id,
+                "contract_revision": "rev-1",
+                "task_map_generation": "gen-1",
+                "dispatch_id": "impl-dispatch",
+                "source_commit": repaired_commit,
+            },
+        ),
+        ZfEvent(
+            type="task.ref.updated",
+            task_id="T-1",
+            correlation_id=run_id,
+            payload={
+                "task_id": "T-1",
+                "workflow_run_id": run_id,
+                "source_commit": task_tip,
+            },
+        ),
+        ZfEvent(
+            type="candidate.task_ref.applied",
+            id="candidate-apply",
+            task_id="T-1",
+            causation_id="candidate-integration",
+            payload={
+                "source_commit": task_tip,
+                "task_commits": [repaired_commit, task_tip],
+                "applied_commits": [repaired_commit, task_tip],
+                "commit": candidate_commit,
+            },
+        ),
+        ZfEvent(
+            type="candidate.ready",
+            correlation_id=run_id,
+            payload={
+                "workflow_run_id": run_id,
+                "candidate_ref": "candidate/F-1",
+                "candidate_base_commit": "a" * 40,
+                "candidate_head_commit": candidate_commit,
+                "completed_task_ids": ["T-1"],
+                "task_map_generation": "gen-1",
+            },
+        ),
+        ZfEvent(
+            type="test.passed",
+            correlation_id=run_id,
+            payload={
+                "workflow_run_id": run_id,
+                "target_ref": "candidate/F-1",
+                "task_map_generation": "gen-1",
+                "status": "completed",
+            },
+        ),
+        claim,
+    ]
+
+    projection = build_run_goal_projection(events, run_id=run_id)
+    completion = run_goal_completion_gate_event(events, claim=claim)
+
+    assert projection["open_feedback_count"] == 0
+    assert projection["pending_handoff_count"] == 0
+    assert completion is not None
+    assert completion.type == "run.goal.completed"
 
 
 def test_goal_completion_waits_for_fanout_and_action_effect() -> None:
@@ -5971,6 +6687,33 @@ def test_run_manager_ignores_shadow_plan_package_rejection() -> None:
     actions = _pending_semantic_event_actions([blocking])
     assert len(actions) == 1
     assert actions[0]["failure_class"] == "plan_artifact_package_rejected"
+
+
+def test_run_manager_leaves_compiled_generic_stage_failure_to_kernel_replan() -> None:
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    owned = ZfEvent(
+        type="scope.failed",
+        payload={
+            "flow_kind": "workflow",
+            "stage_id": "scope",
+            "generic_workflow_contract_digest": "a" * 64,
+            "reason": "reader result needs correction",
+        },
+    )
+    spoofed = ZfEvent(
+        type="scope.failed",
+        payload={
+            "flow_kind": "workflow",
+            "stage_id": "scope",
+            "reason": "missing compiled contract identity",
+        },
+    )
+
+    assert _pending_semantic_event_actions([owned]) == []
+    actions = _pending_semantic_event_actions([spoofed])
+    assert len(actions) == 1
+    assert actions[0]["failure_class"] == "unknown_actionable_event"
 
 
 def test_run_manager_does_not_diagnose_kernel_consumed_context_warning(

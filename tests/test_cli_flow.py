@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -89,6 +90,8 @@ def test_flow_draft_issue_outputs_short_issue_flow(tmp_path):
             "zf-harness-state-sync",
         ],
     }]
+    config = load_config(output)
+    assert config.workflow.orchestration.mode == "exception_advisor"
 
 
 def test_flow_draft_issue_defaults_to_single_lane(tmp_path):
@@ -165,6 +168,7 @@ def test_flow_draft_prd_embeds_executable_claude_runtime_profile(tmp_path):
     assert orchestrator.triggers == [
         "dispatch.silent_stall",
         "orchestrator.rework.triage.requested",
+        "orchestrator.semantic.checkpoint.requested",
     ]
     assert orchestrator.publishes == ["orchestrator.rework.triage.recorded"]
     planner = next(role for role in config.roles if role.name == "planner")
@@ -311,6 +315,10 @@ def test_flow_intake_writes_manifest_and_json(tmp_path, capsys):
     assert data["intake_json_ref"] == str(intake_json)
     assert data["intake_markdown_ref"] == str(intake)
     assert (tmp_path / "artifacts" / "workflow" / "wfint-test" / "skill-adapter-plan.json").exists()
+    skill_plan_path = (
+        tmp_path / "artifacts" / "workflow" / "wfint-test"
+        / "skill-adapter-plan.json"
+    )
     for key in (
         "source_inventory_ref",
         "capability_matrix_ref",
@@ -327,6 +335,13 @@ def test_flow_intake_writes_manifest_and_json(tmp_path, capsys):
         assert enrichment["owner"] == "project-adapter-skill"
         assert "scan" in enrichment["adapter_skill_phases"]
         assert enrichment["command_policy"]["mode"] == "declared_only"
+        adapter_skills = matrix["metadata"]["adapter_skills"]
+        assert adapter_skills
+        assert all(set(item) == {"name", "sha256"} for item in adapter_skills)
+        assert matrix["metadata"]["adapter_skill_plan_ref"] == str(skill_plan_path)
+        assert matrix["metadata"]["adapter_skill_plan_digest"] == hashlib.sha256(
+            skill_plan_path.read_bytes()
+        ).hexdigest()
 
 
 def test_flow_intake_defaults_backend_from_project_config(tmp_path, capsys):
@@ -439,8 +454,12 @@ Build a dependency-free Node.js CLI under app/.
     assert any("add \"buy milk\"" in item for item in criteria)
     assert any("node src/index.js list" in item for item in criteria)
     assert any("node src/index.js help" in item for item in criteria)
-    cli_tests = [row for row in tests["tests"] if row["capability_id"] == "prd-cli"]
-    assert cli_tests and "npm test" in cli_tests[0]["commands"]
+    cli_tests = [
+        row for row in tests["commands"]
+        if row["capability_id"] == "prd-cli"
+    ]
+    assert cli_tests and "npm test" in cli_tests[0]["command"]
+    assert "tests" not in tests
     assert e2e["rows"]
     assert e2e["rows"][0]["surface"] == "cli"
     assert e2e["rows"][0]["command_source"] == "source_prd"
@@ -492,9 +511,8 @@ def test_flow_intake_does_not_execute_cli_usage_placeholders(
         Path(manifest["test_matrix_ref"]).read_text(encoding="utf-8")
     )
     commands = [
-        command
-        for row in tests["tests"]
-        for command in row.get("commands", [])
+        row["command"] for row in tests["commands"]
+        if row.get("command")
     ]
     assert commands == ["python -m unittest discover -s tests -v"]
 
@@ -1921,6 +1939,57 @@ def test_flow_preflight_refactor_target_git_and_overlap_guards(tmp_path, capsys)
     )
 
 
+def test_flow_preflight_refactor_rejects_symlink_overlap(tmp_path, capsys):
+    target = tmp_path / "target"
+    nested_source = target / "legacy"
+    target.mkdir()
+    nested_source.mkdir()
+    _git(target, "init")
+    source_alias = tmp_path / "source-alias"
+    source_alias.symlink_to(nested_source, target_is_directory=True)
+    config = _draft_refactor_config(tmp_path, source_alias, target)
+    capsys.readouterr()
+
+    report = _preflight_report(config, capsys)
+
+    assert any(
+        item["kind"] == "workflow_source_target_overlap"
+        for item in report["blockers"]
+    )
+
+
+def test_flow_preflight_refactor_rejects_explicit_intake_root_conflict(
+    tmp_path,
+    capsys,
+):
+    configured_source = tmp_path / "configured-source"
+    requested_source = tmp_path / "requested-source"
+    target = tmp_path / "target"
+    for root in (configured_source, requested_source, target):
+        root.mkdir()
+        _git(root, "init")
+    config = _draft_refactor_config(tmp_path, configured_source, target)
+    intake = target / "docs" / "intake" / "refactor-conflict.md"
+    assert main([
+        "flow", "intake",
+        "--kind", "refactor",
+        "--from", str(tmp_path / "refactor.md"),
+        "--source-root", str(requested_source),
+        "--target", str(target),
+        "--request-id", "wfint-root-conflict",
+        "--output", str(intake),
+    ]) == 0
+    capsys.readouterr()
+
+    report = _preflight_report(config, capsys, "--intake", str(intake))
+
+    conflicts = [
+        item for item in report["blockers"]
+        if item["kind"] == "workflow_root_binding_conflict"
+    ]
+    assert [item["root_field"] for item in conflicts] == ["source_root"]
+
+
 def test_flow_preflight_refactor_source_baseline_drift_stops(tmp_path, capsys):
     source = tmp_path / "source"
     target = tmp_path / "target"
@@ -2002,6 +2071,14 @@ def test_flow_preflight_refactor_uses_intake_roots_when_yaml_is_thin(
     assert report["effective_flow_metadata"]["target_root"] == str(target)
     assert report["refactor_safety"]["source_root"] == str(source)
     assert report["refactor_safety"]["target_root"] == str(target)
+    root_binding = report["refactor_safety"]["root_binding"]
+    assert root_binding["source_root"] == str(source.resolve())
+    assert root_binding["target_root"] == str(target.resolve())
+    assert len(root_binding["digest"]) == 64
+    contract_binding = report["run_contract"]["preview"]["workflow"][
+        "root_binding"
+    ]
+    assert contract_binding == root_binding
 
 
 def test_flow_preflight_refactor_allows_project_git_target_subdir(

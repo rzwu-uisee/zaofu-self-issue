@@ -16,16 +16,21 @@ GOAL_CLOSURE_SUCCESS_EVENT = "goal.closure.synthesized"
 # R23 (synth 6h stall): the aggregator's whole job is READING child reports /
 # briefings / instructions — without read tools in the allowlist every Read
 # prompts interactively and a headless synth hangs forever. Read-only tools
-# keep the policy's write-protection intent (no Edit/Write/bare Bash) intact.
+# keep the policy's write-protection intent (no Write/bare Bash) intact. Edit
+# is required by the signed result-scratch protocol; the pre-tool guard admits
+# it only for the current operation's pre-created scratch file.
 CLAUDE_AGGREGATOR_READONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+CLAUDE_AGGREGATOR_RESULT_TOOLS: tuple[str, ...] = ("Edit",)
 
 CLAUDE_AGGREGATOR_ALLOWED_TOOLS: tuple[str, ...] = (
     *CLAUDE_AGGREGATOR_READONLY_TOOLS,
+    *CLAUDE_AGGREGATOR_RESULT_TOOLS,
     "Bash(zf emit *)",
     "Bash(zf events *)",
     "Bash(zf trace show *)",
     "Bash(zf artifact list *)",
     "Bash(zf artifact read *)",
+    "Bash(zf result submit *)",
     "Bash(cat .zf/artifacts/*)",
 )
 
@@ -50,10 +55,12 @@ def claude_aggregator_allowed_tools(config: ZfConfig | None) -> tuple[str, ...]:
             "trace show",
             "artifact list",
             "artifact read",
+            "result submit",
         )
     )
     return (
         *CLAUDE_AGGREGATOR_READONLY_TOOLS,
+        *CLAUDE_AGGREGATOR_RESULT_TOOLS,
         *cli_tools,
         f"Bash(cat {state_dir}/artifacts/*)",
     )
@@ -255,10 +262,18 @@ def _apply_readonly_role_policy(
         if not allowed_tools:
             allowed_tools = list(default_tools)
         else:
-            # The read-only tools are load-bearing (a synth without Read
-            # stalls headless on permission prompts) — always include them.
+            # Read and signed-result Edit are load-bearing. Without Read the
+            # synth stalls headless; without Edit it cannot complete the
+            # pre-created result scratch required by ``zf result submit``.
             allowed_tools = [
-                *[t for t in CLAUDE_AGGREGATOR_READONLY_TOOLS if t not in allowed_tools],
+                *[
+                    t
+                    for t in (
+                        *CLAUDE_AGGREGATOR_READONLY_TOOLS,
+                        *CLAUDE_AGGREGATOR_RESULT_TOOLS,
+                    )
+                    if t not in allowed_tools
+                ],
                 *allowed_tools,
             ]
         # R24: the tool allowlist alone is not enough — briefings/instructions/

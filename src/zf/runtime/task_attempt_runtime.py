@@ -9,41 +9,35 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from zf.core.events.model import ZfEvent
-from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.task_attempts import (
     TaskAttemptLimitError,
     TaskAttemptStore,
 )
 from zf.runtime.attempt_ledger import derive_task_ledger
+from zf.runtime.call_result_runtime import has_admitted_semantic_submit_provenance
 from zf.runtime.run_admission import task_workflow_run_id
+from zf.runtime.task_attempt_briefing import (
+    bind_task_attempt_to_briefing as _bind_attempt_to_briefing,
+)
+from zf.runtime.task_attempt_operation_settlement import (
+    settle_terminal_operation_attempt,
+)
+from zf.runtime.task_attempt_terminal import (
+    admitted_result_status as _admitted_result_status,
+    clear_matching_active_dispatch as _clear_matching_active_dispatch,
+    result_status as _result_status,
+)
+from zf.runtime.task_pipeline_attempt_recovery import (
+    emit_task_pipeline_attempt_failure,
+    mark_expired_task_pipeline_attempts,
+    reconcile_expired_task_pipeline_attempt,
+    task_attempt_identity,
+    task_attempt_identity_version,
+)
 from zf.runtime.transport import DispatchContext
 
 
 TASK_ATTEMPT_SCHEMA_VERSION = "task-attempt.v1"
-_BRIEFING_MARKER = "<!-- ZF:TASK-ATTEMPT -->"
-_SUCCESS_EVENTS = frozenset({
-    "arch.proposal.done",
-    "design.critique.done",
-    "dev.build.done",
-    "review.approved",
-    "verify.passed",
-    "test.passed",
-    "judge.passed",
-    "task.done.evidence",
-    "worker.completed",
-})
-_FAILURE_EVENTS = frozenset({
-    "dev.failed",
-    "dev.blocked",
-    "review.rejected",
-    "review.suspended",
-    "verify.failed",
-    "test.failed",
-    "test.suspended",
-    "judge.failed",
-})
-
-
 class TaskAttemptDeliveryClaimedError(RuntimeError):
     """The delivery outcome is already sent or crash-ambiguous."""
 
@@ -153,6 +147,9 @@ def prepare_task_attempt(
     )
     now = _now()
     store = task_attempt_store(runtime)
+    task_pipeline_stage = str(context.task_pipeline_stage or "").strip()
+    identity_version = task_attempt_identity_version(task_pipeline_stage)
+    placement_epoch = int(context.placement_epoch or 0)
     try:
         ensured = store.ensure_for_dispatch(
             run_id=run_id,
@@ -169,6 +166,9 @@ def prepare_task_attempt(
                 if _attempt_mode(runtime) == "enforce"
                 else 0
             ),
+            parent_task_id=str(context.parent_task_id or ""),
+            identity_version=identity_version,
+            placement_epoch=placement_epoch,
         )
     except TaskAttemptLimitError:
         _emit_attempt_exhausted(
@@ -303,7 +303,9 @@ def validate_task_attempt_result(
 ) -> str:
     """Return a rejection reason in enforce mode; shadow mode only audits."""
 
-    if _trusted_kernel_event(event):
+    if _trusted_kernel_event(event) or has_admitted_semantic_submit_provenance(
+        runtime, event,
+    ):
         return ""
     payload = _payload(event)
     run_id = task_workflow_run_id(task)
@@ -360,11 +362,26 @@ def validate_task_attempt_result(
 def settle_task_attempt_result(runtime: Any, event: ZfEvent) -> None:
     """Settle canonical attempt state only after ordinary lifecycle admission."""
 
+    if event.type in {
+        "task.attempt.succeeded",
+        "task.attempt.failed",
+        "task.attempt.superseded",
+        "task.attempt.deadlettered",
+    }:
+        _clear_matching_active_dispatch(runtime, event)
+        return
     if (
-        event.type == "workflow.operation.settled"
+        event.type in {
+            "workflow.operation.settled",
+            "workflow.operation.failed",
+            "workflow.operation.blocked",
+            "workflow.operation.superseded",
+            "workflow.operation.interrupted",
+            "workflow.operation.cancelled",
+        }
         and _trusted_kernel_event(event)
     ):
-        _settle_admitted_operation_attempt(runtime, event)
+        settle_terminal_operation_attempt(runtime, event)
         return
     if _trusted_kernel_event(event) or event.type.startswith("task.attempt."):
         return
@@ -375,6 +392,12 @@ def settle_task_attempt_result(runtime: Any, event: ZfEvent) -> None:
     payload = _payload(event)
     current = _resolve_event_attempt(store, event)
     if current is None:
+        return
+    if str(current.get("status") or "") not in {
+        "prepared",
+        "delivering",
+        "sent",
+    }:
         return
     expected = _identity(current)
     if any(
@@ -503,9 +526,16 @@ def reconcile_task_attempts(runtime: Any) -> int:
     changed = 0
     for event in events:
         if (
-            event.type == "workflow.operation.settled"
+            event.type in {
+                "workflow.operation.settled",
+                "workflow.operation.failed",
+                "workflow.operation.blocked",
+                "workflow.operation.superseded",
+                "workflow.operation.interrupted",
+                "workflow.operation.cancelled",
+            }
             and _trusted_kernel_event(event)
-            and _settle_admitted_operation_attempt(
+            and settle_terminal_operation_attempt(
                 runtime,
                 event,
                 events_by_id=events_by_id,
@@ -514,7 +544,12 @@ def reconcile_task_attempts(runtime: Any) -> int:
             )
         ):
             changed += 1
-    store.expire(now_iso=_now(), is_expired=_expired)
+    expired_rows = store.expire(now_iso=_now(), is_expired=_expired)
+    mark_expired_task_pipeline_attempts(
+        store,
+        expired_rows,
+        updated_at=_now(),
+    )
     for row in store.rows():
         attempt_id = str(row.get("attempt_id") or "")
         if not attempt_id:
@@ -530,6 +565,14 @@ def reconcile_task_attempts(runtime: Any) -> int:
             )
             changed += 1
         if str(row.get("status") or "") != "expired":
+            continue
+        pipeline_changed = reconcile_expired_task_pipeline_attempt(
+            runtime,
+            row,
+            events=events,
+        )
+        if pipeline_changed is not None:
+            changed += pipeline_changed
             continue
         _emit_attempt_failure(runtime, row, reason="lease_expired")
         if _attempt_mode(runtime) != "enforce":
@@ -568,6 +611,8 @@ def _settle_admitted_operation_attempt(
 
 
 def _emit_attempt_failure(runtime: Any, row: dict[str, Any], *, reason: str) -> None:
+    if emit_task_pipeline_attempt_failure(runtime, row, reason=reason):
+        return
     attempt_id = str(row.get("attempt_id") or "")
     task_id = str(row.get("task_id") or "")
     enforce = _attempt_mode(runtime) == "enforce"
@@ -809,42 +854,8 @@ def _requeue_expired_task(runtime: Any, row: dict[str, Any]) -> None:
     getattr(runtime, "_active_dispatch_ids", {}).pop(task_id, None)
 
 
-def _bind_attempt_to_briefing(path: Path, attempt: dict[str, Any]) -> None:
-    try:
-        body = path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    if _BRIEFING_MARKER in body:
-        return
-    identity = _identity(attempt)
-    section = (
-        "\n\n"
-        f"{_BRIEFING_MARKER}\n"
-        "## Runtime TaskAttempt Identity\n\n"
-        "The kernel bound this delivery to one scheduler-owned attempt. "
-        "Completion and heartbeat events must preserve these exact values; "
-        "`zf emit --task ...` auto-fills them from canonical runtime state.\n\n"
-        f"- workflow_run_id: `{identity['workflow_run_id']}`\n"
-        f"- operation_id: `{identity['operation_id']}`\n"
-        f"- attempt_id: `{identity['attempt_id']}`\n"
-        f"- lease_id: `{identity['lease_id']}`\n"
-        f"- dispatch_id: `{identity['dispatch_id']}`\n"
-    )
-    atomic_write_text(path, body.rstrip() + section)
-
-
 def _identity(row: dict[str, Any]) -> dict[str, str]:
-    run_id = str(row.get("run_id") or row.get("workflow_run_id") or "")
-    return {
-        "schema_version": TASK_ATTEMPT_SCHEMA_VERSION,
-        "workflow_run_id": run_id,
-        "run_id": run_id,
-        "task_id": str(row.get("task_id") or ""),
-        "operation_id": str(row.get("operation_id") or ""),
-        "attempt_id": str(row.get("attempt_id") or ""),
-        "lease_id": str(row.get("lease_id") or ""),
-        "dispatch_id": str(row.get("dispatch_id") or ""),
-    }
+    return task_attempt_identity(row)
 
 
 def _emit_once(
@@ -892,14 +903,6 @@ def _has_attempt_event(
             continue
         return True
     return False
-
-
-def _result_status(event_type: str) -> str:
-    if event_type in _SUCCESS_EVENTS or event_type.endswith(".child.completed"):
-        return "succeeded"
-    if event_type in _FAILURE_EVENTS or event_type.endswith(".child.failed"):
-        return "failed"
-    return ""
 
 
 def _attempt_mode(runtime: Any) -> str:

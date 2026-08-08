@@ -81,7 +81,8 @@ def test_make_transport_registers_stream_json_role_config(
     assert registered.allowed_tools == ["Read", "Bash(zf events *)"]
     assert registered.permission_mode == "allowlist"
     assert registered.model == "claude-sonnet-4-6"
-    assert stream_json.is_alive("orchestrator") is True
+    assert stream_json.is_alive("orchestrator") is False
+    assert stream_json._background_dispatch is True
 
 
 def test_send_task_routes_to_correct_underlying(tmp_path: Path, monkeypatch):

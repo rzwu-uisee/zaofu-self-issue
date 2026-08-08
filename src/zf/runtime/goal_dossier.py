@@ -112,9 +112,14 @@ def build_goal_dossier(
     terminal = terminal if isinstance(terminal, dict) else {}
     authoritative_tasks = history.get("authoritative_tasks")
     historical_tasks = history.get("historical_tasks")
+    current_generation_tasks = history.get("current_generation_tasks")
     tasks = (
         list(authoritative_tasks)
         if terminal and isinstance(authoritative_tasks, list)
+        else list(current_generation_tasks)
+        if isinstance(current_generation_tasks, list)
+        else list(historical_tasks)
+        if isinstance(historical_tasks, list)
         else current_tasks
     )
     task_ids = [str(task.get("id") or "") for task in tasks]
@@ -230,6 +235,7 @@ def build_goal_dossier(
                 else tasks
             ),
             "current_overlay": history.get("current_overlay") or {},
+            "superseded_tasks": history.get("superseded_tasks") or [],
             "progress": progress,
             "handoff": handoff,
         },

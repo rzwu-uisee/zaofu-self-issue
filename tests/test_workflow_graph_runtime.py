@@ -32,6 +32,8 @@ from zf.runtime.workflow_reconciler import WorkflowGraphReconciler
 from zf.runtime.orchestrator_reactor import EventReactorMixin
 from zf.web.server import create_app
 from zf.web.projections.workflow_graph import (
+    _task_pipeline_overlay,
+    _workflow_config_signature,
     _workflow_judge_configured,
     _workflow_terminal_success_event,
 )
@@ -1040,6 +1042,33 @@ def test_workflow_graph_web_projection_adds_compiled_graph(tmp_path: Path) -> No
 
     assert data["compiled_graph"]["schema_version"] == "workflow-graph.v1"
     assert data["workflow_node_runs"]["schema_version"] == "workflow-node-run.v1"
+
+
+def test_workflow_graph_keeps_composite_task_pipeline_visible(tmp_path: Path) -> None:
+    cfg = ZfConfig()
+    cfg.workflow.flow_metadata_by_kind = {
+        kind: {
+            "task_pipeline": {
+                "mode": "blocking",
+                "profile_digest": digest * 64,
+            }
+        }
+        for kind, digest in (("issue", "1"), ("prd", "2"))
+    }
+
+    overlay, nodes, edges = _task_pipeline_overlay(
+        tmp_path,
+        config=cfg,
+        role_node_by_ref={},
+    )
+    signature = _workflow_config_signature(cfg, stages=[], roles=[])
+
+    assert overlay["schema_version"] == "task-pipeline-graph-overlay.v1"
+    assert nodes == []
+    assert edges == []
+    assert signature["task_pipeline_profile_digest"] == (
+        f"{'1' * 64},{'2' * 64}"
+    )
 
 
 def test_workflow_graph_web_projection_uses_read_model_cache(

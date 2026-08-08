@@ -1763,6 +1763,44 @@ def test_candidate_quality_gate_failure_blocks_updated_result(tmp_path: Path):
     assert "candidate.updated" not in event_types
 
 
+def test_task_contract_quality_failure_records_failed_task_id(tmp_path: Path):
+    _init_repo(tmp_path)
+    state_dir, config, log = _state(tmp_path)
+    commit = _task_commit(
+        tmp_path,
+        branch="worker/TASK-1",
+        file_name="a.txt",
+        content="TASK-1\n",
+        message="TASK-1",
+    )
+    _record_task_ref(
+        tmp_path,
+        state_dir,
+        config,
+        task_id="TASK-1",
+        commit=commit,
+        branch="worker/TASK-1",
+    )
+    _add_task(state_dir, log, task_id="TASK-1", verification="false")
+    _approve(log, "TASK-1")
+
+    result = _rebuilder(tmp_path, state_dir, config, log).rebuild(
+        "F-11111111",
+        event_writer=EventWriter(log),
+    )
+
+    assert result is not None
+    assert result.status == "quality_failed"
+    assert result.payload["failed_task_ids"] == ["TASK-1"]
+    assert result.payload["quality"]["failed_task_ids"] == ["TASK-1"]
+    failed = [
+        event
+        for event in log.read_all()
+        if event.type == "candidate.quality.failed"
+    ]
+    assert failed[-1].payload["failed_task_ids"] == ["TASK-1"]
+
+
 def test_candidate_dirty_worktree_blocks_updated_result(tmp_path: Path):
     _init_repo(tmp_path)
     state_dir, _, log = _state(tmp_path)

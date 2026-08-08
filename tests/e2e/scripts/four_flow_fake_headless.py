@@ -89,6 +89,13 @@ def _prompt_context(prompt: str) -> dict[str, Any]:
     return {}
 
 
+def _prompt_task_id(prompt: str) -> str:
+    for line in prompt.splitlines():
+        if line.startswith("task_id: "):
+            return line.removeprefix("task_id: ").strip()
+    return ""
+
+
 def _synthesis_contract(prompt: str) -> dict[str, Any]:
     marker = "Contract:\n"
     if marker not in prompt:
@@ -181,6 +188,7 @@ def _channel_setup_plan() -> dict[str, Any]:
                         "channel_id": channel_id,
                         "name": "Four-flow minimal PRD",
                         "thread_id": "main",
+                        "mode": "multi_lens",
                         "overrides": {
                             "backend": "fake",
                             "budget": {"max_rounds": 2},
@@ -241,7 +249,7 @@ def _canonical_prd(context: Mapping[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _task_proposal(
+def _task_create_plan(
     *,
     prompt: str,
     marker: str,
@@ -249,51 +257,81 @@ def _task_proposal(
 ) -> dict[str, Any]:
     context = _prompt_context(prompt)
     prd = _canonical_prd(context)
+    artifact_ref = str(prd["artifact_ref"])
+    artifact_digest = str(prd["artifact_digest"])
+    title = f"Four-flow {flow_kind} {marker}"
+    return {
+        "plan_request": {
+            "subject_type": "task_create",
+            "channel_prd_ref": artifact_ref,
+            "channel_prd_digest": artifact_digest,
+            "channel_prd_intent": {
+                "decision": "bind_channel_prd",
+                "source_quote": f"{marker} create a Task",
+            },
+            "header": f"Create {flow_kind} Task",
+            "question_id": f"{flow_kind}-task-create",
+            "question": f"Create the {marker} Task from the confirmed PRD?",
+            "options": [
+                {
+                    "id": f"{flow_kind}-task",
+                    "label": f"Create {flow_kind} Task (Recommended)",
+                    "description": "Create an exact PRD-bound Task proposal.",
+                    "recommended": True,
+                    "effect": {
+                        "mode": "propose",
+                        "action": "create-task",
+                        "payload": {
+                            "title": title,
+                            "objective": (
+                                f"Run the {flow_kind} workflow from the "
+                                "canonical PRD."
+                            ),
+                            "priority": 2,
+                            "scope": ["README.md"],
+                            "acceptance": "README.md remains present.",
+                            "acceptance_criteria": [
+                                "README.md remains present.",
+                            ],
+                            "explicit_non_goals": [],
+                            "skills_required": [],
+                        },
+                    },
+                },
+                {
+                    "id": "continue",
+                    "label": "Continue discussion",
+                    "description": "Keep discussing without creating work.",
+                    "effect": {"mode": "continue"},
+                },
+            ],
+            "allow_other": False,
+            "reason": "Task creation requires an explicit operator decision.",
+        },
+    }
+
+
+def _task_workflow_plan(
+    *,
+    prompt: str,
+    marker: str,
+    flow_kind: str,
+) -> dict[str, Any]:
+    context = _prompt_context(prompt)
+    task_id = _prompt_task_id(prompt)
+    if not task_id:
+        raise ValueError("task_workflow Plan requires task_id")
     catalog = context.get("workflow_route_catalog")
-    routes = (
-        catalog.get("routes")
-        if isinstance(catalog, Mapping)
-        else []
-    )
-    active_route_ids = {
+    routes = catalog.get("routes") if isinstance(catalog, Mapping) else []
+    route_id = FLOW_ROUTES[flow_kind]
+    if route_id not in {
         str(route.get("route_id") or "")
         for route in routes or []
         if isinstance(route, Mapping)
-    }
-    route_id = FLOW_ROUTES[flow_kind]
-    if route_id not in active_route_ids:
+    }:
         raise ValueError(f"workflow route is not active: {route_id}")
 
-    artifact_ref = str(prd["artifact_ref"])
-    artifact_digest = str(prd["artifact_digest"])
-    source_ref = str(prd["source_ref"])
-    source_refs = {
-        "channel_id": str(prd.get("channel_id") or ""),
-        "thread_id": str(prd.get("thread_id") or "main"),
-        "synthesis_event_id": str(prd.get("synthesis_event_id") or ""),
-        "channel_consensus_event_id": str(
-            prd.get("consensus_event_id") or ""
-        ),
-        "channel_prd_ref": artifact_ref,
-        "channel_prd_digest": artifact_digest,
-    }
-    parameters: dict[str, Any] = {
-        "backend": "mock",
-        "source_ref": artifact_ref,
-        "source_refs": source_refs,
-        "artifact_refs": [{
-            "kind": "channel_prd",
-            "ref": artifact_ref,
-            "digest": artifact_digest,
-        }],
-        "channel_id": str(prd.get("channel_id") or ""),
-        "thread_id": str(prd.get("thread_id") or "main"),
-        "synthesis_event_id": str(prd.get("synthesis_event_id") or ""),
-        "target_ref": "HEAD",
-        "acceptance": ["README.md remains present."],
-        "constraints": ["Use the owner-confirmed canonical Channel PRD."],
-        "expected_output": f"A dispatched {flow_kind} workflow.",
-    }
+    parameters: dict[str, Any] = {"backend": "mock"}
     project_root = ""
     for line in prompt.splitlines():
         if line.startswith("project_root: "):
@@ -306,71 +344,40 @@ def _task_proposal(
             "ZF_FOUR_FLOW_SOURCE_ROOT"
         ]
 
-    title = f"Four-flow {flow_kind} {marker}"
     return {
-        "action_proposal": {
-            "action": "create-task",
-            "intent": {
-                "decision": "propose_action",
-                "source_quote": f"{marker} create a Task",
-            },
-            "payload": {
-                "title": title,
-                "priority": 2,
-                "contract": {
-                    "behavior": (
-                        f"Run the {flow_kind} workflow from the canonical PRD."
-                    ),
-                    "verification": "test -f README.md",
-                    "acceptance": "exit_code=0: test -f README.md",
-                    "acceptance_criteria": [
-                        f"The {flow_kind} workflow dispatch is recorded.",
-                    ],
-                    "spec_ref": artifact_ref,
-                    "source_ref": source_ref,
-                    "handoff_artifacts": [artifact_ref],
-                    "evidence_contract": {
-                        "channel_prd_digest": artifact_digest,
-                    },
-                },
-                "workflow_plan": {
-                    "header": f"{flow_kind.title()} workflow route",
-                    "question_id": f"{flow_kind}-workflow-route",
-                    "question": (
-                        f"How should {marker} execute the confirmed PRD?"
-                    ),
-                    "options": [
-                        {
-                            "id": f"{flow_kind}-delivery",
-                            "label": (
-                                f"{flow_kind.title()} delivery (Recommended)"
-                            ),
-                            "description": (
-                                f"Start the active {route_id} route."
-                            ),
-                            "recommended": True,
+        "plan_request": {
+            "subject_type": "task_workflow",
+            "header": f"{flow_kind.title()} workflow route",
+            "question_id": f"{flow_kind}-workflow-route",
+            "question": f"How should {marker} execute the confirmed PRD?",
+            "options": [
+                {
+                    "id": f"{flow_kind}-delivery",
+                    "label": f"{flow_kind.title()} delivery (Recommended)",
+                    "description": f"Start the active {route_id} route.",
+                    "recommended": True,
+                    "effect": {
+                        "mode": "propose",
+                        "action": "workflow-start",
+                        "payload": {
+                            "task_id": task_id,
                             "route_id": route_id,
+                            "objective": (
+                                f"Run {marker} through {route_id}."
+                            ),
                             "parameters": parameters,
                         },
-                        {
-                            "id": "defer",
-                            "label": "Do not start yet",
-                            "description": (
-                                "Keep the Task tracked without execution."
-                            ),
-                            "mode": "defer",
-                        },
-                    ],
-                    "allow_other": False,
-                    "reason": (
-                        "Task creation and workflow ignition require separate "
-                        "operator decisions."
-                    ),
+                    },
                 },
-            },
-            "reason": (
-                "Create a Task bound to the owner-confirmed Channel PRD."
-            ),
+                {
+                    "id": "continue",
+                    "label": "Do not start yet",
+                    "description": "Keep the Task tracked without execution.",
+                    "effect": {"mode": "continue"},
+                },
+            ],
+            "allow_other": False,
+            "reason": "Workflow ignition requires a separate confirmation.",
         },
     }
 
@@ -383,7 +390,13 @@ def _reply(prompt: str) -> dict[str, Any]:
         return _channel_setup_plan()
     for marker, flow_kind in FLOW_MARKERS.items():
         if marker in message:
-            return _task_proposal(
+            if _prompt_task_id(prompt):
+                return _task_workflow_plan(
+                    prompt=prompt,
+                    marker=marker,
+                    flow_kind=flow_kind,
+                )
+            return _task_create_plan(
                 prompt=prompt,
                 marker=marker,
                 flow_kind=flow_kind,

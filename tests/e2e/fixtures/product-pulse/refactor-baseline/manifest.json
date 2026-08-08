@@ -1,0 +1,15 @@
+{
+  "schema_version": "product-pulse-golden-baseline.v1",
+  "flow_kind": "refactor",
+  "provenance": {
+    "source_run": "zf-oa-clean-four-flow-20260802T024249Z",
+    "product_commit": "98dd115d34e56d574dcd1b32ccab5fa951cb2504"
+  },
+  "git_blobs": {
+    "app/README.md": "da704b1df45897d824a0f0658b28ab1ba361b5f2",
+    "app/package.json": "c4d57040ae7fc55446ad2b550b6cbf5393f68844",
+    "app/server.mjs": "a2c695693cfced0cc4638bff63bd26eb67a5f6bc",
+    "app/tests/package.test.mjs": "dd25bfdb7f53de08e6bdc8a77f6fa922543982b1",
+    "app/tests/server.test.mjs": "83891ddb7fb24390c88d82d984d66eb65e785771"
+  }
+}

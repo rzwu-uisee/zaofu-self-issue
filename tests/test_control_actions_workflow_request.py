@@ -10,16 +10,21 @@ from zf.core.config.loader import load_config
 from zf.core.events import ZfEvent
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
-from zf.core.task.schema import Task
+from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
-from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.workflow_anchor import (
+    WORKFLOW_TASK_REQUEST_ROTATION_SOURCE,
+    workflow_task_request_binding,
+)
 from zf.runtime.workflow_intake import build_flow_intake
 from zf.runtime.workflow_origin import workflow_origin_digest
 from zf.runtime.workflow_requests import (
     WorkflowRequestError,
     load_workflow_request,
 )
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_start import WorkflowStartService
 from zf.runtime.workflow_synthesis import (
     WORKFLOW_SYNTHESIS_RESULT_SCHEMA,
     run_workflow_synthesis as _run_workflow_synthesis,
@@ -234,6 +239,45 @@ def test_channel_workflow_request_pins_canonical_origin(
     assert manifest.read_text(encoding="utf-8") == manifest_before
 
 
+def test_existing_workflow_request_creates_confirmed_requirement_revision(
+    tmp_path: Path,
+) -> None:
+    service, _log = _service(tmp_path)
+    initial = _execute(service, "workflow-request", {
+        "request_id": "REQ-REVISION",
+        "kind": "issue",
+        "objective": "Fix the original session expiry behavior",
+        "backend": "mock",
+        "allow_missing_env": True,
+    })
+    initial_projection = load_workflow_request(
+        service.state_dir,
+        initial["request_id"],
+    )
+
+    revised = _execute(service, "workflow-request", {
+        "request_id": initial["request_id"],
+        "kind": "issue",
+        "objective": "Fix the revised session expiry behavior",
+        "backend": "mock",
+        "allow_missing_env": True,
+    })
+
+    projection = load_workflow_request(
+        service.state_dir,
+        initial["request_id"],
+    )
+    requirement = json.loads(
+        Path(projection["requirement_spec_ref"]).read_text(encoding="utf-8")
+    )
+    assert revised["ok"] is True
+    assert projection["revision"] == initial_projection["revision"] + 1
+    assert projection["confirmed"] is True
+    assert requirement["objective"] == (
+        "Fix the revised session expiry behavior"
+    )
+
+
 def test_intake_rejects_origin_change_before_overwriting_sidecars(
     tmp_path: Path,
 ) -> None:
@@ -311,6 +355,169 @@ def test_workflow_submit_binds_existing_task_before_invoke(
     event_types = [event.type for event in log.read_all()]
     assert event_types.index("task.contract.update") < event_types.index(
         "workflow.invoke.requested"
+    )
+    binding_event = next(
+        event
+        for event in log.read_all()
+        if event.type == "task.contract.update"
+        and event.payload.get("source") == "workflow_submit"
+    )
+    assert binding_event.payload["contract_digest"] == (
+        task_workflow_binding_digest(task)
+    )
+
+
+def test_workflow_start_rotates_terminal_request_for_blocked_task(
+    tmp_path: Path,
+) -> None:
+    service, log = _service(tmp_path)
+    task_store = TaskStore(service.state_dir / "kanban.json")
+    task_store.add(Task(
+        id="TASK-ROTATE",
+        title="Retry the blocked delivery",
+        contract=TaskContract(
+            behavior="Deliver the requested issue fix.",
+            verification="Run the focused runtime regression.",
+            verification_tiers=["runtime"],
+        ),
+    ))
+    proposed = _execute(service, "workflow-request", {
+        "kind": "issue",
+        "objective": "Fix session expiry and add a regression test",
+        "backend": "mock",
+        "task_id": "TASK-ROTATE",
+        "allow_missing_env": True,
+        "project_id": "demo",
+        "conversation_id": "kanban:demo",
+        "thread_key": "session-expiry",
+    })
+    submitted = _execute(service, "workflow-submit", {
+        "intake_ref": proposed["intake_ref"],
+        "request_id": proposed["request_id"],
+        "proposal_ref": proposed["proposal_ref"],
+        "proposal_digest": proposed["proposal_digest"],
+        "kind": "issue",
+        "task_id": "TASK-ROTATE",
+        "allow_missing_env": True,
+    })
+    assert submitted["ok"] is True, submitted
+    old_request = load_workflow_request(
+        service.state_dir,
+        proposed["request_id"],
+    )
+    terminal = EventWriter(log).emit(
+        "run.goal.blocked",
+        actor="orchestrator",
+        task_id="TASK-ROTATE",
+        correlation_id=proposed["request_id"],
+        payload={
+            "run_id": proposed["request_id"],
+            "workflow_run_id": proposed["request_id"],
+            "request_id": proposed["request_id"],
+            "reason": "stage budget exhausted",
+        },
+    )
+    task_store.update(
+        "TASK-ROTATE",
+        status="blocked",
+        blocked_reason="stage budget exhausted",
+    )
+
+    preview_config = load_config(
+        Path(__file__).resolve().parents[1] / "zf.yaml"
+    )
+    start = WorkflowStartService(
+        service.state_dir,
+        preview_config,
+        project_root=tmp_path,
+    )
+    routes = start.routes(task_id="TASK-ROTATE")
+    preview = start.preview(
+        {
+            "task_id": "TASK-ROTATE",
+            "route_id": "research:fixed",
+            "objective": "Retry the blocked delivery with the same contract.",
+            "task_contract_digest": routes["task_contract_digest"],
+            "config_digest": routes["config_digest"],
+            "project_id": "demo",
+            "conversation_id": "kanban:demo",
+            "thread_id": "session-expiry",
+        },
+        require_bindings=True,
+        origin="web",
+    )
+
+    assert preview["ok"] is True, preview
+    assert preview["payload"]["fresh_request"] is True
+    assert "request_id" not in preview["payload"]
+    assert preview["payload"]["prior_request_id"] == proposed["request_id"]
+    assert preview["payload"]["prior_terminal_event_id"] == terminal.id
+    assert preview["payload"]["origin_binding"] == proposed["origin_binding"]
+    assert preview["payload"]["origin_binding"]["surface"] == (
+        "kanban_agent"
+    )
+
+    next_request = _execute(service, "workflow-request", {
+        "request_id": "REQ-ROTATED",
+        "kind": "issue",
+        "objective": "Retry the blocked delivery with the same contract.",
+        "backend": "mock",
+        "task_id": "TASK-ROTATE",
+        "allow_missing_env": True,
+        "fresh_request": True,
+        "origin_binding": preview["payload"]["origin_binding"],
+        "prior_request_id": preview["payload"]["prior_request_id"],
+        "prior_request_revision": preview["payload"][
+            "prior_request_revision"
+        ],
+        "prior_terminal_event_id": preview["payload"][
+            "prior_terminal_event_id"
+        ],
+    })
+    assert next_request["ok"] is True, next_request
+    restarted = _execute(service, "workflow-submit", {
+        "intake_ref": next_request["intake_ref"],
+        "request_id": next_request["request_id"],
+        "proposal_ref": next_request["proposal_ref"],
+        "proposal_digest": next_request["proposal_digest"],
+        "kind": "issue",
+        "task_id": "TASK-ROTATE",
+        "allow_missing_env": True,
+    })
+
+    assert restarted["ok"] is True
+    new_request_id = restarted["request_id"]
+    assert new_request_id != proposed["request_id"]
+    assert load_workflow_request(
+        service.state_dir,
+        proposed["request_id"],
+    )["revision"] == old_request["revision"]
+    assert load_workflow_request(
+        service.state_dir,
+        new_request_id,
+    )["origin_binding"] == proposed["origin_binding"]
+    invokes = [
+        event
+        for event in log.read_all()
+        if event.type == "workflow.invoke.requested"
+    ]
+    assert len(invokes) == 2
+    assert len({event.correlation_id for event in invokes}) == 2
+    task = task_store.get("TASK-ROTATE")
+    assert task is not None
+    binding = workflow_task_request_binding(task)
+    assert binding["request_id"] == new_request_id
+    rotation = next(
+        event
+        for event in reversed(log.read_all())
+        if event.type == "task.contract.update"
+        and event.payload.get("source")
+        == WORKFLOW_TASK_REQUEST_ROTATION_SOURCE
+    )
+    assert rotation.payload["prior_request_id"] == proposed["request_id"]
+    assert rotation.payload["prior_terminal_event_id"] == terminal.id
+    assert rotation.payload["contract_digest"] == (
+        task_workflow_binding_digest(task)
     )
 
 

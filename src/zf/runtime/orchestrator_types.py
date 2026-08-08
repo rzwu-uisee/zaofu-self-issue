@@ -1,18 +1,11 @@
-"""Shared types used by Orchestrator and its Mixin modules.
+"""Compatibility imports for the historical deterministic-runtime types."""
 
-Lives in its own module so Mixin files can import these types without
-forming a circular import with orchestrator.py.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
-@dataclass
-class OrchestratorDecision:
-    action: str  # dispatch, move, respawn, capture, skip
-    task_id: str | None = None
-    role: str | None = None
-    target_role: str | None = None
-    reason: str = ""
+# Compatibility for extensions and replay code that still import the
+# historical deterministic-runtime name.
+OrchestratorDecision = WorkflowRuntimeDecision
+
+
+__all__ = ["WorkflowRuntimeDecision", "OrchestratorDecision"]

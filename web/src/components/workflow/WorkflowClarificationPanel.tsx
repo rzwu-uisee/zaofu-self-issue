@@ -189,6 +189,7 @@ export function WorkflowClarificationPanel({
           ) : null}
           <button
             className="icon-button primary"
+            data-testid="workflow-save-prepare-proposal"
             disabled={!actionReady || busyAction !== "" || !objective.trim()}
             title={!actionReady ? actionState : "Save the revision and prepare its proposal"}
             type="button"

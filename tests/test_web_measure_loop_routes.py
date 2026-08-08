@@ -72,3 +72,29 @@ def test_loop_view_endpoint(client: TestClient) -> None:
     assert data["run"]["promise"]["source"] == "generic fallback"
     assert "delivery" in data["loops"]
     assert data["tasks"]  # T1 dispatch 产生 attempt 行
+
+
+def test_loop_view_ignores_cache_from_older_projection_revision(
+    client: TestClient,
+    state_dir: Path,
+) -> None:
+    from zf.web.projections.read_model import (
+        current_projected_seq,
+        rebuild,
+        set_cached_projection,
+    )
+
+    rebuild(state_dir)
+    source_seq = current_projected_seq(state_dir, config=None)
+    set_cached_projection(
+        state_dir,
+        "loop-view:default",
+        kind="loop-view",
+        source_seq=source_seq,
+        payload={"schema_version": "stale-loop-view.v0"},
+    )
+
+    response = client.get("/api/projects/default/loop-view")
+
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "loop-view.v1"

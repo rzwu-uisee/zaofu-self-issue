@@ -38,10 +38,13 @@ _CHILD_ARTIFACT_SCALAR_KEYS = (
 )
 _PLAN_SOURCE_CANDIDATES = (
     ("goal-objective", "goal_objective", "objective_ref"),
+    ("requirement", "requirement_authority", "target_ref"),
     ("requirement", "requirement_spec", "requirement_spec_ref"),
     ("requirement", "requirement_spec", "requirement_ref"),
     ("requirement", "requirement_spec", "prd_ref"),
     ("review-artifact", "review_artifact", "review_artifact_ref"),
+    ("plan-diagnostics", "plan_gate_diagnostics", "diagnostics_ref"),
+    ("owner-confirmation", "plan_synth_owner_confirmation", "owner_confirmation_ref"),
     ("workflow-input", "workflow_input_manifest", "workflow_input_manifest_ref"),
     ("workflow-prompt", "workflow_prompt", "workflow_prompt_ref"),
 )
@@ -50,6 +53,9 @@ _PLAN_REWORK_CONTEXT_KEYS = (
     "rework_attempt",
     "rework_source",
     "rework_feedback",
+    "diagnostics_ref",
+    "plan_compile_gate",
+    "artifact_gate",
     "rework_categories",
     "rework_summary",
     "replan_classification",
@@ -58,6 +64,10 @@ _PLAN_REWORK_CONTEXT_KEYS = (
     "task_ids",
     "downstream_task_ids",
     "resume_scope",
+    "previous_plan_candidate_refs",
+    "owner_confirmation_ref",
+    "owner_decision_items",
+    "owner_decision_resolution",
 )
 _TASK_DELIVERY_FACT_TYPES = frozenset({
     "candidate.ready",
@@ -96,6 +106,26 @@ def render_plan_synth_completion_command(
         semantic_template=dict(payload),
     )
     return command
+
+
+def render_plan_synth_validation_section(submit_command: str) -> list[str]:
+    """Render the bounded schema preflight shown before plan submission."""
+
+    from zf.runtime.stage_execution_card import render_result_validate_command
+
+    return [
+        "Finding severity is an exact enum: use only `info`, `low`, `medium`, "
+        "`high`, or `critical`. Record a non-blocking residual risk as `info` "
+        "or `low`; never invent `residual-risk` or another label.",
+        "",
+        "Before final submission, run this schema preflight once. It does not "
+        "consume the submit binding. Repair only its structured diagnostics; "
+        "after exit 0, submit immediately:",
+        "```bash",
+        render_result_validate_command(submit_command),
+        "```",
+        "",
+    ]
 
 
 def build_plan_handoff_input_refs(
@@ -165,6 +195,55 @@ def build_plan_handoff_input_refs(
             "allowed_paths": ["$"],
         })
         input_refs.append(source)
+    previous_refs = payload.get("previous_plan_candidate_refs")
+    if previous_refs in (None, []):
+        previous_refs = trigger.get("previous_plan_candidate_refs")
+    if previous_refs not in (None, []) and not isinstance(previous_refs, list):
+        raise ValueError("previous Plan candidate refs must be a list")
+    for index, descriptor in enumerate(
+        previous_refs if isinstance(previous_refs, list) else [],
+        start=1,
+    ):
+        if not isinstance(descriptor, Mapping):
+            raise ValueError(
+                f"previous Plan candidate descriptor {index} must be an object"
+            )
+        ref = str(descriptor.get("ref") or "").strip()
+        expected = str(
+            descriptor.get("sha256") or descriptor.get("digest") or ""
+        ).strip()
+        if not ref or not expected:
+            raise ValueError(
+                "previous Plan candidate descriptor "
+                f"{index} requires ref and sha256"
+            )
+        source = materialize_attempt_source_ref(
+            state_dir=state_dir,
+            project_root=project_root,
+            ref=ref,
+            source_id=f"previous-plan-candidate-{index}",
+            kind=str(descriptor.get("kind") or "plan_candidate_artifact"),
+        )
+        actual = str(source.get("sha256") or "").strip()
+        if actual != expected:
+            raise ValueError(
+                "previous Plan candidate digest mismatch for "
+                f"{ref!r}: expected {expected}, got {actual or 'missing'}"
+            )
+        source.update({
+            "source_id": f"previous-plan-candidate-{index}",
+            "artifact_id": str(
+                descriptor.get("artifact_id") or Path(ref).name
+            ),
+            "allowed_paths": ["$"],
+        })
+        identity = (
+            str(source.get("source_id") or ""),
+            str(source.get("sha256") or ""),
+        )
+        if identity not in seen_sources:
+            input_refs.append(source)
+            seen_sources.add(identity)
     return input_refs
 
 
@@ -307,28 +386,16 @@ def _compact_task_fact(event: Any) -> dict[str, Any]:
     }
 
 
-def build_plan_synth_call_payload(
+def build_plan_candidate_input_refs(
     *,
     state_dir: Path,
     project_root: Path,
-    manifest: Mapping[str, Any],
     reports: list[Mapping[str, Any]],
-    run_id: str,
-    role_instance: str,
-) -> dict[str, Any]:
-    """Build the immutable input set pinned before a plan synth dispatch."""
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Materialize every immutable producer ref for one Plan candidate."""
 
     state_dir = Path(state_dir)
     project_root = Path(project_root)
-    fanout_id = str(manifest.get("fanout_id") or "")
-    stage_id = str(manifest.get("stage_id") or "")
-    trigger_event_id = str(manifest.get("trigger_event_id") or "")
-    workflow_run_id = str(
-        manifest.get("workflow_run_id")
-        or manifest.get("trace_id")
-        or manifest.get("pdd_id")
-        or fanout_id
-    )
     input_refs: list[dict[str, Any]] = []
     child_bindings: list[dict[str, str]] = []
     for index, report in enumerate(reports, start=1):
@@ -365,7 +432,10 @@ def build_plan_synth_call_payload(
         if not source:
             continue
         source.setdefault("source_id", f"child-result-{child_id}")
-        source.setdefault("artifact_id", Path(str(source.get("ref") or "result.json")).name)
+        source.setdefault(
+            "artifact_id",
+            Path(str(source.get("ref") or "result.json")).name,
+        )
         source.setdefault("allowed_paths", ["$"])
         input_refs.append(source)
         child_bindings.append({
@@ -375,6 +445,16 @@ def build_plan_synth_call_payload(
             "artifact_id": str(source.get("artifact_id") or ""),
             "sha256": str(source.get("sha256") or ""),
         })
+        from zf.runtime.result_handoff_sources import (
+            result_handoff_source_entries,
+        )
+
+        for result_source in result_handoff_source_entries(report):
+            result_source = dict(result_source)
+            result_source["source_id"] = (
+                f"child-{child_id}-{result_source['source_id']}"
+            )
+            input_refs.append(result_source)
         body = (
             report.get("report")
             if isinstance(report.get("report"), Mapping)
@@ -395,6 +475,47 @@ def build_plan_synth_call_payload(
                 continue
             artifact_source.setdefault("allowed_paths", ["$"])
             input_refs.append(artifact_source)
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in input_refs:
+        identity = (
+            str(source.get("ref") or ""),
+            str(source.get("sha256") or ""),
+        )
+        if not all(identity) or identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(source)
+    return deduped, child_bindings
+
+
+def build_plan_synth_call_payload(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    manifest: Mapping[str, Any],
+    reports: list[Mapping[str, Any]],
+    run_id: str,
+    role_instance: str,
+) -> dict[str, Any]:
+    """Build the immutable input set pinned before a plan synth dispatch."""
+
+    state_dir = Path(state_dir)
+    project_root = Path(project_root)
+    fanout_id = str(manifest.get("fanout_id") or "")
+    stage_id = str(manifest.get("stage_id") or "")
+    trigger_event_id = str(manifest.get("trigger_event_id") or "")
+    workflow_run_id = str(
+        manifest.get("workflow_run_id")
+        or manifest.get("trace_id")
+        or manifest.get("pdd_id")
+        or fanout_id
+    )
+    input_refs, child_bindings = build_plan_candidate_input_refs(
+        state_dir=state_dir,
+        project_root=project_root,
+        reports=reports,
+    )
 
     seen_sources = {
         (str(item.get("source_id") or ""), str(item.get("sha256") or ""))
@@ -476,6 +597,13 @@ def _child_artifact_refs(report: Mapping[str, Any]) -> list[str]:
     artifact_refs = report.get("artifact_refs")
     if isinstance(artifact_refs, list):
         refs.extend(str(item or "").strip() for item in artifact_refs)
+    plan_ports = report.get("plan_ports")
+    if isinstance(plan_ports, list):
+        refs.extend(
+            str(item.get("ref") or "").strip()
+            for item in plan_ports
+            if isinstance(item, Mapping)
+        )
     return list(dict.fromkeys(ref for ref in refs if ref))
 
 
@@ -485,6 +613,8 @@ __all__ = [
     "PLAN_SYNTH_PROFILE_REVISION",
     "PLAN_SYNTH_RESULT_SCHEMA",
     "build_plan_handoff_input_refs",
+    "build_plan_candidate_input_refs",
     "build_plan_synth_call_payload",
     "render_plan_synth_completion_command",
+    "render_plan_synth_validation_section",
 ]

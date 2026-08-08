@@ -20,6 +20,7 @@ Persisted to .zf/role_sessions.yaml with three per-instance records:
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 import time
 import uuid
@@ -69,6 +70,7 @@ class RoleSessionRegistry:
         self.project_root = project_root
         self._entries: dict[str, str] = {}          # instance_id → uuid str
         self._meta: dict[str, dict] = {}            # instance_id → metadata dict
+        self._task_stage_bindings: dict[str, dict] = {}
         self._load()
 
     # -- yaml I/O --
@@ -76,6 +78,7 @@ class RoleSessionRegistry:
     def _load(self) -> None:
         self._entries = {}
         self._meta = {}
+        self._task_stage_bindings = {}
         if not self.path.exists():
             return
         data = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
@@ -89,6 +92,13 @@ class RoleSessionRegistry:
                 str(k): dict(v) if isinstance(v, dict) else {}
                 for k, v in meta.items()
             }
+        bindings = data.get("task_stage_bindings", {}) or {}
+        if isinstance(bindings, dict):
+            self._task_stage_bindings = {
+                str(key): dict(value)
+                for key, value in bindings.items()
+                if isinstance(value, dict)
+            }
 
     def _save(self) -> None:
         atomic_write_text(
@@ -98,6 +108,7 @@ class RoleSessionRegistry:
                     "project_root": self.project_root,
                     "roles": self._entries,
                     "instance_meta": self._meta,
+                    "task_stage_bindings": self._task_stage_bindings,
                 },
                 default_flow_style=False,
                 allow_unicode=True,
@@ -282,6 +293,235 @@ class RoleSessionRegistry:
     def instance_meta(self) -> dict[str, dict]:
         return {instance_id: dict(meta) for instance_id, meta in self._meta.items()}
 
+    def bind_task_stage_session(
+        self,
+        *,
+        workflow_run_id: str,
+        task_id: str,
+        stage: str,
+        rework_affinity_id: str,
+        role_instance: str,
+        role_config_digest: str,
+        workspace_generation: int,
+        placement_epoch: int,
+        backend: str = "",
+    ) -> dict:
+        """Create or relocate one v4 Task-stage provider session binding.
+
+        The binding isolates transcript identity from the physical worker pane.
+        Role configuration remains role-scoped and is frozen by digest.
+        """
+
+        fields = {
+            "workflow_run_id": workflow_run_id,
+            "task_id": task_id,
+            "stage": stage,
+            "rework_affinity_id": rework_affinity_id,
+            "role_instance": role_instance,
+            "role_config_digest": role_config_digest,
+        }
+        normalized = {
+            key: str(value or "").strip()
+            for key, value in fields.items()
+        }
+        missing = [key for key, value in normalized.items() if not value]
+        if missing:
+            raise ValueError(
+                "task-stage session binding missing: " + ", ".join(missing)
+            )
+        if workspace_generation < 1:
+            raise ValueError("workspace_generation must be >= 1")
+        if placement_epoch < 1:
+            raise ValueError("placement_epoch must be >= 1")
+        binding_key = _task_stage_binding_key(
+            normalized["workflow_run_id"],
+            normalized["task_id"],
+            normalized["stage"],
+            normalized["rework_affinity_id"],
+        )
+        with self._locked():
+            if self.path.exists():
+                self._load()
+            binding = self._task_stage_bindings.get(binding_key)
+            if binding is None:
+                session_id = uuid.uuid5(
+                    uuid.NAMESPACE_DNS,
+                    f"{self.project_root}:task-stage:{binding_key}:{backend}",
+                )
+                binding = {
+                    "schema_version": "task-stage-session-binding.v1",
+                    "binding_key": binding_key,
+                    "workflow_run_id": normalized["workflow_run_id"],
+                    "task_id": normalized["task_id"],
+                    "stage": normalized["stage"],
+                    "rework_affinity_id": normalized["rework_affinity_id"],
+                    "session_id": str(session_id),
+                    "backend": str(backend or ""),
+                    "role_config_digest": normalized["role_config_digest"],
+                    "workspace_generation": workspace_generation,
+                    "rotation_counter": 0,
+                    "status": "active",
+                    "placement_history": [],
+                    "created_at": _now_iso(),
+                }
+            else:
+                if binding.get("status") == "archived":
+                    raise ValueError("task-stage session binding is archived")
+                if (
+                    str(binding.get("role_config_digest") or "")
+                    != normalized["role_config_digest"]
+                ):
+                    raise ValueError("task-stage role config digest changed")
+                if int(binding.get("workspace_generation") or 0) != workspace_generation:
+                    raise ValueError("task-stage workspace generation changed")
+            history = list(binding.get("placement_history") or [])
+            if history:
+                previous = history[-1]
+                previous_epoch = int(previous.get("placement_epoch") or 0)
+                if placement_epoch < previous_epoch:
+                    raise ValueError("task-stage placement epoch regressed")
+                if placement_epoch == previous_epoch:
+                    if str(previous.get("role_instance") or "") != normalized["role_instance"]:
+                        raise ValueError("task-stage placement epoch is already bound")
+                    self._task_stage_bindings[binding_key] = binding
+                    return _copy_binding(binding)
+            if not history or placement_epoch > int(
+                history[-1].get("placement_epoch") or 0
+            ):
+                history.append({
+                    "placement_epoch": placement_epoch,
+                    "role_instance": normalized["role_instance"],
+                    "workspace_generation": workspace_generation,
+                    "bound_at": _now_iso(),
+                })
+            binding["placement_history"] = history
+            binding["current_role_instance"] = normalized["role_instance"]
+            binding["current_placement_epoch"] = placement_epoch
+            binding["status"] = "active"
+            binding["updated_at"] = _now_iso()
+            self._task_stage_bindings[binding_key] = binding
+            self._save()
+            return _copy_binding(binding)
+
+    def task_stage_binding(
+        self,
+        *,
+        workflow_run_id: str,
+        task_id: str,
+        stage: str,
+        rework_affinity_id: str,
+    ) -> dict | None:
+        key = _task_stage_binding_key(
+            workflow_run_id, task_id, stage, rework_affinity_id
+        )
+        value = self._task_stage_bindings.get(key)
+        return _copy_binding(value) if value is not None else None
+
+    def task_stage_bindings(self) -> dict[str, dict]:
+        return {
+            key: _copy_binding(value)
+            for key, value in self._task_stage_bindings.items()
+        }
+
+    def activate_task_stage_session(
+        self,
+        *,
+        binding_key: str,
+        role_instance: str,
+    ) -> dict:
+        """Project one durable Task-stage session onto a physical slot.
+
+        The binding remains authoritative for conversation identity.  The
+        role-scoped entry is only the currently activated provider projection
+        consumed by ``SpawnCoordinator``.
+        """
+
+        key = str(binding_key or "").strip()
+        instance = str(role_instance or "").strip()
+        if not key or not instance:
+            raise ValueError("task-stage activation requires binding and role")
+        with self._locked():
+            if self.path.exists():
+                self._load()
+            binding = self._task_stage_bindings.get(key)
+            if binding is None:
+                raise ValueError("task-stage session binding does not exist")
+            if str(binding.get("status") or "") == "archived":
+                raise ValueError("task-stage session binding is archived")
+            if str(binding.get("current_role_instance") or "") != instance:
+                raise ValueError("task-stage session placement is not current")
+
+            backend = str(binding.get("backend") or "")
+            meta = self._meta.setdefault(instance, {})
+            previous_key = str(meta.get("active_task_stage_binding_key") or "")
+            meta.update({
+                "active_task_stage_binding_key": key,
+                "task_stage_binding_activated_at": _now_iso(),
+                "task_stage_binding_previous_key": previous_key,
+                "backend": backend or str(meta.get("backend") or ""),
+            })
+            session_id = str(binding.get("session_id") or "")
+            observed = bool(binding.get("provider_session_observed"))
+            if backend == "codex" and not observed:
+                self._entries.pop(instance, None)
+                meta["session_path"] = None
+            elif session_id:
+                self._entries[instance] = session_id
+                session_path = str(binding.get("session_path") or "")
+                if session_path:
+                    meta["session_path"] = session_path
+            binding["status"] = "active"
+            binding["activated_at"] = _now_iso()
+            self._task_stage_bindings[key] = binding
+            self._save()
+            return _copy_binding(binding)
+
+    def seal_task_stage_session(
+        self,
+        *,
+        workflow_run_id: str,
+        task_id: str,
+        stage: str,
+        rework_affinity_id: str,
+    ) -> dict | None:
+        key = _task_stage_binding_key(
+            workflow_run_id, task_id, stage, rework_affinity_id
+        )
+        with self._locked():
+            if self.path.exists():
+                self._load()
+            binding = self._task_stage_bindings.get(key)
+            if binding is None:
+                return None
+            binding["status"] = "sealed"
+            binding["sealed_at"] = _now_iso()
+            self._save()
+            return _copy_binding(binding)
+
+    def archive_task_stage_session(
+        self,
+        *,
+        workflow_run_id: str,
+        task_id: str,
+        stage: str,
+        rework_affinity_id: str,
+    ) -> dict | None:
+        key = _task_stage_binding_key(
+            workflow_run_id, task_id, stage, rework_affinity_id
+        )
+        with self._locked():
+            if self.path.exists():
+                self._load()
+            binding = self._task_stage_bindings.get(key)
+            if binding is None:
+                return None
+            if binding.get("status") != "sealed":
+                raise ValueError("task-stage session must be sealed before archive")
+            binding["status"] = "archived"
+            binding["archived_at"] = _now_iso()
+            self._save()
+            return _copy_binding(binding)
+
     def get_instance_by_uuid(self, uuid_str: str) -> str | None:
         """Reverse lookup: session UUID → instance_id.
 
@@ -344,6 +584,15 @@ class RoleSessionRegistry:
             meta["observed_from"] = observed_from
             if session_path is not None:
                 meta["session_path"] = str(session_path)
+            binding_key = str(meta.get("active_task_stage_binding_key") or "")
+            binding = self._task_stage_bindings.get(binding_key)
+            if binding is not None:
+                binding["session_id"] = str(parsed_uuid)
+                binding["provider_session_observed"] = True
+                binding["provider_session_observed_at"] = _now_iso()
+                if session_path is not None:
+                    binding["session_path"] = str(session_path)
+                self._task_stage_bindings[binding_key] = binding
             for existing_instance, existing_uuid in list(self._entries.items()):
                 if (
                     existing_instance != instance_id
@@ -564,3 +813,29 @@ class RoleSessionRegistry:
             self._entries[instance_id] = str(new_uuid)
             self._save()
             return new_uuid
+
+
+def _task_stage_binding_key(
+    workflow_run_id: str,
+    task_id: str,
+    stage: str,
+    rework_affinity_id: str,
+) -> str:
+    values = [
+        str(value or "").strip()
+        for value in (workflow_run_id, task_id, stage, rework_affinity_id)
+    ]
+    if any(not value for value in values):
+        raise ValueError("task-stage binding identity is incomplete")
+    digest = hashlib.sha256("|".join(values).encode("utf-8")).hexdigest()[:24]
+    return f"task-stage-{digest}"
+
+
+def _copy_binding(binding: dict) -> dict:
+    copy = dict(binding)
+    copy["placement_history"] = [
+        dict(item)
+        for item in binding.get("placement_history", [])
+        if isinstance(item, dict)
+    ]
+    return copy

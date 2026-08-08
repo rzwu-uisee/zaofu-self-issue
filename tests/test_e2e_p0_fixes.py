@@ -277,11 +277,41 @@ def test_completion_nudge_fires_once_then_idempotent():
         e.payload.get("recovery_action") == "completion_nudge_requested"
         for e in appended
     )
+    assert appended[-1].payload["recovery_mode"] == "resume_or_complete"
     d2 = Orchestrator._request_terminal_completion_nudge(
         stub, role=role, task=task, dispatch_id="d1", reason="x"
     )
     assert d2 is None  # already nudged → caller falls through to requeue
     assert len(injected) == 1  # not nudged again
+
+
+def test_completion_nudge_preserves_incomplete_work_instead_of_forcing_failure(
+    tmp_path,
+):
+    from types import SimpleNamespace
+
+    from zf.runtime.orchestrator import Orchestrator
+
+    sent: list[tuple[str, object, str, object]] = []
+    stub = SimpleNamespace(
+        state_dir=tmp_path / ".zf",
+        _dispatch_context=lambda **kwargs: {"task_id": kwargs["task_id"]},
+        _send_transport_task=lambda *args: sent.append(args),
+    )
+    path = Orchestrator._inject_terminal_completion_nudge_prompt(
+        stub,
+        role=SimpleNamespace(instance_id="dev-core"),
+        task=SimpleNamespace(id="TASK-INCOMPLETE"),
+        dispatch_id="dispatch-1",
+        expected_event="dev.build.done",
+    )
+
+    prompt = path.read_text(encoding="utf-8")
+    assert "Resume or complete the active task" in prompt
+    assert "continue the original task from the preserved state" in prompt
+    assert "Do not emit a failure solely because this nudge arrived" in prompt
+    assert "You appear to have done the work" not in prompt
+    assert sent and sent[-1][0] == "dev-core"
 
 
 def test_worktree_resolver_handles_zf_prefixed_ref(tmp_path):

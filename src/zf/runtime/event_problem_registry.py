@@ -356,6 +356,55 @@ def _kernel_projection(
     )
 
 
+def _oa_semantic_negative(event_type: str) -> EventProblemSpec:
+    return EventProblemSpec(
+        event_type=event_type,
+        event_class="expected_negative",
+        problem_class="semantic_control_admission",
+        failure_class=event_type.replace(".", "_"),
+        source="orchestrator_agent",
+        severity="medium",
+        title=event_type,
+        owner_route="run_manager",
+        action_policy="needs_diagnosis",
+        intervention_class="diagnose",
+        suggested_route="run_manager_recovery",
+        suggested_action_kind="diagnose_attention",
+        supervisor_attention="on_repeated",
+        run_manager_semantics=("pending_action",),
+        autoresearch_eligible=False,
+        producer_kind="kernel",
+        required_scope_any=(
+            "operation_id",
+            "workflow_run_id",
+            "task_id",
+            "source_event_id",
+        ),
+        notification_policy="owner_on_repair_failed",
+        recovery_policy="run_manager",
+    )
+
+
+def _owner_narrative_negative(event_type: str) -> EventProblemSpec:
+    return EventProblemSpec(
+        event_type=event_type,
+        event_class="projection_only",
+        problem_class="owner_delivery",
+        failure_class=event_type.replace(".", "_"),
+        source="owner_delivery_narrative",
+        severity="low",
+        title=event_type,
+        owner_route="run_manager",
+        action_policy="informational",
+        supervisor_attention="none",
+        autoresearch_eligible=False,
+        producer_kind="kernel",
+        required_scope_any=("operation_id", "workflow_run_id"),
+        notification_policy="trace_only",
+        recovery_policy="none",
+    )
+
+
 def _failure_envelope(
     event_type: str,
     *,
@@ -400,6 +449,26 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             producer_kind="kernel",
             required_scope_any=("action",),
         ),
+        EventProblemSpec(
+            event_type="runtime.action.rejected",
+            event_class="expected_negative",
+            problem_class="controlled_action_admission",
+            failure_class="runtime_action_rejected",
+            source="controlled_action",
+            severity="low",
+            title="Controlled action admission rejected",
+            owner_route="kernel_aggregate",
+            action_policy="kernel_consumed",
+            intervention_class="none",
+            suggested_action_kind="observe_only",
+            supervisor_attention="none",
+            autoresearch_eligible=False,
+            producer_kind="kernel",
+            required_scope_any=("action",),
+            notification_policy="trace_only",
+            recovery_policy="none",
+            dedupe_key_fields=("action", "reason"),
+        ),
         _failure_envelope(
             "web.action.failed",
             title="Web action result failed",
@@ -421,6 +490,30 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
         _candidate_quality_expected("judge.failed"),
         _candidate_quality_expected("integration.failed"),
         _candidate_quality_expected("candidate.quality.failed"),
+        _flow_stage_expected(
+            "task.pipeline.verify.failed",
+            failure_class="task_pipeline_verify_failed",
+            title="Task Pipeline verification failed",
+            source="task_pipeline",
+        ),
+        _flow_stage_expected(
+            "task.pipeline.acceptance.failed",
+            failure_class="task_pipeline_acceptance_failed",
+            title="Task Pipeline acceptance execution failed",
+            source="task_pipeline",
+        ),
+        _flow_stage_expected(
+            "task.pipeline.acceptance.blocked",
+            failure_class="task_pipeline_acceptance_blocked",
+            title="Task Pipeline acceptance blocked",
+            source="task_pipeline",
+        ),
+        _oa_semantic_negative("orchestrator.semantic.checkpoint.rejected"),
+        _oa_semantic_negative("orchestrator.semantic.decision.failed"),
+        _oa_semantic_negative("orchestrator.semantic.decision.rejected"),
+        _oa_semantic_negative("orchestrator.semantic.rework.rejected"),
+        _owner_narrative_negative("owner.delivery.narrative.failed"),
+        _owner_narrative_negative("owner.delivery.narrative.rejected"),
         _artifact_contract_expected(
             "zaofu.refactor.review.blocked",
             failure_class="refactor_review_blocked",
@@ -1270,6 +1363,28 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             dedupe_key_fields=("channel_id", "request_id", "run_generation"),
         ),
         EventProblemSpec(
+            event_type="channel.synthesis.blocked",
+            event_class="abnormal",
+            problem_class="contract",
+            failure_class="channel_synthesis_repair_exhausted",
+            source="channel_contract",
+            severity="high",
+            title="Channel synthesis repair attempts exhausted",
+            owner_route="run_manager",
+            action_policy="needs_diagnosis",
+            intervention_class="diagnose",
+            suggested_route="run_manager_recovery",
+            suggested_action_kind="diagnose_channel_synthesis",
+            supervisor_attention="on_single",
+            run_manager_semantics=("pending_action",),
+            autoresearch_eligible=True,
+            producer_kind="kernel",
+            required_scope_any=("request_id", "channel_id", "thread_id"),
+            notification_policy="owner_on_repair_failed",
+            recovery_policy="run_manager_then_autoresearch",
+            dedupe_key_fields=("channel_id", "thread_id", "request_id"),
+        ),
+        EventProblemSpec(
             event_type="channel.workflow.rejected",
             event_class="expected_negative",
             problem_class="human",
@@ -1863,6 +1978,12 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
         ),
         EventProblemSpec(
             event_type="worker.context.warning",
+            # The Kernel lifecycle already owns warning-threshold handling:
+            # it emits the observation, then compacts or marks a busy worker
+            # pending-recycle at the configured threshold.  Treating the
+            # observation as a Run Manager pending action creates a generic
+            # diagnose-attention fallback and launches Autoresearch while the
+            # worker is still making healthy progress.
             event_class="expected_negative",
             problem_class="worker_lifecycle",
             failure_class="worker_context_warning",

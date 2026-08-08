@@ -20,4 +20,5 @@ PY="${PY:-$(command -v python3)}"
 exec env PYTHONPATH=src "$PY" -m pytest \
   tests/test_flow_smoke_e2e.py \
   tests/test_controller_flow_smoke_matrix.py \
+  tests/e2e/test_task_pipeline_v4_runtime_noise_mock_e2e.py \
   -q --no-cov -p no:cacheprovider "$@"

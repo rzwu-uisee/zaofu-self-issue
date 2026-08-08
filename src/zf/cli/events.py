@@ -124,11 +124,15 @@ def run_emit(args: argparse.Namespace) -> int:
     if getattr(args, "dispatch_id", None):
         payload["dispatch_id"] = args.dispatch_id
     if args.task:
-        _autofill_task_attempt_identity(
+        attempt_binding_error = _autofill_task_attempt_identity(
             payload,
             state_dir=state_dir,
             task_id=args.task,
+            actor=str(args.actor or ""),
         )
+        if attempt_binding_error and _is_task_attempt_result_event(args.type):
+            print(f"Error: {attempt_binding_error}", file=sys.stderr)
+            return 2
         _autofill_completion_revisions(
             payload,
             state_dir=state_dir,
@@ -212,7 +216,8 @@ def _autofill_task_attempt_identity(
     *,
     state_dir: Path,
     task_id: str,
-) -> None:
+    actor: str = "",
+) -> str:
     """Bind ordinary ``zf emit --task`` calls to the scheduler lease."""
 
     try:
@@ -225,11 +230,28 @@ def _autofill_task_attempt_identity(
     except Exception:
         current = None
     if current is None:
-        return
+        return ""
     supplied_dispatch = str(payload.get("dispatch_id") or "")
     current_dispatch = str(current.get("dispatch_id") or "")
     if supplied_dispatch and supplied_dispatch != current_dispatch:
-        return
+        return ""
+    actor = str(actor or "").strip()
+    owners = {
+        str(current.get(key) or "").strip()
+        for key in ("role", "instance_id")
+        if str(current.get(key) or "").strip()
+    }
+    if actor and owners and actor not in owners:
+        return (
+            f"current TaskAttempt for {task_id} is owned by "
+            f"{', '.join(sorted(owners))}, not {actor}"
+        )
+    status = str(current.get("status") or "").strip()
+    if status not in {"prepared", "delivering", "sent"}:
+        return (
+            f"current TaskAttempt for {task_id} is already terminal "
+            f"(status={status or 'unknown'})"
+        )
     run_id = str(current.get("run_id") or "")
     identity = {
         "workflow_run_id": run_id,
@@ -242,6 +264,13 @@ def _autofill_task_attempt_identity(
     for key, value in identity.items():
         if value and not str(payload.get(key) or ""):
             payload[key] = value
+    return ""
+
+
+def _is_task_attempt_result_event(event_type: str) -> bool:
+    from zf.runtime.task_attempt_terminal import result_status
+
+    return bool(result_status(str(event_type or "")))
 
 
 def _terminal_run_quiesces_emit(event_type: str, event_log: Any) -> bool:

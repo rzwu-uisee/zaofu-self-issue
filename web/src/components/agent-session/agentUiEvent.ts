@@ -227,7 +227,7 @@ export function parsePlanRequest(payload: Record<string, unknown>): AgentSession
   const rawQuestions = Array.isArray(request.questions)
     ? request.questions
     : [request];
-  const questions = rawQuestions.flatMap((item, index) => {
+  let questions = rawQuestions.flatMap((item, index) => {
     const rawQuestion = recordValue(item);
     if (!rawQuestion) return [];
     const id = textValue(
@@ -257,6 +257,23 @@ export function parsePlanRequest(payload: Record<string, unknown>): AgentSession
       allowOther: rawQuestion.allow_other !== false,
     }];
   });
+  const validationError = textValue(request.validation_error).trim();
+  if (!questions.length && request.valid === false && validationError) {
+    const rawQuestion = recordValue(rawQuestions[0]) || request;
+    questions = [{
+      id: textValue(
+        rawQuestion.id
+        || rawQuestion.question_id
+        || request.question_id
+        || request.id
+        || "invalid-plan",
+      ).trim(),
+      header: textValue(rawQuestion.header || request.header).trim() || "Plan",
+      question: "This Plan draft needs revision before it can be submitted.",
+      options: parsePlanOptions(rawQuestion.options || request.options || []),
+      allowOther: rawQuestion.allow_other !== false,
+    }];
+  }
   const primaryQuestion = questions[0];
   if (!requestEventId || !requestId || !primaryQuestion) return undefined;
   return {
@@ -284,7 +301,7 @@ export function parsePlanRequest(payload: Record<string, unknown>): AgentSession
         item.options.length >= 2 && item.options.length <= 3
       ))
     ),
-    validationError: textValue(request.validation_error).trim(),
+    validationError,
     backend: textValue(request.backend).trim(),
     providerSessionId: textValue(request.provider_session_id).trim(),
     submitAction: textValue(request.submit_action).trim(),

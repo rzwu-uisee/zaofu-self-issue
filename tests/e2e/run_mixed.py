@@ -408,9 +408,11 @@ def start_watcher(worktree: Path) -> int:
         cwd=worktree,
         stdout=open(log_path, "wb"),
         stderr=subprocess.STDOUT,
-        # Autoresearch resident owns one dedicated process group. Keep the
-        # nested watcher in it so resident shutdown cannot orphan the watcher.
-        start_new_session=False,
+        # The nested harness owns its own process group. Its eventual `zf
+        # stop` signals the watcher PGID; sharing the resident's PGID would
+        # terminate the outer Autoresearch resident and can cascade into the
+        # parent harness shutdown path.
+        start_new_session=True,
         env=_subprocess_env(),
     )
     deadline = time.time() + 90

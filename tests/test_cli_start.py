@@ -323,6 +323,37 @@ def test_record_ready_worker_state_does_not_overwrite_busy(tmp_path: Path):
     assert event_log.read_all() == []
 
 
+def test_record_ready_worker_state_refreshes_stale_idle_heartbeat(tmp_path: Path):
+    from zf.cli.start import _record_ready_worker_state
+    from zf.core.events.log import EventLog
+    from zf.core.state.role_sessions import RoleSessionRegistry
+
+    event_log = EventLog(tmp_path / "events.jsonl")
+    registry = RoleSessionRegistry(
+        tmp_path / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    registry.record_heartbeat("orchestrator", {
+        "instance_id": "orchestrator",
+        "state": "idle",
+        "current_task_id": "",
+        "source": "old-runtime",
+    })
+
+    _record_ready_worker_state(
+        event_log=event_log,
+        registry=registry,
+        instance_id="orchestrator",
+    )
+
+    _last_at, payload = registry.get_last_heartbeat("orchestrator")
+    assert payload is not None
+    assert payload["state"] == "idle"
+    assert payload["source"] == "zf.start.ready"
+    assert payload["reason"] == "worker pane ready on zf start"
+    assert event_log.read_all() == []
+
+
 @pytest.fixture
 def project_dir(tmp_path: Path, monkeypatch):
     """Set up a minimal project directory with zf.yaml and .zf/."""
@@ -650,6 +681,51 @@ workflow:
             / "skills"
         ).exists()
 
+    def test_start_prepares_headless_orchestrator_capabilities(
+        self,
+        project_dir: Path,
+    ) -> None:
+        (project_dir / "zf.yaml").write_text(
+            yaml.safe_dump({
+                "version": "1.0",
+                "project": {"name": "test-project", "state_dir": ".zf"},
+                "session": {"tmux_session": "test-zf"},
+                "orchestrator": {"backend": "claude-code"},
+                "roles": [{
+                    "name": "orchestrator",
+                    "backend": "claude-code",
+                    "transport": "stream-json",
+                    "permission_mode": "bypass",
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        result = main(["start", "--dry-run"])
+
+        assert result == 0
+        state_dir = project_dir / ".zf"
+        events = [
+            json.loads(line)
+            for line in (state_dir / "events.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        assert any(
+            event["type"] == "worker.launch_artifact.written"
+            and event["payload"].get("instance_id") == "orchestrator"
+            for event in events
+        )
+        assert (
+            state_dir / "private" / "artifact-read" / "roles"
+            / "orchestrator.token"
+        ).is_file()
+        assert (
+            state_dir / "private" / "result-submit" / "roles"
+            / "orchestrator.token"
+        ).is_file()
+
     def test_start_restores_on_demand_role_with_in_progress_task(
         self,
         project_dir: Path,
@@ -725,6 +801,37 @@ workflow:
         )
         assert hydration["schema_version"] == "briefing-hydration-report.v1"
         assert hydration["roles"][0]["has_run_contract_context"] is True
+
+    def test_start_reconciles_research_generation_before_transport(
+        self,
+        project_dir: Path,
+        monkeypatch,
+    ):
+        import zf.cli.start as start_mod
+        import zf.runtime.research_generation as generation_mod
+
+        calls: list[tuple[str, Path]] = []
+
+        def _reconcile(*, config, state_dir, writer):  # noqa: ANN001
+            calls.append((config.project.name, Path(state_dir)))
+            assert writer.event_log.path == Path(state_dir) / "events.jsonl"
+            return []
+
+        original_make_transport = start_mod.make_transport
+
+        def _make_transport(config, dry_run=False):  # noqa: ANN001
+            assert calls == [("test-project", project_dir / ".zf")]
+            return original_make_transport(config, dry_run=dry_run)
+
+        monkeypatch.setattr(
+            generation_mod,
+            "reconcile_stale_research_generations",
+            _reconcile,
+        )
+        monkeypatch.setattr(start_mod, "make_transport", _make_transport)
+
+        assert main(["start", "--dry-run"]) == 0
+        assert calls == [("test-project", project_dir / ".zf")]
 
     def test_start_fails_closed_on_strict_run_contract_drift(
         self,

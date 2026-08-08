@@ -171,10 +171,12 @@ class WriterFanoutDataMixin:
             "Write plan artifacts inside the assigned project workdir using workdir-relative paths such as `docs/plans/<name>.md` or `artifacts/<stage>/<name>.json`. Never write the configured state dir or root project directly.",
             "Include the same workdir-relative `plan_artifact_ref` or `plan_ref` in `artifact_refs`; the Kernel relocates admitted refs into canonical runtime artifact storage and computes their digests.",
             "When a task map is produced, include `task_map_ref`; when source coverage is available, include `source_index_ref`.",
+            "Prefer exactly one Task Map producer: `task_map_ref` pointing to the workdir-relative JSON artifact. Do not duplicate the full Task Map inline in `task_map` or a `plan_ports` task-map descriptor unless the output contract explicitly requires another representation. If more than one representation is returned, every copy MUST contain identical JSON; Runtime rejects stale copies as `task_map_producer_mismatch`. Do not manually diff or print Task Map producers; the pre-submit validator performs the identity check. `exclusive_files` has exactly one owner even when tasks are serialized. Writer `allowed_paths` are writable scopes and cannot overlap across tasks or waves; keep sibling-owned read-only files out of another task's allowed_paths.",
             "When implementation must start from a non-default existing target, put its immutable git commit in top-level `task_map.target_commit`; do not leave the only baseline binding under metadata or prose.",
             "If the plan splits work across more than one parallel bundle (distinct `owner_role` bundles running concurrently), it MUST include one separate task with `root_owner_class: \"assembly\"` that owns the shared entrypoint/wiring and merges the bundles. The writer fanout admission rejects a multi-bundle task_map lacking it and forces a replan — declare the assembly task up front.",
             "Set task_map.workspace_root_owner_required=true only when this delivery must change or validate a root-level scaffold/entrypoint; then assign that root path to one task. Do not infer it from a local leaf patch.",
             "Each task_map validation.commands[] tier must use the canonical vocabulary `static`, `runtime`, `e2e`, or `manual_evidence`. Common producer aliases are normalized at admission, but unknown tiers fail closed; use `static` for setup/install/build checks rather than inventing a `setup` tier.",
+            "When the active v4 Task Pipeline requires rolling smoke, every task must mark at least one cheap deterministic reusable `static` or `runtime` command with JSON boolean `rolling_smoke: true`; `rolling_smoke` is a command selector, never a tier.",
             "For refactor plan handoff, include `scan_quality_audit_ref` and list that audit artifact in `artifact_refs`.",
             "If the workflow asks for a full manifest, emit `artifact.manifest.published` with `kind=implementation_plan` and `kind=task_map` refs before the terminal success event.",
         ]
@@ -196,6 +198,9 @@ class WriterFanoutDataMixin:
             "Every required matrix body must set top-level `status: ready` and "
             "`metadata.enrichment_contract.status: fulfilled`; do not overwrite "
             "kernel state or claim an unadapted draft as ready.",
+            "Test Matrix has exactly one command registry: `test_matrix.commands[]`; never redefine commands under `tests[]`.",
+            "Passing fixture: every required matrix is `status:ready` with `metadata.enrichment_contract.status:fulfilled`; Task `TASK-1` command `test-command` uses tier `runtime`, exact command `pytest -q tests/test_command.py`, and `acceptance_ids:[\"AC-1\"]`.",
+            "Cross-links: capability `CAP-1` has `task_ids:[\"TASK-1\"]` and `acceptance_ids:[\"AC-1\"]`; acceptance `AC-1` has `capability_id:\"CAP-1\"`, `task_id:\"TASK-1\"`, and `verification_command_ids:[\"test-command\"]`; Test Matrix repeats the exact command and acceptance ids.",
             "A pure aggregator may validate and carry child-supplied `plan_ports`, "
             "but it must reject rather than invent missing project facts or matrix "
             "bodies.",
@@ -377,6 +382,11 @@ class WriterFanoutDataMixin:
             payload["artifact_refs"] = self._dedupe_strings(artifact_refs)
 
         if success_event == "task_map.ready":
+            trigger_payload = (
+                manifest.get("trigger_payload")
+                if isinstance(manifest.get("trigger_payload"), dict)
+                else {}
+            )
             task_map_ref = (
                 self._first_child_value(manifest, payloads, "task_map_ref")
                 or str(manifest.get("task_map_ref") or "")
@@ -394,25 +404,24 @@ class WriterFanoutDataMixin:
                 or source_commit
             )
             pdd_id = (
-                self._first_child_value(manifest, payloads, "pdd_id")
+                str(payload.get("pdd_id") or "")
+                or self._first_child_value(manifest, payloads, "pdd_id")
                 or str(manifest.get("pdd_id") or manifest.get("feature_id") or "")
             )
             feature_id = (
-                self._first_child_value(manifest, payloads, "feature_id")
+                str(payload.get("feature_id") or "")
+                or self._first_child_value(manifest, payloads, "feature_id")
                 or str(manifest.get("feature_id") or pdd_id)
             )
+            goal_id = str(payload.get("goal_id") or feature_id or pdd_id)
             payload.update({
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
+                "goal_id": goal_id,
                 "task_map_ref": task_map_ref,
                 "source_commit": source_commit,
                 "candidate_base_commit": base_commit,
             })
-            trigger_payload = (
-                manifest.get("trigger_payload")
-                if isinstance(manifest.get("trigger_payload"), dict)
-                else {}
-            )
             for key in (
                 "plan_admission_incident_id",
                 "task_map_digest",
@@ -421,46 +430,15 @@ class WriterFanoutDataMixin:
                 if value not in (None, ""):
                     payload[key] = value
         if success_event == "goal.closure.synthesized":
-            result = self._first_child_mapping(
-                manifest, payloads, "goal_closure_result",
+            from zf.runtime.goal_closure_fanout_payload import (
+                apply_goal_closure_aggregate_payload,
             )
-            envelope_ref = self._first_child_mapping(
-                manifest, payloads, "admitted_call_result_ref",
-            )
-            control_ref = self._first_child_mapping(
-                manifest, payloads, "control_result_ref",
-            )
-            trigger_payload = (
-                manifest.get("trigger_payload")
-                if isinstance(manifest.get("trigger_payload"), dict)
-                else {}
-            )
-            payload.update({
-                "goal_closure_result": result,
-                "admitted_call_result_ref": envelope_ref,
-                "control_result_ref": control_ref,
-            })
-            for key in (
-                "workflow_run_id", "goal_id", "flow_kind",
-                "task_map_generation", "candidate_head_commit",
-                "closure_identity", "closure_fact_ref",
-                "closure_fact_digest", "goal_claim_set_ref",
-                "goal_claim_set_digest", "candidate_ref", "target_ref",
-                "pdd_id", "feature_id", "operation_id", "request_hash",
-                "contract_snapshot_ref", "contract_snapshot_digest",
-                "target_snapshot_ref", "target_snapshot_digest",
-            ):
-                value = self._first_child_value(manifest, payloads, key)
-                if value in (None, ""):
-                    value = result.get(key)
-                if value in (None, ""):
-                    value = trigger_payload.get(key)
-                if value not in (None, ""):
-                    payload[key] = value
-            payload.setdefault("pdd_id", str(payload.get("goal_id") or ""))
-            payload.setdefault(
-                "feature_id",
-                str(payload.get("pdd_id") or payload.get("goal_id") or ""),
+
+            apply_goal_closure_aggregate_payload(
+                state_dir=self.state_dir,
+                manifest=manifest,
+                payloads=payloads,
+                payload=payload,
             )
         if success_event == "flow.discovery.completed":
             trigger_payload = (
@@ -654,6 +632,9 @@ class WriterFanoutDataMixin:
             "workflow_template",
             "completion_profile",
             "generic_workflow_contract_digest",
+            "goal_id",
+            "pdd_id",
+            "feature_id",
         ):
             # Request identity belongs to the parent invocation. A child may
             # echo it, but may not replace the trigger/manifest truth.
@@ -717,10 +698,10 @@ class WriterFanoutDataMixin:
         # task map look like a fresh plan; writer admission then rejects it as
         # stale and the stage can repeatedly resynthesise the same map.
         for key in (
-            "rework_of",
-            "rework_attempt",
+            "rework_of", "rework_attempt",
             "rework_source",
             "rework_feedback",
+            "rework_feedback_ref", "rework_feedback_digest", "feedback_revision",
             "rework_categories",
             "rework_summary",
             "replan_classification",
@@ -790,6 +771,10 @@ class WriterFanoutDataMixin:
         success_event: str,
         payload: dict,
     ) -> str:
+        if success_event == "goal.closure.synthesized":
+            error = str(payload.get("goal_closure_result_error") or "").strip()
+            if error:
+                return error
         if (
             success_event == "flow.discovery.completed"
             and isinstance(payload.get("gap_task_contract_errors"), list)

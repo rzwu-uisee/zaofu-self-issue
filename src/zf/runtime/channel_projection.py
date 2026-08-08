@@ -127,6 +127,10 @@ CHANNEL_EVENT_TYPES = {
     "channel.finding.recorded",
     "channel.summary.updated",
     "channel.synthesis.requested",
+    "channel.synthesis.repair.requested",
+    "channel.synthesis.repair.completed",
+    "channel.synthesis.repair.stale_ignored",
+    "channel.synthesis.blocked",
     "channel.synthesis.proposed",
     "workflow.invoke.requested",
     "workflow.invoke.accepted",
@@ -462,6 +466,8 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_artifact(channel, event, payload)
         elif event.type.startswith("agent.session."):
             _apply_agent_session(channel, event, payload)
+        elif event.type == "channel.finding.recorded":
+            _apply_contribution(channel, event, payload)
         elif event.type.startswith("channel.context_pack."):
             _apply_context_pack(channel, event, payload, state_dir=state_dir)
         elif event.type.startswith("channel.handoff."):
@@ -507,7 +513,11 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
         elif event.type == "channel.summary.updated":
             channel["summary"] = _payload_str(payload, "summary")
             channel["summary_event_id"] = event.id
-        elif event.type == "channel.synthesis.requested":
+        elif event.type in {
+            "channel.synthesis.requested",
+            "channel.synthesis.repair.requested",
+            "channel.synthesis.blocked",
+        }:
             _apply_synthesis_request(channel, event, payload)
         elif event.type == "channel.synthesis.proposed":
             _apply_synthesis(channel, event, payload)
@@ -548,6 +558,7 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "syntheses": [],
         "synthesis_requests": [],
         "question_dedup_requests": [],
+        "contributions": {},
         "workflow_requests": [],
         "mentions_detected": [],
         "routes": [],
@@ -2057,6 +2068,13 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         else:
             item["human_confirmed"] = True
             item["human_confirmed_by"] = member_id
+            item["risk_accepted"] = payload.get("risk_accepted") is True
+            item["confirmed_readiness_ref"] = _payload_str(
+                payload, "readiness_ref"
+            )
+            item["confirmed_readiness_digest"] = _payload_str(
+                payload, "readiness_digest"
+            )
         return
     if event.type == "channel.consensus.blocked":
         item.setdefault("blocked", []).append({
@@ -2080,6 +2098,42 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         })
         return
     if event.type == "channel.consensus.reached":
+        for field in (
+            "artifact_ref",
+            "artifact_digest",
+            "prd_ref",
+            "prd_digest",
+            "readiness_ref",
+            "readiness_digest",
+            "readiness_verdict",
+            "conclusion_ref",
+            "conclusion_digest",
+            "product_mode",
+        ):
+            value = _payload_str(payload, field)
+            if value:
+                item[field] = value
+        if isinstance(payload.get("source_refs"), list):
+            item["source_refs"] = _string_list(payload.get("source_refs"))
+        if payload.get("confirmed_by"):
+            item["human_confirmed"] = True
+            item["human_confirmed_by"] = _payload_str(
+                payload, "confirmed_by"
+            )
+        if payload.get("risk_accepted") is True:
+            item["risk_accepted"] = True
+            item["confirmed_readiness_ref"] = _payload_str(
+                payload, "readiness_ref"
+            )
+            item["confirmed_readiness_digest"] = _payload_str(
+                payload, "readiness_digest"
+            )
+        if "implementation_start" in payload:
+            item["implementation_start"] = (
+                payload.get("implementation_start") is True
+            )
+        if payload.get("prd_revision") is not None:
+            item["prd_revision"] = int(payload.get("prd_revision") or 0)
         item["reached_event_id"] = event.id
         item["status"] = "reached"
         item["confirmed_revision"] = int(
@@ -2096,13 +2150,58 @@ def _apply_synthesis_request(channel: dict[str, Any], event: ZfEvent, payload: d
         "thread_id": _payload_str(payload, "thread_id") or "main",
         "request_id": _payload_str(payload, "request_id") or event.id,
         "target_member_id": _payload_str(payload, "target_member_id"),
-        "status": _payload_str(payload, "status") or "requested",
+        "status": _payload_str(payload, "status") or (
+            "blocked"
+            if event.type == "channel.synthesis.blocked"
+            else "repair_requested"
+            if event.type == "channel.synthesis.repair.requested"
+            else "requested"
+        ),
         "reason": _payload_str(payload, "reason"),
         "prompt": _payload_str(payload, "prompt"),
         "source": _payload_str(payload, "source"),
+        "repair_id": _payload_str(payload, "repair_id"),
+        "repair_revision": int(payload.get("repair_revision") or 0),
+        "max_repair_attempts": int(payload.get("max_repair_attempts") or 0),
+        "contract_status": _payload_str(payload, "contract_status"),
+        "contract_error": _payload_str(payload, "contract_error"),
+        "invalid_reply_ref": (
+            redact_obj(payload.get("invalid_reply_ref"))
+            if isinstance(payload.get("invalid_reply_ref"), dict)
+            else {}
+        ),
+        "type": event.type,
         "ts": event.ts,
     }
     channel["synthesis_requests"].append(redact_obj(item))
+
+
+def _apply_contribution(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+) -> None:
+    if str(payload.get("contract_status") or "") != "structured":
+        return
+    artifact_ref = str(payload.get("artifact_ref") or "").strip()
+    artifact_digest = str(payload.get("artifact_digest") or "").strip()
+    if not artifact_ref or not artifact_digest:
+        return
+    thread_id = str(payload.get("thread_id") or "main")
+    member_id = str(payload.get("member_id") or event.actor or "").strip()
+    if not member_id:
+        return
+    channel["contributions"][f"{thread_id}:{member_id}"] = {
+        "event_id": event.id,
+        "ts": event.ts,
+        "thread_id": thread_id,
+        "member_id": member_id,
+        "contract_status": "structured",
+        "artifact_ref": artifact_ref,
+        "artifact_digest": artifact_digest,
+        "source_refs": _string_list(payload.get("source_refs")),
+        "evidence_refs": _string_list(payload.get("evidence_refs")),
+    }
 
 
 def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
@@ -2423,6 +2522,13 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
             ),
         ),
         "attention": channel["attention"],
+        "contributions": sorted(
+            channel["contributions"].values(),
+            key=lambda item: (
+                str(item.get("thread_id") or ""),
+                str(item.get("member_id") or ""),
+            ),
+        ),
         "syntheses": channel["syntheses"],
         "synthesis_requests": channel["synthesis_requests"],
         "question_dedup_requests": channel["question_dedup_requests"],

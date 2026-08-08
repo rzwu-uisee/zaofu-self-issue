@@ -606,6 +606,43 @@ def test_snapshot_projects_workflow_handoffs_to_kanban_columns(state_dir: Path):
     assert archived["TASK-DONE"]["workflow_phase"] == "done"
 
 
+def test_snapshot_archived_task_preserves_completed_workflow_gates(
+    state_dir: Path,
+) -> None:
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-ARCH-FLOW",
+        title="archived workflow",
+        status="in_progress",
+        assigned_to="judge",
+    ))
+    log = EventLog(state_dir / "events.jsonl")
+    for event_type, actor in (
+        ("dev.build.done", "dev"),
+        ("static_gate.passed", "zf-cli"),
+        ("review.approved", "review"),
+        ("test.passed", "test"),
+        ("judge.passed", "judge"),
+    ):
+        log.append(ZfEvent(
+            type=event_type,
+            actor=actor,
+            task_id="TASK-ARCH-FLOW",
+        ))
+    store.update("TASK-ARCH-FLOW", status="done")
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    snapshot = client.get("/api/snapshot").json()
+    archived = next(
+        task for task in snapshot["archive_tasks"]
+        if task["id"] == "TASK-ARCH-FLOW"
+    )
+
+    assert archived["impl_exit_gate_state"] == "passed"
+    assert archived["verify_state"] == "passed"
+    assert archived["judge_state"] == "passed"
+
+
 def test_snapshot_projects_candidate_fanout_workflow_context(state_dir: Path) -> None:
     store = TaskStore(state_dir / "kanban.json")
     store.add(Task(

@@ -11,6 +11,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.runtime.call_result_runtime import (
     admit_runtime_call_result,
+    has_admitted_semantic_submit_provenance,
     mark_call_operation_started,
     prepare_call_operation,
 )
@@ -23,8 +24,10 @@ from zf.runtime.result_submit import (
 )
 from zf.runtime.call_result_adapters import hydrate_profiled_control_result_event
 from zf.runtime.fanout import validate_fanout_report
+from zf.runtime.task_attempt_runtime import validate_task_attempt_result
 from zf.runtime.workflow_operation import WorkflowOperationService
 from zf.cli.main import build_parser
+from zf.cli.result import _print_error
 
 
 def _runtime(tmp_path: Path):
@@ -96,6 +99,111 @@ def _semantic() -> dict:
     }
 
 
+def _plan_candidate() -> dict:
+    return {
+        "status": "passed",
+        "recommendation": "approve",
+        "summary": "Plan candidate is complete.",
+        "findings": [],
+        "plan_md": "# Plan\n\nImplement TASK-1.",
+        "source_index": {
+            "schema_version": "source-index.v1",
+            "tasks": [{
+                "task_id": "TASK-1",
+                "source_key": "issue:one",
+                "source_ref": "docs/issues/one.md",
+                "source_excerpt": "The command succeeds.",
+            }],
+        },
+        "task_map": {
+            "schema_version": "task-map.v1",
+            "goal_claims": [{
+                "goal_claim_id": "CLAIM-1",
+                "text": "The command succeeds.",
+                "mandatory": True,
+            }],
+            "tasks": [{
+                "task_id": "TASK-1",
+                "title": "Implement the command",
+                "goal_claim_ids": ["CLAIM-1"],
+                "allowed_paths": ["src/command.py", "tests/test_command.py"],
+                "allowed_paths_reason": "Own implementation and test.",
+                "blocked_by": [],
+                "validation": {"commands": [{
+                    "id": "test-command",
+                    "command": "pytest -q tests/test_command.py",
+                    "acceptance_ids": ["AC-1"],
+                    "owner": "task_verify",
+                    "tier": "runtime",
+                    "deterministic": True,
+                    "reusable": True,
+                    "timeout_seconds": 60,
+                }]},
+                "acceptance_criteria": [{
+                    "id": "AC-1",
+                    "statement": "The command succeeds.",
+                    "mandatory": True,
+                    "verification_owner": "task_verify",
+                    "verification_tier": "runtime",
+                    "verification_command_ids": ["test-command"],
+                }],
+            }],
+        },
+    }
+
+
+def _running_plan_candidate_operation(tmp_path: Path):
+    runtime = _runtime(tmp_path)
+    runtime.config.workflow.flow_metadata["result_protocol"][
+        "semantic_submit_profiles"
+    ]["workflow-read"] = "blocking"
+    token_path = provision_role_submit_credential(runtime.state_dir, "planner")
+    payload = {
+        "workflow_run_id": "run-plan-candidate",
+        "role_instance": "planner",
+        "fanout_id": "fanout-plan-candidate",
+        "stage_id": "issue-triage",
+        "child_id": "planner",
+        "run_id": "attempt-plan-candidate",
+        "attempt_domain": "plan",
+        "canonical_success_event": "issue.triage.child.completed",
+        "canonical_failure_event": "issue.triage.child.failed",
+        "plan_candidate_validation": {
+            "schema_version": "plan-candidate-validation-context.v1",
+            "manifest": {
+                "fanout_id": "fanout-plan-candidate",
+                "stage_id": "issue-triage",
+                "trigger_payload": {
+                    "flow_kind": "issue",
+                    "issue_ref": "docs/issues/one.md",
+                },
+            },
+            "metadata": {"flow_kind": "issue"},
+        },
+    }
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="planner",
+        stage_id="issue-triage",
+        task_id="",
+        dispatch_id="attempt-plan-candidate",
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="",
+        dispatch_id="attempt-plan-candidate",
+    )
+    service = SemanticResultSubmitService(
+        state_dir=runtime.state_dir,
+        event_log=runtime.event_log,
+        event_writer=runtime.event_writer,
+    )
+    return runtime, prepared, service, token_path.read_text().strip()
+
+
 def _running_plan_synth_operation(tmp_path: Path):
     runtime = _runtime(tmp_path)
     token_path = provision_role_submit_credential(
@@ -141,7 +249,11 @@ def _running_plan_synth_operation(tmp_path: Path):
     return runtime, prepared, service, token
 
 
-def _running_workflow_read_operation(tmp_path: Path):
+def _running_workflow_read_operation(
+    tmp_path: Path,
+    *,
+    artifact_output: bool = False,
+):
     runtime = _runtime(tmp_path)
     runtime.config.workflow.flow_metadata["result_protocol"][
         "semantic_submit_profiles"
@@ -161,6 +273,15 @@ def _running_workflow_read_operation(tmp_path: Path):
         "canonical_success_event": "workflow.child.completed",
         "canonical_failure_event": "workflow.child.failed",
     }
+    if artifact_output:
+        payload.update({
+            "generic_workflow_operation": "audit.scope",
+            "result_semantics": "artifact_production",
+            "workflow_output_ports": [{
+                "name": "scope",
+                "kind": "audit/scope",
+            }],
+        })
     prepared = prepare_call_operation(
         runtime,
         payload=payload,
@@ -313,9 +434,20 @@ def test_stdin_semantic_submit_fills_identity_and_emits_canonical_event(tmp_path
     assert canonical.payload["workflow_run_id"] == "run-1"
     assert canonical.payload["operation_id"] == prepared.operation_id
     assert canonical.payload["source_commit"] == "abc123"
+    assert canonical.payload["changed_files"] == ["result.txt"]
     assert (
         canonical.payload["semantic_submit_admission_event_id"]
         == result.admitted_event_id
+    )
+    assert has_admitted_semantic_submit_provenance(runtime, canonical)
+    assert validate_task_attempt_result(
+        runtime,
+        canonical,
+        task=SimpleNamespace(id="T1"),
+    ) == ""
+    assert not any(
+        event.type == "task.attempt.shadow_mismatch"
+        for event in runtime.event_log.read_all()
     )
     assert "implementation_result" not in canonical.payload
     hydrated = hydrate_profiled_control_result_event(runtime.state_dir, canonical)
@@ -329,6 +461,140 @@ def test_stdin_semantic_submit_fills_identity_and_emits_canonical_event(tmp_path
             credential=token,
         )
     assert duplicate.value.code == "duplicate_submit"
+
+
+def test_plan_candidate_validate_can_fail_fix_and_submit_same_operation(
+    tmp_path: Path,
+) -> None:
+    runtime, prepared, service, token = _running_plan_candidate_operation(
+        tmp_path
+    )
+    invalid = _plan_candidate()
+    invalid["task_map"]["tasks"][0]["acceptance_criteria"][0].pop(
+        "verification_command_ids"
+    )
+    before_ids = [event.id for event in runtime.event_log.read_all()]
+
+    failed = service.validate_plan_candidate(
+        operation_id=prepared.operation_id,
+        semantic_result=invalid,
+        role_instance="planner",
+        credential=token,
+        project_root=runtime.project_root,
+    )
+    passed = service.validate_plan_candidate(
+        operation_id=prepared.operation_id,
+        semantic_result=_plan_candidate(),
+        role_instance="planner",
+        credential=token,
+        project_root=runtime.project_root,
+    )
+
+    assert failed["status"] == "failed"
+    assert "acceptance_command_missing" in {
+        item["code"] for item in failed["errors"]
+    }
+    assert passed["status"] == "passed"
+    assert [event.id for event in runtime.event_log.read_all()] == before_ids
+    submitted = service.submit(
+        operation_id=prepared.operation_id,
+        semantic_result=_plan_candidate(),
+        role_instance="planner",
+        credential=token,
+    )
+    assert submitted.canonical_event_type == "issue.triage.child.completed"
+
+
+def test_plan_synth_validate_uses_typed_profile_without_candidate_context(
+    tmp_path: Path,
+) -> None:
+    runtime, prepared, service, token = _running_plan_synth_operation(tmp_path)
+    semantic = {
+        "status": "completed",
+        "recommendation": "approve",
+        "workflow_run_id": "run-plan",
+        "fanout_id": "fanout-plan",
+        "stage_id": "plan",
+        "plan_revision": "plan-r1",
+        "plan_synth_contract_ref": "artifacts/contracts/plan-r1.json",
+        "plan_synth_contract_digest": "a" * 64,
+        "summary": "plan approved",
+        "report": {
+            "child_id": "synth",
+            "status": "passed",
+            "recommendation": "approve",
+            "summary": "plan approved",
+            "findings": [{
+                "severity": "residual-risk",
+                "message": "Implementation evidence is still required.",
+            }],
+        },
+    }
+    before_ids = [event.id for event in runtime.event_log.read_all()]
+
+    failed = service.validate_plan_candidate(
+        operation_id=prepared.operation_id,
+        semantic_result=semantic,
+        role_instance="plan-critic",
+        credential=token,
+        project_root=runtime.project_root,
+    )
+    semantic["report"]["findings"][0]["severity"] = "low"
+    passed = service.validate_plan_candidate(
+        operation_id=prepared.operation_id,
+        semantic_result=semantic,
+        role_instance="plan-critic",
+        credential=token,
+        project_root=runtime.project_root,
+    )
+
+    assert failed["status"] == "failed"
+    assert any(
+        "severity must be one of" in item["message"]
+        for item in failed["errors"]
+    )
+    assert passed == {
+        "schema_version": "semantic-result-preflight.v1",
+        "status": "passed",
+        "profile_id": "plan-synth",
+        "profile_revision": "1",
+        "errors": [],
+    }
+    assert [event.id for event in runtime.event_log.read_all()] == before_ids
+    submitted = service.submit(
+        operation_id=prepared.operation_id,
+        semantic_result=semantic,
+        role_instance="plan-critic",
+        credential=token,
+    )
+    assert submitted.canonical_event_type == "fanout.synth.completed"
+
+
+def test_result_validate_cli_is_registered() -> None:
+    args = build_parser().parse_args([
+        "result",
+        "validate",
+        "--operation",
+        "operation-1",
+        "--result-file",
+        "/tmp/result.json",
+    ])
+
+    assert args.result_command == "validate"
+    assert args.operation == "operation-1"
+
+
+def test_result_submit_cli_accepts_operation_scratch() -> None:
+    args = build_parser().parse_args([
+        "result",
+        "submit",
+        "--operation",
+        "operation-1",
+        "--scratch",
+    ])
+
+    assert args.result_command == "submit"
+    assert args.scratch is True
 
 
 def test_workflow_read_submit_emits_registered_product_child_event(
@@ -458,6 +724,63 @@ def test_workflow_read_submit_rejects_ambiguous_wrapper_without_losing_retry(
     ]
 
 
+def test_workflow_output_rejection_returns_actionable_cli_diagnostics(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    runtime, prepared, service, token = _running_workflow_read_operation(
+        tmp_path,
+        artifact_output=True,
+    )
+    incomplete = {
+        "execution_status": "completed",
+        "status": "passed",
+        "summary": "Scope evidence is complete.",
+        "recommendation": "approve",
+        "findings": [],
+    }
+
+    with pytest.raises(ResultSubmitError) as rejected:
+        service.submit(
+            operation_id=prepared.operation_id,
+            semantic_result=incomplete,
+            role_instance="scan-verification",
+            credential=token,
+        )
+
+    assert rejected.value.code == "result_not_admitted"
+    assert rejected.value.details["status"] == "repair_pending"
+    assert rejected.value.details["issues"] == [{
+        "field": "control_result.workflow_output_ports[0]",
+        "code": "workflow_output_missing",
+        "message": "flow-scan.scope",
+        "required_change": (
+            "Provide the non-placeholder artifact body at outputs.scope "
+            "for declared port flow-scan.scope."
+        ),
+    }]
+    _print_error(rejected.value, fallback_code="result_submit_failed")
+    stderr = capsys.readouterr().err
+    assert '"code": "workflow_output_missing"' in stderr
+    assert "outputs.scope" in stderr
+
+    admitted = service.submit(
+        operation_id=prepared.operation_id,
+        semantic_result={
+            **incomplete,
+            "outputs": {
+                "scope": {
+                    "acceptance_ids": ["AUD-AC-001"],
+                    "conclusion": "not_ready",
+                },
+            },
+        },
+        role_instance="scan-verification",
+        credential=token,
+    )
+    assert admitted.canonical_event_type == "workflow.child.completed"
+
+
 def test_plan_synth_legacy_reject_projects_normalized_verdict(
     tmp_path: Path,
 ) -> None:
@@ -514,6 +837,52 @@ def test_plan_synth_legacy_reject_projects_normalized_verdict(
         "required_change": "Return descriptor objects.",
         "done_when": "Every required port has a body.",
     }]
+
+
+def test_plan_synth_legacy_string_feedback_is_preserved(
+    tmp_path: Path,
+) -> None:
+    runtime, prepared, service, token = _running_plan_synth_operation(tmp_path)
+    result = service.submit(
+        operation_id=prepared.operation_id,
+        semantic_result={
+            "status": "completed",
+            "recommendation": "reject",
+            "workflow_run_id": "run-plan",
+            "fanout_id": "fanout-plan",
+            "stage_id": "plan",
+            "plan_revision": "plan-r1",
+            "plan_synth_contract_ref": "artifacts/contracts/plan-r1.json",
+            "plan_synth_contract_digest": "a" * 64,
+            "summary": "plan requires rework",
+            "report": {
+                "status": "failed",
+                "recommendation": "reject",
+                "summary": "plan requires rework",
+                "findings": ["Foundation scope exceeds the writer limit."],
+                "fix_items": ["Split Foundation into bounded work units."],
+                "evidence_refs": [],
+            },
+        },
+        role_instance="plan-critic",
+        credential=token,
+    )
+
+    canonical = next(
+        event for event in runtime.event_log.read_all()
+        if event.id == result.canonical_event_id
+    )
+    hydrated = hydrate_profiled_control_result_event(runtime.state_dir, canonical)
+    plan_result = hydrated.payload["plan_synthesis_result"]
+    assert plan_result["findings"][0]["message"] == (
+        "Foundation scope exceeds the writer limit."
+    )
+    assert plan_result["fix_items"][0]["required_change"] == (
+        "Split Foundation into bounded work units."
+    )
+    assert canonical.payload["report"]["fix_items"][0]["required_change"] == (
+        "Split Foundation into bounded work units."
+    )
 
 
 def test_plan_synth_zero_line_projects_as_missing_optional_line(
@@ -778,6 +1147,32 @@ def test_result_file_requires_exact_regular_scratch_path(tmp_path: Path) -> None
             credential=token,
         )
     assert symlink.value.code == "result_file_unsafe"
+
+
+def test_operation_scratch_resolves_the_signed_result_path(tmp_path: Path) -> None:
+    runtime, prepared, service, token = _running_operation(tmp_path)
+    scratch = runtime.state_dir / prepared.result_scratch_ref
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text(json.dumps(_semantic()), encoding="utf-8")
+
+    with pytest.raises(ResultSubmitError) as ambiguous:
+        service.submit(
+            operation_id=prepared.operation_id,
+            semantic_result=_semantic(),
+            use_operation_scratch=True,
+            role_instance="dev-1",
+            credential=token,
+        )
+    assert ambiguous.value.code == "input_mode_invalid"
+
+    result = service.submit(
+        operation_id=prepared.operation_id,
+        use_operation_scratch=True,
+        role_instance="dev-1",
+        credential=token,
+    )
+
+    assert result.canonical_event_type == "dev.build.done"
 
 
 def test_result_scratch_write_authorization_is_exact_and_current(

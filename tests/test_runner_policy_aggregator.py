@@ -3,7 +3,8 @@
 review-synth (permission_mode: bypass in yaml) is narrowed by pure_aggregator.v1
 to an allowlist. R23: the allowlist had no Read tools and a hard-coded
 ``.zf/artifacts`` cat path, so a headless synth stalled 6h+ on interactive
-permission prompts. The narrowing (no write tools) is intentional and stays.
+permission prompts. Edit is admitted only so the pre-tool guard can authorize
+the current operation's signed result scratch; broad writes remain forbidden.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from zf.core.workflow.runner_policy import (
     goal_closure_judge_role_refs,
 )
 from zf.core.workflow.lane_pipeline import parse_lane_pipeline
+from zf.runtime.cli_command import zf_cli_cmd
 
 
 def _config(state_dir: str = ".zf-custom") -> ZfConfig:
@@ -76,15 +78,18 @@ def test_aggregator_allowlist_uses_exact_runtime_cli_prefix(monkeypatch):
 
     assert f"Bash({command} artifact list *)" in tools
     assert f"Bash({command} artifact read *)" in tools
+    assert f"Bash({command} result submit *)" in tools
     assert "Bash(zf artifact list *)" not in tools
+    assert "Bash(zf result submit *)" not in tools
 
 
-def test_aggregator_write_protection_intact():
+def test_aggregator_only_adds_signed_result_edit_to_write_tools():
     effective = apply_pure_aggregator_policy(_config(), _synth_role())
-    for tool in ("Edit", "Write", "NotebookEdit"):
+    assert "Edit" in effective.allowed_tools
+    for tool in ("Write", "NotebookEdit"):
         assert tool not in effective.allowed_tools
     bash_tools = [t for t in effective.allowed_tools if t.startswith("Bash")]
-    assert bash_tools, "zf emit whitelist must survive"
+    assert f"Bash({zf_cli_cmd()} result submit *)" in bash_tools
     assert all("zf " in t or "cat " in t for t in bash_tools), (
         "no bare/broad Bash in the aggregator allowlist"
     )
@@ -185,7 +190,8 @@ def test_lane_pipeline_final_judge_gets_goal_closure_readonly_policy():
     effective = apply_goal_closure_judge_policy(config, role)
     assert effective.permission_mode == "allowlist"
     assert {"Read", "Glob", "Grep"} <= set(effective.allowed_tools)
-    assert "Edit" not in effective.allowed_tools
+    assert "Edit" in effective.allowed_tools
+    assert "Write" not in effective.allowed_tools
 
 
 def test_codex_goal_closure_judge_stays_headless_safe():

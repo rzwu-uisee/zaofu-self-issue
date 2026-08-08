@@ -966,7 +966,7 @@ def test_invalid_event_replay_is_idempotent(tmp_path: Path) -> None:
     assert len(invalids2) == 1, "重放不得累积重复 invalid 事件"
 
 
-def test_plan_synthesis_result_is_not_bound_to_previous_plan_package(
+def test_plan_domain_result_is_not_bound_to_previous_plan_package(
     tmp_path: Path,
 ) -> None:
     admission, operations = _runtime(tmp_path)
@@ -1000,9 +1000,21 @@ def test_plan_synthesis_result_is_not_bound_to_previous_plan_package(
         },
     ) == []
 
+    planner_envelope = {
+        "control_result": {"schema_version": "workflow-read-result.v1"},
+        "identity": {
+            "workflow_run_id": "run-plan",
+            "attempt_domain": "plan",
+        },
+    }
+    assert admission._plan_package_currentness_issues(planner_envelope) == []
+
     implementation_envelope = {
         "control_result": {"schema_version": "implementation-result.v1"},
-        "identity": {"workflow_run_id": "run-plan"},
+        "identity": {
+            "workflow_run_id": "run-plan",
+            "attempt_domain": "task",
+        },
     }
     assert {
         issue["code"]

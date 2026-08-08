@@ -36,11 +36,14 @@ Write and emit:
 
 All refs needed by the next stage must be top-level payload fields and included
 in `artifact_refs` or `evidence_refs`.
-List the corresponding canonical `required_plan_ports` in the Task Map,
-including the requirement/contract ref, Goal Claim Set, Task Map, planning
-result, source inventory/index, and matrices actually consumed. Do not choose
-the current Plan Artifact Package or copy plan bodies into a package object;
-runtime validates explicit refs and performs admission.
+List only planner-produced ports with explicit refs/descriptors in the Task
+Map's `required_plan_ports`, such as source inventory/index and matrices that
+Impl/Verify actually consume. `requirement_spec`, `goal_claim_set`, `task_map`,
+and `planning_result` are Kernel/profile-required ports: runtime derives or
+binds them from canonical intake and the admitted Task Map. Do not redeclare a
+Kernel-derived port unless this Plan result also emits its real top-level
+descriptor. Do not choose the current Plan Artifact Package or copy plan bodies
+into a package object; runtime validates explicit refs and performs admission.
 
 ## Source Index Rules
 
@@ -69,8 +72,9 @@ Every task must be dispatchable:
 - `wave` 与 `depends_on` define order(字段名以 admission 为准,
   `writer_fanout_admission.py` 读 `wave` / `depends_on`,不是 `dependencies`)。
 - `allowed_paths` lists every path the worker may touch.
-- `exclusive_files` lists non-shared files, or the task explains why it must be
-  serialized.
+- `exclusive_files` lists only files uniquely owned by this task. A file may
+  appear in one task only; dependency ordering or serialization never permits
+  duplicate exclusive ownership. Combine shared edits under one owner task.
 - `verification` names concrete commands or evidence checks.
 
 The workflow contract is authoritative:

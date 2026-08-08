@@ -30,12 +30,20 @@ from zf.runtime.workflow_operation import (
 
 
 MAX_RESULT_BYTES = 1024 * 1024
+_PLAN_SYNTH_PROFILE_ID = "plan-synth"
 
 
 class ResultSubmitError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -143,34 +151,14 @@ def is_authorized_result_scratch_write(
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         return False
 
-    operations = reduce_workflow_operations(event_log.read_all())
-    candidates = [
-        operation
-        for operation in operations.values()
-        if operation.get("status") == "running"
-        and str(operation.get("role_instance") or "") == role_instance
-    ]
-    if not candidates:
-        return False
-    current = max(
-        candidates,
-        key=lambda operation: (
-            str(operation.get("last_event_at") or ""),
-            str(operation.get("last_event_id") or ""),
-        ),
+    current_request = _current_running_operation_request(
+        state_root,
+        event_log,
+        role_instance=role_instance,
     )
-    descriptor = current.get("request_ref")
-    if not isinstance(descriptor, Mapping):
+    if current_request is None:
         return False
-    try:
-        request_body = hydrate_sidecar_ref(state_root, dict(descriptor)).payload
-    except Exception:
-        return False
-    if not isinstance(request_body, Mapping):
-        return False
-    request = request_body.get("request")
-    if not isinstance(request, Mapping):
-        return False
+    current, request = current_request
     expected = Path(os.path.abspath(
         state_root / str(request.get("result_scratch_ref") or "")
     ))
@@ -190,6 +178,95 @@ def is_authorized_result_scratch_write(
         and not bool(binding.get("used"))
         and all(binding.get(key) == value for key, value in expected_binding.items())
     )
+
+
+def authorized_operation_workdir_write_scopes(
+    state_dir: Path,
+    event_log: EventLog,
+    *,
+    role_instance: str,
+    task_id: str = "",
+) -> list[str]:
+    """Return kernel-pinned write scopes from the actor's running operation."""
+
+    current_request = _current_running_operation_request(
+        Path(state_dir).resolve(),
+        event_log,
+        role_instance=role_instance,
+        task_id=task_id,
+    )
+    if current_request is None:
+        return []
+    _, request = current_request
+    raw_scopes = request.get("workdir_write_scopes")
+    if not isinstance(raw_scopes, list):
+        return []
+    scopes: list[str] = []
+    for raw_scope in raw_scopes:
+        scope = str(raw_scope or "").strip()
+        scope_path = Path(scope)
+        if (
+            not scope
+            or scope_path.is_absolute()
+            or ".." in scope_path.parts
+            or scope.startswith(".zf/")
+        ):
+            continue
+        if scope not in scopes:
+            scopes.append(scope)
+    return scopes
+
+
+def _current_running_operation_request(
+    state_root: Path,
+    event_log: EventLog,
+    *,
+    role_instance: str,
+    task_id: str = "",
+) -> tuple[dict[str, Any], Mapping[str, Any]] | None:
+    operations = reduce_workflow_operations(event_log.read_all())
+    candidates = [
+        operation
+        for operation in operations.values()
+        if operation.get("status") == "running"
+        and str(operation.get("role_instance") or "") == role_instance
+        and (
+            not task_id
+            or str(operation.get("task_id") or "") == task_id
+        )
+    ]
+    candidates.sort(
+        key=lambda operation: (
+            str(operation.get("last_event_at") or ""),
+            str(operation.get("last_event_id") or ""),
+        ),
+        reverse=True,
+    )
+    for current in candidates:
+        descriptor = current.get("request_ref")
+        if not isinstance(descriptor, Mapping):
+            continue
+        try:
+            request_body = hydrate_sidecar_ref(
+                state_root,
+                dict(descriptor),
+            ).payload
+        except Exception:
+            continue
+        if not isinstance(request_body, Mapping):
+            continue
+        request = request_body.get("request")
+        if not isinstance(request, Mapping):
+            continue
+        if (
+            not str(request.get("task_pipeline_stage") or "").strip()
+            and str(request.get("role_instance") or "") != role_instance
+        ):
+            continue
+        if task_id and str(request.get("task_id") or "") != task_id:
+            continue
+        return current, request
+    return None
 
 
 class SemanticResultSubmitService:
@@ -217,64 +294,224 @@ class SemanticResultSubmitService:
             adapters=self.registry,
         )
 
+    def validate_plan_candidate(
+        self,
+        *,
+        operation_id: str,
+        semantic_result: Mapping[str, Any] | None = None,
+        result_file: Path | None = None,
+        use_operation_scratch: bool = False,
+        role_instance: str,
+        credential: str,
+        project_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Preflight one Plan result without consuming its submit binding.
+
+        Plan producers carry the full candidate-validation context. Plan Synth
+        operations carry only the critic verdict delta, so they use their
+        pinned typed-result profile instead of pretending to be a second Plan
+        candidate producer.
+        """
+
+        _operation, request, semantic, profile_id, _revision = (
+            self._authorized_semantic_result(
+                operation_id=operation_id,
+                semantic_result=semantic_result,
+                result_file=result_file,
+                use_operation_scratch=use_operation_scratch,
+                role_instance=role_instance,
+                credential=credential,
+            )
+        )
+        validation = request.get("plan_candidate_validation")
+        if isinstance(validation, Mapping):
+            if profile_id != "workflow-read":
+                raise ResultSubmitError(
+                    "plan_candidate_profile_invalid",
+                    "Plan candidate validation requires the workflow-read profile",
+                )
+            manifest = validation.get("manifest")
+            if not isinstance(manifest, Mapping):
+                raise ResultSubmitError(
+                    "plan_candidate_context_invalid",
+                    "operation has no pinned Plan candidate manifest",
+                )
+            metadata = validation.get("metadata")
+            if metadata is not None and not isinstance(metadata, Mapping):
+                raise ResultSubmitError(
+                    "plan_candidate_context_invalid",
+                    "operation Plan candidate metadata must be an object",
+                )
+            writer_policy = validation.get("writer_policy")
+            if writer_policy is not None and not isinstance(writer_policy, Mapping):
+                raise ResultSubmitError(
+                    "plan_candidate_context_invalid",
+                    "operation Plan candidate writer policy must be an object",
+                )
+            from zf.runtime.plan_candidate_preflight import (
+                evaluate_plan_candidate_preflight,
+            )
+
+            return evaluate_plan_candidate_preflight(
+                state_dir=self.state_dir,
+                project_root=Path(project_root or Path.cwd()),
+                reports=[{"report": semantic}],
+                manifest=dict(manifest),
+                metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+                writer_policy=(
+                    dict(writer_policy)
+                    if isinstance(writer_policy, Mapping)
+                    else None
+                ),
+            )
+        if profile_id == _PLAN_SYNTH_PROFILE_ID:
+            return self._validate_plan_synth_result(
+                operation=_operation,
+                request=request,
+                semantic=semantic,
+                operation_id=operation_id,
+                role_instance=role_instance,
+                profile_id=profile_id,
+                revision=_revision,
+            )
+        raise ResultSubmitError(
+            "plan_candidate_validation_unavailable",
+            "operation has no supported pre-submit validation profile",
+        )
+
+    def _validate_plan_synth_result(
+        self,
+        *,
+        operation: Mapping[str, Any],
+        request: Mapping[str, Any],
+        semantic: Mapping[str, Any],
+        operation_id: str,
+        role_instance: str,
+        profile_id: str,
+        revision: str,
+    ) -> dict[str, Any]:
+        """Run the Plan Synth typed-result checks without writing sidecars."""
+
+        profile = self.registry.profile(profile_id, revision)
+        event_type = self._canonical_event_type(request, semantic)
+        identity = dict(request.get("result_identity") or {})
+        identity.update({
+            "workflow_run_id": str(operation.get("workflow_run_id") or ""),
+            "operation_id": operation_id,
+            "request_hash": str(operation.get("request_hash") or ""),
+            "attempt_id": str(operation.get("active_attempt_id") or ""),
+            "dispatch_id": str(operation.get("dispatch_id") or ""),
+            "lease_id": str(operation.get("lease_id") or ""),
+            "role_instance": role_instance,
+            "output_profile_id": profile_id,
+            "output_profile_revision": revision,
+        })
+        protected = {
+            key: value for key, value in identity.items()
+            if value not in (None, "")
+        }
+        event = ZfEvent(
+            type=event_type,
+            actor=role_instance,
+            payload={
+                **protected,
+                profile.semantic_field: {**dict(semantic), **protected},
+            },
+        )
+        adapter = self.registry.adapter_for(event)
+        if adapter is None or adapter.adapter_id != profile.adapter_id:
+            raise ResultSubmitError(
+                "profile_adapter_invalid",
+                f"no {profile.adapter_id!r} adapter for {event_type!r}",
+            )
+        _normalized, adapter_issues = adapter.normalize(event)
+        errors = [dict(item) for item in adapter_issues]
+
+        execution_status = str(semantic.get("status") or "completed").lower()
+        if execution_status not in {"completed", "failed", "failure"}:
+            errors.append({
+                "field": "status",
+                "code": "plan_synth_status_invalid",
+                "message": (
+                    "Plan Synth status must be completed or failed; "
+                    f"got {execution_status!r}"
+                ),
+            })
+        recommendation = str(semantic.get("recommendation") or "").lower()
+        if recommendation and recommendation not in {
+            "approve", "reject", "needs_rework", "abstain",
+        }:
+            errors.append({
+                "field": "recommendation",
+                "code": "plan_synth_recommendation_invalid",
+                "message": (
+                    "Plan Synth recommendation must be approve, reject, "
+                    "needs_rework, or abstain; "
+                    f"got {recommendation!r}"
+                ),
+            })
+
+        report = semantic.get("report")
+        if not isinstance(report, Mapping):
+            errors.append({
+                "field": "report",
+                "code": "plan_synth_report_invalid",
+                "message": "Plan Synth result requires a report object",
+            })
+        else:
+            from zf.runtime.fanout import validate_fanout_report
+
+            report_validation = validate_fanout_report(
+                dict(report),
+                child_id="synth",
+            )
+            errors.extend({
+                "field": "report",
+                "code": "plan_synth_report_invalid",
+                "message": diagnostic,
+            } for diagnostic in report_validation.diagnostics)
+            if semantic.get("findings") not in (None, []):
+                top_level_report = dict(report)
+                top_level_report["findings"] = semantic.get("findings")
+                top_level_validation = validate_fanout_report(
+                    top_level_report,
+                    child_id="synth",
+                )
+                errors.extend({
+                    "field": "findings",
+                    "code": "plan_synth_report_invalid",
+                    "message": diagnostic,
+                } for diagnostic in top_level_validation.diagnostics)
+
+        return {
+            "schema_version": "semantic-result-preflight.v1",
+            "status": "failed" if errors else "passed",
+            "profile_id": profile_id,
+            "profile_revision": revision,
+            "errors": errors,
+        }
+
     def submit(
         self,
         *,
         operation_id: str,
         semantic_result: Mapping[str, Any] | None = None,
         result_file: Path | None = None,
+        use_operation_scratch: bool = False,
         role_instance: str,
         credential: str,
     ) -> SubmittedSemanticResult:
-        operation = load_workflow_operation(self.event_log, operation_id)
-        if operation is None:
-            raise ResultSubmitError("operation_missing", f"unknown operation {operation_id!r}")
-        existing_binding = _read_json(_binding_path(self.state_dir, operation_id))
-        if bool(existing_binding.get("used")):
-            raise ResultSubmitError("duplicate_submit", "submit capability was already consumed")
-        if str(operation.get("status") or "") != "running":
-            raise ResultSubmitError(
-                "operation_not_running",
-                f"operation {operation_id!r} is {operation.get('status')!r}",
+        operation, request, semantic, profile_id, revision = (
+            self._authorized_semantic_result(
+                operation_id=operation_id,
+                semantic_result=semantic_result,
+                result_file=result_file,
+                use_operation_scratch=use_operation_scratch,
+                role_instance=role_instance,
+                credential=credential,
             )
-        request_body = self._request_body(operation)
-        request = request_body.get("request")
-        if not isinstance(request, Mapping):
-            raise ResultSubmitError("request_invalid", "operation request body is missing")
-        self._authorize(
-            operation=operation,
-            request=request,
-            role_instance=role_instance,
-            credential=credential,
         )
-        if (semantic_result is None) == (result_file is None):
-            raise ResultSubmitError(
-                "input_mode_invalid",
-                "provide exactly one semantic result input",
-            )
-        if result_file is not None:
-            semantic_result = self._read_result_file(request, result_file)
-        assert semantic_result is not None
-        semantic = dict(semantic_result)
-        profile_id = str(request.get("output_profile_id") or "")
-        revision = str(request.get("output_profile_revision") or "")
         profile = self.registry.profile(profile_id, revision)
-        wrapped = semantic.get(profile.semantic_field)
-        if isinstance(wrapped, Mapping):
-            sibling_fields = sorted(
-                str(key)
-                for key in semantic
-                if key != profile.semantic_field
-            )
-            if sibling_fields:
-                raise ResultSubmitError(
-                    "ambiguous_semantic_result",
-                    "semantic result must be either the profile body or an exact "
-                    f"{profile.semantic_field!r} wrapper; sibling fields would be "
-                    "discarded: "
-                    + ", ".join(sibling_fields),
-                )
-            semantic = dict(wrapped)
         event_type = self._canonical_event_type(request, semantic)
         identity = dict(request.get("result_identity") or {})
         identity.update({
@@ -312,21 +549,31 @@ class SemanticResultSubmitService:
         outcome = self.admission.report_legacy_result(
             event,
             mode="blocking",
-            operation={
-                "workflow_run_id": str(operation.get("workflow_run_id") or ""),
-                "parent_operation_id": str(operation.get("parent_operation_id") or ""),
-                "operation_id": operation_id,
-                "request_hash": str(operation.get("request_hash") or ""),
-            },
+            operation=dict(operation),
             input_policy=policy,
             require_semantic_submit=True,
             semantic_submit=True,
         )
         if not outcome.admitted:
             codes = ", ".join(str(item.get("code") or "invalid") for item in outcome.issues)
+            from zf.runtime.call_result_correction import repair_instruction
+
+            issues = [
+                {
+                    **dict(item),
+                    "required_change": repair_instruction(item),
+                }
+                for item in outcome.issues
+            ]
             raise ResultSubmitError(
                 "result_not_admitted",
                 f"semantic result was not admitted: {codes or outcome.status}",
+                details={
+                    "status": outcome.status,
+                    "repair_round": outcome.repair_round,
+                    "correction_ref": dict(outcome.correction_ref or {}),
+                    "issues": issues,
+                },
             )
         event.payload.pop(profile.semantic_field, None)
         event.payload.update({
@@ -348,6 +595,95 @@ class SemanticResultSubmitService:
             envelope_ref=dict(outcome.envelope_ref or {}),
             control_result_ref=dict(outcome.control_result_ref or {}),
         )
+
+    def _authorized_semantic_result(
+        self,
+        *,
+        operation_id: str,
+        semantic_result: Mapping[str, Any] | None,
+        result_file: Path | None,
+        use_operation_scratch: bool,
+        role_instance: str,
+        credential: str,
+    ) -> tuple[
+        dict[str, Any],
+        Mapping[str, Any],
+        dict[str, Any],
+        str,
+        str,
+    ]:
+        operation = load_workflow_operation(self.event_log, operation_id)
+        if operation is None:
+            raise ResultSubmitError(
+                "operation_missing",
+                f"unknown operation {operation_id!r}",
+            )
+        existing_binding = _read_json(_binding_path(self.state_dir, operation_id))
+        if bool(existing_binding.get("used")):
+            raise ResultSubmitError(
+                "duplicate_submit",
+                "submit capability was already consumed",
+            )
+        if str(operation.get("status") or "") != "running":
+            raise ResultSubmitError(
+                "operation_not_running",
+                f"operation {operation_id!r} is {operation.get('status')!r}",
+            )
+        request_body = self._request_body(operation)
+        request = request_body.get("request")
+        if not isinstance(request, Mapping):
+            raise ResultSubmitError(
+                "request_invalid",
+                "operation request body is missing",
+            )
+        self._authorize(
+            operation=operation,
+            request=request,
+            role_instance=role_instance,
+            credential=credential,
+        )
+        input_count = sum((
+            semantic_result is not None,
+            result_file is not None,
+            use_operation_scratch,
+        ))
+        if input_count != 1:
+            raise ResultSubmitError(
+                "input_mode_invalid",
+                "provide exactly one semantic result input",
+            )
+        if use_operation_scratch:
+            scratch_ref = str(request.get("result_scratch_ref") or "").strip()
+            if not scratch_ref:
+                raise ResultSubmitError(
+                    "result_scratch_missing",
+                    "operation has no signed result scratch",
+                )
+            result_file = self.state_dir / scratch_ref
+        if result_file is not None:
+            semantic_result = self._read_result_file(request, result_file)
+        assert semantic_result is not None
+        semantic = dict(semantic_result)
+        profile_id = str(request.get("output_profile_id") or "")
+        revision = str(request.get("output_profile_revision") or "")
+        profile = self.registry.profile(profile_id, revision)
+        wrapped = semantic.get(profile.semantic_field)
+        if isinstance(wrapped, Mapping):
+            sibling_fields = sorted(
+                str(key)
+                for key in semantic
+                if key != profile.semantic_field
+            )
+            if sibling_fields:
+                raise ResultSubmitError(
+                    "ambiguous_semantic_result",
+                    "semantic result must be either the profile body or an exact "
+                    f"{profile.semantic_field!r} wrapper; sibling fields would be "
+                    "discarded: "
+                    + ", ".join(sibling_fields),
+                )
+            semantic = dict(wrapped)
+        return dict(operation), request, semantic, profile_id, revision
 
     def _request_body(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         descriptor = operation.get("request_ref")
@@ -505,6 +841,7 @@ def _compatibility_projection(field: str, payload: Mapping[str, Any]) -> dict[st
             "status": status,
             "summary": str(result.get("summary") or ""),
             "findings": list(result.get("findings") or []),
+            "fix_items": list(result.get("fix_items") or []),
             "evidence_refs": list(
                 result.get("verification_evidence_refs")
                 or result.get("evidence_refs")
@@ -536,6 +873,7 @@ def _compatibility_projection(field: str, payload: Mapping[str, Any]) -> dict[st
         **(
             {
                 "source_commit": str(result.get("target_commit") or ""),
+                "changed_files": list(result.get("changed_files") or []),
                 "files_touched": list(result.get("changed_files") or []),
                 "evidence_refs": list(result.get("evidence_refs") or []),
                 "impl_self_check": dict(result.get("self_check") or {}),

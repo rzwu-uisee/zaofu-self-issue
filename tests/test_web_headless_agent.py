@@ -19,10 +19,13 @@ from zf.core.config.schema import WorkflowConfig, WorkflowStageConfig, ZfConfig
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.task.store import TaskStore
 from zf.runtime.agent_session_stream import AgentSessionIdentity, AgentSessionStreamEmitter
 from zf.runtime.kanban_plan_requests import PLAN_REQUESTED_EVENT
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.workflow_anchor import is_workflow_managed_task
 from zf.web.plan_extraction import extract_plan_request
+from zf.web.plan_runtime import prepare_web_plan_discussion
 from zf.web.headless_agent import (
     ClaudeHeadlessBackend,
     CodexHeadlessBackend,
@@ -140,12 +143,27 @@ def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
     assert "canonical_channel_prds" in prompt
     assert "multiple plausible items" in prompt
     assert "Decide that intent semantically" in prompt
+    assert "subject_type to exactly one of channel_setup, clarification" in prompt
+    assert "never invent a family-specific subject_type" in prompt
     assert '"decision": "propose_action"' in prompt
     assert "exact verbatim substring" in prompt
     assert "do not rely on English or Chinese keyword spelling" in prompt
     assert "subject_type=task_create with two or three options" in prompt
+    assert "channel_prd_ref and channel_prd_digest" in prompt
+    assert 'channel_prd_intent={"decision":"bind_channel_prd"' in prompt
+    assert "Never add them for an unrelated Issue" in prompt
+    assert "task_create Plan is reserved" in prompt
+    assert "emit a create-task action_proposal" in prompt
+    assert "exact option-level submit_payload" in prompt
+    assert "Do not wrap Channel options in effect" in prompt
+    assert "never as effect.mode or submit_mode" in prompt
     assert "Do not nest a contract or channel_authority" in prompt
     assert "effect.mode=continue, not defer" in prompt
+    assert "do not add payload.workflow_plan or plan_request.payload" in prompt
+    assert "parameters may contain only executable adapter keys" in prompt
+    assert "runner/config, and evidence-producer paths" in prompt
+    assert "omit Playwright/evidence paths" in prompt
+    assert "target_root" in prompt
 
 
 def test_chat_plan_payload_rejects_discussion_and_response_together() -> None:
@@ -217,6 +235,106 @@ def test_chat_orchestrator_injects_canonical_channel_prd_context(
     assert '"canonical_channel_prds"' in prompt
     assert '"artifact_ref": "channel-artifacts/ch-prd/prd.md"' in prompt
     assert '"artifact_digest": "sha256:canonical"' in prompt
+
+
+def test_chat_orchestrator_binds_agent_selected_channel_prd_plan(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_ref = "channels/ch-prd/prd/r1.json"
+    artifact_digest = "a" * 64
+    canonical = {
+        "schema_version": "channel-prd-context.v1",
+        "items": [{
+            "channel_id": "ch-prd",
+            "thread_id": "main",
+            "channel_member_id": "product-pm",
+            "leader_revision": 1,
+            "prd_revision": 1,
+            "artifact_ref": artifact_ref,
+            "artifact_digest": artifact_digest,
+        }],
+    }
+    reply = json.dumps({
+        "plan_request": {
+            "subject_type": "task_create",
+            "channel_prd_ref": artifact_ref,
+            "channel_prd_digest": artifact_digest,
+            "channel_prd_intent": {
+                "decision": "bind_channel_prd",
+                "source_quote": "Create the Task from the confirmed PRD.",
+            },
+            "header": "Create PRD Task",
+            "question": "Create the exact Task?",
+            "options": [
+                {
+                    "label": "Create Task (Recommended)",
+                    "description": "Create the PRD-bound proposal.",
+                    "effect": {
+                        "mode": "propose",
+                        "action": "create-task",
+                        "payload": {"title": "Deliver the Channel PRD"},
+                    },
+                },
+                {
+                    "label": "Continue discussion",
+                    "description": "Do not create work yet.",
+                    "effect": {"mode": "continue"},
+                },
+            ],
+            "allow_other": False,
+        },
+    })
+
+    def fake_turn(_self, **_kwargs) -> HeadlessTurnResult:
+        return HeadlessTurnResult(
+            ok=True,
+            status="completed",
+            backend="codex-headless",
+            thread_id="thread-1",
+            provider_session_id="provider-1",
+            reply=reply,
+            messages=[],
+            usage={},
+            resumed=False,
+        )
+
+    monkeypatch.setattr(KanbanHeadlessAgent, "run_turn", fake_turn)
+    monkeypatch.setattr(
+        "zf.web.server.canonical_channel_prd_context",
+        lambda _state_dir: canonical,
+    )
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    client = TestClient(
+        create_app(state_dir, project_root=state_dir.parent)
+    )
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "codex-headless",
+            "project_id": "zaofu-test",
+            "conversation_id": "kanban:zaofu-test",
+            "thread_key": "main",
+            "sync": True,
+            "message": "Create the Task from the confirmed PRD.",
+        },
+    )
+
+    assert response.status_code == 200
+    requested = [
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == PLAN_REQUESTED_EVENT
+    ][-1]
+    request = requested.payload["plan_request"]
+    assert request["valid"] is True, request["validation_error"]
+    assert request["channel_prd_intent"]["source_quote"] == (
+        "Create the Task from the confirmed PRD."
+    )
+    assert request["options"][0]["submit_payload"][
+        "channel_authority"
+    ]["source_ref"] == artifact_ref
 
 
 def _fake_codex_patch_approval_script(tmp_path: Path) -> Path:
@@ -813,6 +931,7 @@ def test_headless_provider_env_strips_zf_control_plane_secrets(
     monkeypatch.setenv("ZF_FEISHU_ACTION_TOKEN_SECRET", "feishu-secret")
     monkeypatch.setenv("ZF_DOC156_REQUEST_ID", "non-secret-context")
     monkeypatch.setenv("OPENAI_API_KEY", "provider-secret")
+    monkeypatch.setenv("ZF_CLI_CMD", "/active-runtime/bin/zf")
 
     env = headless_agent._headless_subprocess_env()
 
@@ -822,6 +941,38 @@ def test_headless_provider_env_strips_zf_control_plane_secrets(
     assert "ZF_FEISHU_ACTION_TOKEN_SECRET" not in env
     assert env["ZF_DOC156_REQUEST_ID"] == "non-secret-context"
     assert env["OPENAI_API_KEY"] == "provider-secret"
+    assert env["ZF_CLI_CMD"] == "/active-runtime/bin/zf"
+
+
+def test_headless_provider_and_prompt_pin_active_zf_cli(
+    state_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZF_CLI_CMD", raising=False)
+    monkeypatch.setattr(
+        headless_agent,
+        "default_zf_cli_cmd",
+        lambda: "/repair-worktree/.venv/bin/zf",
+    )
+    agent = KanbanHeadlessAgent(
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    env = headless_agent._headless_subprocess_env()
+    system_prompt = agent._system_prompt("read_only")
+    turn_prompt = agent._build_prompt(
+        message="inspect the current route",
+        task_id="TASK-CLI",
+        context={"thread_key": "kanban:test"},
+    )
+
+    assert env["ZF_CLI_CMD"] == "/repair-worktree/.venv/bin/zf"
+    assert "use the exact active-runtime command" in system_prompt
+    assert "`/repair-worktree/.venv/bin/zf`" in system_prompt
+    assert "Do not use a bare `zf`" in system_prompt
+    assert "zf_cli_cmd: /repair-worktree/.venv/bin/zf" in turn_prompt
 
 
 def test_codex_headless_resume_reapplies_provider_security(
@@ -1270,13 +1421,16 @@ def test_chat_orchestrator_streams_first_text_delta_before_final_reply(
     monkeypatch: pytest.MonkeyPatch,
 ):
     script = tmp_path / "fake_claude_slow_stream.py"
+    first_chunk_written = tmp_path / "fake_claude_first_chunk_written"
     script.write_text(
         "\n".join([
             "import json, sys, time",
+            "from pathlib import Path",
             "sys.stdin.readline()",
             "print(json.dumps({'type':'system','session_id':'claude-slow-1'}), flush=True)",
             "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'first chunk'}]}}), flush=True)",
-            "time.sleep(1.0)",
+            f"Path({str(first_chunk_written)!r}).write_text('ready', encoding='utf-8')",
+            "time.sleep(2.0)",
             "print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':' second chunk'}]}}), flush=True)",
             "print(json.dumps({'type':'result','session_id':'claude-slow-1','result':'first chunk second chunk'}), flush=True)",
         ]),
@@ -1298,7 +1452,12 @@ def test_chat_orchestrator_streams_first_text_delta_before_final_reply(
     )
 
     assert response.status_code == 202
-    deadline = time.monotonic() + 0.6
+    provider_deadline = time.monotonic() + 3.0
+    while time.monotonic() < provider_deadline and not first_chunk_written.exists():
+        time.sleep(0.02)
+    assert first_chunk_written.exists()
+
+    deadline = time.monotonic() + 1.5
     text_deltas = []
     while time.monotonic() < deadline:
         text_deltas = [
@@ -1595,6 +1754,7 @@ def test_chat_orchestrator_extracts_headless_action_proposal(
     assert proposal_data["payload"]["causation_id"] == response.json()["event_id"]
     assert proposal_data["mutates_task_state"] is True
     assert proposal_data["valid"] is True
+
     assert proposal_data["proposal_event_id"].startswith("evt-")
     events = EventLog(state_dir / "events.jsonl").read_all()
     reply_event = [
@@ -1894,6 +2054,56 @@ def test_chat_orchestrator_discusses_exact_pending_plan_without_answering(
     assert stale.json()["status"] == "plan_request_revision_mismatch"
 
 
+def test_plan_discussion_can_repair_current_invalid_draft(
+    state_dir: Path,
+) -> None:
+    request = extract_plan_request(
+        json.dumps({
+            "plan_request": {
+                "header": "Broken route draft",
+                "id": "route",
+                "question": "Which route?",
+                "options": [{"id": "only", "label": "Only option"}],
+            },
+        }),
+    )
+    assert request is not None and request["valid"] is False
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    source = writer.append(ZfEvent(
+        type=PLAN_REQUESTED_EVENT,
+        actor="web",
+        payload={"request": request, "plan_request": request},
+    ))
+    requested = writer.append(ZfEvent(
+        type="web.action.requested",
+        actor="web",
+        payload={"action": "chat-orchestrator"},
+    ))
+
+    prepared, terminal = prepare_web_plan_discussion(
+        writer,
+        requested=requested,
+        action="chat-orchestrator",
+        requested_action="chat-orchestrator",
+        task_id=None,
+        payload={
+            "message": "Remove the unsupported fields.",
+            "plan_discussion": {
+                "request_event_id": source.id,
+                "request_id": request["request_id"],
+                "revision": request["revision"],
+            },
+        },
+    )
+
+    assert terminal is None
+    canonical = prepared["plan_discussion"]
+    assert canonical["request_valid"] is False
+    assert canonical["validation_error"] == request["validation_error"]
+    assert canonical["request_event_id"] == source.id
+
+
 def test_chat_orchestrator_rejects_combined_plan_and_approve_output(
     state_dir: Path,
     tmp_path: Path,
@@ -2076,6 +2286,7 @@ def test_chat_orchestrator_extracts_create_task_proposal(
     proposal_data = data["reply"]["action_proposal"]
     assert proposal_data["action"] == "create-task"
     assert proposal_data["payload"]["title"] == "Add auth timeout retry"
+    assert proposal_data["payload"]["execution_mode"] == "workflow"
     assert proposal_data["payload"]["project_id"] == "zaofu-test"
     assert proposal_data["payload"]["conversation_id"] == "kanban:zaofu-test"
     assert proposal_data["payload"]["thread_id"] == "new-task-thread"
@@ -2083,6 +2294,22 @@ def test_chat_orchestrator_extracts_create_task_proposal(
     assert proposal_data["payload"]["causation_id"] == data["event_id"]
     assert proposal_data["mutates_task_state"] is True
     assert proposal_data["valid"] is True
+
+    approved = client.post(
+        "/api/actions/create-task",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            **proposal_data["payload"],
+            "proposal_event_id": proposal_data["proposal_event_id"],
+        },
+    )
+
+    assert approved.status_code == 201, approved.text
+    task = TaskStore(state_dir / "kanban.json").get(
+        approved.json()["task_id"]
+    )
+    assert task is not None
+    assert is_workflow_managed_task(task)
 
 
 def test_readonly_message_keeps_agent_contract_error_visible():

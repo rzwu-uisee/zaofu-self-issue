@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_readiness import owner_readiness_risk_accepted
 from zf.runtime.channel_workflow_authority import (
     channel_authority_context_from_submit_payload,
     channel_workflow_authority_error,
@@ -62,7 +63,17 @@ def compile_channel_prd_task_payload(
         "implementation_start",
         consensus.get("implementation_start"),
     )
-    if readiness_verdict != "ready" or implementation_start is not True:
+    readiness_ref = str(synthesis.get("readiness_ref") or "").strip()
+    readiness_digest = _bare_digest(synthesis.get("readiness_digest"))
+    risk_accepted = owner_readiness_risk_accepted(
+        consensus,
+        readiness_ref=readiness_ref,
+        readiness_digest=readiness_digest,
+    )
+    if (
+        readiness_verdict != "ready"
+        or implementation_start is not True
+    ) and not risk_accepted:
         raise ChannelPrdTaskContractError(
             "Channel PRD is not implementation-ready: "
             f"readiness_verdict={readiness_verdict!r}, "
@@ -75,8 +86,6 @@ def compile_channel_prd_task_payload(
 
     source_ref = str(authority.get("source_ref") or "").strip()
     source_digest = _bare_digest(authority.get("source_digest"))
-    readiness_ref = str(synthesis.get("readiness_ref") or "").strip()
-    readiness_digest = _bare_digest(synthesis.get("readiness_digest"))
     if not readiness_ref or not readiness_digest:
         raise ChannelPrdTaskContractError(
             "Channel PRD readiness artifact ref/digest is required"
@@ -107,11 +116,11 @@ def compile_channel_prd_task_payload(
     if (
         str(readiness_payload.get("verdict") or "") != "ready"
         or readiness_payload.get("implementation_start") is not True
-    ):
+    ) and not risk_accepted:
         raise ChannelPrdTaskContractError(
             "Channel PRD readiness artifact does not authorize implementation"
         )
-    if _string_items(readiness_payload.get("gaps")):
+    if _string_items(readiness_payload.get("gaps")) and not risk_accepted:
         raise ChannelPrdTaskContractError(
             "Channel PRD readiness artifact still contains blocking gaps"
         )
@@ -126,10 +135,8 @@ def compile_channel_prd_task_payload(
         if isinstance(prd_body.get("synthesis"), dict)
         else {}
     )
-    acceptance_criteria = list(
+    acceptance_criteria = _canonical_acceptance_criteria(
         semantic.get("acceptance_criteria")
-        if isinstance(semantic.get("acceptance_criteria"), list)
-        else []
     )
     if not acceptance_criteria:
         raise ChannelPrdTaskContractError(
@@ -201,6 +208,11 @@ def compile_channel_prd_task_payload(
         "readiness_digest": readiness_digest,
         "readiness_verdict": readiness_verdict,
         "implementation_start": True,
+        "declared_implementation_start": implementation_start is True,
+        "readiness_risk_accepted": risk_accepted,
+        "readiness_risk_confirmed_by": str(
+            consensus.get("human_confirmed_by") or ""
+        ),
         "spec_digest": spec_digest,
         "conclusion_digest": _bare_digest(synthesis.get("conclusion_digest")),
         "contract_digest": _bare_digest(synthesis.get("contract_digest")),
@@ -373,15 +385,56 @@ def _verification_commands(
         if isinstance(contract.get("validation"), dict)
         else {}
     )
-    raw: Any = contract.get("verification")
+    semantic_raw = _canonical_semantic_verification_commands(
+        semantic.get("verification_commands")
+    )
+    raw: Any = semantic_raw
+    command_validation = {} if semantic_raw else validation
     if not raw:
-        raw = semantic.get("verification_commands")
+        raw = contract.get("verification")
     if not raw:
         raw = _extract_verification_commands(str(prd_body.get("markdown") or ""))
     try:
-        return normalize_verification_commands(raw, validation=validation)
+        return normalize_verification_commands(raw, validation=command_validation)
     except VerificationCommandError as exc:
         raise ChannelPrdTaskContractError(str(exc)) from exc
+
+
+def _canonical_acceptance_criteria(value: object) -> list[Any]:
+    source = value if isinstance(value, list) else []
+    criteria: list[Any] = []
+    for item in source:
+        if not isinstance(item, dict):
+            criteria.append(item)
+            continue
+        row = dict(item)
+        command_ids = _string_items(
+            row.get("verification_command_ids")
+            or row.get("verification_command_refs")
+        )
+        if command_ids:
+            row["verification_command_ids"] = command_ids
+        criteria.append(row)
+    return criteria
+
+
+def _canonical_semantic_verification_commands(value: object) -> list[Any]:
+    source = value if isinstance(value, list) else []
+    commands: list[Any] = []
+    for item in source:
+        if not isinstance(item, dict):
+            commands.append(item)
+            continue
+        row = dict(item)
+        acceptance_ids = _string_items(
+            row.get("acceptance_ids")
+            or row.get("acceptance_id")
+            or row.get("covers")
+        )
+        if acceptance_ids:
+            row["acceptance_ids"] = acceptance_ids
+        commands.append(row)
+    return commands
 
 
 def _verification_tiers(

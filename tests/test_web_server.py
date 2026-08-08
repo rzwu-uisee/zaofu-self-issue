@@ -124,6 +124,24 @@ class TestApiState:
         assert timing_log.exists()
         assert "/api/state" in timing_log.read_text(encoding="utf-8")
 
+    def test_task_pipeline_projection_default_and_project_routes(self, client):
+        direct = client.get("/api/task-pipeline")
+        assert direct.status_code == 200
+        assert direct.json()["schema_version"] == "task-pipeline-projection.v1"
+        assert direct.json()["enabled"] is False
+        assert direct.json()["authority"]["worker"] == (
+            "WorkflowOperation.role_instance"
+        )
+
+        workspace = client.get("/api/workspace/projects").json()
+        scoped = client.get(
+            f"/api/projects/{workspace['active_project_id']}/task-pipeline"
+        )
+        assert scoped.status_code == 200
+        assert scoped.json()["projection_digest"] == direct.json()[
+            "projection_digest"
+        ]
+
     def test_delivery_contract_projection_endpoints(self, state_dir: Path, tmp_path: Path):
         project_root = state_dir.parent
         matrix_ref = "docs/real-e2e-matrix.json"
@@ -615,6 +633,22 @@ class TestApiSnapshot:
         assert data["runtime"]["mode"] == "read-only"
         assert data["tasks"][0]["id"] == "T1"
         assert data["tasks"][0]["ready"] is True
+
+    def test_snapshot_runtime_liveness_matches_project_state(
+        self,
+        state_dir,
+        client,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "zf.web.server._project_runtime_state",
+            lambda *_args, **_kwargs: "stopped",
+        )
+
+        runtime = client.get("/api/snapshot").json()["runtime"]
+
+        assert runtime["live"] is False
+        assert runtime["runtime_state"] == "stopped"
 
     def test_snapshot_uses_explicit_project_root_when_state_dir_is_external(
         self,

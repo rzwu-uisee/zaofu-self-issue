@@ -91,6 +91,31 @@ def _usage(ratio: float, timestamp: str, window: int = 200_000) -> UsageReport:
     )
 
 
+def _codex_usage(
+    *,
+    context_input: int,
+    latest_output: int,
+    cumulative_input: int,
+    cumulative_output: int,
+    timestamp: str,
+) -> UsageReport:
+    window = 258_400
+    return UsageReport(
+        effective_input_tokens=context_input,
+        output_tokens=latest_output,
+        model_context_window=window,
+        ratio=context_input / window,
+        timestamp=timestamp,
+        raw={
+            "input_tokens": cumulative_input,
+            "output_tokens": cumulative_output,
+        },
+        model="gpt-5.5-codex",
+        usage_semantics="cumulative",
+        usage_series_id="codex:session-a",
+    )
+
+
 class TestAgentUsageSynthesized:
     def test_threshold_check_emits_agent_usage_from_disk(
         self, state_dir, config, transport
@@ -181,6 +206,128 @@ class TestDedupe:
         orch._check_context_thresholds()
         second = orch.cost_tracker.per_role_totals()["dev"].input_tokens
         assert second > first
+
+    def test_incremental_claude_turns_are_each_charged_across_restart(
+        self, state_dir, config, transport
+    ):
+        first_runtime = Orchestrator(state_dir, config, transport)
+        first_runtime._session_readers = {
+            "claude-code": _FakeReader([
+                _usage(0.3, "2026-04-15T10:00:00Z"),
+            ]),
+        }
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).get_or_create("dev")
+        first_runtime._check_context_thresholds()
+
+        restarted_runtime = Orchestrator(state_dir, config, transport)
+        restarted_runtime._session_readers = {
+            "claude-code": _FakeReader([
+                _usage(0.4, "2026-04-15T10:01:00Z"),
+            ]),
+        }
+        restarted_runtime._check_context_thresholds()
+
+        totals = restarted_runtime.cost_tracker.per_role_totals()["dev"]
+        assert totals.input_tokens == 140_000
+        assert totals.output_tokens == 200
+
+    def test_codex_totals_charge_only_growth_when_last_output_decreases(
+        self, state_dir, transport
+    ):
+        codex_config = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[RoleConfig(name="dev", backend="codex")],
+        )
+        reports = [
+            _codex_usage(
+                context_input=114_558,
+                latest_output=8_562,
+                cumulative_input=1_401_758,
+                cumulative_output=36_000,
+                timestamp="2026-08-06T03:00:00Z",
+            ),
+            _codex_usage(
+                context_input=177_882,
+                latest_output=3_100,
+                cumulative_input=1_465_082,
+                cumulative_output=39_100,
+                timestamp="2026-08-06T03:01:00Z",
+            ),
+        ]
+        first_runtime = Orchestrator(state_dir, codex_config, transport)
+        first_runtime._session_readers = {"codex": _FakeReader([reports[0]])}
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).bind_codex_session(
+            "dev",
+            "22222222-2222-2222-2222-222222222222",
+            session_path=Path("/tmp/session-a.jsonl"),
+        )
+        first_runtime._check_context_thresholds()
+
+        restarted_runtime = Orchestrator(state_dir, codex_config, transport)
+        restarted_runtime._session_readers = {"codex": _FakeReader([reports[1]])}
+        restarted_runtime._check_context_thresholds()
+
+        totals = restarted_runtime.cost_tracker.per_role_totals()["dev"]
+        assert totals.input_tokens == 1_465_082
+        assert totals.output_tokens == 39_100
+
+    def test_codex_series_upgrade_seeds_history_without_charging_new_run(
+        self, state_dir, transport
+    ):
+        codex_config = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[RoleConfig(name="dev", backend="codex")],
+        )
+        first_runtime = Orchestrator(state_dir, codex_config, transport)
+        first_runtime.cost_tracker.record_cumulative_usage(
+            role="dev",
+            instance_id="dev",
+            input_tokens=80_000,
+            output_tokens=2_000,
+            backend="codex",
+            usage_series_id="disk_reader:dev:codex:default",
+            usage_sample_id="legacy-sample",
+        )
+        baseline = first_runtime.cost_tracker.usage_totals(instance_id="dev")
+
+        first_runtime.cost_tracker.record_cumulative_usage(
+            role="dev",
+            instance_id="dev",
+            input_tokens=1_500_000,
+            output_tokens=10_000,
+            backend="codex",
+            usage_series_id="disk_reader:dev:codex:codex:session-a",
+            usage_sample_id="upgraded-sample",
+        )
+
+        assert first_runtime.cost_tracker.usage_totals(
+            instance_id="dev"
+        ) == baseline
+        entries = first_runtime.cost_tracker._read_entries()
+        assert entries[-1]["accounting_baseline"] is True
+        assert entries[-1]["cumulative_usage"]["input_tokens"] == 1_500_000
+
+        first_runtime.cost_tracker.record_cumulative_usage(
+            role="dev",
+            instance_id="dev",
+            input_tokens=1_500_100,
+            output_tokens=10_050,
+            backend="codex",
+            usage_series_id="disk_reader:dev:codex:codex:session-a",
+            usage_sample_id="upgraded-growth",
+        )
+        totals = first_runtime.cost_tracker.usage_totals(instance_id="dev")
+        assert totals["input_tokens"] == baseline["input_tokens"] + 100
+        assert totals["output_tokens"] == baseline["output_tokens"] + 50
+        assert totals["entries"] == baseline["entries"] + 1
 
 
 class TestCodexUnboundSessions:

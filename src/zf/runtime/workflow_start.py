@@ -30,6 +30,9 @@ from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
     workflow_route_catalog,
 )
+from zf.runtime.workflow_task_request_rotation import (
+    terminal_task_request_rotation_context,
+)
 
 
 WORKFLOW_START_SCHEMA_VERSION = "workflow-start.v1"
@@ -173,46 +176,72 @@ class WorkflowStartService:
         except (TypeError, ValueError):
             payload_request_revision = 0
         request_projection: dict[str, Any] = {}
+        terminal_rotation: dict[str, Any] = {}
         if task_request:
-            if (
-                payload_request_id
-                and payload_request_id != task_request["request_id"]
-            ):
-                return _failure(
-                    "workflow_task_stale",
-                    "workflow Request does not match the Task binding",
-                    status_code=409,
-                    task_id=task_id,
-                )
-            if (
-                payload_request_revision
-                and payload_request_revision
-                != int(task_request["request_revision"])
-            ):
-                return _failure(
-                    "workflow_task_stale",
-                    "workflow Request revision does not match the Task binding",
-                    status_code=409,
-                    task_id=task_id,
-                )
-            try:
-                request_projection = require_current_workflow_request(
-                    self.state_dir,
-                    task_request["request_id"],
-                    int(task_request["request_revision"]),
-                )
-            except WorkflowRequestError as exc:
-                return _failure(
-                    "workflow_task_stale",
-                    str(exc),
-                    status_code=409,
-                    task_id=task_id,
-                )
+            terminal_rotation = terminal_task_request_rotation_context(
+                self.state_dir,
+                task_request,
+            )
+            if terminal_rotation:
+                if payload_request_id == task_request["request_id"]:
+                    return _failure(
+                        "workflow_request_run_terminal",
+                        "terminal Workflow Request cannot be replayed; start a distinct Request",
+                        status_code=409,
+                        task_id=task_id,
+                    )
+                if payload_request_revision:
+                    return _failure(
+                        "workflow_task_stale",
+                        "fresh Workflow Request must not reuse a prior revision",
+                        status_code=409,
+                        task_id=task_id,
+                    )
+                parameters = dict(parameters)
+                parameters.pop("request_id", None)
+                parameters.pop("request_revision", None)
+            else:
+                if (
+                    payload_request_id
+                    and payload_request_id != task_request["request_id"]
+                ):
+                    return _failure(
+                        "workflow_task_stale",
+                        "workflow Request does not match the Task binding",
+                        status_code=409,
+                        task_id=task_id,
+                    )
+                if (
+                    payload_request_revision
+                    and payload_request_revision
+                    != int(task_request["request_revision"])
+                ):
+                    return _failure(
+                        "workflow_task_stale",
+                        "workflow Request revision does not match the Task binding",
+                        status_code=409,
+                        task_id=task_id,
+                    )
+                try:
+                    request_projection = require_current_workflow_request(
+                        self.state_dir,
+                        task_request["request_id"],
+                        int(task_request["request_revision"]),
+                    )
+                except WorkflowRequestError as exc:
+                    return _failure(
+                        "workflow_task_stale",
+                        str(exc),
+                        status_code=409,
+                        task_id=task_id,
+                    )
             if (
                 task_request.get("origin_binding_digest")
                 and task_request["origin_binding_digest"]
                 != workflow_origin_digest(
-                    request_projection["origin_binding"]
+                    request_projection.get("origin_binding")
+                    or terminal_rotation.get("origin_binding")
+                    or {}
                 )
             ):
                 return _failure(
@@ -221,24 +250,12 @@ class WorkflowStartService:
                     status_code=409,
                     task_id=task_id,
                 )
-            origin_binding = request_projection["origin_binding"]
-            canonical_channel = str(
-                origin_binding.get("channel_id") or ""
+            origin_binding = (
+                request_projection.get("origin_binding")
+                or terminal_rotation.get("origin_binding")
+                or {}
             )
-            canonical_thread = str(
-                origin_binding.get("thread_id") or ""
-            )
-            supplied_channel = str(
-                payload.get("channel_id") or ""
-            ).strip()
-            supplied_thread = str(
-                payload.get("thread_id") or ""
-            ).strip()
-            if (
-                supplied_channel and supplied_channel != canonical_channel
-            ) or (
-                supplied_thread and supplied_thread != canonical_thread
-            ):
+            if not _matches_canonical_origin(payload, origin_binding):
                 return _failure(
                     "origin_binding_mismatch",
                     (
@@ -248,11 +265,12 @@ class WorkflowStartService:
                     status_code=409,
                     task_id=task_id,
                 )
-            parameters = dict(parameters)
-            parameters["request_id"] = task_request["request_id"]
-            parameters["request_revision"] = int(
-                task_request["request_revision"]
-            )
+            if not terminal_rotation:
+                parameters = dict(parameters)
+                parameters["request_id"] = task_request["request_id"]
+                parameters["request_revision"] = int(
+                    task_request["request_revision"]
+                )
         elif payload_request_id:
             return _failure(
                 "workflow_task_stale",
@@ -363,15 +381,68 @@ class WorkflowStartService:
                 normalized["thread_id"] = str(
                     origin_binding.get("thread_id") or "main"
                 )
+            elif origin_binding.get("surface") == "kanban_agent":
+                normalized["project_id"] = str(
+                    origin_binding.get("project_id") or ""
+                )
+                normalized["conversation_id"] = str(
+                    origin_binding.get("conversation_id") or ""
+                )
+                normalized["thread_key"] = str(
+                    origin_binding.get("thread_key") or "main"
+                )
+        elif terminal_rotation:
+            origin_binding = dict(terminal_rotation["origin_binding"])
+            normalized.update({
+                "fresh_request": True,
+                "prior_request_id": str(
+                    terminal_rotation["prior_request_id"]
+                ),
+                "prior_request_revision": int(
+                    terminal_rotation["prior_request_revision"]
+                ),
+                "prior_terminal_event_id": str(
+                    terminal_rotation["prior_terminal_event_id"]
+                ),
+                "origin_binding": origin_binding,
+            })
+            if payload_request_id:
+                normalized["request_id"] = payload_request_id
+            if origin_binding.get("surface") == "channel":
+                normalized["channel_id"] = str(
+                    origin_binding.get("channel_id") or ""
+                )
+                normalized["thread_id"] = str(
+                    origin_binding.get("thread_id") or "main"
+                )
+            elif origin_binding.get("surface") == "kanban_agent":
+                normalized["project_id"] = str(
+                    origin_binding.get("project_id") or ""
+                )
+                normalized["conversation_id"] = str(
+                    origin_binding.get("conversation_id") or ""
+                )
+                normalized["thread_key"] = str(
+                    origin_binding.get("thread_key") or "main"
+                )
         for key in (
             "artifact_refs",
             "channel_id",
+            "conversation_id",
             "idempotency_key",
+            "project_id",
             "reason",
             "source_refs",
             "thread_id",
+            "thread_key",
         ):
-            if request_projection and key in {"channel_id", "thread_id"}:
+            if (request_projection or terminal_rotation) and key in {
+                "channel_id",
+                "conversation_id",
+                "project_id",
+                "thread_id",
+                "thread_key",
+            }:
                 continue
             value = payload.get(key)
             if value not in (None, "", [], {}):
@@ -391,7 +462,6 @@ class WorkflowStartService:
                 "contract_digest": task_digest,
             },
         }
-
     def propose(
         self,
         writer: EventWriter,
@@ -484,6 +554,54 @@ class WorkflowStartService:
             "proposal_digest": digest,
             "replayed": False,
         }
+
+
+def _matches_canonical_origin(
+    payload: dict[str, Any],
+    origin_binding: dict[str, Any],
+) -> bool:
+    """Validate surface-specific return fields without conflating thread ids."""
+
+    supplied_project = str(payload.get("project_id") or "").strip()
+    canonical_project = str(origin_binding.get("project_id") or "").strip()
+    if supplied_project and supplied_project != canonical_project:
+        return False
+
+    surface = str(origin_binding.get("surface") or "").strip()
+    supplied_channel = str(payload.get("channel_id") or "").strip()
+    if surface == "channel":
+        supplied_thread = str(payload.get("thread_id") or "").strip()
+        return not (
+            supplied_channel
+            and supplied_channel
+            != str(origin_binding.get("channel_id") or "")
+        ) and not (
+            supplied_thread
+            and supplied_thread
+            != str(origin_binding.get("thread_id") or "")
+        )
+
+    supplied_conversation = str(
+        payload.get("conversation_id") or ""
+    ).strip()
+    supplied_thread_key = str(
+        payload.get("thread_key") or payload.get("thread_id") or ""
+    ).strip()
+    if surface == "kanban_agent":
+        return not supplied_channel and not (
+            supplied_conversation
+            and supplied_conversation
+            != str(origin_binding.get("conversation_id") or "")
+        ) and not (
+            supplied_thread_key
+            and supplied_thread_key
+            != str(origin_binding.get("thread_key") or "")
+        )
+    return not any((
+        supplied_channel,
+        supplied_conversation,
+        supplied_thread_key,
+    ))
 
 
 def workflow_start_proposal(

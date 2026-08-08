@@ -236,6 +236,8 @@ class TestGenerateRoleInstructions:
         )[0]
         assert "/scan-map" in auto_section
         assert "mode: auto-inject" in auto_section
+        assert "Activation is required" in auto_section
+        assert "metadata only" in auto_section
         assert "/impl-helper" in demand_section
         assert "mode: load-on-demand" in demand_section
 
@@ -908,6 +910,26 @@ class TestTaskBriefing:
         assert "instructions/review.md" in prompt
         assert "instructions/dev.md" not in prompt
 
+    def test_build_task_prompt_resolves_nested_task_pipeline_instructions(
+        self,
+        tmp_path: Path,
+    ):
+        briefing_path = (
+            tmp_path / "briefings" / "task-pipeline" / "verify-T2.md"
+        )
+        briefing_path.parent.mkdir(parents=True)
+        briefing_path.write_text("## Task Pipeline Verify\n")
+
+        prompt = build_task_prompt(
+            "verify-lane-0",
+            briefing_path,
+            prompt_kind="task_pipeline_stage",
+        )
+
+        expected = tmp_path / "instructions" / "verify-lane-0.md"
+        assert str(expected) in prompt
+        assert "briefings/instructions" not in prompt
+
     def test_build_task_prompt_for_fanout_child_does_not_require_task_doc(
         self,
         tmp_path: Path,
@@ -925,6 +947,8 @@ class TestTaskBriefing:
         assert "fanout child briefing" in prompt
         assert "target_ref" in prompt
         assert "do not look for a task.md" in prompt
+        assert "does not own the root canonical Task" in prompt
+        assert "do not apply a role-instruction `zf guard ownership`" in prompt
         assert "load the kernel-managed task.md" not in prompt
 
     def test_build_task_prompt_for_fanout_synth_does_not_require_task_doc(

@@ -12,7 +12,10 @@ from zf.core.events.factory import event_log_from_project
 from zf.runtime.dispatch_diagnostics import build_dispatch_diagnostics
 from zf.runtime.loop_projection import build_loop_projection
 from zf.runtime.measure_loop_projection import build_measure_loop_projection
-from zf.runtime.stage_loop_projection import build_loop_view
+from zf.runtime.stage_loop_projection import (
+    LOOP_VIEW_CACHE_REVISION,
+    build_loop_view,
+)
 
 
 def _now() -> str:
@@ -79,7 +82,7 @@ def build_measure_loop_router(*, resolve_ctx: Callable[[str], Any]) -> APIRouter
     def loop_view(project_id: str) -> JSONResponse:
         ctx = resolve_ctx(project_id)
         source_seq = 0
-        cache_key = f"loop-view:{project_id}"
+        cache_key = f"loop-view:{LOOP_VIEW_CACHE_REVISION}:{project_id}"
         try:
             from zf.web.projections import read_model
 

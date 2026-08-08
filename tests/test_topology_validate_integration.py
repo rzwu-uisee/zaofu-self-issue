@@ -265,3 +265,18 @@ workflow:
         "event_without_consumer: stage=module-parity "
         "event=cangjie.module.parity.scan.completed"
     ) not in out
+    assert (
+        "trigger_without_producer: stage=module-parity "
+        "event=verify.parity_scan.requested"
+    ) not in out
+    assert (
+        "trigger_without_producer: stage=judge event=module.parity.closed"
+    ) not in out
+    assert (
+        "event_without_consumer: stage=plan "
+        "event=zaofu.refactor.plan.ready"
+    ) not in out
+    assert (
+        "event_without_consumer: stage=judge "
+        "event=goal.closure.synthesized"
+    ) not in out

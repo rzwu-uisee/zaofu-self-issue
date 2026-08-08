@@ -230,6 +230,7 @@ class WorkdirManager:
         git_worktree_created: bool,
     ) -> None:
         workdir = Path(plan.workdir)
+        preserved_dependency = self._preserved_dependency_metadata(role, plan)
         if workdir.exists():
             assert_owned_workdir(workdir, state_dir=self.state_dir)
         write_workdir_owner_marker(
@@ -241,6 +242,7 @@ class WorkdirManager:
         )
         meta = {
             **asdict(plan),
+            **preserved_dependency,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "git_worktree_created": git_worktree_created,
         }
@@ -248,6 +250,72 @@ class WorkdirManager:
             workdir / "meta.json",
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
         )
+
+    def _preserved_dependency_metadata(
+        self,
+        role: RoleConfig,
+        plan: WorkdirPlan,
+    ) -> dict[str, object]:
+        """Keep a live writer's dependency boundary across control restarts."""
+        if plan.role_kind != "writer":
+            return {}
+        meta_path = Path(plan.workdir) / "meta.json"
+        project_path = Path(plan.project_path)
+        try:
+            existing = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(existing, dict):
+            return {}
+        if str(existing.get("instance_id") or "") != role.instance_id:
+            return {}
+        dependency_after = str(existing.get("dependency_after") or "").strip()
+        if not dependency_after or not (project_path / ".git").exists():
+            return {}
+        if not self._is_ancestor(project_path, dependency_after, "HEAD"):
+            return {}
+        keys = (
+            "dependency_base_before",
+            "dependency_after",
+            "dependency_refs",
+            "dependency_refs_skipped",
+            "dependency_refs_updated_at",
+        )
+        return {key: existing[key] for key in keys if key in existing}
+
+    def _clear_dependency_metadata(
+        self,
+        role: RoleConfig,
+        plan: WorkdirPlan,
+    ) -> None:
+        """Clear the previous task's boundary after an explicit writer sync."""
+        meta_path = Path(plan.workdir) / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if (
+            not isinstance(meta, dict)
+            or str(meta.get("instance_id") or "") != role.instance_id
+        ):
+            return
+        keys = (
+            "dependency_base_before",
+            "dependency_after",
+            "dependency_refs",
+            "dependency_refs_skipped",
+            "dependency_refs_updated_at",
+        )
+        changed = False
+        for key in keys:
+            if key in meta:
+                meta.pop(key)
+                changed = True
+        if changed:
+            atomic_write_text(
+                meta_path,
+                json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+            )
 
     def _prepare_writer_worktree(self, role: RoleConfig, plan: WorkdirPlan) -> None:
         self._require_git_repo()
@@ -453,6 +521,17 @@ class WorkdirManager:
             if value is not None
         }
 
+    def current_writer_head(self, role: RoleConfig) -> str:
+        """Return the current commit for a managed writer worktree."""
+
+        plan = self.plan(role)
+        if not plan.enabled or plan.mode != "worktree" or plan.role_kind != "writer":
+            return ""
+        project_path = Path(plan.project_path)
+        if not (project_path / ".git").exists():
+            return ""
+        return self._git(project_path, "rev-parse", "HEAD").strip()
+
     def reset_reader_if_dirty(self, role: RoleConfig) -> str:
         plan = self.plan(role)
         if not plan.enabled or plan.mode != "worktree" or plan.role_kind != "reader":
@@ -650,6 +729,7 @@ class WorkdirManager:
                 self._clean_managed_worktree(project_path)
                 stashed_ref = ""
         if before == source_ref and not stashed_ref:
+            self._clear_dependency_metadata(role, plan)
             return {
                 "project_path": str(project_path),
                 "branch": branch,
@@ -665,6 +745,7 @@ class WorkdirManager:
         self._git(project_path, "reset", "--hard", source_ref)
         self._clean_managed_worktree(project_path)
         after = self._git(project_path, "rev-parse", "HEAD").strip()
+        self._clear_dependency_metadata(role, plan)
         return {
             "project_path": str(project_path),
             "branch": branch,

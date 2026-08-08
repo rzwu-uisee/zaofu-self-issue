@@ -163,6 +163,13 @@ open questions use free text. Submission still records individual resolved
 facts in the `channel.question.*` ledger, so the component does not become a
 second question state machine.
 
+When an active discussion needs a mode change or a fresh review, use
+`Restart discussion` in Details. The controlled action first closes the old
+session with `cancelled / explicit_restart`, then starts the selected mode with
+a fresh trigger-message identity. The original requirement is retained only as
+`source_requirement_message_id`, so ingress idempotency cannot mistake the new
+fanout for a duplicate post.
+
 ![Natural discussion, directed replies, and multi-role convergence in a Channel Group](assets/quickstart-channel-discussion.webp)
 
 ## 7. PRD Finalize And Owner Authority

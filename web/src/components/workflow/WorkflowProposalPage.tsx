@@ -530,6 +530,7 @@ function WorkflowProposalDetail({
           {changeMode === "config_change" && !configApplied && isDecision ? (
             <button
               className="icon-button"
+              data-testid="workflow-apply-config"
               disabled={!actionReady || !approvable || busyAction !== "" || !validationResultRef.ref}
               title={!actionReady ? actionState : "Validate CAS and apply this proposal to zf.yaml"}
               type="button"
@@ -542,6 +543,7 @@ function WorkflowProposalDetail({
           {isDecision ? (
             <button
               className="icon-button primary"
+              data-testid="workflow-approve-run"
               disabled={
                 !actionReady
                 || !approvable
@@ -565,6 +567,7 @@ function WorkflowProposalDetail({
           {runVisible ? (
             <button
               className="icon-button primary"
+              data-testid="workflow-open-run"
               type="button"
               onClick={onOpenRuns}
             >

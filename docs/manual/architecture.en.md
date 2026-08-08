@@ -98,7 +98,7 @@ flowchart LR
     direction TB
     EVENTS["EventWriter / EventLog<br/>append occurrence / causation / verdict / ref"]
     WATCH["EventWatcher<br/>wake-worthy event / periodic tick"]
-    ORCH["Orchestrator.run_once()"]
+    ORCH["WorkflowRuntimeCoordinator.run_once()"]
     ROUTE["Registered Topology / Profile<br/>dependency / readiness / WIP / barrier"]
     ADMIT["Mechanical Admission<br/>schema / identity / currentness / scope / budget"]
     ATTEMPT["WorkflowOperation / TaskAttempt<br/>generation / lease / dispatch"]
@@ -149,29 +149,31 @@ flowchart LR
 ```
 
 Human approval in this diagram is a profile/policy branch rather than a fixed
-stage in every Workflow. This page shows only the current `dev` path: the
-deterministic runtime is still the Python `Orchestrator`. The proposed
-`WorkflowRuntimeCoordinator` name, blocking OA semantic control, and a
-Task-centric Pipeline with reusable Stage Worker Slots are not presented as
-current capabilities. Worker results and approved recovery actions can re-enter
-the next EventWatcher reconciliation only through sanctioned event/artifact
-paths.
+stage in every Workflow. The deterministic runtime class is now named
+`WorkflowRuntimeCoordinator`; `Orchestrator` remains a compatibility alias for
+the same class. Current code includes two default-off
+execution extensions: configured OA semantic checkpoints and PRD/Issue/Refactor
+Task Pipeline v4 canaries. Both reuse the same Kernel, EventLog, Stores,
+Artifacts, and controlled-action boundary instead of creating another state
+machine. Worker results and approved recovery actions can re-enter the next
+EventWatcher reconciliation only through sanctioned event/artifact paths.
 
 | Actor | Current responsibility |
 |---|---|
-| Kernel / Python `Orchestrator` runtime | config loading, identity, mechanical dispatch, schema/gates, replay, transitions, and external effects |
+| Kernel / Python `WorkflowRuntimeCoordinator` | config loading, identity, mechanical dispatch, schema/gates, replay, transitions, and external effects; `Orchestrator` is a compatibility alias |
 | Worker Agents and Skills | planning, implementation, review, verification, diagnosis, and product judgment; report typed results or intent only |
-| configured `orchestrator` role Agent | stable session identity, exceptional semantic triage, and replan/proposal; not a full-run blocking semantic owner in current Product Flow |
+| configured `orchestrator` role Agent | defaults to `exception_advisor`; an explicit `semantic_control` profile may make shadow/blocking judgments at registered checkpoints, but it never owns dispatch, Task/Run state, or external effects |
 | Supervisor | observe, correlate, and raise attention; no direct repair |
 | Run Manager | own operational liveness, choose bounded recovery, and require post-verification |
 | Autoresearch | reproduce repeated harness fingerprints and propose isolated diagnosis/repair |
 | ControlledActionService | apply approved, auditable deterministic side effects |
 | Web / CLI / Feishu | read projections, submit intent, and request token-gated controlled actions |
 
-The deterministic Python `Orchestrator` and an Agent role named `orchestrator`
-are different objects. Current code keeps the former as the Product Flow
-happy-path coordinator. Candidate designs for full OA semantic control or
-blocking checkpoints are not current production defaults.
+The deterministic Python `WorkflowRuntimeCoordinator` and an Agent role named
+`orchestrator` are different objects. Current code keeps the former as the
+Product Flow happy-path coordinator. The OA P0-P15 harness is wired, but its real canary is
+still on HOLD. Projects without explicit configuration continue to use
+`exception_advisor`; a canary blocking checkpoint is not a production default.
 
 ## 5. Two Orchestration Modes
 
@@ -216,12 +218,16 @@ evidence. The Kernel remains the only scheduling state machine.
 | Multi-role Channel Group | Implemented | People and Agents use natural conversation or explicit `multi_lens`; Owner confirms the PRD, and discussion never auto-creates a Task or starts a Workflow |
 | Reader fanout/fan-in | Implemented | Read-only roles research or scan in parallel and aggregate through `wait_for_all` or a synth contract |
 | Writer fanout | Implemented | Independent Task Map tasks use isolated branches/worktrees; conflict, scope, and candidate admission fail closed |
-| Task Map waves and lanes | Implemented | The Kernel releases work from dependencies, waves, WIP, and currentness rather than a lead Agent manually dispatching every step |
+| Task Map waves and lanes (v3) | Implemented and still default | The Kernel releases work from dependencies, waves, WIP, and currentness rather than a lead Agent manually dispatching every step |
 | Static replicas and compatible role autoscaling | Implemented, configuration required | `zf.yaml` sets bounds; Runtime uses ready Tasks, cooldown, and worker health, while a dirty worktree blocks retirement |
 | On-demand Worker lifecycle | Implemented, provider resume support required | Dormant roles activate before dispatch and may suspend after settlement and idle admission |
 | Cross-provider collaboration | Implemented | Codex, Claude Code, and other configured backends can be assigned by role; independent verification does not trust implementer prose |
 | Provider-native compound children | Opt-in Research pilot | Only the root is a ZaoFu protocol actor; the current pilot is read-only, depth one, and limited to four children that cannot create canonical Tasks |
-| Task-centric elastic Stage Worker Pool | Not implemented | Logical Task, attempt, session, worktree, and physical placement are not fully decoupled; generic autoscaling is not an elastic lane pipeline |
+| OA semantic checkpoints | Harness implemented, release HOLD | Only explicit profiles enable them; normal Task handoff adds no OA turn and the Kernel keeps sole dispatch authority |
+| Task-centric elastic Stage Worker Pool (v4) | Implementation complete, default off, rollout NO-GO | Canaries separate Task Pipeline identity from physical Worker Slots; only explicit PRD/Issue/Refactor shadow/blocking profiles may use it |
+| Research generation freshness | Deterministic implementation complete, real E2E pending | prompt, config, route, role, Task, and Run Contract freeze one generation; startup isolates stale generations |
+| Recovery Coordinator convergence | Candidate, not implemented | Supervisor and Run Manager remain separate components and cannot be operated as one current endpoint |
+| OpenCode Provider SPI | Candidate, not implemented | Current public Provider paths must not claim an OpenCode native session |
 
 The current topology/profile can compose the following execution shapes as a
 DAG. They are not a fixed Reader -> Writer -> Verifier pipeline that every
@@ -271,9 +277,26 @@ flowchart TB
 
 One profile may feed a Reader aggregate into the next Stage or let a Candidate
 trigger exact-target verification. That ordering comes from the admitted DAG,
-not from a hard-coded global barrier in this diagram. Current Writer fanout also
-does not imply a persistent Task Pipeline identity or a Worker Slot reusable
-across Stages.
+not from a hard-coded global barrier in this diagram. v3 Writer fanout by itself
+does not imply persistent Task Pipeline identity. Only an explicit v4 profile
+enables the Task-local pipeline and reusable Worker Slots below:
+
+```text
+Task A: Impl -> Task Verify -> Integration Admission -> serial Candidate Integration
+              | failed -> bounded Task A rework
+              | passed -> Impl slot may serve Task C immediately
+
+all admitted Task receipts
+  -> freeze exact Candidate
+  -> Global Candidate Verify / Discovery / Goal Closure
+```
+
+The v4 `verify_admitted` default is a zero-Agent-turn mechanical admission.
+High-risk `risk_review` is a separate, default-off canary. Local Task success
+never replaces global acceptance of the frozen exact Candidate, and a partial
+Candidate cannot auto-ship. Available examples live under
+`examples/prod/controller/*-task-pipeline-v4-canary*.yaml` and declare
+`preferred: false`.
 
 ### Controlled Dynamic Workflows
 
@@ -308,10 +331,13 @@ Workflow serves long-tail compositions.
 ```text
 zf start
   -> load zf.yaml + project.state_dir
+  -> reconcile stale Research generations before transport startup
   -> start tmux and/or stream-json transports and sidecars
   -> EventWatcher tails events.jsonl
-  -> wake-worthy event calls Orchestrator.run_once()
+  -> wake-worthy event calls WorkflowRuntimeCoordinator.run_once()
   -> topology/profile selects mechanical next work
+     -> v3: declared stage/fanout/barrier route
+     -> v4 blocking canary: Task-local Impl/Verify/Integration operations
   -> briefing + contract + required inputs reach worker
   -> worker emits facts/results/evidence
   -> reducers/gates update sanctioned state

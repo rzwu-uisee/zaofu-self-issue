@@ -13,6 +13,10 @@ from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.product_delivery import ingest_task_map_to_kanban
 from zf.runtime.replan_contract_eval import evaluate_replan_contract
+from zf.runtime.task_contract_snapshot import (
+    build_task_contract_snapshot,
+    task_map_generation,
+)
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
 
@@ -328,6 +332,93 @@ def test_ingest_task_map_to_kanban_normalizes_verification_command_list(
     assert len(
         contract_updates[-1].payload["contract"]["validation"]["commands"]
     ) == 2
+
+
+def test_product_delivery_materializes_global_commands_into_task_contract(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state_dir(tmp_path)
+    task_map = {
+        "schema_version": "task-map.v1",
+        "feature_id": "F-GLOBAL-COMMAND",
+        "tasks": [
+            {
+                "task_id": "TASK-PRODUCER",
+                "title": "Produce shared verification",
+                "owner_role": "dev",
+                "scope": ["src/producer.py", "tests/test_shared.py"],
+                "verification_tiers": ["task_non_smoke"],
+                "validation": {"commands": [{
+                    "id": "shared-contract",
+                    "command": "pytest -q tests/test_shared.py",
+                    "acceptance_ids": ["AC-P", "AC-C"],
+                    "owner": "candidate_verify",
+                    "tier": "real_e2e",
+                }]},
+                "acceptance_criteria": [{
+                    "id": "AC-P",
+                    "statement": "The shared contract is available.",
+                    "verification_owner": "candidate_verify",
+                    "verification_tier": "real_e2e",
+                    "verification_command_ids": ["shared-contract"],
+                }],
+            },
+            {
+                "task_id": "TASK-CONSUMER",
+                "title": "Consume shared verification",
+                "owner_role": "dev",
+                "scope": ["src/consumer.py", "tests/test_consumer.py"],
+                "blocked_by": ["TASK-PRODUCER"],
+                "verification_tiers": ["task_non_smoke"],
+                "validation": {"commands": [{
+                    "id": "consumer-smoke",
+                    "command": "pytest -q tests/test_consumer.py",
+                    "acceptance_ids": ["AC-C"],
+                    "owner": "task_verify",
+                    "tier": "task_non_smoke",
+                }]},
+                "acceptance_criteria": [{
+                    "id": "AC-C",
+                    "statement": "The consumer preserves the shared contract.",
+                    "verification_owner": "task_verify",
+                    "verification_tier": "task_non_smoke",
+                    "verification_command_ids": [
+                        "consumer-smoke",
+                        "shared-contract",
+                    ],
+                }],
+            },
+        ],
+    }
+
+    result = ingest_task_map_to_kanban(
+        state_dir,
+        task_map,
+        task_map_ref="artifacts/task-map.json",
+    )
+
+    assert result.passed is True
+    consumer = TaskStore(state_dir / "kanban.json").get("TASK-CONSUMER")
+    assert consumer is not None
+    assert [
+        item["id"] for item in consumer.contract.validation["commands"]
+    ] == ["consumer-smoke", "shared-contract"]
+    snapshot = build_task_contract_snapshot(
+        consumer,
+        workflow_run_id="run-global-command",
+        task_map_generation_id=task_map_generation(consumer),
+        base_commit="a" * 40,
+        task_ref="refs/zf/tasks/TASK-CONSUMER",
+    )
+    assert [
+        item["command_id"] for item in snapshot["verification_commands"]
+    ] == ["consumer-smoke", "shared-contract"]
+    assert snapshot["acceptance_criteria"][0][
+        "verification_command_ids"
+    ] == ["consumer-smoke", "shared-contract"]
+    assert [
+        item["id"] for item in task_map["tasks"][1]["validation"]["commands"]
+    ] == ["consumer-smoke"]
 
 
 def test_product_delivery_accepts_structured_expected_red_validation(

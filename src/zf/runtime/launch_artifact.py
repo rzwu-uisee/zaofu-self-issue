@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.config.schema import RoleConfig
+from zf.core.safety import write_workdir_owner_marker
+from zf.core.safety.path_guard import WORKDIR_OWNER_MARKER
 from zf.core.state.atomic_io import atomic_write_text
 
 
@@ -42,10 +44,38 @@ def write_launch_artifact(
     session_id: str | None,
     is_resume: bool,
     transport: object | None = None,
+    config: object | None = None,
 ) -> Path:
     """Write latest + attempt launch artifacts for one worker spawn."""
 
-    runtime_dir = state_dir / "workdirs" / role.instance_id / "runtime"
+    workdir_root = None
+    project_name = project_root.name
+    if config is not None:
+        from zf.runtime.workdirs import WorkdirManager
+
+        workdir_root = WorkdirManager(
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+        ).root
+        project_name = config.project.name
+    role_workdir = (workdir_root or state_dir / "workdirs") / role.instance_id
+    marker = role_workdir / WORKDIR_OWNER_MARKER
+    if not marker.exists():
+        existing = (
+            {path.name for path in role_workdir.iterdir()}
+            if role_workdir.exists()
+            else set()
+        )
+        if not existing - {".claude", ".codex", "codex-home", "runtime"}:
+            write_workdir_owner_marker(
+                role_workdir,
+                project_name=project_name or project_root.name,
+                instance_id=role.instance_id,
+                project_root=project_root,
+                created_by="zf-launch-artifact",
+            )
+    runtime_dir = role_workdir / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     attempt = _next_attempt(runtime_dir)
     payload = {

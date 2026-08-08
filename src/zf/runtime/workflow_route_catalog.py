@@ -6,10 +6,12 @@ import hashlib
 import json
 from typing import Any
 
+from zf.core.workflow.flow_metadata import flow_metadata_for, normalize_flow_kind
 from zf.runtime.research_templates import (
     ADAPTIVE_RESEARCH_TEMPLATE,
     FIXED_RESEARCH_TEMPLATE,
     RESEARCH_TEMPLATES,
+    research_stage_contract_error,
 )
 
 WORKFLOW_ROUTE_CATALOG_SCHEMA_VERSION = "workflow-route-catalog.v1"
@@ -65,6 +67,15 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
             stage = stage_by_id.get(pattern_id)
             if stage is None:
                 continue
+            entry_contract = delivery_route_entry_contract(
+                config,
+                kind=canonical_kind,
+                pattern_id=pattern_id,
+                stage=stage,
+                role_kind_by_id=role_kind_by_id,
+            )
+            if not entry_contract["ok"]:
+                continue
             claimed_entries.add(pattern_id)
             route_stages = _delivery_route_stages(
                 stages,
@@ -107,18 +118,26 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
                 ],
                 "lane_count": lane_count,
                 "output_profile": "candidate_and_evidence",
-                "start_adapter": "delivery_request_submit",
+                "entry_class": entry_contract["entry_class"],
+                "entry_topology": entry_contract["entry_topology"],
+                "entry_trigger": entry_contract["entry_trigger"],
+                "start_adapter": entry_contract["start_adapter"],
                 "available": True,
             })
 
     for template in RESEARCH_TEMPLATES:
         research_stage = stage_by_id.get(template.pattern_id)
-        if research_stage is None or not _is_reader_entry(
+        if research_stage is None:
+            continue
+        claimed_entries.add(template.pattern_id)
+        if research_stage_contract_error(
+            research_stage,
+            template,
+        ) or not _is_reader_entry(
             research_stage,
             role_kind_by_id=role_kind_by_id,
         ):
             continue
-        claimed_entries.add(template.pattern_id)
         research_roles = _stage_roles([research_stage])
         routes.append({
             "route_id": template.route_id,
@@ -322,6 +341,156 @@ def _delivery_lane_count(
     return max([writer_count, *counts], default=0)
 
 
+def delivery_route_entry_contract(
+    config: Any,
+    *,
+    kind: str,
+    pattern_id: str,
+    stage: Any | None = None,
+    role_kind_by_id: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Validate the adapter boundary for one externally selectable route."""
+    stages = list(getattr(getattr(config, "workflow", None), "stages", []) or [])
+    if stage is None:
+        stage = next(
+            (
+                item
+                for item in stages
+                if str(getattr(item, "id", "") or "") == pattern_id
+            ),
+            None,
+        )
+    if stage is None:
+        return _delivery_entry_contract_failure(
+            f"workflow route {kind!r} references missing stage {pattern_id!r}"
+        )
+
+    canonical_kind = str(kind or "").strip().lower()
+    stage_kind = str(getattr(stage, "flow_kind", "") or "").strip().lower()
+    if stage_kind and stage_kind != canonical_kind:
+        return _delivery_entry_contract_failure(
+            f"workflow route {canonical_kind!r} points at stage {pattern_id!r} "
+            f"owned by flow_kind {stage_kind!r}"
+        )
+
+    topology = str(getattr(stage, "topology", "") or "").strip()
+    trigger = str(getattr(stage, "trigger", "") or "").strip()
+    metadata = flow_metadata_for(config, canonical_kind)
+    if str(metadata.get("topology") or "").strip() == "light":
+        entry_trigger = str(metadata.get("light_entry_trigger") or "").strip()
+        if not entry_trigger:
+            return _delivery_entry_contract_failure(
+                f"light workflow route {canonical_kind!r} has no light_entry_trigger"
+            )
+        if topology != "fanout_writer_scoped" or trigger != "task_map.ready":
+            return _delivery_entry_contract_failure(
+                f"light workflow route {canonical_kind!r} must target a "
+                "fanout_writer_scoped task_map.ready stage"
+            )
+        return {
+            "ok": True,
+            "error": "",
+            "entry_class": "light_adapter",
+            "entry_topology": topology,
+            "entry_trigger": entry_trigger,
+            "start_adapter": "light_delivery_request_submit",
+        }
+
+    if topology != "fanout_reader":
+        return _delivery_entry_contract_failure(
+            f"blocking workflow route {canonical_kind!r} must target a "
+            f"fanout_reader entry, got {topology or 'unset'}"
+        )
+    role_kinds = role_kind_by_id or _role_kind_index(config)
+    if not _is_reader_entry(stage, role_kind_by_id=role_kinds):
+        return _delivery_entry_contract_failure(
+            f"blocking workflow route {canonical_kind!r} entry {pattern_id!r} "
+            "must contain reader roles only"
+        )
+    external_triggers = {
+        str(item or "").strip()
+        for item in list(
+            getattr(
+                getattr(getattr(config, "workflow", None), "dag", None),
+                "external_triggers",
+                [],
+            )
+            or []
+        )
+        if str(item or "").strip()
+    }
+    if not trigger or trigger not in external_triggers:
+        return _delivery_entry_contract_failure(
+            f"blocking workflow route {canonical_kind!r} entry trigger "
+            f"{trigger or 'unset'!r} is not declared in workflow.dag.external_triggers"
+        )
+    return {
+        "ok": True,
+        "error": "",
+        "entry_class": "external_reader",
+        "entry_topology": topology,
+        "entry_trigger": trigger,
+        "start_adapter": "delivery_request_submit",
+    }
+
+
+def delivery_route_contracts_for_kind(
+    config: Any,
+    kind: str,
+) -> list[dict[str, Any]]:
+    """Return every configured external entry contract for one request kind."""
+    canonical_request_kind = normalize_flow_kind(kind)
+    routes = dict(
+        getattr(getattr(config, "workflow", None), "kind_routes", {}) or {}
+    )
+    route = routes.get(canonical_request_kind)
+    if route is None:
+        return []
+    canonical_kind, resolved = _resolve_kind_route(
+        routes,
+        canonical_request_kind,
+        route,
+    )
+    if resolved is None:
+        return []
+    return [
+        {
+            "tier": tier,
+            "pattern_id": pattern_id,
+            **delivery_route_entry_contract(
+                config,
+                kind=canonical_kind,
+                pattern_id=pattern_id,
+            ),
+        }
+        for tier, pattern_id in _route_targets(resolved)
+    ]
+
+
+def _delivery_entry_contract_failure(error: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": error,
+        "entry_class": "invalid",
+        "entry_topology": "",
+        "entry_trigger": "",
+        "start_adapter": "",
+    }
+
+
+def _role_kind_index(config: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for role in list(getattr(config, "roles", []) or []):
+        kind = str(getattr(role, "role_kind", "") or "")
+        for identity in (
+            str(getattr(role, "instance_id", "") or ""),
+            str(getattr(role, "name", "") or ""),
+        ):
+            if identity:
+                result[identity] = kind
+    return result
+
+
 def _is_reader_entry(
     stage: Any,
     *,
@@ -353,6 +522,8 @@ __all__ = [
     "FIXED_RESEARCH_PATTERN_ID",
     "FIXED_RESEARCH_ROUTE_ID",
     "WORKFLOW_ROUTE_CATALOG_SCHEMA_VERSION",
+    "delivery_route_contracts_for_kind",
+    "delivery_route_entry_contract",
     "resolve_workflow_route",
     "workflow_route_catalog",
 ]

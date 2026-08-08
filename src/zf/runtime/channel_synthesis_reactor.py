@@ -92,6 +92,93 @@ def react_channel_synthesis_requested(
     )
 
 
+def react_channel_synthesis_repair_requested(
+    host,
+    event: ZfEvent,
+) -> None:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    channel_id = str(
+        payload.get("channel_id") or event.correlation_id or ""
+    )
+    synthesis_request_id = str(payload.get("request_id") or "")
+    repair_id = str(payload.get("repair_id") or "")
+    target_member_id = str(payload.get("target_member_id") or "")
+    if not channel_id or not synthesis_request_id or not repair_id or not target_member_id:
+        return
+    message = _message_for_ref(
+        host,
+        key="synthesis_repair_id",
+        value=repair_id,
+    )
+    thread_id = str(payload.get("thread_id") or "main")
+    if message is None:
+        revision = int(payload.get("repair_revision") or 0)
+        contract_error = str(payload.get("contract_error") or "").strip()
+        invalid_reply_ref = (
+            payload.get("invalid_reply_ref")
+            if isinstance(payload.get("invalid_reply_ref"), dict)
+            else {}
+        )
+        message_payload = channel_message_event_payload(
+            host.state_dir,
+            {
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "message_id": f"msg-{repair_id}",
+                "member_id": "operator",
+                "role": "user",
+                "source": "runtime",
+                "text": (
+                    f"@{target_member_id} Correct synthesis contract revision "
+                    f"{revision}. Return one complete channel_synthesis JSON "
+                    "object; do not abbreviate or continue the old fragment. "
+                    f"Contract diagnostic: {contract_error}. Invalid reply "
+                    f"evidence: {invalid_reply_ref.get('ref') or 'unavailable'}."
+                ),
+                "mentions": [target_member_id],
+                "refs": {
+                    "synthesis_request_id": synthesis_request_id,
+                    "synthesis_repair_id": repair_id,
+                    "synthesis_repair_revision": revision,
+                    "synthesis_invalid_reply": invalid_reply_ref,
+                    "synthesis_contract_error": contract_error,
+                },
+            },
+            created_by="channel-synthesis-repair:runtime",
+            source_event_id=event.id,
+        )
+        message = host.event_writer.emit(
+            "channel.message.posted",
+            actor="orchestrator-reactor",
+            task_id=event.task_id,
+            causation_id=event.id,
+            correlation_id=channel_id,
+            payload=message_payload,
+        )
+    message_id = str((message.payload or {}).get("message_id") or "")
+    for prior in host.event_log.read_all():
+        prior_payload = (
+            prior.payload if isinstance(prior.payload, dict) else {}
+        )
+        if (
+            prior.type == "channel.agent.reply.requested"
+            and str(prior_payload.get("message_id") or "") == message_id
+        ):
+            return
+    route_channel_message(
+        state_dir=host.state_dir,
+        writer=host.event_writer,
+        message_event=message,
+        message_payload=message.payload,
+        actor="orchestrator-reactor",
+        source="runtime",
+        project_root=getattr(host, "project_root", None),
+        config=getattr(host, "config", None),
+        openclaw_client=getattr(host, "openclaw_client", None),
+        dispatch_inline=True,
+    )
+
+
 def react_channel_question_dedup_requested(
     host,
     event: ZfEvent,

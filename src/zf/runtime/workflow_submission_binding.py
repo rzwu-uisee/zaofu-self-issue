@@ -87,6 +87,13 @@ def pin_submitted_run_contract(
             "effective_config_ref": payload.get("effective_config_ref")
             if isinstance(payload.get("effective_config_ref"), dict) else {},
             "initial_binding": bool(run_contract.get("initial_binding")),
+            "prior_terminal_rotation": bool(
+                run_contract.get("prior_terminal_rotation")
+            ),
+            "prior_run_id": str(run_contract.get("prior_run_id") or ""),
+            "prior_terminal_event_id": str(
+                run_contract.get("prior_terminal_event_id") or ""
+            ),
         },
     ))
 

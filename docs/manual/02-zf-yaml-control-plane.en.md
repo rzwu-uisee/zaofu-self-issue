@@ -76,9 +76,12 @@ roles:
 The current schema, loader, CLI help, and runtime callers define implemented
 behavior. Design documents may also contain future intent.
 
-In Product Flow, the Kernel mechanically dispatches from topology/profile and an explicit
-`orchestrator` role subscribes only to exceptional triage signals. Only Legacy safe-team lets a Layer 2
-Agent decompose and assign work. Treat the `orchestrator` config block, Python `Orchestrator` runtime, and
+In Product Flow, the Kernel mechanically dispatches from topology/profile. An
+explicit `orchestrator` role subscribes to exceptional triage by default; only
+`workflow.orchestration.mode: semantic_control` lets it make shadow/blocking
+semantic judgments at registered checkpoints. Legacy safe-team remains a
+separate compatibility mode. Treat the `orchestrator` config block, Python
+`WorkflowRuntimeCoordinator` (`Orchestrator` compatibility alias), and the
 same-named role Agent as three distinct objects.
 
 ## 3. Role Configuration
@@ -96,6 +99,8 @@ Common fields:
 | `replicas` | Static role replica count |
 | `role_kind` | `writer`, `reader`, or `auto` |
 | `skills` | Enabled skill names |
+| `provider_session` | Role-scoped Provider-native `effort`, `agent`, and `max_parallel_agents`, frozen by digest |
+| `lifecycle` | Provider process/pane lifecycle: `eager`, `resident`, or `on_demand` |
 | `triggers` | Events that make the role eligible |
 | `publishes` | Events the role is authorized to publish |
 | `stuck_threshold_seconds` | Stuck detection threshold |
@@ -108,6 +113,40 @@ Common fields:
 Prefer replicas over duplicated role definitions. A logical `dev` role with
 four replicas expands to concrete worker instances such as `dev-1` through
 `dev-4`.
+
+### 3.1 Role-Scoped Provider Sessions and On-Demand Lifecycle
+
+Initial Provider dynamic configuration belongs to a role/session rather than a
+per-Task execution-profile selector:
+
+```yaml
+roles:
+  - name: orchestrator
+    backend: codex
+    role_kind: reader
+    lifecycle:
+      mode: resident
+  - name: dev-lane-0
+    backend: codex
+    role_kind: writer
+    provider_session:
+      effort: high
+      max_parallel_agents: 2
+    lifecycle:
+      mode: on_demand
+      idle_seconds: 120
+      cooldown_seconds: 30
+      preserve_session: true
+      preserve_workdir: true
+```
+
+When `provider_session` is absent, the Provider default is inherited. Explicit
+settings produce an immutable effective-session sidecar whose digest binds the
+`RoleSessionRegistry`; a digest change cannot blindly resume an old session.
+`on_demand` releases only an idle process/pane while retaining logical role,
+session, workdir, and affinity. The `orchestrator` role cannot be `on_demand`.
+Broad real-Provider rollout is still pending, so use this first in controller
+canaries.
 
 ## 4. Skills
 
@@ -190,6 +229,58 @@ verification:
 
 Gates answer whether commands pass. Discriminators answer whether evidence,
 scope, contract, and architecture requirements are satisfied.
+
+### 6.1 OA Checkpoints and the Task Pipeline v4 Canary
+
+OA semantic checkpoints require explicit configuration; the default remains
+`exception_advisor`:
+
+```yaml
+workflow:
+  orchestration:
+    mode: semantic_control
+    checkpoints: [plan_candidate]
+    checkpoint_policies:
+      plan_candidate: shadow
+```
+
+`shadow` records a typed decision without blocking the Kernel. `blocking` is
+limited to PRD/Issue/Refactor profiles with an explicit pilot/canary boundary.
+The current real canary is on HOLD and is not a Project default.
+
+Task Pipeline v4 is also enabled only by an explicit Flow document:
+
+```yaml
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+spec:
+  flowProfile: issue-flow-v4-task-pipeline
+  topology: fanout
+  taskPipeline:
+    mode: ${ZF_TASK_PIPELINE_MODE:-shadow}
+    maxActiveTaskPipelines: 4
+    pools:
+      impl: {capacity: 1, roleInstances: [fix-lane-0]}
+      verify: {capacity: 1, roleInstances: [verify-lane-0]}
+    workerLifecycle: {mode: on_demand, idleSeconds: 120}
+    integrationAdmission:
+      default: verify_admitted
+      riskReview: {enabled: false}
+    candidate:
+      integration: incremental_serial_cas
+      integrationCapacity: 1
+      rollingSmoke: required
+      partialCandidateAutoShip: forbidden
+      finalVerifyTarget: frozen_exact_commit
+```
+
+The only valid profile IDs are `issue-flow-v4-task-pipeline`,
+`prd-flow-v4-task-pipeline`, and `refactor-flow-v4-task-pipeline`. Repository
+canaries live under
+`examples/prod/controller/*-task-pipeline-v4-canary*.yaml` and all declare
+`preferred: false`. The implementation is complete but rollout remains NO-GO.
+Do not interpret `shadow` as owning business dispatch, and never hot-edit its
+mode/profile during an active Run.
 
 ## 7. Runtime State Files
 

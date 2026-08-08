@@ -191,4 +191,37 @@ def project_report_failure(
     return findings
 
 
-__all__ = ["normalize_finding", "project_report_failure"]
+def project_synth_failure_payload(
+    artifact_payload: dict[str, Any],
+    payload: dict[str, Any],
+    report: dict[str, Any],
+    diagnostics: list[str],
+) -> dict[str, Any]:
+    summary = str(
+        report.get("summary") or payload.get("summary") or payload.get("reason") or ""
+    )
+    findings = project_report_failure(artifact_payload, report, diagnostics)
+    if summary:
+        artifact_payload["summary"] = summary
+    if findings:
+        artifact_payload["findings"] = findings
+    for key in (
+        "failure_class",
+        "plan_candidate_preflight_ref",
+        "previous_plan_candidate_refs",
+        "owner_confirmation_ref",
+        "owner_confirmation",
+        "owner_decision_items",
+        "owner_decision_resolution",
+    ):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            artifact_payload[key] = value
+    return artifact_payload
+
+
+__all__ = [
+    "normalize_finding",
+    "project_report_failure",
+    "project_synth_failure_payload",
+]

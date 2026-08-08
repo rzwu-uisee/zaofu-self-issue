@@ -35,6 +35,33 @@ _FINAL_ACTION_FENCE = re.compile(
 )
 
 
+def is_dedicated_bare_plan(decoded: Any) -> bool:
+    if not isinstance(decoded, dict):
+        return False
+    if any(
+        key in decoded
+        for key in (
+            "action",
+            "action_proposal",
+            "input_request",
+            "plan_request",
+            "requested_action",
+        )
+    ):
+        return False
+    return bool(
+        str(decoded.get("subject_type") or "").strip()
+        and (
+            isinstance(decoded.get("questions"), list)
+            or str(decoded.get("question") or "").strip()
+        )
+    )
+
+
+def label_is_recommended(label: str) -> bool:
+    return "(Recommended)" in label or "(推荐)" in label
+
+
 def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
     """Minimal portable validation: mirrors the controlled-action hard gate."""
     if action == "create-task":
@@ -54,6 +81,60 @@ def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
                 return "request_revision must be a positive integer"
             if execution_mode == "direct":
                 return "workflow Request binding requires execution_mode workflow"
+        contract = payload.get("contract")
+        if execution_mode == "workflow" and isinstance(contract, dict):
+            if payload.get("workflow_plan") is not None:
+                if not str(contract.get("behavior") or "").strip():
+                    return (
+                        "contract.behavior is required when workflow_plan "
+                        "is attached"
+                    )
+                if not str(contract.get("verification") or "").strip():
+                    return (
+                        "contract.verification is required when workflow_plan "
+                        "is attached"
+                    )
+            has_semantic_contract = bool(
+                str(contract.get("behavior") or "").strip()
+                or str(contract.get("verification") or "").strip()
+            )
+            if (
+                has_semantic_contract
+                and not _channel_prd_contract_compilation_pending(payload)
+            ):
+                tiers = contract.get("verification_tiers")
+                if not isinstance(tiers, list) or not any(
+                    str(item or "").strip() for item in tiers
+                ):
+                    return (
+                        "contract.verification_tiers is required for "
+                        "workflow execution"
+                    )
+            scoped_product_work = bool(
+                contract.get("scope") or contract.get("affected_files")
+            )
+            source_fields = (
+                "product_contract_ref",
+                "spec_skip_reason",
+                "spec_ref",
+                "source_ref",
+                "source_key",
+                "source_task_id",
+                "source_backlog_task_id",
+            )
+            if (
+                payload.get("workflow_plan") is not None
+                and scoped_product_work
+                and not any(
+                str(contract.get(key) or "").strip() for key in source_fields
+                )
+            ):
+                return (
+                    "scoped workflow Task requires a source contract ref or "
+                    "contract.spec_skip_reason"
+                )
+        elif execution_mode == "workflow" and payload.get("workflow_plan") is not None:
+            return "contract is required when workflow_plan is attached"
     if action == "idea-to-product" and not any(
         str(payload.get(key) or "").strip()
         for key in ("objective", "message", "title")
@@ -156,6 +237,50 @@ def default_validate_payload(action: str, payload: dict[str, Any]) -> str:
     return ""
 
 
+def _channel_prd_contract_compilation_pending(payload: dict[str, Any]) -> bool:
+    """Recognize the exact envelope compiled by Channel PRD Task admission.
+
+    The Web gate sees the Plan-bound seed contract before the controlled action
+    hydrates the immutable PRD/readiness/spec artifacts. Completeness remains
+    fail-closed in ``compile_channel_prd_task_payload``; this predicate only
+    prevents the earlier generic Task validator from rejecting that two-phase
+    contract before the compiler can run.
+    """
+
+    if str(payload.get("execution_mode") or "") != "workflow":
+        return False
+    authority = payload.get("channel_authority")
+    contract = payload.get("contract")
+    artifact = payload.get("source_artifact")
+    if not all(isinstance(value, dict) for value in (authority, contract, artifact)):
+        return False
+    required_authority = (
+        "channel_id",
+        "thread_id",
+        "channel_member_id",
+        "leader_revision",
+        "prd_revision",
+        "source_ref",
+        "source_digest",
+    )
+    if any(authority.get(key) in (None, "") for key in required_authority):
+        return False
+    source_ref = str(authority.get("source_ref") or "")
+    source_digest = str(authority.get("source_digest") or "").removeprefix(
+        "sha256:"
+    )
+    return bool(
+        str(contract.get("source_mode") or "") == "channel_prd"
+        and str(contract.get("source_ref") or "") == source_ref
+        and str(artifact.get("kind") or "") == "channel_prd"
+        and str(artifact.get("ref") or "") == source_ref
+        and str(artifact.get("digest") or "").removeprefix("sha256:")
+        == source_digest
+        and str(artifact.get("revision") or "")
+        == str(authority.get("prd_revision") or "")
+    )
+
+
 def json_candidates(text: str) -> list[str]:
     """Broad JSON candidates used by the resumable Plan parser.
 
@@ -234,7 +359,41 @@ def extract_action_proposal(
         )
         if proposal is not None:
             return proposal
+    fenced = _FINAL_ACTION_FENCE.search(str(answer or "").strip())
+    if fenced:
+        decoded = _decode_action_candidate(fenced.group(1).strip())
+        if _is_dedicated_bare_action(decoded):
+            return normalize_action_proposal(
+                {"action_proposal": decoded},
+                user_message=user_message,
+                proposal_context=proposal_context or {},
+                validate_payload=validate_payload,
+            )
     return None
+
+
+def _is_dedicated_bare_action(decoded: Any) -> bool:
+    if not isinstance(decoded, dict):
+        return False
+    allowed = {
+        "action",
+        "confidence",
+        "expires_at",
+        "intent",
+        "payload",
+        "reason",
+        "requested_action",
+        "revision",
+        "summary",
+        "supersedes",
+    }
+    if set(decoded) - allowed:
+        return False
+    return bool(
+        str(decoded.get("action") or decoded.get("requested_action") or "").strip()
+        and isinstance(decoded.get("intent"), dict)
+        and isinstance(decoded.get("payload"), dict)
+    )
 
 
 def normalize_action_proposal(
@@ -272,6 +431,12 @@ def normalize_action_proposal(
     if not isinstance(payload, dict):
         return None
     payload = dict(payload)
+    if action == "create-task" and not str(
+        payload.get("execution_mode") or ""
+    ).strip():
+        # Agent-created Tasks are inert until an approved Workflow starts.
+        # Legacy direct dispatch remains available only as an explicit choice.
+        payload["execution_mode"] = "workflow"
     for key, value in (proposal_context or {}).items():
         if value and not payload.get(key):
             payload[key] = value

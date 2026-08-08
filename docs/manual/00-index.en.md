@@ -13,6 +13,7 @@
 | Install ZaoFu and complete one verified delivery | [First verified delivery](getting-started/first-verified-delivery.en.md) | A Task enters a Workflow and Delivery explains its result and evidence |
 | Turn an unclear request into an owner-confirmed PRD with people and agents | [Channel to PRD](workflows/channel-to-prd.en.md) | The owner confirms the canonical PRD and receives a source receipt |
 | Select and start a Workflow for an existing Task | [Controlled Workflow start](workflows/controlled-workflow-start.en.md) | The exact proposal is approved and emits `workflow.invoke.requested` |
+| Accept real PRD, Issue, Refactor, General, and Research Workflows | [Five-Workflow real E2E](18-product-fanout-real-e2e.en.md) | The exact Run reaches its family terminal with readable identity, artifacts, and evidence |
 | Decide whether a long-running goal is actually complete | [Observe a delivery](operations/observe-delivery.en.md) | Goal, Claims, Tasks, Evidence, Gaps, and Closure explain the result |
 | Recover a stalled, failed, or no-progress Run | [Recover a long-running Run](operations/recover-long-running-run.en.md) | The Run advances or converges with evidence to blocked/failed/cancelled |
 | Understand context and evidence inheritance across agents | [Context, Artifacts, and Handoff](operations/context-handoff-artifacts.en.md) | You can locate the current contract, required reads, result, and lineage |
@@ -35,6 +36,20 @@ Requirement
 Project, Channel, Task, Workflow, Run, and Delivery are first-class product
 objects. Graph, Trace, Loop, SQLite, and Web summaries are query and presentation
 surfaces, not another scheduler.
+
+## Current Evolution Boundary
+
+Designs 150-168 brought Web ownership, Artifact/Handoff, unified Workflow Start,
+role-scoped Provider/session configuration, Orchestrator Agent checkpoints,
+Channel-to-PRD, and Research generations into the current implementation. Their
+release states differ: v3 remains the default Product Flow; Task Pipeline v4 is
+available only through `preferred: false`, default-off canaries and remains
+rollout NO-GO; OA `semantic_control` is enabled only by explicit profiles or
+pilots, while the unspecified default remains `exception_advisor`; Recovery
+Coordinator convergence and the OpenCode Provider SPI remain candidate designs.
+See the [`zf.yaml` control plane](02-zf-yaml-control-plane.en.md),
+[Plan, Task Map, and dispatch](13-plan-task-map-orchestrator-dispatch.en.md), and
+[Five-Workflow real E2E](18-product-fanout-real-e2e.en.md).
 
 ## Browse By Subject
 
@@ -67,7 +82,7 @@ the outcome routes above first.
 - [14 Delivery Trace](14-delivery-trace-usage.en.md)
 - [15 Channel collaboration](15-channel-collaboration.en.md)
 - [16 Real-provider preflight](16-real-codex-provider-preflight.en.md)
-- [18 Product fanout E2E](18-product-fanout-real-e2e.en.md)
+- [18 Product fanout and Five-Workflow real E2E](18-product-fanout-real-e2e.en.md)
 - [19 Feishu AI-Native Bridge, live conversations, and approvals](19-feishu-ai-native-direct-bridge.en.md)
 - [20 Project, bootstrap, and Workflow start](20-project-bootstrap-workflow-ignition.en.md)
 

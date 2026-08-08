@@ -34,6 +34,8 @@ def test_role_specific_goal_clauses_do_not_cross_stage_boundaries() -> None:
     assert "不运行测试" in judge
     assert "不 commit" in judge
     assert "必要的邻接回归" not in judge
+    assert "仅以已准入结果" in judge
+    assert "以 workdir 当前状态" not in judge
 
     verify = "\n".join(goal_briefing_section(
         _events(), config=_cfg(), role="verify-1", stage="candidate-verify",

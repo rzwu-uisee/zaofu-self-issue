@@ -135,6 +135,14 @@ def test_reconciles_prd_task_run_and_delivery_to_exact_origin(
         item["receipt_kind"] for item in receipts
     } == {"prd_confirmed", "task_created", "workflow_terminal", "delivery_terminal"}
     assert {item["thread_id"] for item in receipts} == {"main"}
+    prd_receipt = next(
+        item for item in receipts if item["receipt_kind"] == "prd_confirmed"
+    )
+    assert prd_receipt["artifact_digest"] == "a" * 64
+    assert prd_receipt["revision"] == 2
+    assert prd_receipt["links"]["prd_ref"] == (
+        "channels/ch-product/prd/r2.json"
+    )
     for item in receipts:
         hydrated = hydrate_sidecar_ref(
             state_dir,

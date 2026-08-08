@@ -53,6 +53,8 @@ def materialize_terminal_goal_deliveries(
     event_log: EventLog,
     writer: EventWriter,
     project_id: str = "",
+    config: Any | None = None,
+    project_root: Path | None = None,
 ) -> GoalDossierDeliveryResult:
     """Materialize every unhandled terminal and request owner delivery once."""
 
@@ -202,6 +204,46 @@ def materialize_terminal_goal_deliveries(
                 dossier,
                 receipt=receipt,
             )
+            from zf.runtime.owner_delivery_narrative import (
+                prepare_owner_delivery_narrative_operation,
+                write_owner_delivery_composite,
+            )
+
+            prepared_narrative = None
+            if config is not None:
+                prepared_narrative = prepare_owner_delivery_narrative_operation(
+                    state_dir=state_dir,
+                    project_root=Path(project_root or state_dir.parent),
+                    config=config,
+                    event_log=event_log,
+                    writer=writer,
+                    terminal=terminal,
+                    dossier=dossier,
+                    dossier_path=dossier_path,
+                    receipt=receipt,
+                    receipt_path=receipt_path,
+                )
+            narrative_reason = (
+                "semantic_narrative_pending_factual_fallback_delivered"
+                if prepared_narrative is not None
+                else "semantic_narrative_unavailable_factual_fallback_delivered"
+            )
+            composite_path = write_owner_delivery_composite(
+                state_dir=state_dir,
+                run_id=run_id,
+                dossier_ref=dossier_path.relative_to(state_dir).as_posix(),
+                dossier_source_fingerprint=str(
+                    dossier.get("source_fingerprint") or ""
+                ),
+                completion_receipt_ref=(
+                    receipt_path.relative_to(state_dir).as_posix()
+                    if receipt_path is not None
+                    else ""
+                ),
+                terminal_event_id=terminal.id,
+                narrative_status="degraded",
+                narrative_reason=narrative_reason,
+            )
             message_id = _message_id(
                 run_id=run_id,
                 terminal_event_id=terminal.id,
@@ -231,6 +273,9 @@ def materialize_terminal_goal_deliveries(
                 receipt_path=receipt_path,
                 summary=summary,
                 message_id=message_id,
+                narrative_status="degraded",
+                narrative_reason=narrative_reason,
+                composite_path=composite_path,
             )
             writer.emit(
                 OWNER_MESSAGE_REQUESTED,
@@ -349,6 +394,9 @@ def _owner_request_payload(
     receipt_path: Path | None,
     summary: Mapping[str, Any],
     message_id: str,
+    narrative_status: str,
+    narrative_reason: str,
+    composite_path: Path,
 ) -> dict[str, Any]:
     blocked = terminal.type == "run.goal.blocked"
     deep_link = (
@@ -396,6 +444,11 @@ def _owner_request_payload(
         "completion_receipt_fingerprint": str(
             (receipt or {}).get("source_fingerprint") or ""
         ),
+        "narrative_status": narrative_status,
+        "narrative_reason": narrative_reason,
+        "owner_delivery_composite_ref": composite_path.relative_to(
+            state_root
+        ).as_posix(),
         "web_deep_link": deep_link,
     })
 

@@ -135,6 +135,19 @@ def test_resident_codex_launch_pins_model_and_reasoning_effort() -> None:
     assert 'model_reasoning_effort="xhigh"' in command
 
 
+def test_resident_claude_launch_pins_model_and_reasoning_effort() -> None:
+    role = build_resident_run_manager_role(_resident_config(
+        backend="claude-code",
+        model="k3[1m]",
+        model_reasoning_effort="high",
+    ))
+
+    assert role is not None
+    command = get_adapter(role.backend).build_command(role)
+    assert command[command.index("--model") + 1] == "k3[1m]"
+    assert command[command.index("--effort") + 1] == "high"
+
+
 def test_resident_run_manager_briefing_preserves_kernel_boundary(
     tmp_path: Path,
 ) -> None:
@@ -153,6 +166,8 @@ def test_resident_run_manager_briefing_preserves_kernel_boundary(
     assert "bounded repair worker" in briefing
     assert "zf emit run.manager.agent.observation" in briefing
     assert "停止常规 proof-of-life 写入" in briefing
+    assert "不要启动 `Monitor`" in briefing
+    assert "provider 子进程不得越过角色生命周期" in briefing
     assert f"--state-dir {tmp_path / '.zf'}" in briefing
     assert "human.escalate" in briefing
 
@@ -481,7 +496,7 @@ def test_pane_probe_observes_dedicated_resident_run_manager(
     )
 
 
-def test_run_manager_projection_detects_prompted_resident_without_observation(
+def test_run_manager_projection_treats_resident_silence_as_normal_wait(
     tmp_path: Path,
 ) -> None:
     cfg = _resident_config(session_mode="dedicated")
@@ -511,18 +526,17 @@ def test_run_manager_projection_detects_prompted_resident_without_observation(
         project_root=tmp_path,
     )
 
-    assert projection["resident_agent"]["status"] == "stalled"
+    assert projection["resident_agent"]["status"] == "silent"
+    assert projection["resident_agent"]["stalled"] is False
+    assert projection["resident_agent"]["watchdog"]["silence_is_fault"] is False
     actions = [
         item for item in projection["pending_actions"]
         if item.get("failure_class") == "run_manager_resident_agent_stalled"
     ]
-    assert len(actions) == 1
-    assert actions[0]["preflight"]["status"] == "passed"
-    assert actions[0]["policy_decision"]["decision"] == "needs_diagnosis"
-    assert actions[0]["source_event_ids"] == ["evt-spawned", "evt-prompted"]
+    assert actions == []
 
 
-def test_run_manager_tick_requests_diagnosis_for_resident_stall(
+def test_run_manager_tick_does_not_recover_from_resident_silence(
     tmp_path: Path,
 ) -> None:
     cfg = _resident_config(session_mode="dedicated")
@@ -554,16 +568,16 @@ def test_run_manager_tick_requests_diagnosis_for_resident_stall(
         spawn_repairs=False,
     )
 
-    assert result.autoresearch_requested == 1
+    assert result.autoresearch_requested == 0
+    assert result.actions_applied == 0
     requests = [
         event for event in log.read_all()
         if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
     ]
-    assert len(requests) == 1
-    assert requests[0].payload["failure_class"] == "run_manager_resident_agent_stalled"
+    assert requests == []
 
 
-def test_run_manager_tick_reprompts_live_resident_pane(
+def test_run_manager_tick_reprompts_live_resident_pane_for_explicit_action(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -591,6 +605,21 @@ def test_run_manager_tick_reprompts_live_resident_pane(
         ts=_stale_event_ts(1),
         actor="zf-cli",
         payload={"prompted": True, "briefing_path": str(briefing)},
+    ))
+    log.append(ZfEvent(
+        type="run.manager.agent.recommendation",
+        id="evt-resident-reprompt-recommendation",
+        actor="run-manager",
+        payload={
+            "recommended_route": "controlled_action",
+            "safe_resume_action": "resident_agent_reprompt",
+            "checkpoint_id": "ck-resident-reprompt",
+            "fingerprint": "resident:ck-resident-reprompt",
+            "tmux_session": "zf-rm",
+            "instance_id": "run-manager",
+            "briefing_path": str(briefing),
+            "summary": "typed resident input fault requires one bounded reprompt",
+        },
     ))
     calls: list[list[str]] = []
 
@@ -747,6 +776,21 @@ def test_run_manager_tick_blocks_reprompt_into_shell_only_pane(
         ts=_stale_event_ts(1),
         actor="zf-cli",
         payload={"prompted": True, "briefing_path": str(briefing)},
+    ))
+    log.append(ZfEvent(
+        type="run.manager.agent.recommendation",
+        id="evt-shell-reprompt-recommendation",
+        actor="run-manager",
+        payload={
+            "recommended_route": "controlled_action",
+            "safe_resume_action": "resident_agent_reprompt",
+            "checkpoint_id": "ck-shell-reprompt",
+            "fingerprint": "resident:ck-shell-reprompt",
+            "tmux_session": "zf-rm",
+            "instance_id": "run-manager",
+            "briefing_path": str(briefing),
+            "summary": "typed resident input fault requires one bounded reprompt",
+        },
     ))
     calls: list[list[str]] = []
 

@@ -6,10 +6,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Mapping
 
 from zf.core.config.schema import ZfConfig
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
+from zf.runtime.escalation_terminal import escalation_terminal_metadata
 
 
 def _escalate_signature(task_id: str, reason: str) -> tuple[str, str]:
@@ -42,17 +44,28 @@ class EscalationManager:
         self.event_log = event_log_from_project(state_dir, config=config)
         self.steer_path = state_dir / "steer"
 
-    def escalate(self, reason: str, task_id: str | None = None) -> None:
+    def escalate(
+        self,
+        reason: str,
+        task_id: str | None = None,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+        correlation_id: str | None = None,
+    ) -> ZfEvent | None:
         """Emit escalation event and write steer marker."""
         if self._recently_escalated(reason, task_id or ""):
-            return
-        self.event_log.append(ZfEvent(
+            return None
+        terminal_metadata = escalation_terminal_metadata(reason)
+        event = ZfEvent(
             type="human.escalate",
             actor="orchestrator",
             task_id=task_id or "",
-            payload={"reason": reason},
-        ))
+            payload={"reason": reason, **terminal_metadata, **dict(metadata or {})},
+            correlation_id=correlation_id,
+        )
+        self.event_log.append(event)
         self.steer_path.write_text("")  # empty steer file signals escalation
+        return event
 
     def _recently_escalated(self, reason: str, task_id: str) -> bool:
         signature = _escalate_signature(task_id, reason)

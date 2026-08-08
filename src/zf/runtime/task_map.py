@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from zf.runtime import verification_command_safety
+from zf.runtime.task_map_assembly import (
+    assembly_ownership_errors as _assembly_ownership_errors,
+)
 from zf.runtime.task_map_goal_coverage import validate_goal_coverage
 from zf.runtime.task_map_required_ports import required_plan_port_errors
 from zf.runtime.task_map_successor import successor_base_errors
@@ -273,41 +276,6 @@ def _workspace_root_owner_requirement_values(payload: dict[str, Any]) -> list[tu
             contract["workspace_root_owner_required"],
         ))
     return values
-
-
-def _assembly_ownership_errors(
-    *,
-    assembly_owner_roles: dict[str, str],
-    bundle_owner_roles: dict[str, str],
-    task_dependencies: dict[str, list[str]],
-) -> list[str]:
-    """Reject plans without independent assembly ownership or with a
-    dependency owner collision."""
-    bundle_owners = set(bundle_owner_roles.values())
-    if len(bundle_owners) <= 1:
-        return []
-    if not assembly_owner_roles:
-        return ["缺 assembly 任务: 多个并行 bundle 需要一个独立 root_owner_class=assembly 任务"]
-    errors: list[str] = []
-    for task_id, owner_role in assembly_owner_roles.items():
-        reachable: set[str] = set()
-        pending = list(task_dependencies.get(task_id, []))
-        while pending:
-            dependency_id = pending.pop()
-            if dependency_id in reachable:
-                continue
-            reachable.add(dependency_id)
-            pending.extend(task_dependencies.get(dependency_id, []))
-        dependency_owner_roles = {
-            bundle_owner_roles[dependency_id] for dependency_id in reachable
-            if dependency_id in bundle_owner_roles
-        }
-        if owner_role in dependency_owner_roles:
-            errors.append(
-                f"{task_id}.owner_role {owner_role!r} 与并行 bundle owner 冲突: "
-                "assembly 任务不能和它依赖的 bundle 共用同一 owner_role(自锁)"
-            )
-    return errors
 
 
 def _inventory_binding_errors(
@@ -655,10 +623,12 @@ def _unquoted_glob_filter_errors(command: str) -> list[str]:
 
 def _unquoted_path_glob_errors(command: str) -> list[str]:
     tokens = _shell_tokens_with_quote_state(command)
+    case_pattern_indexes = _case_pattern_token_indexes(tokens)
     matches = sorted({
         token
-        for token, quoted in tokens
+        for index, (token, quoted) in enumerate(tokens)
         if not quoted
+        and index not in case_pattern_indexes
         and any(ch in token for ch in "*?[")
         and "/" in token
         and "--filter" not in token
@@ -669,6 +639,36 @@ def _unquoted_path_glob_errors(command: str) -> list[str]:
         "must quote shell glob path arguments before the shell expands them: "
         + ", ".join(matches)
     ]
+
+
+def _case_pattern_token_indexes(tokens: list[tuple[str, bool]]) -> set[int]:
+    """Return path-pattern tokens that shell grammar will not glob-expand."""
+    states: list[str] = []
+    pattern_indexes: set[int] = set()
+    for index, (token, quoted) in enumerate(tokens):
+        if quoted:
+            continue
+        if token == "esac" and states:
+            states.pop()
+            continue
+        if token == "case" and (not states or states[-1] == "body"):
+            states.append("subject")
+            continue
+        if not states:
+            continue
+        if states[-1] == "subject":
+            if token == "in":
+                states[-1] = "pattern"
+            continue
+        if states[-1] == "pattern":
+            if token == ")":
+                states[-1] = "body"
+            elif token not in {"|", "||"}:
+                pattern_indexes.add(index)
+            continue
+        if token in {";;", ";&", ";;&"}:
+            states[-1] = "pattern"
+    return pattern_indexes
 
 
 def _shell_tokens_with_quote_state(command: str) -> list[tuple[str, bool]]:
@@ -696,13 +696,25 @@ def _shell_tokens_with_quote_state(command: str) -> list[tuple[str, bool]]:
             current.append(ch)
             quote = ch
             continue
-        if ch.isspace() or ch in {";", "|", "&"}:
+        if ch.isspace() or ch in {";", "|", "&", "(", ")"}:
             if current:
                 token = "".join(current).strip()
                 if token:
                     tokens.append((token.strip("'\""), quoted))
                 current = []
                 quoted = False
+            if not ch.isspace():
+                if (
+                    tokens
+                    and not tokens[-1][1]
+                    and tokens[-1][0]
+                    and all(item in ";|&" for item in tokens[-1][0])
+                    and ch in ";|&"
+                ):
+                    previous, _ = tokens[-1]
+                    tokens[-1] = (previous + ch, False)
+                else:
+                    tokens.append((ch, False))
             continue
         current.append(ch)
     if current:

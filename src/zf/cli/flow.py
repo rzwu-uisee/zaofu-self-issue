@@ -35,6 +35,7 @@ from zf.cli.flow_draft_support import (
     draft_runtime_profile_doc as _draft_runtime_profile_doc,
     explicit_orchestrator_spec as _explicit_orchestrator_spec,
     non_empty_mapping as _non_empty_mapping,
+    orchestration_spec as _orchestration_spec,
     skill_sources_from_adapter_plan as _skill_sources_from_adapter_plan,
 )
 from zf.runtime.preflight import preflight_ok, run_preflight_checks
@@ -574,7 +575,13 @@ def draft_flow_spec(
             "session": {
                 "tmux_session": f"${{ZF_TMUX_SESSION:-{_default_tmux_session(project)}}}",
             },
-            **_explicit_orchestrator_spec(backend),
+            **_explicit_orchestrator_spec(
+                backend,
+                semantic_control=kind in {"prd", "refactor"},
+            ),
+            **_orchestration_spec(
+                tier="light" if kind == "issue" else "full",
+            ),
         },
     }
     runtime_profile_name = "flow-draft-runtime/v1"
@@ -670,7 +677,8 @@ def draft_multi_kind_project_spec(
         "session": {
             "tmux_session": f"${{ZF_TMUX_SESSION:-{_default_tmux_session(project)}}}",
         },
-        **_explicit_orchestrator_spec(backend),
+        **_explicit_orchestrator_spec(backend, semantic_control=True),
+        **_orchestration_spec(tier="multi"),
         "uses": [runtime_profile_name],
     }
     if skill_sources:

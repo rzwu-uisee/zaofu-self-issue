@@ -255,7 +255,7 @@ def _record_ready_worker_state(
     previous = ""
     if isinstance(last_payload, dict):
         previous = str(last_payload.get("state") or "")
-    if previous and previous not in {
+    if previous and previous != "idle" and previous not in {
         "respawning",
         "blocked_human",
         "pending_recycle",
@@ -274,13 +274,15 @@ def _record_ready_worker_state(
             "reason": reason,
         },
     )
-    event_log.append(event)
+    state_changed = previous != "idle"
+    if state_changed:
+        event_log.append(event)
     registry.record_heartbeat(instance_id, {
         "instance_id": instance_id,
         "state": "idle",
         "current_task_id": "",
         "last_action_ts": event.ts,
-        "source": "worker.state.changed",
+        "source": "worker.state.changed" if state_changed else "zf.start.ready",
         "reason": reason,
     })
 
@@ -999,6 +1001,16 @@ def run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from zf.core.events.writer import EventWriter
+        from zf.runtime.research_generation import (
+            reconcile_stale_research_generations,
+        )
+
+        reconcile_stale_research_generations(
+            config=config,
+            state_dir=state_dir,
+            writer=EventWriter(event_log, default_origin="kernel"),
+        )
         session_store = SessionStore(state_dir / "session.yaml")
         session_name = config.session.tmux_session
 
@@ -1068,7 +1080,10 @@ def run(args: argparse.Namespace) -> int:
         instructions_dir = state_dir / "instructions"
         startup_roles = initial_role_configs(config)
         for role in startup_roles:
-            skip_spawn = role.name == "orchestrator" and role.transport == "stream-json"
+            headless_orchestrator = (
+                role.name == "orchestrator"
+                and role.transport == "stream-json"
+            )
             resume_obligation = _role_has_resume_obligation(
                 state_dir=state_dir,
                 registry=registry,
@@ -1076,14 +1091,14 @@ def run(args: argparse.Namespace) -> int:
             )
             defer_spawn = (
                 role.lifecycle.mode == "on_demand"
-                and not skip_spawn
+                and not headless_orchestrator
                 and not control_plane_only
                 and not resume_obligation
             )
             spawn_cwd: Path | None = None
             if (
                 workdir_manager is not None
-                and not skip_spawn
+                and not headless_orchestrator
                 and not defer_spawn
                 and not control_plane_only
             ):
@@ -1135,10 +1150,12 @@ def run(args: argparse.Namespace) -> int:
                         payload=materialized.to_payload(),
                     ))
 
-            # stream-json orchestrator spawns lazily (SDK invoked per
-            # dispatch); tmux orchestrator needs an upfront pane like
-            # the workers so send-keys has somewhere to land.
-            if skip_spawn:
+            # The stream-json orchestrator has no resident process, but it
+            # still needs SpawnCoordinator's provider/session/capability
+            # preparation before its first SDK dispatch.
+            if headless_orchestrator:
+                if not control_plane_only:
+                    coordinator.spawn(role)
                 continue
             if defer_spawn:
                 coordinator.prepare_provider_session(role)
@@ -1360,7 +1377,7 @@ def run(args: argparse.Namespace) -> int:
 
         # 10. Set up watcher + orchestrator
         from zf.runtime.watcher import EventWatcher
-        from zf.runtime.orchestrator import Orchestrator
+        from zf.runtime.workflow_runtime import WorkflowRuntimeCoordinator
         from zf.runtime.wake_patterns import (
             WakeRateLimiter,
             compute_effective_wake_patterns,
@@ -1384,7 +1401,7 @@ def run(args: argparse.Namespace) -> int:
             config=config,
             control_plane_only=control_plane_only,
         )
-        orchestrator = Orchestrator(
+        orchestrator = WorkflowRuntimeCoordinator(
             state_dir, config, transport, project_root=project_root,
         )
         orchestrator._claude_session_tailer = claude_tailer

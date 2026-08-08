@@ -20,6 +20,12 @@ _CONTEXT_KEYS = (
     "run_id",
     "attempt_id",
     "operation_id",
+    "task_pipeline_stage",
+    "operation_generation",
+    "workspace_generation",
+    "placement_epoch",
+    "pipeline_key",
+    "task_stage_session_binding",
     "contract_revision",
     "task_map_generation",
     "workflow_generation",
@@ -37,6 +43,14 @@ _CONTEXT_KEYS = (
     "base_commit",
     "task_ref",
     "target_commit",
+    "risk_class",
+    "integration_admission_profile",
+    "exact_task_target_commit",
+    "verification_result_ref",
+    "verification_result_digest",
+    "risk_review_timeout_seconds",
+    "risk_review_max_turns",
+    "risk_review_budget_usd",
     "candidate_ref",
     "source_branch",
     "workdir",
@@ -54,6 +68,16 @@ _GENERIC_ARTIFACT_CONTEXT_KEYS = (
     "run_contract_ref",
     "run_contract_digest",
 )
+_FANOUT_DUPLICATE_IDENTITY_KEYS = frozenset({
+    "workflow_run_id",
+    "task_id",
+    "fanout_id",
+    "stage_id",
+    "child_id",
+    "run_id",
+    "attempt_id",
+    "operation_id",
+})
 ARTIFACT_DELIVERY_SUBJECT_GUIDANCE = (
     "SUBJECT OF REVIEW: this artifact-delivery profile has no candidate branch. "
     "Verify only the current Run's Controlled Artifact Inputs, declared "
@@ -76,6 +100,12 @@ ARTIFACT_DELIVERY_RESULT_GUIDANCE = (
     "are themselves declared delivery artifacts.",
     "Use the mandatory claim ids from the controlled Goal claim-set input; do "
     "not invent or rename claims.",
+    "The Kernel pre-fills `artifacts[]` from immutable producer outputs. Preserve "
+    "those descriptors and verify their content; never remove them or replace "
+    "them with transcript/raw workdir paths.",
+    "Use only verdicts `passed`, `rejected`, or `blocked`. For `rejected`, set "
+    "recommended_action to `gap_plan` or `replan`; for `blocked`, use `human` "
+    "or `hold`. Never emit verdict `failed` or action `rework`.",
 )
 _IMMUTABLE_RESULT_FIELDS = frozenset({
     "workflow_run_id", "operation_id", "request_hash", "task_id",
@@ -84,6 +114,7 @@ _IMMUTABLE_RESULT_FIELDS = frozenset({
     "task_map_generation", "base_commit", "task_ref",
     "contract_snapshot_ref", "contract_snapshot_digest",
     "target_snapshot_ref", "target_commit", "target_snapshot_digest",
+    "impl_self_check_ref", "impl_self_check_digest",
     "goal_id", "flow_kind", "objective_ref", "goal_claim_set_ref",
     "goal_claim_set_digest", "planning_result_ref", "candidate_ref",
     "closure_fact_ref", "closure_fact_digest", "output_profile_id",
@@ -94,6 +125,12 @@ _IMMUTABLE_RESULT_FIELDS = frozenset({
     "required_delivery_artifacts", "verifier_stage_id", "verifier_role",
     "run_contract_ref", "run_contract_digest",
     "input_result_refs",
+    "risk_class", "integration_admission_profile",
+    "exact_task_target_commit", "verification_result_ref",
+    "verification_result_digest", "execution_profile_id",
+    "execution_profile_digest", "risk_review_timeout_seconds",
+    "risk_review_max_turns", "risk_review_budget_usd",
+    "required_read_ledger_ref", "required_read_ledger_digest",
 })
 
 
@@ -162,6 +199,16 @@ def compact_stage_context(payload: Mapping[str, Any]) -> dict[str, Any]:
     return context
 
 
+def compact_fanout_stage_context(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop identities already pinned by the fanout header/attempt section."""
+
+    return {
+        key: value
+        for key, value in compact_stage_context(payload).items()
+        if key not in _FANOUT_DUPLICATE_IDENTITY_KEYS
+    }
+
+
 def prepare_result_file_command(
     *,
     state_dir: Path,
@@ -198,10 +245,16 @@ def prepare_result_file_command(
         shlex.quote(operation_id),
         "--state-dir",
         shlex.quote(str(state_root)),
-        "--result-file",
-        shlex.quote(str(scratch)),
+        "--scratch",
     ])
     return command, scratch
+
+
+def render_result_validate_command(submit_command: str) -> str:
+    marker = "result submit"
+    if marker not in submit_command:
+        raise ValueError("semantic submit command has no result submit action")
+    return submit_command.replace(marker, "result validate", 1)
 
 
 def prepare_fanout_result_guidance(
@@ -234,9 +287,11 @@ def prepare_fanout_result_guidance(
             f"For `{verification_prefix}requirement_results[].status`, use only "
             "`passed`, `failed`, `blocked`, `waived`, or `not_applicable`; "
             "a `rejected` verdict requires at least one `failed` requirement.",
-            "Reuse only `reusable_impl_receipts` listed in this briefing. Record "
-            f"their ids in `{verification_prefix}reused_command_receipt_ids`; put "
-            "every newly run independent check in `probe_receipts`.",
+            "Reuse only listed `reusable_impl_receipts`; record their ids in "
+            f"`{verification_prefix}reused_command_receipt_ids`. New canonical "
+            "checks in `probe_receipts` must preserve exact `command_id`, `command`, "
+            "`command_digest`, and `target_commit`; no substitutions. Passing needs "
+            "status=passed, exit_code=0, and durable report/probe evidence refs.",
             "For a rejected or blocked verdict, replace the sample with exact "
             "`rework_items`: classify missing/incomplete/incorrect/unverified/blocked "
             "and state observed gap, required delta, scope, done_when, next gate, "
@@ -267,6 +322,77 @@ def render_fanout_submit_commands(
     ]
 
 
+def _render_plan_candidate_policy(
+    validation: Mapping[str, Any],
+) -> list[str]:
+    """Render the pinned Plan admission limits before candidate authoring."""
+
+    writer_policy = validation.get("writer_policy")
+    writer_policy = writer_policy if isinstance(writer_policy, Mapping) else {}
+    work_units = writer_policy.get("work_units")
+    work_units = work_units if isinstance(work_units, Mapping) else {}
+    split_quality = work_units.get("split_quality")
+    split_quality = (
+        split_quality if isinstance(split_quality, Mapping) else {}
+    )
+    metadata = validation.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    task_pipeline = metadata.get("task_pipeline")
+    task_pipeline = task_pipeline if isinstance(task_pipeline, Mapping) else {}
+    candidate = task_pipeline.get("candidate")
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+
+    policy_rows: list[str] = []
+    if "candidate_quality_source" in writer_policy:
+        policy_rows.append(
+            "- candidate quality source: "
+            f"`{writer_policy['candidate_quality_source']}`"
+        )
+    if "enabled" in work_units:
+        policy_rows.append(
+            f"- work-unit splitting enabled: `{bool(work_units['enabled'])}`"
+        )
+    if "mode" in split_quality:
+        policy_rows.append(
+            f"- split-quality mode: `{split_quality['mode']}`"
+        )
+    if "max_scope_files" in split_quality:
+        policy_rows.append(
+            "- maximum scope paths per task: "
+            f"`{split_quality['max_scope_files']}` (`0` means unbounded)"
+        )
+    if "max_acceptance_criteria" in split_quality:
+        policy_rows.append(
+            "- maximum acceptance criteria per task: "
+            f"`{split_quality['max_acceptance_criteria']}` "
+            "(`0` means unbounded)"
+        )
+    if "require_validation_surface" in split_quality:
+        policy_rows.append(
+            "- validation surface required: "
+            f"`{bool(split_quality['require_validation_surface'])}`"
+        )
+    rolling_smoke = str(candidate.get("rolling_smoke") or "").strip()
+    if rolling_smoke:
+        policy_rows.append(f"- rolling smoke policy: `{rolling_smoke}`")
+        if rolling_smoke == "required":
+            policy_rows.append(
+                "- every task must mark at least one validation command with "
+                "`rolling_smoke: true`, `deterministic: true`, "
+                "`reusable: true`, and tier `static` or `runtime`"
+            )
+    if not policy_rows:
+        return []
+    return [
+        "## Effective Plan Admission Policy (kernel-pinned)",
+        "",
+        "Apply these hard constraints before authoring the first candidate; "
+        "do not wait for validation diagnostics to discover them.",
+        *policy_rows,
+        "",
+    ]
+
+
 def prepare_profiled_stage_result(
     *,
     state_dir: Path,
@@ -287,6 +413,20 @@ def prepare_profiled_stage_result(
         for key, value in semantic_body.items()
         if key not in _IMMUTABLE_RESULT_FIELDS
     }
+    output_names = [
+        str(port.get("name") or "").strip()
+        for port in child_payload.get("workflow_output_ports") or []
+        if isinstance(port, Mapping) and str(port.get("name") or "").strip()
+    ]
+    if output_names:
+        outputs = (
+            dict(semantic_body.get("outputs") or {})
+            if isinstance(semantic_body.get("outputs"), Mapping)
+            else {}
+        )
+        for name in output_names:
+            outputs.setdefault(name, "")
+        semantic_body["outputs"] = outputs
     command, scratch = prepare_result_file_command(
         state_dir=state_dir,
         result_scratch_ref=str(
@@ -309,11 +449,71 @@ def prepare_profiled_stage_result(
         f"`{profile.semantic_field}` body; preserve prefilled fields at the root. "
         f"Do not wrap it under `{profile.semantic_field}` or add identity fields. "
         "The Kernel supplies immutable identity and selects the canonical event.",
+        "- Update the prefilled scratch file in place. With apply_patch use "
+        "`*** Update File`; never delete, add, move, or recreate the scratch path.",
         "- For failure, set `execution_status`/`verdict` and exact findings before "
         "running the same command.",
+        "- Complete authoring contract: this briefing, prefilled result, and skills. "
+        "Do not inspect ZaoFu runtime source/tests/examples/package for hidden fields.",
         "- Submit authorization is transport-owned; do not print or inspect it.",
         "",
     ]
+    if output_names:
+        output_fields = ", ".join(f"`outputs.{name}`" for name in output_names)
+        lines[7:7] = [
+            f"- Required stage output bodies: {output_fields}. Replace every "
+            "prefilled empty value with the complete non-placeholder artifact body "
+            "before submission.",
+        ]
+    if str(child_payload.get("result_semantics") or "") == "artifact_production":
+        lines[7:7] = [
+            "- Artifact-production status rule: `execution_status` reports whether "
+            "this role produced its required outputs, not whether the inspected "
+            "subject is healthy. Keep it `completed` when outputs are complete, "
+            "including with high/critical findings or `needs_rework`/`reject`; use "
+            "`failed` only when the assigned output cannot be produced.",
+        ]
+    if (
+        child_payload.get("workflow_output_ports")
+        and child_payload.get("required_delivery_artifacts")
+    ):
+        lines[7:7] = [
+            "- Stage-scope rule: produce this stage's `workflow_output_ports`. "
+            "Run-level `required_delivery_artifacts` assigned to downstream stages "
+            "are not missing outputs for this operation and must not make it fail.",
+        ]
+    plan_candidate_validation = child_payload.get("plan_candidate_validation")
+    if isinstance(plan_candidate_validation, Mapping):
+        lines.extend(_render_plan_candidate_policy(plan_candidate_validation))
+        validate_command = render_result_validate_command(command)
+        lines.extend([
+            "- Plan candidate rule: after authoring, run only the pre-submit "
+            "validation command below. It uses the same runtime evaluator as "
+            "formal Plan admission and does not consume the submit capability.",
+            "- If validation fails, edit this same scratch/artifact set from the "
+            "structured diagnostics and rerun validation in this turn. After exit "
+            "0, the next tool call MUST be the Success command; do not run any "
+            "other audit, search, test, or readback.",
+            "- On validation or submission rejection, follow structured "
+            "diagnostics only; do not reverse-engineer the harness.",
+            "",
+            "Plan candidate pre-submit validation:",
+            "```bash",
+            validate_command,
+            "```",
+            "",
+        ])
+    else:
+        lines.extend([
+            "- Terminal submit rule: once the required artifacts and prefilled "
+            "result are complete, the next tool call MUST be the Success command "
+            "below. Do not run a post-authoring audit, search, test, or result "
+            "readback; `result submission` performs deterministic schema/admission "
+            "validation and returns structured diagnostics on rejection.",
+            "- On rejection, follow structured diagnostics only; do not "
+            "reverse-engineer the harness.",
+            "",
+        ])
     return command, lines
 
 
@@ -362,6 +562,8 @@ def prepare_writer_execution_card(
         "",
         "- profile: `implementation` revision `1`",
         f"- Edit the complete semantic result at `{scratch}`.",
+        "- Update the prefilled scratch file in place. With apply_patch use "
+        "`*** Update File`; never delete, add, move, or recreate the scratch path.",
         "- For a blocker, set `execution_status` to `failed`, describe "
         "the reproducible blocker, and run the same submit command.",
         "- Kernel supplies operation/run/task/attempt identity and selects "

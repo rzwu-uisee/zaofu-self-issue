@@ -168,6 +168,26 @@ def test_channel_route_blocked_never_unknown_actionable() -> None:
     assert _pending_semantic_event_actions([event]) == []
 
 
+def test_controlled_action_rejection_is_not_an_autoresearch_trigger() -> None:
+    from zf.core.events.model import ZfEvent
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    spec = spec_for_event("runtime.action.rejected")
+    assert spec is not None
+    assert spec.event_class == "expected_negative"
+    assert spec.action_policy == "kernel_consumed"
+    assert spec.autoresearch_eligible is False
+
+    event = ZfEvent(
+        type="runtime.action.rejected",
+        payload={
+            "action": "create-task",
+            "reason": "contract.verification_tiers is required",
+        },
+    )
+    assert _pending_semantic_event_actions([event]) == []
+
+
 def test_failure_envelopes_do_not_create_recovery_actions() -> None:
     from zf.core.events.model import ZfEvent
     from zf.runtime.run_manager import _pending_semantic_event_actions
@@ -284,3 +304,41 @@ def test_worker_pane_evidence_is_not_an_autoresearch_source_repair_trigger() -> 
     assert runner.is_expected_negative
     assert runner.supervisor_attention == "on_repeated"
     assert runner.autoresearch_eligible is False
+
+
+def test_context_warning_is_owned_by_kernel_lifecycle_not_recovery() -> None:
+    from zf.core.events.model import ZfEvent
+    from zf.runtime.run_manager import _pending_semantic_event_actions
+
+    warning = spec_for_event("worker.context.warning")
+
+    assert warning is not None
+    assert warning.is_expected_negative
+    assert warning.action_policy == "kernel_consumed"
+    assert warning.run_manager_semantics == ()
+    assert warning.supervisor_attention == "on_single"
+    assert warning.autoresearch_eligible is False
+    assert warning.effective_notification_policy == "trace_only"
+    assert warning.effective_recovery_policy == "none"
+
+    event = ZfEvent(
+        type="worker.context.warning",
+        actor="refactor-plan-synth",
+        payload={
+            "instance_id": "refactor-plan-synth",
+            "role": "refactor-plan-synth",
+            "context_usage_ratio": 0.61,
+            "reason": "recycle_threshold_exceeded",
+            "idle": False,
+        },
+    )
+    assert _pending_semantic_event_actions([event]) == []
+
+
+def test_context_critical_keeps_bounded_recovery_route() -> None:
+    critical = spec_for_event("worker.context.critical")
+
+    assert critical is not None
+    assert critical.is_expected_negative
+    assert critical.run_manager_semantics == ("pending_action",)
+    assert critical.autoresearch_eligible is True

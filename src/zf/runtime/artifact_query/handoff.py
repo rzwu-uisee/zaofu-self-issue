@@ -11,6 +11,7 @@ from zf.core.config.schema import ZfConfig
 from zf.core.task.store import TaskStore
 from zf.core.workflow.flow_metadata import flow_metadata_for
 from zf.runtime.artifact_query.service import ArtifactQueryService
+from zf.runtime.artifact_read_policy import reader_stage_input_refs
 from zf.runtime.artifact_read_ledger import (
     ArtifactReadError,
     source_manifest_from_payload,
@@ -24,7 +25,7 @@ from zf.runtime.plan_artifact_package import (
 from zf.runtime.artifact_package_policy import effective_artifact_package_mode
 from zf.runtime.plan_artifact_ports import canonical_plan_port_name
 from zf.runtime.run_scope import events_for_run
-from zf.runtime.sidecar_refs import SidecarRefError
+from zf.runtime.sidecar_refs import SidecarRefError, hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
     current_task_contract_identity,
@@ -117,11 +118,33 @@ class CanonicalHandoffResolver:
             if profile == "candidate-verify"
             else {}
         )
+        freeze_ref = str(candidate_snapshot.get("freeze_receipt_ref") or "")
+        freeze_digest = str(
+            candidate_snapshot.get("freeze_receipt_digest") or ""
+        )
+        if freeze_ref and freeze_digest:
+            artifact_refs = (
+                list(mutable.get("artifact_refs") or [])
+                if isinstance(mutable.get("artifact_refs"), list)
+                else []
+            )
+            mutable["artifact_refs"] = [
+                *artifact_refs,
+                {
+                    "source_id": "candidate-freeze",
+                    "artifact_id": Path(freeze_ref).name,
+                    "kind": "candidate_freeze_receipt",
+                    "ref": freeze_ref,
+                    "sha256": freeze_digest,
+                    "allowed_paths": ["$"],
+                },
+            ]
         plan_port_sources = (
             self._current_plan_port_sources(
                 workflow_run_id=workflow_run_id,
                 task_id=task_id,
                 currentness=currentness,
+                allow_without_task=profile == "candidate-verify",
             )
             if profile in {"implementation", "task-verify", "candidate-verify"}
             else []
@@ -133,6 +156,43 @@ class CanonicalHandoffResolver:
                 else []
             )
             mutable["artifact_refs"] = [*artifact_refs, *plan_port_sources]
+        from zf.runtime.orchestrator_agent_run_plan import (
+            admitted_context_route_sources,
+        )
+
+        route_sources = admitted_context_route_sources(
+            state_dir=self.state_dir,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            stage_id=str(authority_contract.get("stage_id") or ""),
+            task_map_generation=str(
+                currentness.get("task_map_generation") or ""
+            ),
+            plan_artifact_package_ref=str(
+                currentness.get("plan_artifact_package_ref") or ""
+            ),
+            plan_artifact_package_digest=str(
+                currentness.get("plan_artifact_package_digest") or ""
+            ),
+        )
+        if route_sources:
+            artifact_refs = (
+                list(mutable.get("artifact_refs") or [])
+                if isinstance(mutable.get("artifact_refs"), list)
+                else []
+            )
+            mutable["artifact_refs"] = [*artifact_refs, *route_sources]
+        reader_inputs = reader_stage_input_refs(
+            mutable,
+            stage_id=str(authority_contract.get("stage_id") or ""),
+        )
+        if reader_inputs:
+            input_refs = (
+                list(mutable.get("input_refs") or [])
+                if isinstance(mutable.get("input_refs"), list)
+                else []
+            )
+            mutable["input_refs"] = [*input_refs, *reader_inputs]
         if str(mutable.get("attempt_domain") or "") == "plan":
             from zf.runtime.plan_synth_handoff import (
                 build_plan_handoff_input_refs,
@@ -153,6 +213,11 @@ class CanonicalHandoffResolver:
                 mutable["input_refs"] = [*input_refs, *plan_inputs]
         metadata = {
             **currentness,
+            "feedback_revision": str(
+                mutable.get("feedback_revision")
+                or mutable.get("rework_feedback_digest")
+                or ""
+            ),
             "source_snapshot": self._stable_source_snapshot(
                 payload=mutable,
                 currentness=currentness,
@@ -165,6 +230,10 @@ class CanonicalHandoffResolver:
             "read_purpose": profile,
             "handoff_authority_contract": authority_contract,
             "candidate_snapshot": candidate_snapshot,
+            "orchestrator_context_route_source_ids": [
+                str(source.get("source_id") or "")
+                for source in route_sources
+            ],
         }
         manifest, descriptor = source_manifest_from_payload(
             state_dir=self.state_dir,
@@ -192,6 +261,22 @@ class CanonicalHandoffResolver:
                 raise ArtifactReadError(
                     "required Plan Artifact Package sources could not be "
                     "materialized: " + ", ".join(missing_sources)
+                )
+        if route_sources:
+            expected_sources = {
+                str(source.get("source_id") or "")
+                for source in route_sources
+            }
+            materialized_sources = {
+                str(source.get("source_id") or "")
+                for source in manifest.get("sources", [])
+                if isinstance(source, Mapping)
+            }
+            missing_sources = sorted(expected_sources - materialized_sources)
+            if missing_sources:
+                raise ArtifactReadError(
+                    "admitted OA context-route sources could not be materialized: "
+                    + ", ".join(missing_sources)
                 )
         return manifest, descriptor
 
@@ -221,16 +306,14 @@ class CanonicalHandoffResolver:
             ),
         }
         profile = str(payload.get("output_profile_id") or "")
-        task_bound_profile = profile in {
-            "implementation",
-            "task-verify",
-            "candidate-verify",
-        }
+        task_bound_profile = profile in {"implementation", "task-verify"}
+        candidate_bound_profile = profile == "candidate-verify"
+        authority_bound_profile = task_bound_profile or candidate_bound_profile
         authority_profile = self._authority_profile(payload, profile=profile)
         result["handoff_authority_profile"] = authority_profile
         blocking = self._blocking_handoff(payload)
         authority_contract = self._authority_contract(payload, profile=profile)
-        if blocking and task_bound_profile and not authority_contract:
+        if blocking and authority_bound_profile and not authority_contract:
             raise ArtifactReadError(
                 f"{authority_profile} handoff requires an authority contract"
             )
@@ -312,7 +395,10 @@ class CanonicalHandoffResolver:
             result["target_commit"] = accepted_commit
 
         package_id = result["plan_artifact_package_id"]
-        if workflow_run_id and (package_id or (task is not None and task_bound_profile)):
+        package_authority_required = candidate_bound_profile or (
+            task is not None and task_bound_profile
+        )
+        if workflow_run_id and (package_id or package_authority_required):
             events = self.query._events()
             reduced = reduce_plan_artifact_packages(
                 events,
@@ -329,7 +415,7 @@ class CanonicalHandoffResolver:
             )
             expected_ref = str(current_package.get("package_ref") or "")
             expected_digest = str(current_package.get("package_digest") or "")
-            if blocking and task_bound_profile and not all(
+            if blocking and authority_bound_profile and not all(
                 (expected_package, expected_ref, expected_digest)
             ):
                 raise ArtifactReadError(
@@ -354,6 +440,8 @@ class CanonicalHandoffResolver:
                         f"cannot prove current {field}: incoming {incoming!r}"
                     )
                 if current or incoming:
+                    if candidate_bound_profile and not incoming:
+                        continue
                     self._require_match(field, incoming, current)
             result["plan_artifact_package_id"] = expected_package or package_id
             result["plan_artifact_package_ref"] = (
@@ -363,6 +451,14 @@ class CanonicalHandoffResolver:
                 expected_digest or result["plan_artifact_package_digest"]
             )
         if task is not None and task_bound_profile:
+            self._validate_task_snapshots(
+                payload=payload,
+                workflow_run_id=workflow_run_id,
+                task_id=task_id,
+                profile=profile,
+                currentness=result,
+            )
+        elif candidate_bound_profile and blocking:
             self._validate_task_snapshots(
                 payload=payload,
                 workflow_run_id=workflow_run_id,
@@ -499,6 +595,75 @@ class CanonicalHandoffResolver:
             raise ArtifactReadError(
                 "candidate-verify task_map_generation is stale"
             )
+        freeze_ref = body.get("freeze_receipt_ref")
+        freeze_digest = str(body.get("freeze_receipt_digest") or "").strip()
+        frozen_candidate = (
+            str(body.get("schema_version") or "").strip()
+            == "candidate-freeze-receipt.v1"
+        )
+        freeze_receipt: dict[str, Any] = {}
+        freeze_descriptor: dict[str, Any] = {}
+        if frozen_candidate:
+            if not isinstance(freeze_ref, Mapping) or not freeze_digest:
+                raise ArtifactReadError(
+                    "candidate-verify frozen candidate requires freeze receipt"
+                )
+            freeze_descriptor = dict(freeze_ref)
+            if str(freeze_descriptor.get("sha256") or "") != freeze_digest:
+                raise ArtifactReadError(
+                    "candidate-verify freeze receipt digest mismatch"
+                )
+            try:
+                hydrated = hydrate_sidecar_ref(self.state_dir, freeze_descriptor)
+            except SidecarRefError as exc:
+                raise ArtifactReadError(
+                    f"candidate-verify freeze receipt cannot be hydrated: {exc}"
+                ) from exc
+            if not isinstance(hydrated.payload, Mapping):
+                raise ArtifactReadError(
+                    "candidate-verify freeze receipt must be an object"
+                )
+            freeze_receipt = dict(hydrated.payload)
+            expected_fields = {
+                "schema_version": "candidate-freeze-receipt.v1",
+                "freeze_id": str(body.get("freeze_id") or ""),
+                "workflow_run_id": workflow_run_id,
+                "task_map_generation": candidate_generation,
+                "candidate_generation": str(
+                    body.get("candidate_generation") or ""
+                ),
+                "candidate_base_commit": str(
+                    body.get("candidate_base_commit") or ""
+                ),
+                "candidate_head_commit": candidate_head,
+                "integration_ledger_digest": str(
+                    body.get("integration_ledger_digest") or ""
+                ),
+                "status": "frozen",
+            }
+            for field, expected in expected_fields.items():
+                actual = str(
+                    freeze_receipt.get(field)
+                    or (
+                        freeze_receipt.get("candidate_head")
+                        if field == "candidate_head_commit"
+                        else ""
+                    )
+                    or ""
+                )
+                if actual != expected:
+                    raise ArtifactReadError(
+                        f"candidate-verify freeze receipt {field} mismatch"
+                    )
+            frozen_tasks = sorted(
+                str(item).strip()
+                for item in freeze_receipt.get("completed_task_ids") or []
+                if str(item).strip()
+            )
+            if frozen_tasks != sorted(completed):
+                raise ArtifactReadError(
+                    "candidate-verify freeze receipt task set mismatch"
+                )
         integrated = candidate_task_source_commits(
             all_events,
             workflow_run_id=workflow_run_id,
@@ -527,6 +692,13 @@ class CanonicalHandoffResolver:
                 if task in set(completed)
             ],
         }
+        if freeze_descriptor:
+            snapshot.update({
+                "freeze_receipt_ref": str(
+                    freeze_descriptor.get("ref") or ""
+                ),
+                "freeze_receipt_digest": freeze_digest,
+            })
         encoded = json.dumps(
             snapshot,
             ensure_ascii=False,
@@ -547,13 +719,15 @@ class CanonicalHandoffResolver:
         workflow_run_id: str,
         task_id: str,
         currentness: Mapping[str, Any],
+        allow_without_task: bool = False,
     ) -> list[dict[str, Any]]:
         task = TaskStore(self.state_dir / "kanban.json").get(task_id) if task_id else None
-        if task is None:
+        if task is None and not allow_without_task:
             return []
         evidence = (
             task.contract.evidence_contract
-            if isinstance(task.contract.evidence_contract, dict)
+            if task is not None
+            and isinstance(task.contract.evidence_contract, dict)
             else {}
         )
         declared = self._declared_required_ports(

@@ -11,6 +11,8 @@ harness's own named session deterministically.
 
 from __future__ import annotations
 
+import subprocess
+
 from zf.runtime.tmux import TmuxSession, tmux_env
 
 
@@ -45,3 +47,26 @@ def test_run_passes_nested_free_env(monkeypatch):
     assert env is not None
     assert "TMUX" not in env
     assert "TMUX_PANE" not in env
+
+
+def test_create_session_refreshes_provider_env_without_logging_values(
+    monkeypatch,
+):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        stdout = "DISPLAY SSH_AUTH_SOCK\n" if args[1] == "show-options" else ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret-value")
+    monkeypatch.setattr("zf.runtime.tmux.subprocess.run", fake_run)
+    session = TmuxSession(session_name="zf-provider-env")
+
+    session.create_session()
+
+    set_call = next(args for args in calls if args[1] == "set-option")
+    new_session_call = next(args for args in calls if args[1] == "new-session")
+    assert "ANTHROPIC_API_KEY" in set_call[-1]
+    assert calls.index(set_call) < calls.index(new_session_call)
+    assert all("provider-secret-value" not in command for command in session.command_log)

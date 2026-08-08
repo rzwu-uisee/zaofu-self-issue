@@ -355,6 +355,64 @@ def test_validate_cold_start_failing(tmp_path: Path, monkeypatch, capsys):
     assert "FAIL" in captured.out
 
 
+def test_validate_cold_start_rejects_invalid_registered_research_route(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "zf.yaml").write_text(
+        '''\
+version: "1.0"
+project:
+  name: test
+roles:
+  - {name: research-source, backend: python, role_kind: reader}
+  - {name: research-product, backend: python, role_kind: reader}
+  - {name: research-technical, backend: python, role_kind: reader}
+  - {name: research-risk-critic, backend: python, role_kind: reader}
+  - {name: research-synthesizer, backend: python, role_kind: reader}
+workflow:
+  stages:
+    - id: research-fanout
+      trigger: workflow.invoke.requested
+      topology: fanout_reader
+      roles:
+        - research-source
+        - research-product
+        - research-technical
+        - research-risk-critic
+        - research-synthesizer
+      fanout:
+        children:
+          - {role_instance: research-source}
+          - {role_instance: research-product}
+          - {role_instance: research-technical}
+          - {role_instance: research-risk-critic}
+      aggregate:
+        mode: wait_for_all
+        child_success_event: research.child.completed
+        child_failure_event: research.child.failed
+        synth_role: research-synthesizer
+''',
+        encoding="utf-8",
+    )
+    for name in ("README.md", "AGENTS.md", "CLAUDE.md"):
+        (tmp_path / name).write_text(f"# {name}\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+
+    result = main(["validate", "--cold-start"])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert "research_route_contract" in captured.out
+    assert "source_researcher" in captured.out
+
+
 def test_dead_letter_channel_warnings_pairs():
     """ZF-E2E-PRDCTL-P1-6:请求方开/执行方关 → WARN;执行方开 → 对应 WARN 消失。"""
     from zf.cli.validate import _dead_letter_channel_warnings
@@ -398,3 +456,33 @@ def test_stage_failure_event_collision_detected():
 
     config.workflow.stages[1].aggregate.failure_event = "task_map.blocked"
     assert _stage_failure_event_collisions(config) == []
+
+
+def test_stage_failure_event_reuse_allowed_across_scoped_fanout_flows():
+    from zf.cli.validate import _stage_failure_event_collisions
+    from zf.core.config.schema import (
+        FanoutAggregateConfig,
+        WorkflowStageConfig,
+        ZfConfig,
+    )
+
+    config = ZfConfig()
+    config.workflow.stages = [
+        WorkflowStageConfig(
+            id="issue-verify",
+            flow_kind="issue",
+            topology="fanout_reader",
+            aggregate=FanoutAggregateConfig(failure_event="test.failed"),
+        ),
+        WorkflowStageConfig(
+            id="prd-verify",
+            flow_kind="prd",
+            topology="fanout_reader",
+            aggregate=FanoutAggregateConfig(failure_event="test.failed"),
+        ),
+    ]
+
+    assert _stage_failure_event_collisions(config) == []
+
+    config.workflow.stages[1].flow_kind = "issue"
+    assert len(_stage_failure_event_collisions(config)) == 1

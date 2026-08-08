@@ -10,10 +10,11 @@ from pathlib import Path
 
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.runtime.fanout_evidence_queries import FanoutEvidenceQueriesMixin
 from zf.runtime.lifecycle_evidence_queries import LifecycleEvidenceQueriesMixin
 
 
-class _Host(LifecycleEvidenceQueriesMixin):
+class _Host(LifecycleEvidenceQueriesMixin, FanoutEvidenceQueriesMixin):
     def __init__(self, path: Path) -> None:
         self.event_log = EventLog(path)
 
@@ -23,16 +24,28 @@ def _dispatched(
     child_id: str,
     instance: str,
     *,
+    workflow_run_id: str = "",
     run_id: str | None = None,
     task_id: str = "",
 ) -> ZfEvent:
-    return ZfEvent(type="fanout.child.dispatched", actor="zf-cli", payload={
+    payload = {
         "fanout_id": fanout_id,
         "child_id": child_id,
         "run_id": run_id or f"run-{fanout_id}-{child_id}",
         "role_instance": instance,
         "task_id": task_id,
-    }, task_id=task_id or None)
+    }
+    if workflow_run_id:
+        payload["workflow_run_id"] = workflow_run_id
+    if task_id:
+        payload["task_id"] = task_id
+    return ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id=task_id or None,
+        payload=payload,
+        correlation_id=workflow_run_id or None,
+    )
 
 
 def test_child_of_cancelled_fanout_is_not_active(tmp_path: Path) -> None:
@@ -67,6 +80,74 @@ def test_timed_out_pending_children_are_terminal(tmp_path: Path) -> None:
         payload={"fanout_id": "fanout-impl-1", "pending_children": ["queued-T2-2"]},
     ))
     assert host._active_fanout_child_for_instance("dev-lane-0") is None
+
+
+def test_terminal_workflow_run_invalidates_active_child_and_recovery(
+    tmp_path: Path,
+) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    run_id = "workflow-real-1"
+    host.event_log.append(ZfEvent(
+        type="run.goal.started",
+        actor="zf-cli",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-scan-1",
+        "scan-runtime",
+        "scan-runtime",
+        workflow_run_id=run_id,
+        task_id="TASK-1",
+    ))
+    blocked = ZfEvent(
+        type="run.goal.blocked",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+        correlation_id=run_id,
+    )
+    host.event_log.append(blocked)
+
+    assert host._active_fanout_child_for_instance("scan-runtime") is None
+    assert host._fanout_task_state_for_instance(
+        "scan-runtime",
+        "TASK-1",
+    ) == "terminal"
+    assert host._fanout_identity_stale_reason("fanout-scan-1") == (
+        "workflow_run_terminal:run.goal.blocked",
+        blocked.id,
+    )
+
+
+def test_terminal_for_other_run_does_not_invalidate_live_child(
+    tmp_path: Path,
+) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    for run_id in ("workflow-live", "workflow-blocked"):
+        host.event_log.append(ZfEvent(
+            type="run.goal.started",
+            actor="zf-cli",
+            payload={"run_id": run_id},
+            correlation_id=run_id,
+        ))
+    host.event_log.append(_dispatched(
+        "fanout-live",
+        "scan-runtime",
+        "scan-runtime",
+        workflow_run_id="workflow-live",
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="zf-cli",
+        payload={"run_id": "workflow-blocked"},
+        correlation_id="workflow-blocked",
+    ))
+
+    child = host._active_fanout_child_for_instance("scan-runtime")
+    assert child is not None
+    assert child["fanout_id"] == "fanout-live"
+    assert host._fanout_identity_stale_reason("fanout-live") == ("", "")
 
 
 def test_stale_completion_terminates_exact_superseded_child(tmp_path: Path) -> None:

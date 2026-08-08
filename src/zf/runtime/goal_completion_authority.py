@@ -152,7 +152,11 @@ def _row_matches_authority(
             task_map_generation,
         )
     task_id = str(row.get("task_id") or "").strip()
-    return bool(task_id and task_id in candidate_task_ids)
+    if candidate_task_ids:
+        return bool(task_id and task_id in candidate_task_ids)
+    # A legacy row with no generation cannot be proven historical when the
+    # current candidate has no task inventory. Keep it blocking (fail closed).
+    return bool(task_id)
 
 
 def _fanout_generations(event: ZfEvent) -> set[str]:

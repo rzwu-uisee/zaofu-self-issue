@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from zf.cli.flow_draft_support import orchestration_spec
 from zf.core.config.loader import load_config
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
@@ -113,6 +114,35 @@ def _synthesis_result(request: dict, *, lanes: int = 1) -> dict:
 
 
 def _generic_config(path: Path) -> None:
+    semantic_workflow = orchestration_spec(tier="multi")["workflow"]
+    semantic_workflow["execution_profiles"] = {
+        "direct-v1": {"strategy": "direct"},
+    }
+    roles = [{
+        "name": "orchestrator",
+        "instance_id": "orchestrator",
+        "backend": "mock",
+        "role_kind": "reader",
+        "triggers": [
+            "dispatch.silent_stall",
+            "orchestrator.rework.triage.requested",
+            "orchestrator.semantic.checkpoint.requested",
+        ],
+    }, *[
+        {
+            "name": role,
+            "instance_id": role,
+            "backend": "mock",
+            "role_kind": "reader",
+        }
+        for role in (
+            "scoper",
+            "collector-a",
+            "collector-b",
+            "synthesizer",
+            "verifier",
+        )
+    ]]
     path.write_text(
         yaml.safe_dump_all(
             [{
@@ -125,26 +155,8 @@ def _generic_config(path: Path) -> None:
                         "name": "generic-research",
                         "state_dir": ".zf",
                     },
-                    "roles": [
-                        {
-                            "name": role,
-                            "instance_id": role,
-                            "backend": "mock",
-                            "role_kind": "reader",
-                        }
-                        for role in (
-                            "scoper",
-                            "collector-a",
-                            "collector-b",
-                            "synthesizer",
-                            "verifier",
-                        )
-                    ],
-                    "workflow": {
-                        "execution_profiles": {
-                            "direct-v1": {"strategy": "direct"},
-                        },
-                    },
+                    "roles": roles,
+                    "workflow": semantic_workflow,
                 },
             }],
             sort_keys=False,
@@ -313,6 +325,26 @@ def test_generic_research_proposal_materializes_registered_graph_and_diff(
     assert diff["changed"] is True
     assert "generic_workflows:" in diff["unified_diff"]
     assert "evidence-synthesis-v1" in diff["unified_diff"]
+    effective = hydrate_sidecar_ref(
+        state_dir,
+        proposal["effective_config_ref"],
+    ).payload["config"]
+    policy = effective["workflow"]["orchestration"]
+    assert policy["mode"] == "exception_advisor"
+    assert policy["checkpoints"] == []
+    assert policy["flow_policies"]["prd"]["checkpoints"] == [
+        "plan_candidate",
+    ]
+    assert policy["flow_policies"]["prd"][
+        "checkpoint_policies"
+    ]["plan_candidate"] == "shadow"
+    assert policy["flow_policies"]["workflow"]["mode"] == (
+        "exception_advisor"
+    )
+    assert policy["flow_policies"]["research"]["mode"] == (
+        "exception_advisor"
+    )
+    assert len(effective["workflow"]["_generic_workflows"]) == 1
     assert "autoresearch" not in json.dumps(
         proposal,
         sort_keys=True,

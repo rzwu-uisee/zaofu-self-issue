@@ -200,6 +200,13 @@ def write_fanout_retry_briefing(
             *workflow_input_lines,
             *retry_contract_lines,
             "",
+            "## Child Result Authority",
+            "",
+            "Any root Task id in the payload is a lineage anchor for this "
+            "workflow operation; this reader child is not the canonical Task "
+            "assignee. Do not run `zf guard ownership` for that Task. Use the "
+            "new retry run_id and submit exactly one result with a command below.",
+            "",
             "Success command:",
             "```bash",
             emit_command(child_success_event, success_payload),
@@ -211,13 +218,8 @@ def write_fanout_retry_briefing(
             "```",
             "",
             "Do not emit the aggregate success/failure event directly; the kernel publishes it after the fanout barrier or synth role finishes.",
-            "Emit-once protocol: the result event is consumed asynchronously — you will",
-            "NOT receive an acknowledgement. Emitting succeeds when the command exits 0.",
-            "NEVER re-emit the same completion (no retry loops, no periodic re-sends):",
-            "if this fanout generation was superseded, every duplicate is marked",
-            "stale_completion and discarded, and re-sending floods the event log",
-            "(r10 forensics: one lane re-emitting every ~7s produced 4.5k junk rows).",
-            "After emitting once, stop and wait for new instructions.",
+            "Emit once: command exit 0 is success; there is no asynchronous ack. "
+            "Never retry or re-send (stale generations are discarded). Then stop.",
             "`fanout_id`, `stage_id`, `child_id`, `run_id`, `role_instance`, and `status` must stay as top-level payload fields.",
             "Finding schema: use `severity` = info|low|medium|high|critical, `path`, `message`, and optional integer `line`.",
         ])

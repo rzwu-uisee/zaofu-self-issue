@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **68** 个顶层命令 family、**256** 条可寻址命令路径。
+当前共 **68** 个顶层命令 family、**257** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -525,6 +525,7 @@ Durable call-result commands
 |---|---|
 | `zf result` | Durable call-result commands |
 | `zf result submit` | Submit one operation semantic result |
+| `zf result validate` | Preflight one profiled result without consuming submit capability |
 
 ## `zf rules`
 

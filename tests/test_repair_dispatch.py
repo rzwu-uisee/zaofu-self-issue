@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from zf.runtime.repair_dispatch import (
     DISPATCH_REQUESTED,
     DISPATCHED,
+    RepairContractError,
+    RepairRequest,
     build_repair_briefing,
     pending_repair_dispatches,
     repair_branch_name,
+    validate_repair_contract_action,
+    write_repair_contract,
 )
 
 
@@ -53,3 +59,59 @@ def test_briefing_carries_scope_verification_and_skill():
     assert "pytest tests/test_x.py" in briefing
     assert "never merge on red" in briefing.lower()
     assert "do not push" in briefing.lower()
+
+
+def test_immutable_repair_contract_rejects_scope_and_plan_drift(tmp_path):
+    req = RepairRequest(
+        fingerprint="stall:contract",
+        attempt=2,
+        candidate_id="C-CONTRACT",
+        candidate_path="/state/candidate.json",
+        repair_task_payload={
+            "contract": {
+                "scope": ["src/zf/runtime/**", "tests/**"],
+                "verification_commands": ["git diff --check"],
+            },
+            "continuation": {"checkpoint_id": "checkpoint-1"},
+        },
+    )
+    contract, descriptor = write_repair_contract(
+        tmp_path,
+        req,
+        base_commit="abc123",
+        created_by="test",
+    )
+    action = {
+        "fingerprint": req.fingerprint,
+        "attempt": req.attempt,
+        "candidate_id": req.candidate_id,
+        "base_commit": "abc123",
+        "changed_files": ["src/zf/runtime/fix.py", "tests/test_fix.py"],
+        "verification_plan": [
+            {"command": "git diff --check"},
+            {"command": "python scripts/dev-verify.py plan --base abc123"},
+            {"command": "python scripts/dev-verify.py run --base abc123"},
+        ],
+        "continuation": {"checkpoint_id": "checkpoint-1"},
+        "repair_contract_ref": descriptor,
+        "repair_contract_digest": descriptor["sha256"],
+    }
+
+    assert validate_repair_contract_action(tmp_path, action) == contract
+
+    with pytest.raises(RepairContractError) as scope_error:
+        validate_repair_contract_action(
+            tmp_path,
+            {**action, "changed_files": ["web/src/App.tsx"]},
+        )
+    assert scope_error.value.code == "repair_contract_scope_drift"
+
+    with pytest.raises(RepairContractError) as plan_error:
+        validate_repair_contract_action(
+            tmp_path,
+            {
+                **action,
+                "verification_plan": action["verification_plan"][:2],
+            },
+        )
+    assert plan_error.value.code == "repair_contract_impact_closure_missing"

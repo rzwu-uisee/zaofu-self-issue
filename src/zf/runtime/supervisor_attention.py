@@ -262,7 +262,13 @@ def _attention_superseded_by_later_progress(
         return False
     source_idx = min(source_indexes)
     source_events = [event for event in events if event.id in source_ids]
-    for event in events[source_idx + 1:]:
+    later_events = events[source_idx + 1:]
+    for event in later_events:
+        if any(
+            _causal_retry_started(source, event, later_events)
+            for source in source_events
+        ):
+            return True
         if not _is_attention_progress_event(event):
             continue
         if event.type == "run.completed":
@@ -273,6 +279,26 @@ def _attention_superseded_by_later_progress(
         if any(_attention_progress_matches_source(source, event) for source in source_events):
             return True
     return False
+
+
+def _causal_retry_started(
+    source: ZfEvent,
+    progress: ZfEvent,
+    later_events: list[ZfEvent],
+) -> bool:
+    """Resolve a transient failure only after its direct retry really starts."""
+
+    if progress.type != "fanout.started" or not progress.causation_id:
+        return False
+    retry = next(
+        (
+            event
+            for event in later_events
+            if event.id == progress.causation_id
+        ),
+        None,
+    )
+    return bool(retry is not None and retry.causation_id == source.id)
 
 
 _ATTENTION_PROGRESS_EVENTS = frozenset({
@@ -766,6 +792,8 @@ def _attention_from_automation(automation: dict[str, Any]) -> list[dict[str, Any
                 )
                 event_type = str(ref.get("type") or key)
                 spec = spec_for_event(event_type)
+                if spec is not None and spec.supervisor_attention == "none":
+                    continue
                 row = _attention_item(
                     source="automation",
                     fingerprint=f"automation:{key}:{dedupe_key}",

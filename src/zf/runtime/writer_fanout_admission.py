@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
@@ -17,7 +17,11 @@ from zf.runtime.task_map_successor import (
     task_map_successor_base_commit,
     task_map_supersedes_task_ids,
 )
-from zf.runtime.verification_commands import validation_with_commands
+from zf.runtime.verification_commands import (
+    materialize_task_verification_commands,
+    task_map_command_registry,
+    validation_with_commands,
+)
 from zf.runtime.task_contract_normalize import (
     canonical_verification_tiers,
     owner_fields_from_task_map_item,
@@ -370,14 +374,14 @@ def writer_task_map_policy_errors(
                 + ", ".join(missing)
             )
 
-    if not getattr(work_units_config, "enabled", False):
+    if not _config_value(work_units_config, "enabled", False):
         return errors
-    split = getattr(work_units_config, "split_quality", None)
-    if str(getattr(split, "mode", "warning") or "warning") != "blocking":
+    split = _config_value(work_units_config, "split_quality", None)
+    if str(_config_value(split, "mode", "warning") or "warning") != "blocking":
         return errors
-    max_scope = int(getattr(split, "max_scope_files", 0) or 0)
+    max_scope = int(_config_value(split, "max_scope_files", 0) or 0)
     max_acceptance = int(
-        getattr(split, "max_acceptance_criteria", 0) or 0
+        _config_value(split, "max_acceptance_criteria", 0) or 0
     )
     for item in task_items:
         task_id = str(item.get("task_id") or "<unknown>")
@@ -393,6 +397,12 @@ def writer_task_map_policy_errors(
                 f"max is {max_acceptance}"
             )
     return errors
+
+
+def _config_value(config: Any, key: str, default: Any) -> Any:
+    if isinstance(config, Mapping):
+        return config.get(key, default)
+    return getattr(config, key, default)
 
 
 def admit_writer_fanout(
@@ -502,6 +512,8 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
                 break
     if not isinstance(raw_items, list):
         return []
+    source_map = data if isinstance(data, Mapping) else {"tasks": raw_items}
+    command_registry = task_map_command_registry(source_map)
     items: list[dict[str, Any]] = []
     for raw in raw_items:
         if isinstance(raw, str):
@@ -516,6 +528,9 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             continue
         if not isinstance(raw, dict):
             continue
+        materialized_raw = materialize_task_verification_commands(
+            raw, registry=command_registry
+        )
         task_id = str(raw.get("task_id") or raw.get("id") or raw.get("task") or "")
         allowed_paths = _string_list(
             raw.get("allowed_paths")
@@ -534,12 +549,14 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
         )
         payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
         owner_role, owner_instance = owner_fields_from_task_map_item(raw)
-        verification_commands = task_verification_commands(raw)
+        verification_commands = task_verification_commands(materialized_raw)
         verification = str(
             verification_commands[0]["command"] if verification_commands else ""
         )
         validation = (
-            raw.get("validation") if isinstance(raw.get("validation"), dict) else {}
+            materialized_raw.get("validation")
+            if isinstance(materialized_raw.get("validation"), dict)
+            else {}
         )
         raw_verification_tiers = _string_list(raw.get("verification_tiers"))
         items.append({
@@ -575,11 +592,7 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             "verification_tiers": canonical_verification_tiers(
                 raw_verification_tiers,
                 verification=verification,
-                validation=(
-                    raw.get("validation")
-                    if isinstance(raw.get("validation"), dict)
-                    else {}
-                ),
+                validation=validation,
             ),
             "raw_verification_tiers": raw_verification_tiers,
             "acceptance_criteria": _acceptance_criteria_list(
@@ -597,7 +610,7 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
                 validation_with_commands(validation, verification_commands)
                 if verification_commands else dict(validation)
             ),
-            "raw_task": dict(raw),
+            "raw_task": materialized_raw,
         })
     return _normalize_writer_task_items(items)
 

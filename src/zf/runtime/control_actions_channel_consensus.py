@@ -5,6 +5,7 @@ from __future__ import annotations
 from zf.core.state.locks import locked_path
 from zf.core.events import ZfEvent
 from zf.runtime.channel_contracts import normalize_product_discussion_mode
+from zf.runtime.channel_consensus_identity import consensus_reached_payload
 from zf.runtime.channel_owner_authority import (
     channel_owner_authority_error,
 )
@@ -370,25 +371,16 @@ class ChannelConsensusActionsMixin:
                 task_id=_task_id_from_payload(payload),
                 causation_id=event.id,
                 correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": thread_id,
-                    "artifact_ref": artifact_ref,
-                    "artifact_digest": artifact_digest,
-                    "prd_ref": str(
-                        consensus.get("prd_ref") or artifact_ref
+                payload=consensus_reached_payload(
+                    consensus,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    source=self.surface,
+                    confirmed_by=self.actor,
+                    risk_accepted=bool(
+                        payload.get("accept_readiness_risk")
                     ),
-                    "prd_digest": str(
-                        consensus.get("prd_digest")
-                        or artifact_digest
-                    ),
-                    "prd_revision": current_revision,
-                    "confirmed_by": self.actor,
-                    "signed_by": sorted(
-                        (consensus.get("signed") or {}).keys()
-                    ),
-                    "source": self.surface,
-                },
+                ),
             )
         self._completed(
             requested=requested,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from zf.core.events import EventWriter, ZfEvent
@@ -26,6 +27,46 @@ from zf.web.projections.common import _action_failed
 class HeadlessPlanDraft:
     request: dict[str, Any]
     event: ZfEvent
+
+
+def task_contract_context_for_plan(
+    tasks: Iterable[Any],
+    *,
+    config: Any | None,
+    project_root: Path,
+) -> tuple[
+    dict[str, str],
+    dict[str, list[str]],
+    dict[str, dict[str, str]],
+]:
+    from zf.core.task.contract_validation import validate_task_contract
+    from zf.runtime.task_workflow_plans import (
+        task_workflow_binding_digest,
+        task_workflow_route_eligibility_map,
+    )
+
+    candidates = list(tasks)
+    digests = {
+        str(task.id): task_workflow_binding_digest(task)
+        for task in candidates
+    }
+    errors_by_task: dict[str, list[str]] = {}
+    route_eligibility = (
+        task_workflow_route_eligibility_map(candidates, config)
+        if config is not None
+        else {}
+    )
+    if config is None:
+        return digests, errors_by_task, route_eligibility
+    for task in candidates:
+        errors = validate_task_contract(
+            task,
+            config=config,
+            project_root=project_root,
+        )
+        if errors:
+            errors_by_task[str(task.id)] = errors
+    return digests, errors_by_task, route_eligibility
 
 
 def validate_chat_plan_payload(payload: dict[str, Any]) -> str:
@@ -105,6 +146,7 @@ def prepare_web_plan_discussion(
         request_event_id=str(discussion.get("request_event_id") or ""),
         request_id=str(discussion.get("request_id") or ""),
         revision=discussion.get("revision"),
+        require_valid=False,
     )
     if not gate.get("ok"):
         return payload, _action_failed(
@@ -167,6 +209,9 @@ def prepare_web_plan_discussion(
         "revision": int(gate.get("revision") or 1),
         "header": str(request.get("header") or "Plan"),
         "questions": redact_obj(questions),
+        "request_valid": bool(request.get("valid")),
+        "validation_error": str(request.get("validation_error") or ""),
+        "validation_errors": redact_obj(request.get("validation_errors") or []),
     }
     return {
         **payload,
@@ -402,11 +447,16 @@ def prepare_headless_plan_draft(
     task_contract_digest: str = "",
     task_binding_digests: dict[str, str] | None = None,
     workflow_route_eligibility: dict[str, dict[str, str]] | None = None,
+    task_contract_errors: dict[str, list[str]] | None = None,
     workflow_context: dict[str, Any] | None = None,
+    canonical_channel_prds: dict[str, Any] | None = None,
     correlation_id: str | None,
     config: Any | None = None,
 ) -> tuple[HeadlessPlanDraft | None, dict[str, Any] | None]:
     event_list = list(events)
+    effective_task_contract_digest = task_contract_digest or str(
+        (task_binding_digests or {}).get(task_id or "") or ""
+    )
     requirement_rows = _plan_requirement_rows(
         event_list,
         originating_message_event_id=originating_message_event_id,
@@ -422,9 +472,10 @@ def prepare_headless_plan_draft(
         plan_context={
             "project_id": project_id,
             "task_id": task_id or "",
-            "task_contract_digest": task_contract_digest,
+            "task_contract_digest": effective_task_contract_digest,
             "task_binding_digests": task_binding_digests or {},
             "workflow_route_eligibility": workflow_route_eligibility or {},
+            "task_contract_errors": task_contract_errors or {},
             "conversation_id": conversation_id,
             "thread_key": thread_key or fallback_thread_id,
             "turn_id": turn_id,
@@ -439,7 +490,11 @@ def prepare_headless_plan_draft(
                 if requirement_rows
                 else ""
             ),
+            "user_semantic_context": "\n\n".join(
+                message for _event_id, message in requirement_rows
+            ),
             "workflow_parameters": workflow_context or {},
+            "canonical_channel_prds": canonical_channel_prds or {},
         },
         config=config,
     )
@@ -457,6 +512,7 @@ def prepare_headless_plan_draft(
             ),
             request_id=str(discussion.get("request_id") or ""),
             revision=discussion.get("revision"),
+            require_valid=False,
         )
         plan_request["request_id"] = str(
             discussion.get("request_id") or ""
@@ -701,6 +757,7 @@ __all__ = [
     "plan_proposal_user_message",
     "prepare_web_plan_discussion",
     "prepare_headless_plan_draft",
+    "task_contract_context_for_plan",
     "prepare_web_plan_interaction",
     "prepare_web_plan_response",
     "validate_chat_plan_payload",

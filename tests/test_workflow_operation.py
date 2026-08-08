@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from zf.core.events.log import EventLog
@@ -65,6 +66,82 @@ def test_ensure_operation_dedupes_and_fails_closed_on_drift(tmp_path: Path) -> N
     view = reduce_workflow_operations(events)[operation_id]
     assert view["request_count"] == 1
     assert view["replay_count"] == 0
+
+
+def test_task_pipeline_operation_replays_across_placement_relocation(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    common_request = {
+        "task_pipeline_stage": "impl",
+        "task_id": "T1",
+        "operation_generation": 1,
+        "task_map_generation": 3,
+        "workspace_generation": 1,
+        "prompt": "implement the admitted task contract",
+        "result_identity": {
+            "task_id": "T1",
+            "role_instance": "writer_lane_1",
+            "attempt_id": "attempt-1",
+            "lease_id": "lease-1",
+            "placement_epoch": 1,
+        },
+    }
+    first = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage",
+        operation_type="task-stage",
+        request={
+            **common_request,
+            "role_instance": "writer_lane_1",
+            "active_attempt_id": "attempt-1",
+            "lease_id": "lease-1",
+            "placement_epoch": 1,
+            "task_stage_session_binding": "binding-1",
+        },
+        task_id="T1",
+        role_instance="writer_lane_1",
+        active_attempt_id="attempt-1",
+        lease_id="lease-1",
+    )
+    replay = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage",
+        operation_type="task-stage",
+        request={
+            **common_request,
+            "result_identity": {
+                "task_id": "T1",
+                "role_instance": "writer_lane_2",
+                "attempt_id": "attempt-2",
+                "lease_id": "lease-2",
+                "placement_epoch": 2,
+            },
+            "role_instance": "writer_lane_2",
+            "active_attempt_id": "attempt-2",
+            "lease_id": "lease-2",
+            "placement_epoch": 2,
+            "task_stage_session_binding": "binding-2",
+        },
+        task_id="T1",
+        role_instance="writer_lane_2",
+        active_attempt_id="attempt-2",
+        lease_id="lease-2",
+    )
+
+    assert replay.replay_hit is True
+    assert replay.request_hash == first.request_hash
+    requested = next(
+        event
+        for event in service.event_log.read_all()
+        if event.type == "workflow.operation.requested"
+    )
+    request_path = tmp_path / requested.payload["request_ref"]["ref"]
+    persisted = json.loads(request_path.read_text(encoding="utf-8"))
+    assert persisted["role_instance"] == "writer_lane_1"
+    assert persisted["active_attempt_id"] == "attempt-1"
+    assert persisted["lease_id"] == "lease-1"
+    assert persisted["request"]["placement_epoch"] == 1
 
 
 def test_operation_settles_even_when_product_verdict_is_rejected(tmp_path: Path) -> None:
@@ -156,6 +233,150 @@ def test_cancelled_operation_ignores_late_settlement(tmp_path: Path) -> None:
     ]
     assert view["status"] == "cancelled"
     assert view["last_event_type"] == "workflow.operation.cancelled"
+
+
+def test_interrupted_operation_is_suspended_until_recovery(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-interrupted",
+        operation_type="agent",
+        request={"prompt": "plan"},
+        task_id="FLOW-1",
+        parent_task_id="FLOW-1",
+    )
+    service.mark_started(
+        operation_id="op-interrupted",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="FLOW-1",
+        dispatch_id="dispatch-1",
+    )
+    service.interrupt(
+        operation_id="op-interrupted",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="FLOW-1",
+        reason="graceful_stop",
+    )
+
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-interrupted"
+    ]
+    assert view["status"] == "suspended"
+    assert view["task_id"] == "FLOW-1"
+    assert view["parent_task_id"] == "FLOW-1"
+
+
+def test_task_pipeline_redrive_preserves_operation_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-a-impl-g1",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "impl",
+            "operation_generation": 1,
+            "prompt": "implement",
+        },
+        task_id="TASK-A",
+    )
+    service.mark_started(
+        operation_id="op-task-a-impl-g1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        dispatch_id="dispatch-1",
+        role_instance="impl-1",
+        active_attempt_id="attempt-1",
+        lease_id="lease-1",
+    )
+    service.interrupt(
+        operation_id="op-task-a-impl-g1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        reason="lease_expired",
+        source_attempt_id="attempt-1",
+    )
+
+    first = service.admit_redrive(
+        operation_id="op-task-a-impl-g1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        source_attempt_id="attempt-1",
+        recovery_decision_event_id="run-manager-decision-1",
+        reason="worker respawn completed",
+    )
+    replay = service.admit_redrive(
+        operation_id="op-task-a-impl-g1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        source_attempt_id="attempt-1",
+        recovery_decision_event_id="run-manager-decision-1",
+        reason="worker respawn completed",
+    )
+
+    assert first is not None
+    assert replay is None
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-task-a-impl-g1"
+    ]
+    assert view["status"] == "requested"
+    assert view["operation_id"] == "op-task-a-impl-g1"
+    assert view["operation_generation"] == 1
+    assert view["redrive_count"] == 1
+    assert view["redrive_source_attempt_ids"] == ["attempt-1"]
+    assert view["role_instance"] == ""
+    assert view["active_attempt_id"] == ""
+
+
+def test_transient_transport_retry_reopens_same_operation_once(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-transport-retry",
+        operation_type="orchestrator_agent_semantic",
+        request={"prompt": "review plan"},
+        role_instance="orchestrator",
+    )
+    service.mark_started(
+        operation_id="op-transport-retry",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        dispatch_id="checkpoint-1",
+        role_instance="orchestrator",
+    )
+    service.interrupt(
+        operation_id="op-transport-retry",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        reason="transient_transport:pane_dead:TmuxError",
+    )
+
+    service.mark_retry_started(
+        operation_id="op-transport-retry",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        retry_attempt=1,
+        reason="retry_after_orchestrator_pane_respawn",
+        dispatch_id="checkpoint-retry-1",
+        role_instance="orchestrator",
+    )
+
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-transport-retry"
+    ]
+    assert view["status"] == "running"
+    assert view["retry_count"] == 1
+    assert view["retry_attempt"] == 1
+    assert view["dispatch_id"] == "checkpoint-retry-1"
 
 
 def test_continuation_reservation_is_replay_safe_and_supersedable(

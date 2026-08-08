@@ -213,7 +213,11 @@ _OVERSIZED_FILE_CAPS = {
     # +22 (2026-07-11): dead-sweep authoritative progress lookup (+12, part of
     # the sweep calibration that owns this file's in-flight bookkeeping) merged
     # with dev's semantic-recovery loop wiring (+10, parallel driver). Re-freeze.
-    "src/zf/runtime/orchestrator.py": 4927,
+    # Merge 2026-08-05: local OA lifecycle/WorkflowRuntimeDecision call sites
+    # combined with origin/dev's task-map amendment and workflow-reader wiring.
+    # Both parents stayed below the frozen cap and the behavior remains in
+    # sibling modules; freeze the merged registration/call-site surface here.
+    "src/zf/runtime/orchestrator.py": 4944,
     # +14 (2026-06-20): PRD-product-stage branch in the fanout-child briefing
     # builder (emits prd_ref/artifact_refs/evidence_refs). It is one more
     # sibling branch of the same _write_*_fanout_briefing method that already
@@ -311,7 +315,11 @@ _OVERSIZED_FILE_CAPS = {
     # judge.failed state guard call sites; predicates live in terminal_events.
     # Reconciliation 2026-07-08: dev 已到 6962(feishu/goal-spine merges),
     # cap 未随之更新(基线红)。按 clean dev 尺寸冻结。
-    "src/zf/runtime/orchestrator_reactor.py": 6962,
+    # Merge 2026-08-05: OA semantic lifecycle handlers combined with
+    # origin/dev's current channel/workflow reactor call sites. The semantic
+    # implementations remain in siblings; freeze the merged handler surface.
+    # Two Channel dedup terminal events are mechanically registered here.
+    "src/zf/runtime/orchestrator_reactor.py": 6977,
     # Merge 2026-06-22: dispatch recovery helpers crossed the previous cap.
     # Reconciliation 2026-07-03: RF-7B transition-only dispatch (+32) + prior
     # merges pushed to 4851. Freeze at clean dev size; next dispatch feature extracts.
@@ -419,12 +427,19 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     "src/zf/core/verification/discriminator.py",
     "src/zf/core/verification/event_schema.py",
     "src/zf/runtime/automation_projection.py",
+    # Merge 2026-08-05: result handoff and semantic-replan source registration
+    # jointly crossed the soft limit. Split trigger: next source-manifest or
+    # required-read policy change moves profile assembly into a sibling.
     # 2026-07-04 blocked-burn 看门狗(70 行)破千;tick_services 是纯
     # 调度器+module 级看门狗集合,同质 handler 列表形状。defer trigger:
     # 下个 watchdog 进驻时抽 tick_watchdogs.py sibling。
     "src/zf/runtime/tick_services.py",
     "src/zf/runtime/candidates.py",
     "src/zf/runtime/channel_projection.py",
+    # Task Pipeline V4 durable-call integration crossed the soft limit while
+    # keeping prepare/admit/hydrate behavior together. Split trigger: next
+    # durable call preparation, admission, or hydration behavior change.
+    "src/zf/runtime/call_result_runtime.py",
     # E1/E3(2026-07-04)registry closure 达成 100% 后 43 条新注册破千行。
     # 同质数据表(平行 EventProblemSpec 条目),认知成本=滚动而非结构;
     # defer 触发条件:下次新增 ≥10 条 spec 时把 EVENT_PROBLEM_SPECS 数据
@@ -435,6 +450,10 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     "src/zf/runtime/long_horizon.py",
     "src/zf/runtime/product_delivery.py",
     "src/zf/runtime/run_archive.py",
+    # Merge 2026-08-05: writer retry ownership and plan-artifact write-scope
+    # preparation jointly crossed the soft limit. Split trigger: next durable
+    # writer preparation/recovery change extracts its dispatch preparation.
+    "src/zf/runtime/durable_call_fanout.py",
     # Full-suite reconciliation 2026-06-24: product controlled-action helpers
     # crossed the soft limit at 1002. Split trigger: next product action or
     # product delivery controlled-action change.
@@ -450,6 +469,10 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # checkpoint format change.
     "src/zf/runtime/workflow_resume.py",
     "src/zf/runtime/workflow_resume_apply.py",
+    # Task Pipeline V4 continuation reservations crossed the soft limit in the
+    # canonical operation reducer/service. Split trigger: next operation
+    # reservation, reducer, or continuation lifecycle behavior change.
+    "src/zf/runtime/workflow_operation.py",
     "src/zf/runtime/workdirs.py",
     "src/zf/web/headless_agent.py",
     # Merge 2026-06-22: task timeline/read-model projection grew past the

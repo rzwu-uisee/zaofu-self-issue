@@ -59,15 +59,17 @@ export function startDiscussionPayload(
   channelId: string,
   threadId: string,
   message: string,
-  messageId: string,
+  requirementMessageId: string,
   mode: string,
+  restart = false,
 ): Record<string, unknown> {
   return {
     channel_id: channelId,
     thread_id: threadId,
     message,
-    message_id: messageId || undefined,
+    requirement_message_id: requirementMessageId || undefined,
     mode,
+    restart,
     source: "web-channel-discussion",
   };
 }

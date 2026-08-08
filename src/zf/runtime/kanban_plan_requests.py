@@ -371,8 +371,14 @@ def plan_request_gate(
     request_event_id: str,
     request_id: str,
     revision: object,
+    require_valid: bool = True,
 ) -> dict[str, Any]:
-    """Resolve one exact current Plan request without answering it."""
+    """Resolve one exact current Plan request without answering it.
+
+    Discussion may set ``require_valid=False`` so an agent can repair its own
+    current invalid draft. Answering and side-effect paths keep the default
+    fail-closed validity gate.
+    """
     event_list = list(events)
     source = next(
         (
@@ -397,7 +403,7 @@ def plan_request_gate(
             "status": "plan_request_revision_mismatch",
             "revision": source_revision,
         }
-    if not bool(request.get("valid")):
+    if require_valid and not bool(request.get("valid")):
         return {"ok": False, "status": "plan_request_invalid"}
     if _expired(str(request.get("expires_at") or "")):
         return {"ok": False, "status": "plan_request_expired"}

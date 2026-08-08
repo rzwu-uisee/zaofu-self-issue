@@ -6,9 +6,9 @@ _drain_transport_events called _apply_housekeeping inline after appending
 to the log, and then _react_to_events on the NEXT cycle read the same
 event from offset and housekept it again.
 
-Fix: the two inline sites add event.id to _processed_event_ids so the
-_react_to_events loop's own dedup (already present at line 368) covers
-the second path.
+Fix: synthesized usage events are fully processed inline, while transport
+events use a separate housekeeping dedup set so semantic signals remain
+reactive on the next watcher wake.
 
 Also covers Finding 3: orchestrator role now feeds cost tracker. Before
 the fix, _check_context_thresholds hard-skipped role.name=='orchestrator'
@@ -99,7 +99,8 @@ def _usage(ratio: float, timestamp: str, window: int = 200_000) -> UsageReport:
 
 class TestDrainNoDoubleCount:
     """_drain_transport_events appends + housekeeps inline; on the next
-    run_once cycle _react_to_events must NOT housekeep the same event."""
+    run_once cycle _react_to_events must NOT housekeep the same event, while
+    still allowing semantic transport signals to reach their handlers."""
 
     def test_single_drain_cost_equals_one_entry(self, state_dir):
         config = ZfConfig(
@@ -122,7 +123,7 @@ class TestDrainNoDoubleCount:
         after_1 = orch.cost_tracker.per_role_totals()["dev"].input_tokens
 
         # Cycle 2: nothing new; _react_to_events reads the drained event
-        # from offset but must skip housekeeping (already _processed).
+        # from offset but must skip its already-completed housekeeping.
         orch.run_once()
         after_2 = orch.cost_tracker.per_role_totals()["dev"].input_tokens
 

@@ -48,6 +48,18 @@ class CallResultAuthorityMixin:
         contract_digest = str(identity.get("contract_snapshot_digest") or "")
         if not task_id or not contract_ref or not contract_digest:
             return []
+        if (
+            adapted.schema_version == "verification-result.v1"
+            and self._is_candidate_contract_authority(
+                contract_ref,
+                contract_digest,
+            )
+        ):
+            return self._candidate_verification_currentness_issues(
+                identity=identity,
+                contract_ref=contract_ref,
+                contract_digest=contract_digest,
+            )
 
         task = TaskStore(self.state_dir / "kanban.json").get(task_id)
         if task is None:
@@ -197,6 +209,217 @@ class CallResultAuthorityMixin:
             ))
         return issues
 
+    def _is_candidate_contract_authority(
+        self,
+        contract_ref: str,
+        contract_digest: str,
+    ) -> bool:
+        try:
+            snapshot = hydrate_task_contract_snapshot(
+                self.state_dir,
+                {"ref": contract_ref, "sha256": contract_digest},
+            )
+        except TaskContractSnapshotError:
+            return False
+        return str(snapshot.get("authority_scope") or "") == "candidate"
+
+    def _candidate_verification_currentness_issues(
+        self,
+        *,
+        identity: Mapping[str, Any],
+        contract_ref: str,
+        contract_digest: str,
+    ) -> list[dict[str, str]]:
+        """Validate Candidate Verify without consulting the anchor Task contract."""
+
+        snapshot_expected = {
+            key: identity.get(key)
+            for key in (
+                "workflow_run_id",
+                "task_id",
+                "contract_revision",
+                "task_map_generation",
+                "base_commit",
+                "task_ref",
+                "plan_artifact_package_id",
+                "plan_artifact_package_ref",
+                "plan_artifact_package_digest",
+            )
+            if identity.get(key) not in (None, "")
+        }
+        try:
+            contract_snapshot = hydrate_task_contract_snapshot(
+                self.state_dir,
+                {"ref": contract_ref, "sha256": contract_digest},
+                expected=snapshot_expected,
+            )
+        except TaskContractSnapshotError as exc:
+            return [_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_contract_snapshot",
+                str(exc),
+            )]
+        if str(contract_snapshot.get("authority_scope") or "") != "candidate":
+            return [_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_contract_snapshot",
+                "candidate-verify requires candidate-scoped contract authority",
+            )]
+
+        target_ref = str(identity.get("target_snapshot_ref") or "")
+        target_digest = str(identity.get("target_snapshot_digest") or "")
+        target_commit = str(identity.get("target_commit") or "")
+        try:
+            target_snapshot = hydrate_target_snapshot(
+                self.state_dir,
+                {"ref": target_ref, "sha256": target_digest},
+                expected={
+                    **{
+                        key: contract_snapshot.get(key)
+                        for key in (
+                            "workflow_run_id",
+                            "task_id",
+                            "contract_revision",
+                            "task_map_generation",
+                            "base_commit",
+                            "task_ref",
+                            "plan_artifact_package_id",
+                            "plan_artifact_package_ref",
+                            "plan_artifact_package_digest",
+                        )
+                    },
+                    "contract_snapshot_ref": contract_ref,
+                    "contract_snapshot_digest": contract_digest,
+                    "target_commit": target_commit,
+                },
+            )
+        except TaskContractSnapshotError as exc:
+            return [_currentness_issue(
+                "control_result.target_snapshot_ref",
+                "stale_target_snapshot",
+                str(exc),
+            )]
+        if str(target_snapshot.get("authority_scope") or "") != "candidate":
+            return [_currentness_issue(
+                "control_result.target_snapshot_ref",
+                "stale_target_snapshot",
+                "candidate-verify requires candidate-scoped target authority",
+            )]
+
+        workflow_run_id = str(identity.get("workflow_run_id") or "")
+        current_candidate = self._latest_candidate_for_run(workflow_run_id)
+        if current_candidate is None:
+            return [_currentness_issue(
+                "control_result.target_commit",
+                "stale_target_commit",
+                "current candidate.ready is missing",
+            )]
+        candidate = (
+            current_candidate.payload
+            if isinstance(current_candidate.payload, Mapping)
+            else {}
+        )
+        issues: list[dict[str, str]] = []
+        expected_generation = str(candidate.get("task_map_generation") or "")
+        actual_generation = str(identity.get("task_map_generation") or "")
+        if expected_generation and not same_task_map_generation(
+            actual_generation,
+            expected_generation,
+        ):
+            issues.append(_currentness_issue(
+                "control_result.task_map_generation",
+                "stale_task_map_generation",
+                f"current candidate expects {expected_generation}",
+            ))
+        expected_target = str(
+            candidate.get("candidate_head_commit")
+            or candidate.get("candidate_head")
+            or ""
+        )
+        if expected_target and target_commit != expected_target:
+            issues.append(_currentness_issue(
+                "control_result.target_commit",
+                "stale_target_commit",
+                f"current frozen candidate targets {expected_target}, got {target_commit}",
+            ))
+        for field, candidate_field, code in (
+            ("base_commit", "candidate_base_commit", "stale_contract_snapshot"),
+            ("task_ref", "candidate_ref", "stale_contract_snapshot"),
+            (
+                "plan_artifact_package_id",
+                "plan_artifact_package_id",
+                "stale_plan_artifact_package",
+            ),
+            (
+                "plan_artifact_package_ref",
+                "plan_artifact_package_ref",
+                "stale_plan_artifact_package",
+            ),
+            (
+                "plan_artifact_package_digest",
+                "plan_artifact_package_digest",
+                "stale_plan_artifact_package",
+            ),
+        ):
+            expected = str(candidate.get(candidate_field) or "")
+            actual = str(contract_snapshot.get(field) or "")
+            if expected and actual != expected:
+                issues.append(_currentness_issue(
+                    f"control_result.{field}",
+                    code,
+                    f"current candidate expects {expected}, got {actual or '<missing>'}",
+                ))
+
+        contract_event_id = str(contract_snapshot.get("candidate_event_id") or "")
+        if contract_event_id != current_candidate.id:
+            issues.append(_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_contract_snapshot",
+                "candidate contract was not derived from current candidate.ready",
+            ))
+        freeze_descriptor = candidate.get("freeze_receipt_ref")
+        freeze_descriptor = (
+            freeze_descriptor if isinstance(freeze_descriptor, Mapping) else {}
+        )
+        source_refs = (
+            contract_snapshot.get("source_refs")
+            if isinstance(contract_snapshot.get("source_refs"), Mapping)
+            else {}
+        )
+        for field, actual, expected in (
+            (
+                "freeze_receipt_ref",
+                str(source_refs.get("freeze_receipt_ref") or ""),
+                str(freeze_descriptor.get("ref") or ""),
+            ),
+            (
+                "freeze_receipt_digest",
+                str(source_refs.get("freeze_receipt_digest") or ""),
+                str(candidate.get("freeze_receipt_digest") or ""),
+            ),
+        ):
+            if expected and actual != expected:
+                issues.append(_currentness_issue(
+                    "control_result.contract_snapshot_ref",
+                    "stale_contract_snapshot",
+                    f"current candidate {field} expects {expected}, got {actual}",
+                ))
+        expected_tasks = sorted(
+            str(item) for item in candidate.get("completed_task_ids") or []
+            if str(item)
+        )
+        actual_tasks = sorted(
+            str(item) for item in contract_snapshot.get("completed_task_ids") or []
+            if str(item)
+        )
+        if expected_tasks and actual_tasks != expected_tasks:
+            issues.append(_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_contract_snapshot",
+                "candidate contract completed_task_ids do not match current freeze",
+            ))
+        return issues
+
     def _plan_package_currentness_issues(
         self,
         envelope: Mapping[str, Any],
@@ -206,13 +429,20 @@ class CallResultAuthorityMixin:
             if isinstance(envelope.get("control_result"), Mapping)
             else {}
         )
-        if str(control_result.get("schema_version") or "") == "plan-synthesis-result.v1":
-            return []
         identity = (
             envelope.get("identity")
             if isinstance(envelope.get("identity"), Mapping)
             else {}
         )
+        if (
+            str(control_result.get("schema_version") or "")
+            == "plan-synthesis-result.v1"
+            or str(identity.get("attempt_domain") or "") == "plan"
+        ):
+            # Plan-domain calls produce the replacement candidate/package.  A
+            # prior package is an input to rework, not the output authority to
+            # which the replacement result must remain bound.
+            return []
         workflow_run_id = str(identity.get("workflow_run_id") or "")
         if not workflow_run_id:
             return []
@@ -275,6 +505,7 @@ class CallResultAuthorityMixin:
             ("child_id", "child_id", "stale_operation_identity"),
             ("run_id", "attempt_id", "stale_operation_identity"),
             ("attempt_domain", "attempt_domain", "stale_attempt_domain"),
+            ("result_semantics", "result_semantics", "stale_operation_identity"),
             ("role_instance", "producer_role", "stale_operation_identity"),
             ("plan_revision", "plan_revision", "stale_plan_revision"),
             (

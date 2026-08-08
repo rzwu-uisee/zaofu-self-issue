@@ -103,6 +103,38 @@ def test_plan_preview_reads_digest_and_task_map(tmp_path: Path) -> None:
     assert preview["actions"]["repair_chat"] == "chat-orchestrator"
 
 
+def test_plan_preview_resolves_legacy_zf_alias_to_custom_state_dir(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = tmp_path / "runtime-state"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    digest = state_dir / "artifacts" / "plan" / "digest.md"
+    digest.parent.mkdir(parents=True)
+    digest.write_text("# Custom State Plan\n", encoding="utf-8")
+    task_map = state_dir / "artifacts" / "plan" / "task-map.json"
+    task_map.write_text(
+        json.dumps({"tasks": [{"task_id": "T-CUSTOM", "title": "Ship"}]}),
+        encoding="utf-8",
+    )
+    _request_plan(
+        log,
+        ".zf/artifacts/plan/digest.md",
+        ".zf/artifacts/plan/task-map.json",
+    )
+
+    preview = build_plan_preview(
+        state_dir,
+        log.read_all(),
+        plan_id="evt-plan-1",
+        project_root=project_root,
+    )
+
+    assert preview["markdown"].startswith("# Custom State Plan")
+    assert preview["task_map_summary"]["tasks"][0]["task_id"] == "T-CUSTOM"
+
+
 def test_kanban_agent_cannot_propose_plan_approve() -> None:
     intent = infer_operator_intent(
         "approve this plan",

@@ -7,6 +7,7 @@ import pytest
 from zf.core.config.schema import GoalConfig, ProjectConfig, ZfConfig
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.wake_patterns import LAYER2_NOISE_EVENTS, WAKE_PATTERNS
 
@@ -82,6 +83,37 @@ def test_periodic_reconcile_recovers_missing_completion_claim(
     types = [event.type for event in log.read_all()]
     assert types.count("run.goal.completion.claimed") == 1
     assert types.count("run.goal.completed") == 1
+
+
+def test_explicit_blocked_goal_closure_cannot_claim_on_redrive(
+    tmp_path: Path,
+) -> None:
+    orchestrator, log = _orchestrator(tmp_path)
+    run_id = "R-BLOCKED-CLOSURE"
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id=run_id,
+        payload={"run_id": run_id},
+    ))
+    closure = ZfEvent(
+        type="goal.closure.synthesized",
+        correlation_id=run_id,
+        payload={
+            "goal_closure_result": {
+                "workflow_run_id": run_id,
+                "goal_id": run_id,
+                "verdict": "blocked",
+            },
+        },
+    )
+    log.append(closure)
+
+    orchestrator._maybe_complete_run_goal(closure)
+    orchestrator._reconcile_run_goal_completion()
+
+    types = [event.type for event in log.read_all()]
+    assert "run.goal.completion.claimed" not in types
+    assert "run.goal.completed" not in types
 
 
 def test_orchestrator_records_blocked_claim_without_completing(tmp_path: Path) -> None:
@@ -242,3 +274,56 @@ def test_run_once_rechecks_blocked_claim_after_action_effect_passes(
 def test_run_manager_tick_is_a_mechanical_completion_wake() -> None:
     assert "run.manager.tick.completed" in WAKE_PATTERNS
     assert "run.manager.tick.completed" in LAYER2_NOISE_EVENTS
+
+
+def test_delivery_request_preserves_candidate_pdd_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from zf.runtime.goal_completion_gate import _apply_delivery_request
+    from zf.runtime.ship import ShipResult, ShipService
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    captured: dict = {}
+
+    def _ship(self, **kwargs):  # noqa: ANN001, ARG001
+        captured.update(kwargs)
+        return ShipResult(
+            status="completed",
+            ok=True,
+            event_type="ship.completed",
+            payload={"final_commit": "a" * 40},
+        )
+
+    monkeypatch.setattr(ShipService, "ship", _ship)
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(runtime=SimpleNamespace(git=object())),
+        state_dir=state_dir,
+        project_root=tmp_path,
+        event_log=log,
+        event_writer=writer,
+    )
+    request = ZfEvent(
+        id="delivery-request",
+        type="run.delivery.requested",
+        correlation_id="RUN-X",
+        payload={
+            "run_id": "RUN-X",
+            "goal_id": "RUN-X",
+            "pdd_id": "PDD-X",
+            "claim_id": "claim-x",
+            "delivery_operation_id": "delivery-claim-x",
+            "candidate_ref": "refs/heads/candidate/PDD-X",
+            "target_commit": "a" * 40,
+        },
+    )
+
+    _apply_delivery_request(runtime, request)
+
+    assert captured["pdd_id"] == "PDD-X"
+    assert [event.type for event in log.read_all()] == ["run.delivery.settled"]

@@ -9,6 +9,7 @@ from pathlib import Path
 from zf.core.config.schema import ZfConfig
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.core.state.session import SessionStore
 from zf.core.task.schema import Task
 from zf.core.workflow.topology import WorkflowEventSets
@@ -185,11 +186,21 @@ class GracefulShutdown:
         (self.state_dir / "shutdown-requested").write_text("")
         self.steps_completed.append("shutdown_marker")
 
-        self.event_log.append(ZfEvent(type="loop.shutdown_requested", actor="zf-cli"))
+        shutdown_event = ZfEvent(
+            type="loop.shutdown_requested",
+            actor="zf-cli",
+        )
+        self.event_log.append(shutdown_event)
         self.steps_completed.append("emit_shutdown_event")
 
         self.session_store.update(runtime_state="shutdown_requested")
         self.steps_completed.append("stop_dispatch")
+
+        self._interrupt_workflow_operations(
+            reason="graceful_stop",
+            causation_id=shutdown_event.id,
+        )
+        self.steps_completed.append("interrupt_workflow_operations")
 
         # Step 4: in-flight task wait — best-effort, no blocking poll in the
         # deterministic kernel. The orchestrator's _processed_event_ids set
@@ -281,15 +292,22 @@ class GracefulShutdown:
         (self.state_dir / "shutdown-requested").write_text("")
         self.steps_completed.append("shutdown_marker")
 
-        self.event_log.append(ZfEvent(
+        shutdown_event = ZfEvent(
             type="loop.shutdown_requested",
             actor="zf-cli",
             payload={"mode": "fast"},
-        ))
+        )
+        self.event_log.append(shutdown_event)
         self.steps_completed.append("emit_shutdown_event")
 
         self.session_store.update(runtime_state="shutdown_requested")
         self.steps_completed.append("stop_dispatch")
+
+        self._interrupt_workflow_operations(
+            reason="fast_stop",
+            causation_id=shutdown_event.id,
+        )
+        self.steps_completed.append("interrupt_workflow_operations")
 
         requeued_inflight = self._emit_stale_inflight_cleanup()
         self.steps_completed.append("stale_inflight_cleanup")
@@ -364,6 +382,24 @@ class GracefulShutdown:
             )
         except Exception:
             pass
+
+    def _interrupt_workflow_operations(
+        self,
+        *,
+        reason: str,
+        causation_id: str,
+    ) -> None:
+        from zf.runtime.workflow_operation import (
+            interrupt_active_workflow_operations,
+        )
+
+        interrupt_active_workflow_operations(
+            state_dir=self.state_dir,
+            event_log=self.event_log,
+            event_writer=EventWriter(self.event_log),
+            reason=reason,
+            causation_id=causation_id,
+        )
 
     def _stop_feishu_projection_sidecar(self) -> None:
         """Cross-process teardown for the managed Feishu projector."""

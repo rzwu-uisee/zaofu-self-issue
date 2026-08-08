@@ -108,9 +108,15 @@ def _assignment_drift(node: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     if _status(node) not in _STARTED_STATES:
         return []
+    affinity = node.get("actual", {}).get("affinity")
+    if (
+        isinstance(affinity, dict)
+        and affinity.get("pooled_dispatch")
+        and not str(planned.get("owner_instance") or "").strip()
+    ):
+        return []
     if _role_prefix(assigned) == _role_prefix(owner_role):
         return []
-    affinity = node.get("actual", {}).get("affinity")
     if isinstance(affinity, dict):
         history = affinity.get("instances_history")
         if isinstance(history, list):

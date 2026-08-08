@@ -329,6 +329,19 @@ def _run_manager_tick_unlocked(
 
     deterministic_actions_applied = 0
     deterministic_actions_failed = 0
+    from zf.runtime.escalation_terminal import (
+        converge_unrecoverable_escalations,
+    )
+
+    escalation_terminals = converge_unrecoverable_escalations(
+        events,
+        writer=writer,
+        task_store=TaskStore(state_dir / "kanban.json"),
+        request_autoresearch=True,
+    )
+    if escalation_terminals:
+        deterministic_actions_applied += escalation_terminals
+        events = _read_events(state_dir, event_log=event_log)
     try:
         from zf.runtime.fanout_recovery import (
             recover_unrecorded_writer_fanout_results,
@@ -791,6 +804,7 @@ def build_run_manager_projection(
         goal=goal,
         repair_ledger=ledger,
         repair_merge_queue=merge_queue,
+        run_id=str(goal.get("run_id") or ""),
     )
     context = build_run_context_bundle(state_dir, events, project_root=project_root)
     workflow_resume = _workflow_resume_projection(state_dir, config, events)
@@ -841,6 +855,31 @@ def build_run_manager_projection(
             action=action_name,
             payload=action,
         )
+    candidate_action_candidates = _pending_candidate_rework_actions(
+        state_dir,
+        config,
+        events,
+        project_root=project_root,
+    )
+    legacy_replan_sources, legacy_replan_tasks = (
+        _legacy_candidate_replan_fallbacks(
+            rework_triage_actions,
+            candidate_action_candidates,
+            config=config,
+            events=events,
+        )
+    )
+    if legacy_replan_sources:
+        rework_triage_actions = [
+            action
+            for action in rework_triage_actions
+            if not (
+                str(action.get("failure_class") or "")
+                == "semantic_replan_route_unavailable"
+                and str(action.get("source_event_id") or "")
+                in legacy_replan_sources
+            )
+        ]
     triage_owned_tasks = active_rework_triage_task_ids(
         events,
         threshold=triage_threshold,
@@ -851,6 +890,7 @@ def build_run_manager_projection(
         for action in rework_triage_actions
         if str(action.get("task_id") or "")
     )
+    triage_owned_tasks.difference_update(legacy_replan_tasks)
     events_by_id = {event.id: event for event in events if event.id}
     triage_owned_fanouts: set[str] = set()
     for event in events:
@@ -873,6 +913,17 @@ def build_run_manager_projection(
         *_pending_workflow_task_actions(workflow_resume, events),
         *_pending_workflow_batch_actions(workflow_resume, events),
     ]
+    current_run_id = str(goal.get("run_id") or "")
+    if current_run_id:
+        workflow_actions = [
+            action
+            for action in workflow_actions
+            if _pending_action_matches_run(
+                action,
+                events=events,
+                run_id=current_run_id,
+            )
+        ]
     workflow_actions = [
         action for action in workflow_actions
         if (
@@ -916,12 +967,7 @@ def build_run_manager_projection(
         events,
     )
     candidate_actions = [
-        action for action in _pending_candidate_rework_actions(
-            state_dir,
-            config,
-            events,
-            project_root=project_root,
-        )
+        action for action in candidate_action_candidates
         if (
             not _candidate_rework_shadowed_by_workflow(action, workflow_actions)
             and str(action.get("fanout_id") or "") not in triage_owned_fanouts
@@ -1034,6 +1080,16 @@ def build_run_manager_projection(
         *selectable_actions,
         *unknown_gap_actions,
     ]
+    if current_run_id:
+        pending_actions = [
+            action
+            for action in pending_actions
+            if _pending_action_matches_run(
+                action,
+                events=events,
+                run_id=current_run_id,
+            )
+        ]
     pending_actions = [
         _action_with_problem_envelope(action)
         for action in pending_actions
@@ -1415,7 +1471,7 @@ def build_resident_agent_projection(
     prompt_payload = prompted.payload if prompted and isinstance(prompted.payload, dict) else {}
     prompt_sent = bool(prompt_payload.get("prompted")) if prompted else False
     prompt_age = _event_age_seconds(prompted, current) if prompted else None
-    stalled = bool(
+    silent = bool(
         enabled
         and spawned is not None
         and prompted is not None
@@ -1424,6 +1480,11 @@ def build_resident_agent_projection(
         and prompt_age is not None
         and prompt_age >= threshold_seconds
     )
+    # Resident advice is event-driven.  A healthy run may not need a
+    # recommendation for a long time, so silence alone is not a workflow or
+    # provider fault.  Pane/process health is owned by run_manager_watchdog and
+    # carries an explicit typed failure when recovery is warranted.
+    stalled = False
     if not enabled:
         status = "disabled"
     elif spawned is None:
@@ -1432,8 +1493,8 @@ def build_resident_agent_projection(
         status = "not_prompted"
     elif agent_event is not None:
         status = "observing"
-    elif stalled:
-        status = "stalled"
+    elif silent:
+        status = "silent"
     else:
         status = "pending_first_observation"
     source_event_ids = [
@@ -1454,9 +1515,11 @@ def build_resident_agent_projection(
             "enabled": enabled,
             "threshold_seconds": threshold_seconds,
             "prompt_age_seconds": prompt_age,
+            "silent": silent,
+            "silence_is_fault": False,
             "reason": (
-                "prompted resident agent did not emit observation, recommendation, or triage advice"
-                if stalled else ""
+                "resident agent has not emitted advice; silence alone is not a business fault"
+                if silent else ""
             ),
         },
         "spawned_event": _event_summary(spawned) if spawned else {},
@@ -1653,6 +1716,25 @@ def build_run_monitor_projection(
                 "assigned_to": assignee,
                 "title": str(getattr(task, "title", "") or ""),
             })
+    known_task_ids = {
+        str(item.get("task_id") or "")
+        for item in in_flight
+        if str(item.get("task_id") or "")
+    }
+    for task_id, context in _task_attempt_contexts(state_dir / "projections").items():
+        if task_id in known_task_ids or int(context.get("open_attempts") or 0) < 1:
+            continue
+        status = str(context.get("latest_state") or "running")
+        assignee = str(context.get("current_owner") or "")
+        if assignee:
+            lane_counts[assignee] += 1
+        in_flight.append({
+            "task_id": task_id,
+            "status": status,
+            "assigned_to": assignee,
+            "title": "",
+            "source_ref": str(context.get("source_ref") or ""),
+        })
     supervisor = _read_json(state_dir / "projections" / "supervisor" / "snapshot.json")
     attention = supervisor.get("attention_items") if isinstance(supervisor, dict) else []
     open_attention = [
@@ -2117,7 +2199,7 @@ def build_run_goal_projection(
     from zf.runtime.attempt_handoff_reducer import reduce_attempt_handoffs
 
     handoff = reduce_attempt_handoffs(
-        scoped_events,
+        all_events,
         workflow_run_id=selected_run_id,
     )
     if terminal_event is not None:
@@ -2190,6 +2272,10 @@ def run_goal_completion_claim_event(
         if isinstance(payload.get("goal_closure_result"), dict)
         else {}
     )
+    if cause.type == "goal.closure.synthesized" and closure_result:
+        verdict = str(closure_result.get("verdict") or "").strip()
+        if verdict and verdict != "passed":
+            return None
     artifact_result = (
         payload.get("artifact_delivery_result")
         if isinstance(payload.get("artifact_delivery_result"), dict)
@@ -2420,7 +2506,7 @@ def run_goal_completion_gate_event(
     )
     handoff = scope_handoff_snapshot(
         reduce_attempt_handoffs(
-            scoped_events,
+            events,
             workflow_run_id=run_id,
         ),
         task_map_generation=str(claim_payload.get("task_map_generation") or ""),
@@ -3198,6 +3284,8 @@ def build_repair_ledger(events: list[ZfEvent]) -> dict[str, Any]:
             RUN_MANAGER_REPAIR_REJECTED,
             RUN_MANAGER_REPAIR_BLOCKED,
             "autoresearch.repair.dispatched",
+            "autoresearch.repair.spawned",
+            "autoresearch.repair.terminated",
             "autoresearch.repair.dispatch_blocked",
             "autoresearch.repair.closeout.required",
         }:
@@ -3225,6 +3313,17 @@ def build_repair_ledger(events: list[ZfEvent]) -> dict[str, Any]:
         elif event.type == "autoresearch.repair.dispatched":
             row["status"] = "dispatched"
             row["next_allowed_action"] = "wait_for_closeout"
+        elif event.type == "autoresearch.repair.spawned":
+            row["status"] = "running"
+            row["next_allowed_action"] = "wait_for_repair_terminal"
+        elif event.type == "autoresearch.repair.terminated":
+            terminal_status = str(payload.get("status") or "failed")
+            row["status"] = terminal_status
+            row["next_allowed_action"] = (
+                "wait_for_closeout"
+                if terminal_status == "completed"
+                else "human_escalate"
+            )
         elif event.type == "autoresearch.repair.closeout.required":
             row["status"] = "closeout_required"
             row["next_allowed_action"] = "operator_merge_or_reject"
@@ -3269,6 +3368,7 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
         row = entries.setdefault(key, {
             "queue_id": key,
             "fingerprint": _fingerprint(payload, fallback=key),
+            "attempt": _safe_int(payload.get("attempt")),
             "candidate_id": str(payload.get("candidate_id") or ""),
             "candidate_path": str(payload.get("candidate_path") or ""),
             "branch": str(payload.get("branch") or payload.get("candidate_branch") or ""),
@@ -3284,6 +3384,14 @@ def build_repair_merge_queue(events: list[ZfEvent]) -> dict[str, Any]:
             if isinstance(payload.get("risk_classification"), dict) else {},
             "verification_plan": payload.get("verification_plan")
             if isinstance(payload.get("verification_plan"), list) else [],
+            "repair_contract_ref": payload.get("repair_contract_ref")
+            if isinstance(payload.get("repair_contract_ref"), dict) else {},
+            "repair_contract_digest": str(
+                payload.get("repair_contract_digest") or ""
+            ),
+            "repair_contract_required": bool(
+                payload.get("repair_contract_required", False)
+            ),
             "continuation": payload.get("continuation")
             if isinstance(payload.get("continuation"), dict) else {},
             "restart_strategy": str(payload.get("restart_strategy") or ""),
@@ -3420,10 +3528,11 @@ def build_run_completion_profile(
     goal: dict[str, Any],
     repair_ledger: dict[str, Any],
     repair_merge_queue: dict[str, Any],
+    run_id: str = "",
 ) -> dict[str, Any]:
     completion_events = events
     completion_repair_merge_queue = repair_merge_queue
-    current_run_id = str(goal.get("run_id") or "").strip()
+    current_run_id = str(run_id or goal.get("run_id") or "").strip()
     if current_run_id:
         from zf.runtime.run_scope import events_for_run
 
@@ -4541,6 +4650,8 @@ def _emit_autoresearch_request(
     request_id = _run_manager_autoresearch_request_id(action)
     if _request_id_seen(writer.event_log, RUN_MANAGER_AUTORESEARCH_REQUESTED, request_id):
         return False
+    if _autoresearch_inflight_request_ids(writer.event_log.read_all()):
+        return False
     try:
         context_refs = _write_run_manager_context_sidecars(
             state_dir=state_dir,
@@ -5072,6 +5183,7 @@ def _execute_controlled_run_action(
         )
     if action_name == "repair-closeout-validate":
         return _execute_repair_closeout_validate(
+            state_dir=state_dir,
             writer=writer,
             action=action,
             causation_id=causation_id,
@@ -5233,14 +5345,29 @@ def _execute_orchestrator_triage_request(
         causation_id=causation_id,
         payload={"schema_version": "run-manager.action.v1", **_action_payload(action)},
     )
+    from zf.runtime.orchestrator_agent_semantic_failure import (
+        semantic_failure_request_type,
+    )
+
+    request_type = semantic_failure_request_type(
+        config,
+        flow_kind=str(action.get("flow_kind") or ""),
+        source=action,
+    )
     requested = writer.emit(
-        TRIAGE_REQUESTED,
+        request_type,
         actor="run-manager",
         task_id=str(action.get("task_id") or "") or None,
         causation_id=planned.id,
         correlation_id=str(action.get("request_id") or "") or None,
         payload={
             "schema_version": "orchestrator.rework-triage.request.v1",
+            "problem_class": "semantic",
+            "workflow_run_id": str(action.get("workflow_run_id") or ""),
+            "flow_kind": str(action.get("flow_kind") or ""),
+            "stage_id": str(action.get("stage_id") or ""),
+            "pattern_id": str(action.get("pattern_id") or ""),
+            "request_kind": str(action.get("request_kind") or ""),
             "request_id": str(action.get("request_id") or ""),
             "checkpoint_id": str(action.get("checkpoint_id") or ""),
             "task_id": str(action.get("task_id") or ""),
@@ -5783,6 +5910,18 @@ def _execute_worker_lifecycle_recover(
                 str(value) for value in action.get("source_event_ids") or []
                 if str(value).strip()
             ],
+            "workflow_run_id": str(action.get("workflow_run_id") or ""),
+            "operation_id": str(action.get("operation_id") or ""),
+            "attempt_id": str(action.get("attempt_id") or ""),
+            "lease_id": str(action.get("lease_id") or ""),
+            "dispatch_id": str(action.get("dispatch_id") or ""),
+            "identity_version": str(action.get("identity_version") or ""),
+            "placement_epoch": int(action.get("placement_epoch") or 0),
+            "recovery_decision_owner": "run_manager",
+            "recovery_effect_owner": str(
+                action.get("recovery_effect_owner")
+                or "workflow_runtime_coordinator"
+            ),
         },
     )
     outcome = writer.emit(
@@ -5881,10 +6020,15 @@ def _execute_candidate_rework_apply(
 
 def _execute_repair_closeout_validate(
     *,
+    state_dir: Path,
     writer: EventWriter,
     action: dict[str, Any],
     causation_id: str,
 ) -> str:
+    from zf.runtime.repair_dispatch import (
+        RepairContractError,
+        validate_repair_contract_action,
+    )
     from zf.runtime.run_manager_repair_validation import execute_repair_verification_plan
 
     planned = writer.emit(
@@ -5896,10 +6040,33 @@ def _execute_repair_closeout_validate(
             **_action_payload(action),
         },
     )
-    result = execute_repair_verification_plan(
-        worktree=str(action.get("worktree_path") or action.get("worktree") or ""),
-        verification_plan=list(action.get("verification_plan") or []),
-    )
+    contract_digest = str(action.get("repair_contract_digest") or "")
+    if bool(action.get("repair_contract_required", False)):
+        try:
+            validate_repair_contract_action(state_dir, action)
+        except RepairContractError as exc:
+            result = {
+                "schema_version": "run-manager.repair-validation-result.v1",
+                "ok": False,
+                "status": "failed",
+                "reason": exc.code,
+                "worktree": str(action.get("worktree_path") or ""),
+                "results": [],
+                "repair_contract_digest": contract_digest,
+            }
+        else:
+            result = execute_repair_verification_plan(
+                worktree=str(
+                    action.get("worktree_path") or action.get("worktree") or ""
+                ),
+                verification_plan=list(action.get("verification_plan") or []),
+            )
+            result["repair_contract_digest"] = contract_digest
+    else:
+        result = execute_repair_verification_plan(
+            worktree=str(action.get("worktree_path") or action.get("worktree") or ""),
+            verification_plan=list(action.get("verification_plan") or []),
+        )
     ok = bool(result.get("ok"))
     event_type = RUN_MANAGER_ACTION_APPLIED if ok else RUN_MANAGER_ACTION_FAILED
     outcome = writer.emit(
@@ -5932,6 +6099,10 @@ def _execute_repair_closeout_apply(
     action: dict[str, Any],
     causation_id: str,
 ) -> str:
+    from zf.runtime.repair_dispatch import (
+        RepairContractError,
+        validate_repair_contract_action,
+    )
     from zf.runtime.self_repair_runner import harness_root
     from zf.runtime.source_repair_apply import apply_verified_checkpoint_repair
 
@@ -5944,6 +6115,41 @@ def _execute_repair_closeout_apply(
             **_action_payload(action),
         },
     )
+    if bool(action.get("repair_contract_required", False)):
+        try:
+            validate_repair_contract_action(state_dir, action)
+        except RepairContractError as exc:
+            writer.emit(
+                RUN_MANAGER_ACTION_FAILED,
+                actor="run-manager",
+                causation_id=planned.id,
+                payload={
+                    "schema_version": "run-manager.action.v1",
+                    **_action_payload(action),
+                    "status": "failed",
+                    "reason": exc.code,
+                },
+            )
+            return "failed"
+        validation_result = action.get("validation_result")
+        validation_result = (
+            validation_result if isinstance(validation_result, dict) else {}
+        )
+        if str(validation_result.get("repair_contract_digest") or "") != str(
+            action.get("repair_contract_digest") or ""
+        ):
+            writer.emit(
+                RUN_MANAGER_ACTION_FAILED,
+                actor="run-manager",
+                causation_id=planned.id,
+                payload={
+                    "schema_version": "run-manager.action.v1",
+                    **_action_payload(action),
+                    "status": "failed",
+                    "reason": "repair_validation_contract_mismatch",
+                },
+            )
+            return "failed"
     queue_payload = {
         "schema_version": "run-manager.repair-merge.v1",
         **_action_payload(action),
@@ -5981,6 +6187,7 @@ def _execute_repair_closeout_apply(
         deny_paths=_string_list(action.get("deny_paths")),
     )
     if not bool(result.get("ok")):
+        blocked = str(result.get("status") or "") == "blocked"
         review = writer.emit(
             RUN_MANAGER_REPAIR_MERGE_NEEDS_REVIEW,
             actor="run-manager",
@@ -5993,18 +6200,18 @@ def _execute_repair_closeout_apply(
             },
         )
         writer.emit(
-            RUN_MANAGER_ACTION_FAILED,
+            RUN_MANAGER_ACTION_BLOCKED if blocked else RUN_MANAGER_ACTION_FAILED,
             actor="run-manager",
             causation_id=review.id,
             payload={
                 "schema_version": "run-manager.action.v1",
                 **_action_payload(action),
-                "status": "failed",
+                "status": "blocked" if blocked else "failed",
                 "reason": str(result.get("reason") or "repair_apply_failed"),
                 "apply_receipt": result,
             },
         )
-        return "failed"
+        return "blocked" if blocked else "failed"
     if project_root is None:
         reason = "project_root_missing_for_control_plane_restart"
         review = writer.emit(
@@ -6615,16 +6822,19 @@ def _settle_pending_action_effects(
         effect_id = str(payload.get("effect_id") or "")
         if not effect_id or effect_id in terminal_by_id:
             continue
+        recovery_event_type = {
+            "goal_closure_identity_invalid": "flow.goal.closed",
+            "goal_closure_aggregate_schema_failed": "goal.closure.synthesized",
+        }.get(str(payload.get("failure_class") or ""))
         if (
             str(payload.get("action") or "") == "fanout-aggregate-rebuild"
-            and str(payload.get("failure_class") or "")
-            == "goal_closure_identity_invalid"
+            and recovery_event_type
         ):
             observed = next(
                 (
                     candidate
                     for candidate in events[index + 1:]
-                    if candidate.type == "flow.goal.closed"
+                    if candidate.type == recovery_event_type
                     and _effect_event_matches_scope(candidate, payload)
                 ),
                 None,
@@ -6643,7 +6853,7 @@ def _settle_pending_action_effects(
                         "observed_event_id": observed.id,
                         "observed_event_type": observed.type,
                         "status": "passed",
-                        "reason": "Goal closure identity recovery observed",
+                        "reason": "Goal closure aggregate recovery observed",
                     },
                 )
                 terminal_by_id.add(effect_id)
@@ -7345,6 +7555,7 @@ def _pending_workflow_task_actions(
             "expected_next_role": str(checkpoint.get("expected_next_role") or ""),
             "source_event_id": str(checkpoint.get("last_trusted_event_id") or ""),
             "source_event_type": str(checkpoint.get("source_event_type") or ""),
+            "workflow_run_id": str(checkpoint.get("workflow_run_id") or ""),
             "blocking_event_id": str(checkpoint.get("blocking_event_id") or ""),
             "source_event_ids": [
                 str(value) for value in checkpoint.get("evidence_event_ids") or []
@@ -7365,6 +7576,38 @@ def _pending_workflow_task_actions(
         )
         out.append(action)
     return out
+
+
+def _pending_action_matches_run(
+    action: dict[str, Any],
+    *,
+    events: list[ZfEvent],
+    run_id: str,
+) -> bool:
+    """Keep unscoped legacy actions, but exclude proven older-run work."""
+
+    from zf.runtime.run_scope import resolve_run_for_event, resolve_run_id
+
+    for key in ("workflow_run_id", "run_id", "trace_id"):
+        resolved = resolve_run_id(events, str(action.get(key) or ""))
+        if resolved:
+            return resolved == run_id
+    event_ids = [
+        str(action.get("source_event_id") or ""),
+        str(action.get("blocking_event_id") or ""),
+        *(
+            str(value or "")
+            for value in action.get("source_event_ids") or []
+        ),
+    ]
+    wanted = {value for value in event_ids if value}
+    for event in events:
+        if event.id not in wanted:
+            continue
+        resolved = resolve_run_for_event(events, event)
+        if resolved:
+            return resolved == run_id
+    return True
 
 
 def _pending_workflow_batch_actions(
@@ -7586,14 +7829,25 @@ def _pending_repair_validation_actions(
             "safe_resume_action": "repair_closeout_validate",
             "queue_id": str(item.get("queue_id") or ""),
             "fingerprint": str(item.get("fingerprint") or ""),
+            "attempt": _safe_int(item.get("attempt")),
             "candidate_id": str(item.get("candidate_id") or ""),
             "branch": str(item.get("branch") or ""),
             "worktree_path": str(item.get("worktree_path") or ""),
+            "base_commit": str(item.get("base_commit") or ""),
             "source_commit": str(item.get("source_commit") or ""),
             "source_title": str(item.get("source_title") or ""),
+            "changed_files": _string_list(item.get("changed_files")),
             "risk_classification": item.get("risk_classification")
             if isinstance(item.get("risk_classification"), dict) else {},
             "verification_plan": plan,
+            "repair_contract_ref": item.get("repair_contract_ref")
+            if isinstance(item.get("repair_contract_ref"), dict) else {},
+            "repair_contract_digest": str(
+                item.get("repair_contract_digest") or ""
+            ),
+            "repair_contract_required": bool(
+                item.get("repair_contract_required", False)
+            ),
             "continuation": item.get("continuation")
             if isinstance(item.get("continuation"), dict) else {},
             "failure_class": "self_repair_validation",
@@ -7667,6 +7921,7 @@ def _pending_repair_apply_actions(
             "safe_resume_action": "repair_closeout_apply",
             "queue_id": str(item.get("queue_id") or ""),
             "fingerprint": str(item.get("fingerprint") or ""),
+            "attempt": _safe_int(item.get("attempt")),
             "candidate_id": str(item.get("candidate_id") or ""),
             "branch": str(item.get("branch") or ""),
             "worktree_path": str(item.get("worktree_path") or ""),
@@ -7683,6 +7938,16 @@ def _pending_repair_apply_actions(
             "validation_event_id": str(validation.get("event_id") or ""),
             "validation_result": validation.get("result")
             if isinstance(validation.get("result"), dict) else {},
+            "verification_plan": item.get("verification_plan")
+            if isinstance(item.get("verification_plan"), list) else [],
+            "repair_contract_ref": item.get("repair_contract_ref")
+            if isinstance(item.get("repair_contract_ref"), dict) else {},
+            "repair_contract_digest": str(
+                item.get("repair_contract_digest") or ""
+            ),
+            "repair_contract_required": bool(
+                item.get("repair_contract_required", False)
+            ),
             "continuation": continuation,
             "continuation_checkpoint_id": continuation_checkpoint_id,
             "continuation_safe_resume_action": continuation_safe_action,
@@ -7798,7 +8063,7 @@ def _event_matches_continuation_scope(
 
 _INFRA_ACTORS = frozenset({
     "zf-cli", "run-manager", "zf-supervisor", "zf-runtime",
-    "zf-autoresearch", "operator", "",
+    "zf-autoresearch", "zf-autoresearch-resident", "operator", "",
 })
 
 
@@ -7840,6 +8105,8 @@ def _run_has_recent_worker_activity(
 
 def _pending_failure_closeout_activation_actions(events: list[ZfEvent]) -> list[dict[str, Any]]:
     if _current_run_completed_closeout(events) is not None:
+        return []
+    if _autoresearch_inflight_request_ids(events):
         return []
     # T1 (2026-07-08 E2E): defer owner escalation while the run is actively
     # progressing. failure-closeout is the common chokepoint for premature
@@ -8315,6 +8582,17 @@ def _pending_semantic_event_actions(
     for idx, event in enumerate(events):
         event_payload = event.payload if isinstance(event.payload, dict) else {}
         if (
+            event.type == "task.attempt.failed"
+            and str(event_payload.get("identity_version") or "")
+            == "operation-v2"
+            and str(event_payload.get("recovery_owner") or "")
+            == "run_manager"
+            and event_payload.get("retryable") is True
+        ):
+            # The canonical TaskAttempt store owns the exact mechanical
+            # recovery. A semantic diagnosis here would create a second owner.
+            continue
+        if (
             event.type == "autoresearch.trigger.accepted"
             and str(event_payload.get("source") or "")
             == "autoresearch.invocation.accepted"
@@ -8354,7 +8632,63 @@ def _pending_semantic_event_actions(
             ):
                 continue
         spec = spec_for_event(event.type)
-        if event.type in RUN_MANAGER_PENDING_EVENT_TYPES:
+        if _is_blocked_goal_closure_schema_failure(event):
+            if spec is None:
+                continue
+            action = _semantic_event_diagnostic_action(event, spec)
+            blocked_payload = event_payload.get("blocked_event_payload")
+            blocked_payload = (
+                blocked_payload if isinstance(blocked_payload, dict) else {}
+            )
+            action.update({
+                "action": "fanout-aggregate-rebuild",
+                "safe_resume_action": "fanout_aggregate_rebuild",
+                "failure_class": "goal_closure_aggregate_schema_failed",
+                "action_policy": "auto_decide",
+                "intervention_class": "auto_recover",
+                "summary": (
+                    "Rebuild the blocked goal closure aggregate from its "
+                    "admitted child control result."
+                ),
+                "source_event_id": event.id,
+                "aggregate_source_event_id": str(
+                    event_payload.get("blocked_event_id") or ""
+                ),
+                "fanout_id": str(
+                    event_payload.get("fanout_id")
+                    or blocked_payload.get("fanout_id")
+                    or ""
+                ),
+                "workflow_run_id": str(
+                    event_payload.get("workflow_run_id")
+                    or blocked_payload.get("workflow_run_id")
+                    or event.correlation_id
+                    or ""
+                ),
+                "goal_id": str(
+                    event_payload.get("goal_id")
+                    or blocked_payload.get("goal_id")
+                    or ""
+                ),
+                "expected_downstream_events": [
+                    "fanout.aggregate.rebuild.requested",
+                    "goal.closure.synthesized",
+                ],
+                "verify_condition": (
+                    "expected_downstream_event:goal.closure.synthesized"
+                ),
+                "effect_expected_events": ["goal.closure.synthesized"],
+                "effect_failure_events": [
+                    "goal.closure.synthesis.failed",
+                    "discriminator.failed",
+                ],
+                "suggested_action": {
+                    "kind": "fanout-aggregate-rebuild",
+                    "event_type": event.type,
+                    "scope": _semantic_event_scope(event, event_payload),
+                },
+            })
+        elif event.type in RUN_MANAGER_PENDING_EVENT_TYPES:
             if spec is None or spec.event_class != "expected_negative":
                 continue
             action = _semantic_event_diagnostic_action(event, spec)
@@ -8390,9 +8724,29 @@ def _pending_semantic_event_actions(
     return out[:10]
 
 
+def _is_blocked_goal_closure_schema_failure(event: ZfEvent) -> bool:
+    if event.type != "discriminator.failed":
+        return False
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    blocked_payload = payload.get("blocked_event_payload")
+    return (
+        str(payload.get("blocked_event_type") or "")
+        == "goal.closure.synthesized"
+        and isinstance(blocked_payload, dict)
+        and bool(
+            str(payload.get("fanout_id") or blocked_payload.get("fanout_id") or "")
+        )
+        and "EventSchemaD" in {
+            str(item) for item in payload.get("failed_d", [])
+        }
+    )
+
+
 def _is_unknown_actionable_workflow_event(event: ZfEvent) -> bool:
     event_type = str(event.type or "")
     if not looks_actionable_event(event_type):
+        return False
+    if _is_generic_stage_replan_event(event):
         return False
     # These are Run Manager / control-loop feedback events, not workflow
     # producer outputs. Let the existing no-progress and repair ledgers consume
@@ -8407,6 +8761,21 @@ def _is_unknown_actionable_workflow_event(event: ZfEvent) -> bool:
     )):
         return False
     return True
+
+
+def _is_generic_stage_replan_event(event: ZfEvent) -> bool:
+    """Recognize a compiled Generic stage failure owned by the Kernel replan."""
+
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    stage_id = str(payload.get("stage_id") or "").strip()
+    digest = str(payload.get("generic_workflow_contract_digest") or "").strip()
+    return bool(
+        str(payload.get("flow_kind") or "").strip().lower() == "workflow"
+        and stage_id
+        and event.type == f"{stage_id}.failed"
+        and len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
 
 
 def _unknown_actionable_event_diagnostic_action(event: ZfEvent) -> dict[str, Any]:
@@ -8965,6 +9334,84 @@ def _pending_candidate_rework_actions(
     return out
 
 
+def _legacy_candidate_replan_fallbacks(
+    triage_actions: list[dict[str, Any]],
+    candidate_actions: list[dict[str, Any]],
+    *,
+    config: ZfConfig,
+    events: list[ZfEvent],
+) -> tuple[set[str], set[str]]:
+    """Prefer an anchored legacy replan when the semantic route is unavailable."""
+
+    unavailable_by_source = {
+        str(action.get("source_event_id") or ""): str(
+            action.get("task_id") or ""
+        )
+        for action in triage_actions
+        if (
+            str(action.get("failure_class") or "")
+            == "semantic_replan_route_unavailable"
+            and str(action.get("source_event_id") or "")
+        )
+    }
+    if not unavailable_by_source:
+        return set(), set()
+    sources: set[str] = set()
+    tasks: set[str] = set()
+    for action in candidate_actions:
+        source_event_id = str(action.get("source_event_id") or "")
+        if (
+            source_event_id not in unavailable_by_source
+            or str(action.get("candidate_rework_action") or "") != "replan"
+            or not _legacy_replan_trigger_is_anchored(
+                action,
+                config=config,
+                events=events,
+            )
+        ):
+            continue
+        sources.add(source_event_id)
+        task_id = unavailable_by_source[source_event_id]
+        if task_id:
+            tasks.add(task_id)
+    return sources, tasks
+
+
+def _legacy_replan_trigger_is_anchored(
+    action: dict[str, Any],
+    *,
+    config: ZfConfig,
+    events: list[ZfEvent],
+) -> bool:
+    replan = getattr(config.workflow, "admission_replan", None)
+    trigger = str(getattr(replan, "resynth_trigger", "") or "").strip()
+    if not getattr(replan, "enabled", False) or not trigger:
+        return False
+    trace_id = str(action.get("trace_id") or "").strip()
+    pdd_id = str(action.get("pdd_id") or action.get("feature_id") or "").strip()
+    if not trace_id and not pdd_id:
+        return False
+    for event in reversed(events):
+        if event.type != trigger:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        event_trace = str(
+            payload.get("workflow_run_id")
+            or payload.get("trace_id")
+            or event.correlation_id
+            or ""
+        ).strip()
+        event_pdd = str(
+            payload.get("pdd_id") or payload.get("feature_id") or ""
+        ).strip()
+        if trace_id and event_trace != trace_id:
+            continue
+        if pdd_id and event_pdd != pdd_id:
+            continue
+        return True
+    return False
+
+
 def _pending_candidate_recovery_actions(
     state_dir: Path,
     config: ZfConfig,
@@ -9026,6 +9473,8 @@ def _pending_attention_diagnostic_actions(
         if not isinstance(item, dict):
             continue
         if str(item.get("status") or "open") not in {"", "open", "unacknowledged"}:
+            continue
+        if _attention_is_informational(item):
             continue
         route = str(item.get("suggested_route") or item.get("recommended_route") or "")
         owner_route = str(item.get("owner_route") or "")
@@ -9098,6 +9547,26 @@ def _pending_attention_diagnostic_actions(
         if len(out) >= 10:
             break
     return out
+
+
+def _attention_is_informational(item: dict[str, Any]) -> bool:
+    envelope = item.get("problem_envelope")
+    envelope = envelope if isinstance(envelope, dict) else {}
+    action_policy = str(
+        item.get("action_policy") or envelope.get("action_policy") or ""
+    ).strip()
+    intervention = str(
+        item.get("intervention_class")
+        or envelope.get("intervention_class")
+        or ""
+    ).strip()
+    recovery_policy = str(
+        item.get("recovery_policy") or envelope.get("recovery_policy") or ""
+    ).strip()
+    return (
+        action_policy == "informational"
+        or (intervention == "observe" and recovery_policy == "none")
+    )
 
 
 def _attention_diagnostic_action(
@@ -9727,15 +10196,19 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
         "pdd_id": str(action.get("pdd_id") or ""),
         "feature_id": str(action.get("feature_id") or ""),
         "stage_id": str(action.get("stage_id") or ""),
+        "pattern_id": str(action.get("pattern_id") or ""),
+        "request_kind": str(action.get("request_kind") or ""),
         "trace_id": str(action.get("trace_id") or ""),
         "run_id": str(action.get("run_id") or ""),
         "workflow_run_id": str(action.get("workflow_run_id") or ""),
+        "flow_kind": str(action.get("flow_kind") or ""),
         "diff_ref": str(action.get("diff_ref") or ""),
         "source_event_id": str(action.get("source_event_id") or ""),
         "source_event_type": str(action.get("source_event_type") or ""),
         "mutating_resume_supported": bool(action.get("mutating_resume_supported")),
         "queue_id": str(action.get("queue_id") or ""),
         "fingerprint": str(action.get("fingerprint") or ""),
+        "attempt": _safe_int(action.get("attempt")),
         "request_id": str(action.get("request_id") or ""),
         "operation_key": str(action.get("operation_key") or ""),
         "operation_precondition": (
@@ -9775,6 +10248,14 @@ def _action_payload(action: dict[str, Any]) -> dict[str, Any]:
         "source_title": str(action.get("source_title") or ""),
         "verification_plan": action.get("verification_plan")
         if isinstance(action.get("verification_plan"), list) else [],
+        "repair_contract_ref": action.get("repair_contract_ref")
+        if isinstance(action.get("repair_contract_ref"), dict) else {},
+        "repair_contract_digest": str(
+            action.get("repair_contract_digest") or ""
+        ),
+        "repair_contract_required": bool(
+            action.get("repair_contract_required", False)
+        ),
         "risk_classification": action.get("risk_classification")
         if isinstance(action.get("risk_classification"), dict) else {},
         "continuation": action.get("continuation")
@@ -10158,6 +10639,8 @@ def _is_run_level_recovery_source(payload: dict[str, Any], event_type: str) -> b
         marker in text
         for marker in (
             "candidate rework exhausted",
+            "stage replan cap exhausted",
+            "goal idle rescan",
             "reviewer findings unresolved",
             "resident run manager",
             "run_manager",
@@ -10738,6 +11221,17 @@ def _event_age_seconds(event: ZfEvent | None, now: datetime) -> int | None:
 def _derive_phase(events: list[ZfEvent]) -> str:
     for event in reversed(events):
         etype = event.type
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        stage_phase = _phase_from_stage_identity(
+            str(payload.get("stage_id") or payload.get("producer_stage_id") or "")
+        )
+        if stage_phase and etype in {
+            "fanout.started",
+            "fanout.child.dispatched",
+            "workflow.operation.requested",
+            "workflow.operation.started",
+        }:
+            return stage_phase
         if (
             etype.endswith(".passed")
             or etype in {
@@ -10764,6 +11258,25 @@ def _derive_phase(events: list[ZfEvent]) -> str:
         if etype.startswith("scan.") or etype.endswith(".scan.requested"):
             return "scan"
     return "unknown"
+
+
+def _phase_from_stage_identity(stage_id: str) -> str:
+    identity = stage_id.strip().lower()
+    if not identity:
+        return ""
+    if "scan" in identity:
+        return "scan"
+    if "plan" in identity:
+        return "plan"
+    if "verify" in identity or "test" in identity:
+        return "verify"
+    if "review" in identity or "critic" in identity:
+        return "review"
+    if any(token in identity for token in ("judge", "closure", "final")):
+        return "judge"
+    if any(token in identity for token in ("impl", "dev", "writer", "rework")):
+        return "impl"
+    return ""
 
 
 def _next_wait(state: str, pending_actions: list[dict[str, Any]], open_attention: list[dict[str, Any]]) -> str:
@@ -11113,6 +11626,50 @@ def _autoresearch_result_request_id(event: ZfEvent, payload: dict[str, Any]) -> 
         or event.correlation_id
         or ""
     )
+
+
+def _autoresearch_inflight_request_ids(events: list[ZfEvent]) -> set[str]:
+    """Return diagnosis requests that do not have a bounded terminal answer."""
+
+    request_types = {
+        RUN_MANAGER_AUTORESEARCH_REQUESTED,
+        "autoresearch.invocation.requested",
+        "autoresearch.invocation.accepted",
+        "autoresearch.trigger.accepted",
+        "autoresearch.loop.requested",
+        "autoresearch.loop.accepted",
+        "autoresearch.loop.started",
+    }
+    terminal_types = {
+        "autoresearch.invocation.rejected",
+        "autoresearch.loop.completed",
+        "autoresearch.loop.failed",
+        "autoresearch.loop.skipped",
+        RUN_MANAGER_AUTORESEARCH_CONSUMED,
+    }
+    requested: set[str] = set()
+    terminal: set[str] = set()
+    request_by_checkpoint: dict[str, str] = {}
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type in request_types:
+            request_id = _autoresearch_result_request_id(event, payload)
+            if request_id:
+                requested.add(request_id)
+                checkpoint_id = str(payload.get("checkpoint_id") or "")
+                if checkpoint_id:
+                    request_by_checkpoint[checkpoint_id] = request_id
+        elif event.type in terminal_types:
+            request_id = _autoresearch_result_request_id(event, payload)
+            if request_id:
+                terminal.add(request_id)
+        elif event.type in {RUN_MANAGER_ACTION_FAILED, RUN_MANAGER_ACTION_BLOCKED}:
+            request_id = request_by_checkpoint.get(
+                str(payload.get("checkpoint_id") or "")
+            )
+            if request_id:
+                terminal.add(request_id)
+    return requested - terminal
 
 
 def _autoresearch_proposal_refs(payload: dict[str, Any]) -> dict[str, Any]:

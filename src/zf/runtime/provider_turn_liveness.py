@@ -37,15 +37,27 @@ def active_codex_turn(
             active.clear()
             recycling_turns = None
             continue
+        if (
+            event.type == "role.lifecycle.dormant"
+            and str(payload.get("instance_id") or "") == instance_id
+        ):
+            active.clear()
+            recycling_turns = None
+            continue
         if event.actor != instance_id:
             continue
         if event.type not in {
             "codex.hook.user_prompt_submit",
             "codex.hook.stop",
             "provider.turn.closed",
+            "worker.respawned",
             "worker.recycling",
             "worker.recycled",
         }:
+            continue
+        if event.type == "worker.respawned":
+            active.clear()
+            recycling_turns = None
             continue
         if event.type == "worker.recycling":
             recycling_turns = set(active)

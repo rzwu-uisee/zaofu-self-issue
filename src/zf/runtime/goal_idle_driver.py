@@ -15,6 +15,10 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.workflow_operation import (
+    TERMINAL_OPERATION_STATUSES,
+    reduce_workflow_operations,
+)
 
 GOAL_RESCAN_EVENT = "goal.rescan.requested"
 _GOAL_RESCAN_TERMINALS = frozenset({
@@ -57,6 +61,18 @@ def maybe_emit_goal_idle_rescan(
     }
     projection = build_run_goal_projection(events)
     if str(projection.get("status")) != "active":
+        state.goal_idle_ticks = 0
+        return ""
+    run_id = str(projection.get("run_id") or "")
+    operations = reduce_workflow_operations(
+        events,
+        workflow_run_id=run_id,
+    )
+    if any(
+        str(operation.get("status") or "")
+        not in TERMINAL_OPERATION_STATUSES
+        for operation in operations.values()
+    ):
         state.goal_idle_ticks = 0
         return ""
 

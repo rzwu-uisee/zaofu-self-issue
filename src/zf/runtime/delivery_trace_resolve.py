@@ -11,12 +11,18 @@ then compose. It performs **no writes** — only ``EventLog.read_all`` and
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from zf.core.events.factory import event_log_from_project
+from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
+from zf.runtime.call_result_adapters import (
+    ControlResultAdapterError,
+    hydrate_profiled_control_result_event,
+)
 from zf.runtime.delivery_trace import build_delivery_trace
 from zf.runtime.delivery_run_trace import build_delivery_run_projection
 from zf.runtime.drift_report import build_drift_report
@@ -29,6 +35,18 @@ from zf.runtime.goal_coverage_graph import (
 from zf.runtime.workflow_trace import build_workflow_trace
 
 _IDEA_TYPES = ("feature.created", "user.message")
+_TASK_MAP_BINDING_EVENTS = frozenset({
+    "product_delivery.task_map.accepted",
+    "task.pipeline.generation.admitted",
+    "task_map.admitted",
+    "task_map.amended",
+    "task_map.ready",
+})
+_GOAL_PROJECTION_RESULT_SCHEMAS = frozenset({
+    "artifact-delivery-result.v1",
+    "goal-closure-result.v1",
+    "verification-result.v1",
+})
 
 
 def resolve_delivery_trace(
@@ -78,23 +96,41 @@ def resolve_delivery_trace(
     ))
     try:
         task_map = inp["task_map"] or {}
+        binding = inp["task_map_binding"]
+        workflow_run_id = str(
+            binding.get("workflow_run_id")
+            or task_map.get("workflow_run_id")
+            or task_map.get("run_id")
+            or ""
+        )
+        goal_id = str(
+            binding.get("goal_id")
+            or inp["feature_id"]
+            or task_map.get("goal_id")
+            or task_map.get("feature_id")
+            or ""
+        )
+        task_map_generation = str(
+            binding.get("task_map_generation")
+            or task_map.get("task_map_generation")
+            or ""
+        )
         pinned_claim_set = hydrate_pinned_goal_claim_set(
             state_dir=state_dir,
             events=inp["all_events"],
-            workflow_run_id=str(
-                task_map.get("workflow_run_id")
-                or task_map.get("run_id")
-                or ""
-            ),
-            goal_id=str(
-                task_map.get("goal_id")
-                or task_map.get("feature_id")
-                or inp["feature_id"]
-                or ""
-            ),
+            workflow_run_id=workflow_run_id,
+            goal_id=goal_id,
+            task_map_generation=task_map_generation,
         )
+        projection_task_map = dict(task_map)
+        if workflow_run_id:
+            projection_task_map["workflow_run_id"] = workflow_run_id
+        if goal_id:
+            projection_task_map["goal_id"] = goal_id
+        if task_map_generation:
+            projection_task_map["task_map_generation"] = task_map_generation
         trace["goal_coverage_graph"] = build_goal_coverage_graph(
-            task_map=inp["task_map"],
+            task_map=projection_task_map or None,
             tasks=inp["tasks"],
             events=inp["events"],
             project_id=project_id,
@@ -172,7 +208,10 @@ def _load_feature_inputs(
     """Shared read-only loader: events + kanban tasks + accepted task-map."""
     event_log = event_log_from_project(state_dir, config=config)
     all_events = event_log.read_all()
-    events = list(enumerate(all_events))
+    events, result_diagnostics = _hydrate_goal_projection_events(
+        state_dir,
+        all_events,
+    )
 
     all_tasks = TaskStore(state_dir / "kanban.json").list_all_with_archive()
     # feature_id resolution (doc 65 §20.2): explicit > task_id's contract.
@@ -182,13 +221,18 @@ def _load_feature_inputs(
             feature_id = task.contract.feature_id
 
     tasks = _tasks_for_feature(all_tasks, feature_id=feature_id, task_id=task_id)
-    ref, task_map, diagnostics, bundle = _resolve_task_map(
-        state_dir, feature_id=feature_id, task_map_ref=task_map_ref,
+    ref, task_map, diagnostics, bundle, task_map_binding = _resolve_task_map(
+        state_dir,
+        feature_id=feature_id,
+        task_map_ref=task_map_ref,
+        events=all_events,
     )
+    diagnostics.extend(result_diagnostics)
     return {
         "feature_id": feature_id, "tasks": tasks, "task_map": task_map,
         "ref": ref, "events": events, "all_events": all_events,
         "diagnostics": diagnostics, "bundle": bundle,
+        "task_map_binding": task_map_binding,
     }
 
 
@@ -203,23 +247,62 @@ def _tasks_for_feature(
 
 
 def _resolve_task_map(
-    state_dir: Path, *, feature_id: str, task_map_ref: str,
-) -> tuple[str, dict[str, Any] | None, list[dict[str, str]], dict[str, Any]]:
-    """Locate the accepted task-map. P0: explicit ref, else artifacts/<feature>/.
-
-    Richer artifact-manifest-event resolution (doc 65 §7.1 fallbacks) is P2.
-    """
+    state_dir: Path,
+    *,
+    feature_id: str,
+    task_map_ref: str,
+    events: Sequence[ZfEvent] = (),
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+    list[dict[str, str]],
+    dict[str, Any],
+    dict[str, str],
+]:
+    """Locate the accepted task-map from explicit, indexed, or event truth."""
     diagnostics: list[dict[str, str]] = []
     bundle: dict[str, Any] = {}
-    candidates: list[Path] = []
+    candidates: list[tuple[Path, str, dict[str, str]]] = []
+    seen_paths: set[str] = set()
+
+    def add_ref(ref: str, binding: Mapping[str, Any] | None = None) -> None:
+        normalized = str(ref or "").strip()
+        if not normalized:
+            return
+        metadata = {
+            key: str(value or "").strip()
+            for key, value in dict(binding or {}).items()
+            if str(value or "").strip()
+        }
+        for path in _candidate_paths(state_dir, normalized):
+            key = str(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            candidates.append((path, normalized, metadata))
+
     if task_map_ref.strip():
-        candidates.extend(_candidate_paths(state_dir, task_map_ref))
+        add_ref(
+            task_map_ref,
+            _latest_task_map_binding(
+                events,
+                feature_id=feature_id,
+                task_map_ref=task_map_ref,
+            ),
+        )
     if feature_id.strip():
         bundle = _feature_current_bundle(state_dir, feature_id)
         bundle_ref = str(bundle.get("current_task_map_ref") or "").strip()
         if bundle_ref:
             bundle_candidates = _candidate_paths(state_dir, bundle_ref)
-            candidates.extend(bundle_candidates)
+            add_ref(
+                bundle_ref,
+                _latest_task_map_binding(
+                    events,
+                    feature_id=feature_id,
+                    task_map_ref=bundle_ref,
+                ),
+            )
             if not any(path.exists() for path in bundle_candidates):
                 diagnostics.append({
                     "kind": "task_map_ref_unreadable",
@@ -227,9 +310,18 @@ def _resolve_task_map(
                     "task_map_ref": bundle_ref,
                     "attempted_paths": ", ".join(str(path) for path in bundle_candidates),
                 })
+    for event_ref, binding in _task_map_event_bindings(
+        events,
+        feature_id=feature_id,
+    ):
+        add_ref(event_ref, binding)
     if feature_id.strip():
         base = state_dir / "artifacts" / feature_id
-        candidates.extend([base / "task_map.json", base / "task-map.json"])
+        for path in (base / "task_map.json", base / "task-map.json"):
+            key = str(path)
+            if key not in seen_paths:
+                seen_paths.add(key)
+                candidates.append((path, str(path), {}))
         versioned = sorted(
             [
                 path for path in base.glob("v*/task_map.json")
@@ -238,16 +330,119 @@ def _resolve_task_map(
             key=lambda path: _version_sort_key(path.parent.name),
             reverse=True,
         )
-        candidates.extend(versioned)
-    for path in candidates:
+        for path in versioned:
+            key = str(path)
+            if key not in seen_paths:
+                seen_paths.add(key)
+                candidates.append((path, str(path), {}))
+    for path, resolved_ref, binding in candidates:
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
             if isinstance(data, dict):
-                return (task_map_ref or str(path)), data, diagnostics, bundle
-    return task_map_ref, None, diagnostics, bundle
+                return resolved_ref, data, diagnostics, bundle, binding
+    return task_map_ref, None, diagnostics, bundle, {}
+
+
+def _task_map_event_bindings(
+    events: Sequence[ZfEvent],
+    *,
+    feature_id: str,
+) -> list[tuple[str, dict[str, str]]]:
+    bindings: list[tuple[str, dict[str, str]]] = []
+    for event in reversed(events):
+        if event.type not in _TASK_MAP_BINDING_EVENTS:
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        ref = str(payload.get("task_map_ref") or "").strip()
+        if not ref or not _task_map_event_matches(
+            event,
+            payload=payload,
+            feature_id=feature_id,
+        ):
+            continue
+        bindings.append((ref, _task_map_binding(payload, feature_id=feature_id)))
+    return bindings
+
+
+def _latest_task_map_binding(
+    events: Sequence[ZfEvent],
+    *,
+    feature_id: str,
+    task_map_ref: str,
+) -> dict[str, str]:
+    expected = str(task_map_ref or "").strip()
+    for ref, binding in _task_map_event_bindings(events, feature_id=feature_id):
+        if ref == expected:
+            return binding
+    return {}
+
+
+def _task_map_event_matches(
+    event: ZfEvent,
+    *,
+    payload: Mapping[str, Any],
+    feature_id: str,
+) -> bool:
+    if not feature_id:
+        return True
+    identities = {
+        str(value or "").strip()
+        for value in (
+            payload.get("feature_id"),
+            payload.get("pdd_id"),
+            payload.get("goal_id"),
+            event.task_id,
+        )
+        if str(value or "").strip()
+    }
+    return feature_id in identities
+
+
+def _task_map_binding(
+    payload: Mapping[str, Any],
+    *,
+    feature_id: str,
+) -> dict[str, str]:
+    return {
+        "workflow_run_id": str(
+            payload.get("workflow_run_id") or payload.get("run_id") or ""
+        ).strip(),
+        "goal_id": str(payload.get("goal_id") or feature_id or "").strip(),
+        "task_map_generation": str(
+            payload.get("task_map_generation") or ""
+        ).strip(),
+    }
+
+
+def _hydrate_goal_projection_events(
+    state_dir: Path,
+    events: Sequence[ZfEvent],
+) -> tuple[list[tuple[int, ZfEvent]], list[dict[str, str]]]:
+    projected: list[tuple[int, ZfEvent]] = []
+    diagnostics: list[dict[str, str]] = []
+    for index, event in enumerate(events):
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        descriptor = payload.get("control_result_ref")
+        schema = str(
+            descriptor.get("schema_version")
+            if isinstance(descriptor, Mapping)
+            else ""
+        ).strip()
+        if schema in _GOAL_PROJECTION_RESULT_SCHEMAS:
+            try:
+                event = hydrate_profiled_control_result_event(state_dir, event)
+            except ControlResultAdapterError as exc:
+                diagnostics.append({
+                    "kind": "control_result_ref_unreadable",
+                    "message": str(exc),
+                    "event_id": event.id,
+                    "schema_version": schema,
+                })
+        projected.append((index, event))
+    return projected, diagnostics
 
 
 def _feature_current_bundle(state_dir: Path, feature_id: str) -> dict[str, Any]:

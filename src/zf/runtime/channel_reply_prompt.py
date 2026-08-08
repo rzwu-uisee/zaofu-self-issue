@@ -60,7 +60,26 @@ def fake_channel_reply_text(
             "channel_synthesis": {
                 "decision": "proceed",
                 "summary": summary,
-                "verification_commands": ["python -m pytest -q"],
+                "decisions": ["Preserve the requested product behavior."],
+                "assumptions": [],
+                "out_of_scope": [],
+                "acceptance_criteria": [{
+                    "id": "AC-MOCK-01",
+                    "criterion": "README.md remains present.",
+                    "verification_command_ids": ["VC-MOCK-01"],
+                    "producer_paths": ["README.md"],
+                }],
+                "verification_commands": [{
+                    "id": "VC-MOCK-01",
+                    "command": "test -f README.md",
+                    "acceptance_ids": ["AC-MOCK-01"],
+                    "owner": "verify",
+                    "tier": "runtime",
+                    "deterministic": True,
+                    "reusable": True,
+                    "timeout_seconds": 30,
+                    "producer_paths": ["README.md"],
+                }],
                 "open_questions": [],
                 "risks": [],
                 "readiness": {
@@ -72,6 +91,8 @@ def fake_channel_reply_text(
                     "reason": "deterministic test contract is complete",
                 },
                 "recommended_workflow": {},
+                "classification": {},
+                "dissent": [],
                 "source_refs": [],
                 "evidence_refs": [],
                 "consumed_contribution_refs": [],
@@ -107,11 +128,23 @@ def channel_reply_response_contract(
             "and evidence_refs. Facts may be settled only with evidence_refs."
         )
     if refs.get("consensus_review_id"):
+        artifact_ref = str(refs.get("artifact_ref") or "")
+        artifact_digest = str(refs.get("artifact_digest") or "")
+        target_binding = ""
+        if artifact_ref and artifact_digest:
+            target_binding = (
+                " The canonical review target is artifact_ref="
+                f"{json.dumps(artifact_ref)} with artifact_digest="
+                f"{json.dumps(artifact_digest)}. The response artifact_digest "
+                "MUST equal that canonical digest exactly; do not substitute a "
+                "spec_digest, Markdown digest, contract digest, or evidence digest."
+            )
         return (
             "Read the exact synthesis artifact and end with one JSON object "
             "named channel_consensus_review containing verdict signed|blocked, "
             "summary, artifact_digest, evidence_refs, and for blocked verdict "
             "blocker_question plus optional blocker_question_id."
+            + target_binding
         )
     if refs.get("question_dedup_request_id"):
         return (
@@ -140,7 +173,23 @@ def channel_reply_response_contract(
             "evidence_refs, and reason. Set implementation_start=true only "
             "when verdict=ready, open_questions and gaps are empty, acceptance "
             "criteria are complete, and verification_commands contains at "
-            "least one pure executable shell command. All plural fields must "
+            "least one pure executable shell command. Every mandatory "
+            "acceptance criterion must have a declared real evidence method; "
+            "summary must describe only durable product behavior and must not "
+            "include transient sign-off, Owner confirmation, or execution "
+            "authorization status; keep those facts in readiness. Every "
+            "acceptance criterion must have a stable id. Every verification "
+            "command must have a stable id, acceptance_ids matching those "
+            "criterion ids, and producer_paths; do not rename acceptance_ids "
+            "to covers. Commands must also declare owner, tier, deterministic, "
+            "reusable, and timeout_seconds instead of relying on downstream "
+            "defaults. "
+            "browser viewport, pointer, network, storage, refresh, or screenshot "
+            "criteria require a repo-root executable Docker Playwright command, "
+            "not only unit/build commands. Missing future screenshots or traces "
+            "before implementation is not a readiness gap when a runnable command "
+            "and producer paths can be planned; a missing or forbidden runner is. "
+            "All plural fields must "
             "be JSON arrays. Keep the preceding Markdown concise."
         )
     thread_id = str(request.get("thread_id") or "main")
@@ -151,12 +200,16 @@ def channel_reply_response_contract(
         if isinstance(channel.get("scope"), dict)
         else {}
     )
+    state = str(session.get("state") or "") if isinstance(session, dict) else ""
+    is_initial_blind_reply = (
+        state == "phase1_blind"
+        and str(session.get("requirement_message_id") or "")
+        == str(request.get("message_id") or "")
+    )
     if (
         isinstance(session, dict)
         and isinstance(scope.get("template"), dict)
-        and str(session.get("state") or "") == "phase1_blind"
-        and str(session.get("requirement_message_id") or "")
-        == str(request.get("message_id") or "")
+        and (is_initial_blind_reply or state == "phase2_relay")
     ):
         return (
             "End with one JSON object named channel_contribution containing "

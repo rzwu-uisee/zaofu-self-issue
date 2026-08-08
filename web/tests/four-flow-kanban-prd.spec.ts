@@ -136,29 +136,35 @@ async function createTaskAndStartFlow(
   id: string,
   flow: typeof flows[number],
 ): Promise<string> {
-  const cursor = await eventCursor(request, id);
-  const dialog = page.getByRole("dialog", { name: "Kanban Agent" });
-  const input = dialog.locator("textarea.headless-input");
-  await expect(input).toBeVisible();
-  await input.fill(
-    `${flow.marker} create a Task from the owner-confirmed PRD and `
-      + `recommend ${flow.routeId}.`,
+  const channelPage = page.locator(".channel-page");
+  const taskCursor = await eventCursor(request, id);
+  await channelPage.getByTestId("channel-workflow-objective").fill(
+    `${flow.marker} create a Task from the owner-confirmed PRD.`,
   );
-  await dialog.getByRole("button", { name: "Send message" }).click();
+  await channelPage.getByTestId("channel-create-task-from-prd").click();
+  await openAgent(page, id);
 
-  const createCard = page.locator(".agent-stack-card.approve").filter({
+  const createPlan = page.getByTestId("agent-card-plan").filter({
     hasText: flow.marker,
   }).last();
+  await expect(createPlan).toBeVisible({ timeout: 45_000 });
+  await createPlan.getByTestId(`ask-user-option-${flow.kind}-task`).check();
+  await createPlan.getByTestId("ask-user-submit").click();
+  await expect(createPlan).toContainText("Ready for confirmation", {
+    timeout: 30_000,
+  });
+
+  const createCard = page.locator(
+    '[data-testid="agent-card-approve"][data-proposal-action="create-task"]',
+  ).filter({ hasText: flow.marker }).last();
   await expect(createCard).toBeVisible({ timeout: 45_000 });
-  await expect(
-    createCard.getByRole("button", { name: "Create task" }),
-  ).toBeEnabled();
-  await createCard.getByRole("button", { name: "Create task" }).click();
+  await expect(createCard.getByTestId("agent-proposal-approve")).toBeEnabled();
+  await createCard.getByTestId("agent-proposal-approve").click();
 
   const taskEvents = await waitForEvents(
     request,
     id,
-    cursor,
+    taskCursor,
     (events) => events.some((event) => (
       event.type === "task.created" && Boolean(event.task_id)
     )),
@@ -168,31 +174,39 @@ async function createTaskAndStartFlow(
   );
   expect(taskId).not.toBe("");
 
-  const plan = page.locator(".agent-stack-card.plan").filter({
+  await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
+  await channelPage.getByTestId("channel-workflow-task").fill(taskId);
+  await channelPage.getByTestId("channel-workflow-objective").fill(
+    `${flow.marker} execute the confirmed PRD through ${flow.routeId}.`,
+  );
+  const workflowCursor = await eventCursor(request, id);
+  await channelPage.getByTestId("channel-plan-workflow").click();
+
+  const plan = page.getByTestId("agent-card-plan").filter({
     hasText: flow.marker,
   }).last();
   await expect(plan).toBeVisible({ timeout: 45_000 });
   await expect(plan).toContainText(flow.routeId);
-  await plan.getByLabel(flow.option).check();
-  await plan.getByRole("button", { name: "Continue" }).click();
+  await plan.getByTestId(`ask-user-option-${flow.kind}-delivery`).check();
+  await plan.getByTestId("ask-user-submit").click();
   await expect(plan).toContainText("Ready for confirmation", {
     timeout: 30_000,
   });
 
-  const approve = page.locator(".agent-stack-card.approve").filter({
+  const approve = page.locator(
+    '[data-testid="agent-card-approve"][data-proposal-action="workflow-start"]',
+  ).filter({
     hasText: flow.routeId,
   }).last();
   await expect(approve).toBeVisible({ timeout: 45_000 });
   await expect(approve).toContainText(taskId);
-  await expect(
-    approve.getByRole("button", { name: "Start workflow" }),
-  ).toBeEnabled();
-  await approve.getByRole("button", { name: "Start workflow" }).click();
+  await expect(approve.getByTestId("agent-proposal-approve")).toBeEnabled();
+  await approve.getByTestId("agent-proposal-approve").click();
 
   await waitForEvents(
     request,
     id,
-    cursor,
+    workflowCursor,
     (events) => events.some((event) => (
       event.type === "workflow.invoke.requested"
       && event.task_id === taskId
@@ -202,6 +216,7 @@ async function createTaskAndStartFlow(
   await expect(approve).toContainText("Workflow started", {
     timeout: 45_000,
   });
+  await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
   return taskId;
 }
 
@@ -232,7 +247,7 @@ test("creates a two-round PRD Channel and starts four workflows from its PRD", a
       + "README.md, preserve existing behavior, and produce the canonical PRD.",
   );
   await dialog.getByRole("button", { name: "Send message" }).click();
-  const channelPlan = page.locator(".agent-stack-card.plan").filter({
+  const channelPlan = page.getByTestId("agent-card-plan").filter({
     hasText: "FOURFLOW_CHANNEL_SETUP",
   }).last();
   await expect(channelPlan).toBeVisible({ timeout: 45_000 });
@@ -242,9 +257,9 @@ test("creates a two-round PRD Channel and starts four workflows from its PRD", a
   await expect(channelPlan).toContainText("synthesizer");
   await expect(channelPlan).toContainText("4 members");
   await expect(channelPlan).toContainText("2 rounds");
-  await channelPlan.getByLabel("PRD clarification (Recommended)").check();
+  await channelPlan.getByTestId("ask-user-option-prd-clarification").check();
   await capture(page, "03-prd-channel-plan");
-  await channelPlan.getByRole("button", { name: "Create & start" }).click();
+  await channelPlan.getByTestId("ask-user-submit").click();
 
   await waitForEvents(
     request,
@@ -306,8 +321,11 @@ test("creates a two-round PRD Channel and starts four workflows from its PRD", a
     90_000,
   );
   await capture(page, "05-canonical-prd-confirmed");
+  await channelPage.getByTestId("channel-details-tab").click();
+  await expect(
+    channelPage.getByTestId("channel-create-task-from-prd"),
+  ).toBeEnabled({ timeout: 90_000 });
 
-  await openAgent(page, id);
   const taskIds: string[] = [];
   for (const flow of flows) {
     taskIds.push(await createTaskAndStartFlow(

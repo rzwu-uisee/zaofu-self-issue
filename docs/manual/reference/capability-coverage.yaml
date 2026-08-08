@@ -1,5 +1,5 @@
 schema_version: zf-manual-capability-coverage.v1
-last_verified: 2026-08-03
+last_verified: 2026-08-08
 capabilities:
   - id: project-bootstrap
     name: Project 初始化与 Bootstrap
@@ -86,6 +86,126 @@ capabilities:
       readback: Inspect canonical Task contracts, wave readiness, TaskAttempt, dispatch token, and evidence chain.
       rollback: Produce a new artifact/task-map generation and controlled replan; never hand-edit existing canonical Tasks.
       authority: Agents own semantic decomposition; the Kernel owns deterministic validation, readiness, dispatch, and transitions.
+
+  - id: controlled-workflow-synthesis
+    name: 受控 Workflow 合成与冻结
+    name_en: Controlled Workflow synthesis and freeze
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/04-harness-runtime.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.md
+        - docs/manual/workflows/controlled-workflow-start.md
+      en:
+        - docs/manual/04-harness-runtime.en.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.en.md
+        - docs/manual/workflows/controlled-workflow-start.en.md
+    code:
+      - src/zf/runtime/workflow_synthesis_generic.py
+      - src/zf/runtime/workflow_start.py
+    tests:
+      - tests/test_generic_workflow.py
+      - tests/test_workflow_synthesis.py
+    release:
+      activation: Build a typed static-safe FlowSpec/proposal from the requirement, then approve the exact Task-bound proposal.
+      readback: Inspect the frozen effective config, route, artifact package, Task Map generation, and invoke causation.
+      rollback: Reject or supersede the proposal before admission, or cancel the admitted Run and create a new immutable generation.
+      authority: Agents own semantic synthesis; the Kernel validates and freezes registered operations, schemas, references, and side effects. Runtime-authored dynamic graph fragments remain deferred.
+
+  - id: role-provider-session-lifecycle
+    name: Role 级 Provider Session 与按需生命周期
+    name_en: Role-scoped Provider session and on-demand lifecycle
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/02-zf-yaml-control-plane.md
+        - docs/manual/architecture.md
+      en:
+        - docs/manual/02-zf-yaml-control-plane.en.md
+        - docs/manual/architecture.en.md
+    code:
+      - src/zf/runtime/provider_session_config.py
+      - src/zf/runtime/role_lifecycle_runtime.py
+    tests:
+      - tests/test_provider_session_config.py
+      - tests/test_role_lifecycle_runtime.py
+    release:
+      activation: Configure supported `provider_session` options and an eager, resident, or on-demand role lifecycle in `zf.yaml`.
+      readback: Verify normalized Provider options, immutable session digest, RoleSession identity, activation, idle retirement, and preserved workdir/affinity.
+      rollback: Restore the prior role config in a new runtime generation; retire only idle processes whose workdir and session evidence remain preserved.
+      authority: Lifecycle owns process and pane placement only; it cannot mutate Task truth, transfer one Task's conversation to another, or make the orchestrator role on-demand.
+
+  - id: orchestrator-semantic-control
+    name: Orchestrator Agent 语义 Checkpoint
+    name_en: Orchestrator Agent semantic checkpoints
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/architecture.md
+        - docs/manual/04-harness-runtime.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.md
+      en:
+        - docs/manual/architecture.en.md
+        - docs/manual/04-harness-runtime.en.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.en.md
+    code:
+      - src/zf/runtime/orchestrator_agent_policy.py
+      - src/zf/runtime/orchestrator_agent_reactor.py
+    tests:
+      - tests/test_orchestrator_agent_policy.py
+      - tests/e2e/test_orchestrator_agent_semantic_control_mock_e2e.py
+    release:
+      activation: Explicitly select `semantic_control` and an allowed checkpoint/pilot profile; otherwise retain `exception_advisor`.
+      readback: Inspect the OA operation, required reads, typed decision, admission verdict, resulting graph delta or narrative, and exact Run lineage.
+      rollback: Return the profile to `exception_advisor` or shadow in a new Run; preserve prior OA operations and decisions for audit.
+      authority: OA owns semantic proposals at bounded checkpoints; Kernel/WRC retains schema, currentness, Task readiness, leases, dispatch, transitions, and side effects. P15 real canary remains HOLD.
+
+  - id: task-pipeline-v4
+    name: Task Pipeline v4 与弹性 Stage Worker
+    name_en: Task Pipeline v4 and elastic Stage Workers
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/02-zf-yaml-control-plane.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.md
+        - docs/manual/18-product-fanout-real-e2e.md
+      en:
+        - docs/manual/02-zf-yaml-control-plane.en.md
+        - docs/manual/13-plan-task-map-orchestrator-dispatch.en.md
+        - docs/manual/18-product-fanout-real-e2e.en.md
+    code:
+      - src/zf/runtime/task_pipeline_runtime.py
+      - src/zf/runtime/task_pipeline_reconciler.py
+    tests:
+      - tests/test_task_pipeline_profile.py
+      - tests/test_task_pipeline_rollout.py
+      - tests/test_task_pipeline_fault_matrix.py
+    release:
+      activation: "Use a `preferred: false` v4 canary and explicitly select shadow or an approved blocking pilot; v3 remains the default."
+      readback: Correlate Task pipeline and operation generations, Task Workspace, Stage Worker placement, Impl/Verify receipts, Candidate integration, and Goal Closure.
+      rollback: Start a fresh Run on the v3 profile or default-off shadow mode; preserve v4 attempts, workspaces, receipts, and terminal evidence.
+      authority: v4 changes scheduling and placement, not Task/Event/Store/Artifact or Stage semantic contracts. Implementation is complete, but rollout remains NO-GO.
+
+  - id: research-generation-five-workflow-terminal
+    name: Research Generation 与五类 Workflow 终态签收
+    name_en: Research generation and five-Workflow terminal acceptance
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/18-product-fanout-real-e2e.md
+      en:
+        - docs/manual/18-product-fanout-real-e2e.en.md
+    code:
+      - src/zf/runtime/research_generation.py
+      - src/zf/runtime/control_actions_product.py
+    tests:
+      - tests/test_control_actions_research.py
+      - tests/e2e/test_five_workflow_terminal_runner.py
+    release:
+      activation: Run suite preflight, freeze an isolated family case, and start exactly one approved Workflow against the frozen implementation and Project identity.
+      readback: Verify generation binding, exact family terminal, Task/Run/Operation/Attempt/Role evidence, artifact lineage, and Docker Playwright capture when required.
+      rollback: Supersede or cancel a stale Research generation and clean only its isolated runtime after preserving the terminal evidence bundle.
+      authority: The immutable generation and read-only runner observe canonical facts; they do not create Tasks, emit business success, or become another scheduler. Real-Provider 5/5 remains pending.
 
   - id: bounded-agent-swarm
     name: 受控多 Agent 蜂群与弹性 Worker

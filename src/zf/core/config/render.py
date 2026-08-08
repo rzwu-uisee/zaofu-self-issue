@@ -145,6 +145,8 @@ _EXPECTED_FLOW_EVENT_SINKS = {
     "module.parity.scan.completed": "module parity closeout / gap-plan loop",
     "module.parity.scan.failed": "kernel candidate-rework sweep",
     "module.parity.closed": "RefactorFlow v3 final judge trigger",
+    "zaofu.refactor.plan.ready": "refactor plan-to-task-map kernel bridge",
+    "goal.closure.synthesized": "goal closure result processor",
 }
 _EXPECTED_FLOW_TRIGGER_SOURCES = {
     "flow.discovery.requested": "verify.passed post-verify discovery bridge",

@@ -206,6 +206,7 @@ export function ApproveInteractionActions({
     <div className="agent-approve-actions">
       <button
         className="agent-inline-button"
+        data-testid="agent-proposal-revise"
         disabled={busy || !onRevise}
         type="button"
         onClick={onRevise}
@@ -215,6 +216,7 @@ export function ApproveInteractionActions({
       </button>
       <button
         className="agent-inline-button"
+        data-testid="agent-proposal-reject"
         disabled={busy || !onReject}
         type="button"
         onClick={onReject}
@@ -224,6 +226,7 @@ export function ApproveInteractionActions({
       </button>
       <button
         className="agent-inline-button primary agent-action-primary"
+        data-testid="agent-proposal-approve"
         disabled={busy || !proposal.valid || !onApprove}
         type="button"
         onClick={onApprove}

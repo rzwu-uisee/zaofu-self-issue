@@ -41,7 +41,8 @@ from zf.runtime.remediation_cascade import (
     decide_cascade,
 )
 from zf.runtime.recovery_sufficiency import run_recovery_sufficiency_gate
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.repair_action_fanout_runtime import RepairActionFanoutRuntimeMixin
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 if TYPE_CHECKING:
     from zf.runtime.spawn_coordinator import SpawnCoordinator
@@ -64,6 +65,7 @@ from zf.runtime.task_completion_liveness import TaskCompletionLivenessMixin
 
 
 class LifecycleManagerMixin(
+    RepairActionFanoutRuntimeMixin,
     LifecycleEvidenceQueriesMixin,
     LifecycleObservationMixin,
     LifecycleLivenessEvidenceMixin,
@@ -175,6 +177,24 @@ class LifecycleManagerMixin(
             if role is None:
                 role = next(iter(self.config.roles), None)
             if role is None:
+                continue
+            try:
+                from zf.runtime.task_attempt_liveness import iso_epoch, live_task_attempt_for_parent
+
+                live_attempt = live_task_attempt_for_parent(
+                    self,
+                    parent_task_id=task.id,
+                    now_epoch=now,
+                )
+            except Exception:
+                live_attempt = None
+            if live_attempt is not None:
+                last_lease_activity = iso_epoch(
+                    str(live_attempt.get("updated_at") or "")
+                )
+                if epoch < last_lease_activity <= now:
+                    self._dispatch_epoch[task.id] = last_lease_activity
+                self._orphan_warned.discard(task.id)
                 continue
             worker_activity = getattr(self, "_worker_activity_epoch", {})
             activity_keys = [key for key in (worker_id, assignee) if key]
@@ -334,14 +354,14 @@ class LifecycleManagerMixin(
         return None
 
 
-    def _capture_logs(self) -> list[OrchestratorDecision]:
+    def _capture_logs(self) -> list[WorkflowRuntimeDecision]:
         """Capture agent output from all roles for debugging + stuck detection.
 
         G-RESUME-4 also runs the is_alive watchdog here: each failed
         check bumps a per-instance counter; reaching _dead_threshold
         triggers a respawn via SpawnCoordinator.
         """
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         logs_dir = self.state_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         # 2026-06-10 review P1-3: after a safe-halt the watchdog must stop
@@ -829,7 +849,7 @@ class LifecycleManagerMixin(
             pass
         return True
 
-    def _cancel_instance(self, role: "RoleConfig") -> "OrchestratorDecision":
+    def _cancel_instance(self, role: "RoleConfig") -> "WorkflowRuntimeDecision":
         active_task = self._active_task_for_instance(role.instance_id)
         active_task_id = active_task.id if active_task is not None else ""
         self._set_worker_state(
@@ -849,7 +869,7 @@ class LifecycleManagerMixin(
                 task_id=active_task_id,
                 force=True,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="cancel_failed",
                 role=role.instance_id,
                 task_id=active_task_id,
@@ -862,103 +882,14 @@ class LifecycleManagerMixin(
             task_id=active_task_id,
             force=True,
         )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="cancel",
             role=role.instance_id,
             task_id=active_task_id,
             reason="worker cancelled by repair action",
         )
 
-    def _rerun_fanout_child(
-        self,
-        fanout_id: str,
-        child_id: str,
-    ) -> "OrchestratorDecision":
-        manifest = self._fanout_manifest(fanout_id)
-        if not manifest:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                reason=f"unknown_fanout:{fanout_id}",
-            )
-        child = self._fanout_child(manifest, child_id)
-        if child is None:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                reason=f"unknown_fanout_child:{child_id}",
-            )
-        role_instance = str(child.get("role_instance") or "")
-        task_id = str(child.get("task_id") or "")
-        status = str(child.get("status") or "")
-        if status in {"completed", "failed"}:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                role=role_instance,
-                task_id=task_id,
-                reason=f"fanout_child_terminal:{status}",
-            )
-        stale_reason, superseded_by = self._fanout_identity_stale_reason(fanout_id)
-        if stale_reason:
-            suffix = f":{superseded_by}" if superseded_by else ""
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                role=role_instance,
-                task_id=task_id,
-                reason=f"stale_fanout:{stale_reason}{suffix}",
-            )
-        role = next(iter(self._fanout_roles([role_instance])), None)
-        if role is None:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                role=role_instance,
-                task_id=task_id,
-                reason=f"unknown_worker:{role_instance or '(missing)'}",
-            )
-        dispatches: list[ZfEvent] = []
-        terminal_event_type = ""
-        for event in self.event_log.read_all():
-            if event.type not in {
-                "fanout.child.dispatched",
-                "fanout.child.completed",
-                "fanout.child.failed",
-            }:
-                continue
-            payload = event.payload if isinstance(event.payload, dict) else {}
-            if str(payload.get("fanout_id") or "") != fanout_id:
-                continue
-            if str(payload.get("child_id") or "") != child_id:
-                continue
-            if event.type == "fanout.child.dispatched":
-                dispatches.append(event)
-            else:
-                terminal_event_type = event.type
-        if terminal_event_type:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                role=role.instance_id,
-                task_id=task_id,
-                reason=f"fanout_child_terminal:{terminal_event_type}",
-            )
-        if not dispatches:
-            return OrchestratorDecision(
-                action="rerun_fanout_child_failed",
-                role=role.instance_id,
-                task_id=task_id,
-                reason="missing_previous_fanout_child_dispatch",
-            )
-        self._retry_fanout_child(
-            manifest=manifest,
-            child=child,
-            previous_dispatch=dispatches[-1],
-            attempt=len(dispatches),
-        )
-        return OrchestratorDecision(
-            action="rerun_fanout_child",
-            role=role.instance_id,
-            task_id=task_id,
-            reason="fanout child rerun dispatched",
-        )
-
-    def restart_role_instance(self, role: "RoleConfig") -> "OrchestratorDecision":
+    def restart_role_instance(self, role: "RoleConfig") -> "WorkflowRuntimeDecision":
         """Restart one role through the same recovery path as the watchdog.
 
         A CLI/operator restart is still a provider-session replacement.  It
@@ -975,7 +906,7 @@ class LifecycleManagerMixin(
         *,
         recovery_reason: str = "watchdog",
         inject_idle_prompt: bool = True,
-    ) -> "OrchestratorDecision":
+    ) -> "WorkflowRuntimeDecision":
         """Serialize replacement of one provider session across processes.
 
         ``zf restart <role>`` creates a short-lived Orchestrator while the
@@ -998,7 +929,7 @@ class LifecycleManagerMixin(
         *,
         recovery_reason: str = "watchdog",
         inject_idle_prompt: bool = True,
-    ) -> "OrchestratorDecision":
+    ) -> "WorkflowRuntimeDecision":
         """G-RESUME-4/5: watchdog-triggered respawn.
 
         Uses SpawnCoordinator so the correct --resume / exec resume
@@ -1012,7 +943,7 @@ class LifecycleManagerMixin(
         # has flooded recent respawn failures. Park in blocked_human
         # state until operator clears.
         if self._respawn_success_circuit_active(role.instance_id):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="respawn_circuit_open",
                 role=role.instance_id,
                 reason=(
@@ -1020,7 +951,7 @@ class LifecycleManagerMixin(
                 ),
             )
         if self._respawn_recent_failure_cooldown_active(role.instance_id):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="respawn_cooldown",
                 role=role.instance_id,
                 reason=(
@@ -1145,7 +1076,7 @@ class LifecycleManagerMixin(
                 role.instance_id,
                 task_id=active_task_id,
             ):
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="respawn_circuit_open",
                     role=role.instance_id,
                     task_id=active_task_id,
@@ -1163,7 +1094,7 @@ class LifecycleManagerMixin(
                 force=active_task is None and active_fanout is None,
             )
             complete_respawn(self, role)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="respawn",
                 role=role.instance_id,
                 task_id=active_task_id,
@@ -1181,7 +1112,7 @@ class LifecycleManagerMixin(
             except Exception:
                 pass
             self._record_respawn_failure(role.instance_id)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="respawn_failed",
                 role=role.instance_id,
                 reason=f"watchdog respawn failed: {e}",
@@ -1319,10 +1250,12 @@ class LifecycleManagerMixin(
             except Exception:
                 path = None
             if path is None:
-                # B-COST-02: session file not found by derived path nor uuid
-                # glob → signal (debounced) instead of silently skipping, so a
-                # claude-code worker's 0 usage doesn't read as "free".
-                self._note_usage_capture_miss(role, usage_cwd, session_id_str)
+                # Signal only when active execution can hide usage; rotated
+                # idle UUIDs have no transcript by design.
+                if self._usage_capture_expected(role):
+                    self._note_usage_capture_miss(role, usage_cwd, session_id_str)
+                else:
+                    self._usage_capture_misses.pop(role.instance_id, None)
                 continue
             # Captured → clear any pending miss streak for this instance.
             self._usage_capture_misses.pop(role.instance_id, None)
@@ -1816,7 +1749,7 @@ class LifecycleManagerMixin(
             return False
         try:
             snapshot_ref = str(fanout_child.get("snapshot_ref") or "")
-            prompt = build_task_prompt(role.instance_id, path)
+            prompt = build_task_prompt(role.instance_id, path, "fanout_child")
             context = self._dispatch_context(
                 role=role,
                 briefing_path=path,
@@ -2111,7 +2044,7 @@ class LifecycleManagerMixin(
         source: str = "pane_watchdog",
         reason: str = "",
         heartbeat_age_s: float | None = None,
-    ) -> "OrchestratorDecision":
+    ) -> "WorkflowRuntimeDecision":
         """Emit worker.stuck and try to recover the active task/worker."""
         from zf.runtime.stuck_recovery_signal import emit_stuck_signal
 
@@ -2141,7 +2074,7 @@ class LifecycleManagerMixin(
                 progress_event=progress_event,
                 dispatch_id=dispatch_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="recover",
                 task_id=task.id,
                 role=role.instance_id,
@@ -2233,7 +2166,7 @@ class LifecycleManagerMixin(
             try:
                 recovery = self._respawn_instance(role)
             except Exception as e:
-                recovery = OrchestratorDecision(
+                recovery = WorkflowRuntimeDecision(
                     action="respawn_failed",
                     role=role.instance_id,
                     reason=f"watchdog respawn failed: {e}",
@@ -2272,7 +2205,7 @@ class LifecycleManagerMixin(
                     ))
                 except Exception:
                     pass
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="recover",
                     task_id=task.id if task is not None else None,
                     role=role.instance_id,
@@ -2323,7 +2256,7 @@ class LifecycleManagerMixin(
             self.escalation.escalate(reason)
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="escalate",
             role=role.instance_id,
             reason=f"worker.stuck: {role.instance_id}",
@@ -2414,7 +2347,7 @@ class LifecycleManagerMixin(
         causation_id: str | None = None,
         correlation_id: str | None = None,
         preserve_correlation: bool = False,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Recover an artifact-first role that published durable refs but
         has not emitted its terminal event yet.
 
@@ -2511,7 +2444,7 @@ class LifecycleManagerMixin(
                 ))
             except Exception:
                 pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="recover",
             task_id=task.id,
             role=role.instance_id,
@@ -2589,10 +2522,13 @@ class LifecycleManagerMixin(
         reason: str,
         causation_id: str | None = None,
         correlation_id: str | None = None,
-    ) -> "OrchestratorDecision | None":
-        """DID-9: nudge a worker that did its task but never emitted its terminal
-        event (no manifest, no progress event) to run its completion protocol,
-        instead of requeuing (which loses its uncommitted work). Nudges once per
+    ) -> "WorkflowRuntimeDecision | None":
+        """DID-9: ask a silent worker to resume or complete its active task.
+
+        With no durable progress event the kernel cannot know whether the worker
+        finished, has uncommitted work, or stalled before implementation.  The
+        prompt therefore preserves the worktree and lets the worker continue the
+        original briefing when acceptance is not yet met.  Nudges once per
         (instance, task, dispatch); the next stuck cycle falls through to requeue.
         """
         if task is None:
@@ -2619,7 +2555,10 @@ class LifecycleManagerMixin(
         self._set_worker_state(
             role.instance_id,
             "completion_pending",
-            reason=f"did work but never emitted {expected_event}; nudging to complete",
+            reason=(
+                f"active turn stalled before {expected_event}; "
+                "nudging to resume or complete"
+            ),
         )
         prompt_injected = False
         prompt_error = ""
@@ -2646,6 +2585,7 @@ class LifecycleManagerMixin(
                     "task_id": task.id,
                     "dispatch_id": dispatch_id,
                     "recovery_action": "completion_nudge_requested",
+                    "recovery_mode": "resume_or_complete",
                     "reason": reason,
                     "expected_event": expected_event,
                     "prompt_injected": prompt_injected,
@@ -2654,12 +2594,12 @@ class LifecycleManagerMixin(
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="recover",
             task_id=task.id,
             role=role.instance_id,
             reason=(
-                f"completion nudge: re-sent {expected_event} instruction "
+                f"completion nudge: requested resume or {expected_event} "
                 "instead of requeue"
             ),
         )
@@ -2678,13 +2618,13 @@ class LifecycleManagerMixin(
         lines = [
             f"Active task: {task.id}",
             "",
-            "# Completion required — you have not emitted your terminal event",
+            "# Resume or complete the active task",
             "",
             (
-                "You appear to have done the work for this task but ended your turn "
-                "WITHOUT emitting the terminal completion event. The harness cannot "
-                "proceed until you emit it. Do NOT redo, rewrite, or re-plan the "
-                "implementation — your existing changes are intact."
+                "The worker became silent before the kernel observed a terminal "
+                "event. The kernel does not know whether implementation is complete. "
+                "Preserve the current worktree and use the original active briefing "
+                "and role instructions as the authoritative task contract."
             ),
             "",
             "## Required action (run these now, in order)",
@@ -2694,16 +2634,23 @@ class LifecycleManagerMixin(
                 "(your ownership is stale)."
             ),
             (
-                "2. If you have uncommitted changes in this worktree, COMMIT them "
-                "before completing. Stage only this task's changed files with explicit "
-                "pathspecs (`git add -- <path>...`); never use `git add -A`, `git add .`, "
-                "or `git commit -a`. An uncommitted task file is rejected at integration."
+                "2. Inspect the current worktree and the original active briefing. "
+                "If acceptance is not yet met and no real external blocker exists, "
+                "continue the original task from the preserved state. Do not emit a "
+                "failure solely because this nudge arrived, the worktree is clean, "
+                "or expected tests do not exist yet."
             ),
             (
-                f"3. Emit your terminal event `{expected_event}` with the active "
+                "3. When acceptance is met, commit any task-owned changes before "
+                "completion. Stage only this task's changed files with explicit "
+                "pathspecs (`git add -- <path>...`); never use `git add -A`, `git add .`, "
+                "or `git commit -a`."
+            ),
+            (
+                f"4. Emit your terminal event `{expected_event}` with the active "
                 f"dispatch id `{dispatch_id or '-'}` (see your role instructions "
-                "for the exact command). If the work does NOT meet acceptance, "
-                "emit the failure event instead."
+                "for the exact command). Emit the failure event only when a real "
+                "acceptance blocker remains after attempting to resume the task."
             ),
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

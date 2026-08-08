@@ -128,6 +128,7 @@ def build_event_contract_report(
         producer_event_types.update(_known_workflow_actionable_events())
 
     gap_types = set(event_consumer_contract_gaps(producer_event_types))
+    gap_types.difference_update(_generic_stage_failure_consumers(config))
     producer_by_event: dict[str, EventProducer] = {
         producer.event_type: producer for producer in producers
     }
@@ -177,6 +178,28 @@ def build_event_contract_report(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def _generic_stage_failure_consumers(config: Any) -> set[str]:
+    """Return config-local failures owned by the Generic stage replan handler."""
+
+    failures: set[str] = set()
+    workflow = getattr(config, "workflow", None)
+    for stage in list(getattr(workflow, "stages", []) or []):
+        if (
+            str(getattr(stage, "flow_kind", "") or "") != "workflow"
+            or str(getattr(stage, "topology", "") or "") != "fanout_reader"
+        ):
+            continue
+        aggregate = getattr(stage, "aggregate", None)
+        failure = str(
+            getattr(stage, "failure_event", "")
+            or getattr(aggregate, "failure_event", "")
+            or ""
+        ).strip()
+        if failure:
+            failures.add(failure)
+    return failures
 
 
 def event_scope_contract_diagnostics(

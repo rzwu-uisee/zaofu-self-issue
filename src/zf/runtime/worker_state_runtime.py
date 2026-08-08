@@ -196,7 +196,10 @@ class WorkerStateRuntimeMixin:
         completed_task_id = str(event.task_id or "")
         if current_task_id and current_task_id != completed_task_id:
             return
-        if event.type == "dev.blocked":
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("task_pipeline_stage") or "").strip():
+            target_state = "idle"
+        elif event.type == "dev.blocked":
             target_state = "blocked_human"
         elif event.type in {"dev.build.done", "arch.proposal.done"}:
             target_state = "awaiting_review"

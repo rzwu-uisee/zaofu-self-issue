@@ -60,9 +60,17 @@ Emit top-level `plan_artifact_ref`, `task_map_ref`, `source_index_ref`,
 `artifact_refs`, and `evidence_refs`.
 
 The generated `task_map.json` must follow `zf-plan-task-map-contract`: every
-task needs direct `source_key` / `source_keys` / `source_ref` / `source_refs` /
-`source_excerpt`, or `source_index.json` must map every `task_id` through
-`tasks[]` or `task_sources[]`.
+task needs singular `source_key`, `source_ref`, and `source_excerpt` anchors.
+Optional `source_keys` / `source_refs` add evidence but do not replace those
+primary fields. If provenance lives in `source_index.json`, every `task_id`
+under `tasks[]` or `task_sources[]` must carry the same singular anchors.
+
+Read the exact confirmed requirement/PRD authority artifact before slicing.
+When it explicitly names task boundaries, task ids, dependencies, AC ownership,
+or a confirmed/recommended workflow, preserve that decision map exactly unless
+the current owner request explicitly asks for a redesign. A smaller task count
+or a cleaner-looking merge is not permission to collapse those boundaries.
+Derived matrices and scan summaries do not override the authority artifact.
 
 For greenfield PRD builds, include top-level `schema_version: "task-map.v1"`,
 `target_root`, and `shared_conventions` before emitting success. At minimum,
@@ -89,6 +97,10 @@ has API/runtime/web slices, each with:
 - dependencies and wave;
 - acceptance criteria tied to the PRD;
 - verification commands for product, API, and web verify agents.
+
+Each `exclusive_files` path has one owner across the full map. A later wave or
+dependency does not permit duplicate ownership; assign shared entrypoint and
+scaffold edits to one assembly/owner task.
 
 For small products, a serial task map is often better than parallel horizontal
 tasks:

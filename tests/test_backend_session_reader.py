@@ -34,6 +34,7 @@ class TestClaudeReader:
         # Last assistant usage: input=5, cache_read=5050, cache_creation=200
         assert report.effective_input_tokens == 5 + 5050 + 200
         assert report.output_tokens == 30
+        assert report.usage_semantics == "incremental"
         assert report.model_context_window == 200_000
         expected_ratio = (5 + 5050 + 200) / 200_000
         assert abs(report.ratio - expected_ratio) < 1e-9
@@ -173,6 +174,10 @@ class TestCodexReader:
         # Latest token_count.info.last_token_usage.input_tokens = 33000
         assert report.effective_input_tokens == 33000
         assert report.output_tokens == 400
+        assert report.raw["input_tokens"] == 45000
+        assert report.raw["output_tokens"] == 700
+        assert report.usage_semantics == "cumulative"
+        assert report.usage_series_id == "codex:22222222-2222-2222-2222-222222222222"
         # Codex self-reports window = 258400
         assert report.model_context_window == 258400
         expected_ratio = 33000 / 258400

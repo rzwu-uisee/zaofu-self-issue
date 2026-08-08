@@ -31,6 +31,8 @@ _VALID_REMOTE_POLICIES = ("local", "optional", "required", "local_only")
 _VALID_SHIP_CANDIDATE_STRATEGIES = ("merge",)
 _VALID_SHIP_TASK_STRATEGIES = ("cherry-pick",)
 _VALID_STAR_TOPOLOGIES = ("fanout_reader", "fanout_writer_scoped")
+_VALID_ATTEMPT_DOMAINS = ("plan", "task", "candidate", "gap", "recovery")
+_VALID_RESULT_SEMANTICS = ("artifact_production", "subject_gate")
 _VALID_FANOUT_ASSIGNMENT_STRATEGIES = ("static_index", "affinity_stage_slots")
 _VALID_AFFINITY_STAGE_SLOTS = ("impl", "review", "verify")
 _VALID_AUTOPILOT_MODES = ("proposal_only",)
@@ -96,12 +98,15 @@ from zf.core.config.schema import (  # noqa: E402
     WakeExtensionConfig,
     WakeExtensionsConfig,
     WorkflowConfig,
+    WorkflowOrchestrationConfig,
+    WorkflowOrchestrationFlowPolicyConfig,
     WorkflowDagConfig,
     WorkflowKindRouteConfig,
     WorkflowWorkUnitsConfig,
     WorkflowSplitQualityConfig,
     WorkflowAdmissionReplanConfig,
     WorkflowRunAdmissionConfig,
+    WorkflowRunLimitsConfig,
     WorkflowTaskAttemptConfig,
     WorkflowCompletionAuditConfig,
     WorkflowResumePacketConfig,
@@ -315,9 +320,11 @@ _KNOWN_WORKFLOW_KEYS = frozenset({
     "_flow_metadata_by_kind", "_generic_workflows",
     "kind_routes",
     "execution_profiles",
+    "run_limits",
     "allow_unverified_candidate",  # ⑤c 合并候选树门显式豁免(2026-07-08)
     "candidate_quality_source",
     "impl_self_check_required",
+    "orchestration",
 })
 _KNOWN_ROLE_KEYS = frozenset({
     "name", "backend", "backends", "role_kind", "flow_kind", "model",
@@ -626,6 +633,258 @@ def _build_admission_replan(data) -> WorkflowAdmissionReplanConfig:
     return WorkflowAdmissionReplanConfig(
         enabled=bool(data.get("enabled", False)),
         resynth_trigger=str(data.get("resynth_trigger", "") or "").strip(),
+    )
+
+
+_ORCHESTRATION_MODES = frozenset({"exception_advisor", "semantic_control"})
+_ORCHESTRATION_CHECKPOINTS = frozenset({
+    "pre_impl",
+    "plan_candidate",
+    "stage_barrier",
+    "semantic_failure",
+    "goal_revision",
+    "pre_closeout",
+    "owner_delivery",
+})
+_ORCHESTRATION_CHECKPOINT_POLICIES = frozenset({"shadow", "blocking"})
+_ORCHESTRATION_FLOW_KINDS = frozenset({
+    "issue",
+    "prd",
+    "refactor",
+    "workflow",
+    "research",
+})
+_ORCHESTRATION_BLOCKING_PILOT_PATHS = frozenset({
+    "workflow.orchestration.flow_policies.issue",
+    "workflow.orchestration.flow_policies.prd",
+    "workflow.orchestration.flow_policies.refactor",
+})
+
+
+def _build_orchestration_flow_policy(
+    data: object,
+    *,
+    path: str,
+) -> WorkflowOrchestrationFlowPolicyConfig:
+    if data in (None, ""):
+        return WorkflowOrchestrationFlowPolicyConfig()
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path} must be a mapping")
+    known = {
+        "mode",
+        "checkpoints",
+        "checkpoint_policies",
+        "pilot_id",
+        "shadow_sample_percent",
+    }
+    unknown = sorted(str(key) for key in data if str(key) not in known)
+    if unknown:
+        raise ConfigError(
+            f"{path} contains unknown key(s): " + ", ".join(unknown)
+        )
+    mode = str(data.get("mode") or "exception_advisor").strip().lower()
+    if mode not in _ORCHESTRATION_MODES:
+        raise ConfigError(
+            f"{path}.mode must be exception_advisor or semantic_control; "
+            f"got {mode!r}"
+        )
+    checkpoints_raw = data.get("checkpoints", []) or []
+    if not isinstance(checkpoints_raw, list):
+        raise ConfigError(f"{path}.checkpoints must be a list")
+    checkpoints = [
+        str(value or "").strip().lower() for value in checkpoints_raw
+    ]
+    if any(not value for value in checkpoints):
+        raise ConfigError(f"{path}.checkpoints cannot contain empty values")
+    invalid_checkpoints = sorted(set(checkpoints) - _ORCHESTRATION_CHECKPOINTS)
+    if invalid_checkpoints:
+        raise ConfigError(
+            f"{path}.checkpoints contains unsupported value(s): "
+            + ", ".join(invalid_checkpoints)
+        )
+    if len(checkpoints) != len(set(checkpoints)):
+        raise ConfigError(f"{path}.checkpoints cannot contain duplicates")
+    policies_raw = data.get("checkpoint_policies", {}) or {}
+    if not isinstance(policies_raw, dict):
+        raise ConfigError(f"{path}.checkpoint_policies must be a mapping")
+    policies = {
+        str(key or "").strip().lower(): str(value or "").strip().lower()
+        for key, value in policies_raw.items()
+    }
+    invalid_policy_checkpoints = sorted(
+        set(policies) - _ORCHESTRATION_CHECKPOINTS
+    )
+    if invalid_policy_checkpoints:
+        raise ConfigError(
+            f"{path}.checkpoint_policies contains unsupported checkpoint(s): "
+            + ", ".join(invalid_policy_checkpoints)
+        )
+    invalid_policies = sorted({
+        value
+        for value in policies.values()
+        if value not in _ORCHESTRATION_CHECKPOINT_POLICIES
+    })
+    if invalid_policies:
+        raise ConfigError(
+            f"{path} checkpoint policy must be shadow or blocking; got "
+            + ", ".join(invalid_policies)
+        )
+    undeclared = sorted(set(policies) - set(checkpoints))
+    if undeclared:
+        raise ConfigError(
+            f"{path} checkpoint policy requires the checkpoint to be declared: "
+            + ", ".join(undeclared)
+        )
+    if mode == "exception_advisor" and checkpoints:
+        raise ConfigError(f"{path}.checkpoints require mode=semantic_control")
+    if mode == "semantic_control" and not checkpoints:
+        raise ConfigError(
+            f"{path} mode=semantic_control requires at least one checkpoint"
+        )
+    pilot_id = str(data.get("pilot_id") or "").strip()
+    try:
+        shadow_sample_percent = int(data.get("shadow_sample_percent", 100))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{path}.shadow_sample_percent must be an integer"
+        ) from exc
+    if not 0 <= shadow_sample_percent <= 100:
+        raise ConfigError(
+            f"{path}.shadow_sample_percent must be between 0 and 100"
+        )
+    blocking = sorted(
+        checkpoint
+        for checkpoint in checkpoints
+        if policies.get(checkpoint, "blocking") == "blocking"
+    )
+    if blocking and not pilot_id:
+        raise ConfigError(
+            f"{path} blocking checkpoints require an explicit pilot_id"
+        )
+    if blocking and path not in _ORCHESTRATION_BLOCKING_PILOT_PATHS:
+        raise ConfigError(
+            f"{path} blocking rollout is restricted to an explicit full "
+            "Product Flow pilot"
+        )
+    if blocking != ["plan_candidate"] and blocking:
+        raise ConfigError(
+            f"{path} rollout currently permits only plan_candidate blocking; "
+            f"got {', '.join(blocking)}"
+        )
+    if pilot_id and not blocking:
+        raise ConfigError(
+            f"{path}.pilot_id requires one blocking checkpoint"
+        )
+    return WorkflowOrchestrationFlowPolicyConfig(
+        mode=mode,
+        checkpoints=checkpoints,
+        checkpoint_policies=policies,
+        pilot_id=pilot_id,
+        shadow_sample_percent=shadow_sample_percent,
+    )
+
+
+def _validate_orchestration_blocking_pilot_tiers(config: ZfConfig) -> None:
+    """Keep semantic blocking out of micro/light and non-Product routes."""
+    orchestration = config.workflow.orchestration
+    for flow_kind, policy in orchestration.flow_policies.items():
+        blocking = [
+            checkpoint
+            for checkpoint in policy.checkpoints
+            if policy.checkpoint_policies.get(checkpoint, "blocking")
+            == "blocking"
+        ]
+        if not blocking:
+            continue
+        route = config.workflow.kind_routes.get(flow_kind)
+        tier = str(getattr(route, "default_tier", "") or "").strip().lower()
+        if tier not in {"standard", "full"}:
+            raise ConfigError(
+                "workflow.orchestration.flow_policies."
+                f"{flow_kind} blocking rollout requires a standard or full "
+                "kind route; micro/light/unspecified routes stay advisory"
+            )
+
+
+def _build_workflow_orchestration(
+    data: object,
+) -> WorkflowOrchestrationConfig:
+    if data in (None, ""):
+        return WorkflowOrchestrationConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("workflow.orchestration must be a mapping")
+    known = {
+        "mode",
+        "checkpoints",
+        "checkpoint_policies",
+        "pilot_id",
+        "shadow_sample_percent",
+        "flow_policies",
+        "max_plan_revisions",
+        "no_progress_limit",
+    }
+    unknown = sorted(str(key) for key in data if str(key) not in known)
+    if unknown:
+        raise ConfigError(
+            "workflow.orchestration contains unknown key(s): "
+            + ", ".join(unknown)
+        )
+    root = _build_orchestration_flow_policy(
+        {
+            key: data[key]
+            for key in (
+                "mode",
+                "checkpoints",
+                "checkpoint_policies",
+                "pilot_id",
+                "shadow_sample_percent",
+            )
+            if key in data
+        },
+        path="workflow.orchestration",
+    )
+    flow_policies_raw = data.get("flow_policies", {}) or {}
+    if not isinstance(flow_policies_raw, dict):
+        raise ConfigError("workflow.orchestration.flow_policies must be a mapping")
+    invalid_flow_kinds = sorted(
+        str(key) for key in flow_policies_raw
+        if str(key).strip().lower() not in _ORCHESTRATION_FLOW_KINDS
+    )
+    if invalid_flow_kinds:
+        raise ConfigError(
+            "workflow.orchestration.flow_policies contains unsupported flow "
+            "kind(s): " + ", ".join(invalid_flow_kinds)
+        )
+    flow_policies = {
+        str(key).strip().lower(): _build_orchestration_flow_policy(
+            value,
+            path=(
+                "workflow.orchestration.flow_policies."
+                + str(key).strip().lower()
+            ),
+        )
+        for key, value in flow_policies_raw.items()
+    }
+    try:
+        max_plan_revisions = int(data.get("max_plan_revisions", 2))
+        no_progress_limit = int(data.get("no_progress_limit", 2))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "workflow.orchestration revision limits must be integers"
+        ) from exc
+    if max_plan_revisions < 1 or no_progress_limit < 1:
+        raise ConfigError(
+            "workflow.orchestration revision limits must be >= 1"
+        )
+    return WorkflowOrchestrationConfig(
+        mode=root.mode,
+        checkpoints=root.checkpoints,
+        checkpoint_policies=root.checkpoint_policies,
+        pilot_id=root.pilot_id,
+        shadow_sample_percent=root.shadow_sample_percent,
+        flow_policies=flow_policies,
+        max_plan_revisions=max_plan_revisions,
+        no_progress_limit=no_progress_limit,
     )
 
 
@@ -1141,6 +1400,12 @@ def _build_workflow_stages(
         trigger = str(raw_stage.get("trigger") or "")
         flow_kind = str(raw_stage.get("flow_kind") or "").strip().lower()
         topology = str(raw_stage.get("topology") or "")
+        attempt_domain = str(
+            raw_stage.get("attempt_domain") or ""
+        ).strip().lower()
+        result_semantics = str(
+            raw_stage.get("result_semantics") or ""
+        ).strip().lower()
         if not stage_id:
             raise ConfigError(f"workflow.stages[{i}].id is required")
         if not trigger:
@@ -1159,6 +1424,16 @@ def _build_workflow_stages(
             raise ConfigError(
                 f"workflow.stages[{i}].topology {topology!r} must be one of "
                 f"{_VALID_STAR_TOPOLOGIES}"
+            )
+        if attempt_domain and attempt_domain not in _VALID_ATTEMPT_DOMAINS:
+            raise ConfigError(
+                f"workflow.stages[{i}].attempt_domain {attempt_domain!r} "
+                f"must be one of {_VALID_ATTEMPT_DOMAINS}"
+            )
+        if result_semantics and result_semantics not in _VALID_RESULT_SEMANTICS:
+            raise ConfigError(
+                f"workflow.stages[{i}].result_semantics {result_semantics!r} "
+                f"must be one of {_VALID_RESULT_SEMANTICS}"
             )
         fanout = raw_stage.get("fanout") or {}
         if fanout and not isinstance(fanout, dict):
@@ -1235,6 +1510,8 @@ def _build_workflow_stages(
             flow_kind=flow_kind,
             topology=topology,
             operation=str(raw_stage.get("operation") or ""),
+            attempt_domain=attempt_domain,
+            result_semantics=result_semantics,
             input_ports=_build_workflow_ports(
                 raw_stage.get("input_ports"),
                 stage_index=i,
@@ -1999,6 +2276,7 @@ def _build_execution_profiles(
         "max_children",
         "max_depth",
         "timeout_seconds",
+        "max_usage_samples",
         "token_budget",
         "cost_budget_usd",
     })
@@ -2034,6 +2312,9 @@ def _build_execution_profiles(
                 max_depth=int(raw_limits.get("max_depth", 0) or 0),
                 timeout_seconds=float(
                     raw_limits.get("timeout_seconds", 0.0) or 0.0
+                ),
+                max_usage_samples=int(
+                    raw_limits.get("max_usage_samples", 0) or 0
                 ),
                 token_budget=int(raw_limits.get("token_budget", 0) or 0),
                 cost_budget_usd=float(
@@ -2075,6 +2356,26 @@ def _build_execution_profiles(
             )
         profiles[name] = profile
     return profiles
+
+
+def _build_workflow_run_limits(data: object) -> WorkflowRunLimitsConfig:
+    if data is None:
+        return WorkflowRunLimitsConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("workflow.run_limits must be a mapping")
+    _reject_unknown_keys(
+        data,
+        frozenset({"timeout_seconds", "token_budget", "cost_budget_usd"}),
+        "workflow.run_limits",
+    )
+    try:
+        return WorkflowRunLimitsConfig(
+            timeout_seconds=float(data.get("timeout_seconds", 0.0) or 0.0),
+            token_budget=int(data.get("token_budget", 0) or 0),
+            cost_budget_usd=float(data.get("cost_budget_usd", 0.0) or 0.0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid workflow.run_limits: {exc}") from exc
 
 
 def _validate_role_execution_profiles(
@@ -2415,6 +2716,15 @@ def load_config(path: Path) -> ZfConfig:
             for s in stage_dicts if isinstance(s, dict)
         }
         flow_metadata_raw = workflow_data.get("_flow_metadata")
+        task_pipeline_raw = (
+            flow_metadata_raw.get("task_pipeline")
+            if isinstance(flow_metadata_raw, dict)
+            else None
+        )
+        task_pipeline_blocking = bool(
+            isinstance(task_pipeline_raw, dict)
+            and str(task_pipeline_raw.get("mode") or "") == "blocking"
+        )
         rendered_pipeline_stages = bool(
             isinstance(flow_metadata_raw, dict)
             and flow_metadata_raw.get("rendered_pipeline_stages")
@@ -2453,7 +2763,10 @@ def load_config(path: Path) -> ZfConfig:
                     )
                 continue
             stage_dicts.extend(
-                materialize_lane_pipeline_stages(pipeline_spec),
+                materialize_lane_pipeline_stages(
+                    pipeline_spec,
+                    task_pipeline_blocking=task_pipeline_blocking,
+                ),
             )
             dag_data = workflow_data.setdefault("dag", {})
             if isinstance(dag_data, dict):
@@ -2547,6 +2860,9 @@ def load_config(path: Path) -> ZfConfig:
             impl_self_check_required=bool(
                 workflow_data.get("impl_self_check_required", False)
             ),
+            orchestration=_build_workflow_orchestration(
+                workflow_data.get("orchestration")
+            ),
             event_actions=workflow_data.get("event_actions", []) or [],
             # 131-P2-3:lease 宽限可配置(F15 实证出厂 900s)。
             attempt_lease_grace_s=float(
@@ -2555,6 +2871,9 @@ def load_config(path: Path) -> ZfConfig:
             rework_routing=rework_routing,
             kind_routes=workflow_kind_routes,
             execution_profiles=execution_profiles,
+            run_limits=_build_workflow_run_limits(
+                workflow_data.get("run_limits")
+            ),
             # R28 (doc 93 §1/§5): admission/W1 机械拒 → 自动回 synth。缺省关。
             admission_replan=_build_admission_replan(
                 workflow_data.get("admission_replan")
@@ -2821,6 +3140,7 @@ def load_config(path: Path) -> ZfConfig:
     # they declare new event names and are NOT validated.
     for warn in validate_role_event_names(cfg.roles):
         print(f"Warning: {warn}", file=sys.stderr)
+    _validate_orchestration_blocking_pilot_tiers(cfg)
     cfg.config_sources = list(raw.get("_config_profile_sources", []) or [])
     return cfg
 

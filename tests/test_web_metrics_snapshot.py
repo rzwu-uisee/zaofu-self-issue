@@ -41,6 +41,9 @@ def test_snapshot_has_metrics_snapshot(client: TestClient):
                 "avg_task_duration_minutes", "mtts", "stuck_recovery_rate"):
         assert key in metrics
     assert metrics["tasks_done"] == 1
+    oa = metrics["orchestrator_agent"]
+    assert oa["schema_version"] == "orchestrator-agent-metrics.v1"
+    assert oa["summary"]["operation_count"] == 0
 
 
 def test_snapshot_has_fleet_stats(client: TestClient):

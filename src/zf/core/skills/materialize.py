@@ -88,16 +88,24 @@ def materialize_role_skills(
     state_dir: Path,
     role: RoleConfig,
     task_id: str | None = None,
+    execution_project_root: Path | None = None,
+    execution_runtime_root: Path | None = None,
 ) -> SkillMaterializationResult | None:
     if not role.skills:
         return None
 
     mode = config.runtime.skills.materialize
-    target_root = _target_root_for_role(state_dir, role)
+    target_root = _target_root_for_role(
+        state_dir,
+        role,
+        execution_project_root=execution_project_root,
+    )
     manifest_path = (
-        state_dir
-        / "workdirs"
-        / role.instance_id
+        (
+            Path(execution_runtime_root)
+            if execution_runtime_root is not None
+            else state_dir / "workdirs" / role.instance_id
+        )
         / "runtime"
         / "skills-manifest.json"
     )
@@ -215,7 +223,12 @@ def _expanded_role_skill_requests(
     return requests
 
 
-def _target_root_for_role(state_dir: Path, role: RoleConfig) -> Path:
+def _target_root_for_role(
+    state_dir: Path,
+    role: RoleConfig,
+    *,
+    execution_project_root: Path | None = None,
+) -> Path:
     if role.backend == "codex":
         return state_dir / "workdirs" / role.instance_id / "codex-home" / "skills"
     if role.backend == "claude-code":
@@ -226,9 +239,12 @@ def _target_root_for_role(state_dir: Path, role: RoleConfig) -> Path:
         # CLAUDE_CONFIG_DIR (claude uses the operator's ~/.claude for
         # auth/trust). Project-level discovery is additive — it does not
         # relocate auth/settings — so no per-role home pre-seed is needed.
-        return (
-            state_dir / "workdirs" / role.instance_id / "project" / ".claude" / "skills"
+        project = (
+            Path(execution_project_root)
+            if execution_project_root is not None
+            else state_dir / "workdirs" / role.instance_id / "project"
         )
+        return project / ".claude" / "skills"
     return state_dir / "workdirs" / role.instance_id / "runtime" / "skills"
 
 

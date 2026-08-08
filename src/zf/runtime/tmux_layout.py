@@ -71,7 +71,13 @@ class TmuxLayout(ABC):
         """
 
     @abstractmethod
-    def kill_slot(self, session: "TmuxSession", target: PaneTarget) -> None:
+    def kill_slot(
+        self,
+        session: "TmuxSession",
+        target: PaneTarget,
+        *,
+        instance_id: str | None = None,
+    ) -> None:
         """Tear down the slot identified by ``target``."""
 
     @abstractmethod
@@ -91,6 +97,19 @@ class TmuxLayout(ABC):
         primitives when they only need the string form."""
         return self.resolve(session, instance_id).address()
 
+    def target_owned_by(
+        self,
+        session: "TmuxSession",
+        target: PaneTarget,
+        instance_id: str,
+    ) -> bool:
+        """Return whether ``target`` still belongs to ``instance_id``.
+
+        Window-per-role targets encode ownership in the window name. Shared
+        pane layouts override this with a stable tmux pane identity check.
+        """
+        return target.pane is None and target.window == instance_id
+
 
 class WindowPerRoleLayout(TmuxLayout):
     """Default: one tmux window per role instance (legacy behavior).
@@ -104,7 +123,13 @@ class WindowPerRoleLayout(TmuxLayout):
         session.create_window(name)
         return PaneTarget(session=session.session_name, window=name, pane=None)
 
-    def kill_slot(self, session: "TmuxSession", target: PaneTarget) -> None:
+    def kill_slot(
+        self,
+        session: "TmuxSession",
+        target: PaneTarget,
+        *,
+        instance_id: str | None = None,
+    ) -> None:
         session.kill_window(target.window)
 
     def resolve(self, session: "TmuxSession", instance_id: str) -> PaneTarget:
@@ -152,7 +177,7 @@ class PaneGridLayout(TmuxLayout):
         name = getattr(role, "instance_id", None) or role.name
         existing = self._existing_target(session, name)
         if existing is not None:
-            self.kill_slot(session, existing)
+            self.kill_slot(session, existing, instance_id=name)
 
         if not self._window_created and not session.dry_run:
             self._window_id = self._find_shared_window_id(session)
@@ -210,7 +235,15 @@ class PaneGridLayout(TmuxLayout):
             pane=pane,
         )
 
-    def kill_slot(self, session: "TmuxSession", target: PaneTarget) -> None:
+    def kill_slot(
+        self,
+        session: "TmuxSession",
+        target: PaneTarget,
+        *,
+        instance_id: str | None = None,
+    ) -> None:
+        from zf.runtime.tmux import TmuxError
+
         if target.pane is None and not session.dry_run:
             pane = self._find_pane_by_title(session, target.window)
             if pane is not None:
@@ -219,25 +252,56 @@ class PaneGridLayout(TmuxLayout):
                     window=self.window_name,
                     pane=pane,
                 )
-        # Reverse lookup: which instance owns this pane?
-        removed: str | None = None
-        for name, idx in list(self._panes.items()):
-            if idx == target.pane:
-                del self._panes[name]
-                self._expected_cwds.pop(name, None)
-                self._forget_binding(name)
-                if session.dry_run and isinstance(idx, int):
-                    self._free.append(idx)
-                    self._free.sort()
-                removed = name
-                break
+        if target.pane is None:
+            raise TmuxError("pane-grid slot teardown requires an exact pane target")
+
+        mapped_owner = next(
+            (
+                name
+                for name, pane in self._panes.items()
+                if pane == target.pane
+            ),
+            None,
+        )
+        expected_owner = str(instance_id or mapped_owner or "").strip()
+        if not expected_owner:
+            raise TmuxError(
+                f"refusing unowned pane-grid teardown for {target.address()}"
+            )
+        if mapped_owner and mapped_owner != expected_owner:
+            raise TmuxError(
+                f"pane-grid target {target.address()} is mapped to "
+                f"{mapped_owner!r}, not {expected_owner!r}"
+            )
+
+        pane_exists = True
+        if session.dry_run:
+            owned = mapped_owner == expected_owner
+        else:
+            pane_exists, actual_owner = self._pane_owner(session, str(target.pane))
+            owned = pane_exists and actual_owner == expected_owner
+        if pane_exists and not owned:
+            raise TmuxError(
+                f"pane-grid target {target.address()} is not owned by "
+                f"{expected_owner!r}"
+            )
+
+        idx = self._panes.get(expected_owner)
+        if idx == target.pane:
+            del self._panes[expected_owner]
+            self._expected_cwds.pop(expected_owner, None)
+            self._forget_binding(expected_owner)
+            if session.dry_run and isinstance(idx, int):
+                self._free.append(idx)
+                self._free.sort()
         # Kill the actual pane. When the shared window loses its last
         # pane tmux destroys the window, so reset the _window_created
         # flag so the next create_slot rebuilds it.
-        session._run(
-            ["tmux", "kill-pane", "-t", target.address()],
-            check=False,
-        )
+        if pane_exists:
+            session._run(
+                ["tmux", "kill-pane", "-t", target.address()],
+                check=False,
+            )
         if not self._panes:
             # All panes gone → window gone. Reset so we know to
             # new-window on the next create_slot.
@@ -248,6 +312,19 @@ class PaneGridLayout(TmuxLayout):
 
     def resolve(self, session: "TmuxSession", instance_id: str) -> PaneTarget:
         pane = self._panes.get(instance_id)
+        if (
+            pane is not None
+            and not session.dry_run
+            and not self._pane_binding_still_valid(
+                session,
+                str(pane),
+                instance_id,
+            )
+        ):
+            self._panes.pop(instance_id, None)
+            self._expected_cwds.pop(instance_id, None)
+            self._forget_binding(instance_id)
+            pane = None
         if pane is None:
             pane = self._pane_from_binding(session, instance_id)
         if pane is None and not session.dry_run:
@@ -271,6 +348,19 @@ class PaneGridLayout(TmuxLayout):
             window=self.window_name,
             pane=pane,
         )
+
+    def target_owned_by(
+        self,
+        session: "TmuxSession",
+        target: PaneTarget,
+        instance_id: str,
+    ) -> bool:
+        if target.pane is None:
+            return False
+        if session.dry_run:
+            return self._panes.get(instance_id) == target.pane
+        pane_exists, owner = self._pane_owner(session, str(target.pane))
+        return pane_exists and owner == instance_id
 
     def record_cwd(
         self,
@@ -461,18 +551,29 @@ class PaneGridLayout(TmuxLayout):
         pane: str,
         instance_id: str,
     ) -> bool:
+        exists, owner = self._pane_owner(session, pane)
+        return exists and owner == instance_id
+
+    def _pane_owner(
+        self,
+        session: "TmuxSession",
+        pane: str,
+    ) -> tuple[bool, str]:
         result = session._run(
             [
                 "tmux", "display-message",
                 "-p", "-t", pane,
-                "#{@zf_instance_id}",
+                "#{pane_id}\t#{@zf_instance_id}",
             ],
             check=False,
             capture=True,
         )
-        if result.returncode != 0:
-            return False
-        return result.stdout.strip() == instance_id
+        if result.returncode != 0 or result.stderr.strip():
+            return False, ""
+        observed_pane, separator, owner = result.stdout.strip().partition("\t")
+        if not separator or observed_pane != pane:
+            return False, ""
+        return True, owner.strip()
 
     def _binding_entry(self, instance_id: str) -> dict[str, object]:
         if self.binding_path is None:

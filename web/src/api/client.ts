@@ -18,6 +18,7 @@ import type {
   EventsPage,
   FanoutDetail,
   IntegrationQueueProjection,
+  TaskPipelineProjection,
   LoopProjection,
   LoopActionResponse,
   LoopLearningPromotionResponse,
@@ -722,6 +723,10 @@ export function getWorkdirs(projectId?: string): Promise<WorkdirSummary[]> {
 
 export function getIntegrationQueue(projectId?: string): Promise<IntegrationQueueProjection> {
   return requestJson<IntegrationQueueProjection>(`${projectPrefix(projectId)}/integration-queue`);
+}
+
+export function getTaskPipeline(projectId?: string): Promise<TaskPipelineProjection> {
+  return requestJson<TaskPipelineProjection>(`${projectPrefix(projectId)}/task-pipeline`);
 }
 
 export function getRepairActions(projectId?: string): Promise<RepairActionProjection> {

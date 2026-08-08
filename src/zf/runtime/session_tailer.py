@@ -360,11 +360,12 @@ def _truncate(obj: object, limit: int) -> str:
 def claude_session_path(project_root: str, session_uuid: str) -> Path:
     """Compute ~/.claude/projects/<escaped-cwd>/<session_uuid>.jsonl.
 
-    Claude escapes the project_root path by replacing '/' with '-' and
-    prepending '-'. Mirrors the logic in StreamJsonTransport._session_
-    exists_on_disk so we're looking at the same file Claude writes.
+    Claude escapes the project_root path by replacing '/' and '.' with '-'
+    and prepending '-'. Keep every Claude session consumer on this helper so
+    hidden runtime directories such as ``.zf`` resolve to the file Claude
+    actually writes.
     """
-    escaped = "-" + project_root.lstrip("/").replace("/", "-")
+    escaped = "-" + project_root.lstrip("/").replace("/", "-").replace(".", "-")
     return Path.home() / ".claude" / "projects" / escaped / f"{session_uuid}.jsonl"
 
 

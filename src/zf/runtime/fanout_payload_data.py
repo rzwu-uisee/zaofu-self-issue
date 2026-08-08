@@ -79,3 +79,25 @@ def first_child_mapping(
             return dict(value)
     value = manifest.get(key)
     return dict(value) if isinstance(value, dict) else {}
+
+
+def first_nonempty_plan_ports(payloads: list[dict]) -> list[dict] | None:
+    """Prefer producer ports over an earlier verdict-only empty list."""
+
+    saw_empty = False
+    for payload in payloads:
+        ports = payload_or_report_value(payload, "plan_ports")
+        if not isinstance(ports, list):
+            synthesis = payload_or_report_value(payload, "plan_synthesis_result")
+            ports = (
+                synthesis.get("plan_ports")
+                if isinstance(synthesis, dict)
+                else None
+            )
+        if not isinstance(ports, list):
+            continue
+        normalized = [dict(item) for item in ports if isinstance(item, dict)]
+        if normalized:
+            return normalized
+        saw_empty = True
+    return [] if saw_empty else None

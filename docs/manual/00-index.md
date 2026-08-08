@@ -12,6 +12,7 @@
 | 第一次安装并完成一次可验证交付 | [首个可验证交付](getting-started/first-verified-delivery.md) | Task 进入 Workflow，Delivery 能解释结果和证据 |
 | 用多人和 Agent 把模糊需求聊成 PRD | [Channel 到 PRD](workflows/channel-to-prd.md) | Owner 确认 canonical PRD，并得到来源回执 |
 | 为已有 Task 选择并启动 Workflow | [受控 Workflow 启动](workflows/controlled-workflow-start.md) | exact proposal 获批并产生 `workflow.invoke.requested` |
+| 签收 PRD、Issue、Refactor、General、Research 五类真实 Workflow | [五类 Workflow 真实 E2E](18-product-fanout-real-e2e.md) | exact Run 到达 family 对应终态，identity、artifact 和 evidence 全程可回读 |
 | 判断一个长期目标是否真的完成 | [观察一次交付](operations/observe-delivery.md) | 能从 Goal、Claim、Task、Evidence、Gap、Closure 解释结论 |
 | 处理停滞、失败或无进展 Run | [恢复长期 Run](operations/recover-long-running-run.md) | Run 恢复推进，或有证据地收敛为 blocked/failed/cancelled |
 | 理解跨 Agent 的上下文和证据如何继承 | [上下文、Artifact 与 Handoff](operations/context-handoff-artifacts.md) | 能定位 current contract、required reads、result 和 lineage |
@@ -33,6 +34,18 @@ Requirement
 
 ZaoFu 的一级产品对象是 Project、Channel、Task、Workflow、Run 和 Delivery。Graph、
 Trace、Loop、SQLite、Web summary 是这些对象的查询和表达方式，不是第二套调度状态机。
+
+## 当前演进边界
+
+150-168 号设计带来的 Web 归属、Artifact/Handoff、统一 Workflow Start、Role 级
+Provider/session、Orchestrator Agent checkpoint、Channel-to-PRD 和 Research generation
+已经进入当前实现。发布状态必须分开理解：v3 仍是默认 Product Flow；Task Pipeline v4
+只在 `preferred: false` 的 default-off canary 中提供，当前 rollout 为 NO-GO；OA
+`semantic_control` 只在显式 profile/pilot 中启用，未配置时仍是 `exception_advisor`；
+Recovery Coordinator 收敛和 OpenCode Provider SPI 仍是候选设计。配置见
+[控制面](02-zf-yaml-control-plane.md)，调度边界见
+[Plan、Task Map 与调度](13-plan-task-map-orchestrator-dispatch.md)，真实签收见
+[五类 Workflow 真实 E2E](18-product-fanout-real-e2e.md)。
 
 ## 按主题浏览
 
@@ -64,7 +77,7 @@ Trace、Loop、SQLite、Web summary 是这些对象的查询和表达方式，�
 - [14 Delivery Trace](14-delivery-trace-usage.md)
 - [15 Channel 协作](15-channel-collaboration.md)
 - [16 真实 Provider Preflight](16-real-codex-provider-preflight.md)
-- [18 Product Fanout E2E](18-product-fanout-real-e2e.md)
+- [18 Product Fanout 与五类 Workflow 真实 E2E](18-product-fanout-real-e2e.md)
 - [19 Feishu AI-Native Bridge、实时会话与审批](19-feishu-ai-native-direct-bridge.md)
 - [20 Project、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
 

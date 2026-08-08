@@ -22,20 +22,23 @@ ZaoFu supports two explicitly selected orchestration modes:
 
 | Mode | Happy-path owner | `orchestrator` role responsibility |
 |---|---|---|
-| Product Flow | Kernel mechanical dispatch from topology/profile | low-frequency exception triage and replan/proposal; no direct state writes |
+| Product Flow | Kernel mechanical dispatch from topology/profile | low-frequency exception triage by default; explicit `semantic_control` may make shadow/blocking judgments at registered checkpoints, without direct state writes |
 | Legacy safe-team | Layer 2 Agent may perform semantic decomposition, contract synthesis, and explicit assignment | compatibility mode selected by profile |
 
 Treat new Issue, PRD, Refactor, and long-horizon flows as Product Flow. Do not generalize the
-Layer 2 behavior of legacy safe-team, and do not conflate the Python `Orchestrator` with a configured
-`orchestrator` role Agent.
+Layer 2 behavior of legacy safe-team, and do not conflate the Python
+`WorkflowRuntimeCoordinator` (`Orchestrator` compatibility alias) with a
+configured `orchestrator` role Agent.
 
 ## 2. Product Flow Path
 
 ```text
 approved request / typed event / artifact
+  -> freeze effective config / workflow generation / Run Contract
   -> run admission
   -> Kernel resolves workflow topology and readiness
-  -> persist TaskAttempt / dispatch token
+  -> v3 stage/fanout/barrier or explicit v4 Task-local operation
+  -> persist WorkflowOperation + TaskAttempt / lease / dispatch token
   -> deliver briefing through the transport
   -> Worker emits result, artifacts, and evidence
   -> Kernel applies schema, state, evidence-presence, and safety gates
@@ -53,13 +56,16 @@ Three boundaries matter:
 
 The effective stages, pipelines, fanout, terminal predicates, and rework routes come from `zf.yaml`
 and `zf workflow inspect`, not from a hard-coded dev-review-test-judge chain in a manual.
+Research also binds prompt, effective config, route/template, role, Task contract,
+and Run Contract into an immutable `workflow_generation`; `zf start` isolates a
+stale generation before transport initialization.
 
 ## 3. Start, Watcher, and Wakeups
 
 `zf start` loads `zf.yaml` and the resolved `project.state_dir`, starts configured tmux/stream-json
 transports and sidecars, then tails `events.jsonl` through `EventWatcher`:
 
-- wake-worthy events invoke `Orchestrator.run_once()`;
+- wake-worthy events invoke `WorkflowRuntimeCoordinator.run_once()`;
 - periodic ticks inspect stalled workers, orphan tasks, context pressure, and recovery requests;
 - projections and sidecars refresh under their contracts without becoming a second control plane.
 
@@ -109,6 +115,18 @@ evidence causes a rejected transition and an auditable event.
 Product Flow can declare sequential stages, fanout/fan-in, lanes, barriers, reader/writer roles, and
 custom Issue/PRD/Refactor topologies. The Kernel schedules only the declared mechanical dependencies.
 
+There are currently two explicit delivery execution profiles:
+
+- v3 (default): progress through registered stages, fanout, and barriers;
+- v4 (default-off canary): each Task runs `Impl -> Task Verify -> Integration
+  Admission -> Candidate Integration`, a settled physical Worker Slot can be
+  reused, and the frozen exact Candidate still receives global Verify,
+  Discovery, and Goal Closure.
+
+v4 changes operation placement, capacity, and Task-local handoff, not
+briefing/artifact/result semantics. `shadow` does not own business dispatch and
+`blocking` is limited to explicit canaries. Current rollout is NO-GO.
+
 Rework destinations are resolved from the current contract and topology, typically in this order:
 
 1. a legal rework instruction on the Task contract;
@@ -150,9 +168,14 @@ See [Recover a Long-Running Run](operations/recover-long-running-run.en.md) and
 ## 8. Observability, Supervisor, and Autoresearch
 
 - Provider transcript/session tailers convert tool calls, text, and usage into `agent.*` events or sidecar refs.
-- Run Manager manages retryable and resumable run/attempt semantics; a resident Agent can only advise.
-- Supervisor observes failure signals and creates owner-visible decisions; it does not kill Workers or hand-edit state.
+- Run Manager selects bounded recovery from current facts and requires post-verification; a resident Agent can only advise.
+- Supervisor observes failure signals and produces attention/projections; it does not kill Workers or hand-edit state.
 - Autoresearch performs deep diagnosis or isolated repair candidates and does not apply directly to mainline by default.
+
+Supervisor and Run Manager remain separate components. A unified Recovery
+Coordinator is still a candidate design, so operators must not assume one
+combined CLI, queue, or state owner. Sanctioned controlled actions apply
+recovery; Autoresearch is reserved for repeated, complex harness fingerprints.
 
 Codex/Claude hooks improve telemetry but do not own Task truth. Missing hook authorization creates an
 observability gap; it proves neither execution failure nor completion.
@@ -170,3 +193,10 @@ uv run zf doctor
 Confirm that the Task/Feature closed through its terminal predicate; Goal Dossier claim coverage and
 evidence can be read back; no fatal/blocker remains; Git base/head/log/diff is identifiable; and required
 tests, projection freshness, and external effects have evidence. See [Observe a Delivery](operations/observe-delivery.en.md).
+
+A real five-family validation must not treat an entry turn, `fanout.started`,
+or Agent prose as success. PRD/Issue/Refactor/General wait for the exact Run's
+`run.goal.completed` and applicable Task terminal. Research also requires a
+completed aggregate, lineage/digest-consistent
+`workflow.result.available(research_report)`, and Task terminal. See
+[Product Fanout and Five-Workflow E2E](18-product-fanout-real-e2e.en.md).

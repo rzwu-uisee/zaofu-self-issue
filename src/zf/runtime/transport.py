@@ -14,7 +14,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import os
 import shlex
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +21,10 @@ from zf.core.config.schema import RoleConfig, ZfConfig
 from zf.core.events.model import ZfEvent
 from zf.runtime.provider_context import has_provider_context_exhausted
 from zf.runtime.tmux import TmuxError, TmuxSession
+from zf.runtime.tmux_readiness import (
+    TmuxReadinessMixin,
+    build_tmux_readiness_error,
+)
 
 
 @dataclass
@@ -61,6 +64,7 @@ class DispatchContext:
     trace_id: str | None = None
     run_id: str | None = None
     task_id: str | None = None
+    parent_task_id: str | None = None
     role_name: str | None = None
     instance_id: str | None = None
     backend: str | None = None
@@ -69,6 +73,12 @@ class DispatchContext:
     operation_id: str | None = None
     attempt_id: str | None = None
     lease_id: str | None = None
+    task_pipeline_stage: str | None = None
+    operation_generation: int | None = None
+    task_map_generation: str | None = None
+    workspace_generation: int | None = None
+    placement_epoch: int | None = None
+    task_stage_session_binding: str | None = None
 
     def to_payload(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -78,6 +88,8 @@ class DispatchContext:
             payload["run_id"] = self.run_id
         if self.task_id:
             payload["task_id"] = self.task_id
+        if self.parent_task_id:
+            payload["parent_task_id"] = self.parent_task_id
         if self.role_name:
             payload["role"] = self.role_name
         if self.instance_id:
@@ -94,6 +106,20 @@ class DispatchContext:
             payload["attempt_id"] = self.attempt_id
         if self.lease_id:
             payload["lease_id"] = self.lease_id
+        if self.task_pipeline_stage:
+            payload["task_pipeline_stage"] = self.task_pipeline_stage
+        if self.operation_generation is not None:
+            payload["operation_generation"] = str(self.operation_generation)
+        if self.task_map_generation:
+            payload["task_map_generation"] = self.task_map_generation
+        if self.workspace_generation is not None:
+            payload["workspace_generation"] = str(self.workspace_generation)
+        if self.placement_epoch is not None:
+            payload["placement_epoch"] = str(self.placement_epoch)
+        if self.task_stage_session_binding:
+            payload["task_stage_session_binding"] = (
+                self.task_stage_session_binding
+            )
         return payload
 
 
@@ -156,7 +182,7 @@ class TransportAdapter(ABC):
     def shutdown(self, *, exclude_roles: set[str] | None = None) -> None: ...
 
 
-class TmuxTransport(TransportAdapter):
+class TmuxTransport(TmuxReadinessMixin, TransportAdapter):
     """Run each role in its own tmux window. Wraps TmuxSession."""
 
     _SHELL_COMMANDS = frozenset({"", "bash", "sh", "zsh", "fish", "dash"})
@@ -168,17 +194,11 @@ class TmuxTransport(TransportAdapter):
         "ZF_STATE_DIR",
         "ZF_CLI_CMD",
     )
-    # A tmux pane starts as a shell and only then execs the provider command.
-    # Rejecting that short handoff window turns a healthy respawn into a false
-    # failure; accepting a stable shell turns a failed provider launch into a
-    # false success. Keep the observation window deliberately short and
-    # bounded by the caller's full readiness timeout.
-    _AGENT_LAUNCH_GRACE_SECONDS = 3.0
-    _READY_POLL_INTERVAL_SECONDS = 0.1
-
     def __init__(self, tmux: TmuxSession) -> None:
         self.tmux = tmux
         self._expected_cwds: dict[str, Path] = {}
+        self._launch_records: dict[str, dict[str, object]] = {}
+        self._readiness_failures: dict[str, dict[str, object]] = {}
 
     @property
     def session_name(self) -> str:
@@ -228,7 +248,24 @@ class TmuxTransport(TransportAdapter):
                 command = f"{env_prefix} {command}"
             if cwd is not None:
                 command = f"cd {shlex.quote(str(cwd))} && {command}"
-            self.tmux.send_keys(role.instance_id, command)
+            self._wait_for_shell_handshake(role)
+            self._launch_records[role.instance_id] = {
+                "backend": role.backend,
+                "command": command,
+                "launch_attempts": 1,
+            }
+            try:
+                self.tmux.send_keys(role.instance_id, command)
+            except Exception as exc:
+                diagnostics = self._record_readiness_failure(
+                    role.instance_id,
+                    failure_class="provider_launch_submit_failed",
+                )
+                raise build_tmux_readiness_error(
+                    role.instance_id,
+                    diagnostics,
+                    cause=exc,
+                ) from exc
 
     @classmethod
     def _agent_env_prefix(cls, cwd: Path | None = None) -> str:
@@ -388,52 +425,6 @@ class TmuxTransport(TransportAdapter):
 
     def is_alive(self, role_name: str) -> bool:
         return self._agent_process_alive(role_name)
-
-    def wait_ready(self, role_name: str, pattern: str, timeout: float) -> bool:
-        """Wait for a provider prompt without accepting a shell false-positive.
-
-        Immediately after ``send-keys`` launches a role, tmux still reports
-        ``bash`` for a brief handoff period.  The old implementation returned
-        false on that first sample, even though Claude entered its TUI a few
-        hundred milliseconds later.  Conversely, a provider that exits back
-        to bash must never be accepted merely because old prompt text remains
-        in the pane scrollback.
-        """
-        deadline = time.monotonic() + max(0.0, timeout)
-        launch_grace_deadline = min(
-            deadline,
-            time.monotonic() + self._AGENT_LAUNCH_GRACE_SECONDS,
-        )
-        provider_seen = False
-
-        while time.monotonic() < deadline:
-            if self._agent_process_alive(role_name):
-                provider_seen = True
-                remaining = max(0.0, deadline - time.monotonic())
-                if remaining <= 0:
-                    return False
-                if self.tmux.wait_for_prompt(
-                    role_name,
-                    pattern,
-                    timeout=min(self._READY_POLL_INTERVAL_SECONDS, remaining),
-                ):
-                    # Re-check after the prompt match: scrollback can retain a
-                    # stale provider prompt after the process has exited.
-                    return self._agent_process_alive(role_name)
-            else:
-                # Once a real provider was observed, falling back to a shell is
-                # terminal for this spawn. Before that, allow a bounded exec
-                # handoff from bash to the provider process.
-                if provider_seen or not self.tmux.pane_alive(role_name):
-                    return False
-                if time.monotonic() >= launch_grace_deadline:
-                    return False
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(self._READY_POLL_INTERVAL_SECONDS, remaining))
-        return False
 
     def send_task(
         self,
@@ -640,6 +631,17 @@ class CompositeTransport(TransportAdapter):
     def wait_ready(self, role_name: str, pattern: str, timeout: float) -> bool:
         return self.for_role(role_name).wait_ready(role_name, pattern, timeout)
 
+    def readiness_diagnostics(self, role_name: str) -> dict[str, object]:
+        transport = self.for_role(role_name)
+        getter = getattr(transport, "readiness_diagnostics", None)
+        if not callable(getter):
+            return {}
+        try:
+            result = getter(role_name)
+        except Exception:
+            return {}
+        return result if isinstance(result, dict) else {}
+
     def send_task(
         self,
         role_name: str,
@@ -792,6 +794,7 @@ def make_transport(config: ZfConfig, *, dry_run: bool = False) -> TransportAdapt
                     state_dir, registry, cwd=_Path(project_root),
                     timeout_s=config.orchestrator.transport_timeout_s,
                     max_turns=config.orchestrator.max_turns,
+                    background_dispatch=True,
                 )
             sj_transport.register_role(role)
             by_role[role.instance_id] = sj_transport
@@ -837,7 +840,44 @@ def transport_error_diagnostics(exc: BaseException) -> dict[str, object]:
     probe = getattr(exc, "process_probe", None)
     if isinstance(probe, dict) and probe:
         out["process_probe"] = probe
+    failure_class = str(getattr(exc, "failure_class", "") or "")
+    if failure_class:
+        out["failure_class"] = failure_class
+    for key in (
+        "pane_alive",
+        "last_screen_excerpt",
+        "launch_attempts",
+        "requested_timeout_seconds",
+        "effective_timeout_seconds",
+        "shell_submit_attempts",
+    ):
+        value = getattr(exc, key, None)
+        if value is not None and (value != "" or key == "last_screen_excerpt"):
+            out[key] = value
     return out
+
+
+def transport_readiness_error(
+    transport: object,
+    role_name: str,
+    *,
+    backend: str = "",
+) -> TmuxError:
+    """Build one structured error from the transport's last ready probe."""
+
+    getter = getattr(transport, "readiness_diagnostics", None)
+    diagnostics: dict[str, object] = {}
+    if callable(getter):
+        try:
+            raw = getter(role_name)
+            if isinstance(raw, dict):
+                diagnostics = dict(raw)
+        except Exception:
+            pass
+    if backend and not diagnostics.get("backend"):
+        diagnostics["backend"] = backend
+    diagnostics.setdefault("failure_class", "provider_ready_unproven")
+    return build_tmux_readiness_error(role_name, diagnostics)
 
 
 def _command_contains_executable(command: str, executable: str) -> bool:

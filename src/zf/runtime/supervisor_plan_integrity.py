@@ -13,6 +13,7 @@ from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.workflow_anchor import is_workflow_fanout_anchor_task
+from zf.runtime.workflow_operation import reduce_workflow_operations
 
 
 PLAN_INTEGRITY_SCHEMA_VERSION = "plan-integrity.v0"
@@ -129,7 +130,9 @@ def _has_acceptance_evidence(task: Task, events: list[ZfEvent]) -> bool:
     if not task_id:
         return False
     evidence_events = {
+        "impl.self_check.completed",
         "lane.stage.completed",
+        "task.pipeline.verify.completed",
         "verify.child.completed",
         "verify.passed",
         "test.passed",
@@ -154,6 +157,10 @@ def _has_acceptance_evidence(task: Task, events: list[ZfEvent]) -> bool:
 
 
 def _acceptance_evidence_due(task: Task, events: list[ZfEvent]) -> bool:
+    if _has_active_task_verify(task, events):
+        return False
+    if _has_unresolved_task_failure(task, events):
+        return False
     if str(task.status or "") in {
         "review",
         "testing",
@@ -179,6 +186,67 @@ def _acceptance_evidence_due(task: Task, events: list[ZfEvent]) -> bool:
         }:
             return True
     return False
+
+
+def _has_unresolved_task_failure(task: Task, events: list[ZfEvent]) -> bool:
+    task_id = str(task.id or "")
+    if not task_id:
+        return False
+    failure_types = {
+        "dev.blocked",
+        "dev.failed",
+        "fanout.child.failed",
+        "lane.stage.failed",
+        "task.pipeline.acceptance.failed",
+        "task.pipeline.verify.failed",
+        "task.ref.rejected",
+        "workflow.operation.blocked",
+        "workflow.operation.failed",
+    }
+    recovery_types = {
+        "dev.build.done",
+        "fanout.child.dispatched",
+        "task.ref.updated",
+        "workflow.child.completed",
+        "workflow.operation.redrive_admitted",
+    }
+    unresolved = False
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if task_id not in {
+            str(event.task_id or ""),
+            str(payload.get("task_id") or ""),
+        }:
+            continue
+        if event.type in failure_types:
+            unresolved = True
+        elif event.type in recovery_types:
+            unresolved = False
+    return unresolved
+
+
+def _has_active_task_verify(task: Task, events: list[ZfEvent]) -> bool:
+    task_id = str(task.id or "")
+    if not task_id:
+        return False
+    operations = reduce_workflow_operations(events, task_id=task_id)
+    return any(
+        _is_verify_operation(operation)
+        and str(operation.get("status") or "")
+        in {"requested", "reserved", "running"}
+        for operation in operations.values()
+    )
+
+
+def _is_verify_operation(operation: dict[str, Any]) -> bool:
+    if str(operation.get("task_pipeline_stage") or "").strip().lower() == "verify":
+        return True
+    parent_stage = str(operation.get("parent_stage_id") or "").strip().lower()
+    stage_tokens = parent_stage.replace("_", "-").split("-")
+    if "verify" in stage_tokens:
+        return True
+    role_instance = str(operation.get("role_instance") or "").strip().lower()
+    return role_instance == "verify" or role_instance.startswith("verify-")
 
 
 def _read_events(state_dir: Path) -> list[ZfEvent]:

@@ -147,6 +147,11 @@ phase1 blind answers
 前三题：可枚举问题使用 2--3 个互斥选项和单推荐项，开放问题使用自由文本；提交后仍由
 `channel.question.*` ledger 保存逐项 resolved fact，组件本身不成为第二套问题状态机。
 
+若 active discussion 需要切换 mode 或从头复核，Details 中使用 `Restart discussion`。
+该动作会先以 `cancelled / explicit_restart` 关闭旧 session，再以新的 trigger message
+identity 启动当前 mode；原需求 message 仅通过 `source_requirement_message_id` 引用，
+不会复用旧 message id 而被幂等入口误判为重复发送。
+
 ![Channel Group 中自然讨论、定向回复与多角色收敛](assets/quickstart-channel-discussion.webp)
 
 ## 7. PRD Finalize 和 Owner authority

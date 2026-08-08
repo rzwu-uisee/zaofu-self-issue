@@ -71,7 +71,12 @@ def admit_synthesized_plan_package(
         "refactor.plan.ready",
     }:
         return final_status, recommendation, artifact_payload
-    payload = {**artifact_payload, "stage_id": stage_id}
+    trigger_payload = (
+        manifest.get("trigger_payload")
+        if isinstance(manifest.get("trigger_payload"), dict)
+        else {}
+    )
+    payload = {**trigger_payload, **artifact_payload, "stage_id": stage_id}
     try:
         metadata = flow_metadata_for(runtime.config, payload=payload)
         identity = _admit(
@@ -81,9 +86,9 @@ def admit_synthesized_plan_package(
             metadata=metadata,
             producer_stage_id=stage_id,
             goal_id=str(
-                manifest.get("pdd_id")
+                payload.get("goal_id")
+                or manifest.get("pdd_id")
                 or manifest.get("feature_id")
-                or payload.get("goal_id")
                 or ""
             ),
             workflow_run_id=trace_id,

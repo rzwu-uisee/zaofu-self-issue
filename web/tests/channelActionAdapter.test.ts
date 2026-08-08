@@ -25,6 +25,19 @@ const payloads = [
     "multi_lens",
   ),
 ];
+const discussionPayload = payloads[4];
+assert(
+  discussionPayload.requirement_message_id === "msg-api",
+  "discussion start must retain the source requirement identity",
+);
+assert(
+  discussionPayload.message_id === undefined,
+  "discussion start must use a fresh trigger message identity",
+);
+assert(
+  discussionPayload.restart === false,
+  "discussion start must not restart unless the operator asks",
+);
 assert(
   payloads.every((payload) => payload.thread_id === "feature/api"),
   "every channel control action must preserve the active thread",

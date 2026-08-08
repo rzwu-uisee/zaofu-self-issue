@@ -71,9 +71,13 @@ def evidence_producibility_errors(task_map: Mapping[str, Any]) -> list[str]:
         task_id: set(_strings(task.get("blocked_by")))
         for task_id, task in tasks.items()
     }
+    command_ids = {
+        command_id
+        for task in tasks.values()
+        for command_id in _verification_command_ids(task)
+    }
     errors: list[str] = []
     for task_id, task in tasks.items():
-        command_ids = _verification_command_ids(task)
         criteria = task.get("acceptance_criteria")
         if not isinstance(criteria, list):
             criteria = task.get("acceptance")

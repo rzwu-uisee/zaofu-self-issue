@@ -367,7 +367,12 @@ class SurgeryActionsMixin:
             event_log=self.writer.event_log,
         ).ship(
             target_ref=target_ref,
-            pdd_id=str(claim_payload.get("goal_id") or ""),
+            pdd_id=str(
+                claim_payload.get("pdd_id")
+                or claim_payload.get("feature_id")
+                or claim_payload.get("goal_id")
+                or ""
+            ),
             event_writer=self.writer,
             causation_id=requested.id,
             correlation_id=run_id,

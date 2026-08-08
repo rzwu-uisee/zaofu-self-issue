@@ -112,10 +112,6 @@ from zf.runtime.channel_workflow_authority import (
     bind_task_channel_authority,
     channel_workflow_authority_error,
 )
-from zf.runtime.task_workflow_plans import (
-    task_workflow_binding_digest,
-    task_workflow_route_eligibility_map,
-)
 from zf.runtime.workflow_route_catalog import workflow_route_catalog
 from zf.runtime.operator_reliability import (
     project_agent_cockpit,
@@ -2747,7 +2743,14 @@ def create_app(
             default_project_root=project_root,
         )
         raw_payload = await _request_json(request)
-        envelope = _project_action_envelope(project_id, raw_payload)
+        envelope = _project_action_envelope(
+            project_id,
+            raw_payload,
+            canonical_project_id=str(
+                getattr(getattr(context.config, "project", None), "name", "")
+                or ""
+            ),
+        )
         if not envelope["ok"]:
             return JSONResponse(envelope, status_code=int(envelope["_status_code"]))
         # OBS-A5-1: _web_action runs the action synchronously — for a sync:true
@@ -3619,6 +3622,15 @@ def create_app(
     from zf.web.measure_loop_routes import build_measure_loop_router
 
     app.include_router(build_measure_loop_router(resolve_ctx=_delivery_trace_ctx))
+
+    from zf.web.task_pipeline_routes import build_task_pipeline_router
+
+    app.include_router(build_task_pipeline_router(
+        resolve_ctx=_delivery_trace_ctx,
+        default_state_dir=state_dir,
+        default_project_root=project_root,
+        default_config=config,
+    ))
 
     # B15 (doc 93 §7): plan 审核 pending + operator inbox + plan preview
     from zf.web.plan_health_routes import build_plan_health_router
@@ -5118,9 +5130,11 @@ def _runtime(
             "schema_version": "runtime-resources.v1",
             "error": str(exc),
         }
+    runtime_state = _project_runtime_state(state_dir, config=config)
     return {
         "mode": "read-only",
-        "live": True,
+        "live": runtime_state in ("running", "unknown"),
+        "runtime_state": runtime_state,
         "state_dir": str(state_dir),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "seq": _line_count(events_path) if events_path.exists() else 0,
@@ -7483,6 +7497,7 @@ def _run_headless_kanban_agent_turn(
         flush_interval_s=stream_flush_interval_s,
     )
 
+    channel_prd_context = canonical_channel_prd_context(state_dir)
     try:
         agent = KanbanHeadlessAgent(
             state_dir=state_dir,
@@ -7506,7 +7521,7 @@ def _run_headless_kanban_agent_turn(
                 "conversation_id": conversation_id,
                 "runtime_snapshot_ref": runtime_snapshot_ref,
                 "workflow_route_catalog": workflow_route_catalog(config),
-                "canonical_channel_prds": canonical_channel_prd_context(state_dir),
+                "canonical_channel_prds": channel_prd_context,
                 "workflow_context": workflow_context,
                 "plan_discussion": payload.get("plan_discussion") or {},
             },
@@ -7592,6 +7607,14 @@ def _run_headless_kanban_agent_turn(
         },
         config=config,
     )
+    task_candidates = TaskStore(state_dir / "kanban.json").list_all()
+    task_binding_digests, task_contract_errors, workflow_route_eligibility = (
+        plan_runtime.task_contract_context_for_plan(
+            task_candidates,
+            config=config,
+            project_root=project_root,
+        )
+    )
     plan_draft, action_proposal = plan_runtime.prepare_headless_plan_draft(
         prior_events, answer=result.reply, action_proposal=action_proposal,
         project_id=project_id, conversation_id=conversation_id,
@@ -7600,22 +7623,11 @@ def _run_headless_kanban_agent_turn(
         provider_session_id=result.provider_session_id,
         originating_message_event_id=origin_message_event_id or user_message.id,
         task_id=task_id,
-        task_contract_digest=(
-            task_workflow_binding_digest(task)
-            if task is not None
-            else ""
-        ),
-        task_binding_digests={
-            candidate.id: task_workflow_binding_digest(candidate)
-            for candidate in TaskStore(
-                state_dir / "kanban.json"
-            ).list_all()
-        },
-        workflow_route_eligibility=task_workflow_route_eligibility_map(
-            TaskStore(state_dir / "kanban.json").list_all(),
-            config,
-        ),
+        task_binding_digests=task_binding_digests,
+        workflow_route_eligibility=workflow_route_eligibility,
+        task_contract_errors=task_contract_errors,
         workflow_context=workflow_context,
+        canonical_channel_prds=channel_prd_context,
         correlation_id=user_message.correlation_id,
         config=config,
     )

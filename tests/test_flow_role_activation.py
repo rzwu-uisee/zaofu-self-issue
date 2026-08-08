@@ -4,8 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from zf.core.config.schema import ProjectConfig, RoleConfig, ZfConfig
+from zf.core.config.schema import (
+    ProjectConfig,
+    RoleConfig,
+    RoleLifecycleConfig,
+    ZfConfig,
+)
 from zf.core.events.model import ZfEvent
+from zf.core.state.role_sessions import RoleSessionRegistry
+from zf.core.task.schema import Task
 from zf.runtime.flow_role_activation import (
     activate_flow_roles,
     active_flow_role_instance_ids,
@@ -35,6 +42,10 @@ class _ActivationCoordinator:
     def __init__(self, transport: _ActivationTransport) -> None:
         self.transport = transport
         self.spawned: list[tuple[str, Path | None]] = []
+        self.prepared: list[str] = []
+
+    def prepare_provider_session(self, role: RoleConfig) -> None:
+        self.prepared.append(role.instance_id)
 
     def spawn(self, role: RoleConfig, *, cwd: Path | None = None) -> None:
         self.spawned.append((role.instance_id, cwd))
@@ -67,6 +78,7 @@ def _config() -> ZfConfig:
                 backend="mock",
                 role_kind="writer",
                 flow_kind="issue",
+                lifecycle=RoleLifecycleConfig(mode="on_demand"),
             ),
             RoleConfig(
                 name="workflow-scoper",
@@ -153,6 +165,195 @@ def test_activation_supports_generic_workflow_role_closure(
     assert result.status == "applied"
     assert result.role_instance_ids == ("workflow-scoper",)
     assert [item[0] for item in coordinator.spawned] == ["workflow-scoper"]
+
+
+def test_on_demand_flow_activation_defers_physical_process(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, coordinator = _orchestrator(tmp_path)
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+
+    result = activate_flow_roles(orchestrator, payload=payload)
+
+    assert result.status == "applied"
+    assert result.role_instance_ids == ("issue-fix",)
+    assert result.deferred_instance_ids == ("issue-fix",)
+    assert coordinator.spawned == []
+    assert coordinator.prepared == ["issue-fix"]
+    assert "issue-fix" not in transport.alive
+    registry = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    assert registry.instance_meta()["issue-fix"]["lifecycle_state"] == "dormant"
+    assert (orchestrator.state_dir / "instructions" / "issue-fix.md").exists()
+    assert [
+        role.instance_id
+        for role in orchestrator._runtime_active_role_configs()
+    ] == ["controller"]
+    orchestrator._hibernate_idle_roles()
+    assert not any(
+        event.type == "role.lifecycle.suspend.rejected"
+        for event in orchestrator.event_log.read_all()
+    )
+
+
+def test_on_demand_activation_ignores_terminal_task_heartbeat(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, coordinator = _orchestrator(tmp_path)
+    orchestrator.task_store.add(Task(
+        id="TASK-OLD",
+        title="terminal task",
+        status="blocked",
+        assigned_to="issue-fix",
+    ))
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat("issue-fix", {
+        "current_task_id": "TASK-OLD",
+        "state": "busy",
+    })
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+
+    result = activate_flow_roles(orchestrator, payload=payload)
+
+    assert result.deferred_instance_ids == ("issue-fix",)
+    assert coordinator.spawned == []
+    assert "issue-fix" not in transport.alive
+
+
+def test_on_demand_dispatch_activates_only_selected_role(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, coordinator = _orchestrator(tmp_path)
+    orchestrator.config.roles.append(RoleConfig(
+        name="issue-verify",
+        backend="mock",
+        role_kind="reader",
+        flow_kind="issue",
+        lifecycle=RoleLifecycleConfig(mode="on_demand"),
+    ))
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+    result = activate_flow_roles(orchestrator, payload=payload)
+    assert result.deferred_instance_ids == ("issue-fix", "issue-verify")
+
+    selected = next(
+        role for role in orchestrator.config.roles
+        if role.instance_id == "issue-fix"
+    )
+    orchestrator._ensure_role_active(selected, task_id=None)
+
+    assert [item[0] for item in coordinator.spawned] == ["issue-fix"]
+    assert "issue-fix" in transport.alive
+    assert "issue-verify" not in transport.alive
+    assert "issue-fix" in {
+        role.instance_id
+        for role in orchestrator._runtime_active_role_configs()
+    }
+
+
+def test_restore_keeps_dormant_roles_deferred_and_recovers_active_obligation(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, _coordinator = _orchestrator(tmp_path)
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+    activate_flow_roles(orchestrator, payload=payload)
+
+    dormant_restore, _transport, dormant_coordinator = _orchestrator(
+        tmp_path,
+        transport=transport,
+    )
+    dormant_results = restore_flow_role_activations(dormant_restore)
+    assert dormant_results[0].status == "replay"
+    assert dormant_results[0].deferred_instance_ids == ("issue-fix",)
+    assert dormant_coordinator.spawned == []
+
+    operation = {
+        "workflow_run_id": "run-prd-1",
+        "operation_id": "wop-issue-fix",
+        "operation_type": "agent",
+        "request_hash": "c" * 64,
+        "role_instance": "issue-fix",
+        "task_id": "TASK-ISSUE",
+    }
+    dormant_restore.event_writer.append(ZfEvent(
+        type="workflow.operation.requested",
+        actor="kernel",
+        task_id="TASK-ISSUE",
+        payload=operation,
+    ))
+    dormant_restore.event_writer.append(ZfEvent(
+        type="workflow.operation.started",
+        actor="kernel",
+        task_id="TASK-ISSUE",
+        payload=operation,
+    ))
+    active_restore, _transport, active_coordinator = _orchestrator(
+        tmp_path,
+        transport=transport,
+    )
+
+    active_results = restore_flow_role_activations(active_restore)
+
+    assert active_results[0].status == "recovered"
+    assert active_results[0].recovered_instance_ids == ("issue-fix",)
+    assert [item[0] for item in active_coordinator.spawned] == ["issue-fix"]
+
+
+def test_restore_ignores_nonterminal_operation_from_terminal_run(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, _coordinator = _orchestrator(tmp_path)
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+    payload["workflow_run_id"] = "run-current"
+    payload["workflow_operation_id"] = "wop-current"
+    activate_flow_roles(orchestrator, payload=payload)
+    operation = {
+        "workflow_run_id": "run-old",
+        "operation_id": "wop-stale-issue-fix",
+        "operation_type": "agent",
+        "request_hash": "d" * 64,
+        "role_instance": "issue-fix",
+        "task_id": "TASK-STALE",
+    }
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.requested",
+        actor="kernel",
+        task_id="TASK-STALE",
+        payload=operation,
+        correlation_id="run-old",
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="workflow.operation.started",
+        actor="kernel",
+        task_id="TASK-STALE",
+        payload=operation,
+        correlation_id="run-old",
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="kernel",
+        task_id="TASK-STALE",
+        payload={"run_id": "run-old"},
+        correlation_id="run-old",
+    ))
+
+    restored, _transport, coordinator = _orchestrator(
+        tmp_path,
+        transport=transport,
+    )
+    results = restore_flow_role_activations(restored)
+
+    assert results[0].status == "replay"
+    assert results[0].deferred_instance_ids == ("issue-fix",)
+    assert coordinator.spawned == []
 
 
 def test_activation_prepares_workdir_before_materializing_role_skills(
@@ -285,6 +486,45 @@ def test_activation_restore_fails_closed_on_role_config_drift(
     assert failed.payload["conflicting_activation_id"] == first.activation_id
 
 
+@pytest.mark.parametrize(
+    "terminal_type",
+    ["run.goal.completed", "run.goal.blocked", "run.cancelled"],
+)
+def test_terminal_run_activation_is_not_restored_after_config_change(
+    tmp_path: Path,
+    terminal_type: str,
+) -> None:
+    orchestrator, _transport, _coordinator = _orchestrator(tmp_path)
+    activate_flow_roles(orchestrator, payload=_payload())
+    orchestrator.event_writer.append(ZfEvent(
+        type=terminal_type,
+        actor="kernel",
+        payload={"run_id": "run-prd-1"},
+        correlation_id="run-prd-1",
+    ))
+
+    restored, _transport, restored_coordinator = _orchestrator(tmp_path)
+    next(
+        role
+        for role in restored.config.roles
+        if role.instance_id == "prd-verify"
+    ).backend = "codex"
+
+    assert restore_flow_role_activations(restored) == []
+    assert restored_coordinator.spawned == []
+    assert active_flow_role_instance_ids(
+        restored.config,
+        restored.event_log.read_all(),
+    ) == {"controller"}
+    projected = flow_role_activation_projection(
+        restored.config,
+        restored.event_log.read_all(),
+        active_instance_ids={"controller"},
+    )
+    assert projected["prd-dev"]["activation_state"] == "declared"
+    assert projected["prd-verify"]["activation_state"] == "declared"
+
+
 def test_activation_rejects_digest_drift_within_confirmed_flow_scope(
     tmp_path: Path,
 ) -> None:
@@ -393,6 +633,7 @@ def test_web_roles_expose_flow_activation_state(tmp_path: Path) -> None:
         "confirmed_workflow_invoke"
     )
     assert by_id["issue-fix"]["activation"]["activation_state"] == "declared"
+    assert by_id["issue-fix"]["state"] == "dormant"
 
 
 def test_status_workers_exposes_flow_activation_state(
@@ -426,3 +667,7 @@ def test_status_workers_exposes_flow_activation_state(
     assert "ACTIVATION" in output
     assert "prd-dev" in output and "active" in output
     assert "issue-fix" in output and "declared" in output
+    issue_row = next(
+        line for line in output.splitlines() if line.startswith("issue-fix")
+    )
+    assert "dormant" in issue_row

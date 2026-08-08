@@ -1,0 +1,148 @@
+"""TaskRef admission failures that require a new v4 Impl operation."""
+
+from __future__ import annotations
+
+from typing import Any, Iterable, Mapping
+
+from zf.core.events.model import ZfEvent
+
+
+_TASK_REF_STATUS_EVENTS = frozenset({"task.ref.rejected", "task.ref.updated"})
+
+
+def derive_impl_rework_requests(
+    *,
+    events: Iterable[ZfEvent],
+    generation_contexts: Mapping[str, Mapping[str, Any]],
+    operation_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Project current typed Impl TaskRef rejections into semantic rework.
+
+    A TaskRef gate runs after the provider call result is admitted.  If it
+    rejects that exact typed result, the settled Impl operation cannot be
+    reopened.  The current rejection therefore requests the next v4 operation
+    generation; it must never fall through to the legacy role-v1 repair path.
+    """
+
+    event_rows = list(events)
+    event_by_id = {event.id: event for event in event_rows}
+    operations = {
+        str(row.get("operation_id") or ""): dict(row)
+        for row in operation_rows
+        if str(row.get("operation_id") or "")
+    }
+    latest_status_by_trigger: dict[str, str] = {}
+    for event in event_rows:
+        if event.type not in _TASK_REF_STATUS_EVENTS:
+            continue
+        payload = _payload(event)
+        trigger_id = str(payload.get("trigger_event_id") or "").strip()
+        if trigger_id:
+            latest_status_by_trigger[trigger_id] = event.type
+
+    requests: dict[str, dict[str, Any]] = {}
+    for event in event_rows:
+        if event.type != "task.ref.rejected" or not event.task_id:
+            continue
+        task_id = str(event.task_id)
+        context = generation_contexts.get(task_id)
+        if context is None:
+            continue
+        rejection = _payload(event)
+        if str(rejection.get("rejection_kind") or "") == "stale_contract_result":
+            continue
+        source_event_id = str(
+            rejection.get("trigger_event_id") or ""
+        ).strip()
+        if (
+            not source_event_id
+            or latest_status_by_trigger.get(source_event_id)
+            != "task.ref.rejected"
+        ):
+            continue
+        source_event = event_by_id.get(source_event_id)
+        if source_event is None or source_event.type != "dev.build.done":
+            continue
+        source = _payload(source_event)
+        operation_id = str(source.get("operation_id") or "").strip()
+        operation = operations.get(operation_id)
+        generation = int(source.get("operation_generation") or 0)
+        if (
+            str(source.get("task_pipeline_stage") or "") != "impl"
+            or generation < 1
+            or operation is None
+            or str(operation.get("status") or "") != "settled"
+            or str(operation.get("semantic_verdict") or "").lower()
+            not in {"", "passed", "pass", "approved", "approve", "admit"}
+            or str(operation.get("task_pipeline_stage") or "") != "impl"
+            or int(operation.get("operation_generation") or 0) != generation
+            or str(operation.get("workflow_run_id") or "")
+            != str(context.get("workflow_run_id") or "")
+            or str(operation.get("task_map_generation") or "")
+            != str(context.get("task_map_generation") or "")
+            or not str(operation.get("call_result_admitted_event_id") or "")
+        ):
+            continue
+        requests[task_id] = {
+            "schema_version": "task-pipeline-impl-rework-request.v1",
+            "fault": "task_ref_admission_rejected",
+            "event_id": event.id,
+            "source_event_id": source_event_id,
+            "operation_id": operation_id,
+            "operation_generation": generation,
+            "reason": str(
+                rejection.get("reason") or "TaskRef admission rejected"
+            ).strip(),
+            "expected_action": _expected_action(rejection),
+            "changed_files": _strings(rejection.get("changed_files")),
+            "out_of_scope_files": _strings(
+                rejection.get("out_of_scope_files")
+            ),
+            "dirty_files": _strings(rejection.get("dirty_files")),
+        }
+    return requests
+
+
+def impl_rework_feedback(
+    request: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Render one projected TaskRef rejection for the next Impl briefing."""
+
+    if not request:
+        return []
+    return [{
+        "finding_id": f"task-ref:{request.get('event_id') or 'rejected'}",
+        "category": "task_ref_admission",
+        "severity": "blocking",
+        "reason": str(request.get("reason") or "TaskRef admission rejected"),
+        "expected_action": str(
+            request.get("expected_action")
+            or "repair_task_ref_and_resubmit_typed_impl_result"
+        ),
+        "source_event_id": str(request.get("source_event_id") or ""),
+        "blocking_event_id": str(request.get("event_id") or ""),
+        "changed_files": _strings(request.get("changed_files")),
+        "out_of_scope_files": _strings(request.get("out_of_scope_files")),
+        "dirty_files": _strings(request.get("dirty_files")),
+    }]
+
+
+def _expected_action(payload: Mapping[str, Any]) -> str:
+    if _strings(payload.get("out_of_scope_files")):
+        return "repair_source_scope_and_resubmit_typed_impl_result"
+    if _strings(payload.get("dirty_files")):
+        return "settle_workspace_and_resubmit_typed_impl_result"
+    return "repair_task_ref_and_resubmit_typed_impl_result"
+
+
+def _payload(event: ZfEvent) -> dict[str, Any]:
+    return event.payload if isinstance(event.payload, dict) else {}
+
+
+def _strings(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+__all__ = ["derive_impl_rework_requests", "impl_rework_feedback"]

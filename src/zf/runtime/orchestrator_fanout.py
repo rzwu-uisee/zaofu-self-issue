@@ -24,6 +24,13 @@ from zf.runtime.failure_kind import (
 from zf.runtime.fanout_briefing_runtime import FanoutBriefingMixin
 from zf.runtime.briefing_metrics import write_briefing_with_metrics
 from zf.runtime.fanout_dispatch_liveness import FanoutDispatchLivenessMixin
+from zf.runtime.fanout_dispatch_lineage import (
+    apply_stage_attempt_domain, apply_stage_result_semantics,
+    bind_child_event_lineage,
+    bind_reader_fanout_lineage,
+    bind_started_event_lineage, build_child_dispatch_outcome_event,
+    reader_child_lineage_payload,
+)
 from zf.runtime.fanout_failure_findings import (
     candidate_failure_findings,
     fanout_failure_context, fanout_failure_findings,
@@ -47,10 +54,12 @@ from zf.runtime.writer_completion_briefing import writer_completion_discipline_l
 from zf.runtime.writer_fanout_result_binding import WriterFanoutResultBindingMixin
 from zf.runtime.writer_dispatch_fence import WriterDispatchFenceMixin
 from zf.runtime.writer_preparation_recovery import WriterPreparationRecoveryMixin
-from zf.runtime.writer_failure_continuation import (
-    capture_writer_failure_continuation,
-)
 from zf.runtime.injection import build_task_prompt
+from zf.runtime.orchestrator_agent_dispatch_fences import (
+    pre_impl_dispatch_fence,
+    stage_barrier_blocks_dispatch,
+)
+from zf.runtime import skill_briefing, task_pipeline_fanout
 from zf.runtime.lane_stage_handoff import (
     LANE_STAGE_HANDOFF_FAILURE_EVENT,
     LANE_STAGE_HANDOFF_SUCCESS_EVENT,
@@ -72,8 +81,13 @@ from zf.runtime.plan_synth_runtime import (
     PLAN_SYNTH_HANDOFF_KEYS,
     PlanSynthRuntimeMixin,
 )
+from zf.runtime.run_admission import RunDispatchBlocked
 from zf.runtime.workflow_inputs import render_workflow_input_briefing_section
 from zf.runtime.writer_fanout_data import _FANOUT_AFFINITY_METADATA_KEYS
+from zf.runtime.writer_fanout_dependency_failure import (
+    close_blocked_writer_dependencies,
+    writer_task_dependencies_satisfied as _writer_task_dependencies_satisfied,
+)
 from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
     build_target_snapshot,
@@ -106,6 +120,7 @@ from zf.runtime.rework_feedback import (
     hydrate_rework_feedback,
     write_rework_feedback,
 )
+from zf.runtime.research_generation import RESEARCH_GENERATION_HANDOFF_KEYS
 from zf.runtime.verification_result import (
     VerificationResultError,
     normalize_verification_result,
@@ -160,6 +175,7 @@ _CONTRACT_HANDOFF_KEYS = (
     "effective_config_digest",
     "run_contract_ref",
     "run_contract_digest",
+    *RESEARCH_GENERATION_HANDOFF_KEYS,
     "target_snapshot_ref",
     "target_commit",
     "target_snapshot_digest",
@@ -179,10 +195,12 @@ _CONTRACT_HANDOFF_KEYS = (
     "required_reads",
     "admitted_call_result_ref",
     "admitted_call_result_digest",
+    "control_result_ref",
     "rework_of",
     "rework_attempt",
     "rework_source",
     "rework_feedback",
+    "rework_feedback_ref", "rework_feedback_digest", "feedback_revision",
     "rework_categories",
     "rework_summary",
     "replan_classification",
@@ -228,6 +246,7 @@ _DURABLE_CALL_TRIGGER_KEYS = tuple(dict.fromkeys((
     "effective_config_digest",
     "run_contract_ref",
     "run_contract_digest",
+    *RESEARCH_GENERATION_HANDOFF_KEYS,
     "target_snapshot_ref",
     "target_snapshot_digest",
     "target_commit",
@@ -249,6 +268,7 @@ _DURABLE_CALL_TRIGGER_KEYS = tuple(dict.fromkeys((
     "rework_attempt",
     "rework_source",
     "rework_feedback",
+    "rework_feedback_ref", "rework_feedback_digest", "feedback_revision",
     "rework_categories",
     "rework_summary",
     "replan_classification",
@@ -313,50 +333,6 @@ def _writer_task_value(task_item: dict, key: str) -> str:
         if value not in (None, ""):
             return str(value).strip()
     return ""
-
-
-def _writer_task_dependency_ids(task_item: dict) -> list[str]:
-    def _coerce(value: object) -> list[str]:
-        if isinstance(value, (list, tuple, set)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        if isinstance(value, str) and value.strip():
-            return [value.strip()]
-        return []
-
-    out: list[str] = []
-    seen: set[str] = set()
-    sources: list[dict] = [task_item]
-    payload = task_item.get("payload")
-    if isinstance(payload, dict):
-        sources.append(payload)
-    raw_task = task_item.get("raw_task")
-    if isinstance(raw_task, dict):
-        sources.append(raw_task)
-    for source in sources:
-        for key in ("blocked_by", "depends_on"):
-            for dep in _coerce(source.get(key)):
-                if dep in seen:
-                    continue
-                seen.add(dep)
-                out.append(dep)
-    return out
-
-
-def _writer_task_dependencies_satisfied(
-    task_store,
-    task_item: dict,
-    *,
-    completed_task_ids: set[str] | None = None,
-) -> bool:
-    terminal_statuses = {"done", "cancelled", "superseded"}
-    completed_task_ids = completed_task_ids or set()
-    for dep in _writer_task_dependency_ids(task_item):
-        if dep in completed_task_ids:
-            continue
-        task = task_store.get(dep)
-        if task is None or str(task.status or "") not in terminal_statuses:
-            return False
-    return True
 
 
 def _contract_handoff_ref_fields(
@@ -629,6 +605,7 @@ class FanoutCoordinationMixin(
                 )
             self._note_prompt_sent(role.instance_id, run_id)
             dispatched = context.child_dispatched_event(child, run_id=run_id)
+            bind_child_event_lineage(dispatched, child.payload)
             dispatched.payload["skills"] = list(role.skills)
             dispatched.payload["briefing_path"] = str(briefing_path)
             self._bind_task_attempt_payload(dispatched.payload, dispatch_context)
@@ -682,6 +659,16 @@ class FanoutCoordinationMixin(
                 task_id=str(dispatched.payload.get("task_id") or ""),
             )
             return True
+        except RunDispatchBlocked as exc:
+            self.event_writer.append(build_child_dispatch_outcome_event(
+                context,
+                child=child,
+                run_id=run_id,
+                reason=exc.reason,
+                event_type="fanout.child.dispatch_deferred",
+                causation_id=causation_id,
+            ))
+            return True
         except Exception as exc:
             reason = str(exc)
             if (
@@ -692,36 +679,15 @@ class FanoutCoordinationMixin(
                 )
                 < _READER_CHILD_INFRA_DISPATCH_RETRY_CAP
             ):
-                self.event_writer.append(ZfEvent(
-                    type="fanout.child.dispatch_deferred",
-                    actor="zf-cli",
-                    payload={
-                        "fanout_id": context.fanout_id,
-                        "trace_id": context.trace_id,
-                        "stage_id": context.stage_id,
-                        "child_id": child.child_id,
-                        "run_id": run_id,
-                        "role_instance": child.role_instance,
-                        "reason": reason,
-                    },
+                self.event_writer.append(build_child_dispatch_outcome_event(
+                    context, child=child, run_id=run_id, reason=reason,
+                    event_type="fanout.child.dispatch_deferred",
                     causation_id=causation_id,
-                    correlation_id=context.trace_id,
                 ))
                 return True
-            self.event_writer.append(ZfEvent(
-                type="fanout.child.failed",
-                actor="zf-cli",
-                payload={
-                    "fanout_id": context.fanout_id,
-                    "trace_id": context.trace_id,
-                    "stage_id": context.stage_id,
-                    "child_id": child.child_id,
-                    "run_id": run_id,
-                    "role_instance": child.role_instance,
-                    "reason": reason,
-                },
-                causation_id=causation_id,
-                correlation_id=context.trace_id,
+            self.event_writer.append(build_child_dispatch_outcome_event(
+                context, child=child, run_id=run_id, reason=reason,
+                event_type="fanout.child.failed", causation_id=causation_id,
             ))
             return True
 
@@ -734,8 +700,10 @@ class FanoutCoordinationMixin(
         Reader fanout children often have no kanban task id, so a watcher
         restart or context refresh can leave the manifest at ``dispatched``
         while the worker pane/session has been refreshed back to idle. Treat
-        explicit session replacement events as infrastructure loss and rerun
-        once without spending business retry budget.
+        explicit session replacement events or a provider turn that closes
+        without a canonical child result as infrastructure loss. Rerun within
+        the bounded recovery allowance, then fail explicitly instead of
+        leaving the child dispatched until its wall-clock budget expires.
         """
         terminal_statuses = {"completed", "failed", "timed_out", "cancelled"}
         event_index = {event.id: index for index, event in enumerate(events)}
@@ -810,11 +778,14 @@ class FanoutCoordinationMixin(
                 child_dispatches = dispatches.get(key, [])
                 if not child_dispatches:
                     continue
-                if dispatch_lost_count.get(key, 0) >= allowed_recoveries:
-                    continue
                 latest_dispatch = child_dispatches[-1]
                 latest_index = event_index.get(latest_dispatch.id, -1)
                 if latest_index < 0:
+                    continue
+                if self._fanout_dispatch_has_authoritative_result(
+                    events,
+                    latest_dispatch,
+                ):
                     continue
                 lost_event = self._reader_dispatch_lost_event_after(
                     lost_events_by_role.get(role_instance, []),
@@ -834,6 +805,12 @@ class FanoutCoordinationMixin(
                     activity_index,
                 ):
                     continue
+                provider_turn_closed = lost_event.type == "provider.turn.closed"
+                loss_reason = (
+                    "provider_turn_closed_without_child_result"
+                    if provider_turn_closed
+                    else "reader_worker_session_replaced_after_dispatch"
+                )
                 self.event_writer.append(ZfEvent(
                     type="fanout.child.dispatch_lost",
                     actor="zf-cli",
@@ -846,7 +823,7 @@ class FanoutCoordinationMixin(
                         "run_id": str(child.get("run_id") or ""),
                         "role_instance": role_instance,
                         "task_id": str(child.get("task_id") or ""),
-                        "reason": "reader_worker_session_replaced_after_dispatch",
+                        "reason": loss_reason,
                         "lost_signal_event_id": lost_event.id,
                         "lost_signal_type": lost_event.type,
                     },
@@ -856,12 +833,17 @@ class FanoutCoordinationMixin(
                 self._set_worker_state(
                     role_instance,
                     "idle",
-                    reason=(
-                        "reader fanout dispatch lost after worker session "
-                        "replacement"
-                    ),
+                    reason=loss_reason,
                     force=True,
                 )
+                if dispatch_lost_count.get(key, 0) >= allowed_recoveries:
+                    self._fail_exhausted_reader_fanout_dispatch(
+                        manifest=manifest,
+                        child=child,
+                        lost_event=lost_event,
+                        loss_reason=loss_reason,
+                    )
+                    return True
                 self._retry_fanout_child(
                     manifest=manifest,
                     child=child,
@@ -871,16 +853,6 @@ class FanoutCoordinationMixin(
                 )
                 return True
         return False
-
-    @staticmethod
-    def _reader_dispatch_lost_event_after(
-        role_events: list[tuple[int, ZfEvent]],
-        dispatch_index: int,
-    ) -> ZfEvent | None:
-        for index, event in role_events:
-            if index > dispatch_index:
-                return event
-        return None
 
     def _reader_role_has_activity_after_dispatch(
         self,
@@ -1029,6 +1001,7 @@ class FanoutCoordinationMixin(
         events: list[ZfEvent],
     ) -> bool:
         """Replay reader child result events whose fanout terminal was missed."""
+        event_order = {event.id: index for index, event in enumerate(events)}
         terminal_sources: set[str] = set()
         terminal_children: set[tuple[str, str]] = set()
         for event in events:
@@ -1055,7 +1028,9 @@ class FanoutCoordinationMixin(
             fanout_id = str(payload.get("fanout_id") or "")
             child_id = str(payload.get("child_id") or payload.get("child_run") or "")
             if not fanout_id or not child_id:
-                resolved = self._resolve_orphan_reader_fanout_child(event, payload)
+                resolved = self._resolve_orphan_reader_fanout_child(
+                    event, payload, event_order=event_order,
+                )
                 if resolved is None:
                     continue
                 fanout_id, child_id = resolved
@@ -1689,6 +1664,8 @@ class FanoutCoordinationMixin(
             if event_type == LANE_STAGE_HANDOFF_FAILURE_EVENT
             else ""
         )
+        if verification_error:
+            failure_target = stage_slot
         root_fanout_id = str(
             child_payload.get("root_fanout_id")
             or child_payload.get("upstream_root_fanout_id")
@@ -1844,7 +1821,8 @@ class FanoutCoordinationMixin(
         if verification_error:
             payload["reason"] = verification_error
             payload["failure_class"] = "verifier_contract_failure"
-            payload["recovery_owner"] = "run_manager"
+            payload["recovery_owner"] = "task_verify"
+            payload["recovery_action"] = "result_repair"
         pending_lane_event = ZfEvent(
             type=event_type,
             actor="zf-cli",
@@ -1980,6 +1958,12 @@ class FanoutCoordinationMixin(
                         payload.get("verification_tier") or ""
                     ),
                     "evidence_refs": list(payload.get("evidence_refs") or []),
+                    "admitted_call_result_ref": dict(
+                        payload.get("admitted_call_result_ref") or {}
+                    ),
+                    "control_result_ref": dict(
+                        payload.get("control_result_ref") or {}
+                    ),
                 },
                 causation_id=lane_event.id,
                 correlation_id=lane_event.correlation_id,
@@ -2591,7 +2575,7 @@ class FanoutCoordinationMixin(
         return ready_event
 
     def _maybe_start_reader_fanout(self, event: ZfEvent) -> bool:
-        trigger_payload = event.payload if isinstance(event.payload, dict) else {}
+        trigger_payload = dict(event.payload) if isinstance(event.payload, dict) else {}
         if (
             event.type == "workflow.invoke.requested"
             and not str(trigger_payload.get("workflow_invoke_pattern_id") or "")
@@ -2605,6 +2589,8 @@ class FanoutCoordinationMixin(
         if not stages:
             return False
         if self._run_fanout_dispatch_blocked(event):
+            return False
+        if stage_barrier_blocks_dispatch(self, event):
             return False
         from zf.runtime.fanout import FanoutChild, FanoutContext
 
@@ -3090,6 +3076,13 @@ class FanoutCoordinationMixin(
                     role_instances=[role.instance_id for role in roles],
                     identity_scope=fanout_identity_scope,
                 )
+            lineage = bind_reader_fanout_lineage(
+                self, event=event, context=context, stage_id=stage.id,
+                trace_id=trace_id, trigger_payload=trigger_payload,
+            )
+            if lineage is None:
+                continue
+            workflow_run_id, parent_task_id = lineage
             if trigger_payload:
                 for child in context.expected_children:
                     child.payload.setdefault("trigger_payload", dict(trigger_payload))
@@ -3112,6 +3105,8 @@ class FanoutCoordinationMixin(
                 stage,
                 context.expected_children,
             )
+            apply_stage_attempt_domain(stage, context.expected_children)
+            apply_stage_result_semantics(stage, context.expected_children)
             identity_diagnostics = self._fanout_child_identity_diagnostics(context)
             if identity_diagnostics:
                 self.event_writer.append(ZfEvent(
@@ -3130,6 +3125,10 @@ class FanoutCoordinationMixin(
                 ))
                 continue
             started = context.started_event()
+            bind_started_event_lineage(
+                started, workflow_run_id=workflow_run_id,
+                parent_task_id=parent_task_id,
+            )
             identity_pdd_id = str(
                 trigger_payload.get("pdd_id")
                 or trigger_payload.get("feature_id")
@@ -3304,6 +3303,19 @@ class FanoutCoordinationMixin(
         并返回 False(hold)。rejected 后同 plan_id 不再重发 requested
         (rework 回路会产新 task_map.ready = 新 plan_id)。
         """
+        from zf.runtime.orchestrator_agent_plan_adoption import (
+            plan_candidate_checkpoint_state,
+        )
+
+        semantic = plan_candidate_checkpoint_state(
+            self,
+            stage_id=stage_id,
+            trigger_event=trigger_event,
+            loaded=loaded,
+            trace_id=trace_id,
+        )
+        if semantic.enabled and semantic.blocking:
+            return semantic.satisfied
         try:
             events = self.event_log.read_all()
         except Exception:
@@ -3482,6 +3494,8 @@ class FanoutCoordinationMixin(
             return
         if self._run_fanout_dispatch_blocked(event):
             return
+        if stage_barrier_blocks_dispatch(self, event):
+            return
         from zf.runtime.plan_artifact_package_runtime import admit_task_map_trigger_package
         event = admit_task_map_trigger_package(self, event, stages)
         if event is None:
@@ -3542,6 +3556,9 @@ class FanoutCoordinationMixin(
             use_affinity = (
                 self._fanout_assignment_strategy(stage) == "affinity_stage_slots"
             )
+            blocking_task_pipeline = task_pipeline_fanout.task_pipeline_enabled_for_event(
+                self, event,
+            )
             lane_roles: list[tuple[str, RoleConfig]] = []
             trace_id = event.correlation_id or (
                 event.payload.get("trace_id", "") if isinstance(event.payload, dict) else ""
@@ -3592,6 +3609,29 @@ class FanoutCoordinationMixin(
                     reason=str(exc),
                 )
                 continue
+            pre_impl = pre_impl_dispatch_fence(
+                self,
+                stage_id=stage.id,
+                trigger_event=event,
+                loaded=loaded,
+                trace_id=trace_id,
+            )
+            if pre_impl.failure_reason:
+                emit_plan_admission_cancel(
+                    self,
+                    trigger_event=event,
+                    stage_id=stage.id,
+                    trace_id=trace_id,
+                    pdd_id=loaded.pdd_id or pdd_id,
+                    feature_id=loaded.feature_id or loaded.pdd_id or pdd_id,
+                    task_map_ref=loaded.task_map_ref,
+                    task_map_path=loaded.task_map_path,
+                    source_index_ref=loaded.source_index_ref,
+                    reason=pre_impl.failure_reason,
+                )
+                continue
+            if pre_impl.blocked:
+                return
             try:
                 if suppress_completed_generation(
                     self,
@@ -3616,6 +3656,14 @@ class FanoutCoordinationMixin(
                 else:
                     roles = self._fanout_roles(stage.roles)
                 task_items = loaded.task_items
+                generation_preflight = None
+                if blocking_task_pipeline:
+                    generation_preflight = task_pipeline_fanout.preflight_blocking_task_pipeline_generation(
+                        self, trigger_event=event, stage=stage, trace_id=trace_id,
+                        pdd_id=pdd_id, loaded=loaded, task_items=task_items,
+                    )
+                    if generation_preflight is None:
+                        continue
                 pin_event = event
                 if not str(
                     (event.payload if isinstance(event.payload, dict) else {}).get(
@@ -3692,7 +3740,11 @@ class FanoutCoordinationMixin(
                     ):
                         return
                     self._ensure_writer_tasks_canonical(loaded)
-                if not use_affinity and len(task_items) > len(roles):
+                if (
+                    not blocking_task_pipeline
+                    and not use_affinity
+                    and len(task_items) > len(roles)
+                ):
                     raise RuntimeError(
                         "writer fanout has more tasks than writer role instances"
                     )
@@ -3816,6 +3868,19 @@ class FanoutCoordinationMixin(
                     causation_id=event.id,
                     correlation_id=trace_id,
                 ))
+                continue
+
+            if task_pipeline_fanout.admit_blocking_task_pipeline_generation(
+                self,
+                trigger_event=event,
+                admitted_event=admitted,
+                stage_id=stage.id,
+                trace_id=trace_id,
+                pdd_id=pdd_id,
+                loaded=loaded,
+                task_items=task_items,
+                preflight=generation_preflight,
+            ):
                 continue
 
             writer_target_ref = (
@@ -4323,6 +4388,15 @@ class FanoutCoordinationMixin(
                     "fanout affinity child identity invalid: "
                     + ", ".join(identity_errors)
                 )
+            from zf.runtime.writer_handoff_runtime import guard_writer_redispatch
+
+            if guard_writer_redispatch(
+                self, context=context, child=child, task_item=task_item,
+                task_id=task_id, run_id=run_id, pdd_id=pdd_id,
+                feature_id=feature_id, task_map_ref=task_map_ref,
+                source_index_ref=source_index_ref, causation_id=causation_id,
+            ):
+                return False
             fence_reason = self._writer_task_dispatch_fence_reason(
                 task_id,
                 role_instance=role.instance_id,
@@ -4545,6 +4619,16 @@ class FanoutCoordinationMixin(
                 task_id=task_id,
             )
             return True
+        except RunDispatchBlocked as exc:
+            self.event_writer.append(build_child_dispatch_outcome_event(
+                context,
+                child=child,
+                run_id=run_id,
+                reason=exc.reason,
+                event_type="fanout.child.dispatch_deferred",
+                causation_id=causation_id,
+            ))
+            return True
         except Exception as exc:
             payload = {
                 "fanout_id": context.fanout_id,
@@ -4578,101 +4662,16 @@ class FanoutCoordinationMixin(
         self,
         event: ZfEvent,
         payload: dict,
+        *,
+        event_order: dict[str, int] | None = None,
     ) -> tuple[str, str] | None:
-        """Re-bind a child result that lost its fanout context (B-STUCK-1b).
-
-        Restart / regular re-dispatch can strip ``fanout_id``/``child_id`` from a
-        reader-fanout child: the worker emits a bare domain completion carrying
-        only ``actor`` (its role instance) + ``dispatch_id``, which
-        ``_maybe_update_reader_fanout`` would silently drop -> the fanout barrier
-        never resolves -> stage times out (the ledgerlite prd-refine livelock).
-
-        Reconcile by the one key that survives a bare re-dispatch: the emitting
-        role instance. WIP=1 means a role runs exactly one thing, so a result
-        from role R unambiguously belongs to the single non-terminal reader
-        child whose ``role_instance == R`` -- but only when exactly one such
-        child exists and its manifest treats this event as a child result.
-        Zero or multiple matches -> do not guess.
-        """
-        status = str(payload.get("status") or "")
-        result_statuses = {
-            "completed", "passed", "approved", "success",
-            "failed", "failure", "rejected",
-        }
-        # Cheap gate: skip the manifest scan for the vast majority of events
-        # (heartbeats, usage, decisions) that are not child results.
-        if status not in result_statuses and not isinstance(
-            payload.get("report"), dict
-        ):
-            return None
-        role_instance = str(payload.get("role_instance") or "") or str(
-            getattr(event, "actor", "") or ""
+        from zf.runtime.reader_fanout_orphan_binding import (
+            resolve_orphan_reader_fanout_child,
         )
-        if not role_instance:
-            return None
-        fanout_root = self.state_dir / "fanouts"
-        if not fanout_root.exists():
-            return None
-        terminal = {"completed", "failed", "timed_out", "cancelled"}
-        matches: list[tuple[str, str]] = []
-        for manifest_path in fanout_root.glob("*/manifest.json"):
-            fanout_id = manifest_path.parent.name
-            manifest = self._fanout_manifest(fanout_id)
-            if not manifest or manifest.get("topology") != "fanout_reader":
-                continue
-            aggregate = (
-                manifest.get("aggregate")
-                if isinstance(manifest.get("aggregate"), dict)
-                else {}
-            )
-            if (
-                str(manifest.get("status") or "") in terminal
-                or str(aggregate.get("status") or "") in terminal
-            ):
-                continue
-            # A superseded (non-current) generation is as dead as a terminal one
-            # for re-binding: a superseded fanout is abandoned mid-flight when a
-            # newer instance of the same logical stage starts, so its manifest
-            # status is NOT terminal yet its children are orphans. Binding a fresh
-            # completion to it only gets that completion dropped as
-            # fanout.child.stale_completion. Observed in the feishu e2e: a resident
-            # prd-author re-used across rounds emitted a bare completion that bound
-            # to a 1.5h-old superseded prd-refine fanout -> stale-dropped -> the new
-            # task's prd stage stalled. Skip superseded generations here so the
-            # completion lands on the current generation (or none), never a stale one.
-            stale_reason, _superseded_by = self._fanout_identity_stale_reason(fanout_id)
-            if stale_reason:
-                continue
-            aggregate_config = manifest.get("aggregate_config") or {}
-            success_event = str(aggregate_config.get("success_event") or "")
-            failure_event = str(aggregate_config.get("failure_event") or "")
-            child_success_event, child_failure_event = (
-                self._fanout_child_result_events(aggregate_config)
-            )
-            is_result = (
-                event.type in {
-                    child_success_event,
-                    child_failure_event,
-                    success_event,
-                    failure_event,
-                }
-                or status in result_statuses
-            )
-            if not is_result:
-                continue
-            for child in manifest.get("children", []) or []:
-                if not isinstance(child, dict):
-                    continue
-                if str(child.get("role_instance") or "") != role_instance:
-                    continue
-                if str(child.get("status") or "") in {"completed", "failed"}:
-                    continue
-                child_id = str(child.get("child_id") or "")
-                if child_id:
-                    matches.append((fanout_id, child_id))
-        if len(matches) == 1:
-            return matches[0]
-        return None
+
+        return resolve_orphan_reader_fanout_child(
+            self, event, payload, event_order=event_order,
+        )
 
     def _maybe_update_reader_fanout(self, event: ZfEvent) -> None:
         if event.type == "fanout.synth.completed":
@@ -4732,6 +4731,8 @@ class FanoutCoordinationMixin(
         if child and child.get("status") in {"completed", "failed"}:
             return
         run_id = str(payload.get("run_id") or (child or {}).get("run_id") or "")
+        raw_child_payload = (child or {}).get("payload")
+        child_payload = raw_child_payload if isinstance(raw_child_payload, dict) else {}
         base_payload = {
             "fanout_id": fanout_id,
             "trace_id": manifest.get("trace_id", ""),
@@ -4741,15 +4742,11 @@ class FanoutCoordinationMixin(
             "role_instance": str(payload.get("role_instance") or (child or {}).get("role_instance") or ""),
             "target_ref": manifest.get("target_ref", ""),
         }
+        base_payload.update(reader_child_lineage_payload(payload, child or {}, child_payload))
         for key in _FANOUT_AFFINITY_METADATA_KEYS:
             value = self._fanout_payload_metadata_value(payload, child, key)
             if value:
                 base_payload[key] = value
-        child_payload = (
-            (child or {}).get("payload")
-            if isinstance((child or {}).get("payload"), dict)
-            else {}
-        )
         for key in _CONTRACT_HANDOFF_KEYS:
             value = payload.get(key) or (child or {}).get(key) or child_payload.get(key)
             if value not in (None, ""):
@@ -4776,11 +4773,52 @@ class FanoutCoordinationMixin(
         )
         if not failed_result and not completed_result:
             return
+        provider_failure = (
+            event.type == "workflow.operation.failed"
+            and event.origin == "kernel"
+            and payload.get("provider_failure_projection") is True
+        )
+        if provider_failure:
+            reason = str(
+                payload.get("reason") or "provider operation failed"
+            )
+            self.event_writer.append(ZfEvent(
+                type="fanout.child.failed",
+                actor="zf-cli",
+                origin="kernel",
+                task_id=base_payload.get("task_id") or None,
+                payload={
+                    **base_payload,
+                    "reason": reason,
+                    "failure_class": str(
+                        payload.get("failure_class") or "provider_stop"
+                    ),
+                    "provider_stop_reason": str(
+                        payload.get("provider_stop_reason") or ""
+                    ),
+                    "source_operation_id": str(
+                        payload.get("operation_id") or ""
+                    ),
+                },
+                causation_id=event.id,
+                correlation_id=(
+                    event.correlation_id or manifest.get("trace_id", "")
+                ),
+            ))
+            self._release_fanout_worker_if_terminal(
+                role_instance=base_payload["role_instance"],
+                fanout_id=fanout_id,
+                child_id=child_id,
+                run_id=run_id,
+                task_id=str(base_payload.get("task_id") or ""),
+            )
+            self._evaluate_reader_fanout(fanout_id)
+            return
         output_violation = self._fanout_output_path_violation(fanout_id, payload)
         if output_violation:
             self.event_writer.append(ZfEvent(
                 type="fanout.child.failed",
-                actor="zf-cli",
+                actor="zf-cli", task_id=base_payload.get("task_id") or None,
                 payload={**base_payload, "reason": output_violation},
                 causation_id=event.id,
                 correlation_id=event.correlation_id or manifest.get("trace_id", ""),
@@ -4849,58 +4887,14 @@ class FanoutCoordinationMixin(
             # Result shape correction is attempt-local. Keep this child live
             # and do not consume a semantic rework attempt.
             return
-        generic_artifact_delivery = (
-            str(base_payload.get("flow_kind") or "").strip().lower()
-            == "workflow"
-            and str(
-                base_payload.get("completion_profile") or ""
-            ).strip().lower()
-            == "artifact_delivery"
+        from zf.runtime.reader_handoff_runtime import (
+            handle_non_admitted_reader_result,
         )
-        if generic_artifact_delivery and (
-            call_outcome.status == "superseded"
-            or (call_mode == "blocking" and not call_outcome.admitted)
+        if handle_non_admitted_reader_result(
+            self, fanout_id=fanout_id, child_id=child_id, run_id=run_id,
+            base_payload=base_payload, call_mode=call_mode,
+            call_outcome=call_outcome, event=event, manifest=manifest,
         ):
-            reason = (
-                "stale_call_result_superseded"
-                if call_outcome.status == "superseded"
-                else f"call_result_{call_outcome.status or 'invalid'}"
-            )
-            self.event_writer.append(ZfEvent(
-                type="fanout.child.failed",
-                actor="zf-cli",
-                task_id=str(base_payload.get("task_id") or "") or None,
-                payload={
-                    **base_payload,
-                    "status": "failed",
-                    "reason": reason,
-                    "failure_class": (
-                        "call_result_currentness"
-                        if call_outcome.status == "superseded"
-                        else "call_result_protocol"
-                    ),
-                    "call_result_status": call_outcome.status,
-                    "call_result_issues": [
-                        dict(item) for item in call_outcome.issues
-                    ],
-                    "result_event_id": event.id,
-                },
-                causation_id=event.id,
-                correlation_id=(
-                    event.correlation_id
-                    or str(manifest.get("trace_id") or "")
-                ),
-            ))
-            self._release_fanout_worker_if_terminal(
-                role_instance=base_payload["role_instance"],
-                fanout_id=fanout_id,
-                child_id=child_id,
-                run_id=run_id,
-                task_id=str(base_payload.get("task_id") or ""),
-            )
-            self._evaluate_reader_fanout(fanout_id)
-            return
-        if call_outcome.status == "superseded":
             return
         if call_outcome.admitted:
             base_payload.update({
@@ -5012,7 +5006,7 @@ class FanoutCoordinationMixin(
         else:
             completed_event = self.event_writer.append(ZfEvent(
                 type="fanout.child.completed",
-                actor="zf-cli",
+                actor="zf-cli", task_id=base_payload.get("task_id") or None,
                 payload={
                     **base_payload,
                     **report_payload,
@@ -5040,92 +5034,6 @@ class FanoutCoordinationMixin(
             run_id=run_id, task_id=str(base_payload.get("task_id") or ""),
         )
         self._evaluate_reader_fanout(fanout_id)
-    def _emit_writer_fanout_stale_completion(
-        self,
-        *,
-        event: ZfEvent,
-        payload: dict,
-        manifest: dict,
-        child: dict,
-        expected_run_id: str,
-    ) -> None:
-        fanout_id = str(manifest.get("fanout_id") or "")
-        child_id = str(child.get("child_id") or "")
-        if self._fanout_stale_completion_recorded(
-            fanout_id=fanout_id,
-            child_id=child_id,
-            source_event_id=event.id,
-        ):
-            return
-        self.event_writer.append(ZfEvent(
-            type="fanout.child.stale_completion",
-            actor="zf-cli",
-            task_id=event.task_id or str(payload.get("task_id") or "") or None,
-            payload={
-                "fanout_id": fanout_id,
-                "trace_id": str(manifest.get("trace_id") or ""),
-                "stage_id": str(manifest.get("stage_id") or ""),
-                "child_id": child_id,
-                "task_id": str(event.task_id or payload.get("task_id") or ""),
-                "role_instance": str(
-                    payload.get("role_instance")
-                    or child.get("role_instance")
-                    or event.actor
-                    or ""
-                ),
-                "expected_run_id": expected_run_id,
-                "actual_run_id": str(payload.get("run_id") or ""),
-                "result_event_id": event.id,
-                "source_event_type": event.type,
-                "reason": "fanout child run_id does not match active run",
-            },
-            causation_id=event.id,
-            correlation_id=event.correlation_id or manifest.get("trace_id", ""),
-        ))
-
-    def _emit_writer_fanout_completion_adopted(
-        self,
-        *,
-        event: ZfEvent,
-        manifest: dict,
-        child: dict,
-        adopted_from: str,
-        reason: str,
-    ) -> None:
-        """BF-1 审计事件:一笔携带旧身份的完成被当前代收编。"""
-        fanout_id = str(manifest.get("fanout_id") or "")
-        child_id = str(child.get("child_id") or "")
-        try:
-            already_recorded = any(
-                item.type == "fanout.child.completion_adopted"
-                and str((item.payload or {}).get("fanout_id") or "") == fanout_id
-                and str((item.payload or {}).get("child_id") or "") == child_id
-                and str((item.payload or {}).get("result_event_id") or "") == event.id
-                for item in reversed(self.event_log.read_all())
-                if isinstance(item.payload, dict)
-            )
-        except OSError:
-            already_recorded = False
-        if already_recorded:
-            return
-        self.event_writer.append(ZfEvent(
-            type="fanout.child.completion_adopted",
-            actor="zf-cli",
-            task_id=event.task_id or str(child.get("task_id") or "") or None,
-            payload={
-                "fanout_id": fanout_id,
-                "trace_id": str(manifest.get("trace_id") or ""),
-                "stage_id": str(manifest.get("stage_id") or ""),
-                "child_id": child_id,
-                "task_id": str(event.task_id or child.get("task_id") or ""),
-                "adopted_from": adopted_from,
-                "result_event_id": event.id,
-                "source_event_type": event.type,
-                "reason": reason,
-            },
-            causation_id=event.id,
-            correlation_id=event.correlation_id or manifest.get("trace_id", ""),
-        ))
 
     def _fanout_stale_completion_recorded(
         self,
@@ -5268,6 +5176,13 @@ class FanoutCoordinationMixin(
                 superseded_by=terminal.id,
             )
             return
+        if self._reject_stale_writer_completion_for_operation(
+            event=event,
+            payload=payload,
+            manifest=manifest,
+            child=child,
+        ):
+            return
         adopted_dispatch_id = str(
             payload.get("_writer_fanout_adopted_dispatch_id") or ""
         )
@@ -5342,6 +5257,13 @@ class FanoutCoordinationMixin(
                     superseded_by=superseded_by,
                 )
                 return
+            if self._reject_stale_writer_completion_for_operation(
+                event=event,
+                payload=payload,
+                manifest=target.manifest,
+                child=target.child,
+            ):
+                return
             self._emit_writer_fanout_completion_adopted(
                 event=event,
                 manifest=target.manifest,
@@ -5380,6 +5302,13 @@ class FanoutCoordinationMixin(
                 fanout_id = str(manifest.get("fanout_id") or fanout_id)
                 child_id = str(child.get("child_id") or child_id)
                 recovery = True
+        if self._reject_stale_writer_completion_for_operation(
+            event=event,
+            payload=payload,
+            manifest=manifest,
+            child=child,
+        ):
+            return
         payload = bind_blocking_writer_result_identity(payload, child or {})
         run_id = str(payload.get("run_id") or (child or {}).get("run_id") or "")
         expected_run_id = str((child or {}).get("run_id") or "")
@@ -5612,6 +5541,15 @@ class FanoutCoordinationMixin(
             return
         if call_outcome.status == "superseded":
             return
+        from zf.runtime.writer_handoff_runtime import (
+            handle_blocking_writer_call_failure,
+        )
+        if handle_blocking_writer_call_failure(
+            self, fanout_id=fanout_id, base_payload=base_payload,
+            call_mode=call_mode, call_outcome=call_outcome,
+            event=event, manifest=manifest,
+        ):
+            return
         if call_outcome.admitted:
             base_payload.update({
                 "operation_id": call_outcome.operation_id,
@@ -5745,43 +5683,14 @@ class FanoutCoordinationMixin(
         event: ZfEvent,
         manifest: dict,
     ) -> None:
-        continuation_payload = capture_writer_failure_continuation(base_payload)
-        failed_event = self.event_writer.append(ZfEvent(
-            type="fanout.child.failed",
-            actor="zf-cli",
-            payload={
-                **base_payload,
-                **failure_payload,
-                **continuation_payload,
-            },
-            causation_id=event.id,
-            correlation_id=event.correlation_id or manifest.get("trace_id", ""),
-        ))
-        self._emit_lane_stage_result(
-            event_type=LANE_STAGE_HANDOFF_FAILURE_EVENT,
-            status="failed",
-            source_event=failed_event,
-            manifest=manifest,
-            child_payload=dict(failed_event.payload),
-            extra_payload=failure_payload,
+        from zf.runtime.writer_handoff_runtime import (
+            record_writer_fanout_child_failed,
         )
-        self._release_fanout_worker_if_terminal(
-            role_instance=base_payload["role_instance"],
-            fanout_id=fanout_id,
-            child_id=base_payload["child_id"],
-            run_id=base_payload["run_id"], task_id=str(base_payload.get("task_id") or ""),
+
+        record_writer_fanout_child_failed(
+            self, fanout_id=fanout_id, base_payload=base_payload,
+            failure_payload=failure_payload, event=event, manifest=manifest,
         )
-        # A terminally-failed affinity child must free its lane exactly like
-        # a completed one; otherwise the slot stays pinned to a dead child
-        # and queued overflow children starve until the stage timeout
-        # (2026-06-10 review P1-9).
-        if base_payload.get("assignment_strategy") == "affinity_stage_slots":
-            self._release_affinity_writer_slot_and_dispatch_next(
-                fanout_id=fanout_id,
-                completed_payload=base_payload,
-                causation_id=failed_event.id,
-            )
-        self._evaluate_writer_fanout(fanout_id)
 
     def _writer_fanout_child_result_recorded(
         self,
@@ -5869,11 +5778,37 @@ class FanoutCoordinationMixin(
             if isinstance(manifest.get("aggregate_config"), dict)
             else {}
         )
+        expected_success_event = str(config.get("success_event") or "")
+        source_blocked_payload = (
+            source.payload.get("blocked_event_payload")
+            if source is not None
+            and isinstance(source.payload, dict)
+            and isinstance(source.payload.get("blocked_event_payload"), dict)
+            else {}
+        )
+        source_is_blocked_success = bool(
+            source is not None
+            and source.type == "discriminator.failed"
+            and isinstance(source.payload, dict)
+            and str(source.payload.get("blocked_event_type") or "")
+            == expected_success_event
+            and str(
+                source.payload.get("fanout_id")
+                or source_blocked_payload.get("fanout_id")
+                or ""
+            ) == fanout_id
+        )
         if (
             source is None
             or not manifest
-            or source.type != str(config.get("success_event") or "")
-            or str(source_payload.get("fanout_id") or "") != fanout_id
+            or (
+                not source_is_blocked_success
+                and source.type != expected_success_event
+            )
+            or (
+                not source_is_blocked_success
+                and str(source_payload.get("fanout_id") or "") != fanout_id
+            )
         ):
             return
         if any(
@@ -6265,6 +6200,15 @@ class FanoutCoordinationMixin(
         ]
         if not children:
             return
+        if close_blocked_writer_dependencies(
+            self.event_writer, fanout_id=fanout_id,
+            manifest=manifest,
+        ):
+            manifest = self._fanout_manifest(fanout_id) or manifest
+            children = [
+                child for child in manifest.get("children", [])
+                if isinstance(child, dict)
+            ]
         statuses = [str(child.get("status") or "") for child in children]
         if not all(status in {"completed", "failed"} for status in statuses):
             return
@@ -6378,6 +6322,10 @@ class FanoutCoordinationMixin(
             failed_children=failed_children, fanout_id=fanout_id, trace_id=trace_id,
         ):
             return
+        if final_status == "failed":
+            candidate_contract_payload.update(
+                fanout_failure_context(self, manifest, failed=True)[1]
+            )
         aggregate_event = self.event_writer.append(ZfEvent(
             type="fanout.aggregate.completed",
             actor="zf-cli",
@@ -6859,14 +6807,15 @@ class FanoutCoordinationMixin(
         child: dict,
         previous_dispatch: ZfEvent,
         attempt: int,
+        fresh_operation: bool = False,
         provider_session_replaced: bool = False,
-    ) -> None:
+    ) -> bool:
         fanout_id = str(manifest.get("fanout_id") or "")
         child_id = str(child.get("child_id") or "")
         role_instance = str(child.get("role_instance") or "")
         role = next(iter(self._fanout_roles([role_instance])), None)
         if role is None:
-            return
+            return False
         run_id = f"run-{fanout_id}-{child_id}-retry-{attempt}"
         trace_id = str(manifest.get("trace_id") or "")
         stage_id = str(manifest.get("stage_id") or "")
@@ -6892,7 +6841,7 @@ class FanoutCoordinationMixin(
                     reason=fence_reason,
                     release_slot=False,
                 )
-                return
+                return False
         if not self._ensure_fanout_role_dispatchable(
             role=role,
             fanout_id=fanout_id,
@@ -6906,13 +6855,38 @@ class FanoutCoordinationMixin(
             prompt_kind="fanout_child",
             provider_session_replaced=provider_session_replaced,
         ):
-            return
-        briefing_path = self._write_fanout_retry_briefing(
-            role=role,
-            manifest=manifest,
-            child=child,
-            run_id=run_id,
+            return False
+        writer_retry = (
+            str(manifest.get("topology") or "") == "fanout_writer_scoped"
+            and fresh_operation
         )
+        operation_payload: dict[str, Any] = {}
+        prepared_call = None
+        if writer_retry:
+            retry_dispatch = self._prepare_writer_fanout_retry_dispatch(
+                manifest=manifest,
+                child=child,
+                role=role,
+                run_id=run_id,
+                attempt=attempt,
+                previous_dispatch=previous_dispatch,
+            )
+            operation_payload = dict(retry_dispatch["operation_payload"])
+            prepared_call = retry_dispatch.get("prepared_call")
+            if prepared_call is not None and not prepared_call.should_dispatch:
+                return False
+            briefing_path = retry_dispatch["briefing_path"]
+            identity_sources = retry_dispatch["identity_sources"]
+            task_item = retry_dispatch["task_item"]
+        else:
+            task_item = {}
+            briefing_path = self._write_fanout_retry_briefing(
+                role=role,
+                manifest=manifest,
+                child=child,
+                run_id=run_id,
+            )
+            identity_sources = (child, manifest)
         prompt = build_task_prompt(
             role.instance_id,
             briefing_path,
@@ -6925,9 +6899,26 @@ class FanoutCoordinationMixin(
                 prompt,
                 trace_id=trace_id,
                 dispatch_id=run_id,
-                identity_sources=(child, manifest),
+                identity_sources=identity_sources,
             )
+            if prepared_call is not None:
+                from zf.runtime.call_result_runtime import mark_call_operation_started
+
+                mark_call_operation_started(
+                    self,
+                    prepared_call,
+                    task_id=task_id,
+                    dispatch_id=run_id,
+                    causation_id=previous_dispatch.id,
+                    correlation_id=trace_id,
+                )
             self._note_prompt_sent(role.instance_id, run_id)
+        except RunDispatchBlocked as exc:
+            self._defer_fanout_retry_dispatch(
+                manifest, child, role, run_id, attempt, previous_dispatch,
+                exc.reason,
+            )
+            return False
         except Exception as exc:
             # ZF-E2E-PRDCTL-P0-1: the primary dispatch path already converts
             # send failures (incl. BudgetExceededError) into
@@ -6955,7 +6946,7 @@ class FanoutCoordinationMixin(
                 causation_id=previous_dispatch.id,
                 correlation_id=trace_id,
             ))
-            return
+            return False
         payload = {
             "fanout_id": fanout_id,
             "trace_id": trace_id,
@@ -6975,8 +6966,26 @@ class FanoutCoordinationMixin(
             if value:
                 payload[key] = value
         child_payload = child.get("payload")
-        if isinstance(child_payload, dict) and child_payload:
+        if writer_retry:
+            payload["payload"] = dict(task_item)
+        elif isinstance(child_payload, dict) and child_payload:
             payload["payload"] = dict(child_payload)
+        if writer_retry:
+            for key in _CONTRACT_HANDOFF_KEYS:
+                value = operation_payload.get(key)
+                if value not in (None, "", [], {}):
+                    payload[key] = value
+            for key in (
+                "semantic_result_submit_mode",
+                "output_profile_id",
+                "output_profile_revision",
+                "result_scratch_ref",
+                "retry_of_operation_id",
+                "workdir_sync",
+            ):
+                value = operation_payload.get(key)
+                if value not in (None, "", [], {}):
+                    payload[key] = value
         if str(manifest.get("topology") or "") == "fanout_writer_scoped":
             task_id = str(payload.get("task_id") or "")
             if self._claim_writer_fanout_task(
@@ -7031,6 +7040,7 @@ class FanoutCoordinationMixin(
             reason=f"dispatched fanout child {fanout_id}/{child_id}",
             task_id=str(payload.get("task_id") or ""),
         )
+        return True
 
     def _reader_child_infra_dispatch_deferrals(
         self,
@@ -7187,19 +7197,14 @@ class FanoutCoordinationMixin(
             **artifact_payload,
         }
         if final_status == "failed":
-            summary = str(
-                report_result.report.get("summary")
-                or payload.get("summary")
-                or payload.get("reason")
-                or ""
+            from zf.runtime.fanout_report_failure import project_synth_failure_payload
+
+            artifact_payload = project_synth_failure_payload(
+                artifact_payload,
+                payload,
+                report_result.report,
+                report_result.diagnostics,
             )
-            from zf.runtime.fanout_report_failure import project_report_failure
-            findings = project_report_failure(
-                artifact_payload, report_result.report, report_result.diagnostics)
-            if summary:
-                artifact_payload["summary"] = summary
-            if findings:
-                artifact_payload["findings"] = findings
         if final_status == "completed":
             contract_failure = self._success_payload_contract_failure(
                 success_event,
@@ -8135,7 +8140,7 @@ class FanoutCoordinationMixin(
                 "",
                 *rework_section,
                 *candidate_preflight_section,
-                *self._skill_briefing_section(role, skill_entries),
+                *skill_briefing.render_skill_briefing_section(role, skill_entries),
                 *workflow_input_lines,
                 *controlled_input_lines,
                 *result_file_section,
@@ -8172,7 +8177,7 @@ class FanoutCoordinationMixin(
             stage=str(context.stage_id or ""),
             role=role.instance_id, payload=task_item,
             indexed_skills=list(role.skills),
-            auto_injected_skills=list(skill_entries or []),
+            auto_injected_skills=skill_briefing.auto_injected_skill_entries(skill_entries),
         )
         return path
     def _write_fanout_retry_briefing(
@@ -8380,6 +8385,7 @@ class FanoutCoordinationMixin(
         if call_payload:
             from zf.runtime.plan_synth_handoff import (
                 render_plan_synth_completion_command,
+                render_plan_synth_validation_section,
             )
 
             completion_command = render_plan_synth_completion_command(
@@ -8388,7 +8394,9 @@ class FanoutCoordinationMixin(
                 state_dir=self.state_dir,
                 payload=completion_payload,
             )
+            validation_lines = render_plan_synth_validation_section(completion_command)
         else:
+            validation_lines = []
             completion_command = " ".join([
                 *[shlex.quote(part) for part in shlex.split(zf_cli_cmd()) or ["zf"]],
                 "emit",
@@ -8409,7 +8417,7 @@ class FanoutCoordinationMixin(
             ).rstrip().splitlines()
             child_report_lines = [
                 "Child report bodies are canonical required inputs in the Source Manifest.",
-                "Read every required child result with `zf artifact read`; do not rely on copied inline JSON.",
+                "Read every required child result with `zf artifact read`; do not rely on copied inline JSON. Update the prefilled result scratch in place; with apply_patch use `*** Update File`, and never delete, add, move, or recreate that path.",
                 "",
             ]
         else:
@@ -8436,7 +8444,7 @@ class FanoutCoordinationMixin(
                 *scope_summary_lines,
                 *source_lines,
                 *( [""] if source_lines else [] ),
-                *self._skill_briefing_section(role, skill_entries),
+                *skill_briefing.render_skill_briefing_section(role, skill_entries),
                 *(
                     [
                         (
@@ -8448,8 +8456,11 @@ class FanoutCoordinationMixin(
                         *(
                             [
                                 "This pure aggregator reviews the admitted child plan; it does not author or rewrite plan artifacts.",
+                                "The child plan reached this critic only after deterministic pre-submit validation. Treat mechanical schema and required-port presence as admitted facts unless the supplied evidence shows post-admission tampering; review semantic coverage, slicing, dependencies, risk, and acceptance quality instead.",
+                                "`goal_claim_set` and `planning_result` are Kernel-derived, `task_map_ref` supplies the `task_map` port, and issue flows adapt `requirement_spec` to `issue_spec`. Do not require these as duplicate `plan_ports` entries.",
                                 "Do not write child refs, the configured state dir, or the root project. Edit only the signed result scratch file named by the completion command.",
                                 "Return a semantic verdict delta: recommendation, summary, findings, fix_items, and evidence refs. Leave structural plan fields empty; the Kernel preserves the admitted Planner task map, plan ports, and artifact refs.",
+                                'Every `findings` item must be an object with a non-empty `message`; use `{"message": "...", "severity": "..."}` and never replace `message` with `observation`, `title`, or a prose-only row.',
                             ]
                             if runner_policy.get("applies")
                             else [
@@ -8487,6 +8498,7 @@ class FanoutCoordinationMixin(
                 ], indent=2, ensure_ascii=False),
                 "```",
                 "",
+                *validation_lines,
                 "When finished, emit exactly one fanout.synth.completed event with the runtime state dir explicitly:",
                 "```bash",
                 completion_command,
@@ -8498,7 +8510,7 @@ class FanoutCoordinationMixin(
             stage=str(manifest.get("stage_id") or ""),
             role=role.instance_id, payload={**manifest, **call_payload},
             indexed_skills=list(role.skills),
-            auto_injected_skills=list(skill_entries or []),
+            auto_injected_skills=skill_briefing.auto_injected_skill_entries(skill_entries),
         )
         return path
     def _write_fanout_child_output(

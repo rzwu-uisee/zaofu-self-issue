@@ -34,6 +34,7 @@ class RegisteredOperation:
     operation_id: str
     topologies: tuple[str, ...]
     effect: str
+    result_semantics: str
     independent_verify: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +42,7 @@ class RegisteredOperation:
             "operation_id": self.operation_id,
             "topologies": list(self.topologies),
             "effect": self.effect,
+            "result_semantics": self.result_semantics,
             "independent_verify": self.independent_verify,
         }
 
@@ -50,22 +52,26 @@ REGISTERED_OPERATIONS: dict[str, RegisteredOperation] = {
         "agent.read",
         ("fanout_reader",),
         "read_only",
+        "artifact_production",
     ),
     "agent.synthesize": RegisteredOperation(
         "agent.synthesize",
         ("fanout_reader",),
         "artifact_write",
+        "artifact_production",
     ),
     "agent.verify": RegisteredOperation(
         "agent.verify",
         ("fanout_reader",),
         "read_only",
+        "subject_gate",
         independent_verify=True,
     ),
     "agent.write": RegisteredOperation(
         "agent.write",
         ("fanout_writer_scoped",),
         "source_write",
+        "artifact_production",
     ),
 }
 

@@ -93,6 +93,11 @@ class TaskContract:
     # default. Provider/session identity remains Attempt/Operation state.
     execution_profile_id: str = ""
     execution_profile_digest: str = ""
+    # Task Pipeline v4 integration admission is planner-owned semantic input.
+    # The Kernel validates these facts against the frozen controller profile;
+    # it never infers risk from task prose or code.
+    risk_class: str = ""
+    integration_admission_profile: str = ""
     # P1-1 (2026-04-20): per-task override for rework routing. When a
     # failure event (review.rejected / test.failed / verify.failed /
     # judge.failed / gate.failed) triggers rework, the orchestrator sends the retry to

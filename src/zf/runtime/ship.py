@@ -418,7 +418,7 @@ class ShipService:
         pdd_id = pdd_id.strip()
         task_id = task_id.strip()
         if target_ref:
-            return target_ref
+            return self._short_local_target_ref(target_ref)
         if pdd_id:
             self._validate_id(pdd_id)
             return f"{self.config.runtime.git.candidate_branch_prefix}/{pdd_id}"
@@ -426,6 +426,19 @@ class ShipService:
             self._validate_id(task_id)
             return f"{self.config.runtime.git.task_ref_prefix}/{task_id}"
         return ""
+
+    def _short_local_target_ref(self, target_ref: str) -> str:
+        prefix = "refs/heads/"
+        if not target_ref.startswith(prefix):
+            return target_ref
+        short_ref = target_ref[len(prefix):]
+        allowed_prefixes = (
+            self.config.runtime.git.candidate_branch_prefix,
+            self.config.runtime.git.task_ref_prefix,
+        )
+        if any(short_ref.startswith(f"{item}/") for item in allowed_prefixes):
+            return short_ref
+        return target_ref
 
     def _payload_base(self, target_ref: str, *, pdd_id: str, task_id: str) -> dict:
         if not target_ref:

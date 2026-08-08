@@ -1,5 +1,5 @@
 // ProjectionPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
-import type { ActionResponse, AgentSummary, ChannelSummary, DeliveryFeaturesPage, EventsPage, Feature, IntegrationQueueProjection, RecentEvent, RepairActionProjection, SearchResult, Snapshot, TraceSummary } from "../../api/types";
+import type { ActionResponse, AgentSummary, ChannelSummary, DeliveryFeaturesPage, EventsPage, Feature, IntegrationQueueProjection, RecentEvent, RepairActionProjection, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
 import { LoopPageV2 } from "../../components/delivery-trace/LoopPageV2";
 import { DeliveryTracePage } from "../../components/delivery-trace/DeliveryTracePage";
 import { Settings } from "lucide-react";
@@ -22,6 +22,7 @@ export function ProjectionPage({
   eventsPage,
   eventFilter,
   integrationQueue,
+  taskPipeline,
   liveState,
   recentEvents,
   page,
@@ -49,6 +50,7 @@ export function ProjectionPage({
   eventsPage: EventsPage | null;
   eventFilter: string;
   integrationQueue: IntegrationQueueProjection | null;
+  taskPipeline: TaskPipelineProjection | null;
   liveState: LiveState;
   recentEvents: RecentEvent[];
   page: PageId;
@@ -180,6 +182,7 @@ export function ProjectionPage({
         eventItems={eventItems}
         eventsPage={eventsPage}
         integrationQueue={integrationQueue}
+        taskPipeline={taskPipeline}
         liveState={liveState}
         onOpenChannel={onOpenChannel}
         onOpenPage={onOpenPage}

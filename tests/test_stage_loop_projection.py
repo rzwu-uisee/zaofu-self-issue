@@ -193,6 +193,72 @@ def test_promise_contract_preferred_generic_fallback(tmp_path: Path) -> None:
     assert without["run"]["latched"] is True  # run.completed 在通用链里
 
 
+def test_loop_view_scopes_history_to_latest_goal_run(tmp_path: Path) -> None:
+    log = _log(tmp_path)
+    log.append(ZfEvent(
+        type="workflow.invoke.requested",
+        correlation_id="run-old",
+        payload={"workflow_run_id": "run-old"},
+    ))
+    log.append(ZfEvent(
+        type="prd.plan.failed",
+        correlation_id="run-old",
+        payload={"workflow_run_id": "run-old", "stage_id": "prd-plan"},
+    ))
+    log.append(ZfEvent(
+        type="run.goal.started",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "objective": "ship current"},
+    ))
+    log.append(ZfEvent(
+        type="task_map.ready",
+        correlation_id="run-current",
+        payload={"workflow_run_id": "run-current", "stage_id": "prd-plan"},
+    ))
+    log.append(ZfEvent(
+        type="verify.child.completed",
+        correlation_id="run-current",
+        payload={"workflow_run_id": "run-current", "stage_id": "prd-verify"},
+    ))
+    log.append(ZfEvent(
+        type="run.goal.completed",
+        correlation_id="run-current",
+        payload={"run_id": "run-current", "status": "passed"},
+    ))
+
+    view = build_loop_view(_sd(tmp_path))
+
+    assert view["run"]["run_id"] == "run-current"
+    assert view["run"]["event_count"] == 4
+    assert view["run"]["latched"] is True
+    assert view["faults"] == []
+    assert [stage["id"] for stage in view["stages"]] == [
+        "prd-plan",
+        "prd-verify",
+    ]
+
+
+@pytest.mark.parametrize(
+    "terminal_event",
+    ["run.goal.completed", "ship.completed", "ship.done"],
+)
+def test_goal_and_ship_terminals_latch_legacy_loop_promise(
+    tmp_path: Path,
+    terminal_event: str,
+) -> None:
+    log = _log(tmp_path)
+    log.append(ZfEvent(type=terminal_event, payload={}))
+
+    view = build_loop_view(_sd(tmp_path))
+
+    terminal = next(
+        item for item in view["run"]["promise"]["chain"]
+        if item["event"] == "run.completed"
+    )
+    assert terminal["satisfied"] is True
+    assert view["run"]["latched"] is True
+
+
 def test_broken_arc_semantics_for_approval_and_replan(tmp_path: Path) -> None:
     """escalate 无裁决回声 = 断环;reflect 无采纳 = 断环。"""
     log = _log(tmp_path)

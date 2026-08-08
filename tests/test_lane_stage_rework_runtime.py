@@ -326,6 +326,13 @@ def test_v4_valid_pass_closes_task_and_advances_final_stage(tmp_path: Path) -> N
                 "execution_status": "completed",
                 "verdict": "passed",
                 "summary": "all task requirements passed",
+                "evidence_refs": ["artifacts/task-1-pass.log"],
+                "reused_command_receipt_ids": [],
+                "probe_receipts": [{
+                    "probe_id": "task-1-independent-check",
+                    "status": "passed",
+                    "evidence_refs": ["artifacts/task-1-pass.log"],
+                }],
                 "requirement_results": requirement_results,
             },
         },

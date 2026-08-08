@@ -144,6 +144,7 @@ import type {
   FleetStats,
   IntegrationQueueEntry,
   IntegrationQueueProjection,
+  TaskPipelineProjection,
   MetricsSnapshotProjection,
   OnboardingStatus,
   OverviewPulse,
@@ -668,6 +669,7 @@ export function App() {
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [projectionDetail, setProjectionDetail] = useState<Record<string, unknown> | null>(null);
   const [integrationQueue, setIntegrationQueue] = useState<IntegrationQueueProjection | null>(null);
+  const [taskPipeline, setTaskPipeline] = useState<TaskPipelineProjection | null>(null);
   const [repairActions, setRepairActions] = useState<RepairActionProjection | null>(null);
   const [actionResult, setActionResult] = useState<ActionResponse | null>(null);
   const [webActionTokenPresent, setWebActionTokenPresent] = useState(() =>
@@ -833,6 +835,7 @@ export function App() {
       setSnapshot(null);
       setDeliveryFeaturesPage(null);
       setIntegrationQueue(null);
+      setTaskPipeline(null);
       setRepairActions(null);
       setChannelsPage(null);
       setError(null);
@@ -1058,6 +1061,7 @@ export function App() {
           setSnapshot(null);
           setDeliveryFeaturesPage(null);
           setIntegrationQueue(null);
+          setTaskPipeline(null);
           setRepairActions(null);
           setEvents([]);
           setChannelsPage(null);
@@ -1225,6 +1229,7 @@ export function App() {
     onEventsPage: setEventsPage,
     onIntegrationQueue: setIntegrationQueue,
     onRepairActions: setRepairActions,
+    onTaskPipeline: setTaskPipeline,
     page,
     scope: projectRequestScope,
     selectedTaskId,
@@ -1821,6 +1826,7 @@ export function App() {
     setTaskTimelineError(null);
     setProjectionDetail(null);
     setIntegrationQueue(null);
+    setTaskPipeline(null);
     setRepairActions(null);
     setSearchResult(null);
     setEventFilter("");
@@ -2015,7 +2021,7 @@ export function App() {
                 onRequestSynthesis={(threadId, targetMemberId) => channelActions.requestSynthesis(threadId, targetMemberId)}
                 onResolveQuestion={channelActions.resolveQuestion}
                 onSetDiscussionMode={(threadId, mode, defaultResponderId) => channelActions.setDiscussionMode(threadId, mode, defaultResponderId)}
-                onStartDiscussion={(threadId, message, messageId, mode) => channelActions.startDiscussion(threadId, message, messageId, mode)}
+                onStartDiscussion={(threadId, message, messageId, mode, restart) => channelActions.startDiscussion(threadId, message, messageId, mode, restart)}
                 onConsensusDecision={channelActions.decideConsensus}
                 onRemoveMember={(memberId) => removeChannelMember(memberId)}
                 onResearchAdopt={channelActions.adoptResearchResult}
@@ -2105,6 +2111,7 @@ export function App() {
                   liveState={liveState}
                   recentEvents={events}
                   integrationQueue={integrationQueue}
+                  taskPipeline={taskPipeline}
                   page={page}
                   projectionDetail={projectionDetail}
                   repairActions={repairActions}

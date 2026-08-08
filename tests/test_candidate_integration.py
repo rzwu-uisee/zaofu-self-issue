@@ -7,6 +7,7 @@ import pytest
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.events.model import ZfEvent
 from zf.runtime.candidate_integration import (
+    candidate_failed_task_ids,
     candidate_failure_envelope,
     candidate_integration_identity,
 )
@@ -57,6 +58,30 @@ def test_missing_candidate_dependency_is_structured_environment_failure() -> Non
     ), config)
     assert triage.classification == "environment_issue"
     assert triage.suspected_owner == "operator"
+
+
+def test_task_contract_gate_failure_preserves_task_owner() -> None:
+    candidate = {
+        "status": "quality_failed",
+        "quality": {
+            "status": "failed",
+            "gates_failed": [
+                "task_contract:TASK-SCAFFOLD:CMD-PACKAGE",
+                "candidate_diff",
+            ],
+            "gate_checks": {
+                "task_contract:TASK-SCAFFOLD:CMD-PACKAGE": [{
+                    "command": "npm --prefix app test -- --test-name-pattern package",
+                    "exit_code": 1,
+                    "stdout_tail": "ERR_SERVER_NOT_RUNNING",
+                }],
+            },
+        },
+    }
+
+    assert candidate_failed_task_ids(candidate) == ["TASK-SCAFFOLD"]
+    envelope = candidate_failure_envelope(candidate, failed_children=[])
+    assert envelope["failed_task_ids"] == ["TASK-SCAFFOLD"]
 
 
 def test_candidate_integration_attempt_identity_changes_with_environment() -> None:

@@ -29,6 +29,20 @@ class _Host(LifecycleObservationMixin):
     def __init__(self):
         self._usage_capture_misses = {}
         self.event_writer = _CapturingWriter()
+        self.attempt_identity = {}
+        self.attempt_lookup_complete = True
+        self.operation_identity = {}
+        self.operation_lookup_complete = True
+        self.active_task_id = ""
+
+    def _active_task_attempt_identity_for_usage_role(self, _role):
+        return self.attempt_identity, self.attempt_lookup_complete
+
+    def _active_workflow_operation_identity_for_usage_role(self, _role):
+        return self.operation_identity, self.operation_lookup_complete
+
+    def _active_task_id_for_usage_role(self, _role):
+        return self.active_task_id
 
 
 def _role(backend="claude-code", instance_id="dev-1"):
@@ -78,3 +92,23 @@ def test_codex_is_not_path_sensitive():
     for _ in range(_USAGE_CAPTURE_MISS_THRESHOLD + 2):
         host._note_usage_capture_miss(role, "/wt/proj", "uuid-1")
     assert _misses(host) == []
+
+
+def test_idle_rotated_session_does_not_expect_usage_capture():
+    host = _Host()
+
+    assert host._usage_capture_expected(_role()) is False
+
+
+def test_active_operation_expects_usage_capture():
+    host = _Host()
+    host.operation_identity = {"operation_id": "wop-1"}
+
+    assert host._usage_capture_expected(_role()) is True
+
+
+def test_incomplete_attempt_lookup_fails_conservatively():
+    host = _Host()
+    host.attempt_lookup_complete = False
+
+    assert host._usage_capture_expected(_role()) is True

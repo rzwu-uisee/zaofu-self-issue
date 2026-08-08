@@ -114,6 +114,25 @@ def test_goal_closure_compat_judge_is_not_authoritative_terminal() -> None:
     assert latest_quiescent_run_terminal([compat], run_id="run-compat") is None
 
 
+def test_research_result_available_is_a_successful_run_terminal() -> None:
+    result = ZfEvent(
+        type="workflow.result.available",
+        task_id="TASK-RESEARCH",
+        correlation_id="run-research",
+        payload={
+            "workflow_run_id": "run-research",
+            "result_kind": "research_report",
+            "status": "available",
+        },
+    )
+
+    assert is_successful_run_terminal(result) is True
+    assert latest_quiescent_run_terminal(
+        [result],
+        run_id="run-research",
+    ) is result
+
+
 def test_late_writer_result_with_stale_audit_does_not_reopen_terminal() -> None:
     terminal = ZfEvent(
         id="goal-done",

@@ -256,6 +256,7 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
             f"ZF_PROVIDER_SESSION_CONFIG_REF={provider_config.ref}",
             f"ZF_PROVIDER_SESSION_CONFIG_DIGEST={provider_config.digest}",
         ]
+        env_prefix.extend(self.provider_session_environment(role))
         from zf.runtime.result_submit import provision_role_submit_credential
 
         submit_token_file = provision_role_submit_credential(
@@ -313,6 +314,7 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
             session_id=session_id,
             is_resume=is_respawn,
             transport=self.transport,
+            config=self.config,
         )
         launch_attempt = 0
         try:

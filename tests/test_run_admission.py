@@ -10,6 +10,7 @@ from zf.core.config.schema import (
     ProjectConfig,
     RoleConfig,
     WorkflowRunAdmissionConfig,
+    WorkflowRunLimitsConfig,
     WorkflowConfig,
     WorkflowStageConfig,
     ZfConfig,
@@ -26,6 +27,7 @@ from zf.runtime.run_admission import (
     reject_workflow_invoke_admission,
     request_admission_view,
     run_dispatch_block_reason,
+    RunDispatchBlocked,
 )
 
 
@@ -62,6 +64,11 @@ def _config(
             ),
         ],
         workflow=WorkflowConfig(
+            run_limits=WorkflowRunLimitsConfig(
+                timeout_seconds=120,
+                token_budget=1234,
+                cost_budget_usd=4.5,
+            ),
             run_admission=WorkflowRunAdmissionConfig(
                 mode="concurrent" if concurrent else "serial",
                 max_active_runs=2 if concurrent else 1,
@@ -220,6 +227,17 @@ def test_serial_run_admission_queues_and_releases_exactly_one(
 
     events = log.read_all()
     projection = build_run_admission_projection(events)
+    admitted = next(
+        event
+        for event in events
+        if event.type == "run.admission.admitted"
+        and event.payload.get("run_id") == "RUN-A"
+    )
+    assert admitted.payload["run_limits"] == {
+        "timeout_seconds": 120.0,
+        "token_budget": 1234,
+        "cost_budget_usd": 4.5,
+    }
     assert projection.active_run_ids == ["RUN-A"]
     assert projection.queued_run_ids == ["RUN-B"]
     assert request_admission_view(
@@ -238,13 +256,17 @@ def test_serial_run_admission_queues_and_releases_exactly_one(
         briefing_path=briefing,
         task_id="TASK-B",
     )
-    with pytest.raises(RuntimeError, match="run_not_admitted:queued"):
+    with pytest.raises(
+        RunDispatchBlocked,
+        match="run_not_admitted:queued",
+    ) as blocked:
         runtime._send_transport_task(
             "reviewer",
             briefing,
             "queued",
             queued_context,
         )
+    assert blocked.value.reason == "run_not_admitted:queued"
     assert sum(
         event.type == "workflow.invoke.accepted"
         and event.payload.get("source_event_id") == first.id
@@ -305,6 +327,30 @@ def test_serial_run_admission_queues_and_releases_exactly_one(
         and event.payload.get("source_event_id") == second.id
         for event in replayed
     ) == 1
+
+
+def test_research_result_available_terminalizes_admitted_run(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+
+    result = runtime.event_writer.append(ZfEvent(
+        type="workflow.result.available",
+        actor="zf-cli",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "workflow_run_id": "RUN-A",
+            "result_kind": "research_report",
+            "status": "available",
+        },
+    ))
+    runtime.run_once(events=[result])
+
+    entry = build_run_admission_projection(log.read_all()).runs["RUN-A"]
+    assert entry.status == "completed"
+    assert entry.terminal_type == "workflow.result.available"
 
 
 @pytest.mark.parametrize("terminal_kind", ["cancel", "admission_rejection"])

@@ -24,6 +24,7 @@ import threading
 from zf.web.projections.common import _first_nonempty, _is_blocked_event, _is_failed_event, _line_count, _matches_event_filters, _matches_task_filters, _parse_search_query, _payload_first_string, _payload_mentions, _payload_ref, _raw_event_has_task_id, _read_events_with_seq
 from zf.web.projections.request_util import _sse_event, _sse_gap
 from zf.web.projections.summaries import _archive_tasks, _refs_from_events
+from zf.web.projections.task_pipeline_events import task_pipeline_trace
 
 
 _EVENT_LOG_RUN_ID = "event-log-latest"
@@ -49,6 +50,7 @@ def _trace_detail(
         )
     ]
     execution_route = project_execution_route(events, trace_id=trace_id)
+    task_pipeline = task_pipeline_trace(events)
     return {
         "trace_id": trace_id,
         "event_count": len(events),
@@ -64,6 +66,7 @@ def _trace_detail(
         "git_refs": _refs_from_events(events, state_dir=state_dir, config=config),
         "diagnostics": _diagnostics(state_dir, trace_id),
         "execution_route": redact_obj(execution_route),
+        "task_pipeline": redact_obj(task_pipeline),
         "empty": not events,
     }
 

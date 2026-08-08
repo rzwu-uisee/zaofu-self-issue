@@ -1,0 +1,15 @@
+{
+  "schema_version": "product-pulse-golden-baseline.v1",
+  "flow_kind": "issue",
+  "provenance": {
+    "source_run": "zf-oa-clean-four-flow-20260802T024249Z",
+    "product_commit": "e8713e561e81b207482010cb0563a413d24a4164"
+  },
+  "git_blobs": {
+    "app/README.md": "da704b1df45897d824a0f0658b28ab1ba361b5f2",
+    "app/package.json": "c4d57040ae7fc55446ad2b550b6cbf5393f68844",
+    "app/server.mjs": "b5cd210cfb44d2d9f64d5b70c8c370ac692a3054",
+    "app/tests/package.test.mjs": "dd25bfdb7f53de08e6bdc8a77f6fa922543982b1",
+    "app/tests/server.test.mjs": "d10f55980fd5bc3b77baf927a95633fc975926e7"
+  }
+}

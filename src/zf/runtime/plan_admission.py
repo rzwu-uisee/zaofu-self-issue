@@ -39,6 +39,18 @@ def _task_map_identity(
     }
 
 
+def _plan_artifact_package_identity(payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        key: str(payload.get(key) or "")
+        for key in (
+            "plan_artifact_package_id",
+            "plan_artifact_package_ref",
+            "plan_artifact_package_digest",
+        )
+        if str(payload.get(key) or "")
+    }
+
+
 def emit_upstream_failure_for_bad_task_map(
     coordinator: Any,
     *,
@@ -145,6 +157,7 @@ def emit_upstream_failure_for_bad_task_map(
             "gap_event_type": gap_event_type,
             "resume_scope": str(trigger_payload.get("resume_scope") or ""),
             "gap_plan_ref": str(trigger_payload.get("gap_plan_ref") or ""),
+            **_plan_artifact_package_identity(trigger_payload),
             "reason": f"task_map rejected by writer fanout admission: {reason}",
             "findings": [{
                 "severity": "high",
@@ -221,6 +234,7 @@ def emit_plan_admission_cancel(
         "gap_plan_ref": str(trigger_payload.get("gap_plan_ref") or ""),
         "reason": reason,
         **identity,
+        **_plan_artifact_package_identity(trigger_payload),
     }
     if wave is not None:
         payload["wave"] = wave
@@ -284,6 +298,13 @@ def _emit_unroutable_plan_admission_escalation(
             "reason": f"{escalation_reason}: {reason}",
             "source_event_id": cancelled.id,
             "plan_admission_incident_id": incident_id,
+            "recovery_owner": "operator",
+            "allowed_actions": ["operator_review", "start_new_generation"],
+            "max_auto_attempts": 0,
+            "max_rescans": 0,
+            "terminalization_condition": "immediate",
+            "operator_required": True,
+            "recoverable": False,
         },
     ))
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.runtime.channel_projection import project_channel, project_channels
+from zf.runtime.channel_readiness import owner_readiness_risk_accepted
 
 
 def canonical_channel_prd_context(
@@ -62,7 +63,19 @@ def canonical_channel_prd_context(
                 "implementation_start",
                 consensus.get("implementation_start"),
             )
-            if readiness_verdict != "ready" or implementation_start is not True:
+            readiness_ref = str(synthesis.get("readiness_ref") or "")
+            readiness_digest = str(
+                synthesis.get("readiness_digest") or ""
+            )
+            risk_accepted = owner_readiness_risk_accepted(
+                consensus,
+                readiness_ref=readiness_ref,
+                readiness_digest=readiness_digest,
+            )
+            if (
+                readiness_verdict != "ready"
+                or implementation_start is not True
+            ) and not risk_accepted:
                 continue
             source_refs = list(dict.fromkeys([
                 *(
@@ -82,6 +95,17 @@ def canonical_channel_prd_context(
                 "channel_id": channel_id,
                 "channel_name": str(channel.get("name") or ""),
                 "thread_id": normalized_thread_id,
+                "channel_member_id": str(
+                    channel.get("leader_member_id") or ""
+                ),
+                "leader_revision": int(
+                    channel.get("leader_revision") or 0
+                ),
+                "prd_revision": int(
+                    consensus.get("prd_revision")
+                    or synthesis.get("prd_revision")
+                    or 0
+                ),
                 "artifact_ref": artifact_ref,
                 "artifact_digest": artifact_digest,
                 "source_ref": (
@@ -91,12 +115,17 @@ def canonical_channel_prd_context(
                     synthesis.get("event_id") or ""
                 ),
                 "consensus_event_id": reached_event_id,
-                "readiness_ref": str(synthesis.get("readiness_ref") or ""),
-                "readiness_digest": str(
-                    synthesis.get("readiness_digest") or ""
-                ),
+                "readiness_ref": readiness_ref,
+                "readiness_digest": readiness_digest,
                 "readiness_verdict": readiness_verdict,
                 "implementation_start": True,
+                "declared_implementation_start": (
+                    implementation_start is True
+                ),
+                "risk_accepted": risk_accepted,
+                "confirmed_by": str(
+                    consensus.get("human_confirmed_by") or ""
+                ),
                 "source_refs": source_refs,
                 "updated_at": str(channel.get("updated_at") or ""),
             })

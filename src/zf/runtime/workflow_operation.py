@@ -22,6 +22,14 @@ from zf.runtime.call_result_envelope import (
     CALL_RESULT_CANONICALIZATION,
     write_immutable_json_sidecar,
 )
+from zf.runtime.workflow_operation_task_pipeline import (
+    admit_task_pipeline_redrive,
+    apply_call_result_admission,
+    apply_task_pipeline_operation_event,
+    task_pipeline_operation_seed,
+    task_pipeline_request_fields,
+    task_pipeline_request_hash_body,
+)
 
 
 WORKFLOW_OPERATION_SCHEMA = "workflow-operation.v1"
@@ -30,10 +38,13 @@ OPERATION_EVENT_TYPES = frozenset({
     "workflow.operation.requested",
     "workflow.operation.reserved",
     "workflow.operation.started",
+    "workflow.operation.retry_started",
     "workflow.operation.settled",
     "workflow.operation.failed",
     "workflow.operation.blocked",
     "workflow.operation.superseded",
+    "workflow.operation.interrupted",
+    "workflow.operation.redrive_admitted",
     "workflow.operation.cancelled",
 })
 TERMINAL_OPERATION_STATUSES = frozenset({
@@ -58,8 +69,6 @@ _VOLATILE_REQUEST_KEYS = frozenset({
     "ts",
     "workdir",
 })
-
-
 class WorkflowOperationError(ValueError):
     """Stable operation replay invariant failed."""
 
@@ -176,6 +185,8 @@ def reduce_workflow_operations(
 
     operations: dict[str, dict[str, Any]] = {}
     for event in events:
+        if apply_call_result_admission(operations, event):
+            continue
         if event.type not in OPERATION_EVENT_TYPES:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -198,10 +209,12 @@ def reduce_workflow_operations(
             "operation_id": operation_id,
             "operation_type": str(payload.get("operation_type") or "agent"),
             "attempt_domain": str(payload.get("attempt_domain") or ""),
+            **task_pipeline_operation_seed(payload),
             "request_hash": request_hash,
             "request_ref": payload.get("request_ref") if isinstance(payload.get("request_ref"), dict) else {},
             "status": "requested",
             "task_id": event_task_id,
+            "parent_task_id": str(payload.get("parent_task_id") or ""),
             "role_instance": str(payload.get("role_instance") or ""),
             "active_attempt_id": str(payload.get("active_attempt_id") or ""),
             "dispatch_id": str(payload.get("dispatch_id") or ""),
@@ -221,10 +234,14 @@ def reduce_workflow_operations(
             "expected_package_digest": "",
             "pending_action_digest": "",
             "budget_snapshot": {},
+            "started_at": "",
+            "started_event_id": "",
             "idempotency_key": "",
             "source_event_ids": [],
             "request_count": 0,
             "replay_count": 0,
+            "retry_count": 0,
+            "retry_attempt": 0,
             "divergent": False,
             "reason": "",
         })
@@ -240,6 +257,10 @@ def reduce_workflow_operations(
             row["child_task_ids"] = list(dict.fromkeys(
                 [*row["child_task_ids"], *(str(item) for item in children if str(item).strip())]
             ))
+        parent_task_id = str(payload.get("parent_task_id") or "")
+        if parent_task_id:
+            row["parent_task_id"] = parent_task_id
+        row.update(task_pipeline_request_fields(payload))
         status_before_event = row["status"]
         if event.type == "workflow.operation.requested":
             row["request_count"] += 1
@@ -269,6 +290,8 @@ def reduce_workflow_operations(
                 row["budget_snapshot"] = dict(budget_snapshot)
         elif event.type == "workflow.operation.started" and row["status"] not in TERMINAL_OPERATION_STATUSES:
             row["status"] = "running"
+            row["started_at"] = row["started_at"] or event.ts
+            row["started_event_id"] = row["started_event_id"] or event.id
             for key in (
                 "role_instance",
                 "active_attempt_id",
@@ -289,7 +312,28 @@ def reduce_workflow_operations(
             row["context_delivery_receipt_error"] = str(
                 payload.get("context_delivery_receipt_error") or ""
             )
+            budget_snapshot = payload.get("budget_snapshot")
+            if isinstance(budget_snapshot, Mapping):
+                row["budget_snapshot"] = dict(budget_snapshot)
             for key in ("reservation_id", "idempotency_key"):
+                value = str(payload.get(key) or "")
+                if value:
+                    row[key] = value
+        elif (
+            event.type == "workflow.operation.retry_started"
+            and row["status"] in {"suspended", "failed"}
+            and str(payload.get("recovery_class") or "") == "transient_transport"
+        ):
+            row["status"] = "running"
+            row["reason"] = ""
+            row["retry_count"] += 1
+            row["retry_attempt"] = int(payload.get("retry_attempt") or 0)
+            for key in (
+                "role_instance",
+                "active_attempt_id",
+                "dispatch_id",
+                "lease_id",
+            ):
                 value = str(payload.get(key) or "")
                 if value:
                     row[key] = value
@@ -323,6 +367,14 @@ def reduce_workflow_operations(
         ):
             row["status"] = "superseded"
             row["reason"] = str(payload.get("reason") or "")
+        elif (
+            event.type == "workflow.operation.interrupted"
+            and row["status"] not in TERMINAL_OPERATION_STATUSES
+        ):
+            row["status"] = "suspended"
+            row["reason"] = str(payload.get("reason") or "")
+        elif apply_task_pipeline_operation_event(row, event, payload):
+            pass
         elif (
             event.type == "workflow.operation.cancelled"
             and row["status"] not in TERMINAL_OPERATION_STATUSES
@@ -378,6 +430,7 @@ class WorkflowOperationService:
         parent_stage_id: str = "",
         parent_attempt_id: str = "",
         task_id: str = "",
+        parent_task_id: str = "",
         role_instance: str = "",
         active_attempt_id: str = "",
         lease_id: str = "",
@@ -396,13 +449,16 @@ class WorkflowOperationService:
             "parent_stage_id": parent_stage_id,
             "parent_attempt_id": parent_attempt_id,
             "task_id": task_id,
+            "parent_task_id": parent_task_id,
             "role_instance": role_instance,
             "active_attempt_id": active_attempt_id,
             "lease_id": lease_id,
             "child_task_ids": list(child_task_ids or []),
             "request": canonicalize_operation_request(request),
         }
-        request_hash = operation_request_hash(request_body)
+        request_hash = operation_request_hash(
+            task_pipeline_request_hash_body(request_body, request)
+        )
         lock_path = self.state_dir / "projections" / "workflow-operations" / f"{_safe_component(operation_id)}.guard"
         with locked_path(lock_path):
             existing = load_workflow_operation(self.event_log, operation_id)
@@ -468,10 +524,12 @@ class WorkflowOperationService:
                     "request_hash": request_hash,
                     "request_ref": request_descriptor,
                     "task_id": task_id,
+                    "parent_task_id": parent_task_id,
                     "role_instance": role_instance,
                     "active_attempt_id": active_attempt_id,
                     "lease_id": lease_id,
                     "child_task_ids": list(child_task_ids or []),
+                    **task_pipeline_request_fields(request),
                 },
                 causation_id=causation_id or None,
                 correlation_id=correlation_id or workflow_run_id or None,
@@ -601,6 +659,7 @@ class WorkflowOperationService:
         context_delivery_envelope_ref: Mapping[str, Any] | None = None,
         context_delivery_receipt_ref: Mapping[str, Any] | None = None,
         context_delivery_receipt_error: str = "",
+        budget_snapshot: Mapping[str, Any] | None = None,
         reservation_id: str = "",
         idempotency_key: str = "",
         causation_id: str = "",
@@ -627,6 +686,7 @@ class WorkflowOperationService:
                 "context_delivery_receipt_error": str(
                     context_delivery_receipt_error or ""
                 )[:512],
+                "budget_snapshot": dict(budget_snapshot or {}),
                 "reservation_id": reservation_id,
                 "idempotency_key": idempotency_key,
             },
@@ -656,6 +716,52 @@ class WorkflowOperationService:
                 "reason": reason,
                 "reservation_id": reservation_id,
                 "semantic_attempt_consumed": False,
+            },
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def mark_retry_started(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        retry_attempt: int,
+        reason: str,
+        dispatch_id: str = "",
+        role_instance: str = "",
+        active_attempt_id: str = "",
+        lease_id: str = "",
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+    ) -> ZfEvent | None:
+        if retry_attempt != 1:
+            raise WorkflowOperationError(
+                "workflow operation transport retry must be exactly attempt 1"
+            )
+        current = load_workflow_operation(self.event_log, operation_id)
+        if current is None or str(current.get("request_hash") or "") != request_hash:
+            raise WorkflowOperationError("workflow operation retry identity mismatch")
+        if str(current.get("status") or "") not in {"suspended", "failed"}:
+            raise WorkflowOperationError(
+                "workflow operation retry requires suspended or failed status"
+            )
+        return self._emit_once(
+            "workflow.operation.retry_started",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            payload={
+                "retry_attempt": retry_attempt,
+                "recovery_class": "transient_transport",
+                "reason": reason,
+                "dispatch_id": dispatch_id,
+                "role_instance": role_instance,
+                "active_attempt_id": active_attempt_id,
+                "lease_id": lease_id,
             },
             causation_id=causation_id,
             correlation_id=correlation_id,
@@ -716,6 +822,78 @@ class WorkflowOperationService:
             correlation_id=correlation_id,
         )
 
+    def block(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        reason: str,
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+        details: Mapping[str, Any] | None = None,
+    ) -> ZfEvent | None:
+        return self._emit_once(
+            "workflow.operation.blocked",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            payload={"reason": reason, **dict(details or {})},
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def interrupt(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        reason: str,
+        task_id: str = "",
+        causation_id: str = "",
+        correlation_id: str = "",
+        source_attempt_id: str = "",
+    ) -> ZfEvent | None:
+        return self._emit_once(
+            "workflow.operation.interrupted",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            payload={
+                "reason": reason,
+                "source_attempt_id": source_attempt_id,
+            },
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+
+    def admit_redrive(
+        self,
+        *,
+        operation_id: str,
+        request_hash: str,
+        workflow_run_id: str,
+        task_id: str,
+        source_attempt_id: str,
+        recovery_decision_event_id: str,
+        reason: str,
+    ) -> ZfEvent | None:
+        """Admit one Run Manager decision for same-operation redrive."""
+        return admit_task_pipeline_redrive(
+            self,
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id=task_id,
+            source_attempt_id=source_attempt_id,
+            recovery_decision_event_id=recovery_decision_event_id,
+            reason=reason,
+        )
+
     def fail(
         self,
         *,
@@ -726,6 +904,7 @@ class WorkflowOperationService:
         task_id: str = "",
         causation_id: str = "",
         correlation_id: str = "",
+        details: Mapping[str, Any] | None = None,
     ) -> ZfEvent | None:
         return self._emit_once(
             "workflow.operation.failed",
@@ -733,7 +912,7 @@ class WorkflowOperationService:
             request_hash=request_hash,
             workflow_run_id=workflow_run_id,
             task_id=task_id,
-            payload={"reason": reason},
+            payload={"reason": reason, **dict(details or {})},
             causation_id=causation_id,
             correlation_id=correlation_id,
         )
@@ -750,31 +929,81 @@ class WorkflowOperationService:
         causation_id: str,
         correlation_id: str,
     ) -> ZfEvent | None:
-        for event in reversed(self.event_log.read_all()):
+        events = self.event_log.read_all()
+        existing_operation = reduce_workflow_operations(events).get(operation_id, {})
+        effective_task_id = str(
+            task_id or existing_operation.get("task_id") or ""
+        )
+        parent_task_id = str(existing_operation.get("parent_task_id") or "")
+        emitted_body = dict(payload)
+        if parent_task_id:
+            emitted_body.setdefault("parent_task_id", parent_task_id)
+        for event in reversed(events):
             if event.type != event_type:
                 continue
-            body = event.payload if isinstance(event.payload, dict) else {}
+            existing_body = event.payload if isinstance(event.payload, dict) else {}
             if (
-                str(body.get("operation_id") or "") == operation_id
-                and str(body.get("request_hash") or "") == request_hash
+                str(existing_body.get("operation_id") or "") == operation_id
+                and str(existing_body.get("request_hash") or "") == request_hash
             ):
-                return None
+                source_attempt_id = str(payload.get("source_attempt_id") or "")
+                if not source_attempt_id or str(
+                    existing_body.get("source_attempt_id") or ""
+                ) == source_attempt_id:
+                    return None
         return self.event_writer.append(ZfEvent(
             type=event_type,
             actor="zf-cli",
             origin="kernel",
-            task_id=task_id or None,
+            task_id=effective_task_id or None,
             payload={
                 "schema_version": WORKFLOW_OPERATION_SCHEMA,
                 "workflow_run_id": workflow_run_id,
                 "operation_id": operation_id,
                 "request_hash": request_hash,
-                "task_id": task_id,
-                **dict(payload),
+                "task_id": effective_task_id,
+                **emitted_body,
             },
             causation_id=causation_id or None,
             correlation_id=correlation_id or workflow_run_id or None,
         ))
+
+
+def interrupt_active_workflow_operations(
+    *,
+    state_dir: Path,
+    event_log: EventLog,
+    event_writer: EventWriter,
+    reason: str,
+    causation_id: str = "",
+) -> list[ZfEvent]:
+    """Suspend every non-terminal operation before worker processes stop."""
+
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=event_log,
+        event_writer=event_writer,
+    )
+    interrupted: list[ZfEvent] = []
+    for operation in reduce_workflow_operations(event_log.read_all()).values():
+        if str(operation.get("status") or "") not in {
+            "requested",
+            "reserved",
+            "running",
+        }:
+            continue
+        event = service.interrupt(
+            operation_id=str(operation.get("operation_id") or ""),
+            request_hash=str(operation.get("request_hash") or ""),
+            workflow_run_id=str(operation.get("workflow_run_id") or ""),
+            task_id=str(operation.get("task_id") or ""),
+            reason=reason,
+            causation_id=causation_id,
+            correlation_id=str(operation.get("workflow_run_id") or ""),
+        )
+        if event is not None:
+            interrupted.append(event)
+    return interrupted
 
 
 def _safe_component(value: str) -> str:
@@ -791,6 +1020,7 @@ __all__ = [
     "WorkflowOperationError",
     "WorkflowOperationService",
     "canonicalize_operation_request",
+    "interrupt_active_workflow_operations",
     "load_workflow_operation",
     "operation_request_hash",
     "reduce_workflow_operations",

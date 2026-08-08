@@ -7,12 +7,12 @@
 
 ```text
 Goal / Requirement
-  -> semantic plan and evidence contract
+  -> semantic plan, Goal Claims, and evidence contract
   -> task-map.v1 + source-index.v1 + coverage-report.v1
-  -> deterministic validation and Task contract materialization
-  -> run admission + Kernel dispatch
+  -> immutable Plan Artifact Package + generation admission
+  -> deterministic Task contract materialization + Kernel dispatch
   -> Worker artifacts/evidence
-  -> verify, replan, and closure
+  -> exact-target verify, replan, Candidate freeze, and closure
 ```
 
 The Kernel does not interpret prose and invent a task breakdown. Ownership is explicit:
@@ -21,6 +21,7 @@ The Kernel does not interpret prose and invent a task breakdown. Ownership is ex
 |---|---|
 | requirement meaning, solution, task slices, acceptance quality, project constraints | Planner/Architect/domain Agent plus skills/prompts |
 | schema, refs, dependency, currentness, authorization, WIP, lease, dispatch | deterministic Kernel |
+| registered semantic checkpoints | Orchestrator Agent under explicit `semantic_control`; default remains `exception_advisor` |
 | semantic exception triage and replan direction | Agent/Run Manager/Autoresearch proposal |
 | approved state changes and external effects | `ControlledActionService` / sanctioned CLI |
 
@@ -97,12 +98,37 @@ code scope, and verification evidence. A reduced example:
       "owner_role": "dev",
       "wave": 1,
       "blocked_by": [],
-      "scope": ["src/api/**", "tests/test_api.py"],
+      "allowed_paths": ["src/api/**", "tests/test_api.py"],
+      "allowed_paths_reason": "one vertical slice owns runtime and regression test",
       "exclusive_files": ["src/api/handler.py"],
       "goal_claim_ids": ["CLAIM-A"],
-      "acceptance": ["the compatibility cases pass"],
-      "verification": "uv run pytest tests/test_api.py -q --no-cov",
-      "verification_tiers": ["runtime"]
+      "source_key": "docs/specs/feature.md#api-compatibility",
+      "source_ref": "docs/specs/feature.md#api-compatibility",
+      "source_excerpt": "Preserve the documented API behavior.",
+      "acceptance_criteria": [
+        {
+          "id": "AC-API-COMPAT",
+          "statement": "The compatibility cases pass on the Task target.",
+          "mandatory": true,
+          "verification_owner": "task_verify",
+          "verification_tier": "task_non_smoke",
+          "verification_command_ids": ["api-regression"]
+        }
+      ],
+      "validation": {
+        "commands": [
+          {
+            "id": "api-regression",
+            "command": "uv run pytest tests/test_api.py -q --no-cov",
+            "acceptance_ids": ["AC-API-COMPAT"],
+            "owner": "task_verify",
+            "tier": "task_non_smoke",
+            "deterministic": true,
+            "reusable": true,
+            "timeout_seconds": 120
+          }
+        ]
+      }
     }
   ]
 }
@@ -114,10 +140,11 @@ Common fields:
 |---|---|
 | `goal_claims` / `goal_claim_ids` | establish Goal -> Claim -> Task coverage |
 | `blocked_by` / `wave` | express dependencies, batches, and fan-in waits |
-| `scope` / `allowed_paths` | declare expected changes for scope/evidence checks |
+| `allowed_paths` plus reason | declare unique write ownership and explain it; legacy `scope` is compatibility input only |
 | `exclusive_files` | prevent concurrent writers on the same path |
 | `shared_files` | shared read-only context, not write permission |
-| `verification` / tiers | executable verification entry and level |
+| `acceptance_criteria` | structured product outcomes bound to mandatory, owner, tier, and command IDs |
+| `validation.commands[]` | canonical command registry; downstream consumers execute and read back the exact command/digest |
 | source refs | trace a Task back to its Goal, plan, review, and coverage report |
 
 Prefer independently verifiable vertical slices. A shared schema/API may be an early wave, but avoid
@@ -181,6 +208,51 @@ After transport delivery, Workers report artifacts/evidence through `zf emit` or
 result must match the current TaskAttempt/dispatch token. Reviewers, tests, judges, and custom verifiers
 consume the Task contract, artifact refs, and Git evidence instead of reinterpreting the raw prompt.
 
+### 6.1 Default v3 Dispatch and the v4 Task Pipeline Canary
+
+The production default remains the v3 stage/fanout/barrier path. PRD, Issue,
+and Refactor also have a default-off v4 canary:
+
+```text
+Task Pipeline identity (Task + task-map generation)
+  -> Impl operation
+  -> Task Verify operation
+  -> Integration Admission
+  -> serial Candidate Integration receipt
+
+physical Worker Slot
+  -> serves one operation
+  -> settles and becomes reusable
+  -> preserves Task-stage session/workspace affinity separately
+```
+
+v4 changes scheduling and placement, not Stage briefings, Task Contracts,
+required reads, result artifacts, or Completion Gate:
+
+- Task A may enter its Verify immediately after Impl admission without waiting for sibling Tasks;
+- an idle Impl slot may serve Task C without leaking Task A session context;
+- a Verify failure opens bounded rework for that Task only;
+- a Task becomes `done`, and unblocks dependents, only after its integration receipt is admitted;
+- all local receipts freeze one exact Candidate before global Verify, Discovery, and Goal Closure;
+- a partial Candidate cannot auto-ship, and default `verify_admitted` adds no Agent turn;
+- profile, operation, attempt, lease, workspace, session, and generation must all be current.
+
+Only explicit profiles such as
+`examples/prod/controller/*-task-pipeline-v4-canary*.yaml` may enable this path.
+They declare `preferred: false` and default `ZF_TASK_PIPELINE_MODE` to `shadow`.
+Switching to `blocking` is still a canary; the current rollout decision is
+NO-GO and must not replace ordinary v3 routes.
+
+### 6.2 Orchestrator Agent Checkpoint Boundary
+
+`workflow.orchestration.mode` defaults to `exception_advisor`. Explicit
+`semantic_control` may configure `shadow` or controlled `blocking` policy for
+registered checkpoints such as `plan_candidate`, but the OA submits only typed
+decisions/artifacts. The Kernel still owns operations, dispatch, TaskAttempts,
+WIP, state transitions, and side effects. Normal `Impl -> Verify` handoff adds
+no OA turn. The OA P0-P15 harness is implemented, while its real canary remains
+on HOLD.
+
 ## 7. Replanning During Execution
 
 Re-evaluate the plan instead of mechanically replaying old work when:
@@ -235,10 +307,13 @@ Agent prose, a running tmux pane, or a changed Kanban status alone does not prov
 | `src/zf/runtime/product_delivery.py` | accepted task map to canonical Task contracts |
 | `src/zf/runtime/orchestrator_dispatch.py` | mechanical dispatch from readiness to worker instance |
 | `src/zf/runtime/task_attempt_runtime.py` | attempt/lease/delivery lifecycle |
+| `src/zf/runtime/task_pipeline_runtime.py`, `task_pipeline_reconciler.py` | v4 Task-local operations, capacity, rework, and projection |
+| `src/zf/runtime/orchestrator_agent_reactor.py` | event/artifact handoff for explicit OA semantic checkpoints |
 | `src/zf/runtime/injection.py` | briefing, active-task pin, and Worker protocol |
 | `src/zf/core/task/contract_validation.py` | pre-dispatch Task contract checks |
 | `src/zf/core/verification/scope_ratchet.py` | scope snapshot, diff, and violation checks |
 | `tests/test_task_map.py`, `tests/test_product_delivery.py` | task-map and ingest regressions |
+| `tests/test_task_pipeline_profile.py`, `tests/test_task_pipeline_rollout.py` | v4 profile, default-off behavior, and rollout gates |
 
 Related: [Harness Runtime Flow](04-harness-runtime.en.md), [Delivery Control Model](concepts/delivery-control-model.en.md),
 and [Observe a Delivery](operations/observe-delivery.en.md).

@@ -44,7 +44,13 @@ def normalize_status(status: str) -> str:
 
 
 def event_status(event: ZfEvent) -> str:
-    return normalize_status(str(payload(event).get("status") or event.type.rsplit(".", 1)[-1]))
+    data = payload(event)
+    if (
+        event.type == "run.result.rejected"
+        and str(data.get("reason") or "").startswith("run_terminal:")
+    ):
+        return "settled"
+    return normalize_status(str(data.get("status") or event.type.rsplit(".", 1)[-1]))
 
 
 def event_error(event: ZfEvent) -> dict[str, str]:

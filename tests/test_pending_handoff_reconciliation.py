@@ -25,6 +25,9 @@ from zf.core.feature.store import FeatureStore
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.goal_terminal_reconciliation import (
+    reconcile_goal_terminal_task_settlement,
+)
 
 
 class _StubTransport:
@@ -391,6 +394,75 @@ def test_reconcile_dispatches_task_ref_repair_request_to_owner_lane(
     assert "never copy the source completion's old scheduler attempt" in (
         lineage_instruction
     )
+
+
+def test_pending_handoff_yields_typed_task_ref_rejection_to_v4(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    orch.config.workflow.flow_metadata = {
+        "task_pipeline": {
+            "mode": "blocking",
+            "profile_id": "test-v4",
+            "profile_digest": "a" * 64,
+        }
+    }
+    store.add(Task(
+        id="T-V4-REF",
+        title="typed task ref repair",
+        status="in_progress",
+        assigned_to="dev",
+    ))
+    log.append(ZfEvent(
+        type="task.pipeline.generation.admitted",
+        actor="zf-cli",
+        origin="kernel",
+        payload={
+            "schema_version": "task-pipeline-generation.v1",
+            "generation_id": "generation-1",
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g1",
+            "task_ids": ["T-V4-REF"],
+        },
+    ))
+    result = ZfEvent(
+        type="dev.build.done",
+        actor="dev",
+        task_id="T-V4-REF",
+        payload={
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g1",
+            "task_pipeline_stage": "impl",
+            "operation_generation": 1,
+            "operation_id": "op-v4-impl-g1",
+            "source_commit": "a" * 40,
+        },
+    )
+    log.append(result)
+    log.append(ZfEvent(
+        type="task.ref.rejected",
+        actor="zf-cli",
+        task_id="T-V4-REF",
+        payload={
+            "trigger_event_id": result.id,
+            "reason": "source commit changes outside task scope",
+        },
+        causation_id=result.id,
+    ))
+
+    decisions = orch._reconcile_pending_handoffs()  # type: ignore[attr-defined]
+
+    assert decisions == []
+    events = _events(log)
+    assert not [
+        event for event in events
+        if event.type in {"task.ref.repair.requested", "task.rework.requested"}
+    ]
+    assert not [
+        event for event in events
+        if event.type == "task.dispatched"
+        and event.payload.get("source") == "rework"
+    ]
 
 
 def test_reconcile_emits_task_ref_repair_request_after_rejection(
@@ -1514,6 +1586,73 @@ def test_reconcile_closes_feature_from_nested_contract_feature_id(
 
     assert store.get("T1").status == "done"  # archived lookup
     assert feature_store.get("F-ABC12345").status == "done"  # archived lookup
+
+
+def test_reconcile_closes_feature_from_canonical_task_contract(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    feature_store = FeatureStore(tmp_path / ".zf" / "feature_list.json")
+    feature_store.add(Feature(
+        id="F-ABC12345",
+        title="Feature",
+        status="planning",
+    ))
+    store.add(Task(
+        id="T1",
+        title="T1",
+        key="task-a",
+        status="in_progress",
+        assigned_to="judge",
+        contract=TaskContract(feature_id="F-ABC12345"),
+    ))
+    log.append(ZfEvent(type="task.dispatched", actor="orchestrator",
+                       task_id="T1",
+                       payload={"assignee": "judge", "role": "judge"}))
+    log.append(ZfEvent(type="judge.passed", actor="judge", task_id="T1"))
+
+    orch._reconcile_pending_handoffs()  # type: ignore[attr-defined]
+
+    assert store.get("T1").status == "done"
+    assert feature_store.get("F-ABC12345").status == "done"
+
+
+def test_goal_terminal_restart_closes_feature_from_archived_root_task(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    feature_store = FeatureStore(tmp_path / ".zf" / "feature_list.json")
+    feature_store.add(Feature(
+        id="F-ABC12345",
+        title="Feature",
+        status="planning",
+    ))
+    store.add(Task(
+        id="TASK-ROOT",
+        title="Root",
+        status="in_progress",
+        contract=TaskContract(feature_id="F-ABC12345"),
+    ))
+    store.update("TASK-ROOT", status="done")
+    log.append(ZfEvent(
+        type="run.goal.completed",
+        correlation_id="run-1",
+        payload={
+            "run_id": "run-1",
+            "pdd_id": "TASK-ROOT",
+            "feature_id": "TASK-ROOT",
+            "completed_task_ids": ["TASK-ROOT"],
+        },
+    ))
+
+    reconcile_goal_terminal_task_settlement(orch)
+
+    assert feature_store.get("F-ABC12345").status == "done"
+    assert any(
+        event.type == "feature.status_changed"
+        and event.payload.get("trigger_event") == "run.goal.completed"
+        for event in log.read_all()
+    )
 
 
 def test_reconcile_keeps_feature_active_when_sibling_task_remains(

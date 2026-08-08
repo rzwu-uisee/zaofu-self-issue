@@ -21,6 +21,7 @@ from zf.core.config.schema import (
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.state.session import SessionStore
+from zf.core.state.task_attempts import TaskAttemptStore
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
@@ -326,6 +327,91 @@ class TestOrphanEscalate:
         events = EventLog(state_dir / "events.jsonl").read_all()
         assert not any(e.type == "task.orphaned" for e in events)
         assert not any(e.type == "task.orphan_warning" for e in events)
+
+    def test_live_child_attempt_lease_keeps_workflow_parent_active(
+        self,
+        state_dir,
+        transport,
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[RoleConfig(
+                name="planner",
+                backend="mock",
+                orphan_warning_seconds=10,
+                orphan_escalate_seconds=20,
+            )],
+        )
+        orch = Orchestrator(state_dir, cfg, transport)
+        _seed_busy_task(state_dir, "FLOW-PARENT", dispatch_ts=0.0)
+        orch._dispatch_epoch["FLOW-PARENT"] = 0.0
+        TaskAttemptStore(state_dir / "task_attempts.json").ensure_for_dispatch(
+            run_id="run-parent",
+            task_id="PLAN-CHILD",
+            parent_task_id="FLOW-PARENT",
+            dispatch_id="dispatch-plan",
+            role="planner",
+            instance_id="planner",
+            operation_id="op-plan",
+            briefing_ref="briefings/plan.md",
+            created_at="2099-01-01T00:00:00+00:00",
+            lease_expires_at="2099-01-01T01:00:00+00:00",
+            max_attempts=0,
+        )
+
+        orch._now = lambda: 2_000.0
+        orch._check_orphaned_tasks()
+
+        task = TaskStore(state_dir / "kanban.json").get("FLOW-PARENT")
+        assert task is not None and task.status == "in_progress"
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert not any(event.type == "task.orphaned" for event in events)
+        assert not any(event.type == "task.orphan_warning" for event in events)
+
+    def test_expired_child_attempt_does_not_mask_parent_orphan(
+        self,
+        state_dir,
+        transport,
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[RoleConfig(
+                name="planner",
+                backend="mock",
+                orphan_warning_seconds=10,
+                orphan_escalate_seconds=20,
+            )],
+        )
+        orch = Orchestrator(state_dir, cfg, transport)
+        _seed_busy_task(state_dir, "FLOW-PARENT", dispatch_ts=0.0)
+        orch._dispatch_epoch["FLOW-PARENT"] = 0.0
+        TaskAttemptStore(state_dir / "task_attempts.json").ensure_for_dispatch(
+            run_id="run-parent",
+            task_id="PLAN-CHILD",
+            parent_task_id="FLOW-PARENT",
+            dispatch_id="dispatch-plan",
+            role="planner",
+            instance_id="planner",
+            operation_id="op-plan",
+            briefing_ref="briefings/plan.md",
+            created_at="2099-01-01T00:00:00+00:00",
+            lease_expires_at="2099-01-01T01:00:00+00:00",
+            max_attempts=0,
+        )
+
+        orch._now = lambda: 5_000_000_000.0
+        orch._check_orphaned_tasks()
+
+        task = TaskStore(state_dir / "kanban.json").get("FLOW-PARENT")
+        assert task is not None and task.status == "backlog"
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert sum(
+            event.type == "task.orphaned"
+            and event.task_id == "FLOW-PARENT"
+            for event in events
+        ) == 1
 
 
 class TestIntegrationDispatchEpoch:

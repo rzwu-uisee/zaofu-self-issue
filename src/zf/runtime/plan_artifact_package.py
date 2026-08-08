@@ -12,6 +12,7 @@ from zf.core.events.writer import EventWriter
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.goal_claim_set import (
     canonical_task_map_generation,
+    mandatory_claim_continuity,
     pin_goal_claim_set_from_task_map,
 )
 from zf.runtime.plan_artifact_ports import (
@@ -342,6 +343,7 @@ def prepare_plan_artifact_package(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Build Claim Set and Package from explicit caller refs only."""
 
+    event_list = list(events)
     mode = artifact_package_mode(metadata)
     if mode == "off":
         return {}, {}, {"mode": mode, "status": "off"}
@@ -408,12 +410,13 @@ def prepare_plan_artifact_package(
             "adapter_version": "planning-result-task-map-adapter.v1",
         }
     reduced = reduce_plan_artifact_packages(
-        events,
+        event_list,
         workflow_run_id=workflow_run_id,
     )
     previous = reduced.get("current")
     previous = previous if isinstance(previous, Mapping) else {}
     inherited: list[dict[str, Any]] = []
+    continuity = mandatory_claim_continuity(None, claim_set)
     if previous and previous.get("package_ref") and previous.get("package_digest"):
         prior_body = hydrate_plan_artifact_package(
             state_dir,
@@ -422,6 +425,42 @@ def prepare_plan_artifact_package(
                 "sha256": previous["package_digest"],
             },
         )
+        prior_claim_port = next(
+            (
+                port
+                for port in [*prior_body["produced"], *prior_body["inherited"]]
+                if str(port.get("logical_name") or "") == "goal_claim_set"
+            ),
+            None,
+        )
+        previous_claim_set: Mapping[str, Any] | None = None
+        if isinstance(prior_claim_port, Mapping):
+            hydrated_claim = hydrate_sidecar_ref(
+                state_dir,
+                {
+                    "ref": str(prior_claim_port.get("ref") or ""),
+                    "sha256": str(prior_claim_port.get("sha256") or ""),
+                },
+            )
+            if isinstance(hydrated_claim.payload, Mapping):
+                previous_claim_set = hydrated_claim.payload
+        continuity = mandatory_claim_continuity(
+            previous_claim_set,
+            claim_set,
+            claim_waivers=_goal_claim_waivers(payload),
+            active_waiver_refs=_active_goal_claim_waiver_refs(
+                event_list,
+                goal_id=goal_id,
+            ),
+        )
+        if continuity["status"] != "passed":
+            rejected_ids = ", ".join(
+                str(item.get("goal_claim_id") or "")
+                for item in continuity["findings"]
+            )
+            raise PlanArtifactPackageError(
+                "mandatory goal claim continuity failed: " + rejected_ids
+            )
         for port in [*prior_body["produced"], *prior_body["inherited"]]:
             name = str(port.get("logical_name") or "")
             if name in explicit_ports:
@@ -473,6 +512,7 @@ def prepare_plan_artifact_package(
         "goal_claim_set_ref": str(claim_descriptor.get("ref") or ""),
         "goal_claim_set_digest": str(claim_descriptor.get("sha256") or ""),
         "goal_claim_set_content_digest": str(claim_set.get("claim_set_digest") or ""),
+        "goal_claim_continuity": continuity,
     }
 
 
@@ -735,6 +775,39 @@ def _event_parts(
         str(event.get("id") or ""),
         dict(payload) if isinstance(payload, Mapping) else {},
     )
+
+
+def _goal_claim_waivers(payload: Mapping[str, Any]) -> dict[str, str]:
+    raw = payload.get("goal_claim_waivers")
+    rows = raw if isinstance(raw, list) else []
+    return {
+        str(item.get("goal_claim_id") or "").strip(): str(
+            item.get("waiver_ref") or ""
+        ).strip()
+        for item in rows
+        if isinstance(item, Mapping)
+        and str(item.get("goal_claim_id") or "").strip()
+        and str(item.get("waiver_ref") or "").strip()
+    }
+
+
+def _active_goal_claim_waiver_refs(
+    events: list[ZfEvent | Mapping[str, Any]],
+    *,
+    goal_id: str,
+) -> set[str]:
+    from zf.runtime.waivers import active_waivers
+
+    active = active_waivers(
+        [event for event in events if isinstance(event, ZfEvent)],
+        goal_id,
+    )
+    return {
+        str(value)
+        for waiver in active
+        for value in (waiver.get("signature"), waiver.get("event_id"))
+        if str(value).strip()
+    }
 
 
 def _strings(value: Any) -> list[str]:

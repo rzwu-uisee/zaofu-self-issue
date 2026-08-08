@@ -8,7 +8,7 @@ from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.runtime.generic_workflow_fanout import GENERIC_WORKFLOW_HANDOFF_KEYS
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.workstream_scope_guard import check_workstream_scope
 from zf.runtime.workflow_task_lifecycle import activate_workflow_managed_task
 
@@ -30,6 +30,16 @@ _WORKFLOW_IDENTITY_KEYS = tuple(dict.fromkeys((
     "effective_config_digest",
     "run_contract_ref",
     "run_contract_digest",
+    "route_id",
+    "research_template_id",
+    "research_route_digest",
+    "research_template_digest",
+    "research_role_activation_digest",
+    "research_prompt_contract_digest",
+    "research_generation_contract_ref",
+    "task_contract_digest",
+    "restart_boundary",
+    "safe_resume_action",
     "continuation_key",
     "expected_generation",
     "fragment_id",
@@ -196,10 +206,41 @@ class DurableCallWorkflowMixin:
     def _on_workflow_invoke_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         task_id = event.task_id or str(payload.get("task_id") or "")
         pattern_id = str(payload.get("pattern_id") or payload.get("stage_id") or "")
+        if str(payload.get("request_kind") or "") == "research":
+            from zf.runtime.research_generation import (
+                research_generation_binding_error,
+            )
+
+            research_task = self.task_store.get(task_id) if task_id else None
+            generation_error = (
+                "research_generation_task_missing"
+                if research_task is None
+                else research_generation_binding_error(
+                    self.state_dir,
+                    config=self.config,
+                    task=research_task,
+                    payload=payload,
+                )
+            )
+            if generation_error:
+                self._emit_workflow_invoke_rejected(
+                    event,
+                    generation_error,
+                    task_id=task_id,
+                    pattern_id=pattern_id,
+                )
+                return WorkflowRuntimeDecision(
+                    action="block",
+                    task_id=task_id,
+                    reason=(
+                        "workflow invoke rejected: "
+                        f"{generation_error}"
+                    ),
+                )
         proposal_binding_error = _workflow_proposal_binding_error(
             self.state_dir,
             payload,
@@ -211,7 +252,7 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason=(
@@ -238,7 +279,7 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: task missing",
@@ -250,7 +291,7 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: open questions",
@@ -263,23 +304,23 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: unknown pattern",
             )
         topology = str(getattr(stage, "topology", "") or "")
-        if not topology.startswith("fanout_"):
+        if topology != "fanout_reader":
             self._emit_workflow_invoke_rejected(
                 event,
-                "pattern is not a fanout topology",
+                "pattern is not a supported external reader entry",
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
-                reason="workflow invoke rejected: unsupported topology",
+                reason="workflow invoke rejected: unsupported entry topology",
             )
         dispatch_id = str(
             payload.get("dispatch_id")
@@ -294,7 +335,7 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: stale dispatch",
@@ -304,7 +345,7 @@ class DurableCallWorkflowMixin:
         admission = admit_workflow_invoke(self, event)
         if admission.status != "admitted":
             action = "observe" if admission.status in {"queued", "paused"} else "block"
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action=action,
                 task_id=task_id,
                 reason=(
@@ -331,7 +372,7 @@ class DurableCallWorkflowMixin:
                 or ""
             )
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="observe",
                 task_id=task_id,
                 reason="workflow invoke replayed without duplicate dispatch",
@@ -370,7 +411,7 @@ class DurableCallWorkflowMixin:
                     causation_id=event.id,
                     correlation_id=event.correlation_id,
                 ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="workflow invoke rejected: workstream scope overlap",
@@ -403,7 +444,7 @@ class DurableCallWorkflowMixin:
                     task_id=task_id,
                     pattern_id=pattern_id,
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task_id,
                     reason=f"workflow invoke operation rejected: {reason}",
@@ -448,7 +489,7 @@ class DurableCallWorkflowMixin:
                         causation_id=existing_accept.id,
                         correlation_id=event.correlation_id or "",
                     )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="observe",
                     task_id=task_id,
                     reason=(
@@ -473,7 +514,7 @@ class DurableCallWorkflowMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason=f"workflow invoke role activation rejected: {exc}",
@@ -604,7 +645,7 @@ class DurableCallWorkflowMixin:
                 causation_id=accepted_event.id,
                 correlation_id=event.correlation_id or "",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="workflow_invoke",
             task_id=task_id,
             reason=f"workflow invoke accepted: {pattern_id}",
@@ -785,7 +826,7 @@ class DurableCallWorkflowMixin:
     def _on_durable_fanout_aggregate_completed(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Settle a durable parent from synchronous fanout/recovery paths.
 
         This is intentionally not a reactor-table handler: ordinary fanout
@@ -888,7 +929,7 @@ class DurableCallWorkflowMixin:
             mode=mode,
             dispatch_correction=False,
         )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="observe",
             task_id=str(event.task_id or operation.get("task_id") or ""),
             reason=f"nested workflow aggregate {outcome.status}: {operation_id}",

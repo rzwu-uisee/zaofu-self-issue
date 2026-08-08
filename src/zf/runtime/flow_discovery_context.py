@@ -161,6 +161,7 @@ def _latest_flow_candidate_context(
             continue
         if str(candidate.get("status") or "completed") not in {
             "completed",
+            "frozen",
             "passed",
         }:
             continue

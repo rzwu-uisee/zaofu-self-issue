@@ -62,11 +62,15 @@ def fanout_failure_recovery(
     semantic_result_refs: set[str] = set()
     dependency_blocked = False
     plan_port_rework = False
-    for payload in _fanout_failure_payloads(
+    payloads = _fanout_failure_payloads(
         owner,
         manifest,
         extra_payloads=extra_payloads,
-    ):
+    )
+    typed_handoff = _typed_handoff_recovery(payloads)
+    if typed_handoff:
+        return typed_handoff
+    for payload in payloads:
         result = payload.get("verification_result")
         if not isinstance(result, dict):
             continue
@@ -114,6 +118,58 @@ def fanout_failure_recovery(
         "rework_item_ids": sorted(rework_item_ids),
         "semantic_result_refs": sorted(
             ref for ref in semantic_result_refs if ref
+        ),
+    }
+
+
+def _typed_handoff_recovery(
+    payloads: list[dict[str, Any]],
+) -> dict[str, Any]:
+    typed = [
+        payload
+        for payload in payloads
+        if str(payload.get("handoff_failure_fingerprint") or "")
+    ]
+    if not typed:
+        return {}
+    canonical_plan = any(
+        str(payload.get("failure_scope") or "") == "plan_contract"
+        for payload in typed
+    )
+    no_progress = any(bool(payload.get("no_progress")) for payload in typed)
+    task_ids = sorted({
+        str(payload.get("task_id") or "")
+        for payload in typed
+        if str(payload.get("task_id") or "")
+    })
+    fingerprints = sorted({
+        str(payload.get("handoff_failure_fingerprint") or "")
+        for payload in typed
+        if str(payload.get("handoff_failure_fingerprint") or "")
+    })
+    action = "return_to_plan" if canonical_plan else "result_repair"
+    return {
+        "failure_class": (
+            "canonical_plan_contract_failure"
+            if canonical_plan
+            else "worker_result_contract_failure"
+        ),
+        "recovery_action": action,
+        "rework_scope": "plan_contract" if canonical_plan else "result_payload",
+        "recovery_owner": "planner" if canonical_plan else "implementation_owner",
+        "failed_task_ids": task_ids,
+        "handoff_failure_fingerprints": fingerprints,
+        "redispatch_allowed": not canonical_plan and not no_progress,
+        "no_progress": no_progress,
+        "bounded_recovery_decision": (
+            {
+                "status": "safe_halt",
+                "recovery_owner": "run_manager",
+                "allowed_actions": [action, "operator_review"],
+                "max_additional_writer_attempts": 0,
+            }
+            if no_progress
+            else {}
         ),
     }
 

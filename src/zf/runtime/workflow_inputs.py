@@ -16,6 +16,7 @@ from typing import Any
 
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.security.redaction import redact_obj
+from zf.runtime.sidecar_refs import write_sidecar_text
 
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -33,7 +34,7 @@ def workflow_input_manifest_ref(workflow_run_id: str) -> str:
 
 
 def workflow_prompt_ref(workflow_run_id: str) -> str:
-    return f"workflow-inputs/{_safe_id(workflow_run_id)}/prompt.md"
+    return f"artifacts/workflow-inputs/{_safe_id(workflow_run_id)}/prompt.md"
 
 
 def infer_workflow_prompt_kind(pattern_id: str, payload: dict[str, Any]) -> str:
@@ -52,9 +53,21 @@ def infer_workflow_prompt_kind(pattern_id: str, payload: dict[str, Any]) -> str:
         "refactoring": "refactor",
         "refactor-plan": "refactor",
         "refactor_plan": "refactor",
+        "research": "research",
+        "research-fanout": "research",
+        "research_fanout": "research",
     }
     if raw in aliases:
         return aliases[raw]
+    request_kind = str(payload.get("request_kind") or "").strip().lower()
+    route_id = str(payload.get("route_id") or "").strip().lower()
+    template_id = str(payload.get("research_template_id") or "").strip().lower()
+    if (
+        request_kind == "research"
+        or route_id.startswith("research:")
+        or template_id.startswith("research-")
+    ):
+        return "research"
     haystack = " ".join([
         str(pattern_id or ""),
         str(payload.get("expected_output") or ""),
@@ -171,7 +184,7 @@ def write_workflow_prompt_package(
     artifact_refs: list[dict[str, Any]],
     request_payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Write a deterministic prompt artifact for PRD/refactor workflows."""
+    """Write a deterministic prompt artifact for workflow entry adapters."""
     ref = workflow_prompt_ref(workflow_run_id)
     prompt_text = _render_workflow_prompt(
         state_dir=state_dir,
@@ -182,8 +195,18 @@ def write_workflow_prompt_package(
         artifact_refs=artifact_refs,
         request_payload=request_payload,
     )
-    atomic_write_text(Path(state_dir) / ref, prompt_text)
+    descriptor = write_sidecar_text(
+        Path(state_dir),
+        ref,
+        prompt_text,
+        kind="workflow_prompt",
+        schema_version="workflow-prompt.v1",
+        created_by="workflow-inputs",
+        required=True,
+        content_type="text/markdown",
+    )
     return {
+        **descriptor,
         "kind": "workflow_prompt",
         "prompt_kind": prompt_kind,
         "ref": ref,
@@ -232,6 +255,15 @@ def render_workflow_input_briefing_section(payload: dict[str, Any]) -> str:
     extracted = workflow_input_payload(payload)
     if not extracted:
         return ""
+    if not any((
+        extracted.get("workflow_input_manifest_ref"),
+        extracted.get("source_refs"),
+        extracted.get("artifact_refs"),
+        extracted.get("request_id"),
+        extracted.get("request_revision"),
+        extracted.get("origin_binding"),
+    )):
+        return ""
     return (
         "\n\n## Workflow Input Manifest\n"
         "These refs came from a Channel/Squad workflow invocation. Treat the "
@@ -275,6 +307,17 @@ def _request_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "request_id",
         "request_revision",
         "workflow_prompt_ref",
+        "workflow_generation",
+        "effective_config_digest",
+        "run_contract_digest",
+        "research_template_id",
+        "research_route_digest",
+        "research_template_digest",
+        "research_role_activation_digest",
+        "research_prompt_contract_digest",
+        "research_generation_contract_ref",
+        "restart_boundary",
+        "safe_resume_action",
     }
     return redact_obj({key: payload.get(key) for key in keep if key in payload})
 
@@ -474,6 +517,8 @@ def _prompt_title(prompt_kind: str) -> str:
         return "PRD Workflow Prompt"
     if prompt_kind == "refactor":
         return "Refactor Workflow Prompt"
+    if prompt_kind == "research":
+        return "Research Workflow Prompt"
     return "Workflow Prompt"
 
 
@@ -489,6 +534,12 @@ def _output_contract(prompt_kind: str) -> str:
             "- Produce a refactor plan with current behavior, target shape, scoped files/modules, migration steps, tests, and rollback risks.",
             "- Cite research artifacts, PRD/synthesis refs, and discussion evidence for each risky change.",
             "- Do not mutate code directly from this prompt; emit the workflow's expected planning artifact.",
+        ])
+    if prompt_kind == "research":
+        return "\n".join([
+            "- Produce an evidence-backed research synthesis with source refs, findings, disagreements, risks, and open questions.",
+            "- Separate observed evidence from inference and bind every major claim to a source or artifact ref.",
+            "- Prepare explicit handoff inputs for the requested downstream PRD, refactor, or delivery workflow without mutating product state.",
         ])
     return "- Produce the workflow artifact requested by the execution pattern."
 

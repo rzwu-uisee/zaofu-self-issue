@@ -27,6 +27,12 @@ from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.shutdown import GracefulShutdown
+from zf.runtime.workflow_operation import (
+    WorkflowOperationService,
+    reduce_workflow_operations,
+)
+from zf.core.events.log import EventLog
+from zf.core.events.writer import EventWriter
 
 
 def _make_state_dir(tmp_path: Path) -> Path:
@@ -160,6 +166,45 @@ def test_fast_stop_requeues_and_emits_run_teardown_without_snapshot(tmp_path: Pa
         event["type"] == "task.requeued" and event.get("task_id") == "TASK-X"
         for event in events
     )
+
+
+def test_graceful_stop_suspends_active_workflow_operation(tmp_path: Path):
+    state_dir = _make_state_dir(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    )
+    ensured = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-active",
+        operation_type="agent",
+        request={"prompt": "plan"},
+        task_id="FLOW-1",
+        parent_task_id="FLOW-1",
+    )
+    service.mark_started(
+        operation_id="op-active",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="FLOW-1",
+        dispatch_id="dispatch-1",
+    )
+    transport = MagicMock()
+    transport.shutdown = MagicMock()
+
+    steps = GracefulShutdown(
+        state_dir=state_dir,
+        transport=transport,
+    ).execute()
+
+    operation = reduce_workflow_operations(
+        EventLog(state_dir / "events.jsonl").read_all()
+    )["op-active"]
+    assert "interrupt_workflow_operations" in steps
+    assert operation["status"] == "suspended"
+    assert operation["reason"] == "graceful_stop"
 
 
 def test_inflight_task_with_current_handoff_progress_not_requeued(tmp_path: Path):

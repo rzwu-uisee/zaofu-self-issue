@@ -112,7 +112,7 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
   await expect(page.getByText("Execution Closure", { exact: true })).toBeVisible();
   await expect(page.getByText("Decision Binding", { exact: true })).toBeVisible();
   await expect(page.getByText("direct-v1", { exact: true }).first()).toBeVisible();
-  const approve = page.getByRole("button", { name: "Approve & Run" });
+  const approve = page.getByTestId("workflow-approve-run");
   await expect(approve).toBeEnabled();
   await expectNoViewportOverflow(page);
   await expectVisibleControlsInViewport(page);
@@ -146,7 +146,7 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
   await approve.click();
   expect((await submitted).status()).toBe(202);
   await expect(page.getByTestId("workflow-proposal-feedback")).toContainText("accepted");
-  await expect(page.getByRole("button", { name: "Open Run" })).toBeVisible();
+  await expect(page.getByTestId("workflow-open-run")).toBeVisible();
 
   const detailResponse = await request.get(
     `/api/projects/default/workflow-requests/${requestId}`,
@@ -175,6 +175,6 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
   await expect(page.getByTestId("workflow-readiness")).toContainText("Run completed");
   await expectNoViewportOverflow(page);
 
-  await page.getByRole("button", { name: "Open Run" }).click();
+  await page.getByTestId("workflow-open-run").click();
   await expect(page).toHaveURL(/page=runs/);
 });

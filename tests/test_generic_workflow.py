@@ -154,6 +154,9 @@ def test_safe_generic_workflow_compiles_registered_contract() -> None:
 
     assert stages["scope"]["trigger"] == "workflow.invoke.requested"
     assert stages["scope"]["operation"] == "agent.read"
+    assert stages["scope"]["result_semantics"] == "artifact_production"
+    assert stages["synthesize"]["result_semantics"] == "artifact_production"
+    assert stages["verify"]["result_semantics"] == "subject_gate"
     assert stages["synthesize"]["trigger"] == (
         "workflow.dependency_barrier.satisfied"
     )
@@ -181,6 +184,7 @@ def test_safe_generic_workflow_compiles_registered_contract() -> None:
     assert compilation.flow_metadata["result_protocol"] == {
         "mode": "blocking",
         "semantic_submit_profiles": {
+            "workflow-read": "blocking",
             "artifact-delivery": "blocking",
         },
     }
@@ -217,6 +221,8 @@ def test_generic_workflow_envelope_loads_canonical_sidecars(
         "verify",
     ]
     assert config.workflow.stages[3].dependency_barrier_digest
+    assert config.workflow.stages[0].result_semantics == "artifact_production"
+    assert config.workflow.stages[4].result_semantics == "subject_gate"
     assert config.workflow.stages[3].input_ports[0].source == (
         "collect-a.evidence"
     )
@@ -231,6 +237,7 @@ def test_generic_workflow_envelope_loads_canonical_sidecars(
     assert config.workflow.flow_metadata_by_kind["workflow"][
         "result_protocol"
     ]["semantic_submit_profiles"] == {
+        "workflow-read": "blocking",
         "artifact-delivery": "blocking",
     }
     assert {role.flow_kind for role in config.roles} == {"workflow"}

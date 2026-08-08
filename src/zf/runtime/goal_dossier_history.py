@@ -48,6 +48,8 @@ _INSTRUCTION_REF_KEYS = frozenset({
     "briefing_ref",
     "child_briefing_ref",
     "contract_snapshot_ref",
+    "goal_closure_contract_snapshot_ref",
+    "task_contract_snapshot_ref",
     "objective_ref",
     "plan_artifact_package_ref",
     "prompt_ref",
@@ -98,14 +100,32 @@ def build_goal_dossier_history(
         terminal=terminal,
         excluded_task_ids=excluded_task_ids,
     )
+    current_generation_ids = _task_map_task_ids(task_map)
+    current_generation_tasks = (
+        [
+            task for task in historical_tasks
+            if str(task.get("id") or "") in current_generation_ids
+        ]
+        if current_generation_ids
+        else list(historical_tasks)
+    )
+    superseded_tasks = [
+        {**task, "generation_status": "superseded"}
+        for task in historical_tasks
+        if current_generation_ids
+        and str(task.get("id") or "") not in current_generation_ids
+    ]
     authoritative_tasks = _authoritative_task_rows(
         historical_tasks=historical_tasks,
         task_map=task_map,
         terminal=terminal,
     )
+    projection_tasks = (
+        authoritative_tasks if terminal else current_generation_tasks
+    )
     authoritative_task_ids = {
         str(item.get("id") or "")
-        for item in authoritative_tasks
+        for item in projection_tasks
         if str(item.get("id") or "")
     }
     for item in contract_diagnostics:
@@ -114,14 +134,14 @@ def build_goal_dossier_history(
         else:
             advisories.append(item)
     current_overlay = _current_overlay(
-        historical_tasks=authoritative_tasks,
+        historical_tasks=projection_tasks,
         current_tasks=current_tasks,
     )
     instruction_context = _instruction_context(events)
     claim_matrix = _claim_matrix(
         state_dir=state_dir,
         task_map=task_map,
-        tasks=authoritative_tasks,
+        tasks=projection_tasks,
         events=events,
         project_id=project_id,
         goal_id=goal_id,
@@ -135,6 +155,8 @@ def build_goal_dossier_history(
         "terminal": terminal,
         "authoritative_tasks": authoritative_tasks,
         "historical_tasks": historical_tasks,
+        "current_generation_tasks": current_generation_tasks,
+        "superseded_tasks": superseded_tasks,
         "current_overlay": current_overlay,
         "task_contracts": contracts,
         "task_map": {
@@ -152,6 +174,18 @@ def build_goal_dossier_history(
         "diagnostics": diagnostics,
         "advisories": advisories,
     })
+
+
+def _task_map_task_ids(task_map: Mapping[str, Any]) -> set[str]:
+    tasks = task_map.get("tasks")
+    if not isinstance(tasks, list):
+        return set()
+    return {
+        str(item.get("task_id") or item.get("id") or "").strip()
+        for item in tasks
+        if isinstance(item, Mapping)
+        and str(item.get("task_id") or item.get("id") or "").strip()
+    }
 
 
 def _latest_terminal(events: list[ZfEvent]) -> dict[str, Any]:
@@ -352,15 +386,27 @@ def _hydrate_task_contracts(
         task_id = str(event.task_id or payload.get("task_id") or "")
         if not task_id or task_id in contracts:
             continue
-        ref = str(payload.get("contract_snapshot_ref") or "")
-        digest = str(payload.get("contract_snapshot_digest") or "")
+        explicit_ref = str(payload.get("task_contract_snapshot_ref") or "")
+        explicit_digest = str(
+            payload.get("task_contract_snapshot_digest") or ""
+        )
+        ref = explicit_ref or str(payload.get("contract_snapshot_ref") or "")
+        digest = explicit_digest or str(
+            payload.get("contract_snapshot_digest") or ""
+        )
+        if not explicit_ref and ref and not _is_task_contract_snapshot_ref(ref):
+            continue
         if not ref or not digest or (ref, digest) in attempted:
             continue
         attempted.add((ref, digest))
         try:
             snapshot = hydrate_task_contract_snapshot(
                 state_dir,
-                descriptor_from_payload(payload),
+                descriptor_from_payload({
+                    **payload,
+                    "task_contract_snapshot_ref": ref,
+                    "task_contract_snapshot_digest": digest,
+                }),
                 expected={"task_id": task_id},
             )
         except Exception as exc:
@@ -395,6 +441,13 @@ def _hydrate_task_contracts(
             "source_refs": dict(snapshot.get("source_refs") or {}),
         }
     return contracts, diagnostics
+
+
+def _is_task_contract_snapshot_ref(ref: str) -> bool:
+    normalized = str(ref or "").replace("\\", "/").strip()
+    return "/artifacts/task-contract-snapshots/" in (
+        "/" + normalized.lstrip("/")
+    )
 
 
 def _historical_task_rows(
@@ -584,6 +637,14 @@ def _instruction_context(events: list[ZfEvent]) -> list[dict[str, str]]:
                 for ref in _strings(value):
                     if len(ref) > 1024 or "\n" in ref or "\r" in ref:
                         continue
+                    if key == "contract_snapshot_ref" and any(
+                        ref in _strings(node.get(typed_key))
+                        for typed_key in (
+                            "goal_closure_contract_snapshot_ref",
+                            "task_contract_snapshot_ref",
+                        )
+                    ):
+                        continue
                     identity = (key, ref)
                     if identity in seen:
                         continue
@@ -665,11 +726,19 @@ def _claim_matrix(
                 "reason": str(exc),
             }],
         }
+    result_evidence = {
+        str(node.get("result_ref") or ""): _strings(node.get("evidence_refs"))
+        for node in graph.get("nodes") or []
+        if isinstance(node, Mapping)
+        and node.get("kind") == "verification_result"
+        and str(node.get("result_ref") or "")
+    }
     rows: list[dict[str, Any]] = []
     for node in graph.get("nodes") or []:
         if not isinstance(node, Mapping) or node.get("kind") != "goal_claim":
             continue
         task_ids = _strings(node.get("task_ids"))
+        result_refs = _strings(node.get("supporting_result_refs"))
         rows.append({
             "goal_claim_id": str(node.get("goal_claim_id") or ""),
             "claim": str(node.get("title") or ""),
@@ -680,7 +749,12 @@ def _claim_matrix(
                 for task_id in task_ids
                 if task_id in task_lookup
             ],
-            "evidence_refs": _strings(node.get("supporting_result_refs")),
+            "result_refs": result_refs,
+            "evidence_refs": list(dict.fromkeys(
+                evidence_ref
+                for result_ref in result_refs
+                for evidence_ref in result_evidence.get(result_ref, [])
+            )),
             "verdict": str(node.get("closure") or "unknown"),
             "plan_coverage": str(node.get("plan_coverage") or "unknown"),
             "task_verification": str(node.get("task_verification") or "unverified"),
@@ -691,11 +765,11 @@ def _claim_matrix(
         for item in graph.get("diagnostics") or []
         if isinstance(item, Mapping)
     ]
-    closed_with_evidence = {
+    closed_with_support = {
         str(row.get("goal_claim_id") or "")
         for row in rows
         if str(row.get("verdict") or "") == "closed"
-        and row.get("evidence_refs")
+        and (row.get("result_refs") or row.get("evidence_refs"))
     }
     current_result_tasks = {
         str(item.get("task_id") or "")
@@ -727,7 +801,7 @@ def _claim_matrix(
         if item not in superseded_diagnostics
         and not (
             str(item.get("code") or "") == "mandatory_claim_uncovered"
-            and str(item.get("goal_claim_id") or "") in closed_with_evidence
+            and str(item.get("goal_claim_id") or "") in closed_with_support
         )
     ]
     return {

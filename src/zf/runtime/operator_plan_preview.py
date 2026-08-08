@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from zf.runtime.artifact_refs import resolve_runtime_artifact_ref
+
 
 PLAN_APPROVAL_REQUESTED = "plan.approval.requested"
 PLAN_APPROVED = "plan.approved"
@@ -224,22 +226,11 @@ def _first_existing_ref(
 
 
 def _candidate_paths(ref: str, *, state_dir: Path, project_root: Path | None) -> list[Path]:
-    raw = Path(ref)
-    if raw.is_absolute():
-        return [raw]
-    roots = [state_dir]
-    if project_root is not None:
-        roots.append(project_root)
-    roots.append(state_dir.parent)
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        path = root / raw
-        key = str(path)
-        if key not in seen:
-            seen.add(key)
-            paths.append(path)
-    return paths
+    return [resolve_runtime_artifact_ref(
+        ref,
+        project_root=project_root or state_dir.parent,
+        state_dir=state_dir,
+    )]
 
 
 def _etype(event: Any) -> str:

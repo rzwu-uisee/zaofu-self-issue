@@ -9,6 +9,7 @@ from zf.runtime.candidate_rework import (
     candidate_quality_failure_message,
     plan_candidate_rework,
 )
+from zf.runtime.candidate_integration import candidate_failure_envelope
 from zf.runtime.replan_resynth import (
     build_replan_resynth_event,
     plan_missing_replan_resynth_events,
@@ -58,6 +59,41 @@ def test_verify_failed_plans_candidate_retrigger_with_feedback():
     assert p.source_event_id == "vf1"
     assert "contract_fixture_gap" in p.failure_categories
     assert p.rework_summary["source_event_type"] == "verify.failed"
+
+
+def test_candidate_gate_owner_routes_task_and_downstream_rework():
+    candidate = {
+        "status": "quality_failed",
+        "quality": {
+            "status": "failed",
+            "gates_failed": ["task_contract:TASK-SCAFFOLD:CMD-PACKAGE"],
+            "gate_checks": {
+                "task_contract:TASK-SCAFFOLD:CMD-PACKAGE": [{
+                    "command": "npm --prefix app test -- --test-name-pattern package",
+                    "exit_code": 1,
+                    "stdout_tail": "ERR_SERVER_NOT_RUNNING",
+                }],
+            },
+        },
+    }
+    payload = {
+        "pdd_id": "PRD-COMPOSE",
+        "trace_id": "trace-compose",
+        **candidate_failure_envelope(candidate, failed_children=[]),
+    }
+
+    plans = plan_candidate_rework([
+        ZfEvent(
+            id="integration-compose-failed",
+            type="integration.failed",
+            correlation_id="trace-compose",
+            payload=payload,
+        ),
+    ])
+
+    assert len(plans) == 1
+    assert plans[0].action == "retrigger"
+    assert plans[0].failed_task_ids == ("TASK-SCAFFOLD",)
 
 
 def test_admitted_plan_port_dependency_plans_replan_not_dev_retrigger():
@@ -219,6 +255,32 @@ def test_contract_blocker_survives_downstream_integration_aggregate() -> None:
     assert plan.source_event_id == "integration-config"
     assert plan.failed_task_ids == ("SIM-CONFIG-001",)
     assert "task-contract-blocker SIM-CONFIG-001" in plan.feedback[0]
+
+
+def test_candidate_dependency_failure_retries_integration_without_task_rework() -> None:
+    events = [
+        _ev(
+            "integration.failed",
+            {
+                "pdd_id": "CANLAB-1",
+                "trace_id": "trace-canlab",
+                "fanout_id": "fanout-canlab-impl",
+                "failure_scope": "candidate",
+                "failure_class": "candidate_dependency_missing",
+                "failed_children": [],
+                "failed_task_ids": ["CANLAB-WU-01", "CANLAB-WU-02"],
+                "completed_task_ids": ["CANLAB-WU-01", "CANLAB-WU-02"],
+            },
+            eid="integration-canlab-dependency",
+            corr="trace-canlab",
+        ),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "retrigger"
+    assert plans[0].failed_task_ids == ()
 
 
 def test_new_contract_blocker_does_not_inherit_unrelated_integration_cap() -> None:
@@ -998,6 +1060,41 @@ def test_multiple_rejections_same_pdd_plan_once():
 
 
 # --- doc 78 W2: plan-level failures plan a replan, not a re-implement ---
+
+def test_plan_rejection_resolves_candidate_from_referenced_task_map():
+    events = [
+        _ev("task_map.ready", {
+            "pdd_id": "TASK-REF-1",
+            "trace_id": "run-ref-1",
+            "task_map_ref": "artifacts/refactor/task_map.json",
+        }, eid="plan-candidate-1", corr="run-ref-1"),
+        _ev("plan.rejected", {
+            "plan_id": "plan-candidate-1",
+            "reason": "task_map_goal_claim_ids_not_in_pinned_claim_set",
+            "reason_codes": ["task_map_goal_claim_ids_not_in_pinned_claim_set"],
+            "orchestration_delta": {
+                "directives": [{
+                    "directive_id": "revise-goal-claim-binding",
+                    "required_actions": [
+                        "Replace dangling goal claim IDs with pinned claim IDs."
+                    ],
+                }],
+            },
+        }, eid="plan-rejected-1", corr="run-ref-1"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "replan"
+    assert plans[0].pdd_id == "TASK-REF-1"
+    assert plans[0].source_event_id == "plan-rejected-1"
+    assert "plan-rejection-code: task_map_goal_claim_ids_not_in_pinned_claim_set" in plans[0].feedback
+    assert (
+        "revise-goal-claim-binding: Replace dangling goal claim IDs with pinned claim IDs."
+        in plans[0].feedback
+    )
+
 
 def test_integration_conflict_plans_replan_not_retrigger():
     # A cherry-pick conflict is a plan-level (decomposition) error: re-implementing

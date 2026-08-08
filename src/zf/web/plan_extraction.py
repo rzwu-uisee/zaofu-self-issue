@@ -16,17 +16,22 @@ from zf.runtime.kanban_plan_requests import (
     plan_request_digest,
     plan_request_id,
 )
-from zf.runtime.task_workflow_plans import (
-    normalize_task_workflow_parameters,
-    workflow_route_missing_parameters,
-)
-from zf.runtime.workflow_route_catalog import (
-    resolve_workflow_route,
-    workflow_route_catalog,
-)
+from zf.runtime.task_workflow_plans import normalize_task_workflow_parameters
+from zf.runtime.workflow_route_catalog import workflow_route_catalog
 from zf.runtime.workflow_start import is_workflow_start_action
-from zf.web.channel_task_plan import normalize_channel_task_submit_payload
-from zf.web.proposal_extraction import json_candidates
+from zf.web.channel_task_plan import (
+    normalize_channel_task_submit_payload,
+    selected_channel_task_authority,
+)
+from zf.web.plan_workflow_submit import (
+    normalize_task_workflow_submit_payload,
+)
+from zf.web.proposal_extraction import (
+    action_json_candidates,
+    is_dedicated_bare_plan,
+    json_candidates,
+    label_is_recommended,
+)
 
 
 def extract_plan_request(
@@ -45,6 +50,20 @@ def extract_plan_request(
                 continue
         request = normalize_plan_request(
             decoded,
+            plan_context=plan_context or {},
+            config=config,
+        )
+        if request is not None:
+            return request
+    for candidate in action_json_candidates(answer):
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not is_dedicated_bare_plan(decoded):
+            continue
+        request = normalize_plan_request(
+            {"plan_request": decoded},
             plan_context=plan_context or {},
             config=config,
         )
@@ -185,6 +204,25 @@ def normalize_plan_request(
             "subject_type must be channel_setup, clarification, "
             "task_create, or task_workflow"
         )
+    (
+        selected_channel_authority,
+        channel_prd_intent,
+        channel_selection_error,
+    ) = (
+        selected_channel_task_authority(raw, context)
+    )
+    if channel_selection_error:
+        validation_errors.append(channel_selection_error)
+    if selected_channel_authority:
+        if subject_type != "task_create":
+            validation_errors.append(
+                "Channel PRD selection is only valid for task_create"
+            )
+        else:
+            normalized_workflow_context = {
+                **normalized_workflow_context,
+                **selected_channel_authority,
+            }
     if not request_header:
         request_header = _default_plan_header(subject_type)
     if not question_header:
@@ -206,7 +244,7 @@ def normalize_plan_request(
                 label = item.strip()
                 description = ""
                 explicit_id = ""
-                recommended = "(Recommended)" in label or "(推荐)" in label
+                recommended = label_is_recommended(label)
             elif isinstance(item, dict):
                 label = str(item.get("label") or "").strip()
                 description = str(item.get("description") or "").strip()
@@ -268,6 +306,8 @@ def normalize_plan_request(
                     explicit_option_mode
                     or ("apply" if option_submit_action == submit_action and submit_action else "continue")
                 ).strip().lower()
+                if option_submit_mode == "defer" and not option_submit_action:
+                    option_submit_mode = "continue"
                 raw_submit_payload = (
                     effect.get("payload")
                     if isinstance(effect.get("payload"), dict)
@@ -462,6 +502,20 @@ def normalize_plan_request(
         if len(workflow_task_ids) == 1
         else context_task_id
     )
+    task_contract_errors = context.get("task_contract_errors", {})
+    if not isinstance(task_contract_errors, dict):
+        task_contract_errors = {}
+    if subject_type == "task_workflow" and len(workflow_task_ids) == 1:
+        bound_contract_errors = task_contract_errors.get(request_task_id, [])
+        if isinstance(bound_contract_errors, list) and bound_contract_errors:
+            validation_errors.append(
+                "workflow Task contract is incomplete: "
+                + "; ".join(
+                    str(error).strip()
+                    for error in bound_contract_errors
+                    if str(error).strip()
+                )
+            )
 
     route_catalog = workflow_route_catalog(config)
     request: dict[str, Any] = {
@@ -514,6 +568,11 @@ def normalize_plan_request(
             context.get("requirement_digest") or ""
         ),
         "workflow_parameters": normalized_workflow_context,
+        "channel_prd_ref": str(raw.get("channel_prd_ref") or ""),
+        "channel_prd_digest": str(
+            raw.get("channel_prd_digest") or ""
+        ),
+        "channel_prd_intent": channel_prd_intent,
         "valid": not validation_errors,
         "validation_error": "; ".join(dict.fromkeys(validation_errors)),
     }
@@ -553,14 +612,14 @@ def _normalize_clarification_question(
                 label = item.strip()
                 description = ""
                 explicit_id = ""
-                recommended = _label_is_recommended(label)
+                recommended = label_is_recommended(label)
                 has_effect = False
             elif isinstance(item, dict):
                 label = str(item.get("label") or "").strip()
                 description = str(item.get("description") or "").strip()
                 explicit_id = str(item.get("id") or "").strip()
                 recommended = bool(item.get("recommended")) or (
-                    _label_is_recommended(label)
+                    label_is_recommended(label)
                 )
                 has_effect = any(
                     key in item
@@ -646,10 +705,6 @@ def _normalize_recommended_options(
         options.insert(0, options.pop(recommended[0]))
 
 
-def _label_is_recommended(label: str) -> bool:
-    return "(Recommended)" in label or "(推荐)" in label
-
-
 def _normalize_plan_submit_payload(
     action: str,
     raw_payload: object,
@@ -661,7 +716,7 @@ def _normalize_plan_submit_payload(
     if not isinstance(raw_payload, dict):
         return {}, {}, "submit_payload must be a mapping"
     if is_workflow_start_action(action):
-        return _normalize_task_workflow_submit_payload(
+        return normalize_task_workflow_submit_payload(
             raw_payload,
             config=config,
             task_binding_digests=task_binding_digests or {},
@@ -674,6 +729,7 @@ def _normalize_plan_submit_payload(
 
     allowed_keys = {
         "channel_id",
+        "mode",
         "name",
         "overrides",
         "task_id",
@@ -701,6 +757,15 @@ def _normalize_plan_submit_payload(
         return {}, {}, error or "channel template preflight failed"
 
     payload: dict[str, Any] = {"template_id": template_id}
+    mode = str(raw_payload.get("mode") or "").strip()
+    if mode and mode not in {"conversation", "clarification", "multi_lens"}:
+        return (
+            {},
+            {},
+            "submit_payload.mode must be conversation, clarification, or multi_lens",
+        )
+    if mode:
+        payload["mode"] = mode
     name = str(raw_payload.get("name") or "").strip()
     if name:
         payload["name"] = name
@@ -726,6 +791,7 @@ def _normalize_plan_submit_payload(
         if isinstance(materialized.get("discussion"), dict)
         else {}
     )
+    effective_mode = mode or str(discussion.get("mode") or "conversation")
     details = {
         "template_id": template_id,
         "template_name": str(materialized.get("name") or template_id),
@@ -740,131 +806,9 @@ def _normalize_plan_submit_payload(
         ),
         "member_count": len(members),
         "members": members,
-        "product_mode": str(discussion.get("mode") or "conversation"),
+        "product_mode": effective_mode,
+        "mode": effective_mode,
         "max_rounds": int(discussion.get("max_rounds") or 0),
-    }
-    return payload, details, ""
-
-
-def _normalize_task_workflow_submit_payload(
-    raw_payload: dict[str, Any],
-    *,
-    config: Any | None,
-    task_binding_digests: dict[str, str],
-    workflow_route_eligibility: dict[str, dict[str, str]],
-) -> tuple[dict[str, Any], dict[str, Any], str]:
-    allowed_keys = {
-        "config_digest",
-        "objective",
-        "parameters",
-        "route_id",
-        "task_contract_digest",
-        "task_id",
-    }
-    unknown = sorted(set(raw_payload) - allowed_keys)
-    if unknown:
-        return (
-            {},
-            {},
-            "unsupported submit_payload field(s): " + ", ".join(unknown),
-        )
-    task_id = str(raw_payload.get("task_id") or "").strip()
-    route_id = str(raw_payload.get("route_id") or "").strip()
-    objective = str(raw_payload.get("objective") or "").strip()
-    if not task_id:
-        return {}, {}, "submit_payload.task_id is required"
-    if not route_id:
-        return {}, {}, "submit_payload.route_id is required"
-    if not objective:
-        return {}, {}, "submit_payload.objective is required"
-    current_task_digest = str(
-        task_binding_digests.get(task_id) or ""
-    ).strip()
-    proposed_task_digest = str(
-        raw_payload.get("task_contract_digest") or ""
-    ).strip()
-    if not current_task_digest:
-        return {}, {}, "workflow Task binding is unavailable"
-    if (
-        proposed_task_digest
-        and proposed_task_digest != current_task_digest
-    ):
-        return {}, {}, "workflow Task binding is stale"
-    parameters = raw_payload.get("parameters")
-    if parameters is None:
-        parameters = {}
-    if not isinstance(parameters, dict):
-        return {}, {}, "submit_payload.parameters must be a mapping"
-    parameters, parameter_error = normalize_task_workflow_parameters(
-        parameters
-    )
-    catalog = workflow_route_catalog(config)
-    config_digest = str(
-        raw_payload.get("config_digest")
-        or catalog.get("config_digest")
-        or ""
-    )
-    route = resolve_workflow_route(
-        config,
-        route_id,
-        expected_config_digest=config_digest,
-    )
-    if route is None:
-        return {}, {}, f"workflow route {route_id!r} is stale or unavailable"
-    eligibility_error = str(
-        workflow_route_eligibility.get(task_id, {}).get(route_id) or ""
-    )
-    if eligibility_error:
-        return {}, {}, eligibility_error
-    missing = workflow_route_missing_parameters(
-        route,
-        objective=objective,
-        parameters=parameters,
-    )
-    errors: list[str] = []
-    if parameter_error:
-        errors.append(parameter_error.replace(
-            "unsupported parameter field(s)",
-            "unsupported workflow parameter field(s)",
-        ))
-    if missing:
-        errors.append("missing executable parameter(s): " + ", ".join(missing))
-    if errors:
-        return (
-            {
-                "task_id": task_id,
-                "route_id": route_id,
-                "objective": objective,
-                "config_digest": config_digest,
-                "task_contract_digest": current_task_digest,
-                "parameters": parameters,
-            },
-            {},
-            "; ".join(errors),
-        )
-    payload = {
-        "task_id": task_id,
-        "route_id": route_id,
-        "objective": objective,
-        "config_digest": config_digest,
-        "task_contract_digest": current_task_digest,
-        "parameters": {
-            str(key): value
-            for key, value in parameters.items()
-            if value not in (None, "", [], {})
-        },
-    }
-    details = {
-        "route_id": route_id,
-        "family": str(route.get("family") or ""),
-        "kind": str(route.get("kind") or ""),
-        "tier": str(route.get("tier") or ""),
-        "topology": str(route.get("topology") or ""),
-        "roles": list(route.get("roles") or []),
-        "writer_roles": list(route.get("writer_roles") or []),
-        "verify_roles": list(route.get("verify_roles") or []),
-        "lane_count": int(route.get("lane_count") or 0),
-        "output_profile": str(route.get("output_profile") or ""),
     }
     return payload, details, ""
 

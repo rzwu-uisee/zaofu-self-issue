@@ -125,7 +125,6 @@ KNOWN_TYPES_UNREGISTERED: frozenset[str] = frozenset({
     "run.manager.repair.blocked",
     "run.manager.repair.rejected",
     "run.manager.tick.failed",
-    "runtime.action.rejected",
     "task.doc.ingest.rejected",
     "worker.drain.failed",
     "worker.recovery.blocked",

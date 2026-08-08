@@ -8,6 +8,15 @@ from typing import Any
 from zf.core.events.model import ZfEvent
 
 
+_NON_RESULT_TERMINAL_EVENTS = frozenset({
+    "workflow.operation.failed",
+    "workflow.operation.blocked",
+    "workflow.operation.superseded",
+    "workflow.operation.interrupted",
+    "workflow.operation.cancelled",
+})
+
+
 def settle_admitted_operation_attempt(
     runtime: Any,
     event: ZfEvent,
@@ -39,7 +48,7 @@ def settle_admitted_operation_attempt(
     source_event = events_by_id.get(source_event_id)
     if source_event is None:
         return False
-    terminal = support._result_status(source_event.type)
+    terminal = support._admitted_result_status(source_event.type)
     if not terminal:
         return False
     source_payload = support._payload(source_event)
@@ -134,3 +143,124 @@ def settle_admitted_operation_attempt(
     )
     support._emit_shadow_comparison(runtime, row)
     return True
+
+
+def settle_terminal_operation_attempt(
+    runtime: Any,
+    event: ZfEvent,
+    *,
+    events_by_id: Mapping[str, ZfEvent] | None = None,
+    attempt_rows: list[dict[str, Any]] | None = None,
+    store: Any = None,
+) -> bool:
+    """Project every terminal Workflow Operation into its active attempt."""
+
+    if event.type == "workflow.operation.settled":
+        return settle_admitted_operation_attempt(
+            runtime,
+            event,
+            events_by_id=events_by_id,
+            attempt_rows=attempt_rows,
+            store=store,
+        )
+    if event.type not in _NON_RESULT_TERMINAL_EVENTS:
+        return False
+
+    from zf.runtime import task_attempt_runtime as support
+
+    payload = support._payload(event)
+    operation_id = str(payload.get("operation_id") or "").strip()
+    run_id = str(payload.get("workflow_run_id") or "").strip()
+    task_id = str(event.task_id or payload.get("task_id") or "").strip()
+    if not operation_id:
+        return False
+    attempt_store = store or support.task_attempt_store(runtime)
+    candidates = [
+        row
+        for row in (
+            attempt_rows
+            if attempt_rows is not None
+            else attempt_store.rows()
+        )
+        if str(row.get("operation_id") or "") == operation_id
+        and (not run_id or str(row.get("run_id") or "") == run_id)
+        and (not task_id or str(row.get("task_id") or "") == task_id)
+    ]
+    active = [
+        row for row in candidates
+        if str(row.get("status") or "") in {"prepared", "delivering", "sent"}
+    ]
+    if not active:
+        return False
+    current = max(
+        active,
+        key=lambda row: (
+            str(row.get("created_at") or ""),
+            int(row.get("ordinal") or 0),
+        ),
+    )
+    attempt_id = str(current.get("attempt_id") or "")
+    superseded = event.type in {
+        "workflow.operation.superseded",
+        "workflow.operation.interrupted",
+        "workflow.operation.cancelled",
+    }
+    reason = str(payload.get("reason") or event.type)[:500]
+    row = attempt_store.update(
+        attempt_id,
+        status="superseded" if superseded else "failed",
+        updated_at=support._now(),
+        terminal_event_id=event.id,
+        failure_reason="" if superseded else reason,
+        failure_class="" if superseded else "workflow_operation_terminal",
+        retryable=False,
+        recovery_owner="workflow",
+    )
+    if row is None:
+        return False
+    current.update(row)
+    ledger_ref = _seal_active_read_ledger(runtime, attempt_id)
+    occurrence_type = (
+        "task.attempt.superseded" if superseded else "task.attempt.failed"
+    )
+    support._emit_once(
+        runtime,
+        occurrence_type,
+        attempt_id=attempt_id,
+        task_id=str(row.get("task_id") or task_id),
+        payload={
+            **support._identity(row),
+            "source_event_id": event.id,
+            "source_event_type": event.type,
+            "status": str(row.get("status") or ""),
+            "reason": reason,
+            "failure_class": str(row.get("failure_class") or ""),
+            "retryable": False,
+            "recovery_owner": "workflow",
+            "read_ledger_ref": ledger_ref,
+        },
+        correlation_id=str(row.get("run_id") or run_id),
+        causation_id=event.id,
+    )
+    support._emit_shadow_comparison(runtime, row)
+    return True
+
+
+def _seal_active_read_ledger(runtime: Any, attempt_id: str) -> dict[str, Any]:
+    from zf.runtime.artifact_read_ledger import (
+        active_read_ledger_path,
+        seal_read_ledger,
+    )
+
+    if not active_read_ledger_path(runtime.state_dir, attempt_id).is_file():
+        return {}
+    try:
+        return seal_read_ledger(runtime.state_dir, attempt_id)
+    except (OSError, ValueError):
+        return {}
+
+
+__all__ = [
+    "settle_admitted_operation_attempt",
+    "settle_terminal_operation_attempt",
+]

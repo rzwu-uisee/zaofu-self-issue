@@ -416,6 +416,65 @@ class TestLaneRoleTemplate:
             role for role in cfg.roles if role.name == "verify-lane-0"
         ).backend == "claude-code"
 
+    def test_transport_materializes_from_template(
+        self,
+        tmp_path,
+    ):
+        cfg = self._load(
+            self._raw_with_template(transport="stream-json"),
+            tmp_path=tmp_path,
+        )
+
+        generated = [
+            role for role in cfg.roles
+            if role.name.startswith(("dev-lane-", "review-lane-", "verify-lane-"))
+        ]
+        assert generated
+        assert all(role.transport == "stream-json" for role in generated)
+
+    def test_transport_survives_generated_role_override(
+        self,
+        tmp_path,
+    ):
+        roles = [
+            {
+                "name": "judge-refactor",
+                "backend": "mock",
+                "instance_id": "judge-refactor",
+                "role_kind": "reader",
+            },
+            {
+                "name": "dev-lane-0",
+                "backend": "codex",
+                "instance_id": "dev-lane-0",
+                "transport": "stream-json",
+            },
+        ]
+        cfg = self._load(
+            self._raw_with_template(),
+            roles_yaml=roles,
+            tmp_path=tmp_path,
+        )
+
+        dev = next(role for role in cfg.roles if role.name == "dev-lane-0")
+        review = next(role for role in cfg.roles if role.name == "review-lane-0")
+        assert dev.transport == "stream-json"
+        assert review.transport == "tmux"
+        meta = next(
+            item for item in cfg.workflow.pipelines_role_meta
+            if item.name == "dev-lane-0"
+        )
+        assert "transport" in meta.overridden_fields
+
+    def test_invalid_transport_fails_closed(self, tmp_path):
+        from zf.core.config.loader import ConfigError
+
+        with pytest.raises(ConfigError, match="transport must be"):
+            self._load(
+                self._raw_with_template(transport="stdio"),
+                tmp_path=tmp_path,
+            )
+
     def test_provider_session_and_lifecycle_materialize_by_stage(
         self,
         tmp_path,

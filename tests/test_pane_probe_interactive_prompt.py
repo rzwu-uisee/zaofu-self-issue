@@ -24,6 +24,12 @@ _R5_USAGE_LIMIT_PANE = (
     "› Find and fix a bug in @filename\n"
 )
 _WORKING_PANE = "Codex is still applying the implementation\n"
+_CLAUDE_PERMISSION_PROMPT = (
+    "Contains shell syntax ($) that cannot be statically analyzed\n\n"
+    "Do you want to proceed?\n"
+    "> 1. Yes\n"
+    "  2. No\n"
+)
 
 
 def _completed(args, stdout="", returncode=0, stderr=""):
@@ -112,3 +118,19 @@ def test_fleet_usage_reset_banners_do_not_emit_attention(tmp_path: Path) -> None
     assert fleet == []
     single = [i for i in items if i["fingerprint"].startswith("pane_probe_interactive:")]
     assert single == []
+
+
+def test_permission_confirmation_is_reported_as_interactive_prompt(
+    tmp_path: Path,
+) -> None:
+    probe = _probe(tmp_path, {"plan-critic": _CLAUDE_PERMISSION_PROMPT})
+
+    pane = probe["panes"][0]
+    assert pane["activity_status"] == "interactive_prompt"
+    assert pane["interactive_prompt_marker"] == "permission_confirmation"
+    assert probe["summary"]["interactive_prompt"] == 1
+
+    items = pane_probe_attention_items(probe)
+    assert len(items) == 1
+    assert items[0]["suggested_action"]["marker"] == "permission_confirmation"
+    assert items[0]["human_action_required"] is True

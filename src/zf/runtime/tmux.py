@@ -19,6 +19,32 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\[\?[0-9;]*[A-Za-z]|\x1b\][^\x
 # O-1 (doc 78 ops): vars that bind a tmux client to a nested server/pane.
 _NESTED_TMUX_VARS = ("TMUX", "TMUX_PANE")
 
+# tmux only refreshes variables named by its global update-environment option
+# when a client creates a session on an existing server. Keep this allowlist
+# provider-scoped: values travel through the tmux client protocol and never
+# enter command_log or pane command lines.
+_PROVIDER_UPDATE_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_EFFORT_LEVEL",
+    "ENABLE_TOOL_SEARCH",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+
 
 def tmux_env(base: "dict[str, str] | None" = None) -> dict[str, str]:
     """Return an environment with nested-tmux vars stripped.
@@ -114,11 +140,41 @@ class TmuxSession:
     # -- session lifecycle --
 
     def create_session(self) -> None:
+        server_ready = self._ensure_provider_update_environment()
         self._run([
             "tmux", "new-session",
             "-d", "-s", self.session_name,
             "-x", "200", "-y", "50",
         ])
+        if not server_ready:
+            # With no prior server the first session inherits the full caller
+            # environment. Register the allowlist now so later sessions on
+            # that same server also refresh provider values from their client.
+            self._ensure_provider_update_environment()
+
+    def _ensure_provider_update_environment(self) -> bool:
+        result = self._run(
+            ["tmux", "show-options", "-gv", "update-environment"],
+            check=False,
+            capture=True,
+        )
+        if result.returncode != 0:
+            return False
+        current = [item for item in result.stdout.split() if item]
+        known = {item.lstrip("-").split("=", 1)[0] for item in current}
+        merged = [
+            *current,
+            *(key for key in _PROVIDER_UPDATE_ENV_KEYS if key not in known),
+        ]
+        if merged != current:
+            self._run([
+                "tmux",
+                "set-option",
+                "-g",
+                "update-environment",
+                " ".join(merged),
+            ])
+        return True
 
     def kill_session(self) -> None:
         self._run(["tmux", "kill-session", "-t", self.session_name], check=False)
@@ -147,7 +203,7 @@ class TmuxSession:
         # down. Route to kill-pane when layout says the slot is a pane.
         target = self.layout.resolve(self, name)
         if target.pane is not None:
-            self.layout.kill_slot(self, target)
+            self.layout.kill_slot(self, target, instance_id=name)
         else:
             self._run(
                 ["tmux", "kill-window", "-t", target.address()],
@@ -170,10 +226,15 @@ class TmuxSession:
         consistent even if the process already exited.
         """
         target = self.layout.resolve(self, name)
-        pane_pid = self.pane_pid(name)
+        if not self.layout.target_owned_by(self, target, name):
+            raise TmuxError(
+                f"refusing to terminate {name!r}: tmux target "
+                f"{target.address()!r} does not prove role ownership"
+            )
+        pane_pid = self._pane_pid_for_target(target)
         term_sent = self._signal_pane_process_group(pane_pid, "TERM")
-        alive_after_term = not self._wait_until_pane_gone(
-            name,
+        alive_after_term = not self._wait_until_target_gone(
+            target,
             timeout_seconds=grace_seconds,
             poll_interval=poll_interval,
         )
@@ -181,13 +242,13 @@ class TmuxSession:
         alive_after_kill = alive_after_term
         if alive_after_term:
             kill_sent = self._signal_pane_process_group(pane_pid, "KILL")
-            alive_after_kill = not self._wait_until_pane_gone(
-                name,
+            alive_after_kill = not self._wait_until_target_gone(
+                target,
                 timeout_seconds=min(max(poll_interval, 0.0), 0.5),
                 poll_interval=poll_interval,
             )
 
-        self._hard_kill_target(target)
+        self._hard_kill_target(target, instance_id=name)
         return TmuxTerminationResult(
             target=target.address(),
             pane_pid=pane_pid,
@@ -198,10 +259,14 @@ class TmuxSession:
             alive_after_kill=alive_after_kill,
         )
 
-    def _hard_kill_target(self, target: object) -> None:
+    def _hard_kill_target(self, target: object, *, instance_id: str) -> None:
         pane = getattr(target, "pane", None)
         if pane is not None:
-            self.layout.kill_slot(self, target)  # type: ignore[arg-type]
+            self.layout.kill_slot(  # type: ignore[arg-type]
+                self,
+                target,
+                instance_id=instance_id,
+            )
             return
         address = target.address()  # type: ignore[attr-defined]
         self._run(["tmux", "kill-window", "-t", address], check=False)
@@ -251,18 +316,18 @@ class TmuxSession:
         except (ProcessLookupError, PermissionError, OSError):
             return False
 
-    def _wait_until_pane_gone(
+    def _wait_until_target_gone(
         self,
-        name: str,
+        target: object,
         *,
         timeout_seconds: float,
         poll_interval: float,
     ) -> bool:
         if self.dry_run:
-            return not self.pane_alive(name)
+            return False
         deadline = time.monotonic() + max(timeout_seconds, 0.0)
         while True:
-            if not self.pane_alive(name):
+            if not self._pane_pid_for_target(target):
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -323,15 +388,22 @@ class TmuxSession:
     def pane_pid(self, window: str) -> str:
         if self.dry_run:
             return ""
-        target = self._target(window)
+        target = self.layout.resolve(self, window)
+        return self._pane_pid_for_target(target)
+
+    def _pane_pid_for_target(self, target: object) -> str:
+        if self.dry_run:
+            return ""
+        address = target.address()  # type: ignore[attr-defined]
         result = self._run(
-            ["tmux", "list-panes", "-t", target, "-F", "#{pane_pid}"],
+            ["tmux", "list-panes", "-t", address, "-F", "#{pane_pid}"],
             check=False,
             capture=True,
         )
         if result.returncode != 0:
             return ""
-        return result.stdout.strip().splitlines()[0].strip()
+        lines = result.stdout.strip().splitlines()
+        return lines[0].strip() if lines else ""
 
     def pane_current_command(self, window: str) -> str:
         if self.dry_run:

@@ -19,7 +19,7 @@ from zf.runtime.actions_pending import (
     PendingAction,
     PendingActionsStore,
 )
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 if TYPE_CHECKING:
     from zf.core.task.schema import Task
@@ -118,7 +118,7 @@ class AgentViewRuntimeMixin:
         except Exception:
             pass  # never block the reactor
 
-    def _handle_worker_action_requests(self) -> list[OrchestratorDecision]:
+    def _handle_worker_action_requests(self) -> list[WorkflowRuntimeDecision]:
         store = self._pending_actions_store()
         # Best-effort sync: pull recently emitted request events into the
         # store so requests from before we initialized still surface.
@@ -143,7 +143,7 @@ class AgentViewRuntimeMixin:
             pending = store.take_pending()
         except Exception:
             return []
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         for entry in pending:
             request_event = ZfEvent(
                 id=entry.request_id,
@@ -215,7 +215,7 @@ class AgentViewRuntimeMixin:
         *,
         instance_id: str,
         payload: dict,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         role = self._find_role_by_instance(instance_id)
         message = str(payload.get("message") or payload.get("text") or "").strip()
         if role is None or not message:
@@ -266,7 +266,7 @@ class AgentViewRuntimeMixin:
                     "briefing": str(briefing_path),
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="worker_reply",
                 task_id=task_id or None,
                 role=instance_id,
@@ -286,7 +286,7 @@ class AgentViewRuntimeMixin:
         request: ZfEvent,
         *,
         instance_id: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         role = self._find_role_by_instance(instance_id)
         if role is None:
             self._emit_worker_action_failed(
@@ -305,12 +305,23 @@ class AgentViewRuntimeMixin:
         ))
         decision = self._respawn_instance(role)
         continuation_error = ""
+        checkpoint_requeued = False
         if decision.action != "respawn_failed":
             try:
+                from zf.runtime.orchestrator_agent_recovery import (
+                    requeue_orchestrator_agent_checkpoint_after_respawn,
+                )
                 from zf.runtime.worker_respawn_continuation import (
                     deliver_respawn_continuation,
                 )
 
+                checkpoint_requeued = bool(
+                    requeue_orchestrator_agent_checkpoint_after_respawn(
+                        self,
+                        request,
+                        instance_id=instance_id,
+                    )
+                )
                 deliver_respawn_continuation(
                     self,
                     request,
@@ -335,10 +346,13 @@ class AgentViewRuntimeMixin:
                     (request.payload or {}).get("continuation_briefing_ref")
                     and not continuation_error
                 ) if isinstance(request.payload, dict) else False,
+                "orchestrator_checkpoint_requeued": (
+                    checkpoint_requeued and not continuation_error
+                ),
             },
         ))
         if continuation_error:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="respawn_failed",
                 task_id=request.task_id,
                 role=instance_id,
@@ -352,7 +366,7 @@ class AgentViewRuntimeMixin:
         *,
         instance_id: str,
         payload: dict,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         role = self._find_role_by_instance(instance_id)
         if role is None:
             self._emit_worker_action_failed(
@@ -382,7 +396,7 @@ class AgentViewRuntimeMixin:
                 "reason": reason,
             },
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="drain",
             role=instance_id,
             reason=f"worker marked draining: {reason}",
@@ -411,13 +425,13 @@ class AgentViewRuntimeMixin:
         except Exception:
             pass
 
-    def _autoscale_workers(self) -> list[OrchestratorDecision]:
+    def _autoscale_workers(self) -> list[WorkflowRuntimeDecision]:
         # 2026-06-10 review P1-3: a safe-halted runtime must not keep
         # spawning replicas into the same broken environment.
         if self._runtime_safe_halted():
             return []
         self._restore_autoscaled_roles()
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         for parent_role, template in self._autoscale_parent_templates().items():
             policy = template.autoscale
             if not policy.enabled:
@@ -438,7 +452,7 @@ class AgentViewRuntimeMixin:
         self,
         parent_role: str,
         template: RoleConfig,
-    ) -> list[OrchestratorDecision]:
+    ) -> list[WorkflowRuntimeDecision]:
         policy = template.autoscale
         now = self._now()
         ready_tasks = self._autoscale_ready_tasks(parent_role)
@@ -535,7 +549,7 @@ class AgentViewRuntimeMixin:
         self,
         parent_role: str,
         template: RoleConfig,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         instance_id = self._next_autoscale_instance_id(parent_role)
         role = self._clone_autoscale_role(template, instance_id)
         registry = self._role_session_registry()
@@ -588,7 +602,7 @@ class AgentViewRuntimeMixin:
                     "cwd": str(cwd),
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="scale_up",
                 role=instance_id,
                 reason=f"autoscaled {parent_role} to {instance_id}",
@@ -609,7 +623,7 @@ class AgentViewRuntimeMixin:
                     "reason": str(exc),
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="scale_up_failed",
                 role=instance_id,
                 reason=str(exc),
@@ -620,7 +634,7 @@ class AgentViewRuntimeMixin:
         parent_role: str,
         template: RoleConfig,
         desired_count: int,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         active = self._active_pool_roles(parent_role)
         autoscaled = [
             role for role in active
@@ -644,8 +658,8 @@ class AgentViewRuntimeMixin:
             return self._retire_worker(role, reason="autoscale_scale_down")
         return None
 
-    def _retire_drained_workers(self) -> list[OrchestratorDecision]:
-        decisions: list[OrchestratorDecision] = []
+    def _retire_drained_workers(self) -> list[WorkflowRuntimeDecision]:
+        decisions: list[WorkflowRuntimeDecision] = []
         for role in self.all_roles():
             state = getattr(self, "_last_worker_state", {}).get(role.instance_id, "idle")
             if state != "draining" or not self._worker_idle(role.instance_id):
@@ -660,7 +674,7 @@ class AgentViewRuntimeMixin:
         role: RoleConfig,
         *,
         reason: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         if not self._is_runtime_removable_worker(role.instance_id):
             return None
         if not self._workdir_clean_for_retire(role):
@@ -698,7 +712,7 @@ class AgentViewRuntimeMixin:
                 "reason": reason,
             },
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="scale_down",
             role=role.instance_id,
             reason=f"retired {role.instance_id}: {reason}",

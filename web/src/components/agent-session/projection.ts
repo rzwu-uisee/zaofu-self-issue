@@ -412,6 +412,7 @@ export function buildKanbanConversation(args: {
   const planResponsesByRevision = new Map<string, ReturnType<typeof parsePlanResponse>>();
   const planAnswerEventIds = new Set<string>();
   const latestPlanRevisions = new Map<string, number>();
+  const canonicalPlanRequestEventIds = new Set<string>();
   const proposalResolutions = new Map<string, string>();
   const adoptedResearchResults = new Set<string>();
   for (const event of accepted) {
@@ -430,6 +431,9 @@ export function buildKanbanConversation(args: {
     ) {
       const request = parsePlanRequest(event.payload ?? {});
       if (request) {
+        if (event.type === "kanban.agent.plan.requested") {
+          canonicalPlanRequestEventIds.add(request.requestEventId);
+        }
         latestPlanRevisions.set(
           request.requestId,
           Math.max(
@@ -775,7 +779,10 @@ export function buildKanbanConversation(args: {
           refs: eventSourceRefs(event, recordValue(payload.refs)),
         });
       }
-      if (planRequest) {
+      if (
+        planRequest
+        && !canonicalPlanRequestEventIds.has(planRequest.requestEventId)
+      ) {
         addCard(turn, {
           id: `plan-${planRequest.requestEventId}`,
           kind: "plan",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.loader import load_config
 from zf.core.events import ZfEvent
 from zf.runtime.kanban_plan_requests import (
@@ -13,6 +15,7 @@ from zf.runtime.kanban_plan_requests import (
     plan_requirement_digest,
     plan_request_digest,
     plan_request_id,
+    plan_request_gate,
     plan_response_gate,
 )
 from zf.web.plan_extraction import extract_plan_request
@@ -70,6 +73,7 @@ def _channel_setup_answer() -> str:
         "recommended": true,
         "submit_payload": {
           "template_id": "quick-change",
+          "mode": "multi_lens",
           "overrides": {
             "backend": "fake",
             "budget": {"max_rounds": 4}
@@ -148,6 +152,46 @@ def _task_workflow_answer() -> str:
     })
 
 
+def test_dedicated_final_bare_plan_is_normalized() -> None:
+    answer = """The owner needs to answer these questions.
+```json
+{
+  "subject_type": "clarification",
+  "questions": [
+    {
+      "id": "coordinate-contract",
+      "question": "Which coordinate contract is expected?",
+      "options": [
+        {"label": "row then column (Recommended)"},
+        {"label": "column then row"}
+      ]
+    }
+  ]
+}
+```"""
+
+    request = extract_plan_request(answer)
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    assert request["subject_type"] == "clarification"
+    assert request["question_id"] == "coordinate-contract"
+
+
+def test_bare_plan_example_inside_prose_is_not_extracted() -> None:
+    answer = """Example only:
+```json
+{
+  "subject_type": "clarification",
+  "question": "Which route?",
+  "options": ["Direct", "Research"]
+}
+```
+Do not present this example as the current Plan."""
+
+    assert extract_plan_request(answer) is None
+
+
 def test_channel_task_create_plan_accepts_provider_option_aliases() -> None:
     request = extract_plan_request(
         json.dumps({
@@ -212,9 +256,11 @@ def test_channel_setup_continue_effect_does_not_inherit_top_level_action() -> No
             "plan_request": {
                 "subject_type": "channel_setup",
                 "header": "Channel Setup",
-                "id": "channel_setup",
+                "id": "channel-setup",
                 "question": "Create and start a Channel?",
-                "discussion_seed": "Add an integer add function with pytest coverage.",
+                "discussion_seed": (
+                    "Add an integer add function with pytest coverage."
+                ),
                 "submit_action": "channel-create-and-start",
                 "submit_label": "Create and start",
                 "allow_other": False,
@@ -222,12 +268,13 @@ def test_channel_setup_continue_effect_does_not_inherit_top_level_action() -> No
                     {
                         "id": "create",
                         "label": "Create and start (Recommended)",
+                        "description": "Start one focused conversation.",
                         "recommended": True,
                         "submit_payload": {
                             "template_id": "prd-clarification",
                             "name": "feishu-add-function-e2e",
+                            "mode": "conversation",
                             "overrides": {
-                                "discussion_mode": "conversation",
                                 "budget": {"max_rounds": 1},
                             },
                         },
@@ -235,6 +282,7 @@ def test_channel_setup_continue_effect_does_not_inherit_top_level_action() -> No
                     {
                         "id": "cancel",
                         "label": "Do not create a Channel",
+                        "description": "Keep the current conversation.",
                         "effect": {"mode": "continue"},
                     },
                 ],
@@ -245,9 +293,201 @@ def test_channel_setup_continue_effect_does_not_inherit_top_level_action() -> No
     assert request is not None
     assert request["valid"] is True, request["validation_error"]
     create, cancel = request["options"]
-    assert create["submit_payload"]["overrides"]["discussion_mode"] == "conversation"
+    assert create["submit_payload"]["mode"] == "conversation"
+    assert create["submit_details"]["product_mode"] == "conversation"
     assert cancel["submit_mode"] == "continue"
     assert "submit_action" not in cancel
+
+
+def test_channel_task_create_plan_binds_selected_canonical_prd() -> None:
+    artifact_ref = "channels/ch-product/prd/r2.json"
+    artifact_digest = "a" * 64
+    request = extract_plan_request(
+        json.dumps({
+            "plan_request": {
+                "subject_type": "task_create",
+                "channel_prd_ref": artifact_ref,
+                "channel_prd_digest": artifact_digest,
+                "channel_prd_intent": {
+                    "decision": "bind_channel_prd",
+                    "source_quote": "Create the Task from the confirmed PRD.",
+                },
+                "header": "Create Task",
+                "id": "create-task",
+                "question": "Create the exact PRD-bound Task?",
+                "options": [
+                    {
+                        "id": "create",
+                        "label": "Create Task (Recommended)",
+                        "description": "Prepare the exact proposal.",
+                        "recommended": True,
+                        "effect": {
+                            "mode": "propose",
+                            "action": "create-task",
+                            "payload": {
+                                "title": "Deliver the Channel PRD",
+                                "objective": "Implement the confirmed requirement.",
+                            },
+                        },
+                    },
+                    {
+                        "id": "continue",
+                        "label": "Continue discussion",
+                        "description": "Do not create work yet.",
+                        "effect": {"mode": "continue"},
+                    },
+                ],
+                "allow_other": False,
+            },
+        }),
+        plan_context={
+            "user_semantic_context": (
+                "Create the Task from the confirmed PRD."
+            ),
+            "canonical_channel_prds": {
+                "items": [{
+                    "channel_id": "ch-product",
+                    "thread_id": "main",
+                    "channel_member_id": "product-pm",
+                    "leader_revision": 1,
+                    "prd_revision": 2,
+                    "artifact_ref": artifact_ref,
+                    "artifact_digest": artifact_digest,
+                }],
+            },
+        },
+    )
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    assert request["channel_prd_intent"] == {
+        "decision": "bind_channel_prd",
+        "source_quote": "Create the Task from the confirmed PRD.",
+    }
+    create = request["options"][0]
+    assert create["submit_payload"]["channel_authority"] == {
+        "channel_id": "ch-product",
+        "thread_id": "main",
+        "channel_member_id": "product-pm",
+        "leader_revision": 1,
+        "prd_revision": 2,
+        "source_ref": artifact_ref,
+        "source_digest": artifact_digest,
+    }
+
+
+@pytest.mark.parametrize(
+    ("intent", "semantic_context", "expected_error"),
+    [
+        (
+            None,
+            "Fix the unrelated row and column parser issue.",
+            "Channel PRD selection requires channel_prd_intent",
+        ),
+        (
+            {
+                "decision": "bind_channel_prd",
+                "source_quote": "Create from the confirmed PRD.",
+            },
+            "Fix the unrelated row and column parser issue.",
+            "must occur verbatim in the user semantic context",
+        ),
+    ],
+)
+def test_channel_task_create_plan_requires_explicit_prd_handoff_intent(
+    intent: dict[str, str] | None,
+    semantic_context: str,
+    expected_error: str,
+) -> None:
+    artifact_ref = "channels/ch-product/prd/r2.json"
+    artifact_digest = "a" * 64
+    raw_plan: dict[str, object] = {
+        "subject_type": "task_create",
+        "channel_prd_ref": artifact_ref,
+        "channel_prd_digest": artifact_digest,
+        "question": "Create this Task?",
+        "options": [
+            {
+                "label": "Create Task (Recommended)",
+                "description": "Prepare the proposal.",
+                "effect": {
+                    "mode": "propose",
+                    "action": "create-task",
+                    "payload": {"title": "Fix the parser"},
+                },
+            },
+            {
+                "label": "Continue discussion",
+                "description": "Do not create work yet.",
+                "effect": {"mode": "continue"},
+            },
+        ],
+        "allow_other": False,
+    }
+    if intent is not None:
+        raw_plan["channel_prd_intent"] = intent
+
+    request = extract_plan_request(
+        json.dumps({"plan_request": raw_plan}),
+        plan_context={
+            "user_semantic_context": semantic_context,
+            "canonical_channel_prds": {
+                "items": [{
+                    "channel_id": "ch-product",
+                    "thread_id": "main",
+                    "channel_member_id": "product-pm",
+                    "leader_revision": 1,
+                    "prd_revision": 2,
+                    "artifact_ref": artifact_ref,
+                    "artifact_digest": artifact_digest,
+                }],
+            },
+        },
+    )
+
+    assert request is not None
+    assert request["valid"] is False
+    assert expected_error in request["validation_error"]
+
+
+def test_channel_task_create_plan_rejects_stale_canonical_prd_selector() -> None:
+    answer = json.dumps({
+        "plan_request": {
+            "subject_type": "task_create",
+            "channel_prd_ref": "channels/ch-product/prd/r1.json",
+            "channel_prd_digest": "stale",
+            "header": "Create Task",
+            "question": "Create the exact PRD-bound Task?",
+            "options": [
+                {
+                    "label": "Create Task (Recommended)",
+                    "description": "Prepare the proposal.",
+                    "effect": {
+                        "mode": "propose",
+                        "action": "create-task",
+                        "payload": {"title": "Deliver the PRD"},
+                    },
+                },
+                {
+                    "label": "Continue discussion",
+                    "description": "Keep discussing.",
+                    "effect": {"mode": "continue"},
+                },
+            ],
+            "allow_other": False,
+        },
+    })
+
+    request = extract_plan_request(
+        answer,
+        plan_context={"canonical_channel_prds": {"items": []}},
+    )
+
+    assert request is not None
+    assert request["valid"] is False
+    assert "does not match exactly one current canonical artifact" in (
+        request["validation_error"]
+    )
 
 
 def _requested(event_id: str = "evt-plan") -> ZfEvent:
@@ -439,17 +679,18 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
     quick = request["options"][0]
     assert quick["submit_payload"] == {
         "template_id": "quick-change",
+        "mode": "multi_lens",
         "overrides": {
             "backend": "fake",
             "budget": {"max_rounds": 4},
         },
     }
     assert quick["submit_details"]["member_count"] == 3
+    assert quick["submit_details"]["mode"] == "multi_lens"
     assert [
         member["role"] for member in quick["submit_details"]["members"]
     ] == ["tech_leader", "dev_reviewer", "qa_analyst"]
     assert quick["submit_details"]["max_rounds"] == 4
-    assert quick["submit_details"]["product_mode"] == "conversation"
     assert len(quick["submit_details"]["materialization_digest"]) == 64
 
     source = ZfEvent(
@@ -631,6 +872,66 @@ def test_headless_plan_can_bind_an_existing_task_outside_task_panel() -> None:
     assert draft.request["options"][0]["submit_payload"][
         "task_contract_digest"
     ] == "sha256:canonical-task-binding"
+
+
+def test_task_workflow_plan_rejects_incomplete_canonical_task_contract() -> None:
+    config = load_config(ROOT / "zf.yaml")
+
+    draft, proposal = prepare_headless_plan_draft(
+        [],
+        answer=_task_workflow_answer(),
+        action_proposal=None,
+        project_id="zaofu",
+        conversation_id="kanban:zaofu",
+        thread_key="kanban:zaofu",
+        fallback_thread_id="kanban:zaofu",
+        turn_id="turn-workflow-invalid-task",
+        backend="codex-headless",
+        provider_session_id="session-1",
+        originating_message_event_id="evt-workflow-request",
+        task_id=None,
+        task_binding_digests={
+            "TASK-PLAN": "sha256:canonical-task-binding",
+        },
+        task_contract_errors={
+            "TASK-PLAN": [
+                "TASK-PLAN: contract.verification_tiers must not be empty",
+                "TASK-PLAN: contract.spec_skip_reason is required",
+            ],
+        },
+        correlation_id="trace-workflow-invalid-task",
+        config=config,
+    )
+
+    assert proposal is None
+    assert draft is not None
+    assert draft.request["valid"] is False
+    assert "workflow Task contract is incomplete" in (
+        draft.request["validation_error"]
+    )
+    assert "verification_tiers must not be empty" in (
+        draft.request["validation_error"]
+    )
+
+
+def test_agent_task_workflow_defer_choice_normalizes_to_continue() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    answer = json.loads(_task_workflow_answer())
+    answer["plan_request"]["options"][2]["effect"]["mode"] = "defer"
+
+    request = extract_plan_request(
+        json.dumps(answer),
+        plan_context={
+            "task_id": "TASK-PLAN",
+            "task_contract_digest": "sha256:task-binding",
+        },
+        config=config,
+    )
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    assert request["options"][2]["submit_mode"] == "continue"
+    assert "submit_action" not in request["options"][2]
 
 
 def test_agent_task_workflow_plan_rejects_missing_route_parameters() -> None:
@@ -856,6 +1157,51 @@ def test_plan_discussion_revision_keeps_the_original_request_identity() -> None:
     assert draft.request["requirement_digest"] == "sha256:original"
 
 
+def test_plan_discussion_can_replace_invalid_draft_with_valid_revision() -> None:
+    source = _requested("evt-invalid-plan-source")
+    source_request = source.payload["request"]
+    source_request["valid"] = False
+    source_request["validation_error"] = "unsupported workflow parameter"
+    discussion_message = ZfEvent(
+        id="evt-invalid-plan-repair-message",
+        type="user.message",
+        actor="web",
+        payload={
+            "message": "Remove unsupported workflow parameters.",
+            "request": {
+                "plan_discussion": {
+                    "request_event_id": source.id,
+                    "request_id": source_request["request_id"],
+                    "revision": source_request["revision"],
+                },
+            },
+        },
+    )
+
+    draft, proposal = prepare_headless_plan_draft(
+        [source, discussion_message],
+        answer=_request_answer(),
+        action_proposal=None,
+        project_id="project-a",
+        conversation_id="kanban:project-a",
+        thread_key="main",
+        fallback_thread_id="main",
+        turn_id="turn-invalid-plan-repair",
+        backend="claude-headless",
+        provider_session_id="session-1",
+        originating_message_event_id=discussion_message.id,
+        task_id=None,
+        correlation_id="trace-invalid-plan-repair",
+    )
+
+    assert proposal is None
+    assert draft is not None
+    assert draft.request["request_id"] == source_request["request_id"]
+    assert draft.request["revision"] == source_request["revision"] + 1
+    assert draft.request["valid"] is True
+    assert draft.request["validation_error"] == ""
+
+
 def test_multi_question_plan_rejects_actions_and_invalid_option_count() -> None:
     action_bound = extract_plan_request(
         """
@@ -922,6 +1268,33 @@ def test_pending_plan_request_excludes_invalid_agent_output() -> None:
     source.payload["request"]["validation_error"] = "mutually exclusive output"
 
     assert pending_kanban_plan_requests([source]) == []
+
+
+def test_invalid_current_plan_is_discussable_but_not_answerable() -> None:
+    source = _requested("evt-plan-invalid-discussion")
+    request = source.payload["request"]
+    request["valid"] = False
+    request["validation_error"] = "unsupported workflow parameter"
+    identity = {
+        "request_event_id": source.id,
+        "request_id": request["request_id"],
+        "revision": request["revision"],
+    }
+
+    assert plan_request_gate([source], **identity) == {
+        "ok": False,
+        "status": "plan_request_invalid",
+    }
+    discussion = plan_request_gate(
+        [source],
+        **identity,
+        require_valid=False,
+    )
+    assert discussion["ok"] is True
+    assert discussion["request"]["valid"] is False
+    assert discussion["request"]["validation_error"] == (
+        "unsupported workflow parameter"
+    )
 
 
 def test_new_plan_revision_is_not_resolved_by_old_revision_answer() -> None:

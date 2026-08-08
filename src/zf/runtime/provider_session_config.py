@@ -39,6 +39,16 @@ class ResolvedProviderSessionConfig:
 class ProviderSessionPreparationMixin:
     """Bind effective provider settings at the process-allocation boundary."""
 
+    @staticmethod
+    def provider_session_environment(role: RoleConfig) -> list[str]:
+        """Return child env required to enforce an explicit session config."""
+
+        session = role.provider_session
+        if role.backend == "claude-code" and session is not None and session.effort:
+            # Claude Code gives this variable precedence over --effort.
+            return [f"CLAUDE_CODE_EFFORT_LEVEL={session.effort}"]
+        return []
+
     def prepare_provider_session(
         self,
         role: RoleConfig,

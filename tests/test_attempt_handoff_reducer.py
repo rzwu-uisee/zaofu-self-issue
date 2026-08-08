@@ -67,6 +67,7 @@ def _verify(target: str, *, event_id: str = "verify-1") -> ZfEvent:
             "workflow_run_id": "run-1",
             "contract_revision": "rev-1",
             "task_map_generation": "gen-1",
+            "dispatch_id": "verify-dispatch-1",
             "target_commit": target,
         },
     )
@@ -226,6 +227,26 @@ def test_later_legacy_attempt_supersedes_prior_serial_feedback() -> None:
     assert snapshot["pending_handoff_count"] == 1
 
 
+def test_generation_bound_rework_supersedes_unversioned_retry_nudge() -> None:
+    nudge = ZfEvent(
+        id="operator-nudge",
+        type="task.rework.requested",
+        task_id="T-1",
+        correlation_id="run-1",
+        payload={
+            "task_id": "T-1",
+            "reason": "retry after provider transport stall",
+        },
+    )
+
+    snapshot = reduce_attempt_handoffs([nudge, _request()])
+
+    assert snapshot["handoffs"][0]["status"] == "superseded"
+    assert snapshot["handoffs"][1]["status"] == "published"
+    assert snapshot["open_feedback_count"] == 1
+    assert snapshot["pending_handoff_count"] == 1
+
+
 def test_candidate_verification_closes_task_source_commit_handoff() -> None:
     source_commit = "b" * 40
     candidate_commit = "c" * 40
@@ -263,6 +284,7 @@ def test_candidate_verification_closes_task_source_commit_handoff() -> None:
             correlation_id="run-1",
             payload={
                 "workflow_run_id": "run-1",
+                "dispatch_id": "verify-dispatch-1",
                 "target_ref": "candidate/F-1",
                 "task_ids": ["T-1"],
                 "task_map_generation": "gen-1",
@@ -277,6 +299,77 @@ def test_candidate_verification_closes_task_source_commit_handoff() -> None:
     assert snapshot["pending_handoff_count"] == 0
     assert snapshot["handoffs"][0]["status"] == "verified_closed"
     assert snapshot["handoffs"][0]["target_commit"] == source_commit
+
+
+def test_candidate_verification_closes_commit_from_integrated_task_stack() -> None:
+    repaired_commit = "b" * 40
+    task_tip = "d" * 40
+    candidate_commit = "c" * 40
+    events = [
+        _request(),
+        _dispatch(),
+        _claim(target=repaired_commit),
+        ZfEvent(
+            id="task-ref-1",
+            type="task.ref.updated",
+            task_id="T-1",
+            correlation_id="run-1",
+            payload={
+                "task_id": "T-1",
+                "workflow_run_id": "run-1",
+                "source_commit": task_tip,
+            },
+        ),
+        ZfEvent(
+            id="integration-1",
+            type="candidate.integration.started",
+            payload={"task_refs": ["task/T-1"]},
+        ),
+        ZfEvent(
+            id="task-applied-1",
+            type="candidate.task_ref.applied",
+            task_id="T-1",
+            causation_id="integration-1",
+            payload={
+                "source_commit": task_tip,
+                "task_commits": [repaired_commit, task_tip],
+                "applied_commits": [repaired_commit, task_tip],
+                "commit": candidate_commit,
+            },
+        ),
+        ZfEvent(
+            id="candidate-1",
+            type="candidate.ready",
+            correlation_id="run-1",
+            payload={
+                "workflow_run_id": "run-1",
+                "candidate_ref": "candidate/F-1",
+                "candidate_base_commit": "a" * 40,
+                "candidate_head_commit": candidate_commit,
+                "completed_task_ids": ["T-1"],
+                "task_map_generation": "gen-1",
+            },
+        ),
+        ZfEvent(
+            id="test-1",
+            type="test.passed",
+            correlation_id="run-1",
+            payload={
+                "workflow_run_id": "run-1",
+                "target_ref": "candidate/F-1",
+                "task_ids": ["T-1"],
+                "task_map_generation": "gen-1",
+                "status": "completed",
+            },
+        ),
+    ]
+
+    snapshot = reduce_attempt_handoffs(events, workflow_run_id="run-1")
+
+    assert snapshot["open_feedback_count"] == 0
+    assert snapshot["pending_handoff_count"] == 0
+    assert snapshot["handoffs"][0]["status"] == "verified_closed"
+    assert snapshot["handoffs"][0]["target_commit"] == repaired_commit
 
 
 def test_module_parity_closure_closes_candidate_task_handoff() -> None:

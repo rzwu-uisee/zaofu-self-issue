@@ -444,7 +444,7 @@ export function ChannelPage({
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
   onSearchHistory: (query: string, threadId?: string) => Promise<ChannelHistorySearchResult>;
   onSetDiscussionMode: (threadId: string, mode: string, defaultResponderId?: string) => Promise<void>;
-  onStartDiscussion: (threadId: string, message: string, messageId: string, mode: string) => Promise<void>;
+  onStartDiscussion: (threadId: string, message: string, messageId: string, mode: string, restart: boolean) => Promise<void>;
   onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string) => Promise<void>;
   onWorkflowRequest: (taskId: string, reason: string, threadId: string) => Promise<void>;
   selectedChannelId: string;
@@ -1505,6 +1505,7 @@ export function ChannelPage({
             <span>Task</span>
             <input
               className="filter-input"
+              data-testid="channel-workflow-task"
               placeholder="task id"
               value={workflowDraft.taskId}
               onChange={(event) => setWorkflowDraft({ ...workflowDraft, taskId: event.target.value })}
@@ -1514,6 +1515,7 @@ export function ChannelPage({
             <span>Objective</span>
             <input
               className="filter-input"
+              data-testid="channel-workflow-objective"
               placeholder="workflow objective"
               value={workflowDraft.reason}
               onChange={(event) => setWorkflowDraft({ ...workflowDraft, reason: event.target.value })}
@@ -1523,6 +1525,7 @@ export function ChannelPage({
         <div className="channel-control-actions">
           <button
             className="icon-button"
+            data-testid="channel-create-task-from-prd"
             disabled={!actionReady || controlsBusy || !canonicalPrd.ready}
             type="button"
             onClick={() => void runControl(async () => {
@@ -1537,7 +1540,7 @@ export function ChannelPage({
             <Plus size={16} />
             Create Task from PRD
           </button>
-          <button className="icon-button primary" disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !workflowDraft.taskId.trim()} type="submit">
+          <button className="icon-button primary" data-testid="channel-plan-workflow" disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !workflowDraft.taskId.trim()} type="submit">
             <PlayCircle size={16} />
             Plan workflow
           </button>
@@ -1973,7 +1976,6 @@ export function ChannelPage({
                 !actionReady
                 || controlsBusy
                 || !latestThreadRequirementText
-                || currentDiscussionState !== "idle"
               }
               type="button"
               onClick={() => void runControl(() => onStartDiscussion(
@@ -1981,10 +1983,13 @@ export function ChannelPage({
                 latestThreadRequirementText,
                 latestThreadRequirementId,
                 discussionMode,
+                currentDiscussionState !== "idle",
               ))}
             >
               <PlayCircle size={16} />
-              Start discussion
+              {currentDiscussionState === "idle"
+                ? "Start discussion"
+                : "Restart discussion"}
             </button>
             <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onDrainReplies)}>
               Drain Replies
@@ -2204,7 +2209,6 @@ export function ChannelPage({
               !actionReady
               || controlsBusy
               || !latestThreadRequirementText
-              || currentDiscussionState !== "idle"
             }
             type="button"
             onClick={() => void runControl(() => onStartDiscussion(
@@ -2212,10 +2216,13 @@ export function ChannelPage({
               latestThreadRequirementText,
               latestThreadRequirementId,
               discussionMode,
+              currentDiscussionState !== "idle",
             ))}
           >
             <PlayCircle size={16} />
-            Start discussion
+            {currentDiscussionState === "idle"
+              ? "Start discussion"
+              : "Restart discussion"}
           </button>
         </div>
         <div className="channel-control-panel">
@@ -2312,6 +2319,7 @@ export function ChannelPage({
             <button
               aria-selected={activeTab === "chat"}
               className={`channel-tab ${activeTab === "chat" ? "active" : ""}`}
+              data-testid="channel-chat-tab"
               type="button"
               onClick={() => setActiveTab("chat")}
             >
@@ -2321,6 +2329,7 @@ export function ChannelPage({
             <button
               aria-selected={activeTab === "workspace"}
               className={`channel-tab ${activeTab === "workspace" ? "active" : ""}`}
+              data-testid="channel-details-tab"
               type="button"
               onClick={() => setActiveTab("workspace")}
             >

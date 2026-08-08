@@ -297,8 +297,11 @@ def test_create_task_keeps_task_when_workflow_plan_is_invalid(
     assert "is not active" in created["workflow_plan_warning"]
     assert created["workflow_plan_event_id"] == ""
     retained = TaskStore(state_dir / "kanban.json").get(created["task_id"])
+    tracked = TaskStore(state_dir / "kanban.json").get(task_only["task_id"])
     assert retained is not None
+    assert tracked is not None
     assert is_workflow_managed_task(retained)
+    assert is_workflow_managed_task(tracked)
     assert task_only["ok"] is True
     assert task_only["workflow_plan_event_id"] == ""
     assert task_only["workflow_plan_warning"] == ""
@@ -306,6 +309,21 @@ def test_create_task_keeps_task_when_workflow_plan_is_invalid(
         event.type == PLAN_REQUESTED_EVENT
         for event in writer.event_log.read_all()
     )
+
+
+def test_kanban_create_task_preserves_explicit_direct_execution(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer, service = _service(tmp_path)
+
+    created = _execute(service, writer, "create-task", {
+        "title": "Run through the legacy direct scheduler",
+        "execution_mode": "direct",
+    })
+
+    task = TaskStore(state_dir / "kanban.json").get(created["task_id"])
+    assert task is not None
+    assert not is_workflow_managed_task(task)
 
 
 def test_create_task_publishes_plan_with_nested_route_objective(
@@ -573,6 +591,12 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
             behavior="Implement the selected route.",
             verification="Run deterministic tests.",
             verification_tiers=["runtime"],
+            acceptance_criteria=[
+                {
+                    "id": "AC-ROUTE",
+                    "statement": "The selected route is implemented and verified.",
+                },
+            ],
             evidence_contract={"execution_owner": "workflow"},
         ),
     )
@@ -594,12 +618,13 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         "route_id": "delivery:prd:standard",
         "config_digest": catalog["config_digest"],
         "objective": task.title,
+        "project_id": "kanban-project",
+        "conversation_id": "kanban:kanban-project",
+        "thread_id": "delivery-thread",
         "parameters": {
             "backend": "mock",
             "source_ref": str(requirement),
             "target_root": str(tmp_path),
-            "channel_id": "ch-prd",
-            "thread_id": "main",
             "synthesis_event_id": "evt-channel-prd",
             "source_refs": {
                 "channel_id": "ch-prd",
@@ -619,6 +644,17 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
     assert result["ok"] is True, result
     assert result["route_id"] == "delivery:prd:standard"
     assert result["workflow_request"]["intake_ref"]
+    persisted_task = TaskStore(state_dir / "kanban.json").get(task.id)
+    assert persisted_task is not None
+    contract_event = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "task.contract.update"
+        and event.payload.get("source") == "workflow_submit"
+    )
+    assert contract_event.payload["contract_digest"] == (
+        task_workflow_binding_digest(persisted_task)
+    )
     input_manifest = json.loads(Path(
         result["workflow_request"]["workflow_input_manifest_ref"]
     ).read_text(encoding="utf-8"))
@@ -629,6 +665,30 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
     assert input_manifest["source_refs"]["channel_prd_digest"] == (
         "sha256:canonical-prd"
     )
+    request_id = result["workflow_request"]["request_id"]
+    request_projection = json.loads(
+        (state_dir / "workflow-requests" / f"{request_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert request_projection["origin_binding"] == {
+        "schema_version": "workflow-origin-binding.v1",
+        "surface": "kanban_agent",
+        "source": "kanban-agent",
+        "project_id": "kanban-project",
+        "channel_id": "",
+        "thread_id": "",
+        "conversation_id": "kanban:kanban-project",
+        "thread_key": "delivery-thread",
+    }
+    requirement_spec = json.loads(
+        Path(request_projection["requirement_spec_ref"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert requirement_spec["acceptance"] == [
+        "The selected route is implemented and verified."
+    ]
     invoke = next(
         event
         for event in writer.event_log.read_all()
@@ -636,6 +696,9 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
     )
     assert invoke.task_id == task.id
     assert invoke.payload["pattern_id"] == "prd-scan"
+    assert invoke.payload["origin_binding"] == request_projection[
+        "origin_binding"
+    ]
     assert invoke.payload["source_refs"]["channel_id"] == "ch-prd"
     assert invoke.payload["source_refs"]["channel_prd_ref"] == str(
         requirement

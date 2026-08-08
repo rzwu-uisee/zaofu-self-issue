@@ -310,6 +310,15 @@ def test_workflow_input_briefing_section_reads_nested_trigger_payload() -> None:
     assert "channels/ch-zaofu/spec.md" in section
 
 
+def test_workflow_input_briefing_omits_run_id_only_carrier() -> None:
+    payload = {"workflow_run_id": "wf-already-in-briefing"}
+
+    assert workflow_input_payload(payload)["workflow_run_id"] == (
+        "wf-already-in-briefing"
+    )
+    assert render_workflow_input_briefing_section(payload) == ""
+
+
 def test_dispatch_mixin_renders_latest_workflow_input_context(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()

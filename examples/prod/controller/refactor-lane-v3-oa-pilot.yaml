@@ -1,0 +1,102 @@
+apiVersion: zaofu.dev/v1
+kind: RefactorFlow
+metadata:
+  name: refactor-lane-oa-pilot/v3
+spec:
+  flowProfile: refactor-flow/v3
+  lanes: 2
+  assembly: none
+  laneRoleTemplate:
+    backend: codex
+  roleDefaults:
+    backend: codex
+    model_reasoning_effort: high
+    permission_mode: bypass
+  objectiveRef: docs/plans/refactor-goal.md
+  parityScope: [core, cli, api, web, runtime]
+  gapLoop: enabled
+  verifyRescan: module_parity
+  completionThreshold: close_p0_p1
+  deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
+  semanticSubmitProfiles:
+    workflow-read: blocking
+    plan-synth: blocking
+    implementation: blocking
+    task-verify: blocking
+    candidate-verify: blocking
+    thin-judge-goal-closure: blocking
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata:
+  name: refactor-lane-v3-oa-pilot
+  zaofu:
+    catalog:
+      id: refactor-lane-v3-oa-pilot-codex
+      label: Refactor Lane v3 OA Pilot
+      description: Refactor pilot with one blocking OA plan-candidate checkpoint.
+      intent: refactor
+      backend: codex
+      roles: 13
+      recommended_for: [refactor, pilot]
+      preferred: false
+      order: 41
+spec:
+  profile_sources: [common/profiles.yaml]
+  uses: [refactor-controller-runtime/v3]
+  version: "1.0"
+  project:
+    name: refactor-lane-v3-oa-pilot
+  orchestrator:
+    backend: codex
+    wake_min_interval_s: 5
+  roles:
+    - name: orchestrator
+      instance_id: orchestrator
+      role_kind: reader
+      backend: codex
+      model_reasoning_effort: high
+      permission_mode: bypass
+      transport: tmux
+      execution:
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
+      lifecycle:
+        mode: resident
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
+        - orchestrator.semantic.checkpoint.requested
+      publishes: [orchestrator.rework.triage.recorded]
+      skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
+  runtime:
+    git:
+      auto_ship_on_judge_passed: true
+  workflow:
+    orchestration:
+      mode: exception_advisor
+      max_plan_revisions: 2
+      no_progress_limit: 2
+      flow_policies:
+        refactor:
+          mode: semantic_control
+          pilot_id: refactor-plan-candidate-v1
+          checkpoints:
+            - plan_candidate
+          checkpoint_policies:
+            plan_candidate: blocking
+        research:
+          mode: exception_advisor
+        workflow:
+          mode: exception_advisor
+    kind_routes:
+      refactor:
+        pattern_id: flow-scan
+        default_tier: standard
+    dag:
+      external_triggers: [refactor.scan.requested]
+    rework_routing:
+      static_gate.failed: dev-lane-0

@@ -25,11 +25,20 @@ Division of labor (avoid dual-source drift):
 
 ## Core Rules
 
+- Preserve an exact browser command or security boundary supplied by the
+  canonical Task, PRD, or owner contract byte-for-byte. That run-scoped
+  contract takes precedence over this skill's generic command pattern.
+- Treat the host-network / `mcp/playwright:latest` pattern below as a fallback
+  only when the canonical contract does not provide an exact command. Never
+  replace a contract-pinned image, bridge network, read-only mount, or `tmpfs`
+  boundary with the fallback image, host network, writable mount, or install
+  sequence.
 - Respect `zf.yaml` and `project.state_dir`; do not hard-code `.zf`.
 - Use Docker with `mcp/playwright:latest` for browser E2E unless the operator
-  explicitly asks for host browsers.
+  explicitly asks for host browsers and no exact run-scoped command is pinned.
 - Start local API/UI services on `0.0.0.0` when a container must reach them.
-- Use host networking for local service smoke tests.
+- Use host networking for local service smoke tests only when the canonical
+  contract does not pin a different network boundary.
 - Run the container with the host UID/GID so mounted workdirs remain writable.
 - Bound browser install commands with `timeout`; never leave
   `playwright install chromium` unbounded.
@@ -38,7 +47,8 @@ Division of labor (avoid dual-source drift):
 
 ## Command Pattern
 
-Use this shape for browser gates:
+When no exact Task/PRD/owner command is supplied, use this fallback shape for
+browser gates:
 
 ```bash
 docker run --rm --network host \
@@ -50,7 +60,8 @@ docker run --rm --network host \
   -lc 'set -euo pipefail; timeout 180s ./packages/web-tui/node_modules/.bin/playwright install chromium; ./packages/web-tui/node_modules/.bin/playwright test --config packages/web-tui/playwright.config.ts'
 ```
 
-Adapt paths to the current `task_map`; keep the runner flags intact.
+Adapt paths to the current `task_map`; keep the runner flags intact. When an
+exact command is supplied, preserve it instead of adapting this fallback.
 
 > The `mcp/playwright:latest` image name, the `INSTALLATION_COMPLETE` marker
 > referenced below, and this exact command shape are **skill-owned convention
@@ -62,6 +73,16 @@ Adapt paths to the current `task_map`; keep the runner flags intact.
 - Keep verification commands machine-readable. If `verification` is a list, each
   item must be a standalone command; never stringify a Python list into a
   contract field.
+- Planning readiness is not execution success. Before implementation, missing
+  screenshots, traces, or browser receipts are expected future outputs, not an
+  environment blocker. Keep the plan dispatchable when it names a runnable
+  Docker Playwright command and assigns the runner/config/test/evidence paths to
+  a producer task. Mark the plan blocked only when the declared runner itself is
+  unavailable or forbidden and no sanctioned equivalent exists.
+- A browser acceptance criterion must be bound before dispatch to an `e2e`
+  command plus writable runner/config/test/evidence paths. Do not leave viewport,
+  pointer, network, storage, refresh, or screenshot acceptance attached only to
+  `npm test`, a build command, or a future Verify interpretation.
 - Include static/package checks separately from browser E2E checks.
 - Mark browser checks with the canonical verification tier **`e2e`**. The kernel
   tier set is `static` / `runtime` / `e2e` / `manual_evidence`

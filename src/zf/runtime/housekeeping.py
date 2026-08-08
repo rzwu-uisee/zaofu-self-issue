@@ -35,6 +35,12 @@ _CANONICAL_TASK_CONTRACT_SOURCES = frozenset({
     "writer_dispatch_owner_binding",
 })
 
+_TASK_CONTRACT_AUDIT_REPLAY_SOURCES = frozenset({
+    "workflow_start",
+    "workflow_submit",
+    "workflow_request_terminal_rotation",
+})
+
 
 def apply_agent_usage_event(
     tracker: CostTracker,
@@ -65,8 +71,6 @@ def apply_agent_usage_event(
     usage = event.payload.get("usage") or {}
     input_tokens = int(usage.get("input_tokens", 0))
     output_tokens = int(usage.get("output_tokens", 0))
-    if input_tokens == 0 and output_tokens == 0:
-        return
     instance_id = event.actor
     m = re.match(r"^(.*?)-(\d+)$", instance_id)
     role_type = m.group(1) if m else instance_id
@@ -90,7 +94,28 @@ def apply_agent_usage_event(
     else:
         cache_creation = int(usage.get("cache_creation_input_tokens", 0))
         cache_read = int(usage.get("cache_read_input_tokens", 0))
-    tracker.record_usage(
+    if not any((input_tokens, output_tokens, cache_creation, cache_read)):
+        return
+    record = tracker.record_usage
+    extra: dict[str, object] = {}
+    semantics = str(event.payload.get("usage_semantics") or "").strip()
+    if semantics == "cumulative":
+        record = tracker.record_cumulative_usage
+        extra["usage_series_id"] = str(
+            event.payload.get("usage_series_id")
+            or ":".join((
+                "disk_reader",
+                instance_id,
+                backend or "unknown",
+                model,
+                str(
+                    event.payload.get("session_id")
+                    or event.payload.get("transcript_path")
+                    or "default"
+                ),
+            ))
+        )
+    record(
         role=role_type,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -102,6 +127,7 @@ def apply_agent_usage_event(
         provider_cost_usd=provider_cost_usd,
         source_event_id=str(event.id or ""),
         usage_sample_id=_usage_sample_id_for_event(event),
+        **extra,
     )
 
 
@@ -612,6 +638,12 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
                 blocked_by=_coerce_contract_list(event.payload.get("blocked_by")),
             )
         return
+    if event.payload.get("source") in _TASK_CONTRACT_AUDIT_REPLAY_SOURCES:
+        # These controlled actions persist the canonical TaskContract before
+        # emitting an audit event. Replaying that complete contract through
+        # the legacy partial-update adapter can truncate shell commands and
+        # discard structured validation matrices.
+        return
     if event.actor == "zf-cli" and event.payload.get(
         "source"
     ) in _CANONICAL_TASK_CONTRACT_SOURCES:
@@ -653,11 +685,14 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         "verification_tiers",
         existing.verification_tiers,
     )
-    validation = coerce_validation_spec(
-        contract_data.get(
-            "validation",
-            contract_data.get("validation_spec", existing.validation),
-        ),
+    raw_validation = contract_data.get(
+        "validation",
+        contract_data.get("validation_spec", existing.validation),
+    )
+    validation = (
+        dict(raw_validation)
+        if isinstance(raw_validation, dict) and "commands" in raw_validation
+        else coerce_validation_spec(raw_validation)
     )
     shared_files = _coerce_contract_list(
         contract_data.get("shared_files", existing.shared_files),
@@ -725,6 +760,11 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         execution_profile_digest=contract_data.get(
             "execution_profile_digest",
             existing.execution_profile_digest,
+        ),
+        risk_class=contract_data.get("risk_class", existing.risk_class),
+        integration_admission_profile=contract_data.get(
+            "integration_admission_profile",
+            existing.integration_admission_profile,
         ),
         behavior=str(behavior or ""),
         verification=verification,
@@ -799,6 +839,7 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
             )
             else existing.evidence_contract
         ),
+        complexity=contract_data.get("complexity", existing.complexity),
         review_route=(
             contract_data.get("review_route", existing.review_route)
             if isinstance(contract_data.get("review_route", existing.review_route), dict)
@@ -857,6 +898,9 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
         acceptance_evidence=_coerce_acceptance_evidence(
             contract_data.get("acceptance_evidence"),
             existing=existing.acceptance_evidence,
+        ),
+        goal_claim_ids=_coerce_contract_list(
+            contract_data.get("goal_claim_ids", existing.goal_claim_ids),
         ),
         quality_gates_override=(
             contract_data.get(

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.config.schema import ZfConfig
+from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.safety import PathGuard
 from zf.core.state.locks import locked_path
@@ -100,7 +101,7 @@ class TaskRefManager:
         if event.type not in {"dev.build.done", "impl.child.completed"} or not event.task_id:
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
-        payload = self._canonical_writer_result_payload(payload)
+        payload = self._canonical_writer_result_payload(event, payload)
         stale_reason = self._stale_contract_result_reason(event, payload)
         if stale_reason:
             return self._reject(
@@ -287,6 +288,7 @@ class TaskRefManager:
 
     def _canonical_writer_result_payload(
         self,
+        event: ZfEvent,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         child: dict[str, Any] = {}
@@ -309,7 +311,67 @@ class TaskRefManager:
                     **child,
                 }
                 break
-        return bind_blocking_writer_result_identity(payload, child)
+        bound = bind_blocking_writer_result_identity(payload, child)
+        return self._bind_task_pipeline_workspace(event, bound)
+
+    def _bind_task_pipeline_workspace(
+        self,
+        event: ZfEvent,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            str(payload.get("task_pipeline_stage") or "") != "impl"
+            or str(payload.get("workdir") or "").strip()
+        ):
+            return payload
+        operation_id = str(payload.get("operation_id") or "").strip()
+        attempt_id = str(payload.get("attempt_id") or "").strip()
+        workflow_run_id = str(
+            payload.get("workflow_run_id") or event.correlation_id or ""
+        ).strip()
+        if not operation_id or not attempt_id or not event.task_id:
+            return payload
+
+        # Workdir is replay-volatile and excluded from the operation request
+        # hash. Recover it only from the exact kernel dispatch attempt.
+        for dispatched in reversed(
+            EventLog(self.state_dir / "events.jsonl").read_all()
+        ):
+            if (
+                dispatched.type != "task.pipeline.stage.dispatched"
+                or dispatched.task_id != event.task_id
+            ):
+                continue
+            source = (
+                dispatched.payload
+                if isinstance(dispatched.payload, dict)
+                else {}
+            )
+            if (
+                str(source.get("operation_id") or "") != operation_id
+                or str(source.get("attempt_id") or "") != attempt_id
+                or str(source.get("task_pipeline_stage") or "") != "impl"
+            ):
+                continue
+            dispatched_run_id = str(
+                source.get("workflow_run_id") or source.get("run_id") or ""
+            ).strip()
+            if (
+                workflow_run_id
+                and dispatched_run_id
+                and workflow_run_id != dispatched_run_id
+            ):
+                continue
+            workdir = str(source.get("workdir") or "").strip()
+            if not workdir:
+                continue
+            enriched = dict(payload)
+            for key in ("workdir", "source_branch", "run_id"):
+                value = source.get(key)
+                if value not in (None, "") and enriched.get(key) in (None, ""):
+                    enriched[key] = value
+            return enriched
+        return payload
 
     def _snapshot_dev_artifacts_if_available(
         self,
@@ -705,6 +767,8 @@ class TaskRefManager:
         if not base:
             base = str(payload.get("base_git_head") or "").strip()
         if not base:
+            base = self._combined_dependency_task_ref_base(task_id, source_commit)
+        if not base:
             base = self._nearest_dependency_task_ref_base(task_id, source_commit)
         if not base:
             base = self._nearest_accepted_task_ref_base(source_commit)
@@ -762,6 +826,74 @@ class TaskRefManager:
         except Exception:
             return ""
         return base
+
+    def _combined_dependency_task_ref_base(
+        self,
+        task_id: str,
+        source_commit: str,
+    ) -> str:
+        """Recover the first-parent boundary containing every blocker ref.
+
+        Writer lanes merge each completed dependency before starting a child.
+        If a control restart lost ``meta.json:dependency_after``, individual
+        blocker refs are not a sufficient base when two or more sibling
+        branches were merged. The first first-parent commit containing every
+        blocker is the deterministic post-dependency boundary.
+        """
+        if not task_id or not source_commit:
+            return ""
+        try:
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+        except Exception:
+            return ""
+        if task is None or not task.blocked_by:
+            return ""
+        task_index = self._read_index_unlocked()
+        dependency_commits: list[str] = []
+        for blocker_id in task.blocked_by:
+            entry = task_index.get(blocker_id)
+            if not isinstance(entry, dict):
+                return ""
+            candidate = str(entry.get("source_commit") or "").strip()
+            if not candidate:
+                task_ref = str(entry.get("task_ref") or "").strip()
+                candidate = f"refs/heads/{task_ref}" if task_ref else ""
+            if not candidate:
+                return ""
+            try:
+                commit = self._git(
+                    "rev-parse",
+                    "--verify",
+                    f"{candidate}^{{commit}}",
+                ).strip()
+            except Exception:
+                return ""
+            if commit not in dependency_commits:
+                dependency_commits.append(commit)
+        if not dependency_commits or not all(
+            self._is_ancestor(commit, source_commit)
+            for commit in dependency_commits
+        ):
+            return ""
+        try:
+            first_parent = self._git(
+                "rev-list",
+                "--first-parent",
+                "--reverse",
+                source_commit,
+            )
+        except Exception:
+            return ""
+        for candidate in first_parent.splitlines():
+            boundary = candidate.strip()
+            if not boundary or boundary == source_commit:
+                continue
+            if all(
+                self._is_ancestor(commit, boundary)
+                for commit in dependency_commits
+            ):
+                return boundary
+        return ""
 
     def _nearest_dependency_task_ref_base(self, task_id: str, source_commit: str) -> str:
         if not task_id:

@@ -261,6 +261,97 @@ def test_goal_coverage_graph_uses_closure_rows_without_rejudging() -> None:
     assert first == second
 
 
+def test_goal_coverage_graph_scopes_claim_results_to_covering_tasks() -> None:
+    task_map = _task_map()
+    task_map["tasks"].append({
+        "task_id": "TASK-B",
+        "title": "Implement replay",
+        "goal_claim_ids": ["CLAIM-B"],
+    })
+    tasks = _tasks()
+    tasks["TASK-B"] = Task(
+        id="TASK-B",
+        title="Implement replay",
+        status="done",
+        contract=TaskContract(
+            feature_id="F-GOAL",
+            contract_revision="REV-B",
+            goal_claim_ids=["CLAIM-B"],
+        ),
+    )
+    verify_a = ZfEvent(
+        id="verify-a",
+        type="verify.passed",
+        task_id="TASK-A",
+        payload={"verification_result": _verification_result()},
+    )
+    verify_b = ZfEvent(
+        id="verify-b",
+        type="verify.passed",
+        task_id="TASK-B",
+        payload={"verification_result": _verification_result(
+            task_id="TASK-B",
+            contract_revision="REV-B",
+            contract_snapshot_ref="artifact://contract-b",
+            target_snapshot_ref="artifact://target-b",
+            evidence_refs=["artifact://evidence-b"],
+        )},
+    )
+    result_a = "artifact://admitted/verify-a"
+    result_b = "artifact://admitted/verify-b"
+    closure_result = _closure_result(
+        goal_claim_set_digest=_claim_set_digest(task_map),
+        verdict="passed",
+        goal_coverage=[
+            {
+                "goal_claim_id": "CLAIM-A",
+                "status": "closed",
+                "supporting_result_refs": [result_a, result_b],
+            },
+            {
+                "goal_claim_id": "CLAIM-B",
+                "status": "closed",
+                "supporting_result_refs": [result_a, result_b],
+            },
+        ],
+        input_result_refs=[result_a, result_b],
+        open_gap_refs=[],
+        recommended_action="complete",
+    )
+    closure = ZfEvent(
+        id="closure-both",
+        type="goal.closure.synthesized",
+        payload={"goal_closure_result": closure_result},
+    )
+    graph = build_goal_coverage_graph(
+        task_map=task_map,
+        tasks=tasks,
+        events=[
+            (1, verify_a),
+            (2, _admission_event(verify_a.id)),
+            (3, verify_b),
+            (4, _admission_event(verify_b.id, task_id="TASK-B")),
+            (5, closure),
+            (6, _admission_event(
+                closure.id,
+                schema="goal-closure-result.v1",
+                task_id=None,
+            )),
+        ],
+        project_id="zaofu",
+        feature_id="F-GOAL",
+        task_map_ref="task-map.json",
+    )
+
+    claims = {
+        node["goal_claim_id"]: node
+        for node in graph["nodes"]
+        if node.get("kind") == "goal_claim"
+    }
+    assert claims["CLAIM-A"]["supporting_result_refs"] == [result_a]
+    assert claims["CLAIM-B"]["supporting_result_refs"] == [result_b]
+
+
 def test_goal_coverage_graph_prefers_admitted_candidate_over_plan_base() -> None:
     task_map = _task_map()
     task_map["target_commit"] = "base123"

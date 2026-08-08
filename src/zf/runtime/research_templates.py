@@ -75,6 +75,41 @@ def research_root_role(template: ResearchTemplate) -> str:
     return template.synth_role or template.child_roles[0]
 
 
+def research_stage_contract_error(
+    stage: object | None,
+    template: ResearchTemplate,
+) -> str:
+    """Validate the mechanical stage shape required by a registered route."""
+
+    if stage is None:
+        return f"{template.pattern_id} stage is not declared in zf.yaml"
+    if str(getattr(stage, "topology", "") or "") != "fanout_reader":
+        return f"{template.pattern_id} stage must use fanout_reader topology"
+    children = tuple(
+        str(getattr(item, "role_instance", "") or "")
+        for item in getattr(stage, "children", []) or []
+    )
+    if children != template.child_roles:
+        return (
+            f"{template.pattern_id} stage must declare children "
+            f"{list(template.child_roles)!r}"
+        )
+    synth_role = str(
+        getattr(getattr(stage, "aggregate", None), "synth_role", "") or ""
+    )
+    if synth_role == template.synth_role:
+        return ""
+    if not template.synth_role:
+        return (
+            f"{template.pattern_id} stage must use direct root "
+            "aggregation without aggregate.synth_role"
+        )
+    return (
+        f"{template.pattern_id} stage must declare "
+        f"{template.synth_role} as aggregate.synth_role"
+    )
+
+
 __all__ = [
     "ADAPTIVE_RESEARCH_TEMPLATE",
     "DEFAULT_RESEARCH_TEMPLATE",
@@ -83,6 +118,7 @@ __all__ = [
     "RESEARCH_TEMPLATES_BY_ID",
     "RESEARCH_TEMPLATES_BY_ROUTE",
     "ResearchTemplate",
+    "research_stage_contract_error",
     "research_root_role",
     "resolve_research_template",
 ]

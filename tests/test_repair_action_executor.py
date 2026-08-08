@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -457,6 +458,346 @@ def test_rerun_fanout_child_repair_action_rejects_terminal_child(
     ]
     assert rejected[-1].payload["action_id"] == "ra-rerun-terminal"
     assert rejected[-1].payload["reason"].startswith("fanout_child_terminal:")
+
+
+def test_rerun_fanout_child_repair_action_rebuilds_failed_child(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-1", title="fanout child task", status="in_progress"),
+    )
+    _write_fanout_manifest(state_dir, child_status="failed")
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    previous = writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="fanout.child.failed",
+        actor="dev",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+            "reason": "provider transport stalled",
+        },
+    ))
+    event = _append_request(
+        state_dir,
+        action_id="ra-rerun-failed",
+        kind="rerun_fanout_child",
+        idempotency_key="repair:fanout-1:dev-child:failed",
+        task_id="TASK-1",
+        fanout_id="fanout-1",
+        fanout_child_id="dev-child",
+    )
+    transport = _RepairTransport()
+
+    Orchestrator(state_dir, config, transport).run_once([event])
+
+    events = _events(state_dir)
+    dispatched = [
+        item for item in events
+        if item.type == "fanout.child.dispatched"
+        and item.payload.get("fanout_id") == "fanout-1"
+        and item.payload.get("child_id") == "dev-child"
+    ]
+    assert [sent[0] for sent in transport.sent] == ["dev"]
+    assert dispatched[-1].payload["run_id"] == "run-fanout-1-dev-child-retry-1"
+    assert dispatched[-1].payload["retry_of_run_id"] == previous.payload["run_id"]
+    applied = [item for item in events if item.type == "repair.action.applied"]
+    assert applied[-1].payload["action_id"] == "ra-rerun-failed"
+
+
+def test_rerun_fanout_child_rebuilds_suspended_newer_dispatch(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-1", title="fanout child task", status="backlog"),
+    )
+    manifest = _write_fanout_manifest(state_dir)
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    first = writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="fanout.child.failed",
+        actor="dev",
+        task_id="TASK-1",
+        payload={**first.payload, "reason": "provider failed"},
+    ))
+    operation_id = "operation-retry-1"
+    retry = writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            **first.payload,
+            "run_id": "run-fanout-1-dev-child-retry-1",
+            "operation_id": operation_id,
+        },
+    ))
+    writer.append(ZfEvent(
+        type="workflow.operation.requested",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "trace-1",
+            "operation_id": operation_id,
+            "request_hash": "request-retry-1",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="workflow.operation.started",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "trace-1",
+            "operation_id": operation_id,
+            "request_hash": "request-retry-1",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="workflow.operation.interrupted",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "trace-1",
+            "operation_id": operation_id,
+            "request_hash": "request-retry-1",
+            "reason": "graceful_stop",
+        },
+    ))
+    manifest["children"][0].update({
+        "status": "dispatched",
+        "run_id": retry.payload["run_id"],
+        "operation_id": operation_id,
+    })
+    TaskStore(state_dir / "kanban.json").update(
+        "TASK-1",
+        status="in_progress",
+        assigned_to="dev",
+        active_dispatch_id=str(retry.payload["run_id"]),
+    )
+    (state_dir / "fanouts/fanout-1/manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    event = _append_request(
+        state_dir,
+        action_id="ra-rerun-suspended",
+        kind="rerun_fanout_child",
+        idempotency_key="repair:fanout-1:dev-child:suspended",
+        task_id="TASK-1",
+        fanout_id="fanout-1",
+        fanout_child_id="dev-child",
+    )
+    transport = _RepairTransport()
+
+    Orchestrator(state_dir, config, transport).run_once([event])
+
+    dispatched = [
+        item for item in _events(state_dir)
+        if item.type == "fanout.child.dispatched"
+        and item.payload.get("fanout_id") == "fanout-1"
+    ]
+    assert [sent[0] for sent in transport.sent] == ["dev"]
+    assert dispatched[-1].payload["run_id"].endswith("-retry-2")
+    assert dispatched[-1].payload["retry_of_run_id"] == retry.payload["run_id"]
+    released = [
+        item for item in _events(state_dir)
+        if item.type == "fanout.child.dispatch_lost"
+        and item.payload.get("run_id") == retry.payload["run_id"]
+    ]
+    assert len(released) == 1
+    assert released[0].payload["reason"] == (
+        "suspended_operation_replaced_by_controlled_rerun"
+    )
+    applied = [
+        item for item in _events(state_dir)
+        if item.type == "repair.action.applied"
+    ]
+    assert applied[-1].payload["action_id"] == "ra-rerun-suspended"
+
+
+def test_rerun_fanout_child_rebuilds_suspended_initial_dispatch(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-1", title="fanout child task", status="in_progress"),
+    )
+    manifest = _write_fanout_manifest(state_dir)
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    operation_id = "operation-initial"
+    initial = writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+            "operation_id": operation_id,
+        },
+    ))
+    for event_type in (
+        "workflow.operation.requested",
+        "workflow.operation.started",
+        "workflow.operation.interrupted",
+    ):
+        writer.append(ZfEvent(
+            type=event_type,
+            actor="zf-cli",
+            task_id="TASK-1",
+            payload={
+                "workflow_run_id": "trace-1",
+                "operation_id": operation_id,
+                "request_hash": "request-initial",
+                **(
+                    {"reason": "graceful_stop"}
+                    if event_type == "workflow.operation.interrupted"
+                    else {}
+                ),
+            },
+        ))
+    manifest["children"][0].update({
+        "status": "dispatched",
+        "run_id": initial.payload["run_id"],
+        "operation_id": operation_id,
+    })
+    TaskStore(state_dir / "kanban.json").update(
+        "TASK-1",
+        assigned_to="dev",
+        active_dispatch_id=str(initial.payload["run_id"]),
+    )
+    (state_dir / "fanouts/fanout-1/manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    event = _append_request(
+        state_dir,
+        action_id="ra-rerun-suspended-initial",
+        kind="rerun_fanout_child",
+        idempotency_key="repair:fanout-1:dev-child:suspended-initial",
+        task_id="TASK-1",
+        fanout_id="fanout-1",
+        fanout_child_id="dev-child",
+    )
+    transport = _RepairTransport()
+
+    Orchestrator(state_dir, config, transport).run_once([event])
+
+    events = _events(state_dir)
+    released = [
+        item for item in events
+        if item.type == "fanout.child.dispatch_lost"
+        and item.payload.get("run_id") == initial.payload["run_id"]
+    ]
+    dispatched = [
+        item for item in events
+        if item.type == "fanout.child.dispatched"
+        and item.payload.get("fanout_id") == "fanout-1"
+    ]
+    assert len(released) == 1
+    assert [sent[0] for sent in transport.sent] == ["dev"]
+    assert dispatched[-1].payload["run_id"].endswith("-retry-1")
+    applied = [item for item in events if item.type == "repair.action.applied"]
+    assert applied[-1].payload["action_id"] == "ra-rerun-suspended-initial"
+
+
+def test_rerun_fanout_child_repair_action_rejects_deferred_dispatch(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-1", title="fanout child task", status="in_progress"),
+    )
+    _write_fanout_manifest(state_dir, child_status="failed")
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+        },
+    ))
+    writer.append(ZfEvent(
+        type="fanout.child.failed",
+        actor="dev",
+        task_id="TASK-1",
+        payload={
+            "fanout_id": "fanout-1",
+            "child_id": "dev-child",
+            "run_id": "run-fanout-1-dev-child",
+            "role_instance": "dev",
+            "task_id": "TASK-1",
+            "reason": "provider transport stalled",
+        },
+    ))
+    event = _append_request(
+        state_dir,
+        action_id="ra-rerun-deferred",
+        kind="rerun_fanout_child",
+        idempotency_key="repair:fanout-1:dev-child:deferred",
+        task_id="TASK-1",
+        fanout_id="fanout-1",
+        fanout_child_id="dev-child",
+    )
+    orch = Orchestrator(state_dir, config, _RepairTransport())
+
+    with patch.object(
+        orch,
+        "_ensure_fanout_role_dispatchable",
+        return_value=False,
+    ):
+        orch.run_once([event])
+
+    events = _events(state_dir)
+    assert not [
+        item
+        for item in events
+        if item.type == "repair.action.applied"
+        and item.payload.get("action_id") == "ra-rerun-deferred"
+    ]
+    rejected = [
+        item
+        for item in events
+        if item.type == "repair.action.rejected"
+        and item.payload.get("action_id") == "ra-rerun-deferred"
+    ]
+    assert rejected[-1].payload["reason"] == (
+        "fanout child rerun deferred before transport dispatch"
+    )
 
 
 def test_mark_stale_projection_repair_action_requests_rebuild(

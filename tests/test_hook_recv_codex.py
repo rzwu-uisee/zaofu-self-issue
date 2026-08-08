@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from zf.cli.hook_workdir_guard import bash_command_looks_mutating
 from zf.cli.hook_recv import run as hook_recv_run
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
@@ -39,6 +40,41 @@ def _invoke(state_dir: Path, event: str, backend: str, payload: dict,
         backend=backend,
     )
     return hook_recv_run(args)
+
+
+def test_controlled_zf_json_payload_is_not_shell_mutation() -> None:
+    payload = json.dumps({
+        "evidence": (
+            "`Path.write_text` and $(literal command example) are quoted facts "
+            "about /repo/.zf/facts.json"
+        ),
+    })
+
+    assert not bash_command_looks_mutating(
+        f"uv run zf result submit --operation op-1 --json '{payload}'"
+    )
+    assert not bash_command_looks_mutating(
+        "uv run zf result validate --operation op-1 "
+        "--result-file /tmp/.zf/tmp/result-submit/op-1/result.json"
+    )
+    assert not bash_command_looks_mutating(
+        f"zf emit worker.heartbeat --task T-1 --payload '{payload}'"
+    )
+    assert bash_command_looks_mutating(
+        f"zf emit worker.heartbeat --task T-1 --payload '{payload}' ; rm file"
+    )
+    assert bash_command_looks_mutating(
+        'zf emit worker.heartbeat --task T-1 --payload "$(touch /repo/bad)"'
+    )
+    assert bash_command_looks_mutating(
+        'zf emit worker.heartbeat --task T-1 --payload "don\'t $(touch /repo/bad)"'
+    )
+    assert bash_command_looks_mutating(
+        "zf emit worker.heartbeat --task T-1 --payload `touch /repo/bad`"
+    )
+    assert bash_command_looks_mutating(
+        "python -c \"Path('/repo/.zf/facts.json').write_text('bad')\""
+    )
 
 
 def test_codex_hook_stop_routes_with_namespace(
@@ -585,14 +621,130 @@ def test_codex_allowed_paths_guard_allows_only_current_result_scratch(
         )
 
     assert invoke_patch(scratch, "uuid-result-scratch-ok") == 0
+
+    delete_then_add = _invoke(
+        state_dir,
+        event="codex.hook.pre_tool_use",
+        backend="codex",
+        payload={
+            "session_id": "uuid-result-scratch-delete-add-denied",
+            "transcript_path": str(transcript),
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": (
+                    "*** Begin Patch\n"
+                    f"*** Delete File: {scratch}\n"
+                    f"*** Add File: {scratch}\n"
+                    "+{\"verdict\": \"passed\"}\n"
+                    "*** End Patch"
+                ),
+            },
+        },
+        monkeypatch=monkeypatch,
+    )
+    assert delete_then_add == 2
     assert invoke_patch(sibling, "uuid-result-scratch-denied") == 2
     rejected = [
         event
         for event in event_log.read_all()
         if event.type == "worker.scope_write.rejected"
     ]
+    assert len(rejected) == 2
+    assert rejected[0].payload["offending_paths"] == [str(scratch)]
+    assert rejected[1].payload["offending_paths"] == [str(sibling)]
+
+
+def test_codex_plan_operation_scope_extends_parent_task_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    transcript = _seed_scoped_worker_task(
+        state_dir,
+        ["src/expense_lite/store.py", "tests/**"],
+    )
+    workdir = state_dir / "workdirs" / "dev-1" / "project"
+    workdir.mkdir(parents=True)
+    event_log = EventLog(state_dir / "events.jsonl")
+    runtime = SimpleNamespace(
+        project_root=tmp_path,
+        state_dir=state_dir,
+        event_log=event_log,
+        event_writer=EventWriter(event_log),
+        config=SimpleNamespace(
+            workflow=SimpleNamespace(
+                flow_metadata={"result_protocol": {"mode": "blocking"}}
+            )
+        ),
+    )
+    prepared = prepare_call_operation(
+        runtime,
+        payload={
+            "workflow_run_id": "run-issue",
+            "role_instance": "dev-1",
+            "fanout_id": "fanout-issue-triage",
+            "stage_id": "issue-triage",
+            "child_id": "issue-triage",
+            "run_id": "attempt-issue-triage",
+            "task_id": "T1",
+            "canonical_success_event": "issue.triage.child.completed",
+            "canonical_failure_event": "issue.triage.child.failed",
+        },
+        operation_type="fanout_reader_child",
+        operation_key="issue-triage",
+        stage_id="issue-triage",
+        task_id="T1",
+        dispatch_id="attempt-issue-triage",
+        workdir_write_scopes=["docs/plans/**", "artifacts/plan/**"],
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="T1",
+        dispatch_id="attempt-issue-triage",
+    )
+
+    def invoke_add(target: Path, session_id: str) -> int:
+        return _invoke(
+            state_dir,
+            event="codex.hook.pre_tool_use",
+            backend="codex",
+            payload={
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workdir),
+                "tool_name": "apply_patch",
+                "tool_input": {
+                    "command": (
+                        "*** Begin Patch\n"
+                        f"*** Add File: {target}\n"
+                        "+{}\n"
+                        "*** End Patch"
+                    ),
+                },
+            },
+            monkeypatch=monkeypatch,
+        )
+
+    task_map = workdir / "artifacts" / "plan" / "task_map.json"
+    unrelated = workdir / "artifacts" / "unrelated" / "escape.json"
+    assert invoke_add(task_map, "uuid-plan-artifact-ok") == 0
+    assert invoke_add(unrelated, "uuid-plan-artifact-denied") == 2
+
+    rejected = [
+        event
+        for event in event_log.read_all()
+        if event.type == "worker.scope_write.rejected"
+    ]
     assert len(rejected) == 1
-    assert rejected[0].payload["offending_paths"] == [str(sibling)]
+    assert rejected[0].payload["offending_paths"] == [str(unrelated)]
+    assert rejected[0].payload["allowed_paths"] == [
+        "src/expense_lite/store.py",
+        "tests/**",
+        "docs/plans/**",
+        "artifacts/plan/**",
+    ]
 
 
 def test_codex_refactor_planner_allows_workdir_artifact_and_result_scratch(
@@ -649,7 +801,17 @@ def test_codex_refactor_planner_allows_workdir_artifact_and_result_scratch(
     scratch.parent.mkdir(parents=True, exist_ok=True)
     scratch.write_text("{}\n", encoding="utf-8")
 
-    def invoke_patch(target: Path, session_id: str) -> int:
+    def invoke_patch(
+        target: Path,
+        session_id: str,
+        *,
+        operation: str = "Add",
+    ) -> int:
+        body = (
+            "+{}\n"
+            if operation == "Add"
+            else "@@\n-{}\n+{\"status\": \"completed\"}\n"
+        )
         return _invoke(
             state_dir,
             event="codex.hook.pre_tool_use",
@@ -661,8 +823,8 @@ def test_codex_refactor_planner_allows_workdir_artifact_and_result_scratch(
                 "tool_input": {
                     "command": (
                         "*** Begin Patch\n"
-                        f"*** Add File: {target}\n"
-                        "+{}\n"
+                        f"*** {operation} File: {target}\n"
+                        f"{body}"
                         "*** End Patch"
                     ),
                 },
@@ -672,7 +834,11 @@ def test_codex_refactor_planner_allows_workdir_artifact_and_result_scratch(
 
     artifact = workdir / "artifacts" / "fanout-refactor-plan" / "task_map.json"
     assert invoke_patch(artifact, "uuid-refactor-plan-artifact") == 0
-    assert invoke_patch(scratch, "uuid-refactor-plan-result") == 0
+    assert invoke_patch(
+        scratch,
+        "uuid-refactor-plan-result",
+        operation="Update",
+    ) == 0
     assert not [
         event
         for event in event_log.read_all()
@@ -703,6 +869,44 @@ def _seed_claude_fanout_workdir(state_dir: Path) -> Path:
         },
     ))
     return workdir
+
+
+def test_codex_controlled_emit_allows_quoted_markdown_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    workdir = _seed_claude_fanout_workdir(state_dir)
+    payload = json.dumps({
+        "report": "Use `Path.write_text`; $(example) is literal documentation.",
+    })
+
+    code = _invoke(
+        state_dir,
+        event="codex.hook.pre_tool_use",
+        backend="codex",
+        payload={
+            "session_id": "uuid-controlled-emit",
+            "cwd": str(workdir),
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "zf emit workflow.child.completed --actor dev-1 "
+                    f"--state-dir {state_dir} --payload '{payload}'"
+                ),
+            },
+        },
+        monkeypatch=monkeypatch,
+    )
+
+    assert code == 0
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    assert not [
+        event
+        for event in events
+        if event.type == "worker.scope_write.rejected"
+    ]
 
 
 def test_claude_cwd_resolves_fanout_actor_and_blocks_canonical_root_write(

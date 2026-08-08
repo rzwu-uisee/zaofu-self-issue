@@ -297,6 +297,12 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
         configured_ids.add(instance_id)
         m = meta.get(instance_id, {})
         cost = cost_by_instance.get(instance_id, _empty_cost_summary())
+        configured_state = (
+            "dormant"
+            if role.lifecycle.mode == "on_demand"
+            and instance_id not in sessions
+            else "unknown"
+        )
         out.append({
             "instance_id": instance_id,
             "name": role.name,
@@ -309,7 +315,7 @@ def _roles(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
             "skills": list(role.skills),
             "plugins": list(role.plugins),
             "agent": role.agent,
-            "state": state_by_actor.get(instance_id, "unknown"),
+            "state": state_by_actor.get(instance_id, configured_state),
             "active_task": active_task.get(instance_id, ""),
             "session_id": sessions.get(instance_id, ""),
             "session_path": m.get("session_path") or "",

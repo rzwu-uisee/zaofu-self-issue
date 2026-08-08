@@ -29,24 +29,18 @@ from zf.runtime.plan_synth_handoff import (
     PLAN_SYNTH_RESULT_SCHEMA,
 )
 from zf.runtime.plan_artifact_ports import coerce_plan_port_descriptors
+from zf.runtime.workflow_read_result import (
+    WORKFLOW_READ_PROFILE_ID,
+    WORKFLOW_READ_PROFILE_REVISION,
+    WORKFLOW_READ_RESULT_SCHEMA,
+    normalize_workflow_read_result,
+)
+from zf.runtime import task_pipeline_call_result
+from zf.runtime import plan_synth_feedback
 
 
 IMPLEMENTATION_RESULT_SCHEMA = "implementation-result.v1"
 FANOUT_AGGREGATE_RESULT_SCHEMA = "fanout-aggregate-result.v1"
-WORKFLOW_READ_RESULT_SCHEMA = "workflow-read-result.v1"
-WORKFLOW_READ_PROFILE_ID = "workflow-read"
-WORKFLOW_READ_PROFILE_REVISION = "1"
-_WORKFLOW_READ_TOP_LEVEL_HANDOFF_FIELDS = (
-    "artifact_refs",
-    "evidence_refs",
-    "plan_ports",
-    "plan_artifact_ref",
-    "plan_ref",
-    "task_map_ref",
-    "source_index_ref",
-    "backlog_ref",
-    "scan_quality_audit_ref",
-)
 
 
 class ControlResultAdapterError(ValueError):
@@ -102,6 +96,17 @@ class ControlResultAdapterRegistry:
                 f"no call-result adapter for {event.type!r}"
             )
         payload, issues = adapter.normalize(event)
+        if adapter.schema_version == WORKFLOW_READ_RESULT_SCHEMA:
+            from zf.runtime.generic_workflow_outputs import (
+                materialize_declared_workflow_outputs,
+            )
+
+            payload, output_issues = materialize_declared_workflow_outputs(
+                state_dir,
+                event,
+                payload,
+            )
+            issues.extend(output_issues)
         descriptor = write_immutable_json_sidecar(
             state_dir,
             payload,
@@ -177,7 +182,12 @@ class ControlResultAdapterRegistry:
 
 
 def default_control_result_adapters() -> list[ControlResultAdapter]:
+    from zf.runtime.orchestrator_agent_call_result import (
+        orchestrator_agent_control_result_adapters,
+    )
+
     return [
+        *orchestrator_agent_control_result_adapters(),
         ControlResultAdapter(
             adapter_id="artifact-delivery-result-v1",
             schema_version=ARTIFACT_DELIVERY_RESULT_SCHEMA,
@@ -206,7 +216,7 @@ def default_control_result_adapters() -> list[ControlResultAdapter]:
             adapter_id="workflow-read-result-v1",
             schema_version=WORKFLOW_READ_RESULT_SCHEMA,
             accepts=_is_workflow_read_event,
-            normalize=_normalize_workflow_read,
+            normalize=normalize_workflow_read_result,
         ),
         ControlResultAdapter(
             adapter_id="verification-result-v1-explicit",
@@ -214,6 +224,7 @@ def default_control_result_adapters() -> list[ControlResultAdapter]:
             accepts=_is_verification_event,
             normalize=_normalize_verification,
         ),
+        task_pipeline_call_result.integration_acceptance_adapter(),
         ControlResultAdapter(
             adapter_id="implementation-result-v1-legacy",
             schema_version=IMPLEMENTATION_RESULT_SCHEMA,
@@ -224,7 +235,12 @@ def default_control_result_adapters() -> list[ControlResultAdapter]:
 
 
 def default_call_result_profiles() -> list[CallResultProfile]:
+    from zf.runtime.orchestrator_agent_call_result import (
+        orchestrator_agent_call_result_profiles,
+    )
+
     return [
+        *orchestrator_agent_call_result_profiles(),
         CallResultProfile(
             profile_id="artifact-delivery",
             revision="1",
@@ -252,6 +268,7 @@ def default_call_result_profiles() -> list[CallResultProfile]:
             )
             for profile_id in ("task-verify", "candidate-verify", "global-rescan")
         ],
+        task_pipeline_call_result.integration_acceptance_profile(),
         CallResultProfile(
             profile_id="implementation",
             revision="1",
@@ -380,17 +397,20 @@ def _is_workflow_read_event(event: ZfEvent) -> bool:
         str(payload.get("canonical_success_event") or "").strip(),
         str(payload.get("canonical_failure_event") or "").strip(),
     }
+    profiled_canonical_event = (
+        str(payload.get("output_profile_id") or "").strip()
+        == WORKFLOW_READ_PROFILE_ID
+        and event.type in canonical_events
+    )
     return (
-        isinstance(report, Mapping)
-        and (
-            event.type
-            in {"workflow.child.completed", "workflow.child.failed"}
-            or str(report.get("schema_version") or "")
-            == WORKFLOW_READ_RESULT_SCHEMA
-            or (
-                str(payload.get("output_profile_id") or "").strip()
-                == WORKFLOW_READ_PROFILE_ID
-                and event.type in canonical_events
+        profiled_canonical_event
+        or (
+            isinstance(report, Mapping)
+            and (
+                event.type
+                in {"workflow.child.completed", "workflow.child.failed"}
+                or str(report.get("schema_version") or "")
+                == WORKFLOW_READ_RESULT_SCHEMA
             )
         )
     )
@@ -413,26 +433,13 @@ def _is_task_verify_reader(
     task_id = str(payload.get("task_id") or "").strip()
     if not task_id:
         return False
-    success_event = str(payload.get("canonical_success_event") or "").lower()
     verification_owner = str(payload.get("verification_owner") or "").lower()
-    if (
-        success_event.startswith("verify.")
-        or ".verify." in success_event
-        or "verify" in verification_owner
-    ):
-        return True
-    return any(
-        payload.get(field) not in (None, "", {})
-        for field in (
-            "contract_snapshot_ref",
-            "contract_snapshot_digest",
-            "target_snapshot_ref",
-            "target_snapshot_digest",
-            "contract_revision",
-            "task_map_generation",
-            "task_ref",
-        )
-    )
+    # Candidate/discovery readers also carry target commits, task-map
+    # generations, and sometimes verify-named bridge events as evidence.
+    # Those inputs do not grant Task verification authority. Bind a reader to
+    # the Task contract only when its stage or declared owner is explicitly a
+    # verification surface; callers can also pin output_profile_id directly.
+    return "verify" in verification_owner
 
 
 def _is_goal_closure_event(event: ZfEvent) -> bool:
@@ -472,6 +479,35 @@ def _normalize_artifact_delivery(
         result = dict(raw) if isinstance(raw, Mapping) else {
             "schema_version": ARTIFACT_DELIVERY_RESULT_SCHEMA,
         }
+        for key in (
+            "workflow_run_id",
+            "goal_id",
+            "workflow_generation",
+            "request_revision",
+            "generic_workflow_contract_digest",
+            "run_contract_ref",
+            "run_contract_digest",
+            "completion_profile",
+            "goal_claim_set_ref",
+            "goal_claim_set_digest",
+        ):
+            if result.get(key) in (None, "") and payload.get(key) not in (
+                None,
+                "",
+            ):
+                result[key] = payload[key]
+        if not str(result.get("verifier_stage_id") or "").strip():
+            result["verifier_stage_id"] = str(
+                payload.get("verifier_stage_id")
+                or payload.get("stage_id")
+                or ""
+            )
+        if not str(result.get("verifier_role") or "").strip():
+            result["verifier_role"] = str(
+                payload.get("verifier_role")
+                or payload.get("role_instance")
+                or ""
+            )
         return result, [{
             "field": "control_result",
             "code": "schema_invalid",
@@ -569,12 +605,14 @@ def _normalize_plan_synth(
         "artifact_refs": _strings(source.get("artifact_refs") or report.get("artifact_refs")),
         "evidence_refs": _strings(source.get("evidence_refs") or report.get("evidence_refs")),
         "plan_ports": plan_ports,
-        "findings": _plan_synth_findings(
+        "findings": plan_synth_feedback.normalize_plan_synth_findings(
             source.get("findings") or report.get("findings")
         ),
-        "fix_items": _objects(
+        "fix_items": plan_synth_feedback.normalize_plan_synth_fix_items(
             source.get("fix_items") or report.get("fix_items")
         ),
+        "owner_decision_items": plan_synth_feedback.normalize_plan_synth_owner_decision_items(
+            source.get("owner_decision_items") or report.get("owner_decision_items")),
         "review_artifact_ref": (
             _text(source, "review_artifact_ref")
             or _text(report, "review_artifact_ref")
@@ -648,79 +686,6 @@ def _normalize_verification(
     return result, issues
 
 
-def _normalize_workflow_read(
-    event: ZfEvent,
-) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    payload = event.payload if isinstance(event.payload, dict) else {}
-    raw = payload.get("report")
-    report = dict(raw) if isinstance(raw, Mapping) else {}
-    for field in _WORKFLOW_READ_TOP_LEVEL_HANDOFF_FIELDS:
-        payload_value = payload.get(field)
-        report_value = report.get(field)
-        if _empty_handoff_value(report_value) and not _empty_handoff_value(
-            payload_value
-        ):
-            report[field] = payload_value
-    status = str(report.get("status") or payload.get("status") or "").lower()
-    recommendation = str(
-        report.get("recommendation")
-        or report.get("verdict")
-        or payload.get("recommendation")
-        or ""
-    ).lower()
-    if event.type.endswith(".failed") and not report:
-        execution_status = "failed"
-        verdict = "abstained"
-        failure_class = "reader_execution_failure"
-    elif recommendation in {"reject", "rejected", "needs_rework"} or status in {
-        "failed",
-        "rejected",
-    }:
-        execution_status = "completed"
-        verdict = "rejected"
-        failure_class = "semantic_rejection"
-    elif recommendation in {"block", "blocked"} or status == "blocked":
-        execution_status = "completed"
-        verdict = "blocked"
-        failure_class = "dependency_blocked"
-    elif recommendation in {"abstain", "abstained"}:
-        execution_status = "completed"
-        verdict = "abstained"
-        failure_class = "reader_abstained"
-    else:
-        execution_status = "completed"
-        verdict = "passed"
-        failure_class = "none"
-    report.setdefault("schema_version", WORKFLOW_READ_RESULT_SCHEMA)
-    report.setdefault("execution_status", execution_status)
-    report.setdefault("verdict", verdict)
-    report.setdefault("failure_class", failure_class)
-    report.setdefault("status", "passed" if verdict == "passed" else "failed")
-    report.setdefault(
-        "recommendation",
-        "approve" if verdict == "passed" else "reject",
-    )
-    report.setdefault("summary", str(payload.get("summary") or payload.get("reason") or ""))
-    report.setdefault("findings", [])
-    issues: list[dict[str, str]] = []
-    if not str(report.get("summary") or "").strip():
-        issues.append({
-            "field": "control_result.summary",
-            "code": "missing_required",
-        })
-    if not isinstance(report.get("findings"), list):
-        issues.append({
-            "field": "control_result.findings",
-            "code": "schema_invalid",
-            "message": "findings must be an array",
-        })
-    return report, issues
-
-
-def _empty_handoff_value(value: Any) -> bool:
-    return value is None or value == "" or value == [] or value == {}
-
-
 def _legacy_verification_result(event: ZfEvent) -> dict[str, Any]:
     payload = event.payload if isinstance(event.payload, dict) else {}
     report = payload.get("report") if isinstance(payload.get("report"), Mapping) else {}
@@ -781,6 +746,11 @@ def _legacy_verification_result(event: ZfEvent) -> dict[str, Any]:
         "task_id": str(event.task_id or _text(payload, "task_id", "upstream_task_id")),
         "contract_revision": _text(payload, "contract_revision"),
         "task_map_generation": _text(payload, "task_map_generation"),
+        "feedback_revision": _text(
+            payload,
+            "feedback_revision",
+            "rework_feedback_digest",
+        ),
         "base_commit": _text(payload, "base_commit"),
         "task_ref": _text(payload, "task_ref"),
         "contract_snapshot_ref": _text(payload, "contract_snapshot_ref"),
@@ -827,6 +797,10 @@ def _normalize_implementation(
     result.setdefault("schema_version", IMPLEMENTATION_RESULT_SCHEMA)
     result.setdefault("workflow_run_id", _text(payload, "workflow_run_id", "trace_id"))
     result.setdefault("task_id", str(event.task_id or _text(payload, "task_id")))
+    result.setdefault(
+        "feedback_revision",
+        _text(payload, "feedback_revision", "rework_feedback_digest"),
+    )
     result.setdefault("target_commit", _text(payload, "target_commit", "source_commit"))
     result.setdefault("source_event_id", event.id)
     issues = [
@@ -912,16 +886,6 @@ def _strings(value: Any) -> list[str]:
 
 def _objects(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, Mapping)] if isinstance(value, list) else []
-
-
-def _plan_synth_findings(value: Any) -> list[dict[str, Any]]:
-    findings = _objects(value)
-    for finding in findings:
-        if str(finding.get("line", "")).strip() == "0":
-            finding.pop("line", None)
-    return findings
-
-
 __all__ = [
     "FANOUT_AGGREGATE_RESULT_SCHEMA",
     "IMPLEMENTATION_RESULT_SCHEMA",

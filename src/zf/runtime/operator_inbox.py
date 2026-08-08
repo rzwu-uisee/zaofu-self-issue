@@ -509,7 +509,7 @@ def _generic_approval_item(
     approval_ref: str,
     status: str,
 ) -> dict[str, Any]:
-    return {
+    item = {
         "id": _generic_item_id(approval_ref),
         "kind": "approval",
         "status": status,
@@ -527,6 +527,19 @@ def _generic_approval_item(
             {"action": str(payload.get("reject_action") or ""), "label": "Reject", "requires_token": True},
         ],
     }
+    for key in (
+        "checkpoint_id",
+        "workflow_run_id",
+        "fanout_id",
+        "source_event_id",
+        "proposal_ref",
+        "eval_ref",
+        "candidate_task_map_ref",
+    ):
+        value = str(payload.get(key) or "")
+        if value:
+            item[key] = value
+    return item
 
 
 def _run_delivery_item(

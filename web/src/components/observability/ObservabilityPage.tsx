@@ -1,6 +1,6 @@
 // ObservabilityPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { search } from "../../api/client";
-import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TraceSummary } from "../../api/types";
+import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
 import { LogsPanel } from "../../components/observability/LogsPanel";
 import { RunDossierPanel } from "../../components/observability/RunDossierPanel";
 import { formatTokens } from "../../lib/format";
@@ -10,7 +10,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import type { LiveState, PageId, ParsedEventFilter, ProjectionKind, ProjectionMetricSpec, UiTone } from "../../app/sharedTypes";
 import { EventTable, KeyValuePanel, PreBlock, ProjectionEmptyState, ProjectionList, ProjectionMetricGrid, TablePage, TraceDetailPanel, TraceIndexList, asRecord, asStringArray, eventChannelId, eventFamily, eventKey, eventPayload, eventSummary, formatUsd, parseEventFilter, stringify, textValue, truncateInline } from "../../app/shared";
 
-type ObservabilityTab = "traces" | "events" | "logs" | "runs" | "fanouts" | "candidates" | "integration" | "repair" | "raw";
+type ObservabilityTab = "traces" | "events" | "logs" | "runs" | "fanouts" | "candidates" | "pipeline" | "integration" | "repair" | "raw";
 
 type TraceStatusFilter = "all" | "running" | "completed" | "failed" | "blocked" | "observed";
 
@@ -137,6 +137,7 @@ export function ObservabilityPage({
   eventItems,
   eventsPage,
   integrationQueue,
+  taskPipeline,
   liveState,
   onOpenChannel,
   onOpenPage,
@@ -157,6 +158,7 @@ export function ObservabilityPage({
   eventItems: EventRecord[];
   eventsPage: EventsPage | null;
   integrationQueue: IntegrationQueueProjection | null;
+  taskPipeline: TaskPipelineProjection | null;
   liveState: LiveState;
   onOpenChannel: (channelId: string) => void;
   onOpenPage: (page: PageId) => void;
@@ -333,6 +335,7 @@ export function ObservabilityPage({
     { id: "runs", label: "Runs", count: scopedTraceMode ? undefined : runs.length },
     { id: "fanouts", label: "Fanouts", count: scopedTraceMode ? undefined : fanouts.length },
     { id: "candidates", label: "Candidates", count: scopedTraceMode ? undefined : candidates.length },
+    { id: "pipeline", label: "Pipeline", count: taskPipeline?.summary.task_count ?? 0 },
     { id: "integration", label: "Integration", count: integrationQueue?.summary.total ?? 0 },
     { id: "repair", label: "Repair", count: repairActions?.summary.total ?? 0 },
     // Tokens/Context 与 Feedback tab 已退役(operator 2026-07-11):前者三重复
@@ -608,6 +611,9 @@ export function ObservabilityPage({
       {tab === "integration" ? (
         <IntegrationQueuePanel queue={integrationQueue} />
       ) : null}
+      {tab === "pipeline" ? (
+        <TaskPipelinePanel projection={taskPipeline} />
+      ) : null}
       {tab === "repair" ? (
         <RepairActionsPanel projection={repairActions} />
       ) : null}
@@ -637,6 +643,130 @@ export function ObservabilityPage({
     </div>
   );
 }
+
+function TaskPipelinePanel({ projection }: { projection: TaskPipelineProjection | null }) {
+  const closure = projection?.closure;
+  const taskRows = (projection?.tasks ?? []).map((task) => ({
+    task_id: task.task_id,
+    status: task.task_status,
+    stage: task.pipeline_stage,
+    worker: task.current_worker || "-",
+    operation: task.current_operation_id || "-",
+    generation: task.task_map_generation || "-",
+    active_attempts: task.active_attempt_count,
+    active_sessions: task.active_session_count,
+    blockers: task.blockers.join(", ") || "-",
+  }));
+  const operationRows = (projection?.operations ?? []).map((operation) => ({
+    operation_id: operation.operation_id,
+    task_id: operation.task_id,
+    stage: operation.stage,
+    generation: operation.operation_generation,
+    status: operation.status,
+    verdict: operation.semantic_verdict || "-",
+    worker: operation.current_worker || "-",
+    placement_epoch: operation.placement_epoch,
+    workspace_generation: operation.workspace_generation,
+    attempts: operation.attempt_ids.length,
+    reason: operation.reason || "-",
+  }));
+  const sessionRows = (projection?.sessions ?? []).map((session) => ({
+    binding: session.binding_key,
+    task_id: session.task_id,
+    stage: session.stage,
+    status: session.status,
+    session_id: session.session_id,
+    role: session.current_role_instance || "-",
+    placement_epoch: session.current_placement_epoch,
+    relocations: Math.max(0, session.placement_history.length - 1),
+    workspace_generation: session.workspace_generation,
+    archived_at: session.archived_at || "-",
+  }));
+  const queueRows = Object.entries(projection?.queues ?? {}).map(([queue, taskIds]) => ({
+    queue,
+    count: taskIds.length,
+    task_ids: taskIds.join(", ") || "-",
+  }));
+  const capacity = asRecord(projection?.capacity);
+  const occupancy = asRecord(projection?.occupancy);
+  const capacityPools = asRecord(capacity.pools);
+  const occupancyPools = asRecord(occupancy.pools);
+  const capacityRows = Object.entries(capacityPools).map(([pool, raw]) => {
+    const row = asRecord(raw);
+    return {
+      pool,
+      capacity: textValue(row.capacity) || "0",
+      occupied: textValue(occupancyPools[pool]) || "0",
+      available: textValue(row.available) || "0",
+    };
+  });
+
+  return (
+    <div className="task-pipeline-panel">
+      <div className="runtime-health-strip task-pipeline-strip" aria-label="Task Pipeline summary">
+        <span><strong>Mode</strong><em>{projection?.mode ?? "-"}</em></span>
+        <span><strong>Profile</strong><em className="mono">{projection?.profile_id || "-"}</em></span>
+        <span><strong>Tasks</strong><em>{projection?.summary.task_count ?? 0}</em></span>
+        <span><strong>Operations</strong><em>{projection?.summary.operation_count ?? 0}</em></span>
+        <span><strong>Workers</strong><em>{projection?.summary.active_worker_count ?? 0}</em></span>
+        <span><strong>Closure</strong><em>{closure?.status ?? "-"}</em></span>
+      </div>
+
+      {closure?.residuals.length ? (
+        <section className="subsection task-pipeline-residuals">
+          <div className="inline-heading">
+            <h3>Terminal Residuals</h3>
+            <span className="muted">{closure.residuals.length} active objects</span>
+          </div>
+          <div className="compact-list mono">
+            {closure.residuals.map((residual) => <div key={residual}>{residual}</div>)}
+          </div>
+        </section>
+      ) : null}
+
+      <TablePage
+        title="Task Pipelines"
+        rows={taskRows}
+        embedded
+        emptyState={{
+          title: projection?.enabled ? "No admitted Task Pipeline" : "Task Pipeline disabled",
+          description: projection?.enabled ? "Admitted Task generations appear here." : "The selected immutable workflow profile keeps Task Pipeline off.",
+          icon: GitFork,
+          compact: true,
+        }}
+      />
+      <div className="observability-resource-grid task-pipeline-grid">
+        <TablePage
+          title="Stage Operations"
+          rows={operationRows}
+          embedded
+          emptyState={{ title: "No Stage Operations", description: "Operations appear after a v4 stage is admitted.", icon: PlayCircle, compact: true }}
+        />
+        <div className="task-pipeline-resource-stack">
+          <TablePage
+            title="Queues"
+            rows={queueRows}
+            embedded
+            emptyState={{ title: "No queue data", description: "Stage queues appear with a compiled profile.", icon: Gauge, compact: true }}
+          />
+          <TablePage
+            title="Pool Capacity"
+            rows={capacityRows}
+            embedded
+            emptyState={{ title: "No capacity data", description: "Pool capacity appears with a compiled profile.", icon: Gauge, compact: true }}
+          />
+        </div>
+      </div>
+      <TablePage
+        title="Task-stage Sessions"
+        rows={sessionRows}
+        embedded
+        emptyState={{ title: "No Task-stage sessions", description: "Active, relocated, sealed, and archived bindings appear here.", icon: Archive, compact: true }}
+      />
+    </div>
+  );
+}
+
 
 function IntegrationQueuePanel({ queue }: { queue: IntegrationQueueProjection | null }) {
   const summary = queue?.summary;
@@ -1136,6 +1266,7 @@ function isObservabilityTab(value: string | null): value is ObservabilityTab {
     "runs",
     "fanouts",
     "candidates",
+    "pipeline",
     "integration",
     "repair",
     "raw",

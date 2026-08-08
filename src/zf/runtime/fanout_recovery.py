@@ -139,10 +139,10 @@ def recover_unrecorded_writer_fanout_results(
 
     terminal_before = _terminal_count(before)
     event_count_before = len(before)
-    from zf.runtime.orchestrator import Orchestrator
     from zf.runtime.transport import make_transport
+    from zf.runtime.workflow_runtime import WorkflowRuntimeCoordinator
 
-    orch = Orchestrator(
+    orch = WorkflowRuntimeCoordinator(
         state_dir,
         config,
         transport if transport is not None else make_transport(config),

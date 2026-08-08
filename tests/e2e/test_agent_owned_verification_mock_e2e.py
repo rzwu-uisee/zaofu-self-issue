@@ -101,9 +101,11 @@ def _dispatch_payload(child: dict) -> dict:
     return payload
 
 
-def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
+def test_light_profile_mock_e2e_exact_verify(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("ZF_CLI_CMD", "zf")
     workflow_run_id = "evt-light-entry-148"
     config_source = (
         Path(__file__).resolve().parents[2]
@@ -286,7 +288,7 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
     ]
     assert run_contract["protocols"]["execution_profile"]["roles"][
         "dev-lane-0"
-    ]["default_profile"] == "direct-v1"
+    ]["default_profile"] == "bounded-direct-v1"
 
     task_map_ref = f"{state_dir.name}/artifacts/LIGHT-148/task_map.json"
     task_map_path = tmp_path / task_map_ref
@@ -500,12 +502,17 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
                 "verification_tier": "task_non_smoke",
                 "summary": "verified",
                 "evidence_refs": [f"mock://verify/{task_id}"],
-                "reused_command_receipt_ids": [receipt_ids[task_id]],
+                "reused_command_receipt_ids": [],
                 "probe_receipts": [{
-                    "probe_id": f"probe-{task_id}",
+                    "probe_id": f"verify-{command['command_id']}",
+                    "command_id": command["command_id"],
+                    "command": command["command"],
+                    "command_digest": command["command_digest"],
+                    "target_commit": verify_payload["target_commit"],
                     "status": "passed",
+                    "exit_code": 0,
                     "evidence_refs": [f"mock://verify/{task_id}/probe"],
-                }],
+                } for command in verify_contract["verification_commands"]],
                 "rework_items": [],
                 "requirement_results": [{
                     "acceptance_id": item["acceptance_id"],
@@ -514,7 +521,12 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
                     "verification_tier": item["verification_tier"],
                     "evidence_refs": [f"mock://verify/{task_id}"],
                     "findings": [],
-                    "reproduction_commands": [],
+                    "reproduction_commands": [
+                        command["command"]
+                        for command in verify_contract["verification_commands"]
+                        if command["command_id"]
+                        in item["verification_command_ids"]
+                    ],
                 } for item in verify_contract["acceptance_criteria"]],
             },
             role_instance=verify_child["role_instance"],
@@ -566,8 +578,9 @@ def test_light_profile_mock_e2e_closes_with_self_check_and_receipt_reuse(
         "Success command:\n```bash\n", 1,
     )[1].split("\n```", 1)[0]
     command_argv = shlex.split(command)
+    assert "--scratch" in command_argv
     semantic_result = json.loads(
-        Path(command_argv[command_argv.index("--result-file") + 1]).read_text(
+        (state_dir / judge_child_payload["result_scratch_ref"]).read_text(
             encoding="utf-8",
         )
     )

@@ -96,6 +96,11 @@ _INFRA_FAILURE_MARKERS = (
     "dispatch_deferred",
 )
 
+_CANDIDATE_ENVIRONMENT_FAILURE_CLASSES = frozenset({
+    "candidate_dependency_missing",
+    "candidate_environment_setup_failed",
+})
+
 def _admission_replan_enabled(config: object) -> bool:
     """R28: 仅当 workflow.admission_replan.enabled 且配了 resynth_trigger 才生效。"""
     workflow = getattr(config, "workflow", None)
@@ -178,6 +183,7 @@ def plan_candidate_rework(
         events,
         pdd_by_fanout_id=pdd_by_fanout_id,
     )
+    event_by_id: dict[str, object] = {}
     event_type_by_id: dict[str, str] = {}
     rejection_fp_by_id: dict[str, str] = {}
     fingerprint_on = _fingerprint_counting_enabled(config)
@@ -194,6 +200,8 @@ def plan_candidate_rework(
         payload = getattr(event, "payload", {}) or {}
         if not isinstance(payload, dict):
             payload = {}
+        if event_id:
+            event_by_id[event_id] = event
         reset_generation_caches(
             event,
             payload,
@@ -380,6 +388,8 @@ def plan_candidate_rework(
                 or ""
             )
             feedback = _feedback_lines_from_payload(payload)
+            if etype == "plan.rejected":
+                feedback.extend(_plan_rejection_feedback(payload))
             if feedback:
                 feedback_by_trace.setdefault(trace, []).extend(feedback)
             gap_tasks = _gap_tasks_from_payload(payload)
@@ -435,6 +445,15 @@ def plan_candidate_rework(
             str(payload.get("target_ref") or ""),
             pdd_by_fanout_id=pdd_by_fanout_id,
         )
+        if not pdd and getattr(event, "type", "") == "plan.rejected":
+            source_event = event_by_id.get(str(payload.get("plan_id") or ""))
+            source_payload = getattr(source_event, "payload", {}) or {}
+            if isinstance(source_payload, dict):
+                pdd = _pdd_from_event(
+                    source_payload,
+                    _candidate_scope_ref(source_payload),
+                    pdd_by_fanout_id=pdd_by_fanout_id,
+                )
         if pdd:
             latest_by_pdd[pdd] = event
 
@@ -450,6 +469,17 @@ def plan_candidate_rework(
         source_event_type = str(getattr(event, "type", ""))
         feedback = tuple(_dedupe_feedback(feedback_by_trace.get(trace, [])))
         failed_task_ids = tuple(sorted(failed_task_ids_by_trace.get(trace, set())))
+        if (
+            source_event_type == "integration.failed"
+            and str(payload.get("failure_scope") or "") == "candidate"
+            and str(payload.get("failure_class") or "")
+            in _CANDIDATE_ENVIRONMENT_FAILURE_CLASSES
+            and not payload.get("failed_children")
+        ):
+            # Quality gates identify which task declared each command, not
+            # which implementation task failed. Missing candidate dependencies
+            # must re-run integration on the same refs without reopening WUs.
+            failed_task_ids = ()
         gap_tasks = tuple(_dedupe_gap_tasks(gap_tasks_by_trace.get(trace, [])))
         source_attempts = attempts_by_pdd_source.get((pdd, source_event_type), set())
         task_contract_blocker = any(
@@ -661,6 +691,38 @@ def _feedback_lines_from_payload(payload: dict) -> list[str]:
         seen.add(line)
         lines.append(line)
     return lines
+
+
+def _plan_rejection_feedback(payload: dict) -> list[str]:
+    """Preserve an OA revision delta as bounded synth feedback."""
+
+    lines: list[str] = []
+    reason = str(payload.get("reason") or "").strip()
+    if reason:
+        lines.append(f"plan-rejection: {reason}")
+    reason_codes = payload.get("reason_codes")
+    if isinstance(reason_codes, list):
+        lines.extend(
+            f"plan-rejection-code: {str(code).strip()}"
+            for code in reason_codes
+            if str(code or "").strip()
+        )
+    delta = payload.get("orchestration_delta")
+    directives = delta.get("directives") if isinstance(delta, dict) else []
+    if isinstance(directives, list):
+        for directive in directives:
+            if not isinstance(directive, dict):
+                continue
+            directive_id = str(directive.get("directive_id") or "revision").strip()
+            required_actions = directive.get("required_actions")
+            if not isinstance(required_actions, list):
+                continue
+            lines.extend(
+                f"{directive_id}: {str(action).strip()}"
+                for action in required_actions
+                if str(action or "").strip()
+            )
+    return list(dict.fromkeys(lines))
 
 
 def _gap_tasks_from_payload(payload: dict) -> list[dict[str, Any]]:

@@ -7,6 +7,7 @@ removed after a mechanically safe idle period.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,12 @@ from zf.core.state.locks import FileLock
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.event_window import read_runtime_events
 from zf.runtime.git_capture import capture_git_state
+from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
+from zf.runtime.run_scope import event_run_id, run_aliases
+from zf.runtime.transport import (
+    transport_error_diagnostics,
+    transport_readiness_error,
+)
 from zf.runtime.workflow_operation import (
     TERMINAL_OPERATION_STATUSES,
     reduce_workflow_operations,
@@ -29,6 +36,14 @@ _TRANSITIONAL_LIFECYCLE_STATES = frozenset({
     "activating",
     "resuming",
     "suspending",
+})
+_NORMAL_SUSPEND_DEFERRALS = frozenset({
+    "assigned_task_present",
+    "cooldown",
+    "idle_threshold_not_reached",
+    "lifecycle_transition_in_progress",
+    "provider_operation_active",
+    "runnable_task_present",
 })
 
 
@@ -65,6 +80,8 @@ class RoleLifecycleRuntimeMixin:
         *,
         role: RoleConfig,
         task_id: str | None = None,
+        execution_project_root: Path | None = None,
+        execution_runtime_root: Path | None = None,
     ) -> list:
         """Materialize skills after the role workdir exists."""
         if not role.skills:
@@ -81,6 +98,8 @@ class RoleLifecycleRuntimeMixin:
             state_dir=self.state_dir,
             role=role,
             task_id=task_id,
+            execution_project_root=execution_project_root,
+            execution_runtime_root=execution_runtime_root,
         )
         materialized_paths = (
             materialized.materialized_paths_under(self.project_root)
@@ -115,6 +134,7 @@ class RoleLifecycleRuntimeMixin:
             return True
         except Exception as exc:
             try:
+                diagnostics = transport_error_diagnostics(exc)
                 self.event_writer.append(ZfEvent(
                     type="orchestrator.dispatch_failed",
                     actor="zf-cli",
@@ -124,6 +144,7 @@ class RoleLifecycleRuntimeMixin:
                         "assignee": role.instance_id,
                         "stage": "role_activation",
                         "error": str(exc)[:500],
+                        **diagnostics,
                     },
                 ))
                 self._emit_dispatch_skipped(
@@ -153,6 +174,8 @@ class RoleLifecycleRuntimeMixin:
         role: RoleConfig,
         *,
         task_id: str | None = None,
+        spawn_cwd: Path | None = None,
+        skill_runtime_root: Path | None = None,
     ) -> bool:
         """Start one on-demand role before any dispatch state is mutated.
 
@@ -184,8 +207,10 @@ class RoleLifecycleRuntimeMixin:
             try:
                 if self.transport.is_alive(role.instance_id):
                     if not self._wait_role_ready(role):
-                        raise RuntimeError(
-                            f"live on-demand role {role.instance_id} is not ready"
+                        raise transport_readiness_error(
+                            self.transport,
+                            role.instance_id,
+                            backend=role.backend,
                         )
                     self._mark_role_lifecycle_active(role)
                     self._set_worker_state(
@@ -232,13 +257,19 @@ class RoleLifecycleRuntimeMixin:
             )
 
             try:
-                spawn_cwd = self._role_spawn_cwd(
-                    role,
-                    source="on_demand_activation",
+                effective_spawn_cwd = (
+                    Path(spawn_cwd).resolve()
+                    if spawn_cwd is not None
+                    else self._role_spawn_cwd(
+                        role,
+                        source="on_demand_activation",
+                    )
                 )
                 materialized = self._materialize_role_skills_raw(
                     role=role,
                     task_id=task_id,
+                    execution_project_root=effective_spawn_cwd,
+                    execution_runtime_root=skill_runtime_root,
                 )
                 if materialized:
                     cache = getattr(
@@ -250,10 +281,20 @@ class RoleLifecycleRuntimeMixin:
                         cache = {}
                         self._activation_skill_provenance = cache
                     cache[(role.instance_id, str(task_id or ""))] = materialized
-                self._get_spawn_coordinator().spawn(role, cwd=spawn_cwd)
+                self._write_on_demand_role_instructions(
+                    role,
+                    task_id=task_id,
+                    skill_entries=materialized,
+                )
+                self._get_spawn_coordinator().spawn(
+                    role,
+                    cwd=effective_spawn_cwd,
+                )
                 if not self._wait_role_ready(role):
-                    raise RuntimeError(
-                        f"on-demand role {role.instance_id} did not become ready"
+                    raise transport_readiness_error(
+                        self.transport,
+                        role.instance_id,
+                        backend=role.backend,
                     )
             except Exception as exc:
                 try:
@@ -281,6 +322,7 @@ class RoleLifecycleRuntimeMixin:
                         "from": transition,
                         "to": previous,
                         "reason": str(exc)[:500],
+                        **transport_error_diagnostics(exc),
                     },
                 )
                 raise
@@ -331,6 +373,36 @@ class RoleLifecycleRuntimeMixin:
             )
             return True
 
+    def _write_on_demand_role_instructions(
+        self,
+        role: RoleConfig,
+        *,
+        task_id: str | None,
+        skill_entries: list,
+    ) -> None:
+        from zf.runtime.injection import generate_role_instructions
+
+        task = None
+        if task_id:
+            try:
+                task = self.task_store.get(task_id)
+            except Exception:
+                task = None
+        instructions = generate_role_instructions(
+            self.config,
+            role,
+            task=task,
+            skill_entries=skill_entries,
+            state_dir_ref=self.state_dir,
+            project_root=self.project_root,
+        )
+        instructions_dir = self.state_dir / "instructions"
+        instructions_dir.mkdir(parents=True, exist_ok=True)
+        (instructions_dir / f"{role.instance_id}.md").write_text(
+            instructions,
+            encoding="utf-8",
+        )
+
     def _mark_role_lifecycle_active(self, role: RoleConfig) -> None:
         meta = self._role_lifecycle_meta(role)
         if str(meta.get("lifecycle_state") or "") == "active":
@@ -367,7 +439,7 @@ class RoleLifecycleRuntimeMixin:
                 now=now,
             )
             if not eligible:
-                if reason not in {"idle_threshold_not_reached", "cooldown"}:
+                if reason not in _NORMAL_SUSPEND_DEFERRALS:
                     self._record_suspend_rejection(
                         role,
                         reason=reason,
@@ -419,15 +491,32 @@ class RoleLifecycleRuntimeMixin:
         if ready:
             return False, "runnable_task_present", {"task_ids": ready}
 
-        operations = reduce_workflow_operations(
-            read_runtime_events(self.event_log, self.state_dir)
-        )
+        runtime_events = read_runtime_events(self.event_log, self.state_dir)
+        operations = reduce_workflow_operations(runtime_events)
+        run_alias_map = run_aliases(runtime_events)
+        terminal_runs = {
+            run_id
+            for event in runtime_events
+            if event.type in RUN_TERMINAL_EVENT_TYPES
+            if (run_id := event_run_id(event, aliases=run_alias_map))
+        }
         active_operations = [
             operation_id
             for operation_id, operation in operations.items()
             if str(operation.get("role_instance") or "") == role.instance_id
             and str(operation.get("status") or "")
             not in TERMINAL_OPERATION_STATUSES
+            and (
+                not (
+                    operation_run_id := str(
+                        operation.get("workflow_run_id")
+                        or operation.get("run_id")
+                        or ""
+                    ).strip()
+                )
+                or run_alias_map.get(operation_run_id, operation_run_id)
+                not in terminal_runs
+            )
         ]
         if active_operations:
             return False, "provider_operation_active", {
@@ -443,6 +532,12 @@ class RoleLifecycleRuntimeMixin:
             return False, "provider_session_identity_unproven", {}
 
         checkpoint_ref = str(heartbeat.get("checkpoint_ref") or "")
+        if not checkpoint_ref:
+            checkpoint_ref = _admitted_operation_checkpoint(
+                operations,
+                heartbeat=heartbeat,
+                instance_id=role.instance_id,
+            )
         workdir = (
             self.state_dir
             / "workdirs"
@@ -451,9 +546,21 @@ class RoleLifecycleRuntimeMixin:
         )
         if workdir.exists():
             dirty_files = capture_git_state(workdir).dirty_files
-            if dirty_files and not checkpoint_ref:
+            managed_dirty_files = _managed_skill_dirty_files(
+                state_dir=self.state_dir,
+                project_root=self.project_root,
+                workdir=workdir,
+                instance_id=role.instance_id,
+                dirty_files=dirty_files,
+            )
+            uncheckpointed_files = [
+                path for path in dirty_files
+                if path not in managed_dirty_files
+            ]
+            if uncheckpointed_files and not checkpoint_ref:
                 return False, "workdir_dirty_without_checkpoint", {
-                    "dirty_files": dirty_files,
+                    "dirty_files": uncheckpointed_files,
+                    "managed_dirty_files": managed_dirty_files,
                 }
         return True, "eligible", {
             "idle_seconds": round(idle_seconds, 3),
@@ -465,6 +572,16 @@ class RoleLifecycleRuntimeMixin:
         """Return backlog work that can mechanically target this role pool."""
         task_ids: list[str] = []
         for task in self.task_store.ready():
+            evidence_contract = getattr(
+                getattr(task, "contract", None),
+                "evidence_contract",
+                {},
+            )
+            if (
+                isinstance(evidence_contract, dict)
+                and evidence_contract.get("workflow_fanout_anchor") is True
+            ):
+                continue
             target = str(task.assigned_to or "").strip()
             if not target:
                 target = str(self._initial_role_for_ready_task(task) or "").strip()
@@ -612,6 +729,83 @@ class RoleLifecycleRuntimeMixin:
             },
             correlation_id=self._current_run_id(),
         ))
+
+
+def _admitted_operation_checkpoint(
+    operations: dict[str, dict[str, Any]],
+    *,
+    heartbeat: dict[str, Any],
+    instance_id: str,
+) -> str:
+    operation_id = str(heartbeat.get("operation_id") or "").strip()
+    operation = operations.get(operation_id) if operation_id else None
+    if operation is None:
+        role_operations = [
+            item
+            for item in operations.values()
+            if str(item.get("role_instance") or "") == instance_id
+        ]
+        operation = role_operations[-1] if role_operations else None
+    if not isinstance(operation, dict):
+        return ""
+    if str(operation.get("role_instance") or "") != instance_id:
+        return ""
+    if str(operation.get("status") or "") != "settled":
+        return ""
+    result_ref = operation.get("admitted_call_result_ref")
+    if not isinstance(result_ref, dict) or not str(result_ref.get("ref") or ""):
+        return ""
+    operation_id = str(operation.get("operation_id") or operation_id)
+    digest = str(result_ref.get("sha256") or result_ref.get("ref") or "")
+    return f"workflow-operation://{operation_id}#{digest}"
+
+
+def _managed_skill_dirty_files(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    workdir: Path,
+    instance_id: str,
+    dirty_files: list[str],
+) -> list[str]:
+    manifest_path = (
+        Path(state_dir)
+        / "workdirs"
+        / instance_id
+        / "runtime"
+        / "skills-manifest.json"
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    if str(manifest.get("instance_id") or "") != instance_id:
+        return []
+    managed_roots: list[str] = []
+    for item in manifest.get("skills") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("materialized_to") or "").strip()
+        if not raw_path:
+            continue
+        materialized_path = Path(raw_path)
+        if not materialized_path.is_absolute():
+            materialized_path = Path(project_root) / materialized_path
+        try:
+            relative = materialized_path.resolve().relative_to(workdir.resolve())
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) < 3 or parts[0] not in {".claude", ".codex"}:
+            continue
+        if parts[1] != "skills":
+            continue
+        managed_roots.append(relative.as_posix().rstrip("/"))
+    return [
+        path
+        for path in dirty_files
+        if any(path == root or path.startswith(root + "/") for root in managed_roots)
+    ]
 
 
 def _epoch_from_value(value: object) -> float | None:

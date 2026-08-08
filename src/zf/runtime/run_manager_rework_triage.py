@@ -335,6 +335,16 @@ def _request_action(
             or payload.get("pdd_id")
             or ""
         ),
+        "flow_kind": str(payload.get("flow_kind") or ""),
+        "workflow_run_id": str(
+            payload.get("workflow_run_id")
+            or payload.get("run_id")
+            or payload.get("trace_id")
+            or ""
+        ),
+        "stage_id": str(payload.get("stage_id") or ""),
+        "pattern_id": str(payload.get("pattern_id") or ""),
+        "request_kind": str(payload.get("request_kind") or ""),
         "role": str(payload.get("role") or ""),
         "fingerprint": fingerprint,
         "failure_class": (

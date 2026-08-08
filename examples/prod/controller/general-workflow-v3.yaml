@@ -1,0 +1,126 @@
+apiVersion: zaofu.dev/v1
+kind: Workflow
+metadata:
+  name: general-workflow/v3
+spec:
+  contractVersion: generic-workflow.v1
+  intent: research
+  template: evidence-synthesis-v1
+  entry: scope
+  completionProfile:
+    id: artifact_delivery
+    requiredArtifacts: [synthesize.report]
+    independentVerify: true
+  tasks:
+    - name: scope
+      operation: agent.read
+      role: general-scoper
+      inputs:
+        - {name: requirement, kind: requirement/spec, from: external.requirement, required: true}
+      outputs:
+        - {name: scope, kind: research/scope}
+    - name: collect-a
+      operation: agent.read
+      dependencies: [scope]
+      role: general-collector-a
+      inputs:
+        - {name: scope, kind: research/scope, from: scope.scope, required: true}
+      outputs:
+        - {name: evidence-a, kind: research/evidence}
+    - name: collect-b
+      operation: agent.read
+      dependencies: [scope]
+      role: general-collector-b
+      inputs:
+        - {name: scope, kind: research/scope, from: scope.scope, required: true}
+      outputs:
+        - {name: evidence-b, kind: research/evidence}
+    - name: synthesize
+      operation: agent.synthesize
+      dependencies: [collect-a, collect-b]
+      role: general-synthesizer
+      inputs:
+        - {name: evidence-a, kind: research/evidence, from: collect-a.evidence-a, required: true}
+        - {name: evidence-b, kind: research/evidence, from: collect-b.evidence-b, required: true}
+      outputs:
+        - {name: report, kind: report/markdown}
+    - name: verify
+      operation: agent.verify
+      dependencies: [synthesize]
+      role: general-verifier
+      inputs:
+        - {name: report, kind: report/markdown, from: synthesize.report, required: true}
+      outputs:
+        - {name: verification, kind: verification/verdict}
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata:
+  name: general-workflow-v3
+  zaofu:
+    catalog:
+      id: general-workflow-v3-codex
+      label: General Workflow v3
+      description: Safe generic evidence synthesis with independent verification.
+      intent: research
+      backend: codex
+      roles: 6
+      recommended_for: [research, review, general]
+      preferred: true
+      order: 34
+spec:
+  profile_sources: [common/profiles.yaml]
+  uses: [prod-runtime/v1]
+  version: "1.0"
+  project:
+    name: general-workflow-v3
+  orchestrator:
+    backend: codex
+    wake_min_interval_s: 5
+  roles:
+    - name: orchestrator
+      instance_id: orchestrator
+      role_kind: reader
+      backend: codex
+      model_reasoning_effort: high
+      permission_mode: bypass
+      transport: tmux
+      lifecycle: {mode: resident}
+      execution: &bounded-execution
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
+      publishes: [orchestrator.rework.triage.recorded]
+      skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
+    - &general-reader
+      name: general-scoper
+      instance_id: general-scoper
+      role_kind: reader
+      backend: codex
+      model_reasoning_effort: high
+      permission_mode: bypass
+      transport: tmux
+      lifecycle: {mode: on_demand}
+      execution: *bounded-execution
+      skills: [source-verification]
+    - <<: *general-reader
+      name: general-collector-a
+      instance_id: general-collector-a
+    - <<: *general-reader
+      name: general-collector-b
+      instance_id: general-collector-b
+    - <<: *general-reader
+      name: general-synthesizer
+      instance_id: general-synthesizer
+      skills: [zf-project-suggest]
+    - <<: *general-reader
+      name: general-verifier
+      instance_id: general-verifier
+      skills: [zf-yoke-test-evaluator-role-context]
+  workflow:
+    orchestration:
+      mode: exception_advisor

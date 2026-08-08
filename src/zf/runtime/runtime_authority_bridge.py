@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.transport import DispatchContext
 
 
@@ -47,6 +47,7 @@ class RuntimeAuthorityMixin:
         except Exception:
             task = None
         from zf.runtime.run_admission import (
+            RunDispatchBlocked,
             record_run_dispatch_blocked,
             run_dispatch_block_reason,
         )
@@ -62,7 +63,11 @@ class RuntimeAuthorityMixin:
             reason=blocker,
         )
         self._rollback_inflight_dispatch(context)
-        raise RuntimeError(f"dispatch to {role_name} blocked: {blocker}")
+        raise RunDispatchBlocked(
+            role_name=role_name,
+            reason=blocker,
+            run_id=run_id,
+        )
 
     def _deliver_transport_task(
         self,
@@ -106,13 +111,13 @@ class RuntimeAuthorityMixin:
         self,
         event: ZfEvent,
         task: Any,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         from zf.runtime.task_attempt_runtime import validate_task_attempt_result
 
         reason = validate_task_attempt_result(self, event, task=task)
         if not reason:
             return None
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=(
@@ -124,7 +129,7 @@ class RuntimeAuthorityMixin:
         self,
         event: ZfEvent,
         task_id: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(task_id)
         if task is None:
             return None
@@ -134,7 +139,7 @@ class RuntimeAuthorityMixin:
         self,
         event: ZfEvent,
         task_id: str,
-        decisions: list[OrchestratorDecision],
+        decisions: list[WorkflowRuntimeDecision],
     ) -> bool:
         rejected = self._task_attempt_rejection_for_id(event, task_id)
         if rejected is None:
@@ -159,13 +164,13 @@ class RuntimeAuthorityMixin:
     def _run_lifecycle_rejection(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         from zf.runtime.run_admission import reject_late_run_result
 
         reason = reject_late_run_result(self, event)
         if not reason:
             return None
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=f"{event.type} rejected: {reason}",
@@ -191,7 +196,7 @@ class RuntimeAuthorityMixin:
         task_id: str,
         pattern_id: str,
         entry_trigger: str,
-    ) -> OrchestratorDecision:
+    ) -> WorkflowRuntimeDecision:
         """Admit a configured light flow before publishing its entry."""
 
         from zf.runtime.light_flow import light_flow_metadata
@@ -227,7 +232,7 @@ class RuntimeAuthorityMixin:
                 task_id=task_id,
                 pattern_id=pattern_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason=f"light workflow invoke rejected: {rejection}",
@@ -238,7 +243,7 @@ class RuntimeAuthorityMixin:
         admission = admit_workflow_invoke(self, event)
         if admission.status != "admitted":
             action = "observe" if admission.status in {"queued", "paused"} else "block"
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action=action,
                 task_id=task_id,
                 reason=(
@@ -259,7 +264,7 @@ class RuntimeAuthorityMixin:
         )
         if existing_accept is not None:
             self._activate_workflow_task(existing_accept)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="observe",
                 task_id=task_id,
                 reason="light workflow invoke replayed without duplicate entry",
@@ -305,7 +310,7 @@ class RuntimeAuthorityMixin:
             causation_id=accepted.id,
             correlation_id=event.correlation_id,
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="workflow_invoke",
             task_id=task_id,
             reason=f"light workflow invoke accepted: {entry_trigger}",
@@ -360,6 +365,11 @@ class RuntimeAuthorityMixin:
             briefing_path=briefing_path,
             trace_id=trace_id,
             task_id=_identity_value(identity_sources, "task_id") or None,
+            parent_task_id=_identity_value(
+                identity_sources,
+                "parent_task_id",
+            )
+            or None,
             run_id=_identity_value(
                 identity_sources,
                 "workflow_run_id",

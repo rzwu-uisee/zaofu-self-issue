@@ -15,6 +15,24 @@ from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
 from zf.runtime.injection import infer_completion_protocol
+from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
+from zf.runtime.run_scope import event_run_id, run_aliases
+
+
+def _terminal_run_scope(
+    events: list[ZfEvent],
+) -> tuple[dict[str, str], set[str]]:
+    aliases = run_aliases(events)
+    known_runs = set(aliases.values())
+    singleton = next(iter(known_runs)) if len(known_runs) == 1 else ""
+    terminal_runs: set[str] = set()
+    for event in events:
+        if event.type not in RUN_TERMINAL_EVENT_TYPES:
+            continue
+        run_id = event_run_id(event, aliases=aliases) or singleton
+        if run_id:
+            terminal_runs.add(run_id)
+    return aliases, terminal_runs
 
 
 class LifecycleEvidenceQueriesMixin:
@@ -29,9 +47,30 @@ class LifecycleEvidenceQueriesMixin:
         )
 
         active = active_flow_role_instance_ids(self.config, read_all())
+        try:
+            from zf.core.state.role_sessions import RoleSessionRegistry
+
+            lifecycle_meta = RoleSessionRegistry(
+                self.state_dir / "role_sessions.yaml",
+                project_root=str(self.project_root),
+            ).instance_meta()
+        except Exception:
+            lifecycle_meta = {}
         return [
             role for role in roles
             if role.instance_id in active
+            and not (
+                str(getattr(getattr(role, "lifecycle", None), "mode", "") or "")
+                == "on_demand"
+                and str(
+                    lifecycle_meta.get(role.instance_id, {}).get(
+                        "lifecycle_state",
+                        "dormant",
+                    )
+                    or "dormant"
+                )
+                in {"dormant", "suspended"}
+            )
         ]
 
     def _fanout_child_briefing_path(
@@ -129,6 +168,7 @@ class LifecycleEvidenceQueriesMixin:
             return ""
         if events is None:
             events = self._fanout_lifecycle_events()
+        run_alias_map, terminal_runs = _terminal_run_scope(events)
         terminal_fanouts: set[str] = set()
         stale_child_runs: set[tuple[str, str, str]] = set()
         for event in reversed(events):
@@ -165,7 +205,8 @@ class LifecycleEvidenceQueriesMixin:
             if event.type == "fanout.child.dispatched":
                 key = self._fanout_child_key(payload)
                 if (
-                    key in stale_child_runs
+                    event_run_id(event, aliases=run_alias_map) in terminal_runs
+                    or key in stale_child_runs
                     or (key[0], key[1], "") in stale_child_runs
                 ):
                     return "terminal"
@@ -184,6 +225,7 @@ class LifecycleEvidenceQueriesMixin:
         terminal event arrives.
         """
         events = self._fanout_lifecycle_events()
+        run_alias_map, terminal_runs = _terminal_run_scope(events)
         terminal_children: set[tuple[str, str, str]] = set()
         terminal_fanouts: set[str] = set()
         for event in reversed(events):
@@ -224,6 +266,8 @@ class LifecycleEvidenceQueriesMixin:
                 continue
             if str(payload.get("role_instance") or "") != instance_id:
                 continue
+            if event_run_id(event, aliases=run_alias_map) in terminal_runs:
+                continue
             key = self._fanout_child_key(payload)
             if key[0] in terminal_fanouts:
                 continue
@@ -250,6 +294,10 @@ class LifecycleEvidenceQueriesMixin:
 
     def _fanout_lifecycle_events(self) -> list[ZfEvent]:
         event_types = {
+            "run.started",
+            "run.goal.started",
+            "workflow.invoke.requested",
+            *RUN_TERMINAL_EVENT_TYPES,
             "fanout.child.dispatched",
             "fanout.child.completed",
             "fanout.child.failed",

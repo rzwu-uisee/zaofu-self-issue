@@ -655,6 +655,74 @@ def test_projection_keeps_wrong_rework_action_pending_for_lane_task(
     )
 
 
+def test_projection_does_not_correct_task_pipeline_verify_assignment(
+    tmp_path: Path,
+) -> None:
+    config = ZfConfig(
+        roles=[
+            RoleConfig(name="dev-lane-0", backend="mock", role_kind="writer"),
+            RoleConfig(name="verify-lane-0", backend="mock", role_kind="reader"),
+        ],
+        workflow=WorkflowConfig(
+            affinity_lanes={
+                "issue-slot": WorkflowAffinityLaneProfileConfig(
+                    affinity_key="affinity_tag",
+                    lanes=[
+                        WorkflowAffinityLaneConfig(
+                            id="lane0",
+                            impl="dev-lane-0",
+                            verify="verify-lane-0",
+                        ),
+                    ],
+                ),
+            },
+            flow_metadata={
+                "task_pipeline": {
+                    "mode": "blocking",
+                    "profile_id": "issue-flow-v4-task-pipeline",
+                },
+            },
+        ),
+    )
+    task = Task(
+        id="ISSUE-1",
+        title="issue",
+        status="in_progress",
+        assigned_to="verify-lane-0",
+        contract=TaskContract(
+            owner_role="dev-lane-0",
+            evidence_contract={"affinity_tag": "issue-1"},
+        ),
+    )
+    generation = ZfEvent(
+        id="evt-generation",
+        type="task.pipeline.generation.admitted",
+        payload={
+            "schema_version": "task-pipeline-generation.v1",
+            "generation_id": "generation-1",
+            "task_ids": [task.id],
+        },
+    )
+    impl_done = ZfEvent(
+        id="evt-impl-done",
+        type="dev.build.done",
+        task_id=task.id,
+        payload={"task_pipeline_stage": "impl"},
+    )
+
+    projection = build_workflow_resume_projection(
+        tmp_path / ".zf",
+        config,
+        events=[generation, impl_done],
+        tasks=[task],
+    )
+
+    assert not any(
+        checkpoint["safe_resume_action"] == "needs_assignment_correction"
+        for checkpoint in projection["checkpoints"]
+    )
+
+
 def test_apply_assignment_correction_maps_invalid_lane_assignee(
     tmp_path: Path,
 ) -> None:

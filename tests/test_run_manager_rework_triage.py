@@ -885,6 +885,9 @@ def test_run_manager_requests_and_applies_precise_rework_advice(
             "failure_fingerprint": "missing-expiry-test",
             "failure_count": 3,
             "role": "dev",
+            "flow_kind": "issue",
+            "workflow_run_id": "run-issue-1",
+            "stage_id": "issue-verify",
             "failure_event_ids": ["failure-1", "failure-2", "failure-3"],
             "semantic_triage_required": True,
             "last_reason": "missing expiry test",
@@ -898,6 +901,8 @@ def test_run_manager_requests_and_applies_precise_rework_advice(
     )
     assert projection["pending_actions"][0]["action"] == "orchestrator-rework-triage"
     assert projection["pending_actions"][0]["policy_decision"]["decision"] == "auto_decide"
+    assert projection["pending_actions"][0]["flow_kind"] == "issue"
+    assert projection["pending_actions"][0]["workflow_run_id"] == "run-issue-1"
 
     first = run_manager_tick(
         state_dir=state_dir,
@@ -910,6 +915,8 @@ def test_run_manager_requests_and_applies_precise_rework_advice(
     request = next(event for event in log.read_all() if event.type == TRIAGE_REQUESTED)
     assert request.actor == "run-manager"
     assert request.payload["apply_policy"] == "proposal_only"
+    assert request.payload["flow_kind"] == "issue"
+    assert request.payload["stage_id"] == "issue-verify"
 
     log.append(ZfEvent(
         type=TRIAGE_RECORDED,

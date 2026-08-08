@@ -74,6 +74,11 @@ _NON_SEMANTIC_FAILURE_CLASSES = frozenset({
     "transport_delivery",
     "verifier_execution_failure",
 })
+_PLAN_PACKAGE_IDENTITY_KEYS = (
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+)
 
 
 def _payload_target_ref(payload: dict[str, Any]) -> str:
@@ -109,6 +114,12 @@ def _event_run_id(event: ZfEvent) -> str:
         or event.correlation_id
         or ""
     ).strip()
+
+
+def _same_run(event: ZfEvent, run_id: str) -> bool:
+    """Keep stage retry accounting inside one canonical workflow Run."""
+
+    return not run_id or _event_run_id(event) == run_id
 
 
 def _stage_flow_kind(stage: Any, trigger_type: str) -> str:
@@ -233,9 +244,10 @@ def superseding_candidate_ready(
     return None
 
 
-def reader_stage_failure_events(config: Any) -> dict[str, Any]:
-    """failure_event → stage 映射(仅 fanout_reader,配置驱动零硬编码)。"""
-    out: dict[str, Any] = {}
+def reader_stage_failure_candidates(config: Any) -> dict[str, list[Any]]:
+    """Return every reader stage that may publish each failure event."""
+
+    out: dict[str, list[Any]] = {}
     for stage in getattr(getattr(config, "workflow", None), "stages", []) or []:
         if str(getattr(stage, "topology", "") or "") != "fanout_reader":
             continue
@@ -253,9 +265,78 @@ def reader_stage_failure_events(config: Any) -> dict[str, Any]:
             or getattr(aggregate, "failure_event", "")
             or ""
         )
-        if failure and failure not in out:
-            out[failure] = stage
+        if failure:
+            out.setdefault(failure, []).append(stage)
     return out
+
+
+def reader_stage_failure_events(config: Any) -> dict[str, Any]:
+    """Return the event membership map kept for legacy callers.
+
+    Selection must use :func:`reader_stage_for_failure`; a multi-kind config
+    may intentionally reuse one canonical event across flow-scoped stages.
+    """
+
+    return {
+        event_type: stages[0]
+        for event_type, stages in reader_stage_failure_candidates(config).items()
+        if stages
+    }
+
+
+def reader_stage_for_failure(
+    config: Any,
+    events: list[ZfEvent],
+    failure_event: ZfEvent,
+) -> tuple[Any | None, str]:
+    """Resolve one stage by durable stage/run identity, never first-wins."""
+
+    candidates = reader_stage_failure_candidates(config).get(
+        failure_event.type,
+        [],
+    )
+    if not candidates:
+        return None, "no_reader_stage_for_failure"
+
+    payload = (
+        failure_event.payload if isinstance(failure_event.payload, dict) else {}
+    )
+    stage_id = str(payload.get("stage_id") or "").strip()
+    if stage_id:
+        matching_stage_ids = [
+            stage
+            for stage in candidates
+            if str(getattr(stage, "id", "") or "").strip() == stage_id
+        ]
+        if len(matching_stage_ids) == 1:
+            return matching_stage_ids[0], "stage_id"
+        return None, "failure_stage_id_mismatch"
+
+    canonical_flow_kind = str(payload.get("flow_kind") or "").strip().lower()
+    if not canonical_flow_kind:
+        canonical_flow_kind = _canonical_run_flow_kind(events, failure_event)
+    if canonical_flow_kind:
+        matching_flow_kinds = [
+            stage
+            for stage in candidates
+            if (
+                str(getattr(stage, "flow_kind", "") or "").strip().lower()
+                or _stage_flow_kind(
+                    stage,
+                    str(getattr(stage, "trigger", "") or ""),
+                )
+            )
+            == canonical_flow_kind
+        ]
+        if len(matching_flow_kinds) == 1:
+            return matching_flow_kinds[0], "flow_kind"
+        if not matching_flow_kinds:
+            return None, "cross_flow_failure"
+        return None, "ambiguous_reader_stage_for_failure"
+
+    if len(candidates) == 1:
+        return candidates[0], "single_candidate"
+    return None, "ambiguous_reader_stage_for_failure"
 
 
 def reader_stage_lineage_payload(
@@ -304,12 +385,13 @@ def plan_reader_stage_replan(
     - cap:同类 failure 达 STAGE_REPLAN_CAP 次后不再 replan(说明含
       "cap_exhausted",调用方据此升级 human)。
     """
-    stage = reader_stage_failure_events(config).get(failure_event.type)
+    stage, selection = reader_stage_for_failure(config, events, failure_event)
     if stage is None:
-        return None, "no_reader_stage_for_failure"
+        return None, selection
     trigger_type = str(getattr(stage, "trigger", "") or "")
     if not trigger_type:
         return None, "stage_has_no_trigger"
+    failure_run_id = _event_run_id(failure_event)
     stage_flow_kind = _stage_flow_kind(stage, trigger_type)
     canonical_flow_kind = _canonical_run_flow_kind(events, failure_event)
     if (
@@ -322,6 +404,7 @@ def plan_reader_stage_replan(
     for event in events:
         if (
             event.type == trigger_type
+            and _same_run(event, failure_run_id)
             and isinstance(event.payload, dict)
             and _same_replan_scope(event, failure_event)
         ):
@@ -388,6 +471,7 @@ def plan_reader_stage_replan(
         for index, event in enumerate(events):
             if (
                 event.type == success_event
+                and _same_run(event, failure_run_id)
                 and _same_replan_scope(event, failure_event)
             ):
                 last_success_index = index
@@ -398,13 +482,25 @@ def plan_reader_stage_replan(
             failure_index = index
         if index <= last_success_index:
             continue
-        if event.type != failure_event.type:
+        if (
+            event.type != failure_event.type
+            or not _same_run(event, failure_run_id)
+        ):
             continue
         if not _same_replan_scope(event, failure_event):
             continue
         if event.id == failure_event.id:
             continue
         prior_failures += 1
+    # A reader child can emit its configured success_event before downstream
+    # writer admission rejects the same Plan candidate.  Preserve the durable
+    # rework lineage carried by the latest trigger so that this intermediate
+    # success cannot reset attempt 2 back to attempt 1.
+    try:
+        lineage_attempt = int(origin_payload.get("rework_attempt") or 0)
+    except (TypeError, ValueError):
+        lineage_attempt = 0
+    prior_failures = max(prior_failures, lineage_attempt)
     # ZF-E2E-PRDCTL-P2-7-2:trigger 资格判定——早于最近一次 stage 成功的
     # 失败事件是陈旧的,不得复活 replan(深水轮 12:34 复活 46 分钟前的
     # 旧失败实证;cap 计数窗已按成功翻篇,但 trigger 侧此前不设防)。
@@ -424,15 +520,38 @@ def plan_reader_stage_replan(
     )
     if not target_ref:
         for event in reversed(events):
-            if not isinstance(event.payload, dict):
+            if (
+                not _same_run(event, failure_run_id)
+                or not isinstance(event.payload, dict)
+            ):
                 continue
             if not _same_replan_scope(event, failure_event):
                 continue
             target_ref = _payload_target_ref(event.payload)
             if target_ref:
                 break
-    findings = failure_payload.get("findings")
-    if not isinstance(findings, list) or not findings:
+    findings = [
+        dict(item)
+        for item in failure_payload.get("findings", []) or []
+        if isinstance(item, dict)
+    ]
+    diagnostics_ref = str(failure_payload.get("diagnostics_ref") or "").strip()
+    diagnostic_reason = str(failure_payload.get("reason") or "").strip()
+    if diagnostics_ref and diagnostic_reason and not any(
+        str(item.get("message") or "") == diagnostic_reason
+        for item in findings
+    ):
+        findings.append({
+            "severity": "high",
+            "category": str(
+                "plan_compile_gate"
+                if failure_payload.get("plan_compile_gate") == "failed"
+                else "artifact_gate"
+            ),
+            "path": diagnostics_ref,
+            "message": diagnostic_reason,
+        })
+    if not findings:
         findings = [{
             "severity": "high",
             "message": str(
@@ -449,16 +568,43 @@ def plan_reader_stage_replan(
         "workflow_input_manifest_ref",
         "task_map_ref",
         "task_map_digest",
+        "diagnostics_ref",
+        "plan_compile_gate",
+        "artifact_gate",
+        *_PLAN_PACKAGE_IDENTITY_KEYS,
         "plan_admission_incident_id",
         "canonical_failure_event_id",
         "artifact_refs",
         "evidence_refs",
+        "previous_plan_candidate_refs",
+        "owner_confirmation_ref",
+        "owner_confirmation",
+        "owner_decision_items",
+        "owner_decision_resolution",
     ):
         value = failure_payload.get(key)
         if value not in (None, "", [], {}) and (
             key in _CANONICAL_INPUT_KEYS or not origin_payload.get(key)
         ):
             origin_payload[key] = value
+    source_event_ids = {
+        str(failure_payload.get("trigger_event_id") or "").strip(),
+        str(failure_event.causation_id or "").strip(),
+    }
+    source_event_ids.discard("")
+    for source_event in reversed(events):
+        if source_event.id not in source_event_ids:
+            continue
+        source_payload = (
+            source_event.payload
+            if isinstance(source_event.payload, dict)
+            else {}
+        )
+        for key in _PLAN_PACKAGE_IDENTITY_KEYS:
+            value = source_payload.get(key)
+            if value not in (None, "") and not origin_payload.get(key):
+                origin_payload[key] = value
+        break
     if target_ref:
         origin_payload.setdefault("target_ref", target_ref)
         if trigger_type.startswith("issue."):
@@ -476,6 +622,11 @@ def plan_reader_stage_replan(
             f"{failure_event.type}"
         ),
     })
+    attempt_domain = str(
+        getattr(stage, "attempt_domain", "") or ""
+    ).strip()
+    if attempt_domain:
+        origin_payload["attempt_domain"] = attempt_domain
     return ZfEvent(
         type=trigger_type,
         actor="zf-cli",
@@ -488,7 +639,9 @@ def plan_reader_stage_replan(
 __all__ = [
     "STAGE_REPLAN_CAP",
     "plan_reader_stage_replan",
+    "reader_stage_failure_candidates",
     "reader_stage_lineage_payload",
+    "reader_stage_for_failure",
     "rework_source_from_payload",
     "reader_stage_failure_events",
     "superseding_candidate_ready",

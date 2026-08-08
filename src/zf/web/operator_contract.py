@@ -5,6 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from zf.runtime.task_workflow_plans import TASK_WORKFLOW_PARAMETER_KEYS
+
+
+TASK_WORKFLOW_PARAMETER_KEYS_TEXT = ", ".join(
+    sorted(TASK_WORKFLOW_PARAMETER_KEYS)
+)
+
 
 KANBAN_AGENT_ALLOWED_ACTIONS = (
     "chat-orchestrator",
@@ -384,7 +391,10 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "exactly one compact fenced json block containing plan_request. A single "
     "question may use header, id, question, options, allow_other, and reason; "
     "multiple pure clarification questions use a questions array with one to "
-    "three entries. Each question has two or three mutually exclusive options "
+    "three entries. Set subject_type to exactly one of channel_setup, "
+    "clarification, task_create, or task_workflow. Pure business, research, "
+    "issue, or refactor questions always use clarification; never invent a "
+    "family-specific subject_type. Each question has two or three mutually exclusive options "
     "with exactly one recommended option first. Multi-question Plans cannot bind "
     "an action. Never request secrets, never combine "
     "plan_request with action_proposal. Ordinary Plan requests are clarification, "
@@ -392,11 +402,15 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "exception: set submit_action=channel-create-and-start, include a clean "
     "discussion_seed containing only the business requirement, "
     "submit_label='Create & start', allow_other=false, and give every option "
-    "an exact submit_payload containing template_id plus optional name/overrides. "
-    "Templates default to conversation, which wakes one facilitator and does not "
-    "fan out all listed members. Only when the operator explicitly asks for "
-    "independent multi-role review, set overrides.discussion_mode=multi_lens; "
-    "use clarification for an owner-question-led pass. "
+    "a label, description, and exact option-level submit_payload containing "
+    "template_id plus optional name/overrides/mode. Include a non-empty top-level "
+    "question. Do not wrap Channel options in effect or put submit_payload under "
+    "effect. Templates default to conversation, which wakes one facilitator and "
+    "does not fan out all listed members. Use mode=multi_lens only inside "
+    "submit_payload when the operator "
+    "explicitly requests independent multi-role input or parallel review, never "
+    "as effect.mode or submit_mode; otherwise preserve the template mode; use "
+    "clarification for an owner-question-led pass. "
     "The selected option atomically creates the Channel and members, posts the "
     "original requirement, and starts the discussion without a second proposal. "
     "When turn context contains plan_discussion, answer the visible user message "
@@ -411,19 +425,31 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     '{"action_proposal": {"action": "create-task", "intent": {'
     '"decision": "propose_action", "source_quote": "an exact verbatim user '
     'substring supporting the proposal"}, "payload": {"title": ..., '
-    '"contract": {"behavior": ..., "verification": ..., "acceptance": ...}}, '
+    '"contract": {"behavior": ..., "verification": ..., '
+    '"verification_tiers": ["runtime"], "acceptance": ..., '
+    '"spec_skip_reason": ...}}, '
     '"reason": ...}}. '
     "For tracked execution, add payload.workflow_plan with a task-specific "
     "question and two or three options selected only from the active workflow "
     "route catalog. Executable options contain route_id, label, description, "
     "recommended, and optional parameters; a no-run option uses mode=defer. "
     "The runtime creates the Task before binding and showing that Plan. Task "
-    "approval never starts a Workflow. Do not include Channel creation as a "
+    "approval never starts a Workflow. Every create-task proposal must set "
+    "payload.execution_mode=workflow by default. Use execution_mode=direct only "
+    "when the operator explicitly requests immediate legacy/direct dispatch. For "
+    "tracking without execution, keep execution_mode=workflow and omit "
+    "workflow_plan. Do not include Channel creation as a "
     "workflow option; Channel is an independent collaboration surface. "
     "contract.behavior and contract.verification must each be a single string "
     "(join multiple checks with newlines, not a JSON list); contract.scope, if "
     "present, must contain only repo-relative path globs like src/** — put any "
-    "non-path scope prose in the behavior text instead. For product ideas "
+    "non-path scope prose in the behavior text instead. verification must be "
+    "an executable shell command from the repository root with no prose prefix. "
+    "For workflow-managed Tasks, set contract.verification_tiers to one or more "
+    "of static, runtime, e2e, or manual_evidence. When scope or affected_files "
+    "changes product code, preserve an available product/spec/source ref; if no "
+    "upstream artifact exists, set a non-empty contract.spec_skip_reason that "
+    "explains why the bounded Task contract is the source authority. For product ideas "
     "prefer action=idea-to-product with payload.objective and the same intent "
     "object. Proposal JSON must be the final reply envelope, not an example "
     "embedded in prose. The operator must "
@@ -442,14 +468,36 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "to title, objective, acceptance, acceptance_criteria, scope, "
     "explicit_non_goals, skills_required, priority, and optional task_id; "
     "priority must be an integer from 1 through 5. Put mode, action, and "
-    "payload inside the option's effect object. "
+    "payload inside the option's effect object. Copy the selected canonical "
+    "item's artifact_ref and artifact_digest into top-level plan_request fields "
+    "channel_prd_ref and channel_prd_digest. Also set top-level "
+    'channel_prd_intent={"decision":"bind_channel_prd","source_quote":'
+    '"an exact verbatim substring from the current user requirement chain '
+    'explicitly requesting this PRD handoff"}. Selectors and '
+    "channel_prd_intent must appear together. Never add them for an unrelated "
+    "Issue, Refactor, General, or Research Task merely because a canonical PRD "
+    "is available. "
     "Do not nest contract or channel_authority; runtime binds the exact "
     "authority. Include a second no-action alternative with "
     "effect.mode=continue, not defer, and do not combine this Plan with "
-    "action_proposal. For an existing Task, return a task_workflow Plan whose "
+    "action_proposal. task_create Plan is reserved for this authorized Channel "
+    "PRD handoff. The flat scope must cover every mandatory acceptance "
+    "criterion's implementation plus test, runner/config, and evidence-producer "
+    "paths, including planned paths that do not exist yet. Do not bind browser "
+    "acceptance only to unit/build files or omit Playwright/evidence paths. For "
+    "an unrelated direct Task without an artifact, never use "
+    "subject_type=task_create; emit a create-task action_proposal instead. For "
+    "an existing Task, return a task_workflow Plan whose "
     "executable options use mode=propose, action=workflow-start, and exact "
     "task_id, route_id, objective, config_digest, and parameters. The selected "
     "option is bound to the current task_contract_digest and becomes a separate "
+    "Approve proposal. Put the question and options directly in top-level "
+    "plan_request; do not add payload.workflow_plan or plan_request.payload. "
+    "A no-action alternative uses effect.mode=continue with no action or payload, "
+    "never defer. parameters may contain only executable adapter keys from this "
+    f"list: {TASK_WORKFLOW_PARAMETER_KEYS_TEXT}. Keep business requirements, "
+    "non-goals, verification prose, and output descriptions in the Task contract "
+    "or objective instead of inventing parameter keys. The selected option becomes a separate "
     "Approve proposal. workflow-invoke(pattern_id) is "
     "a compatibility adapter and must not be the normal Kanban product output. "
     "These are proposals, not completed effects, until owner approval succeeds."

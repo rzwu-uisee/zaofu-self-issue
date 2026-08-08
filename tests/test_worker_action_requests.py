@@ -75,6 +75,56 @@ def test_worker_respawn_request_replay_is_applied_once(tmp_path: Path):
     assert [event.type for event in events].count("worker.respawn.completed") == 1
 
 
+def test_worker_respawn_requeues_orchestrator_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    log = EventLog(state_dir / "events.jsonl")
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[RoleConfig(
+            name="orchestrator",
+            backend="mock",
+            instance_id="orchestrator",
+        )],
+    )
+    orch = Orchestrator(state_dir, config, _RecordingTransport())  # type: ignore[arg-type]
+    request = ZfEvent(
+        id="req-oa-respawn",
+        type="worker.respawn.requested",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={
+            "instance_id": "orchestrator",
+            "source": "orchestrator_agent_checkpoint_dispatch_recovery",
+        },
+    )
+    log.append(request)
+    orch._respawn_instance = lambda role: OrchestratorDecision(  # type: ignore[method-assign]
+        action="respawn", role=role.instance_id, reason="resumed",
+    )
+    from zf.runtime import orchestrator_agent_recovery
+
+    monkeypatch.setattr(
+        orchestrator_agent_recovery,
+        "requeue_orchestrator_agent_checkpoint_after_respawn",
+        lambda runtime, event, *, instance_id: ZfEvent(
+            type="orchestrator.semantic.checkpoint.requested"
+        ),
+    )
+
+    orch.run_once(events=[])
+
+    completed = next(
+        event for event in log.read_all()
+        if event.type == "worker.respawn.completed"
+    )
+    assert completed.payload["orchestrator_checkpoint_requeued"] is True
+
+
 def test_worker_respawn_request_completed_marker_is_not_rebuilt(tmp_path: Path):
     state_dir, log, _orch = _state(tmp_path)
     req = _request()

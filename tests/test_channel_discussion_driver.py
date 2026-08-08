@@ -539,25 +539,143 @@ def test_consensus_blocked_reopens_phase2(tmp_path: Path) -> None:
     assert len(opened) == 1
 
 
+def test_late_consensus_blocker_opens_while_phase2_is_already_active(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    _consensus(
+        writer,
+        "proposed",
+        "pm-1",
+        artifact_ref=".zf/channel-artifacts/clarified.md",
+        proposed_by="pm-1",
+    )
+    _consensus(
+        writer,
+        "blocked",
+        "critic-1",
+        member_id="critic-1",
+        blocker_question_id="q-first",
+        blocker_question="first blocker?",
+    )
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert project_channel(state_dir, CH)["discussions"]["main"]["state"] == (
+        "phase2_relay"
+    )
+
+    _consensus(
+        writer,
+        "blocked",
+        "arch-1",
+        member_id="arch-1",
+        blocker_question_id="q-late",
+        blocker_question="late independent blocker?",
+    )
+    emitted = advance_discussion(
+        state_dir,
+        writer,
+        channel_id=CH,
+        thread_id="main",
+    )
+
+    assert emitted == ["channel.question.opened"]
+    questions = {
+        question["question_id"]: question
+        for question in project_channel(state_dir, CH)["open_questions"]
+    }
+    assert questions["q-first"]["status"] == "open"
+    assert questions["q-late"]["status"] == "open"
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    opened = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.question.opened"
+        and event.payload.get("question_id") == "q-late"
+    ]
+    assert len(opened) == 1
+
+
 def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:
     state_dir, writer = _run_to_phase3(tmp_path)
-    _consensus(writer, "proposed", "pm-1",
-               artifact_ref=".zf/channel-artifacts/clarified.md", proposed_by="pm-1")
+    artifact_ref = "channels/ch-disc/prd/r3.json"
+    artifact_digest = "canonical-r3-digest"
+    readiness_ref = "channels/ch-disc/prd/r3-readiness.json"
+    readiness_digest = "readiness-r3-digest"
+    _consensus(
+        writer,
+        "proposed",
+        "pm-1",
+        artifact_ref=artifact_ref,
+        artifact_digest=artifact_digest,
+        prd_ref=artifact_ref,
+        prd_digest=artifact_digest,
+        prd_revision=3,
+        readiness_ref=readiness_ref,
+        readiness_digest=readiness_digest,
+        readiness_verdict="needs_multi_lens",
+        implementation_start=False,
+        conclusion_ref="channels/ch-disc/conclusions/r3.json",
+        conclusion_digest="conclusion-r3-digest",
+        source_refs=["event:requirement"],
+        product_mode="multi_lens",
+        proposed_by="pm-1",
+    )
     for member in ("pm-1", "arch-1", "critic-1"):
         _consensus(writer, "signed", member, member_id=member,
-                   artifact_ref=".zf/channel-artifacts/clarified.md")
+                   artifact_ref=artifact_ref)
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     assert "channel.consensus.reached" not in _types(state_dir)
 
-    _consensus(writer, "signed", "operator", member_id="operator",
-               artifact_ref=".zf/channel-artifacts/clarified.md")
+    _consensus(
+        writer,
+        "signed",
+        "operator",
+        member_id="operator",
+        artifact_ref=artifact_ref,
+        artifact_digest=artifact_digest,
+        prd_revision=3,
+        readiness_ref=readiness_ref,
+        readiness_digest=readiness_digest,
+        risk_accepted=True,
+    )
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
-    types = _types(state_dir)
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    types = [event.type for event in events]
     assert "channel.consensus.reached" in types
     assert "channel.discussion.closed" in types
+    reached = next(
+        event for event in events if event.type == "channel.consensus.reached"
+    )
+    assert reached.payload == {
+        "channel_id": CH,
+        "thread_id": "main",
+        "artifact_ref": artifact_ref,
+        "artifact_digest": artifact_digest,
+        "prd_ref": artifact_ref,
+        "prd_digest": artifact_digest,
+        "prd_revision": 3,
+        "readiness_ref": readiness_ref,
+        "readiness_digest": readiness_digest,
+        "readiness_verdict": "needs_multi_lens",
+        "implementation_start": False,
+        "conclusion_ref": "channels/ch-disc/conclusions/r3.json",
+        "conclusion_digest": "conclusion-r3-digest",
+        "confirmed_by": "operator",
+        "risk_accepted": True,
+        "signed_by": ["arch-1", "critic-1", "pm-1"],
+        "product_mode": "multi_lens",
+        "source_refs": ["event:requirement"],
+        "source": "runtime",
+    }
     detail = project_channel(state_dir, CH)
     assert detail["discussions"]["main"]["state"] == "idle"
     assert detail["discussions"]["main"]["last_outcome"] == "consensus"
+    assert detail["consensus"]["main"]["risk_accepted"] is True
+    assert (
+        detail["consensus"]["main"]["confirmed_readiness_digest"]
+        == readiness_digest
+    )
 
 
 def test_all_mention_without_roster_does_not_start(tmp_path: Path) -> None:
@@ -646,6 +764,41 @@ def test_phase1_deadline_quorum_degrades_to_phase2(tmp_path: Path) -> None:
     detail = project_channel(state_dir, CH)
     assert detail["discussions"]["main"]["state"] == "idle"
     assert detail["discussions"]["main"]["last_outcome"] == "stalled"
+
+
+def test_phase2_convergence_wins_over_elapsed_deadline(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase2(tmp_path)
+    _set_mode(
+        writer,
+        "fanout_then_synthesis",
+        max_rounds=50,
+        phase_deadline_seconds={"phase2_relay": 1},
+    )
+    _open_question(writer, "q-owner")
+    _resolve(
+        writer,
+        "q-owner",
+        resolution="answered",
+        actor="operator",
+    )
+    for member in ("pm-1", "arch-1", "critic-1"):
+        _freeze(writer, member)
+
+    emitted = advance_discussion(
+        state_dir,
+        writer,
+        channel_id=CH,
+        thread_id="main",
+        now=datetime.now(timezone.utc) + timedelta(seconds=600),
+    )
+
+    assert "channel.synthesis.requested" in emitted
+    assert "channel.discussion.closed" not in emitted
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert detail["discussions"]["main"].get("last_outcome") != "stalled"
 
 
 def test_phase1_below_quorum_stalls(tmp_path: Path) -> None:

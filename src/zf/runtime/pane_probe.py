@@ -14,32 +14,16 @@ import yaml
 
 from zf.core.config.schema import ZfConfig
 from zf.core.security.redaction import redact_obj
+from zf.runtime.provider_interactive_prompt import (
+    provider_interactive_prompt_marker,
+)
 from zf.runtime.tmux import TmuxSession
 
 
 PANE_PROBE_SCHEMA_VERSION = "runtime.pane_probe.v0"
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
-# 交互确认假死态标记(avbs-r5 实证:9/15 codex pane 停在撞限确认提示,
-# pane 活/进程活/事件静默,heartbeat/stuck/respawn/drift 全部失明)。
-# 这是一个类别——任何 TUI 等键盘输入的场景都构成假死;标记只匹配 pane
-# 尾部 excerpt(等待提示必然停在底部),避免误伤滚屏历史。
-_INTERACTIVE_PROMPT_MARKERS: tuple[tuple[str, str], ...] = (
-    ("usage_limit_reached", "hit your usage limit"),
-    ("login_required", "please sign in"),
-    ("login_required", "session expired"),
-    ("login_required", "please log in"),
-    ("trust_prompt", "do you trust the files"),
-)
 _FLEET_CORRELATED_MIN = 3
-
-
-def _interactive_prompt_marker(excerpt: str) -> str:
-    text = (excerpt or "").lower()
-    for key, needle in _INTERACTIVE_PROMPT_MARKERS:
-        if needle in text:
-            return key
-    return ""
 
 
 def build_runtime_pane_probe(
@@ -173,9 +157,9 @@ def pane_probe_attention_items(probe: dict[str, Any]) -> list[dict[str, Any]]:
                 "title": f"{instance_id} waiting at interactive prompt ({marker})",
                 "summary": (
                     "Worker pane is alive but parked at an interactive "
-                    "confirmation prompt (usage limit / login / trust). It "
-                    "will not recover on its own and emits no events; a "
-                    "human keystroke is required."
+                    "confirmation prompt (usage limit / login / trust / "
+                    "permission). It will not recover on its own and emits "
+                    "no events; a human decision is required."
                 ),
                 "task_id": str(pane.get("current_task_id") or ""),
                 "source_event_ids": [],
@@ -385,7 +369,9 @@ def _probe_role(
         excerpt = _excerpt(text)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest() if text else ""
     alive = pane_dead != "1"
-    prompt_marker = _interactive_prompt_marker(excerpt) if alive else ""
+    prompt_marker = (
+        provider_interactive_prompt_marker(excerpt) if alive else ""
+    )
     status = _activity_status(
         alive=alive,
         capture_ok=capture.returncode == 0,

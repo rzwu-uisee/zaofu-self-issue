@@ -305,6 +305,15 @@ def test_completed_terminal_materializes_receipt_and_owner_request_once(
     assert payload["completion_receipt_ref"].endswith(
         "goal-completion-receipt.v1.json"
     )
+    assert payload["narrative_status"] == "degraded"
+    assert payload["owner_delivery_composite_ref"].endswith(
+        "owner-delivery-composite.v1.json"
+    )
+    composite = json.loads((
+        state_dir / payload["owner_delivery_composite_ref"]
+    ).read_text(encoding="utf-8"))
+    assert composite["factual"]["dossier_ref"] == payload["dossier_ref"]
+    assert composite["narrative_status"] == "degraded"
     assert payload["web_deep_link"].startswith(
         "/?page=observability&obs_tab=runs"
     )
@@ -610,7 +619,7 @@ def test_terminal_dossier_history_is_stable_when_current_task_store_drifts(
 def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
     tmp_path: Path,
 ) -> None:
-    state_dir, log, _writer = _state(tmp_path)
+    state_dir, log, writer = _state(tmp_path)
     task_map = {
         "schema_version": "task-map.v1",
         "workflow_run_id": RUN_ID,
@@ -631,10 +640,25 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
     }
     task_map_ref = write_sidecar_json(
         state_dir,
-        "artifacts/plan/task-map.json",
+        "artifacts/plan/task-map-custom.json",
         task_map,
         kind="task_map",
         schema_version="task-map.v1",
+        created_by="test",
+        required=True,
+    )
+    claim_set = build_goal_claim_set(
+        task_map,
+        workflow_run_id=RUN_ID,
+        goal_id=GOAL_ID,
+        task_map_generation="generation-2",
+    )
+    claim_set_ref = write_sidecar_json(
+        state_dir,
+        "artifacts/claims-custom.json",
+        claim_set,
+        kind="goal_claim_set",
+        schema_version="goal-claim-set.v1",
         created_by="test",
         required=True,
     )
@@ -661,7 +685,34 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
             "source_refs": {},
         },
     )
-    events = _completion_events(state_dir, with_sources=False)
+    goal_closure_contract_ref = write_sidecar_json(
+        state_dir,
+        "artifacts/goal-closure/contract-snapshots/current.json",
+        {
+            "schema_version": "goal-closure-contract-snapshot.v1",
+            "workflow_run_id": RUN_ID,
+            "goal_id": GOAL_ID,
+            "task_map_generation": "generation-2",
+        },
+        kind="goal_closure_contract_snapshot",
+        schema_version="goal-closure-contract-snapshot.v1",
+        created_by="test",
+        required=True,
+    )
+    events = _completion_events(state_dir, with_sources=True)
+    events[2].payload.update({
+        "goal_claim_set_ref": claim_set_ref["ref"],
+        "goal_claim_set_digest": claim_set_ref["sha256"],
+    })
+    events[3].payload["goal_closure_result"].update({
+        "goal_claim_set_ref": claim_set_ref["ref"],
+        "goal_claim_set_digest": claim_set_ref["sha256"],
+        "goal_coverage": [{
+            "goal_claim_id": "CLAIM-1",
+            "status": "closed",
+            "supporting_result_refs": ["artifacts/verify/result.json"],
+        }],
+    })
     events[1].payload.update({
         "task_map_ref": task_map_ref["ref"],
         "task_map_digest": task_map_ref["sha256"],
@@ -677,6 +728,12 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
     events[-1].payload.update({
         "task_map_ref": task_map_ref["ref"],
         "task_map_digest": task_map_ref["sha256"],
+        "contract_snapshot_ref": goal_closure_contract_ref["ref"],
+        "contract_snapshot_digest": goal_closure_contract_ref["sha256"],
+        "goal_closure_contract_snapshot_ref": goal_closure_contract_ref["ref"],
+        "goal_closure_contract_snapshot_digest": goal_closure_contract_ref[
+            "sha256"
+        ],
     })
     for event in events:
         log.append(event)
@@ -684,6 +741,8 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
     dossier = build_goal_dossier(state_dir, RUN_ID, events=events)
 
     contract = dossier["task_contracts"]["TASK-1"]
+    assert dossier["freshness"]["status"] == "ready"
+    assert not dossier["freshness"]["diagnostics"]
     assert contract["workflow_run_id"] == RUN_ID
     assert contract["base_commit"] == "0" * 40
     assert contract["task_ref"] == "tasks/active/TASK-1.md"
@@ -710,6 +769,20 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
         "event_id": "evt-task",
         "event_type": "dev.build.done",
         "task_id": "TASK-1",
+    }, {
+        "kind": "objective",
+        "ref": "objective:owner-delivery",
+        "digest": "",
+        "event_id": "evt-closure",
+        "event_type": "goal.closure.synthesized",
+        "task_id": "",
+    }, {
+        "kind": "goal_closure_contract_snapshot",
+        "ref": goal_closure_contract_ref["ref"],
+        "digest": goal_closure_contract_ref["sha256"],
+        "event_id": "evt-completed",
+        "event_type": "run.goal.completed",
+        "task_id": "",
     }]
     assert "this semantic body" not in str(dossier["instruction_context"])
     matrix = dossier["claim_to_evidence"]
@@ -718,6 +791,20 @@ def test_dossier_hydrates_task_contract_claim_matrix_and_instruction_refs(
     assert matrix["rows"][0]["implementation"][0]["task_ref"] == (
         "tasks/active/TASK-1.md"
     )
+    delivered = materialize_terminal_goal_deliveries(
+        state_dir=state_dir,
+        event_log=log,
+        writer=writer,
+    )
+    materialization = json.loads((
+        state_dir
+        / "projections"
+        / "goals"
+        / RUN_ID
+        / "delivery-materialization.v1.json"
+    ).read_text(encoding="utf-8"))
+    assert delivered.failed == 0
+    assert materialization["status"] == "delivered_requested"
 
 
 def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
@@ -828,9 +915,10 @@ def test_terminal_dossier_uses_run_goal_identity_over_task_map_feature_alias(
         "CLAIM-PINNED"
     )
     assert dossier["claim_to_evidence"]["rows"][0]["verdict"] == "closed"
-    assert dossier["claim_to_evidence"]["rows"][0]["evidence_refs"] == [
+    assert dossier["claim_to_evidence"]["rows"][0]["result_refs"] == [
         "artifacts/verify/result.json",
     ]
+    assert dossier["claim_to_evidence"]["rows"][0]["evidence_refs"] == []
 
 
 def test_blocked_terminal_delivers_blocker_without_completion_receipt(

@@ -137,8 +137,12 @@ class TestGracefulShutdown:
         # stop_autoresearch_sidecar added 2026-07-10: cross-process pidfile
         # teardown of the resident's process group (R3/R4/R5 orphan leak).
         # Feishu projection uses the same cross-process closeout guarantee.
-        assert len(steps) == 16
+        assert len(steps) == 17
         assert "shutdown_marker" in steps
+        assert "interrupt_workflow_operations" in steps
+        assert steps.index("interrupt_workflow_operations") < steps.index(
+            "wait_active_turns"
+        )
         assert "kill_watcher" in steps
         assert "stale_inflight_cleanup" in steps
         assert "preserve_run_manager" in steps

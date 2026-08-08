@@ -1431,6 +1431,101 @@ export interface IntegrationQueueProjection {
   arbiter?: IntegrationArbiterProjection;
 }
 
+export interface TaskPipelineTaskProjection {
+  task_id: string;
+  title: string;
+  task_status: string;
+  pipeline_stage: string;
+  workflow_run_id: string;
+  task_map_generation: string;
+  generation_id: string;
+  blocked_by: string[];
+  blockers: string[];
+  current_operation_id: string;
+  current_stage: string;
+  current_worker: string;
+  current_worker_source: string;
+  active_operation_count: number;
+  active_attempt_count: number;
+  active_session_count: number;
+}
+
+export interface TaskPipelineOperationProjection {
+  operation_id: string;
+  workflow_run_id: string;
+  task_id: string;
+  stage: string;
+  operation_generation: number;
+  task_map_generation: string;
+  workspace_generation: number;
+  status: string;
+  semantic_verdict: string;
+  role_instance: string;
+  current_worker: string;
+  current_worker_source: string;
+  placement_epoch: number;
+  session_binding_key: string;
+  active_attempt_id: string;
+  attempt_ids: string[];
+  reason: string;
+}
+
+export interface TaskPipelineSessionProjection {
+  binding_key: string;
+  workflow_run_id: string;
+  task_id: string;
+  stage: string;
+  rework_affinity_id: string;
+  session_id: string;
+  status: string;
+  current_role_instance: string;
+  current_placement_epoch: number;
+  workspace_generation: number;
+  placement_history: Array<Record<string, unknown>>;
+  sealed_at: string;
+  archived_at: string;
+}
+
+export interface TaskPipelineProjection {
+  schema_version: string;
+  is_derived_projection: boolean;
+  enabled: boolean;
+  mode: string;
+  profile_id: string;
+  profile_digest: string;
+  summary: {
+    generation_count: number;
+    task_count: number;
+    task_statuses: Record<string, number>;
+    operation_count: number;
+    operation_statuses: Record<string, number>;
+    active_worker_count: number;
+    session_statuses: Record<string, number>;
+    terminal_convergence: string;
+  };
+  generations: Array<Record<string, unknown>>;
+  tasks: TaskPipelineTaskProjection[];
+  operations: TaskPipelineOperationProjection[];
+  attempts: Array<Record<string, unknown>>;
+  sessions: TaskPipelineSessionProjection[];
+  queues: Record<string, string[]>;
+  occupancy: Record<string, unknown>;
+  capacity: Record<string, unknown>;
+  backpressure: Record<string, unknown>;
+  dispatchable: Record<string, Array<Record<string, string>>>;
+  closure: {
+    status: string;
+    terminal_expected: boolean;
+    converged: boolean;
+    active_operation_ids: string[];
+    active_attempt_ids: string[];
+    active_session_binding_keys: string[];
+    missing_candidate_freeze_generation_ids: string[];
+    residuals: string[];
+  };
+  projection_digest: string;
+}
+
 export interface RepairActionSummary {
   total: number;
   counts: Record<string, number>;
@@ -2282,6 +2377,12 @@ export interface OperatorInboxItem {
   reject_reason?: string;
   decision_token?: string;
   checkpoint_id?: string;
+  workflow_run_id?: string;
+  fanout_id?: string;
+  source_event_id?: string;
+  proposal_ref?: string;
+  eval_ref?: string;
+  candidate_task_map_ref?: string;
   fingerprint?: string;
   attention_id?: string;
   message_id?: string;

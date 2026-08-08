@@ -436,6 +436,7 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
             "channel_id": "ch-auto",
             "thread_id": "main",
             "message": "Review and implement the requested API change.",
+            "mode": "multi_lens",
             "overrides": {
                 "backend": "fake",
                 "budget": {"max_rounds": 4},
@@ -455,7 +456,21 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
     assert result["max_rounds"] == 4
     channel = project_channel(state_dir, "ch-auto") or {}
     assert channel["discussion"]["default_responder_id"] == "tech_leader"
-    assert channel["discussions"]["main"]["state"] == "active"
+    assert channel["discussion"]["mode"] == "multi_lens"
+    assert channel["discussion"]["engine_mode"] == "fanout_then_synthesis"
+    assert channel["discussions"]["main"]["state"] == "phase1_blind"
+    reply_targets = {
+        str(event.payload.get("target_member_id") or "")
+        for event in log.read_all()
+        if event.type == "channel.agent.reply.requested"
+        and event.payload.get("message_id") == result["message_id"]
+    }
+    assert reply_targets == {
+        "tech_leader",
+        "dev_reviewer",
+        "qa_analyst",
+    }
+    assert result["reply_request_count"] == 3
     requirement = next(
         event
         for event in log.read_all()
@@ -1038,3 +1053,87 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
         and event.payload["refs"].get("consensus_review_id")
     ]
     assert len(review_messages) == 2
+
+
+def test_discussion_restart_closes_active_session_and_uses_fresh_trigger(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer, service = _runtime(tmp_path)
+    created = _execute(
+        service,
+        writer,
+        "channel-create-from-template",
+        {
+            "template_id": "quick-change",
+            "channel_id": "ch-restart",
+            "overrides": {"backend": "fake"},
+        },
+    )
+    assert created["ok"] is True
+    first = _execute(
+        service,
+        writer,
+        "channel-discussion-start",
+        {
+            "channel_id": "ch-restart",
+            "thread_id": "main",
+            "message": "Review the first requirement.",
+            "mode": "conversation",
+        },
+    )
+    assert first["status"] == "started"
+    before = project_channel(state_dir, "ch-restart") or {}
+    old_discussion_id = before["discussions"]["main"]["discussion_id"]
+
+    restarted = _execute(
+        service,
+        writer,
+        "channel-discussion-start",
+        {
+            "channel_id": "ch-restart",
+            "thread_id": "main",
+            "message": "Review the exact revised artifact.",
+            "requirement_message_id": first["message_id"],
+            "mode": "multi_lens",
+            "restart": True,
+        },
+    )
+
+    assert restarted["status"] == "restarted"
+    assert restarted["message_id"] != first["message_id"]
+    events = log.read_all()
+    closed = [
+        event
+        for event in events
+        if event.type == "channel.discussion.closed"
+        and event.payload.get("reason") == "explicit_restart"
+    ]
+    assert len(closed) == 1
+    assert closed[0].payload["discussion_id"] == old_discussion_id
+    starts = [
+        event
+        for event in events
+        if event.type == "channel.discussion.started"
+        and event.payload.get("product_mode") == "multi_lens"
+    ]
+    assert len(starts) == 1
+    assert starts[0].payload["discussion_id"] != old_discussion_id
+    assert events.index(closed[0]) < events.index(starts[0])
+    trigger = next(
+        event
+        for event in events
+        if event.type == "channel.message.posted"
+        and event.payload.get("message_id") == restarted["message_id"]
+    )
+    assert (
+        trigger.payload["refs"]["source_requirement_message_id"]
+        == first["message_id"]
+    )
+    detail = project_channel(state_dir, "ch-restart") or {}
+    assert detail["discussions"]["main"]["state"] == "phase1_blind"
+    assert detail["discussions"]["main"]["product_mode"] == "multi_lens"
+    assert set(restarted["route"]["targets"]) == {
+        "tech_leader",
+        "dev_reviewer",
+        "qa_analyst",
+    }

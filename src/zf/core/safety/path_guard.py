@@ -127,8 +127,9 @@ def assert_owned_workdir(
     workdir: Path,
     *,
     state_dir: Path,
+    workdir_root: Path | None = None,
 ) -> WorkdirOwnerMarker:
-    PathGuard.assert_under(workdir, state_dir / "workdirs")
+    PathGuard.assert_under(workdir, workdir_root or state_dir / "workdirs")
     PathGuard.assert_safe_to_delete(workdir)
     marker_path = workdir / WORKDIR_OWNER_MARKER
     if not marker_path.is_file():

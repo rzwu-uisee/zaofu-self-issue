@@ -76,9 +76,11 @@ roles:
 
 判断一个字段是否真实生效时,以 `src/zf/core/config/schema.py` 和 runtime 引用为准。设计文档中仍保留了一些未落地意图。
 
-Product Flow 中，Kernel 根据 topology/profile 做快乐路径机械派发；显式 `orchestrator` role
-只订阅异常分诊事件。Legacy safe-team 才可以让 Layer 2 Agent 做拆解和 assign。`orchestrator`
-配置块、Python `Orchestrator` runtime 和同名 role Agent 是三个需要分别核对的对象。
+Product Flow 中，Kernel 根据 topology/profile 做快乐路径机械派发。显式 `orchestrator` role
+默认订阅异常分诊事件；只有配置 `workflow.orchestration.mode: semantic_control` 时，才会在
+预注册 checkpoint 上执行 shadow/blocking 语义判断。Legacy safe-team 仍是另一种兼容模式。
+`orchestrator` 配置块、Python `WorkflowRuntimeCoordinator`（兼容 alias 为 `Orchestrator`）和
+同名 role Agent 是三个需要分别核对的对象。
 
 ## 3. Role 配置
 
@@ -99,6 +101,8 @@ Product Flow 中，Kernel 根据 topology/profile 做快乐路径机械派发；
 | `role_kind` | `auto`、`writer`、`reader`;配合 workdir/git isolation |
 | `skills` | 当前角色启用的 skill 名 |
 | `plugins` / `agent` | Claude-only 扩展;Codex 会忽略或只消费注入文本 |
+| `provider_session` | role-scoped Provider 原生 `effort`、`agent`、`max_parallel_agents`；启动时冻结 digest |
+| `lifecycle` | Provider process/pane 生命周期：`eager`、`resident`、`on_demand` |
 | `triggers` | 该角色被哪些事件唤醒或分配 |
 | `publishes` | 该角色允许发布哪些阶段完成/失败事件 |
 | `stuck_threshold_seconds` | pane 输出无变化多久算 stuck |
@@ -113,6 +117,37 @@ Product Flow 中，Kernel 根据 topology/profile 做快乐路径机械派发；
 - Codex 自动化场景通常使用 `permission_mode: bypass`,避免交互式 approval 挂起。
   `default` / `restricted` 对应更保守的 provider 权限姿态,需要结合具体后端能力验证。
 - 多副本 dev/test 应优先显式设置 `replicas`,不要复制多个同名 role。
+
+### 3.1 Role-scoped Provider session 与按需生命周期
+
+首期 Provider 动态配置绑定 role/session，不是每个 Task 临时选择一套 execution profile：
+
+```yaml
+roles:
+  - name: orchestrator
+    backend: codex
+    role_kind: reader
+    lifecycle:
+      mode: resident
+  - name: dev-lane-0
+    backend: codex
+    role_kind: writer
+    provider_session:
+      effort: high
+      max_parallel_agents: 2
+    lifecycle:
+      mode: on_demand
+      idle_seconds: 120
+      cooldown_seconds: 30
+      preserve_session: true
+      preserve_workdir: true
+```
+
+未声明 `provider_session` 时继承 Provider 默认能力。显式配置会生成 immutable effective
+session sidecar，并将 digest 绑定 `RoleSessionRegistry`；digest 改变时不能盲目 resume 旧
+session。`on_demand` 只释放空闲 process/pane，逻辑 role、session/workdir/affinity 继续保留；
+`orchestrator` role 禁止 `on_demand`。当前真实 Provider 扩大 rollout 尚未签收，因此先在
+controller canary 中使用。
 
 ## 4. Skills 配置
 
@@ -201,6 +236,54 @@ verification:
 ```
 
 严格项目建议开启 contract 和 scope fail-closed。这样 agent 提前宣告完成、缺少验证证据、绕过返工 delta、越界写入时,会被 kernel 阻断并路由返工。
+
+### 6.1 OA checkpoint 与 Task Pipeline v4 canary
+
+OA semantic checkpoint 必须显式配置，默认仍是 `exception_advisor`：
+
+```yaml
+workflow:
+  orchestration:
+    mode: semantic_control
+    checkpoints: [plan_candidate]
+    checkpoint_policies:
+      plan_candidate: shadow
+```
+
+`shadow` 只记录 typed decision，不阻塞 Kernel。`blocking` 仅用于带明确 pilot/canary 边界的
+PRD/Issue/Refactor profile；当前真实 canary 为 HOLD，不能作为项目默认。
+
+Task Pipeline v4 也只通过 Flow document 显式启用：
+
+```yaml
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+spec:
+  flowProfile: issue-flow-v4-task-pipeline
+  topology: fanout
+  taskPipeline:
+    mode: ${ZF_TASK_PIPELINE_MODE:-shadow}
+    maxActiveTaskPipelines: 4
+    pools:
+      impl: {capacity: 1, roleInstances: [fix-lane-0]}
+      verify: {capacity: 1, roleInstances: [verify-lane-0]}
+    workerLifecycle: {mode: on_demand, idleSeconds: 120}
+    integrationAdmission:
+      default: verify_admitted
+      riskReview: {enabled: false}
+    candidate:
+      integration: incremental_serial_cas
+      integrationCapacity: 1
+      rollingSmoke: required
+      partialCandidateAutoShip: forbidden
+      finalVerifyTarget: frozen_exact_commit
+```
+
+合法 profile ID 只有 `issue-flow-v4-task-pipeline`、`prd-flow-v4-task-pipeline` 和
+`refactor-flow-v4-task-pipeline`。仓库 canary 位于
+`examples/prod/controller/*-task-pipeline-v4-canary*.yaml`，均为 `preferred: false`。
+v4 实现已完成但 rollout 仍 NO-GO；不要把 `shadow` 误解为已经接管业务调度，也不要在
+active Run 中热改 mode/profile。
 
 ## 7. 运行态真相文件
 

@@ -129,6 +129,68 @@ def test_task_ref_manager_preserves_workflow_run_without_correlation(tmp_path: P
     assert result.payload["trace_id"] == "run-1"
 
 
+def test_task_pipeline_result_binds_workspace_from_exact_dispatch(
+    tmp_path: Path,
+) -> None:
+    base = _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    workspace = (
+        state_dir / "workdirs" / "tasks" / "run-1" / "TASK-1" / "g1" / "project"
+    )
+    workspace.parent.mkdir(parents=True)
+    branch = "worker/task-pipeline/TASK-1/g1"
+    _git(tmp_path, "worktree", "add", "-b", branch, str(workspace), base)
+    (workspace / "README.md").write_text("task pipeline result\n", encoding="utf-8")
+    _git(workspace, "add", "README.md")
+    _git(workspace, "commit", "-q", "-m", "task pipeline result")
+    source_commit = _git(workspace, "rev-parse", "HEAD")
+    operation_id = "wop-task-impl"
+    attempt_id = "ta-task-impl"
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        type="task.pipeline.stage.dispatched",
+        actor="orchestrator",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "workdir": str(workspace),
+            "source_branch": branch,
+        },
+    ))
+    event = ZfEvent(
+        type="dev.build.done",
+        actor="fix-lane-0",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "result_protocol_mode": "blocking",
+            "source_commit": source_commit,
+            "source_branch": branch,
+            "files_touched": ["README.md"],
+        },
+    )
+
+    result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=_config(state_dir),
+    ).process_dev_build_done(event)
+
+    assert result is not None
+    assert result.status == "updated"
+    assert result.payload["workdir"] == str(workspace)
+    assert result.payload["run_id"] == "run-1"
+    assert result.payload["source_commit"] == source_commit
+
+
 def test_task_ref_manager_rejects_source_commit_outside_contract_scope(
     tmp_path: Path,
 ) -> None:

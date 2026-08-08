@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_turn import run_channel_reply_turn
+from zf.runtime.channel_reply_prompt import fake_channel_reply_text
 
 
 def _setup(tmp_path: Path):
@@ -198,3 +200,20 @@ def test_turn_drains_latest_queued_reply_behind_stale_pending(tmp_path: Path):
     )
     assert states[latest_request_id] == "completed"
     assert [request_id for request_id, _ in out["dispatched"]] == [latest_request_id]
+def test_fake_synthesis_is_task_compilable() -> None:
+    reply = fake_channel_reply_text(
+        {"member_id": "synthesizer"},
+        {
+            "text": "Synthesize the confirmed requirement.",
+            "refs": {"synthesis_request_id": "synth-1"},
+        },
+    )
+
+    contract = json.loads(reply.splitlines()[-1])["channel_synthesis"]
+    criterion = contract["acceptance_criteria"][0]
+    command = contract["verification_commands"][0]
+    assert criterion["id"] == "AC-MOCK-01"
+    assert criterion["verification_command_ids"] == ["VC-MOCK-01"]
+    assert command["acceptance_ids"] == ["AC-MOCK-01"]
+    assert command["command"] == "test -f README.md"
+    assert command["producer_paths"] == ["README.md"]

@@ -7,17 +7,23 @@ from pathlib import Path
 from zf.core.config.schema import RoleConfig
 from zf.runtime.cli_command import zf_cli_cmd
 from zf.runtime.fanout_artifact_refs import refactor_plan_workdir_refs
+from zf.runtime.fanout_execution_boundary import (
+    fanout_task_id,
+    render_execution_boundary,
+)
 from zf.runtime.impl_self_check import (
     descriptor_from_payload as self_check_descriptor_from_payload,
     hydrate_impl_self_check,
     reusable_command_receipts,
 )
+from zf.runtime import skill_briefing
 from zf.runtime.task_contract_snapshot import (
     descriptor_from_payload as contract_descriptor_from_payload,
     hydrate_target_snapshot,
     hydrate_task_contract_snapshot,
     target_descriptor_from_payload,
 )
+from zf.runtime.task_pipeline_briefing import verification_result_template
 from zf.runtime.workflow_inputs import (
     compact_workflow_input_payload_for_briefing,
     render_workflow_input_briefing_section,
@@ -79,12 +85,36 @@ class FanoutBriefingMixin:
                 "fanout affinity child identity invalid: "
                 + ", ".join(identity_errors)
             )
+        # Reader fanout children are workflow-operation owners, not canonical
+        # Task assignees. On-demand activation may have rendered role
+        # instructions from the root Task before this child was selected;
+        # replace that projection with role-only constraints so it cannot
+        # inject the Task ownership guard into the child result protocol.
+        # Some renderer unit probes intentionally omit a complete runtime.
+        if (
+            getattr(self, "config", None) is not None
+            and getattr(self, "project_root", None) is not None
+        ):
+            self._write_on_demand_role_instructions(
+                role,
+                task_id=None,
+                skill_entries=list(skill_entries or []),
+            )
 
         trigger_payload = (
             child_payload.get("trigger_payload")
             if isinstance(child_payload.get("trigger_payload"), dict)
             else {}
         )
+        task_id = fanout_task_id(child_payload, trigger_payload)
+        execution_boundary_lines = render_execution_boundary(
+            getattr(self, "config", None),
+            role,
+            child_payload,
+        )
+        from zf.runtime.injection import _render_recursion_guard
+
+        recursion_guard_lines = _render_recursion_guard(role).splitlines()
         success_payload = {
             "fanout_id": context.fanout_id,
             "stage_id": context.stage_id,
@@ -118,6 +148,7 @@ class FanoutBriefingMixin:
                 child_payload,
                 verifier_stage_id=str(context.stage_id or ""),
                 verifier_role=role.instance_id,
+                state_dir=self.state_dir,
             ))
         elif is_goal_closure:
             from zf.runtime.goal_closure_identity import (
@@ -216,7 +247,6 @@ class FanoutBriefingMixin:
                 )
                 if value not in (None, ""):
                     success_payload[key] = value
-            criteria = contract_snapshot.get("acceptance_criteria") or []
             reusable_receipts: list[dict] = []
             if str(child_payload.get("impl_self_check_ref") or "").strip():
                 target_snapshot = hydrate_target_snapshot(
@@ -243,33 +273,13 @@ class FanoutBriefingMixin:
                     child_payload.get("impl_self_check_digest") or ""
                 )
                 success_payload["reusable_impl_receipts"] = reusable_receipts
-            success_payload["verification_result"] = {
-                "schema_version": "verification-result.v1",
-                "execution_status": "completed",
-                "verdict": "passed",
-                "verification_owner": "task_verify",
-                "verification_tier": "runtime",
-                "reused_command_receipt_ids": [
-                    str(item.get("receipt_id") or "")
-                    for item in reusable_receipts
-                    if str(item.get("receipt_id") or "")
-                ],
-                "probe_receipts": [],
-                "rework_items": [],
-                "requirement_results": [
-                    {
-                        "acceptance_id": str(item.get("acceptance_id") or ""),
-                        "status": "passed",
-                        "verification_owner": str(item.get("verification_owner") or "task_verify"),
-                        "verification_tier": str(item.get("verification_tier") or "runtime"),
-                        "evidence_refs": ["artifact-or-event-ref"],
-                        "findings": [],
-                        "reproduction_commands": [],
-                    }
-                    for item in criteria
-                    if isinstance(item, dict)
-                ],
-            }
+            verification_template = verification_result_template(contract_snapshot)
+            verification_template["reused_command_receipt_ids"] = [
+                str(item.get("receipt_id") or "")
+                for item in reusable_receipts
+                if str(item.get("receipt_id") or "")
+            ]
+            success_payload["verification_result"] = verification_template
         for key in (
             "workflow_run_id", "operation_id", "parent_operation_id",
             "request_hash", "attempt_id", "result_protocol_mode",
@@ -515,7 +525,9 @@ class FanoutBriefingMixin:
                 or child_payload.get("summary")
                 or ""
             ).strip()
-            from zf.runtime.stage_execution_card import compact_stage_context
+            from zf.runtime.stage_execution_card import (
+                compact_fanout_stage_context,
+            )
 
             payload_section.extend([
                 "## Child-Specific Context",
@@ -524,7 +536,7 @@ class FanoutBriefingMixin:
                 "semantic bodies through Controlled Artifact Inputs.",
                 "```json",
                 json.dumps(
-                    compact_stage_context(child_payload),
+                    compact_fanout_stage_context(child_payload),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -712,6 +724,7 @@ class FanoutBriefingMixin:
                 "backlog_ref": "",
                 "source_index_ref": "",
                 "evidence_refs": [],
+                "plan_ports": [],
             })
             result_guidance.extend(self._plan_artifact_contract_lines())
             result_guidance.extend(
@@ -898,13 +911,21 @@ class FanoutBriefingMixin:
             verification_reader=verification_reader,
             artifact_delivery=is_artifact_delivery,
         )
+        briefing_header = (
+            [f"Active task: {task_id}", "", f"# Fanout Reader Child: {child_id}"]
+            if task_id
+            else [f"# Fanout Reader Child: {child_id}"]
+        )
         briefing_text = "\n".join([
-                f"# Fanout Reader Child: {child_id}",
+                *briefing_header,
                 "",
                 f"- fanout_id: `{context.fanout_id}`",
                 f"- stage_id: `{context.stage_id}`",
                 f"- run_id: `{run_id}`",
                 f"- target_ref: `{context.target_ref}`",
+                "",
+                *execution_boundary_lines,
+                *recursion_guard_lines,
                 "",
                 *review_subject_lines,
                 (
@@ -929,24 +950,26 @@ class FanoutBriefingMixin:
                 # B3 (R20): affinity lanes inspect ONLY their slice — not the full
                 # candidate — so a large candidate doesn't exhaust review context.
                 *affinity_scope_briefing_lines(child_payload),
-                *self._skill_briefing_section(role, skill_entries),
+                *skill_briefing.render_skill_briefing_section(role, skill_entries),
                 *workflow_input_lines,
                 *payload_section,
                 *output_contract_lines,
-                "Use the runtime state dir explicitly because this role may run from a detached workdir.",
+                "## Child Result Authority",
+                "",
+                "`Active task` is lineage only; this reader does not own the "
+                "canonical Task. Do not run `zf guard ownership` for that Task. "
+                "Submit one result below; fanout, operation, attempt, and lease "
+                "identity is authoritative.",
+                "",
+                "Use `--state-dir`; this role may run from a detached workdir.",
                 "",
                 *command_lines,
                 "Do not emit the aggregate success/failure event directly; the kernel publishes it after the fanout barrier or synth role finishes.",
                 "",
                 *result_guidance,
                 "",
-                "Emit-once protocol: the result event is consumed asynchronously — you will",
-                "NOT receive an acknowledgement. Emitting succeeds when the command exits 0.",
-                "NEVER re-emit the same completion (no retry loops, no periodic re-sends):",
-                "if this fanout generation was superseded, every duplicate is marked",
-                "stale_completion and discarded, and re-sending floods the event log",
-                "(r10 forensics: one lane re-emitting every ~7s produced 4.5k junk rows).",
-                "After emitting once, stop and wait for new instructions.",
+                "Emit once: command exit 0 is success; there is no asynchronous ack. "
+                "Never retry or re-send (stale generations are discarded). Then stop.",
                 "",
                 f"Child success event: `{child_success_event}`",
                 f"Child failure event: `{child_failure_event}`",
@@ -964,6 +987,6 @@ class FanoutBriefingMixin:
             role=role.instance_id,
             payload=child_payload,
             indexed_skills=list(role.skills),
-            auto_injected_skills=list(skill_entries or []),
+            auto_injected_skills=skill_briefing.auto_injected_skill_entries(skill_entries),
         )
         return path

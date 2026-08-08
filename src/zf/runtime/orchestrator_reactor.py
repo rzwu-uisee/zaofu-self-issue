@@ -1,16 +1,10 @@
-"""EventReactorMixin — event handlers + state-machine moves + scope checks.
+"""Event handlers and state-machine moves for WorkflowRuntimeCoordinator.
 
-Split from orchestrator.py (P1.2 step 3). Methods rely on host
-Orchestrator state (self.task_store, self.sm, self.event_log,
-self._gan_round, self._set_worker_state, self._discriminator_runner,
-self._dispatch_rework, self.config, etc).
+Split from `orchestrator.py` in P1.2. Methods rely on the host coordinator's
+stores, dispatch services, and runtime state.
 
-P0-2 (2026-04-20): replaced the hardcoded `_event_handlers()` dict with
-an `EventActionRegistry`. Built-in handlers register themselves on
-first call; YAML `workflow.event_actions` entries are also registered
-at the same time. Call sites should use `self.event_registry` directly
-via `.primary(event_type)` — `_event_handlers()` is kept as a
-deprecation shim so external probes (tests, wake_patterns) keep working.
+Built-in and YAML event actions register through `EventActionRegistry`.
+`_event_handlers()` remains a compatibility shim for external probes.
 """
 
 from __future__ import annotations
@@ -38,6 +32,7 @@ from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
     react_channel_cross_review_requested,
     react_channel_question_dedup_requested,
+    react_channel_synthesis_repair_requested,
     react_channel_synthesis_requested,
 )
 from zf.runtime.cli_command import zf_cli_cmd
@@ -74,8 +69,13 @@ from zf.runtime.git_capture import (
     capture_files_touched_since,
     capture_git_diff_context,
 )
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
+from zf.runtime.orchestrator_agent_reactor import OrchestratorAgentReactorMixin
 from zf.runtime.product_delivery import ingest_task_map_to_kanban
+from zf.runtime.provider_operation_stop import (
+    emit_provider_stop_recovery,
+    recover_provider_stopped_operation,
+)
 from zf.runtime.provider_stop import classify_provider_stop
 from zf.runtime.rework_triage import ReworkTriageResult
 from zf.runtime.task_map import (
@@ -91,7 +91,6 @@ from zf.runtime.terminal_ledger import (
     is_terminal_success_event,
     terminal_dispatch_id,
 )
-
 
 # Built-in event → handler-method-name map. The mixin walks this at
 # registry-build time to register each built-in as a primary handler.
@@ -113,6 +112,15 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("discriminator.failed", "_on_discriminator_failed"),
     ("task.done.blocked", "_on_task_done_blocked"),
     ("orchestrator.evidence_rework.requested", "_on_evidence_rework_requested"),
+    ("orchestrator.semantic.failure.requested", "_on_orchestrator_semantic_failure_requested"),
+    ("orchestrator.semantic.rework.requested", "_on_orchestrator_semantic_rework_requested"),
+    ("orchestrator.run_plan.admitted", "_on_orchestrator_run_plan_admitted"),
+    ("orchestrator.stage_barrier.admitted", "_on_orchestrator_stage_barrier_admitted"),
+    ("orchestrator.pre_closeout.admitted", "_on_orchestrator_pre_closeout_admitted"),
+    ("orchestrator.semantic.decision.submitted", "_on_orchestrator_semantic_decision"),
+    ("orchestrator.semantic.decision.failed", "_on_orchestrator_semantic_decision"),
+    ("owner.delivery.narrative.submitted", "_on_owner_delivery_narrative"),
+    ("owner.delivery.narrative.failed", "_on_owner_delivery_narrative"),
     ("dev.blocked", "_on_dev_blocked"),
     ("gate.failed", "_on_gate_failed"),
     # K2: silent stall 的显式 handler —— 重驱 dispatch(幂等;emit 侧
@@ -160,6 +168,10 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
         "_on_channel_cross_review_requested",
     ),
     ("channel.synthesis.requested", "_on_channel_synthesis_requested"),
+    (
+        "channel.synthesis.repair.requested",
+        "_on_channel_synthesis_repair_requested",
+    ),
     ("channel.agent.reply.completed", "_on_channel_discussion_event"),
     ("channel.agent.reply.failed", "_on_channel_discussion_event"),
     ("channel.question.opened", "_on_channel_discussion_event"),
@@ -335,7 +347,7 @@ def _autoresearch_failure_class(fingerprint: str) -> str:
     return ""
 
 
-class EventReactorMixin(DurableCallWorkflowMixin):
+class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin):
     """Event handlers + state-machine transitions of Orchestrator.
     Mixin contract: relies on host Orchestrator's instance fields. Do
     not instantiate standalone."""
@@ -473,12 +485,21 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         events = read_runtime_events(self.event_log, self.state_dir)
         replan_event, note = plan_reader_stage_replan(self.config, events, event)
         if replan_event is None:
-            if note in {"cap_exhausted", "input_unchanged"}:
-                reason = (
-                    "canonical input unchanged after semantic scan rejection"
-                    if note == "input_unchanged"
-                    else "stage replan cap exhausted"
+            if note == "cap_exhausted":
+                from zf.runtime.escalation_terminal import converge_stage_replan_cap
+
+                reason = "stage replan cap exhausted"
+                converge_stage_replan_cap(
+                    event, escalation=self.escalation,
+                    writer=self.event_writer, task_store=self.task_store,
                 )
+                return WorkflowRuntimeDecision(
+                    action="escalate",
+                    task_id=str(event.task_id or ""),
+                    reason=f"{event.type} → {reason} → human",
+                )
+            if note == "input_unchanged":
+                reason = "canonical input unchanged after semantic scan rejection"
                 try:
                     self.escalation.escalate(
                         f"{event.type}: {reason}; owner action is required",
@@ -486,14 +507,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     )
                 except Exception:
                     pass
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="escalate",
                     task_id=str(event.task_id or ""),
                     reason=f"{event.type} → {reason} → human",
                 )
             return None
         self.event_writer.append(replan_event)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="dispatch",
             task_id=str(event.task_id or ""),
             reason=f"{event.type} → {note} (re-trigger {replan_event.type})",
@@ -545,7 +566,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_workflow_graph_reconcile_event(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         return self._workflow_graph_reconcile_bridge(event)
 
     def _on_workflow_graph_reconcile_shadow(
@@ -700,7 +721,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         event: ZfEvent,
         *,
         source: str = "event_handler",
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         if not self._workflow_graph_reconcile_enabled(event):
             return None
         if getattr(self, "_workflow_graph_reconcile_bridge_active", False):
@@ -749,13 +770,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     decision.reason for decision in decisions[:2]
                     if decision.reason
                 ) or "workflow graph reconcile blocked"
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} graph reconcile blocked: {reason}",
                 )
         except Exception as exc:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=f"{event.type} graph reconcile error: {type(exc).__name__}",
@@ -767,7 +788,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _workflow_graph_resync_reconcile(
         self,
         events: list[ZfEvent] | None = None,
-    ) -> list[OrchestratorDecision]:
+    ) -> list[WorkflowRuntimeDecision]:
         if not self._workflow_graph_reconcile_enabled():
             return []
         try:
@@ -778,7 +799,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         for event in event_list:
             if event.task_id and event.type in _GRAPH_REVIEW_TEST_JUDGE_EVENTS:
                 latest[event.task_id] = event
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         for event in latest.values():
             if self._workflow_graph_trigger_already_committed(event):
                 continue
@@ -797,14 +818,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         task: Task,
         *,
         source: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         plan = decision.action_plan
         if plan is None:
             return None
         if self._workflow_graph_trigger_already_committed(event):
             if source == "resync":
                 return None
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="noop",
                 task_id=event.task_id,
                 reason=f"{event.type} graph reconcile already committed",
@@ -843,7 +864,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         task: Task,
         *,
         source: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         plan = decision.action_plan
         if plan is None:
             return None
@@ -876,7 +897,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     for result in results
                 ]
             except Exception as exc:
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason=(
@@ -917,7 +938,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             "start_fanout": "fanout",
             "aggregate_fanout": "aggregate",
         }.get(plan.action_type, "workflow")
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action=action,
             task_id=task.id,
             reason=(
@@ -948,9 +969,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         *,
         target_role: str,
         source: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         if not target_role:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason=f"{event.type} graph dispatch missing target_role",
@@ -974,7 +995,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             causation_id=event.id,
             correlation_id=event.correlation_id,
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="assign",
             task_id=task.id,
             role=target_role,
@@ -987,9 +1008,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         event: ZfEvent,
         *,
         source: str,
-    ) -> OrchestratorDecision:
+    ) -> WorkflowRuntimeDecision:
         if not self._evaluate_terminal_done(event, task):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=f"{event.type} terminal evidence blocked",
@@ -1007,7 +1028,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         )
         if event.type == "judge.passed":
             self._emit_spec_promote_decision(event, task)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move",
             task_id=task.id,
             reason=f"{event.type} → done (workflow graph {source})",
@@ -1061,7 +1082,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_worker_state_changed_event(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """A2(PRD goal-mode e2e finding-3):blocked_human 曾无事件出口——
         内存态只在启动 catch-up 重建,运行中外部 worker.state.changed 只进
         registry 永不进内存,唯一解锁是重启(r6.1 悬案根因)。此处把
@@ -1085,7 +1106,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 pass
         return None
 
-    def _on_build_done(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_build_done(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         self._warn_unverified_completion_claims(event)  # r6-F7 诚实核验
         graph_decision = self._workflow_graph_reconcile_bridge(event)
         if graph_decision is not None:
@@ -1101,13 +1122,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             missing_delta, delta_evidence = self._rework_delta_missing(event, task)
             if missing_delta:
                 self._emit_rework_no_delta_failed(event, delta_evidence)
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} blocked: rework has no delta",
                 )
             if self._task_ref_rejected(event):
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} rejected by task ref validation",
@@ -1131,7 +1152,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                             ))
                         except Exception:
                             pass
-                        return OrchestratorDecision(
+                        return WorkflowRuntimeDecision(
                             action="gan_iterate", task_id=event.task_id,
                             reason=f"gan round {current}/{gan_total} (no review yet)",
                         )
@@ -1176,7 +1197,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 except Exception:
                     pass
                 dispatched_role = self._dispatch_rework(task, failed_event)
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="dispatch",
                     task_id=event.task_id,
                     role=dispatched_role or task.assigned_to or "dev",
@@ -1191,7 +1212,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     task.assigned_to, "awaiting_review", task_id=task.id,
                     reason=f"{event.type} for task {task.id}",
                 )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="move", task_id=event.task_id,
                 reason=f"{event.type} → review",
             )
@@ -1276,7 +1297,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_artifact_manifest_published(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Close plan-only tasks when the final orchestrator manifest is valid."""
         task_id = event.task_id or self._payload_str(event, "task_id")
         if not task_id:
@@ -1318,7 +1339,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                         "delivery_mode": "product_delivery",
                     },
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason=(
@@ -1341,7 +1362,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     ],
                 },
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="product delivery blocked: invalid approval",
@@ -1363,7 +1384,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="artifact promotion blocked",
                 details=promote,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="plan-only finalization blocked: artifact promotion",
@@ -1381,7 +1402,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="final backlog validation failed",
                 details=validation,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="plan-only finalization blocked: final backlog validation",
@@ -1448,7 +1469,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             fallback_assignee=task.assigned_to or "",
             reason=f"plan-only task {task.id} done after final manifest",
         )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move",
             task_id=task.id,
             reason="artifact.manifest.published → plan-only done",
@@ -1492,7 +1513,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         event: ZfEvent,
         manifest: Any,
         approval: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         task_map_ref = self._final_task_map_ref(manifest)
         source_index_ref = self._final_source_index_ref(manifest)
         coverage_report_ref = self._final_coverage_report_ref(manifest)
@@ -1514,7 +1535,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     reason="product delivery task-map load failed",
                     details={"task_map_ref": task_map_ref, "error": str(exc)},
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason="product delivery blocked: task-map load failed",
@@ -1533,7 +1554,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                         reason="product delivery source-index load failed",
                         details={"source_index_ref": source_index_ref, "error": str(exc)},
                     )
-                    return OrchestratorDecision(
+                    return WorkflowRuntimeDecision(
                         action="block",
                         task_id=task.id,
                         reason="product delivery blocked: source-index load failed",
@@ -1559,7 +1580,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                             "error": str(exc),
                         },
                     )
-                    return OrchestratorDecision(
+                    return WorkflowRuntimeDecision(
                         action="block",
                         task_id=task.id,
                         reason="product delivery blocked: coverage-report load failed",
@@ -1573,7 +1594,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     reason="product delivery requires task_map_ref or backlog_ref",
                     details={"manifest_event_id": event.id},
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason="product delivery blocked: missing task-map/backlog",
@@ -1622,7 +1643,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     reason="product delivery task-map synthesis failed",
                     details={"backlog_ref": backlog_ref, "error": str(exc)},
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=task.id,
                     reason="product delivery blocked: task-map synthesis failed",
@@ -1642,7 +1663,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="product delivery package admission failed",
                 details={"task_map_ref": task_map_ref, "error": package_error},
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="product delivery blocked: package admission failed",
@@ -1676,7 +1697,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="product delivery task-map validation failed",
                 details=result.to_dict(),
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="product delivery blocked: task-map validation failed",
@@ -1719,7 +1740,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         ))
         if task.status != "done":
             self._move_task(task.id, "done", trigger_event=event.type)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move",
             task_id=task.id,
             reason="artifact.manifest.published → product delivery spine",
@@ -2473,7 +2494,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _reject_invalid_lifecycle_event(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Reject unbound/stale lifecycle events before they affect truth."""
         if event.type not in self._worker_lifecycle_events():
             return None
@@ -2507,7 +2528,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="missing_task_id",
                 event_type="event.malformed",
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason=f"{event.type} rejected: missing task_id",
             )
@@ -2518,7 +2539,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason="unknown_task_id",
                 event_type="event.malformed",
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=f"{event.type} rejected: unknown task_id",
@@ -2543,7 +2564,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if trusted_actor:
             return self._reject_evidence_contract_violation(event, task)
         if self._lifecycle_event_already_handed_off(event):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason=f"{event.type} already handed off",
@@ -2563,7 +2584,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     expected=task.assigned_to,
                     actual=actor,
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} rejected: actor {actor} not assigned",
@@ -2584,7 +2605,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 expected=",".join(sorted(publishes)),
                 actual=event.type,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=(
@@ -2621,7 +2642,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 expected=expected,
                 actual=actual,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=f"{event.type} rejected: dispatch_id mismatch",
@@ -2635,7 +2656,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         replay = self._terminal_replay_record(event, task)
         if replay is not None:
             self._emit_terminal_replayed(event, replay)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason=f"{event.type} replayed for dispatch_id {actual}",
@@ -2652,7 +2673,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         completion_events = TERMINAL_SUCCESS_EVENTS | {
             "arch.proposal.done",
             "design.critique.done",
@@ -2732,7 +2753,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=f"{event.type} rejected: task capsule revision stale",
@@ -2742,7 +2763,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         completion_events = TERMINAL_SUCCESS_EVENTS | {
             "arch.proposal.done",
             "design.critique.done",
@@ -2868,7 +2889,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             pass
         if mode == "shadow":
             return None
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=f"{event.type} rejected: runtime snapshot stale",
@@ -2878,7 +2899,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         if event.type not in TERMINAL_SUCCESS_EVENTS:
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -2933,7 +2954,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=f"{event.type} rejected: stale fanout instance",
@@ -2942,22 +2963,22 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_completion_stale_rejected(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision:
+    ) -> WorkflowRuntimeDecision:
         task = self.task_store.get(event.task_id) if event.task_id else None
         if task is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason="stale completion rejected but task not found",
             )
         dispatched_role = self._dispatch_rework(task, event)
         if dispatched_role is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task.id,
                 reason="stale completion rejected: rework unavailable",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="dispatch",
             task_id=task.id,
             role=dispatched_role,
@@ -2997,7 +3018,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         nested = payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}
         actor = (
@@ -3020,7 +3041,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     expected=expected,
                     actual=actor,
                 )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=(
@@ -3038,7 +3059,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 expected=active_dispatch,
                 actual=event_dispatch,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason="artifact.manifest.published rejected: dispatch_id mismatch",
@@ -3093,7 +3114,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Reject success claims from read-only gate roles that edited files."""
         if event.type not in _READONLY_GATE_SUCCESS_EVENTS:
             return None
@@ -3137,7 +3158,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=(
@@ -3150,7 +3171,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self,
         event: ZfEvent,
         task: Task,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         if event.type not in {
             "arch.proposal.done",
             "design.critique.done",
@@ -3188,12 +3209,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             pass
         dispatched_role = self._dispatch_evidence_reissue(task, event, triage)
         if dispatched_role is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason=f"{event.type} rejected: invalid evidence refs",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="dispatch",
             task_id=event.task_id,
             role=dispatched_role,
@@ -3294,7 +3315,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_evidence_rework_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(event.task_id)
         if task is None:
             return None
@@ -3324,12 +3345,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             pass
         dispatched_role = self._dispatch_evidence_reissue(task, event, triage)
         if dispatched_role is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=event.task_id,
                 reason="evidence rework requested but no reissue target found",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="dispatch",
             task_id=event.task_id,
             role=dispatched_role,
@@ -3728,14 +3749,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         except Exception:
             pass
 
-    def _on_review_approved(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_review_approved(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         graph_decision = self._workflow_graph_reconcile_bridge(event)
         if graph_decision is not None:
             return graph_decision
         task = self.task_store.get(event.task_id)
         if task and task.status == "review":
             self._move_task(event.task_id, "testing")
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="move", task_id=event.task_id,
                 reason="review.approved → testing",
             )
@@ -3766,9 +3787,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         except Exception:
             return False
 
-    def _on_review_rejected(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_review_rejected(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         if self._try_lane_micro_loop(event):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="continuation_injected",
                 task_id=event.task_id or "",
                 reason="lane micro-loop handled rejection in live session",
@@ -4272,7 +4293,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 return True
         return False
 
-    def _on_test_passed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_test_passed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         graph_decision = self._workflow_graph_reconcile_bridge(event)
         if graph_decision is not None:
             return graph_decision
@@ -4317,7 +4338,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 except Exception:
                     pass
             if not self._evaluate_terminal_done(event, task):
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} terminal evidence blocked",
@@ -4340,13 +4361,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 fallback_assignee=assignee,
                 reason=f"task {event.task_id} done after {event.type}",
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="move", task_id=event.task_id,
                 reason=f"{event.type} → done",
             )
         return None
 
-    def _on_test_failed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_test_failed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         graph_decision = self._workflow_graph_reconcile_bridge(event)
         if graph_decision is not None:
             return graph_decision
@@ -4361,19 +4382,19 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             )
         return None
 
-    def _on_verify_passed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_verify_passed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         return self._on_test_passed(event)
 
-    def _on_verify_failed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_verify_failed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         if self._try_lane_micro_loop(event):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="continuation_injected",
                 task_id=event.task_id or "",
                 reason="lane micro-loop handled verify failure in live session",
             )
         return self._on_test_failed(event)
 
-    def _on_judge_passed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_judge_passed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         if (
             isinstance(event.payload, dict)
             and str(event.payload.get("authority") or "") == "compat_projection"
@@ -4388,7 +4409,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             or self._is_terminal_late_success(event, task)
         ):
             if not self._evaluate_terminal_done(event, task):
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=f"{event.type} terminal evidence blocked",
@@ -4411,7 +4432,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             # the canonical spec or skip (with reason). Emits one of
             # spec.promote.{completed,skipped} for audit. Best-effort.
             self._emit_spec_promote_decision(event, task)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="move", task_id=event.task_id,
                 reason="judge.passed → done",
             )
@@ -4419,7 +4440,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _settle_candidate_tasks_done(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Move a passed candidate's canonical tasks to done.
 
         PRD/issue/refactor fanout emit a candidate/PDD-level ``judge.passed``
@@ -4464,7 +4485,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 )
         if not moved:
             return None
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move",
             task_id=moved[0],
             reason=(
@@ -4563,7 +4584,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             if assignee not in active_assignees:
                 self._set_worker_state(assignee, "idle", reason=reason, task_id=task_id)
 
-    def _on_judge_failed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_judge_failed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(event.task_id)
         if task and task.status in {"testing", "in_progress"}:
             graph_decision = self._workflow_graph_reconcile_bridge(event)
@@ -4581,7 +4602,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_discriminator_failed(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Semantic rewrite: terminal claim failed → bounded rework.
 
         A discriminator failure means the task was not really done. Treat it
@@ -4599,7 +4620,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_task_done_blocked(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(event.task_id)
         if task is None or task.status in {"done", "cancelled", "blocked"}:
             return None
@@ -4609,7 +4630,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             reason="task.done.blocked → evidence triage",
         )
 
-    def _on_dev_blocked(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_dev_blocked(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(event.task_id)
         if task and task.status == "in_progress":
             self._move_task(event.task_id, "blocked")
@@ -4629,7 +4650,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                             "candidate replan"
                         ),
                     )
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     role="planner",
@@ -4650,13 +4671,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     task.assigned_to, "blocked_human", task_id=event.task_id or "",
                     reason=f"dev.blocked on {event.task_id}: {reason or 'no reason'}",
                 )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="move", task_id=event.task_id,
                 reason="dev.blocked → blocked + escalate",
             )
         return None
 
-    def _on_suspended(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_suspended(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """LH-3.T4: handle review.suspended / test.suspended.
 
         Difference from rejected/failed: reviewer/tester can't make
@@ -4699,7 +4720,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             )
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move", task_id=event.task_id,
             reason=f"{event.type} → blocked + escalate",
         )
@@ -4708,7 +4729,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_human_escalate(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Observational: a ``human.escalate`` event was raised.
 
         Layer 1 takes no mechanical transition here — the task is already
@@ -4724,7 +4745,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_codex_hook_session_start(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Observe provider lifecycle without asserting a task transition.
         Registered for wake coverage and liveness reconstruction only.
         """
@@ -4732,13 +4753,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_codex_hook_user_prompt_submit(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Observational: user prompt submitted to codex. No-op today."""
         return None
 
     def _on_codex_hook_pre_tool_use(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """When the codex hook reports a denied tool call, surface it as
         `agent.api_blocked` so the circuit breaker + rate-limit paths
         treat it the same as Claude's SDK-level block.
@@ -4761,29 +4782,29 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
     def _on_codex_hook_post_tool_use(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Observational: tool call completed. No-op today."""
         return None
 
     def _on_codex_hook_stop(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Codex round complete plus stop-reason recovery when task-bound."""
         return self._recover_provider_stop(event)
 
     def _on_agent_api_blocked(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         return self._recover_provider_stop(event)
 
     def _on_agent_timeout(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         return self._recover_provider_stop(event)
 
     def _on_cost_budget_exceeded(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         try:
             self.event_writer.append(ZfEvent(
@@ -4806,7 +4827,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             ))
         except Exception:
             pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="skip",
             task_id=event.task_id,
             reason="cost budget exceeded → run goal budget_limited",
@@ -4815,7 +4836,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_autoresearch_worker_stuck_inject(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         from zf.runtime.autoresearch_stuck_injection import (
             handle_autoresearch_stuck_injection,
         )
@@ -4825,7 +4846,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _recover_provider_stop(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         reason = str(payload.get("provider_stop_reason") or "").strip()
         if not reason:
@@ -4834,43 +4855,53 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             return None
 
         task_id = event.task_id or str(payload.get("task_id") or "")
-        if not task_id:
+        task = self.task_store.get(task_id) if task_id else None
+        if not task_id and not str(payload.get("operation_id") or "").strip():
             return None
-        task = self.task_store.get(task_id)
-        if task is None or task.status in {"done", "cancelled"}:
-            return None
-
         action = self._provider_stop_action(reason)
         role = None
-        assignee = task.assigned_to or event.actor or ""
+        assignee = (
+            (task.assigned_to if task is not None else "")
+            or str(payload.get("instance_id") or "")
+            or event.actor
+            or ""
+        )
         if assignee:
-            role = (
-                self._find_role_by_instance(assignee)
-                or self._find_role_by_name(assignee)
+            role = self._find_role_by_instance(assignee) or self._find_role_by_name(
+                assignee
             )
-        if reason == "completed_without_terminal_event" and role is not None:
-            manifest_recovery = (
-                self._request_manifest_terminal_completion_if_pending(
-                    role=role,
-                    task=task,
-                    reason="provider_stop_completed_without_terminal_event",
-                    inject_prompt=True,
-                    causation_id=event.id,
-                )
+        if (
+            reason == "completed_without_terminal_event"
+            and role is not None
+            and task is not None
+            and task.status not in {"done", "cancelled"}
+        ):
+            manifest_recovery = self._request_manifest_terminal_completion_if_pending(
+                role=role,
+                task=task,
+                reason="provider_stop_completed_without_terminal_event",
+                inject_prompt=True,
+                causation_id=event.id,
             )
             if manifest_recovery is not None:
                 return manifest_recovery
-            green_recovery = (
-                self._request_green_terminal_completion_if_pending(
-                    role=role,
-                    task=task,
-                    reason="provider_stop_after_green_verification",
-                    inject_prompt=True,
-                    causation_id=event.id,
-                )
+            green_recovery = self._request_green_terminal_completion_if_pending(
+                role=role,
+                task=task,
+                reason="provider_stop_after_green_verification",
+                inject_prompt=True,
+                causation_id=event.id,
             )
             if green_recovery is not None:
                 return green_recovery
+
+        if decision := recover_provider_stopped_operation(
+            self, event, reason, action, role, task, assignee
+        ):
+            return decision
+
+        if not task_id or task is None or task.status in {"done", "cancelled"}:
+            return None
 
         if action == "suspend":
             self.task_store.update(
@@ -4878,7 +4909,8 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 status="blocked",
                 blocked_reason=f"provider_stop:{reason}",
             )
-            self._emit_provider_stop_recovery(
+            emit_provider_stop_recovery(
+                self,
                 event,
                 task=task,
                 reason=reason,
@@ -4899,7 +4931,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 ))
             except Exception:
                 pass
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 role=assignee,
@@ -4915,7 +4947,8 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 self._layer2_blocked_until,
                 timezone.utc,
             ).isoformat()
-            self._emit_provider_stop_recovery(
+            emit_provider_stop_recovery(
+                self,
                 event,
                 task=task,
                 reason=reason,
@@ -4930,7 +4963,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 reason=f"provider stop: {reason}",
                 role=role,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=task_id,
                 role=assignee,
@@ -4948,14 +4981,15 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 except Exception:
                     pass
             self.task_store.update(task_id, status="backlog", assigned_to=assignee)
-            self._emit_provider_stop_recovery(
+            emit_provider_stop_recovery(
+                self,
                 event,
                 task=task,
                 reason=reason,
                 action=action,
                 role=role,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="dispatch",
                 task_id=task_id,
                 role=assignee,
@@ -4964,14 +4998,15 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
         if action == "requeue":
             self.task_store.update(task_id, status="backlog", assigned_to=assignee)
-            self._emit_provider_stop_recovery(
+            emit_provider_stop_recovery(
+                self,
                 event,
                 task=task,
                 reason=reason,
                 action=action,
                 role=role,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="dispatch",
                 task_id=task_id,
                 role=assignee,
@@ -4991,6 +5026,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             "completed_without_terminal_event",
             "pending_todos",
             "timeout",
+            "provider_policy_rejected",
             "transport_error",
         }:
             return "requeue"
@@ -5035,7 +5071,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         reason: str,
         inject_prompt: bool,
         causation_id: str | None = None,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Ask a worker to finish the terminal protocol after green checks.
 
         Real Codex can stop after a passing pytest/verification command without
@@ -5113,7 +5149,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 ))
             except Exception:
                 pass
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="recover",
             task_id=task.id,
             role=role.instance_id,
@@ -5270,74 +5306,9 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         self._send_transport_task(role.instance_id, path, prompt, context)
         return path
 
-    def _emit_provider_stop_recovery(
-        self,
-        event: ZfEvent,
-        *,
-        task: Task,
-        reason: str,
-        action: str,
-        role: RoleConfig | None,
-        cooldown_until: str = "",
-    ) -> None:
-        try:
-            dispatch_id = getattr(task, "active_dispatch_id", "") or ""
-            recovery_payload = {
-                "reason": reason,
-                "action": action,
-                "origin_event": event.type,
-                "origin_event_id": event.id,
-                "assigned_to": task.assigned_to or "",
-                "role": role.name if role is not None else "",
-                "instance_id": role.instance_id if role is not None else "",
-                "backend": role.backend if role is not None else "",
-                "dispatch_id": dispatch_id,
-                "cooldown_until": cooldown_until,
-            }
-            self.event_writer.append(ZfEvent(
-                type="provider.stop.recovery",
-                actor="zf-cli",
-                task_id=task.id,
-                payload=recovery_payload,
-                causation_id=event.id,
-                correlation_id=event.correlation_id,
-            ))
-            status = (
-                "blocked" if action == "suspend"
-                else "cooldown" if action == "cooldown"
-                else "degraded"
-            )
-            self.event_writer.append(ZfEvent(
-                type="provider.health.changed",
-                actor="zf-cli",
-                task_id=task.id,
-                payload={
-                    **recovery_payload,
-                    "status": status,
-                    "requires_operator": action == "suspend",
-                },
-                causation_id=event.id,
-                correlation_id=event.correlation_id,
-            ))
-            if action == "cooldown":
-                self.event_writer.append(ZfEvent(
-                    type="provider.cooldown.started",
-                    actor="zf-cli",
-                    task_id=task.id,
-                    payload={
-                        **recovery_payload,
-                        "status": "cooldown",
-                        "cooldown_seconds": getattr(self, "_layer2_cooldown_s", 60.0),
-                    },
-                    causation_id=event.id,
-                    correlation_id=event.correlation_id,
-                ))
-        except Exception:
-            pass
-
     def _on_dispatch_silent_stall(
         self, event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """K2:task.assigned 无后续 dispatched 的停摆信号 → 重驱派发。
 
         幂等:_dispatch_ready 只派 ready/assigned 未派发的任务;
@@ -5350,7 +5321,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             return None
         source = str(payload.get("source") or "")
         if source != "dispatch_sweep":
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="wait",
                 task_id=task_id,
                 target_role=str(payload.get("assignee") or ""),
@@ -5360,14 +5331,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 ),
             )
         self._dispatch_ready()
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="redispatch",
             task_id=task_id,
             target_role=str(payload.get("assignee") or ""),
             reason="dispatch.silent_stall → re-drive dispatch sweep",
         )
 
-    def _on_gate_failed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_gate_failed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         task = self.task_store.get(event.task_id)
         if task is None or task.status in ("done", "cancelled", "in_progress"):
             return None
@@ -5392,7 +5363,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             reason=f"gate.failed → rework (from {task.status})",
         )
 
-    def _on_phase_progressed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_phase_progressed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         task_id = event.task_id or str(payload.get("task_id") or "")
         phase = str(payload.get("phase") or "").strip()
@@ -5426,24 +5397,24 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="observe",
                 task_id=task_id,
                 reason=f"phase regression ignored: {current} -> {phase}",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="observe",
             task_id=task_id,
             reason=f"phase progressed: {phase}",
         )
 
-    def _on_task_fanout_requested(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_task_fanout_requested(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         payload = event.payload if isinstance(event.payload, dict) else {}
         task_id = event.task_id or str(payload.get("task_id") or "")
         task = self.task_store.get(task_id) if task_id else None
         if task is None:
             self._emit_task_fanout_rejected(event, "task missing")
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: task missing",
@@ -5451,7 +5422,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         expected_output = str(payload.get("expected_output") or "").strip()
         if not expected_output:
             self._emit_task_fanout_rejected(event, "expected_output missing")
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: expected_output missing",
@@ -5462,7 +5433,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             and pattern_id
             and self._fanout_started(pattern_id, event.id)
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="observe",
                 task_id=task_id,
                 reason="admitted workflow fanout already started",
@@ -5475,14 +5446,14 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 expected="no active fanout for task",
                 actual=active_fanout_id,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: active fanout already exists",
             )
         if _payload_requests_writer_capability(payload):
             self._emit_task_fanout_rejected(event, "reader fanout cannot request write capability")
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: write capability requested",
@@ -5503,7 +5474,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 expected=expected_dispatch,
                 actual=actual_dispatch,
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: stale dispatch",
@@ -5519,7 +5490,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         specialists = _string_list(payload.get("requested_specialists")) or ["review"]
         if len(specialists) > 6:
             self._emit_task_fanout_rejected(event, "capacity exceeded")
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="fanout request rejected: capacity exceeded",
@@ -5541,7 +5512,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="serialize",
                 task_id=task_id,
                 reason="fanout request serialized due to exclusive file overlap",
@@ -5645,7 +5616,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 else []
             )
             self.event_writer.append(child_event)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="fanout",
             task_id=task_id,
             reason=f"fanout request accepted: {context.fanout_id}",
@@ -5657,7 +5628,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         payload: dict,
         *,
         task_id: str,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         pattern_id = str(payload.get("pattern_id") or "").strip()
         if not pattern_id:
             return None
@@ -5666,7 +5637,17 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             return None
         topology = str(getattr(stage, "topology", "") or "")
         if topology != "fanout_reader":
-            return None
+            self._emit_task_fanout_rejected(
+                event,
+                "declared workflow pattern is not an external reader entry",
+                expected="topology=fanout_reader",
+                actual=f"topology={topology or 'unset'}",
+            )
+            return WorkflowRuntimeDecision(
+                action="block",
+                task_id=task_id,
+                reason=f"unsupported declared workflow pattern: {pattern_id}",
+            )
         trigger = str(getattr(stage, "trigger", "") or "").strip()
         if not trigger:
             return None
@@ -5700,12 +5681,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                     f"prompt_kind={stage_payload.get('prompt_kind') or ''}"
                 ),
             )
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason=f"workflow fanout did not start: {pattern_id}",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="workflow_fanout",
             task_id=task_id,
             reason=f"workflow fanout started from pattern: {pattern_id}",
@@ -5759,7 +5740,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         except Exception:
             return None
 
-    def _on_workflow_reconcile_requested(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_workflow_reconcile_requested(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """FIX-6(bizsim r4 F2):审批解锁后的 level 重扫。
 
         阻塞期间被 wait 掉的 stage 触发边沿不会自动重放(r4 实锚:
@@ -5793,7 +5774,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             self._maybe_start_reader_fanout(candidate)
             self._maybe_start_writer_fanout(candidate)
             revived.append(trigger_type)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="capture",
             reason=(
                 "workflow reconcile revived: " + ", ".join(revived)
@@ -5857,7 +5838,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             correlation_id=event.correlation_id,
         ))
 
-    def _on_channel_message_posted(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_channel_message_posted(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Raw `zf emit channel.message.posted` runs the same routing pipeline
         as the web action. The router's `_auto_route_allowed` gate keeps
         agent-authored posts from looping; this handler only adds a
@@ -5869,7 +5850,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         route_reactor_message_after_ingress(self, event=event, payload=payload)
         return None
 
-    def _on_channel_discussion_event(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_channel_discussion_event(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Tick the doc-122 discussion state machine on ledger / reply /
         consensus events arriving over async transports (`zf emit`). The tick
         is idempotent against the folded projection, so double invocation via
@@ -5900,32 +5881,39 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_channel_synthesis_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         react_channel_synthesis_requested(self, event)
+        return None
+
+    def _on_channel_synthesis_repair_requested(
+        self,
+        event: ZfEvent,
+    ) -> WorkflowRuntimeDecision | None:
+        react_channel_synthesis_repair_requested(self, event)
         return None
 
     def _on_channel_question_dedup_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         react_channel_question_dedup_requested(self, event)
         return None
 
     def _on_channel_cross_review_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         react_channel_cross_review_requested(self, event)
         return None
 
     def _on_channel_consensus_proposed(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         react_channel_consensus_proposed(self, event)
         return self._on_channel_discussion_event(event)
 
-    def _on_channel_agent_reply_requested(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_channel_agent_reply_requested(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Raw `zf emit channel.agent.reply.requested` dispatches to the
         target member's backend via `dispatch_reply_request`. The inline
         router path (`route_channel_message` → `dispatch_reply_request`)
@@ -6007,7 +5995,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
 
         resume_pending_channel_reply_queues(self, events)
 
-    def _on_worker_completed(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_worker_completed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Route provider/worker self-completion through completion audit.
 
         This is intentionally conservative: the handler records the audit
@@ -6050,19 +6038,19 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 ))
             except Exception:
                 pass
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="worker.completed completion audit failed",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action=result.route,
             task_id=task_id,
             role=result.recommended_role,
             reason=f"worker.completed → completion audit route {result.route}",
         )
 
-    def _on_context_critical(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _on_context_critical(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Route context hard-cap events through completion audit.
 
         Context pressure is runtime infrastructure state, not product truth.
@@ -6110,12 +6098,12 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 ))
             except Exception:
                 pass
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason="worker.context.critical completion audit failed",
             )
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action=result.route,
             task_id=task_id,
             role=result.recommended_role,
@@ -6142,7 +6130,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_completion_scheduled(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Consume completion-audit continuation/retry schedules.
 
         The audit event is the decision; this handler performs the small
@@ -6156,20 +6144,20 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if not task_id:
             return None
         if self._completion_schedule_already_consumed(event.id):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=task_id,
                 reason=f"{event.type} already consumed",
             )
         task = self.task_store.get(task_id)
         if task is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 task_id=task_id,
                 reason=f"{event.type} task missing",
             )
         if task.status in {"done", "cancelled"}:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=task_id,
                 reason=f"{event.type} ignored for terminal task",
@@ -6197,7 +6185,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=task_id,
                 reason=f"{event.type} stale dispatch ignored",
@@ -6246,7 +6234,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             causation_id=event.id,
             correlation_id=event.correlation_id,
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="move",
             task_id=task_id,
             role=assigned_to or None,
@@ -6276,11 +6264,11 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_autoresearch_trigger_accepted(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Turn a Run Manager-approved trigger into a supervised proposal."""
         payload = event.payload if isinstance(event.payload, dict) else {}
         if str(payload.get("source") or "") != "autoresearch.invocation.accepted":
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="notify", task_id=event.task_id, role="run_manager",
                 reason="autoresearch trigger awaits Run Manager intake",
             )
@@ -6292,7 +6280,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             recovery_case_id.encode("utf-8")
         ).hexdigest()[:12]
         if self._automation_proposal_exists(proposal_id):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="autoresearch maintenance proposal already exists",
@@ -6380,7 +6368,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="notify",
             task_id=task_id or None,
             role="operator",
@@ -6390,7 +6378,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_autoresearch_bug_candidate_confirmed(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Apply the bounded source-repair policy after, never before, diagnosis."""
 
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -6405,7 +6393,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             or str(candidate.get("status") or "") != "confirmed"
             or repair_task_payload is None
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="confirmed candidate lacks bounded repair contract",
@@ -6413,7 +6401,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if bool(candidate.get("expected_fault")) or str(
             candidate.get("failure_scope") or ""
         ) == "plan_admission":
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="expected planner fault cannot dispatch source repair",
@@ -6429,7 +6417,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             and str(item.payload.get("candidate_id") or "") == candidate_id
             for item in existing
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="confirmed candidate repair dispatch already exists",
@@ -6455,7 +6443,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 if repair_mode == "bounded_repair" else None,
             )
         except Exception as exc:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="notify",
                 task_id=event.task_id,
                 role="run_manager",
@@ -6484,7 +6472,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="notify",
                 task_id=event.task_id,
                 role="run_manager",
@@ -6506,7 +6494,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="notify",
             task_id=event.task_id,
             role="run_manager",
@@ -6516,7 +6504,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_autoresearch_invocation_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Accept only L1/proposal-only Autoresearch diagnosis requests.
 
         The accepted invocation is bridged to the existing supervised
@@ -6528,7 +6516,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         if not invocation_id:
             return None
         if self._autoresearch_invocation_handled(invocation_id):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="autoresearch invocation already handled",
@@ -6555,7 +6543,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
                 causation_id=event.id,
                 correlation_id=event.correlation_id,
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="notify",
                 task_id=event.task_id,
                 role="operator",
@@ -6581,7 +6569,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             causation_id=accepted.id,
             correlation_id=event.correlation_id,
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="notify",
             task_id=event.task_id,
             role="operator",
@@ -6591,7 +6579,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_run_manager_autoresearch_requested(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Bridge Run Manager diagnosis requests into the Autoresearch entry path."""
         try:
             events = self.event_log.read_all()
@@ -6602,13 +6590,13 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             events=events,
         )
         if invocation is None:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="run manager autoresearch request already bridged",
             )
         self.event_writer.append(invocation)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="notify",
             task_id=event.task_id,
             role="operator",
@@ -6636,7 +6624,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
     def _on_replan_proposal_created(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Request deterministic replan contract eval for proposal artifacts.
 
         The proposal event may come from Autoresearch, Project Spine Review, or
@@ -6658,7 +6646,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
         ).strip()
         candidate_task_map_ref = str(payload.get("candidate_task_map_ref") or "").strip()
         if not candidate_task_map_ref:
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="replan proposal has no candidate_task_map_ref",
@@ -6680,7 +6668,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             profile=str(payload.get("profile") or "baseline"),
         )
         if self._replan_eval_request_exists(request_payload):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="skip",
                 task_id=event.task_id,
                 reason="replan contract eval request already exists",
@@ -6693,7 +6681,7 @@ class EventReactorMixin(DurableCallWorkflowMixin):
             causation_id=event.id,
             correlation_id=event.correlation_id,
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="notify",
             task_id=event.task_id,
             role="product_delivery",
@@ -6959,3 +6947,7 @@ def _action_covered(action: str, evidence_text: str) -> bool:
         return False
     matches = sum(1 for token in tokens if token in evidence_text)
     return matches >= max(1, min(3, len(tokens)))
+
+
+# Historical extension import compatibility.
+OrchestratorDecision = WorkflowRuntimeDecision

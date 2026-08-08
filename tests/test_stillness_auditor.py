@@ -73,6 +73,60 @@ def test_consumed_trigger_is_not_pending() -> None:
     assert not r.breakpoints
 
 
+def test_active_workflow_operation_is_active_not_stalled() -> None:
+    events = [
+        _ev("loop.started", minutes_ago=30),
+        _ev("task_map.ready", minutes_ago=20, eid="evt-tm"),
+        _ev(
+            "workflow.operation.requested",
+            minutes_ago=19,
+            workflow_run_id="run-1",
+            operation_id="wop-active",
+            request_hash="a" * 64,
+        ),
+    ]
+
+    report = audit_stillness(events, now_epoch=_NOW.timestamp())
+
+    assert report.state == "active"
+    assert report.reason == "inflight_workflow_operations"
+
+
+def test_recovery_redrive_is_not_a_new_driving_root() -> None:
+    events = [
+        _ev("task_map.ready", minutes_ago=20, eid="evt-original"),
+        _ev(
+            "task_map.ready",
+            minutes_ago=19,
+            eid="evt-redrive",
+            redrive_of="evt-original",
+            rework_of="evt-original",
+        ),
+    ]
+
+    report = audit_stillness(events, now_epoch=_NOW.timestamp())
+
+    assert report.state == "active"
+    assert not report.breakpoints
+
+
+def test_task_pipeline_admission_consumes_task_map_trigger() -> None:
+    events = [
+        _ev("task_map.ready", minutes_ago=20, eid="evt-task-map"),
+        _ev(
+            "task.pipeline.generation.admitted",
+            minutes_ago=19,
+            trigger_event_id="evt-task-map",
+            workflow_run_id="run-1",
+        ),
+    ]
+
+    report = audit_stillness(events, now_epoch=_NOW.timestamp())
+
+    assert report.state == "active"
+    assert not report.breakpoints
+
+
 def test_quarantined_trigger_counts_as_consumed() -> None:
     events = [
         _ev("task_map.ready", minutes_ago=20, eid="evt-tm"),

@@ -14,9 +14,43 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
 | Issue fix(default light) | 单一可复现问题；固定 Fix -> Verify -> Judge | `zf flow draft --kind issue` | `IssueFlow` 默认 light，Kernel 合成单 Task Contract |
 | Issue fix(explicit fanout) | 跨模块或根因/范围不确定的问题 | `issue-fanout-v3.yaml` | `prod-runtime/v1` + `IssueFlow topology: fanout` 展开 |
 | Refactor | 从已有系统重构或迁移到新实现 | `refactor-lane-v3.yaml` | `refactor-controller-runtime/v3` + `RefactorFlow v3` 展开 |
+| General | 通用只读证据收集、综合与独立验证 | `general-workflow-v3.yaml` | `prod-runtime/v1` + safe Generic Workflow `evidence-synthesis-v1` |
 
 注:roles 由 flowProfile 展开生成;`common/profiles.yaml` 里的 RoleSet
 (`prd-codex-lanes/v1` 等)是可选组合件,v3 入口并不依赖它们。
+
+## OA Semantic Control
+
+OA 权限按 workflow 规模分级，不按“配置里是否有 orchestrator role”推导：
+
+- 6 个 Codex/Claude PRD fanout、Issue fanout、Refactor v3 入口使用
+  `semantic_control`，但默认只声明 `plan_candidate: shadow`。正常路径不等待 OA，
+  OA 结果只进入对账和指标。
+- `prd-fanout-v3-oa-pilot.yaml`、`issue-fanout-v3-oa-pilot.yaml` 和
+  `refactor-lane-v3-oa-pilot.yaml` 是非 preferred 的 blocking 样例：root 保持
+  `exception_advisor`，仅对应 Product Flow policy 通过显式 `pilot_id` 启用
+  `plan_candidate: blocking`。loader 拒绝无 `pilot_id`、General/Research、micro/light、
+  未声明 standard/full route 或包含其他 blocking checkpoint 的配置。
+- 2 个 PRD light 和 2 个 General v3 入口保持 `exception_advisor`，正常路径不增加
+  OA Provider turn，也不要求它们伪造 Plan Artifact Package。
+- 固定 `research-fanout` / `research-adaptive` 是 preparatory read-only route。完整
+  controller 通过 `flow_policies.research: exception_advisor` 显式隔离；Research
+  聚合、结果回传和后续 PRD/Refactor 启动合同不变。
+
+`zf flow draft` 的默认 Issue 为 light；PRD/Refactor（`feat` 仍是 PRD 别名）和
+`zf project init --kind multi` 中的完整 Product Flow 只生成 `plan_candidate: shadow`。
+动态 General 与 Research 保持 exception advisor。正常 Impl/Verify lane continuation
+始终由 Kernel/WRC 机械推进，不增加逐 lane OA turn。
+
+配置可用 checkpoint 中，`pre_impl` 表示消费 Plan Artifact Package/Task Map 的
+Plan-bound run-plan/context-route 复核，当前默认控制器不启用。真正的 `run_start` 应只消费
+workflow intake/Run Contract，尚未接入配置入口；不得再把 Plan 后的 checkpoint 命名为
+`run_start`。
+
+配置覆盖已经分级完成。PRD、Issue、Refactor 的真实 Codex shadow 全链和隔离 General 真实
+Verify 已通过，Plan -> Impl -> Verify 必读上下文也完成 digest/Read Ledger 对账；但真实
+Provider A/B 仍只有单一 PRD `plan_candidate` 样本。前者证明默认路径兼容性，不能替代完整
+shadow/blocking 对比，因此 blocking 仍只允许上述显式 Product Flow pilot，不进入默认路由。
 
 ## 技能与执法姿态(2026-07-08 起,以 `common/profiles.yaml` 为准)
 
@@ -50,16 +84,26 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
   生成新项目时,若探测器已经得到栈级 gate 命令,会自动写入
   `quality_gates.static.required_checks`,避免生成后立刻被 candidate gate
   拒绝。
-- **Goal delivery parity**:8 个入口统一 `deliveryPolicy: ship_candidate`，
-  admitted Thin Judge result 先形成 completion claim，再由 scoped delivery
-  operation 合入 `ship_target_branch`，成功后产生唯一
-  `run.goal.completed`。`auto_ship_on_judge_passed` 仅供 legacy active run
-  恢复，兼容投影不得触发新运行交付。
-- **Artifact handoff blocking**:8 个入口显式
+- **Goal delivery parity**:原有 8 个 Issue/PRD/Refactor 入口统一
+  `deliveryPolicy: ship_candidate`；2 个 General 入口使用 Generic Workflow
+  `artifact_delivery/report_only`，两者都经 Goal Completion Gate 形成唯一终态。
+  前 8 个入口由 admitted Thin Judge result 形成 completion claim，再由 scoped
+  delivery operation 合入 `ship_target_branch`；General 则以独立 verify 后的必需
+  artifact claim 收口，不经过 Thin Judge。成功后都只产生一个
+  `run.goal.completed`。`auto_ship_on_judge_passed` 仅供 legacy active run 恢复，
+  兼容投影不得触发新运行交付。
+- **Artifact handoff blocking**:原有 8 个 Issue/PRD/Refactor 入口显式
   `artifactPackageMode: blocking`。新 Run 缺 current Package、Contract、
   TaskRef、target 或 required-read evidence 时 fail-closed；mode 同时固定在
   Run Contract 与 immutable Plan Artifact Package。升级前没有 mode 字段的
   Package 保持 legacy shadow，配置回退也不会改写既有 Package/EventLog。
+  General 入口走 Generic Workflow port、Required Read Ledger 和
+  `artifact-delivery` semantic submit，不要求伪造 Plan Package。
+- **Generic failure ownership**:General 编译产生的 `<stage>.failed` 由 Kernel
+  按 `flow_kind=workflow`、`stage_id` 和 Generic Workflow contract digest 注册
+  stage-local bounded replan；cold-start event-contract audit 将这些配置内消费者
+  计入闭包，Run Manager 不再并发创建 unknown-actionable 诊断。缺失上述合同身份的
+  任意自定义 `*.failed` 仍 fail-closed。
 - **Role process lifecycle**:标准 Issue / PRD / Refactor 入口通过 common
   `roleDefaults.lifecycle.mode: on_demand` 延迟创建普通 scan、plan、impl、
   verify、judge Provider process，并在机械准入通过后保留 session/worktree
@@ -68,6 +112,14 @@ controller + profile composition,不是 runtime 执行时的第二控制面。
   `provider_session` 仍为空即继承 Provider 默认；Codex/Claude 的 effort、
   agent 与并发上限属于 provider-specific override，不进入跨 Provider common
   profile。
+- **Active budget breaker**:`bounded-direct-v1` 将每个 provider operation 限制为
+  `900s / 60 usage samples / 1,500,000 tokens / $8`，Run 限制为
+  `3000s / 10,000,000 tokens / $40`。10 个入口的所有 provider role（包括 resident
+  OA）都必须显式或经模板解析到该 profile。operation 上限固定在 immutable request，
+  Run 上限与 meter baseline 固定在 `run.admission.admitted`；运行中越界会终止 provider
+  并进入 owner-visible blocked，而不是等下一次 dispatch 才检查。usage sample 使用
+  去重后的 canonical cost ledger 计数；fanout briefing 要求预留最后两次用于写入和
+  submit，未显式要求当前外部事实的任务不得消耗回合做 Web 调研。
 - **evidencePolicy 驱动执法**:`evidencePolicy: strict_refs` 由 loader
   派生 `event_schema.mode: blocking` + `report_evidence_gate: fail_closed`
   (单一控制点;显式 `verification.*` 配置优先,是逃生门)。
@@ -101,4 +153,6 @@ uv run zf config render --config examples/prod/controller/issue-fanout-v3.yaml \
   --output /tmp/issue.rendered.yaml --lock /tmp/issue.render-lock.json
 uv run zf config render --config examples/prod/controller/refactor-lane-v3.yaml \
   --output /tmp/refactor.rendered.yaml --lock /tmp/refactor.render-lock.json
+uv run zf config render --config examples/prod/controller/general-workflow-v3.yaml \
+  --output /tmp/general.rendered.yaml --lock /tmp/general.render-lock.json
 ```

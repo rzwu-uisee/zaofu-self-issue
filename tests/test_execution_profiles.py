@@ -47,6 +47,7 @@ workflow:
         max_children: 4
         max_depth: 1
         timeout_seconds: 900
+        max_usage_samples: 30
         token_budget: 1000
         cost_budget_usd: 2
 roles:
@@ -94,6 +95,7 @@ def test_legal_profile_round_trips_and_run_contract_pins_catalog(
     path, config = _profile_config(tmp_path)
     profile = config.workflow.execution_profiles["adaptive-read-v1"]
     assert profile.limits.max_children == 4
+    assert profile.limits.max_usage_samples == 30
 
     contract = build_run_contract(
         config,
@@ -129,6 +131,10 @@ def test_legal_profile_round_trips_and_run_contract_pins_catalog(
         {
             "strategy": "provider_native",
             "limits": {"token_budget": 10_000_001},
+        },
+        {
+            "strategy": "provider_native",
+            "limits": {"max_usage_samples": 1_001},
         },
     ],
 )

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from zf.cli.flow import draft_multi_kind_project_spec
+from zf.cli.flow import draft_flow_spec, draft_multi_kind_project_spec
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.events.model import ZfEvent
 from zf.core.verification.event_schema import EventSchemaRegistry
@@ -45,6 +45,69 @@ spec:
 
 
 class TestExpansion:
+    @pytest.mark.parametrize("kind", ["prd", "refactor"])
+    def test_full_flow_drafts_enable_semantic_control(
+        self,
+        tmp_path,
+        kind,
+    ):
+        path = tmp_path / f"{kind}.yaml"
+        docs = draft_flow_spec(
+            kind=kind,
+            backend="mock",
+            project_name=f"{kind}-demo",
+            project_root=tmp_path,
+        )
+        path.write_text(
+            yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        cfg = load_config(path)
+        assert cfg.workflow.orchestration.mode == "semantic_control"
+        assert cfg.workflow.orchestration.checkpoints == [
+            "plan_candidate",
+        ]
+        assert cfg.workflow.orchestration.checkpoint_policies == {
+            "plan_candidate": "shadow",
+        }
+        assert cfg.workflow.orchestration.flow_policies[
+            "research"
+        ].mode == "exception_advisor"
+        assert cfg.workflow.orchestration.flow_policies[
+            "workflow"
+        ].mode == "exception_advisor"
+        orchestrator = next(
+            role for role in cfg.roles if role.name == "orchestrator"
+        )
+        assert "orchestrator.semantic.checkpoint.requested" in (
+            orchestrator.triggers
+        )
+
+    def test_issue_flow_draft_stays_exception_advisor_light(self, tmp_path):
+        path = tmp_path / "issue.yaml"
+        docs = draft_flow_spec(
+            kind="issue",
+            backend="mock",
+            project_name="issue-demo",
+            project_root=tmp_path,
+        )
+        path.write_text(
+            yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+        cfg = load_config(path)
+        policy = cfg.workflow.orchestration
+        assert policy.mode == "exception_advisor"
+        assert policy.checkpoints == []
+        orchestrator = next(
+            role for role in cfg.roles if role.name == "orchestrator"
+        )
+        assert "orchestrator.semantic.checkpoint.requested" not in (
+            orchestrator.triggers
+        )
+
     def test_multi_kind_flow_namespaces_roles_routes_and_dispatch(
         self, tmp_path, capsys,
     ):
@@ -71,6 +134,26 @@ class TestExpansion:
         assert set(cfg.workflow.dag.event_schemas_by_kind) == {
             "issue", "prd", "refactor",
         }
+        policy = cfg.workflow.orchestration
+        assert policy.mode == "exception_advisor"
+        assert policy.checkpoints == []
+        assert policy.flow_policies["prd"].checkpoints == [
+            "plan_candidate",
+        ]
+        assert policy.flow_policies["prd"].checkpoint_policies == {
+            "plan_candidate": "shadow",
+        }
+        assert policy.flow_policies["refactor"].checkpoint_policies == (
+            policy.flow_policies["prd"].checkpoint_policies
+        )
+        for kind in ("issue", "workflow", "research"):
+            assert policy.flow_policies[kind].mode == "exception_advisor"
+        orchestrator = next(
+            role for role in cfg.roles if role.name == "orchestrator"
+        )
+        assert "orchestrator.semantic.checkpoint.requested" in (
+            orchestrator.triggers
+        )
 
         registry = EventSchemaRegistry.from_config(cfg)
         assert registry.validate(ZfEvent(
@@ -152,8 +235,13 @@ class TestExpansion:
                            "flow-lanes-verify", "flow-lanes-final"]
         scan = next(s for s in cfg.workflow.stages if s.id == "flow-scan")
         assert scan.target_ref == ""
+        assert scan.result_semantics == "artifact_production"
         assert any(
             "initial refactor scan" in item
+            for item in scan.criteria.instructions
+        )
+        assert any(
+            "recommendation to approve" in item
             for item in scan.criteria.instructions
         )
         plan = next(s for s in cfg.workflow.stages if s.id == "flow-plan")
@@ -481,6 +569,7 @@ spec:
         defaults = {
             "model": "gpt-5.5",
             "modelReasoningEffort": "xhigh",
+            "contextWindowTokens": 1_000_000,
             "providerSession": {"effort": "high"},
             "lifecycle": {"mode": "on_demand"},
             "providerSessionByStage": {
@@ -492,6 +581,10 @@ spec:
             "permissionMode": "bypass",
             "stuckThresholdSeconds": 901,
             "spawnReadyTimeoutSeconds": 241,
+            "execution": {
+                "default_profile": "bounded-direct-v1",
+                "profile_allowlist": ["bounded-direct-v1"],
+            },
         }
         expansions = [
             expand_issue_flow({"roleDefaults": defaults}),
@@ -509,18 +602,25 @@ spec:
                 and role["spawn_ready_timeout_seconds"] == 241
                 and role["model"] == "gpt-5.5"
                 and role["model_reasoning_effort"] == "xhigh"
+                and role["context_window_tokens"] == 1_000_000
                 and role["provider_session"]["effort"] == "high"
                 and role["lifecycle"]["mode"] == "on_demand"
+                and role["execution"]["default_profile"]
+                == "bounded-direct-v1"
                 for role in expansion["roles"]
             )
             template = expansion["pipelines"][0]["lane_role_template"]
             assert template["permission_mode"] == "bypass"
             assert template["model"] == "gpt-5.5"
             assert template["model_reasoning_effort"] == "xhigh"
+            assert template["context_window_tokens"] == 1_000_000
             assert template["stuck_threshold_seconds"] == 901
             assert template["spawn_ready_timeout_seconds"] == 241
             assert template["provider_session"]["effort"] == "high"
             assert template["lifecycle"]["mode"] == "on_demand"
+            assert template["execution"]["default_profile"] == (
+                "bounded-direct-v1"
+            )
             assert (
                 template["provider_session_by_stage"]["verify"]["effort"]
                 == "ultra"
@@ -664,6 +764,10 @@ spec:
             for item in cfg.workflow.stages[0].criteria.instructions
         )
         assert any(
+            "complete actionable task_map" in item
+            for item in cfg.workflow.stages[0].criteria.instructions
+        )
+        assert any(
             "schema_version` exactly `task-map.v1" in item
             for item in cfg.workflow.stages[0].criteria.instructions
         )
@@ -747,8 +851,13 @@ spec:
         assert final.aggregate.success_event == "goal.closure.synthesized"
         assert final.aggregate.failure_event == "goal.closure.synthesis.failed"
         scan = next(stage for stage in cfg.workflow.stages if stage.id == "prd-scan")
+        assert scan.result_semantics == "artifact_production"
         assert any(
             "initial PRD scan" in item
+            for item in scan.criteria.instructions
+        )
+        assert any(
+            "recommendation to approve" in item
             for item in scan.criteria.instructions
         )
         plan = next(stage for stage in cfg.workflow.stages if stage.id == "prd-plan")

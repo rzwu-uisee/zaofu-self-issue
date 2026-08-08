@@ -270,6 +270,8 @@ def run_standard_tick_services(
                 ),
                 root=project_root,
             ),
+            config=config,
+            project_root=project_root,
         )
         goal_dossier_delivery = dossier_result.changed
         if dossier_result.considered:

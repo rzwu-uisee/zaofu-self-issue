@@ -120,7 +120,10 @@ def build_channel_context_pack(
         if requires_complete_ledger
         else _stable_digest(question_ledger)
     )
-    contribution_index = _contribution_index(channel, thread_id=thread_id)
+    contribution_index = channel_contribution_index(
+        channel,
+        thread_id=thread_id,
+    )
     frontier = question_frontier(channel, thread_id=thread_id)
     questionnaire = owner_questionnaire(channel, thread_id=thread_id)
     raw_cross_reviews = (channel or {}).get("cross_reviews") or []
@@ -398,11 +401,41 @@ def _collaboration_contract(
     }
 
 
-def _contribution_index(
+def channel_contribution_index(
     channel: dict[str, Any] | None,
     *,
     thread_id: str,
 ) -> list[dict[str, Any]]:
+    durable = (channel or {}).get("contributions") or []
+    if isinstance(durable, dict):
+        durable = list(durable.values())
+    if isinstance(durable, list) and durable:
+        return [
+            {
+                "event_id": str(item.get("event_id") or ""),
+                "member_id": str(item.get("member_id") or ""),
+                "contract_status": str(
+                    item.get("contract_status") or ""
+                ),
+                "artifact_ref": str(item.get("artifact_ref") or ""),
+                "artifact_digest": str(
+                    item.get("artifact_digest") or ""
+                ),
+                "source_refs": [
+                    str(ref)
+                    for ref in item.get("source_refs") or []
+                    if isinstance(ref, str)
+                ],
+                "evidence_refs": [
+                    str(ref)
+                    for ref in item.get("evidence_refs") or []
+                    if isinstance(ref, str)
+                ],
+            }
+            for item in durable
+            if isinstance(item, dict)
+            and str(item.get("thread_id") or "main") == thread_id
+        ]
     rows: list[dict[str, Any]] = []
     for event in (channel or {}).get("linked_events") or []:
         if not isinstance(event, dict):

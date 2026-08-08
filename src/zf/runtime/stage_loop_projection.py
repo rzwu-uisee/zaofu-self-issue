@@ -23,6 +23,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_obj
 
 SCHEMA_VERSION = "loop-view.v1"
+LOOP_VIEW_CACHE_REVISION = "2"
 
 PUMP_TYPES = frozenset({
     "orchestrator.round.complete",
@@ -39,7 +40,12 @@ GENERIC_PROMISE_CHAIN = (
     "plan.approved", "task_map.ready", "verify.child.completed",
     "judge.passed", "run.completed",
 )
-_PROMISE_ALIASES = {"verify.child.completed": ("test.passed", "verify.passed")}
+_PROMISE_ALIASES = {
+    "verify.child.completed": ("test.passed", "verify.passed"),
+    # ``run.completed`` is the legacy Loop label. Goal-enabled Product Flow
+    # closes canonically with run.goal.completed and may additionally ship.
+    "run.completed": ("run.goal.completed", "ship.completed", "ship.done"),
+}
 
 _DELIVERY_ACTIVITY_TYPES = frozenset({
     "plan.approved",
@@ -126,6 +132,49 @@ def _payload(event: ZfEvent) -> dict:
 def _read_events(state_dir: Path, *, config: Any | None) -> list[tuple[int, ZfEvent]]:
     log = event_log_from_project(state_dir, config=config)
     return list(enumerate(log.read_all()))
+
+
+def _latest_run_events(
+    events: list[tuple[int, ZfEvent]],
+) -> tuple[str, list[tuple[int, ZfEvent]]]:
+    """Select the latest Goal run while preserving original event sequence."""
+
+    from zf.runtime.run_scope import event_run_id, run_aliases
+
+    rows = [event for _, event in events]
+    aliases = run_aliases(rows)
+    if not aliases:
+        return "", events
+    selected = ""
+    for event_types in (
+        {
+            "run.goal.started",
+            "run.goal.updated",
+            "run.goal.completed",
+            "run.goal.blocked",
+        },
+        {"run.started", "run.completed", "run.failed", "workflow.invoke.requested"},
+    ):
+        for _, event in reversed(events):
+            if event.type not in event_types:
+                continue
+            selected = event_run_id(event, aliases=aliases)
+            if selected:
+                break
+        if selected:
+            break
+    known = set(aliases.values())
+    if not selected and len(known) == 1:
+        selected = next(iter(known))
+    if not selected:
+        return "", events
+    singleton = len(known) == 1
+    scoped = []
+    for seq, event in events:
+        event_run = event_run_id(event, aliases=aliases)
+        if event_run == selected or (singleton and not event_run):
+            scoped.append((seq, event))
+    return selected, scoped
 
 
 def _load_projection(state_dir: Path, name: str) -> dict[str, Any] | None:
@@ -288,7 +337,8 @@ _SUBSCRIBER_TRIGGERS = (
 )
 _SUBSCRIBER_RESULTS = (
     "fanout.child.dispatched", "task.rework.triage.completed",
-    "run.manager.repair.accepted", "run.completed",
+    "run.manager.repair.accepted", "run.completed", "run.goal.completed",
+    "ship.completed", "ship.done",
 )
 
 
@@ -556,10 +606,13 @@ def build_loop_view(
 ) -> dict[str, Any]:
     state_dir = Path(state_dir)
     events = list(events) if events is not None else _read_events(state_dir, config=config)
+    all_event_count = len(events)
+    run_id, events = _latest_run_events(events)
+    run_scoped = len(events) != all_event_count
     counts = _type_counts(events)
-    spine_attempts = _load_projection(state_dir, "task_attempts")
-    spine_stages = _load_projection(state_dir, "stage_spine")
-    spine_health = _load_projection(state_dir, "workflow_health")
+    spine_attempts = None if run_scoped else _load_projection(state_dir, "task_attempts")
+    spine_stages = None if run_scoped else _load_projection(state_dir, "stage_spine")
+    spine_health = None if run_scoped else _load_projection(state_dir, "workflow_health")
 
     tasks = _attempts_from_spine(spine_attempts) if spine_attempts and spine_attempts.get("tasks") \
         else _attempts_from_events(events)
@@ -594,6 +647,8 @@ def build_loop_view(
             ),
         },
         "run": {
+            "run_id": run_id,
+            "scope": "current" if run_id else "project",
             "event_count": len(events),
             "semantic_event_count": len(semantic),
             "first_ts": events[0][1].ts if events else "",

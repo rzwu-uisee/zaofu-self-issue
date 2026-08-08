@@ -33,6 +33,7 @@ RUN_TERMINAL_EVENT_TYPES = frozenset({
     "run.failed",
     "run.cancelled",
     "run.abandoned",
+    "workflow.result.available",
 })
 RUN_ADMISSION_RECONCILE_EVENT_TYPES = frozenset({
     "workflow.invoke.requested",
@@ -47,6 +48,16 @@ _OUTCOME_EVENTS = frozenset({
     "workflow.invoke.accepted",
     "workflow.invoke.rejected",
 })
+
+
+class RunDispatchBlocked(RuntimeError):
+    """A deterministic Run fence deferred one provider dispatch."""
+
+    def __init__(self, *, role_name: str, reason: str, run_id: str = "") -> None:
+        self.role_name = str(role_name or "")
+        self.reason = str(reason or "")
+        self.run_id = str(run_id or "")
+        super().__init__(f"dispatch to {self.role_name} blocked: {self.reason}")
 
 
 @dataclass
@@ -364,6 +375,8 @@ def admit_workflow_invoke(
             "run.admission.admitted",
             event.id,
         ):
+            from zf.runtime.workflow_budget_guard import usage_meter_snapshot
+
             runtime.event_writer.append(ZfEvent(
                 type="run.admission.admitted",
                 actor="orchestrator",
@@ -376,6 +389,8 @@ def admit_workflow_invoke(
                     ),
                     "policy_mode": policy["mode"],
                     "max_active_runs": policy["max_active_runs"],
+                    "budget_snapshot": usage_meter_snapshot(runtime),
+                    "run_limits": _run_limits_payload(runtime),
                 },
                 causation_id=event.id,
                 correlation_id=event.correlation_id or run_id,
@@ -387,6 +402,15 @@ def admit_workflow_invoke(
             source_event_id=event.id,
             replayed=existing is not None,
         )
+
+
+def _run_limits_payload(runtime: Any) -> dict[str, float | int]:
+    limits = getattr(getattr(runtime.config, "workflow", None), "run_limits", None)
+    return {
+        "timeout_seconds": float(getattr(limits, "timeout_seconds", 0.0) or 0.0),
+        "token_budget": int(getattr(limits, "token_budget", 0) or 0),
+        "cost_budget_usd": float(getattr(limits, "cost_budget_usd", 0.0) or 0.0),
+    }
 
 
 def reject_workflow_invoke_admission(
@@ -854,6 +878,13 @@ def _has_dedicated_admission(entry: RunAdmissionEntry) -> bool:
 def _terminal_status(event_type: str, payload: dict[str, Any]) -> str:
     if event_type == "run.goal.completed":
         return "completed"
+    if event_type == "workflow.result.available":
+        return (
+            "completed"
+            if str(payload.get("result_kind") or "") == "research_report"
+            and str(payload.get("status") or "") == "available"
+            else "failed"
+        )
     if event_type == "run.goal.blocked":
         return "blocked"
     if event_type == "run.cancelled":
@@ -922,6 +953,7 @@ __all__ = [
     "RunAdmissionDecision",
     "RunAdmissionEntry",
     "RunAdmissionProjection",
+    "RunDispatchBlocked",
     "admit_workflow_invoke",
     "build_run_admission_projection",
     "concurrent_isolation_blocker",

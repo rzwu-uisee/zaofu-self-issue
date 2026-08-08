@@ -487,7 +487,7 @@ def _write_delivery_matrix_drafts(
     lane_count = max(int(lanes or 1), 1)
     capabilities = []
     acceptances = []
-    tests = []
+    test_commands = []
     tasks = []
     real_e2e = []
     inventory = []
@@ -525,13 +525,13 @@ def _write_delivery_matrix_drafts(
             if surface == "cli"
             else []
         )
-        tests.append({
+        test_commands.append({
             "id": test_id,
-            "test_id": test_id,
+            "command_id": test_id,
             "capability_id": cap_id,
-            "acceptance_id": "",
+            "acceptance_ids": [],
             "tier": "real-e2e" if _surface_needs_real_e2e(surface) else "integration",
-            "commands": related_commands,
+            "command": " && ".join(related_commands),
             "command_source": "source_prd" if related_commands else "project-adapter-skill",
             "status": "planned",
             "evidence_required": True,
@@ -613,18 +613,42 @@ def _write_delivery_matrix_drafts(
             str(row["capability_id"]),
             str(row["acceptance_id"]),
         )
-    for row in tests:
+    for row in test_commands:
         cap_id = str(row["capability_id"])
-        row["acceptance_id"] = (
+        acceptance_id = (
             first_acceptance_by_capability.get(cap_id)
             or (str(acceptances[0]["acceptance_id"]) if acceptances else "")
         )
-    adapter_skills = skill_plan.get("loaded_skills")
-    if not isinstance(adapter_skills, list):
-        adapter_skills = []
+        row["acceptance_ids"] = [acceptance_id] if acceptance_id else []
+    loaded_skills = skill_plan.get("loaded_skills")
+    if not isinstance(loaded_skills, list):
+        loaded_skills = []
+    adapter_skills = [
+        {
+            "name": str(item.get("name") or ""),
+            "sha256": str(item.get("sha256") or ""),
+        }
+        for item in loaded_skills
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+    adapter_skill_plan_path = workflow_dir / "skill-adapter-plan.json"
+    adapter_skill_plan_digest = (
+        hashlib.sha256(adapter_skill_plan_path.read_bytes()).hexdigest()
+        if adapter_skill_plan_path.exists()
+        else hashlib.sha256(
+            json.dumps(
+                skill_plan,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
     metadata = {
         "objective": objective,
         "adapter_skills": adapter_skills,
+        "adapter_skill_plan_ref": str(adapter_skill_plan_path),
+        "adapter_skill_plan_digest": adapter_skill_plan_digest,
         "created_at": created_at,
         "source": "zf-flow-intake",
         "enrichment_contract": _delivery_matrix_enrichment_contract(
@@ -643,7 +667,13 @@ def _write_delivery_matrix_drafts(
     _write_matrix_json(refs["source_inventory_ref"], "source-inventory.v1", "items", inventory, metadata)
     _write_matrix_json(refs["capability_matrix_ref"], "capability-matrix.v1", "capabilities", capabilities, metadata)
     _write_matrix_json(refs["acceptance_matrix_ref"], "acceptance-matrix.v1", "acceptance", acceptances, metadata)
-    _write_matrix_json(refs["test_matrix_ref"], "test-matrix.v1", "tests", tests, metadata)
+    _write_matrix_json(
+        refs["test_matrix_ref"],
+        "test-matrix.v1",
+        "commands",
+        test_commands,
+        metadata,
+    )
     _write_matrix_json(refs["task_map_ref"], "task-map.v1", "tasks", tasks, metadata)
     _write_matrix_json(refs["real_e2e_matrix_ref"], "real-e2e-matrix.v1", "rows", real_e2e, metadata)
     return {key: str(value) for key, value in refs.items()}
@@ -684,7 +714,7 @@ def _delivery_matrix_enrichment_contract(
             "source_inventory must cite concrete source files/modules.",
             "capability_matrix must map source behavior to target behavior.",
             "acceptance_matrix must state user-visible acceptance criteria.",
-            "test_matrix must include deterministic verification commands or evidence refs.",
+            "test_matrix.commands[] is the only command registry and must include deterministic verification commands or evidence refs.",
             "task_map must assign each blocking capability to a lane/role.",
             "real_e2e_matrix must declare real command/evidence for surfaces that need live validation.",
         ],

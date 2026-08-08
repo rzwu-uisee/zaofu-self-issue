@@ -31,7 +31,7 @@ from zf.runtime.loop_projection import (
 from zf.runtime.run_chain import build_run_chain
 from zf.runtime.workflow_run import build_workflow_run
 
-_DELIVERY_TRACE_CACHE_VERSION = "v2"
+_DELIVERY_TRACE_CACHE_VERSION = "v3"
 
 
 def _now() -> str:

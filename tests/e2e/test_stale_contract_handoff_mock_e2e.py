@@ -144,6 +144,11 @@ def _task_map(*, revision: str, lane_id: str, sentinel: bool) -> dict:
     return {
         "schema_version": "task-map.v1",
         "feature_id": "STALE-CONTRACT",
+        "goal_claims": [{
+            "goal_claim_id": "CLAIM-STALE-CONTRACT",
+            "text": "Only the current contract generation may advance",
+            "mandatory": True,
+        }],
         "tasks": [{
             "task_id": TASK_ID,
             "title": f"stale contract proof {revision}",
@@ -153,6 +158,7 @@ def _task_map(*, revision: str, lane_id: str, sentinel: bool) -> dict:
             "owner_role": "dev",
             "affinity_tag": lane_id,
             "acceptance_criteria": acceptance,
+            "goal_claim_ids": ["CLAIM-STALE-CONTRACT"],
             "verification": f"grep -qx {content} result.txt",
             "validation": {"commands": [{
                 "id": f"result-{revision.lower()}",
@@ -259,10 +265,15 @@ def _verification_result(payload: dict, contract: dict, *, marker: str) -> dict:
         "evidence_refs": [f"mock://{marker}"],
         "reused_command_receipt_ids": [],
         "probe_receipts": [{
-            "probe_id": f"probe-{marker}",
+            "probe_id": f"verify-{command['command_id']}-{marker}",
+            "command_id": command["command_id"],
+            "command": command["command"],
+            "command_digest": command["command_digest"],
+            "target_commit": payload["target_commit"],
             "status": "passed",
+            "exit_code": 0,
             "evidence_refs": [f"mock://{marker}/probe"],
-        }],
+        } for command in contract["verification_commands"]],
         "rework_items": [],
         "requirement_results": [{
             "acceptance_id": item["acceptance_id"],
@@ -271,7 +282,11 @@ def _verification_result(payload: dict, contract: dict, *, marker: str) -> dict:
             "verification_tier": item["verification_tier"],
             "evidence_refs": [f"mock://{marker}/acceptance"],
             "findings": [],
-            "reproduction_commands": [],
+            "reproduction_commands": [
+                command["command"]
+                for command in contract["verification_commands"]
+                if command["command_id"] in item["verification_command_ids"]
+            ],
         } for item in contract["acceptance_criteria"]],
     }
 
@@ -809,8 +824,9 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     text = Path(judge_briefing).read_text(encoding="utf-8")
     command = text.split("Success command:\n```bash\n", 1)[1].split("\n```", 1)[0]
     command_argv = shlex.split(command)
+    assert "--scratch" in command_argv
     semantic_result = json.loads(
-        Path(command_argv[command_argv.index("--result-file") + 1]).read_text(
+        (state_dir / judge_payload["result_scratch_ref"]).read_text(
             encoding="utf-8",
         )
     )

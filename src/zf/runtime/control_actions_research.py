@@ -16,6 +16,7 @@ from zf.runtime.research_templates import (
     RESEARCH_TEMPLATES_BY_ID,
     ResearchTemplate,
     research_root_role,
+    research_stage_contract_error,
     resolve_research_template,
 )
 from zf.runtime.workflow_requests import (
@@ -30,6 +31,7 @@ from zf.runtime.workflow_origin import (
     workflow_origin_digest,
 )
 from zf.runtime.workflow_results import WORKFLOW_RESULT_AVAILABLE
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
 
 
 RESEARCH_TEMPLATE_ID = DEFAULT_RESEARCH_TEMPLATE.template_id
@@ -174,6 +176,11 @@ class ResearchActionsMixin:
         invoke_payload.update({
             "task_id": task_id,
             "pattern_id": template.pattern_id,
+            "route_id": template.route_id,
+            "research_template_id": template.template_id,
+            "request_kind": "research",
+            "prompt_kind": "research",
+            "task_contract_digest": task_workflow_binding_digest(task),
             "requested_by": _required_text(payload, "requested_by")
             or "skill:zf-research-fanout-trigger",
             "reason": _required_text(payload, "reason")
@@ -208,6 +215,7 @@ class ResearchActionsMixin:
         )
         source_refs.update({
             "template_id": template.template_id,
+            "route_id": template.route_id,
             "research_rollout": template.rollout,
             "topic": topic,
             "trigger_surface": self.surface,
@@ -697,30 +705,9 @@ def _research_stage_error(
     template: ResearchTemplate,
 ) -> str:
     stage = _workflow_stage(config, template.pattern_id)
-    if stage is None:
-        return f"{template.pattern_id} stage is not declared in zf.yaml"
-    if str(getattr(stage, "topology", "") or "") != "fanout_reader":
-        return f"{template.pattern_id} stage must use fanout_reader topology"
-    children = tuple(
-        str(getattr(item, "role_instance", "") or "")
-        for item in getattr(stage, "children", []) or []
-    )
-    if children != template.child_roles:
-        return (
-            f"{template.pattern_id} stage must declare children "
-            f"{list(template.child_roles)!r}"
-        )
-    synth_role = str(getattr(getattr(stage, "aggregate", None), "synth_role", "") or "")
-    if synth_role != template.synth_role:
-        if not template.synth_role:
-            return (
-                f"{template.pattern_id} stage must use direct root "
-                "aggregation without aggregate.synth_role"
-            )
-        return (
-            f"{template.pattern_id} stage must declare "
-            f"{template.synth_role} as aggregate.synth_role"
-        )
+    contract_error = research_stage_contract_error(stage, template)
+    if contract_error:
+        return contract_error
     if template is not ADAPTIVE_RESEARCH_TEMPLATE:
         return ""
 

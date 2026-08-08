@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import signal
 import shutil
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,8 @@ if str(_REPO_ROOT) not in sys.path:
 from tests.e2e.test_generic_workflow_complex_mock_e2e import (
     run_generic_workflow_complex_scenario,
 )
+from tests.e2e.oa_multiflow_mock_pilot import source_identity
+from tests.e2e.oa_provider_ab_pilot import provider_usage
 from tests.e2e.thin_judge_goal_closure_provider_drill import (
     _invoke_claude,
     _invoke_codex,
@@ -27,6 +31,12 @@ from tests.e2e.thin_judge_goal_closure_provider_drill import (
 
 
 _TEMP_PREFIX = "zf-generic-workflow-provider-"
+
+
+class _DrillTerminated(RuntimeError):
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"real-provider drill terminated by signal {signum}")
+        self.signum = signum
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -218,6 +228,15 @@ def _provider_verifier(
         }
         safe_audit["provider_result"] = dict(result)
         safe_audit["verification_contract"] = dict(expected)
+        raw_rows = [
+            json.loads(line)
+            for line in str(audit.get("raw_stdout") or "").splitlines()
+            if line.strip()
+        ]
+        safe_audit["usage"] = provider_usage(raw_rows)
+        safe_audit["prompt_sha256"] = hashlib.sha256(
+            prompt.encode("utf-8")
+        ).hexdigest()
         if backend == "codex":
             commands = [
                 str(command)
@@ -287,6 +306,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("pass --confirm-real to invoke a real provider")
     root = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir="/tmp"))
     audit: dict[str, Any] = {}
+    started = time.monotonic()
+    identity = source_identity(_REPO_ROOT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _terminate(signum, _frame) -> None:  # noqa: ANN001
+        raise _DrillTerminated(int(signum))
+
+    signal.signal(signal.SIGTERM, _terminate)
     try:
         result = run_generic_workflow_complex_scenario(
             root,
@@ -301,19 +328,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         result.update({
             "schema_version": "generic-workflow-real-provider-drill.v1",
+            "status": "passed",
+            "execution_mode": "hybrid_real_provider",
+            "source_identity": identity,
             "backend": args.backend,
             "model": args.model if args.backend == "codex" else "",
             "reasoning_effort": (
                 args.reasoning_effort if args.backend == "codex" else ""
             ),
             "provider_session_id": audit.get("provider_session_id", ""),
+            "prompt_sha256": audit.get("prompt_sha256", ""),
+            "usage": audit.get("usage", {}),
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "budget": {
+                "provider_turns": 1,
+                "timeout_seconds": args.timeout_seconds,
+            },
             "provider_audit": audit,
+            "oa": dict(result.get("oa") or {}),
             "temporary_root": str(root),
             "cleaned": True,
         })
         return result
     finally:
-        _cleanup(root)
+        try:
+            _cleanup(root)
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def main() -> int:

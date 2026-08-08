@@ -61,6 +61,56 @@ def test_inflight_fanout_blocks_fire() -> None:
     assert not writer.appended
 
 
+def test_active_workflow_operation_blocks_idle_rescan() -> None:
+    events = [
+        _goal_started(),
+        ZfEvent(
+            type="workflow.operation.requested",
+            actor="zf-cli",
+            task_id="TASK-1",
+            payload={
+                "workflow_run_id": "r-1",
+                "operation_id": "wop-task-1-impl",
+                "request_hash": "a" * 64,
+                "role_instance": "impl-1",
+            },
+        ),
+    ]
+    writer = _Writer()
+
+    assert _tick_until_fire(events, _cfg(), _state(), writer) == ""
+    assert not writer.appended
+
+
+def test_settled_workflow_operation_allows_idle_rescan() -> None:
+    events = [
+        _goal_started(),
+        ZfEvent(
+            type="workflow.operation.requested",
+            actor="zf-cli",
+            task_id="TASK-1",
+            payload={
+                "workflow_run_id": "r-1",
+                "operation_id": "wop-task-1-impl",
+                "request_hash": "a" * 64,
+            },
+        ),
+        ZfEvent(
+            type="workflow.operation.settled",
+            actor="zf-cli",
+            task_id="TASK-1",
+            payload={
+                "workflow_run_id": "r-1",
+                "operation_id": "wop-task-1-impl",
+                "request_hash": "a" * 64,
+            },
+        ),
+    ]
+    writer = _Writer()
+
+    assert _tick_until_fire(events, _cfg(), _state(), writer) == "rescan"
+
+
 def test_fresh_progress_resets_counter() -> None:
     state = _state()
     cfg = _cfg(idle_ticks=2)

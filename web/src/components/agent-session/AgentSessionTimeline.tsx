@@ -1119,8 +1119,11 @@ function StackedCards({
         return (
         <div
           className={`agent-stack-card ${compatibilityClass} ${card.status === "completed" ? "is-completed" : ""}`}
+          data-agent-card-kind={card.kind}
           data-plan-request-id={isPlan ? card.planRequest?.requestEventId : undefined}
           data-plan-request-revision={isPlan ? card.planRequest?.revision : undefined}
+          data-proposal-action={isApprove ? card.proposal?.action : undefined}
+          data-testid={`agent-card-${isPlan ? "plan" : isApprove ? "approve" : card.kind}`}
           key={card.id}
         >
           {!planCompleted && !(isApprove && card.status === "completed") ? (

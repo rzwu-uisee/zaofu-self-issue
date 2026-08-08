@@ -6,14 +6,19 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from zf.core.events.model import ZfEvent
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
 from zf.runtime.artifact_access import ArtifactAccessError, require_artifact_access
+from zf.runtime.artifact_read_liveness import live_attempt_ids
+from zf.runtime.artifact_read_requirements import (
+    ArtifactReadRequirementError,
+    build_canonical_required_reads,
+)
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.sidecar_refs import (
     SidecarRefError,
@@ -124,6 +129,7 @@ def build_attempt_source_manifest(
         for key in (
             "contract_revision",
             "task_map_generation",
+            "feedback_revision",
             "base_commit",
             "target_commit",
             "task_ref",
@@ -141,6 +147,7 @@ def build_attempt_source_manifest(
             "candidate_event_id",
             "candidate_head_commit",
             "candidate_snapshot_digest",
+            "orchestrator_context_route_source_ids",
             "context_policy",
             "context_sections",
         ):
@@ -202,6 +209,9 @@ def source_manifest_from_payload(
                 "sha256": digest,
                 "allowed_paths": ["$"],
             })
+    from zf.runtime.result_handoff_sources import result_handoff_source_entries
+
+    sources.extend(result_handoff_source_entries(payload))
     sources.extend(semantic_replan_handoff.replan_sources(
         state_dir, payload, attempt_id=attempt_id, source_event_id=source_event_id,
     ))
@@ -270,98 +280,14 @@ def canonical_required_reads(
     explicit: Iterable[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Declare the canonical artifact slices one stage must actually consume."""
-
-    rows = [dict(item) for item in explicit if isinstance(item, Mapping)]
-    profile = str(output_profile_id or "").strip()
-    required_paths: dict[str, tuple[str, ...]] = {}
-    if profile == "implementation":
-        required_paths = {
-            "contract": ("$.acceptance_criteria", "$.verification_commands"),
-        }
-    elif profile in {"task-verify", "candidate-verify"}:
-        required_paths = {
-            "contract": ("$.acceptance_criteria", "$.verification_commands"),
-            "target": ("$",),
-            "impl-self-check": ("$",),
-        }
-    if profile in {"implementation", "task-verify", "candidate-verify"}:
-        for source in (
-            manifest.get("sources")
-            if isinstance(manifest.get("sources"), list)
-            else []
-        ):
-            if not isinstance(source, Mapping):
-                continue
-            source_id = str(source.get("source_id") or "")
-            if source_id.startswith("plan-port-"):
-                required_paths[source_id] = ("$",)
-
-    authority_contract = (
-        manifest.get("handoff_authority_contract")
-        if isinstance(manifest.get("handoff_authority_contract"), Mapping)
-        else {}
-    )
-    if (
-        profile == "plan-synth"
-        or str(authority_contract.get("attempt_domain") or "") == "plan"
-    ):
-        for source in (
-            manifest.get("sources")
-            if isinstance(manifest.get("sources"), list)
-            else []
-        ):
-            if not isinstance(source, Mapping):
-                continue
-            source_id = str(source.get("source_id") or "")
-            if (
-                source_id == "plan-synth-contract"
-                or source_id.startswith("child-result-")
-                or source_id.startswith("child-artifact-")
-            ):
-                required_paths[source_id] = ("$",)
-            elif source_id in {
-                "goal-objective",
-                "requirement",
-                "review-artifact",
-                "plan-rework-context",
-                "workflow-input",
-                "workflow-prompt",
-            }:
-                required_paths[source_id] = ("$",)
-
-    sources = manifest.get("sources")
-    source_rows = sources if isinstance(sources, list) else []
-    required_paths.update(semantic_replan_handoff.required_read_paths(source_rows))
-    for source in source_rows:
-        if not isinstance(source, Mapping):
-            continue
-        source_id = str(source.get("source_id") or "")
-        for json_path in required_paths.get(source_id, ()):
-            rows.append({
-                "source_id": source_id,
-                "artifact_id": str(source.get("artifact_id") or ""),
-                "artifact_sha256": str(source.get("sha256") or ""),
-                "json_path": json_path,
-                "min_returned_bytes": 1,
-                "max_items": 0,
-                "max_chars": 0,
-                "allow_truncated": False,
-            })
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    for row in rows:
-        key = (
-            str(row.get("source_id") or ""),
-            str(row.get("artifact_id") or ""),
-            str(row.get("artifact_sha256") or row.get("sha256") or ""),
-            str(row.get("json_path") or "$"),
+    try:
+        return build_canonical_required_reads(
+            manifest,
+            output_profile_id=output_profile_id,
+            explicit=explicit,
         )
-        if not all(key[:3]) or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-    return deduped
+    except ArtifactReadRequirementError as exc:
+        raise ArtifactReadError(str(exc)) from exc
 
 
 def materialize_attempt_source_ref(
@@ -651,34 +577,6 @@ def active_read_ledger_path(state_dir: Path, attempt_id: str) -> Path:
     return sidecar_path(state_dir, rel)
 
 
-def live_attempt_ids(events: Iterable[ZfEvent]) -> set[str]:
-    live: set[str] = set()
-    for event in events:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        attempt_id = str(
-            payload.get("attempt_id")
-            or payload.get("run_id")
-            or payload.get("dispatch_id")
-            or ""
-        ).strip()
-        if not attempt_id:
-            continue
-        if event.type in {"task.dispatched", "fanout.child.dispatched", "workflow.operation.started"}:
-            live.add(_safe_component(attempt_id))
-        elif event.type in {
-            "dev.build.done",
-            "dev.failed",
-            "dev.blocked",
-            "fanout.child.completed",
-            "fanout.child.failed",
-            "workflow.operation.settled",
-            "workflow.operation.failed",
-            "workflow.operation.blocked",
-        }:
-            live.discard(_safe_component(attempt_id))
-    return live
-
-
 def active_ledger_attempt_id(ref: str) -> str:
     match = _ATTEMPT_REF_RE.match(str(ref or ""))
     return str(match.group("attempt") if match else "")
@@ -724,7 +622,7 @@ def render_attempt_source_briefing(
             lines.append(
                 f"  - `{cli_command} artifact read --attempt {attempt_id} "
                 f"--source {source_id} --artifact {artifact_id} "
-                f"--json-path {json_path}` (sha256 `{digest[:16]}`)"
+                f"--json-path {shlex.quote(json_path)}` (sha256 `{digest[:16]}`)"
             )
     return "\n".join(lines) + "\n"
 

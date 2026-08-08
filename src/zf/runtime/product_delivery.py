@@ -22,7 +22,11 @@ from zf.runtime.task_map import (
     validate_source_index_payload,
     validate_task_map_payload,
 )
-from zf.runtime.verification_commands import validation_with_commands
+from zf.runtime.verification_commands import (
+    materialize_task_verification_commands,
+    task_map_command_registry,
+    validation_with_commands,
+)
 from zf.runtime.task_contract_normalize import (
     canonical_verification_tiers,
     owner_fields_from_task_map_item,
@@ -177,6 +181,7 @@ def ingest_task_map_to_kanban(
 
     source_entries = _source_entries_by_task_id(source_index)
     required_plan_ports = _string_list(task_map.get("required_plan_ports"))
+    command_registry = task_map_command_registry(task_map)
     materialization_tasks: list[Task] = []
     for raw in task_map.get("tasks") or []:
         if not isinstance(raw, dict):
@@ -184,9 +189,13 @@ def ingest_task_map_to_kanban(
         task_id = str(raw.get("task_id") or raw.get("id") or "").strip()
         if not task_id:
             continue
+        materialized_raw = materialize_task_verification_commands(
+            raw,
+            registry=command_registry,
+        )
         _owner_role, owner_instance = owner_fields_from_task_map_item(raw)
         contract = _contract_from_task_map_item(
-            raw,
+            materialized_raw,
             feature_id=str(task_map.get("feature_id") or ""),
             refs=refs,
             source_entry=source_entries.get(task_id),

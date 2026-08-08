@@ -17,6 +17,7 @@ from zf.runtime.canonical_recovery import (
 from zf.runtime.rework_feedback import (
     ReworkFeedbackError,
     feedback_briefing_lines,
+    feedback_payload_fields,
     hydrate_rework_feedback,
     write_rework_feedback,
 )
@@ -24,9 +25,11 @@ from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
     build_target_snapshot,
     build_task_contract_snapshot,
+    descriptor_from_payload,
     effective_contract_revision,
     hydrate_task_contract_snapshot,
     hydrate_target_snapshot,
+    snapshot_payload_fields,
     target_payload_fields,
     task_map_generation,
     write_task_contract_snapshot,
@@ -103,6 +106,16 @@ def test_task_contract_snapshot_round_trip_and_tamper_detection(tmp_path: Path) 
     target_descriptor = write_target_snapshot(tmp_path, target_body)
     assert hydrate_target_snapshot(tmp_path, target_descriptor) == target_body
     assert target_payload_fields(target_descriptor)["target_snapshot_ref"]
+
+    fields = snapshot_payload_fields(descriptor)
+    assert fields["task_contract_snapshot_ref"] == descriptor["ref"]
+    assert fields["task_contract_snapshot_digest"] == descriptor["sha256"]
+    assert descriptor_from_payload(fields)["ref"] == descriptor["ref"]
+    legacy_fields = {
+        "contract_snapshot_ref": descriptor["ref"],
+        "contract_snapshot_digest": descriptor["sha256"],
+    }
+    assert descriptor_from_payload(legacy_fields)["ref"] == descriptor["ref"]
 
     (tmp_path / descriptor["ref"]).write_text("{}\n", encoding="utf-8")
     with pytest.raises(TaskContractSnapshotError):
@@ -220,6 +233,9 @@ def test_rework_feedback_is_lossless_and_digest_verified(tmp_path: Path) -> None
     assert body["failed_acceptance_ids"] == ["ac-one"]
     assert "ac-one: returned zero" in feedback_briefing_lines(body)
     assert descriptor["feedback_id"] == body["feedback_id"]
+    assert feedback_payload_fields(descriptor)["feedback_revision"] == (
+        descriptor["sha256"]
+    )
     assert descriptor["finding_ids"] == [body["findings"][0]["finding_id"]]
     assert body["requirement_results"][0]["findings"][0]["finding_id"]
 

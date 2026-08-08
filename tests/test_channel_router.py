@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -1014,6 +1015,121 @@ def test_channel_router_dispatches_codex_provider_through_headless_backend(tmp_p
     detail = project_channel(state_dir, "ch-zaofu")
     assert detail is not None
     assert detail["provider_runs"][0]["parts"]
+
+
+def test_channel_synthesis_repair_reuses_provider_session(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    backend = _FakeHeadlessBackend(
+        reply='{"channel_synthesis":{"summary":"truncated"',
+    )
+    writer.emit(
+        "channel.member.invited",
+        actor="web",
+        correlation_id="ch-repair",
+        payload={
+            "channel_id": "ch-repair",
+            "member_id": "synthesizer",
+            "member_type": "provider_agent",
+            "backend": "codex",
+            "channel_role": "synthesizer",
+            "permissions": ["read", "message", "summarize"],
+            "source": "web",
+        },
+    )
+    original = writer.emit(
+        "channel.message.posted",
+        actor="web",
+        correlation_id="ch-repair",
+        payload={
+            "channel_id": "ch-repair",
+            "thread_id": "main",
+            "message_id": "msg-synthesis-original",
+            "member_id": "operator",
+            "role": "user",
+            "source": "web",
+            "text": "@synthesizer produce the synthesis",
+            "mentions": ["synthesizer"],
+            "refs": {"synthesis_request_id": "synth-session"},
+        },
+    )
+    route_channel_message(
+        state_dir=state_dir,
+        writer=writer,
+        message_event=original,
+        message_payload=original.payload,
+        actor="web",
+        source="web",
+        project_root=tmp_path,
+        headless_backends={"codex-headless": backend},
+    )
+    repair = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.repair.requested"
+    )
+    backend.reply = json.dumps({
+        "channel_synthesis": {
+            "summary": "The repaired synthesis is complete.",
+            "open_questions": [],
+            "readiness": {
+                "verdict": "needs_owner",
+                "implementation_start": False,
+                "gaps": ["owner approval"],
+                "risks": [],
+                "evidence_refs": [],
+                "reason": "owner approval remains",
+            },
+        },
+    })
+    repaired_payload = channel_message_event_payload(
+        state_dir,
+        {
+            "channel_id": "ch-repair",
+            "thread_id": "main",
+            "message_id": f"msg-{repair.payload['repair_id']}",
+            "member_id": "operator",
+            "role": "user",
+            "source": "runtime",
+            "text": "@synthesizer repair the synthesis contract",
+            "mentions": ["synthesizer"],
+            "refs": {
+                "synthesis_request_id": "synth-session",
+                "synthesis_repair_id": repair.payload["repair_id"],
+                "synthesis_repair_revision": 1,
+            },
+        },
+        created_by="test",
+        source_event_id=repair.id,
+    )
+    repaired = writer.emit(
+        "channel.message.posted",
+        actor="orchestrator-reactor",
+        causation_id=repair.id,
+        correlation_id="ch-repair",
+        payload=repaired_payload,
+    )
+    route_channel_message(
+        state_dir=state_dir,
+        writer=writer,
+        message_event=repaired,
+        message_payload=repaired.payload,
+        actor="orchestrator-reactor",
+        source="runtime",
+        project_root=tmp_path,
+        headless_backends={"codex-headless": backend},
+    )
+
+    assert len(backend.calls) == 2
+    assert backend.calls[0]["provider_session_id"] == ""
+    assert backend.calls[1]["provider_session_id"] == "codex-session-1"
+    assert sum(
+        event.type == "channel.synthesis.proposed"
+        for event in writer.event_log.read_all()
+    ) == 1
 
 
 def test_channel_project_writer_legacy_policy_allows_project_skills(tmp_path: Path) -> None:

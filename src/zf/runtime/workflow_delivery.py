@@ -220,6 +220,11 @@ def build_flow_submit_preview(
         "requirement_spec_ref": str(request_projection.get("requirement_spec_ref") or ""),
         "requirement_spec_digest": str(request_projection.get("requirement_spec_digest") or ""),
         "request_revision": int(request_projection.get("revision") or 0),
+        "origin_binding": (
+            dict(request_projection["origin_binding"])
+            if isinstance(request_projection.get("origin_binding"), dict)
+            else {}
+        ),
         "requested_by": requested_by or "zf-cli",
         "reason": reason or f"workflow submit {request_id}",
         # E2(prd-goal e2e):objective 曾不入 submit payload,G0 铸造
@@ -837,6 +842,11 @@ def _submit_payload_to_workflow_invoke(payload: dict[str, Any]) -> dict[str, Any
         "requirement_spec_ref": str(payload.get("requirement_spec_ref") or ""),
         "requirement_spec_digest": str(payload.get("requirement_spec_digest") or ""),
         "request_revision": int(payload.get("request_revision") or 0),
+        "origin_binding": (
+            dict(payload["origin_binding"])
+            if isinstance(payload.get("origin_binding"), dict)
+            else {}
+        ),
         "goal_id": str(
             payload.get("goal_id")
             or payload.get("run_id")

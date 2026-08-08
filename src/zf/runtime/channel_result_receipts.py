@@ -265,6 +265,8 @@ def _receipt_candidate(
                     or payload.get("artifact_ref")
                     or ""
                 ),
+                "readiness_ref": str(payload.get("readiness_ref") or ""),
+                "conclusion_ref": str(payload.get("conclusion_ref") or ""),
             },
         }
     if source.type == "workflow.result.available":

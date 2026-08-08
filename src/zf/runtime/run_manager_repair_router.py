@@ -85,6 +85,15 @@ def special_action_preflight(
         plan = payload.get("verification_plan")
         if not isinstance(plan, list) or not plan:
             failures.append("missing_verification_plan")
+        if bool(payload.get("repair_contract_required", False)):
+            if not isinstance(payload.get("repair_contract_ref"), dict) or not payload.get(
+                "repair_contract_ref"
+            ):
+                failures.append("missing_repair_contract_ref")
+            if not str(payload.get("repair_contract_digest") or ""):
+                failures.append("missing_repair_contract_digest")
+            if not str(payload.get("base_commit") or ""):
+                failures.append("missing_repair_contract_base_commit")
         return _preflight_result(
             payload=payload,
             failures=failures,
@@ -107,6 +116,18 @@ def special_action_preflight(
             failures.append("repair_validation_not_passed")
         if not str(payload.get("validation_event_id") or ""):
             failures.append("missing_validation_event_id")
+        if bool(payload.get("repair_contract_required", False)):
+            if not isinstance(payload.get("repair_contract_ref"), dict) or not payload.get(
+                "repair_contract_ref"
+            ):
+                failures.append("missing_repair_contract_ref")
+            contract_digest = str(payload.get("repair_contract_digest") or "")
+            if not contract_digest:
+                failures.append("missing_repair_contract_digest")
+            validation = payload.get("validation_result")
+            validation = validation if isinstance(validation, dict) else {}
+            if str(validation.get("repair_contract_digest") or "") != contract_digest:
+                failures.append("repair_validation_contract_mismatch")
         if not str(payload.get("continuation_checkpoint_id") or ""):
             failures.append("missing_continuation_checkpoint_id")
         if not str(payload.get("continuation_safe_resume_action") or ""):
@@ -148,6 +169,7 @@ def special_expected_downstream_events(safe_action: str) -> set[str] | None:
         return {
             "fanout.aggregate.rebuild.requested",
             "flow.discovery.completed",
+            "goal.closure.synthesized",
             "flow.goal.closed",
         }
     return None

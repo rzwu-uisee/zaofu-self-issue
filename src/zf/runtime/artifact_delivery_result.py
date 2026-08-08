@@ -42,6 +42,7 @@ def artifact_delivery_success_payload(
     *,
     verifier_stage_id: str,
     verifier_role: str,
+    state_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build the editable result-submit template for an artifact verifier."""
 
@@ -107,6 +108,24 @@ def artifact_delivery_success_payload(
             "artifact delivery briefing inputs must be admitted call-result "
             "envelopes"
         )
+    resolved_artifacts: dict[str, dict[str, Any]] = {}
+    if state_dir is not None:
+        from zf.runtime.generic_workflow_outputs import (
+            resolve_declared_output_artifact_index,
+        )
+
+        resolved_artifacts, missing_sources = (
+            resolve_declared_output_artifact_index(
+                state_dir,
+                input_result_refs=input_result_refs,
+                required_artifacts=expected_artifacts,
+            )
+        )
+        if missing_sources:
+            raise ArtifactDeliveryResultError(
+                "artifact delivery inputs do not contain required immutable "
+                "outputs: " + ", ".join(missing_sources)
+            )
     payload = {
         key: child_payload[key]
         for key in (
@@ -160,16 +179,19 @@ def artifact_delivery_success_payload(
             ),
             "verdict": "passed",
             "artifacts": [
-                {
-                    "name": str(item.get("name") or ""),
-                    "kind": str(item.get("kind") or ""),
-                    "source_ref": str(item.get("source_ref") or ""),
-                    "producer_stage_id": str(
-                        item.get("source_ref") or ""
-                    ).split(".", 1)[0],
-                    "ref": "<replace with immutable sidecar ref>",
-                    "sha256": "<replace with sidecar sha256>",
-                }
+                resolved_artifacts.get(
+                    str(item.get("source_ref") or ""),
+                    {
+                        "name": str(item.get("name") or ""),
+                        "kind": str(item.get("kind") or ""),
+                        "source_ref": str(item.get("source_ref") or ""),
+                        "producer_stage_id": str(
+                            item.get("source_ref") or ""
+                        ).split(".", 1)[0],
+                        "ref": "<replace with immutable sidecar ref>",
+                        "sha256": "<replace with sidecar sha256>",
+                    },
+                )
                 for item in expected_artifacts
             ],
             "goal_coverage": [{
@@ -227,14 +249,14 @@ def normalize_artifact_delivery_result(
     ):
         if result.get(key) in (None, "") and payload.get(key) not in (None, ""):
             result[key] = payload[key]
-    result.setdefault(
-        "verifier_stage_id",
-        str(payload.get("verifier_stage_id") or payload.get("stage_id") or ""),
-    )
-    result.setdefault(
-        "verifier_role",
-        str(payload.get("verifier_role") or payload.get("role_instance") or ""),
-    )
+    if not str(result.get("verifier_stage_id") or "").strip():
+        result["verifier_stage_id"] = str(
+            payload.get("verifier_stage_id") or payload.get("stage_id") or ""
+        )
+    if not str(result.get("verifier_role") or "").strip():
+        result["verifier_role"] = str(
+            payload.get("verifier_role") or payload.get("role_instance") or ""
+        )
     result.setdefault("schema_version", SCHEMA_VERSION)
     result.setdefault("completion_profile", COMPLETION_PROFILE)
     result["artifacts"] = _objects(result.get("artifacts"))

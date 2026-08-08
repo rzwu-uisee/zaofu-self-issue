@@ -144,6 +144,7 @@ def test_refactor_plan_synth_admits_package_before_bridge(monkeypatch) -> None:
         recommendation="approve",
         artifact_payload={
             "flow_kind": "refactor",
+            "goal_id": "refactor-run",
             "task_map_ref": "artifacts/task-map.json",
         },
     )
@@ -153,6 +154,7 @@ def test_refactor_plan_synth_admits_package_before_bridge(monkeypatch) -> None:
     assert payload["plan_artifact_package_id"] == "planpkg-refactor"
     assert admitted[0]["producer_stage_id"] == "flow-plan"
     assert admitted[0]["workflow_run_id"] == "refactor-run"
+    assert admitted[0]["goal_id"] == "refactor-run"
 
 
 def test_package_preparation_consumes_task_map_required_ports(tmp_path) -> None:
@@ -390,6 +392,82 @@ def test_issue_requirement_snapshot_adapts_to_issue_spec_port(tmp_path) -> None:
     assert issue_spec["source_logical_name"] == "requirement_spec"
     assert issue_spec["adapter_version"] == "issue-spec-requirement-adapter.v1"
     assert not any(port["ref"] == "HEAD" for port in package["produced"])
+
+
+def test_replan_package_rejects_silent_mandatory_claim_loss(tmp_path) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf"
+    artifacts = state_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "requirement.md").write_text(
+        "The command must remain available.\n",
+        encoding="utf-8",
+    )
+    task_map_path = artifacts / "task-map-r1.json"
+    first_map = {
+        "schema_version": "task-map.v1",
+        "goal_claims": [{
+            "goal_claim_id": "CLAIM-KEEP",
+            "text": "The command remains available.",
+            "mandatory": True,
+        }],
+        "tasks": [{
+            "task_id": "T1",
+            "goal_claim_ids": ["CLAIM-KEEP"],
+            "acceptance_criteria": [{
+                "id": "AC-1",
+                "text": "The command exits successfully.",
+            }],
+        }],
+    }
+    task_map_path.write_text(json.dumps(first_map), encoding="utf-8")
+    contract = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "prd"},
+    }
+    write_run_contract(
+        state_dir,
+        {**contract, "contract_digest": stable_json_sha256(contract)},
+    )
+    args = {
+        "state_dir": state_dir,
+        "project_root": project_root,
+        "payload": {
+            "task_map_ref": ".zf/artifacts/task-map-r1.json",
+            "requirement_spec_ref": ".zf/artifacts/requirement.md",
+        },
+        "workflow_run_id": "run-claim-continuity",
+        "flow_kind": "prd",
+        "producer_stage_id": "prd-plan",
+        "goal_id": "GOAL-CLAIM-CONTINUITY",
+        "metadata": {"artifact_package": {"mode": "blocking"}},
+    }
+    first, descriptor, _claim = prepare_plan_artifact_package(
+        events=[],
+        **args,
+    )
+    admitted = ZfEvent(
+        type="plan.artifact_package.admitted",
+        correlation_id="run-claim-continuity",
+        payload=package_event_payload(first, descriptor, status="admitted"),
+    )
+    second_map = dict(first_map)
+    second_map["goal_claims"] = []
+    second_path = artifacts / "task-map-r2.json"
+    second_path.write_text(json.dumps(second_map), encoding="utf-8")
+    second_args = {
+        **args,
+        "payload": {
+            **args["payload"],
+            "task_map_ref": ".zf/artifacts/task-map-r2.json",
+        },
+    }
+
+    with pytest.raises(
+        PlanArtifactPackageError,
+        match="mandatory goal claim continuity failed: CLAIM-KEEP",
+    ):
+        prepare_plan_artifact_package(events=[admitted], **second_args)
 
 
 def test_reducer_uses_run_and_slot_not_producer_stage(tmp_path):

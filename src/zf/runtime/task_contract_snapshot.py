@@ -136,6 +136,7 @@ def normalize_acceptance_criteria(
             "verification_owner": owner,
             "verification_tier": tier,
             "verification_command_ids": command_ids,
+            "producer_paths": _string_list(record.get("producer_paths")),
         })
     if not out:
         raise TaskContractSnapshotError("task contract has no acceptance criteria")
@@ -272,14 +273,31 @@ def build_task_contract_snapshot(
                 "deterministic": item["deterministic"],
                 "reusable": item["reusable"],
                 "timeout_seconds": item["timeout_seconds"],
+                **(
+                    {"producer_paths": list(item["producer_paths"])}
+                    if item.get("producer_paths")
+                    else {}
+                ),
             }
             for item in commands
         ],
         "verification_tiers": list(getattr(contract, "verification_tiers", []) or []),
-        "required_source_outputs": _string_list(
-            evidence_contract.get("required_source_outputs")
-            or evidence_contract.get("required_files")
-        ),
+        "required_source_outputs": list(dict.fromkeys([
+            *_string_list(
+                evidence_contract.get("required_source_outputs")
+                or evidence_contract.get("required_files")
+            ),
+            *[
+                path
+                for criterion in criteria
+                for path in _string_list(criterion.get("producer_paths"))
+            ],
+            *[
+                path
+                for command in commands
+                for path in _string_list(command.get("producer_paths"))
+            ],
+        ])),
         "required_contract_tests": _string_list(
             evidence_contract.get("required_contract_tests")
             or evidence_contract.get("required_tests")
@@ -289,6 +307,10 @@ def build_task_contract_snapshot(
         "source_ref": str(getattr(contract, "source_ref", "") or ""),
         "source_index_ref": str(getattr(contract, "source_index_ref", "") or ""),
         "product_contract_ref": str(getattr(contract, "product_contract_ref", "") or ""),
+        "risk_class": str(getattr(contract, "risk_class", "") or ""),
+        "integration_admission_profile": str(
+            getattr(contract, "integration_admission_profile", "") or ""
+        ),
     }
 
 
@@ -348,8 +370,16 @@ def hydrate_task_contract_snapshot(
 
 
 def descriptor_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    ref = str(payload.get("contract_snapshot_ref") or "").strip()
-    digest = str(payload.get("contract_snapshot_digest") or "").strip()
+    ref = str(
+        payload.get("task_contract_snapshot_ref")
+        or payload.get("contract_snapshot_ref")
+        or ""
+    ).strip()
+    digest = str(
+        payload.get("task_contract_snapshot_digest")
+        or payload.get("contract_snapshot_digest")
+        or ""
+    ).strip()
     if not ref or not digest:
         raise TaskContractSnapshotError("contract snapshot ref/digest missing")
     return {
@@ -363,9 +393,15 @@ def descriptor_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def snapshot_payload_fields(descriptor: Mapping[str, Any]) -> dict[str, str]:
+    ref = str(descriptor.get("ref") or "")
+    digest = str(descriptor.get("sha256") or "")
     return {
-        "contract_snapshot_ref": str(descriptor.get("ref") or ""),
-        "contract_snapshot_digest": str(descriptor.get("sha256") or ""),
+        "task_contract_snapshot_ref": ref,
+        "task_contract_snapshot_digest": digest,
+        # Replay compatibility for events and profiles written before the
+        # typed snapshot fields were introduced.
+        "contract_snapshot_ref": ref,
+        "contract_snapshot_digest": digest,
     }
 
 

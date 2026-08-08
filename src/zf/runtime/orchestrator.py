@@ -1,12 +1,12 @@
-"""Orchestrator — deterministic dispatch loop, no LLM calls.
+"""Workflow Runtime Coordinator — deterministic dispatch loop, no LLM calls.
 
 Interaction protocol:
-  1. Orchestrator selects a ready task + idle role
+  1. WRC selects a ready task + idle role
   2. Writes task briefing to .zf/briefings/{role}-{task_id}.md
   3. Injects briefing into agent's tmux pane (agent sees it as prompt)
   4. Agent works, then runs: zf emit <event-type> --task <task_id>
   5. EventWatcher detects the event in events.jsonl
-  6. Orchestrator.run_once() called → reacts to event → dispatches next
+  6. WRC.run_once() called → reacts to event → dispatches next
 """
 
 from __future__ import annotations
@@ -83,11 +83,15 @@ from zf.runtime.rework_triage import (
     triage_from_payload,
 )
 from zf.runtime.terminal_events import is_stage_progress_event
+from zf.runtime.task_pipeline_result import (
+    is_admitted_task_pipeline_stage_result,
+)
 from zf.runtime.worker_state_runtime import WorkerStateRuntimeMixin
 from zf.runtime.writer_fanout_data import WriterFanoutDataMixin
 from zf.core.cost.tracker import CostTracker
 from zf.core.memory.store import MemoryStore
 from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
 if TYPE_CHECKING:
@@ -128,6 +132,15 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     "autoresearch.invocation.requested",
     "autoresearch.inject.worker_stuck",
     "orchestrator.evidence_rework.requested",
+    "orchestrator.semantic.failure.requested",
+    "orchestrator.semantic.rework.requested",
+    "orchestrator.run_plan.admitted",
+    "orchestrator.stage_barrier.admitted",
+    "orchestrator.pre_closeout.admitted",
+    "orchestrator.semantic.decision.submitted",
+    "orchestrator.semantic.decision.failed",
+    "owner.delivery.narrative.submitted",
+    "owner.delivery.narrative.failed",
     "worker.completed",
     "artifact.manifest.published",
     # 2026-06-01: channel routing is mechanical (mention → reply.requested →
@@ -140,6 +153,7 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     # channel_router.route_channel_message.
     "channel.message.posted",
     "channel.agent.reply.requested", "channel.synthesis.requested",
+    "channel.synthesis.repair.requested",
     "channel.question.dedup.requested",
     "channel.question.dedup.applied",
     "channel.cross_review.requested",
@@ -313,7 +327,7 @@ def _parse_event_ts(value: object) -> datetime | None:
     return parsed
 
 
-class Orchestrator(
+class WorkflowRuntimeCoordinator(
     FanoutCoordinationMixin,
     EventCursorMixin,
     DispatchMixin,
@@ -327,7 +341,7 @@ class Orchestrator(
     WorkerStateRuntimeMixin,
     RuntimeAuthorityMixin,
 ):
-    """Deterministic orchestrator — reads state, makes dispatch decisions.
+    """Deterministic workflow runtime coordinator.
 
     Communication with agents:
       Outbound: task briefings delivered via the TransportAdapter
@@ -392,6 +406,11 @@ class Orchestrator(
         # without bound over zero-touch runs; the offset cursor already
         # prevents old replay, so FIFO eviction of the oldest ids is safe.
         self._processed_event_ids = BoundedIdSet(max_size=50_000)
+        # Transport events are appended and housekept at the end of the
+        # dispatch cycle, then semantically consumed by the next watcher
+        # wake. Track the first half separately so agent.usage is not
+        # charged twice without suppressing provider-stop recovery.
+        self._transport_housekept_event_ids = BoundedIdSet(max_size=50_000)
         # Memory auto-promote dedupe: which trigger event ids have already
         # been turned into a memory.note this process. Reset per process —
         # restart allows one duplicate at worst, TTL/decay handles it.
@@ -418,9 +437,10 @@ class Orchestrator(
         # Values: "healthy" (default implicit), "pending_recycle", "recycling".
         self._instance_state: dict[str, str] = {}
         # G-RECYCLE-8: dedup key for synthesized agent.usage events.
-        # (instance_id, timestamp) → True. Prevents double-counting when
+        # (instance_id, usage_series_id, timestamp) → True. Prevents
+        # double-counting while keeping recycled provider sessions distinct.
         # _check_context_thresholds reads the same session turn twice.
-        self._synth_usage_seen: set[tuple[str, str]] = set()
+        self._synth_usage_seen: set[tuple[str, str, str]] = set()
         # Warning-band samples change after nearly every provider tool call.
         # Keep one warning per active execution/session until usage recovers
         # below the warning threshold or the role moves to another execution.
@@ -830,14 +850,14 @@ class Orchestrator(
 
     def run_once(
         self, events: list[ZfEvent] | None = None, *, consumed_offset: int | None = None,
-    ) -> list[OrchestratorDecision]:
+    ) -> list[WorkflowRuntimeDecision]:
         """Run one orchestration cycle.
 
         If `events` is given (push from EventWatcher), react to those.
         Otherwise read the tail of events.jsonl since the last persisted
         offset stored in session.yaml — never re-react to old events on restart.
         """
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         from zf.runtime import orchestrator_periodic_sweep as periodic
 
         # Pushed events already run their direct handlers in
@@ -938,7 +958,7 @@ class Orchestrator(
     def _emit_decision_recorded(
         self,
         triggers: list[ZfEvent] | None,
-        decisions: list[OrchestratorDecision],
+        decisions: list[WorkflowRuntimeDecision],
     ) -> None:
         """ZF-ORCH-ACT-001: emit one ``orchestrator.decision.recorded``
         event summarising this wake's outcome.
@@ -1161,7 +1181,7 @@ class Orchestrator(
             },
         ))
 
-    def _sweep_feature_liveness(self) -> list[OrchestratorDecision]:
+    def _sweep_feature_liveness(self) -> list[WorkflowRuntimeDecision]:
         try:
             from zf.runtime.feature_liveness import sweep_feature_liveness
 
@@ -1173,16 +1193,16 @@ class Orchestrator(
             )
         except Exception:
             return []
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         for event in events:
             if event.type == "feature.status_changed":
-                decisions.append(OrchestratorDecision(
+                decisions.append(WorkflowRuntimeDecision(
                     action="move",
                     task_id=event.task_id,
                     reason="feature liveness sweep closed delivered feature",
                 ))
             elif event.type == "feature.liveness.blocked":
-                decisions.append(OrchestratorDecision(
+                decisions.append(WorkflowRuntimeDecision(
                     action="block",
                     task_id=event.task_id,
                     reason=event.payload.get(
@@ -1380,22 +1400,23 @@ class Orchestrator(
         if not getattr(self.config, "budget_enforcement_enabled", True):
             return
         cap = getattr(self.config, "global_budget_usd", None)
-        if cap is None:
-            return
-        try:
-            total = self.cost_tracker.total_usd()
-        except Exception:
-            return
-        if total >= cap:
-            import time as _time
+        if cap is not None:
+            try:
+                total = self.cost_tracker.total_usd()
+            except Exception:
+                total = None
+            if total is not None and total >= cap:
+                import time as _time
 
-            self._emit_cost_block(
-                scope="global_sweep",
-                role_name="*",
-                budget=cap,
-                current=total,
-                now=_time.time(),
-            )
+                self._emit_cost_block(
+                    scope="global_sweep",
+                    role_name="*",
+                    budget=cap,
+                    current=total,
+                    now=_time.time(),
+                )
+        from zf.runtime.workflow_budget_guard import enforce_active_workflow_budgets
+        enforce_active_workflow_budgets(self)
 
     def _run_heartbeat_sweep(self) -> None:
         """α-3 (2026-05-17): periodic sweep over role_sessions.yaml.
@@ -2233,10 +2254,10 @@ class Orchestrator(
                 )
             # Mechanical state writes (cost/memory/contract) for the new event.
             self._apply_housekeeping(ev)
-            # E1 fix: mark as processed so _react_to_events on the next
-            # cycle doesn't housekeep the same event a second time
-            # (inflated cost.jsonl by 2× before this).
-            self._processed_event_ids.add(ev.id)
+            # E1: suppress only duplicate housekeeping. The next watcher
+            # wake must still route kernel-owned signals such as
+            # agent.api_blocked through their deterministic recovery handler.
+            self._transport_housekept_event_ids.add(ev.id)
 
     def _send_transport_task(
         self,
@@ -2356,7 +2377,7 @@ class Orchestrator(
 
     def _react_to_events(
         self, pushed: list[ZfEvent] | None = None, *, consumed_offset: int | None = None,
-    ) -> list[OrchestratorDecision]:
+    ) -> list[WorkflowRuntimeDecision]:
         """React to events.
 
         Two modes (chosen by config):
@@ -2370,7 +2391,7 @@ class Orchestrator(
           `_on_*` handlers fire. This preserves backward compatibility with
           configs that don't yet use the three-layer architecture.
         """
-        decisions: list[OrchestratorDecision] = []
+        decisions: list[WorkflowRuntimeDecision] = []
         if pushed is not None:
             recent = pushed
             # The watcher acknowledges its immutable batch boundary only
@@ -2416,9 +2437,17 @@ class Orchestrator(
                     if self._reject_resolved_task_attempt(event, resolved_task_id, decisions):
                         continue
 
-            # Layer 1 housekeeping: mechanical state writes from emitted events
-            self._apply_housekeeping(event)
+            # Layer 1 housekeeping: mechanical state writes from emitted
+            # events. Transport-drained events already ran this inline at the
+            # end of their dispatch cycle, but still need semantic reaction.
+            if event.id not in self._transport_housekept_event_ids:
+                self._apply_housekeeping(event)
             self._settle_task_attempt_result(event)
+
+            # Admitted v4 results advance only through the Task Pipeline.
+            if is_admitted_task_pipeline_stage_result(self, event):
+                self._processed_event_ids.add(event.id)
+                continue
 
             # ZF-LH-INLINE-001 (doc 26 §3.3): scan user.message for
             # operator inline-override keywords. Emits audit event when
@@ -2561,7 +2590,7 @@ class Orchestrator(
                         )
                         if will_dispatch:
                             self._notify_orchestrator_agent(event)
-                            decisions.append(OrchestratorDecision(
+                            decisions.append(WorkflowRuntimeDecision(
                                 action="notify",
                                 task_id=event.task_id,
                                 role="orchestrator",
@@ -2597,7 +2626,7 @@ class Orchestrator(
                 )
                 if will_dispatch:
                     self._notify_orchestrator_agent(event)
-                    decisions.append(OrchestratorDecision(
+                    decisions.append(WorkflowRuntimeDecision(
                         action="notify",
                         task_id=event.task_id,
                         role="orchestrator",
@@ -2646,7 +2675,7 @@ class Orchestrator(
                 continue
             entries = self.event_registry.resolve(event.type)
             if entries:
-                # Primary handler first — drives OrchestratorDecision
+                # Primary handler first — drives WorkflowRuntimeDecision
                 primary = entries[0]
                 decision = primary.handler(event)
                 if decision:
@@ -2984,6 +3013,19 @@ class Orchestrator(
     def _apply_housekeeping(self, event: ZfEvent) -> None:
         """Layer 1 mechanical state writes — never decisions."""
         self._renew_task_attempt_lease(event)
+        if event.type in {"run.goal.completed", "run.goal.blocked", "run.failed"}:
+            try:
+                from zf.runtime.workflow_task_lifecycle import (
+                    settle_workflow_managed_task_from_run_terminal,
+                )
+
+                settle_workflow_managed_task_from_run_terminal(
+                    task_store=self.task_store,
+                    event_writer=self.event_writer,
+                    terminal_event=event,
+                )
+            except Exception:
+                pass
         if event.type == "run.cancelled":
             from zf.runtime.run_cancel_reconciliation import (
                 reconcile_cancelled_run_resources,
@@ -3269,10 +3311,11 @@ class Orchestrator(
                 # (configurable per project). Opt-in via workflow.dag.enabled
                 # so projects without the new DAG keep their existing
                 # post-judge quality_gates behavior in candidates.py.
-                try:
-                    self._maybe_run_static_gate(event)
-                except Exception:
-                    pass  # static_gate never blocks the dispatch loop
+                if not is_admitted_task_pipeline_stage_result(self, event):
+                    try:
+                        self._maybe_run_static_gate(event)
+                    except Exception:
+                        pass  # static_gate never blocks the dispatch loop
             elif event.type == "candidate.integration.completed":
                 # Auto-ship the validated candidate into ship_target_branch so
                 # operators stop running `git merge candidate/<id>` by hand
@@ -4072,7 +4115,10 @@ class Orchestrator(
         ))
         self._maybe_start_writer_fanout(event)
 
-    def _bridge_gap_plan_ready_to_task_map(self, event: ZfEvent) -> OrchestratorDecision | None:
+    def _bridge_gap_plan_ready_to_task_map(
+        self,
+        event: ZfEvent,
+    ) -> WorkflowRuntimeDecision | None:
         """Deterministically convert module parity gap plans into dispatchable work.
 
         The bridge writes an amended full task-map artifact and then reuses the
@@ -4092,12 +4138,13 @@ class Orchestrator(
             event.id,
             {"task_map.amended", "task_map.amend.failed"},
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="noop",
                 reason=f"{gap_event_type} task_map amend already settled",
             )
 
         payload = event.payload if isinstance(event.payload, dict) else {}
+        workflow_identity = self._gap_workflow_identity(payload)
         pdd_id = str(payload.get("pdd_id") or payload.get("feature_id") or "").strip()
         feature_id = str(payload.get("feature_id") or pdd_id).strip()
         trace_id = str(payload.get("trace_id") or event.correlation_id or event.id).strip()
@@ -4122,7 +4169,7 @@ class Orchestrator(
                     "source_event_id": event.id,
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason=f"{gap_event_type} missing pdd_id or task_map_ref",
             )
@@ -4151,7 +4198,7 @@ class Orchestrator(
                         "source_event_id": event.id,
                     },
                 ))
-                return OrchestratorDecision(
+                return WorkflowRuntimeDecision(
                     action="block",
                     reason=f"{gap_event_type} gap_plan_ref unreadable",
                 )
@@ -4173,7 +4220,7 @@ class Orchestrator(
                     "source_event_id": event.id,
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason=f"{gap_event_type} contains no gap_tasks",
             )
@@ -4183,6 +4230,7 @@ class Orchestrator(
             causation_id=event.id,
             correlation_id=trace_id,
             payload={
+                **workflow_identity,
                 "schema_version": "task-map-amend-request.v1",
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
@@ -4223,7 +4271,7 @@ class Orchestrator(
                     "request_event_id": requested.id,
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason=f"task_map amend failed: {exc}",
             )
@@ -4246,6 +4294,7 @@ class Orchestrator(
             causation_id=requested.id,
             correlation_id=trace_id,
             payload={
+                **workflow_identity,
                 "schema_version": "task-map-amended.v1",
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
@@ -4272,6 +4321,7 @@ class Orchestrator(
             causation_id=amended.id,
             correlation_id=trace_id,
             payload={
+                **workflow_identity,
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
                 "trace_id": trace_id,
@@ -4307,7 +4357,7 @@ class Orchestrator(
             },
         ))
         self._maybe_start_writer_fanout(ready)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="bridge",
             reason=f"{gap_event_type} amended task_map for {len(gap_task_ids)} gap task(s)",
         )
@@ -4512,9 +4562,30 @@ class Orchestrator(
             [str(ref) for ref in payload.get("artifact_refs", []) or [] if str(ref)]
             + [str(diagnostics_path)]
         ))
+        compile_reason = (
+            "plan compile gate failed: " + "; ".join(diagnostics)
+        )[:1000]
+        findings = [
+            dict(item)
+            for item in payload.get("findings", []) or []
+            if isinstance(item, dict)
+        ]
+        compile_finding = {
+            "severity": "high",
+            "category": "plan_compile_gate",
+            "path": task_map_ref,
+            "message": compile_reason,
+        }
+        if not any(
+            str(item.get("message") or "") == compile_reason
+            for item in findings
+        ):
+            findings.append(compile_finding)
         payload.update({
             "artifact_gate": "failed",
             "plan_compile_gate": "failed",
+            "reason": compile_reason,
+            "findings": findings,
             "diagnostics_ref": str(diagnostics_path),
             "artifact_refs": artifact_refs,
             "artifact_digests": {
@@ -4600,63 +4671,6 @@ class Orchestrator(
         ).task_items
 
 
-    @staticmethod
-    def _skill_briefing_section(
-        role: RoleConfig,
-        skill_entries: list | None = None,
-    ) -> list[str]:
-        if not role.skills:
-            return []
-        entries_by_name = {
-            getattr(entry, "name", ""): entry
-            for entry in (skill_entries or [])
-        }
-        lines = [
-            "## Enabled Skills",
-            "",
-            "These skills are enabled by `zf.yaml` for this Star child. "
-            "Use them when their description matches the task; they define "
-            "review, verification, or output rules for this run.",
-        ]
-        for skill in role.skills:
-            entry = entries_by_name.get(skill)
-            description = (
-                str(getattr(entry, "description", "") or "").strip()
-                if entry is not None else ""
-            )
-            status = (
-                str(getattr(entry, "status", "") or "").strip()
-                if entry is not None else ""
-            )
-            source = (
-                str(getattr(entry, "source", "") or "").strip()
-                if entry is not None else ""
-            )
-            runtime = (
-                str(getattr(entry, "materialized_to", "") or "").strip()
-                if entry is not None else ""
-            )
-            metadata = [
-                item for item in (
-                    f"status: {status}" if status else "",
-                    f"source: {source}" if source else "",
-                    f"runtime: {runtime}" if runtime else "",
-                )
-                if item
-            ]
-            suffix = f" ({'; '.join(metadata)})" if metadata else ""
-            if description:
-                lines.append(f"- `/{skill}` - {description}{suffix}")
-            else:
-                lines.append(f"- `/{skill}`{suffix}")
-        lines.append("")
-        return lines
-
-
-
-
-
-
     def _notify_orchestrator_agent(self, event: ZfEvent) -> None:
         """Layer 2 dispatch: build orchestrator briefing + send via transport.
 
@@ -4724,6 +4738,9 @@ class Orchestrator(
                 ))
                 return
             self._layer2_freeze_wake_fired = frozen
+        if event.type == "orchestrator.semantic.checkpoint.requested":
+            self._fire_orchestrator_turn(orch_role, [event])
+            return
         # Batch coalescing (doc 66 §14.0): while inside a run_once reaction
         # batch, every trigger event accumulates into _layer2_pending and the
         # batch fires ONE multi-trigger turn at its end (_flush_layer2_batch).
@@ -4814,6 +4831,13 @@ class Orchestrator(
         if not triggers:
             return
         primary = triggers[-1]
+        if primary.type == "orchestrator.semantic.checkpoint.requested":
+            from zf.runtime.orchestrator_agent_transport import (
+                dispatch_orchestrator_agent_operation,
+            )
+
+            dispatch_orchestrator_agent_operation(self, orch_role, primary)
+            return
         # Regenerate progress.md so Layer 2 sees fresh narrative state.
         try:
             regenerate_progress(self.state_dir)
@@ -4913,3 +4937,8 @@ class Orchestrator(
             return  # still inside the window; wait for the next run_once
         rep = self._layer2_pending.pop()
         self._notify_orchestrator_agent(rep)
+
+
+# Historical imports remain valid while the deterministic runtime's concrete
+# public name moves away from the configured orchestrator role agent.
+Orchestrator = WorkflowRuntimeCoordinator

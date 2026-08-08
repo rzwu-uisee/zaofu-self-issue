@@ -67,8 +67,8 @@ def _task_map(*, generation: str, sentinel: str) -> dict:
             "planning_result",
         ],
         "goal_claims": [{
-            "goal_claim_id": f"CLAIM-{generation}",
-            "text": sentinel,
+            "goal_claim_id": "CLAIM-DOC152-CURRENT",
+            "text": "Deliver the current sentinel",
             "mandatory": True,
         }],
         "tasks": [{
@@ -81,7 +81,7 @@ def _task_map(*, generation: str, sentinel: str) -> dict:
                 "id": f"AC-{generation}",
                 "text": f"result.txt contains {sentinel}",
             }],
-            "goal_claim_ids": [f"CLAIM-{generation}"],
+            "goal_claim_ids": ["CLAIM-DOC152-CURRENT"],
             "verification": f"grep -qx {sentinel} result.txt",
             "verification_tiers": ["runtime"],
         }],
@@ -348,7 +348,7 @@ def test_doc152_package_currentness_and_restart_closure(tmp_path: Path) -> None:
     assert task_sources["plan_artifact_package_ref"] == current[
         "plan_artifact_package_ref"
     ]
-    assert task.contract.goal_claim_ids == ["CLAIM-G2"]
+    assert task.contract.goal_claim_ids == ["CLAIM-DOC152-CURRENT"]
     assert task.contract.evidence_contract["required_plan_ports"] == [
         "requirement_spec",
         "goal_claim_set",

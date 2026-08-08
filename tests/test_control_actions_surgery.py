@@ -143,6 +143,7 @@ def test_scoped_ship_retry_cannot_cross_run_operation_or_target(
             payload={
                 "run_id": run_id,
                 "goal_id": f"goal-{run_id}",
+                "pdd_id": f"pdd-{run_id}",
                 "claim_id": claim_id,
                 "candidate_ref": candidate,
                 "target_commit": run_id[-1] * 40,
@@ -167,16 +168,18 @@ def test_scoped_ship_retry_cannot_cross_run_operation_or_target(
     })
     assert crossed.get("ok") is not True
 
-    monkeypatch.setattr(
-        ShipService,
-        "ship",
-        lambda self, **kwargs: ShipResult(
+    captured: dict = {}
+
+    def _ship(self, **kwargs):  # noqa: ANN001, ARG001
+        captured.update(kwargs)
+        return ShipResult(
             status="completed",
             ok=True,
             event_type="ship.completed",
             payload={"final_commit": "a" * 40},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(ShipService, "ship", _ship)
     result = _exec(service, "ship-retry", {
         "run_id": "run-a",
         "claim_id": "claim-a",
@@ -190,3 +193,4 @@ def test_scoped_ship_retry_cannot_cross_run_operation_or_target(
     assert settled[0].payload["run_id"] == "run-a"
     assert settled[0].payload["claim_id"] == "claim-a"
     assert settled[0].payload["candidate_ref"] == "candidate/A"
+    assert captured["pdd_id"] == "pdd-run-a"

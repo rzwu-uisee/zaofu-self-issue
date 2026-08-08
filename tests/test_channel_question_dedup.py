@@ -588,6 +588,114 @@ def test_rejected_dedup_retries_twice_then_emits_one_exhaustion(
     assert exhausted[0].payload["attempts"] == 3
 
 
+def test_failed_dedup_reply_reissues_bound_request_once(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    started = writer.emit(
+        "channel.discussion.started",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "roster": ["arch"],
+            "synthesizer": "arch",
+            "requirement_message_id": "msg-requirement",
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.discussion.phase.changed",
+        actor="runtime",
+        causation_id=started.id,
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "phase": "phase2_relay",
+            "source": "test",
+        },
+    )
+    _open(writer, "q-0")
+    digest = question_ledger_digest(
+        project_channel(state_dir, CHANNEL_ID),
+        thread_id="main",
+    )
+    writer.emit(
+        "channel.question.dedup.requested",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "dedup-initial",
+            "target_member_id": "arch",
+            "ledger_digest": digest,
+            "generation": 1,
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.message.posted",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "message_id": "msg-dedup-initial",
+            "member_id": "operator",
+            "role": "user",
+            "text": "Deduplicate the question ledger.",
+            "refs": {"question_dedup_request_id": "dedup-initial"},
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.agent.reply.requested",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-dedup-initial",
+            "message_id": "msg-dedup-initial",
+            "target_member_id": "arch",
+            "status": "pending",
+            "source": "test",
+        },
+    )
+    failed = writer.emit(
+        "channel.agent.reply.failed",
+        actor="runtime",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-dedup-initial",
+            "message_id": "msg-dedup-initial",
+            "target_member_id": "arch",
+            "reason": "provider launch failed",
+            "source": "test",
+        },
+    )
+
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == ["channel.question.dedup.requested"]
+    retried = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.question.dedup.requested"
+    ][-1]
+    assert retried.causation_id == failed.id
+    assert retried.payload["generation"] == 2
+    assert retried.payload["prior_request_id"] == "dedup-initial"
+    assert retried.payload["repair_reason"] == "dedup_reply_failed"
+    assert advance_discussion(
+        state_dir, writer, channel_id=CHANNEL_ID, thread_id="main",
+    ) == []
+
+
 def test_dedup_rejects_invalid_question_graph_and_target_without_updates(
     tmp_path: Path,
 ) -> None:

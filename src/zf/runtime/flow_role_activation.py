@@ -19,7 +19,18 @@ from zf.runtime.flow_roles import (
     is_multi_flow_config,
     role_configs_for_flow,
 )
+from zf.runtime.event_window import read_runtime_events
+from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
+from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.transport import (
+    transport_error_diagnostics,
+    transport_readiness_error,
+)
+from zf.runtime.workflow_operation import (
+    TERMINAL_OPERATION_STATUSES,
+    reduce_workflow_operations,
+)
 
 
 ACTIVATION_SCHEMA_VERSION = "flow-role-activation.v1"
@@ -44,6 +55,7 @@ class FlowRoleActivationResult:
     manifest_ref: dict[str, Any] | None = None
     role_instance_ids: tuple[str, ...] = ()
     recovered_instance_ids: tuple[str, ...] = ()
+    deferred_instance_ids: tuple[str, ...] = ()
     reason: str = ""
 
 
@@ -61,8 +73,11 @@ def active_flow_role_instance_ids(config: Any, events: list[ZfEvent]) -> set[str
         str(getattr(role, "instance_id", "") or "")
         for role in initial_role_configs(config)
     }
+    aliases, terminal_runs = _terminal_run_scope(events)
     for event in _latest_activation_state_events(events).values():
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if _activation_run_is_terminal(payload, aliases, terminal_runs):
+            continue
         if event.type in {
             "flow.roles.activation.applied",
             "flow.roles.activation.recovered",
@@ -96,6 +111,7 @@ def flow_role_activation_projection(
         str(getattr(role, "instance_id", "") or "")
         for role in initial_role_configs(config)
     }
+    aliases, terminal_runs = _terminal_run_scope(events)
     projection: dict[str, dict[str, Any]] = {}
     for role in getattr(config, "roles", ()) or ():
         instance_id = str(getattr(role, "instance_id", "") or "")
@@ -132,6 +148,8 @@ def flow_role_activation_projection(
         if event.type not in activation_events:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if _activation_run_is_terminal(payload, aliases, terminal_runs):
+            continue
         role_ids = _strings(payload.get("role_instance_ids"))
         failed_id = str(payload.get("failed_instance_id") or "")
         if failed_id and failed_id not in role_ids:
@@ -188,6 +206,7 @@ def flow_role_activation_projection(
                 "flow.roles.activation.recovered",
             }
             or latest_activation_events.get(activation_id) is not event
+            or _activation_run_is_terminal(payload, aliases, terminal_runs)
         ):
             continue
         for instance_id in _strings(payload.get("role_instance_ids")):
@@ -238,10 +257,11 @@ def activate_flow_roles(
     correlation_id: str = "",
     recovery: bool = False,
 ) -> FlowRoleActivationResult:
-    """Materialize and spawn the exact configured role closure for one Flow.
+    """Materialize the exact role closure and allocate required processes.
 
     The manifest is immutable and keyed by confirmed workflow identity. Replays
-    repair only missing processes and do not create a second activation truth.
+    repair only eager roles or on-demand roles with active resume obligations;
+    dormant on-demand roles remain logical capacity without a pane/process.
     """
 
     if not flow_role_activation_required(orchestrator.config, payload):
@@ -369,17 +389,37 @@ def activate_flow_roles(
         ))
 
     spawned: list[str] = []
+    deferred: list[str] = []
     try:
         for role in roles:
             if _is_alive(orchestrator, role.instance_id):
                 continue
-            _prepare_and_spawn_role(
+            resume_required, resume_task_id = _on_demand_resume_obligation(
                 orchestrator,
                 role,
-                activation_id=activation_id,
             )
+            if _is_on_demand(role) and not resume_required:
+                _prepare_dormant_role(
+                    orchestrator,
+                    role,
+                    activation_id=activation_id,
+                )
+                deferred.append(role.instance_id)
+                continue
+            if _is_on_demand(role):
+                orchestrator._ensure_role_active(
+                    role,
+                    task_id=resume_task_id or None,
+                )
+            else:
+                _prepare_and_spawn_role(
+                    orchestrator,
+                    role,
+                    activation_id=activation_id,
+                )
             spawned.append(role.instance_id)
     except Exception as exc:
+        diagnostics = transport_error_diagnostics(exc)
         orchestrator.event_writer.append(ZfEvent(
             type="flow.roles.activation.failed",
             actor="zf-cli",
@@ -396,6 +436,7 @@ def activate_flow_roles(
                 "error_type": type(exc).__name__,
                 "reason": str(exc)[:400],
                 "source_event_id": source_event_id,
+                **diagnostics,
             },
             causation_id=source_event_id or None,
             correlation_id=correlation_id or identity["workflow_run_id"],
@@ -416,6 +457,7 @@ def activate_flow_roles(
                 "activation_manifest_ref": descriptor,
                 "role_instance_ids": list(role_ids),
                 "spawned_instance_ids": spawned,
+                "deferred_instance_ids": deferred,
                 "reason": manifest["activation_reason"],
                 "source_event_id": source_event_id,
             },
@@ -433,6 +475,7 @@ def activate_flow_roles(
                 "activation_manifest_ref": descriptor,
                 "role_instance_ids": list(role_ids),
                 "recovered_instance_ids": spawned,
+                "deferred_instance_ids": deferred,
                 "reason": "missing runtime role restored from activation truth",
                 "source_event_id": source_event_id,
             },
@@ -449,6 +492,7 @@ def activate_flow_roles(
         manifest_ref=descriptor,
         role_instance_ids=role_ids,
         recovered_instance_ids=tuple(spawned) if applied is not None else (),
+        deferred_instance_ids=tuple(deferred),
     )
 
 
@@ -459,10 +503,14 @@ def restore_flow_role_activations(orchestrator: Any) -> list[FlowRoleActivationR
         return []
     results: list[FlowRoleActivationResult] = []
     seen: set[str] = set()
-    for event in orchestrator.event_log.read_all():
+    events = orchestrator.event_log.read_all()
+    aliases, terminal_runs = _terminal_run_scope(events)
+    for event in events:
         if event.type != "flow.roles.activation.applied":
             continue
         event_payload = event.payload if isinstance(event.payload, dict) else {}
+        if _activation_run_is_terminal(event_payload, aliases, terminal_runs):
+            continue
         activation_id = str(event_payload.get("activation_id") or "")
         if not activation_id or activation_id in seen:
             continue
@@ -566,6 +614,28 @@ def _latest_activation_state_events(
     return latest
 
 
+def _terminal_run_scope(
+    events: list[ZfEvent],
+) -> tuple[dict[str, str], set[str]]:
+    aliases = run_aliases(events)
+    terminal_runs = {
+        run_id
+        for event in events
+        if event.type in RUN_TERMINAL_EVENT_TYPES
+        if (run_id := event_run_id(event, aliases=aliases))
+    }
+    return aliases, terminal_runs
+
+
+def _activation_run_is_terminal(
+    payload: Mapping[str, Any],
+    aliases: Mapping[str, str],
+    terminal_runs: set[str],
+) -> bool:
+    run_id = str(payload.get("workflow_run_id") or "").strip()
+    return bool(run_id and aliases.get(run_id, run_id) in terminal_runs)
+
+
 def _activation_event(
     events: list[ZfEvent],
     activation_id: str,
@@ -584,6 +654,135 @@ def _is_alive(orchestrator: Any, instance_id: str) -> bool:
         return bool(orchestrator.transport.is_alive(instance_id))
     except Exception:
         return False
+
+
+def _is_on_demand(role: Any) -> bool:
+    lifecycle = getattr(role, "lifecycle", None)
+    return str(getattr(lifecycle, "mode", "") or "") == "on_demand"
+
+
+def _on_demand_resume_obligation(
+    orchestrator: Any,
+    role: Any,
+) -> tuple[bool, str]:
+    if not _is_on_demand(role):
+        return False, ""
+    targets = {
+        str(getattr(role, "instance_id", "") or ""),
+        str(getattr(role, "name", "") or ""),
+    }
+    try:
+        for task in orchestrator.task_store.list_all():
+            if (
+                str(getattr(task, "status", "") or "") == "in_progress"
+                and str(getattr(task, "assigned_to", "") or "") in targets
+            ):
+                return True, str(getattr(task, "id", "") or "")
+    except Exception:
+        pass
+
+    try:
+        runtime_events = read_runtime_events(
+            orchestrator.event_log,
+            orchestrator.state_dir,
+        )
+        operations = reduce_workflow_operations(runtime_events)
+        aliases, terminal_runs = _terminal_run_scope(runtime_events)
+    except Exception:
+        operations = {}
+        aliases, terminal_runs = {}, set()
+    for operation in operations.values():
+        workflow_run_id = str(
+            operation.get("workflow_run_id")
+            or operation.get("run_id")
+            or ""
+        ).strip()
+        if (
+            str(operation.get("role_instance") or "")
+            == str(getattr(role, "instance_id", "") or "")
+            and str(operation.get("status") or "")
+            not in TERMINAL_OPERATION_STATUSES
+            and (
+                not workflow_run_id
+                or aliases.get(workflow_run_id, workflow_run_id)
+                not in terminal_runs
+            )
+        ):
+            return True, str(operation.get("task_id") or "")
+
+    try:
+        registry = RoleSessionRegistry(
+            orchestrator.state_dir / "role_sessions.yaml",
+            project_root=str(orchestrator.project_root),
+        )
+        _heartbeat_at, heartbeat = registry.get_last_heartbeat(role.instance_id)
+    except Exception:
+        heartbeat = None
+    if isinstance(heartbeat, dict) and (
+        str(heartbeat.get("current_task_id") or "")
+        and str(heartbeat.get("state") or "") in {"busy", "in_progress"}
+    ):
+        try:
+            still_owned = orchestrator._heartbeat_current_task_still_owned(
+                registry,
+                role.instance_id,
+            )
+        except Exception:
+            still_owned = False
+        if still_owned:
+            return True, str(heartbeat.get("current_task_id") or "")
+    return False, ""
+
+
+def _prepare_dormant_role(
+    orchestrator: Any,
+    role: Any,
+    *,
+    activation_id: str,
+) -> None:
+    coordinator = orchestrator._get_spawn_coordinator()
+    prepare_provider = getattr(coordinator, "prepare_provider_session", None)
+    if callable(prepare_provider):
+        prepare_provider(role)
+    _write_flow_role_instructions(orchestrator, role, skill_entries=[])
+
+    registry = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(orchestrator.project_root),
+    )
+    meta = registry.instance_meta().get(role.instance_id, {})
+    previous = str(meta.get("lifecycle_state") or "")
+    if previous in {"dormant", "suspended"}:
+        return
+    event = orchestrator.event_writer.append(ZfEvent(
+        type="role.lifecycle.dormant",
+        actor="orchestrator",
+        payload={
+            "schema_version": "role-lifecycle.v1",
+            "role": role.name,
+            "instance_id": role.instance_id,
+            "backend": role.backend,
+            "from": previous,
+            "to": "dormant",
+            "activation_id": activation_id,
+            "preserve_session": role.lifecycle.preserve_session,
+            "preserve_workdir": role.lifecycle.preserve_workdir,
+        },
+        correlation_id=orchestrator._current_run_id() or None,
+    ))
+    registry.update_instance_meta(
+        role.instance_id,
+        lifecycle_state="dormant",
+        lifecycle_transition_at=event.ts,
+        lifecycle_active_at="",
+        lifecycle_suspended_at="",
+    )
+    orchestrator._set_worker_state(
+        role.instance_id,
+        "dormant",
+        reason="Flow role registered without provider process",
+        force=True,
+    )
 
 
 def _prepare_and_spawn_role(
@@ -639,8 +838,32 @@ def _prepare_and_spawn_role(
 
     orchestrator._get_spawn_coordinator().spawn(role, cwd=spawn_cwd)
     if not orchestrator._wait_role_ready(role):
-        raise RuntimeError(f"{role.instance_id} did not become ready")
+        raise transport_readiness_error(
+            orchestrator.transport,
+            role.instance_id,
+            backend=role.backend,
+        )
 
+    _write_flow_role_instructions(
+        orchestrator,
+        role,
+        skill_entries=skill_entries,
+    )
+    orchestrator._set_worker_state(
+        role.instance_id,
+        "idle",
+        reason=f"Flow role activated by {activation_id}",
+        force=True,
+    )
+    _attach_session_tailer(orchestrator, role, spawn_cwd=spawn_cwd)
+
+
+def _write_flow_role_instructions(
+    orchestrator: Any,
+    role: Any,
+    *,
+    skill_entries: list[Any],
+) -> None:
     from zf.runtime.injection import generate_role_instructions
 
     instructions = generate_role_instructions(
@@ -656,13 +879,6 @@ def _prepare_and_spawn_role(
         instructions,
         encoding="utf-8",
     )
-    orchestrator._set_worker_state(
-        role.instance_id,
-        "idle",
-        reason=f"Flow role activated by {activation_id}",
-        force=True,
-    )
-    _attach_session_tailer(orchestrator, role, spawn_cwd=spawn_cwd)
 
 
 def _attach_session_tailer(

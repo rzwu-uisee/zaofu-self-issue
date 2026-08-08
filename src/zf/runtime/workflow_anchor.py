@@ -17,6 +17,7 @@ from zf.core.task.store import TaskStore
 
 WORKFLOW_INVOKE_BOOTSTRAP_SOURCE = "workflow_invoke_bootstrap"
 WORKFLOW_MANAGED_EXECUTION_OWNER = "workflow"
+WORKFLOW_TASK_REQUEST_ROTATION_SOURCE = "workflow_request_terminal_rotation"
 
 
 def mark_workflow_fanout_anchor(
@@ -209,3 +210,16 @@ def is_workflow_dispatch_managed_task(task: Task) -> bool:
         is_workflow_fanout_anchor_task(task)
         or is_workflow_managed_task(task)
     )
+
+
+def legacy_pending_handoff_tasks(
+    runtime: Any,
+    events: Iterable[ZfEvent],
+) -> list[Task]:
+    """Exclude blocking v4 Tasks from the legacy handoff state machine."""
+
+    tasks = runtime.task_store.list_all()
+    from zf.runtime.task_pipeline_contexts import task_pipeline_generation_contexts
+
+    managed = set(task_pipeline_generation_contexts(events))
+    return [task for task in tasks if task.id not in managed]

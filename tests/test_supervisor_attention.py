@@ -272,6 +272,78 @@ def test_attention_lifecycle_resolves_after_matching_fanout_terminal() -> None:
     assert updated[0]["status"] == "resolved"
 
 
+def test_attention_lifecycle_resolves_after_causal_stage_retry_starts() -> None:
+    item = {
+        "fingerprint": "failure:semantic-flow:issue_triage_failed:run-1",
+        "attention_id": "attn-plan-retry",
+        "status": "open",
+        "source_event_ids": ["evt-triage-failed"],
+    }
+    events = [
+        ZfEvent(
+            id="evt-triage-failed",
+            type="issue.triage.failed",
+            correlation_id="run-1",
+            payload={"trace_id": "run-1", "reason": "invalid task map"},
+        ),
+        ZfEvent(
+            id="evt-issue-retry",
+            type="issue.requested",
+            causation_id="evt-triage-failed",
+            correlation_id="run-1",
+            payload={"trace_id": "run-1", "rework_attempt": 1},
+        ),
+        ZfEvent(
+            id="evt-retry-started",
+            type="fanout.started",
+            causation_id="evt-issue-retry",
+            correlation_id="run-1",
+            payload={"trace_id": "run-1", "stage_id": "issue-triage"},
+        ),
+    ]
+
+    updated = apply_attention_lifecycle(
+        [item],
+        events,
+        now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+    )
+
+    assert updated[0]["status"] == "resolved"
+    assert updated[0]["quiesced_by"] == "later_progress"
+
+
+def test_attention_lifecycle_keeps_failure_open_before_retry_starts() -> None:
+    item = {
+        "fingerprint": "failure:semantic-flow:issue_triage_failed:run-1",
+        "attention_id": "attn-plan-retry-pending",
+        "status": "open",
+        "source_event_ids": ["evt-triage-failed"],
+    }
+    events = [
+        ZfEvent(
+            id="evt-triage-failed",
+            type="issue.triage.failed",
+            correlation_id="run-1",
+            payload={"trace_id": "run-1", "reason": "invalid task map"},
+        ),
+        ZfEvent(
+            id="evt-issue-retry",
+            type="issue.requested",
+            causation_id="evt-triage-failed",
+            correlation_id="run-1",
+            payload={"trace_id": "run-1", "rework_attempt": 1},
+        ),
+    ]
+
+    updated = apply_attention_lifecycle(
+        [item],
+        events,
+        now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+    )
+
+    assert updated[0]["status"] == "open"
+
+
 def test_attention_lifecycle_resolves_stuck_after_matching_worker_activity() -> None:
     item = {
         "fingerprint": "failure:worker_stuck:dev-lane-0",

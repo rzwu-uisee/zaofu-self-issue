@@ -759,6 +759,28 @@
   gap: 12px;
 }
 
+.task-pipeline-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.task-pipeline-strip span {
+  max-width: 100%;
+}
+
+.task-pipeline-grid {
+  grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.7fr);
+}
+
+.task-pipeline-resource-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.task-pipeline-residuals {
+  border-left: 3px solid var(--warn);
+}
+
 .integration-queue-strip span {
   max-width: 100%;
 }
@@ -812,6 +834,7 @@
 
 @media (max-width: 720px) {
   .integration-queue-grid,
+  .task-pipeline-grid,
   .integration-queue-review-row,
   .repair-action-attention-row {
     grid-template-columns: minmax(0, 1fr);

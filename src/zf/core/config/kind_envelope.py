@@ -77,6 +77,7 @@ def _norm_template(value: Any) -> Any:
             "backendByStage": "backend_by_stage",
             "allowedTools": "allowed_tools",
             "budgetUsd": "budget_usd",
+            "contextWindowTokens": "context_window_tokens",
             "contextWarningThreshold": "context_warning_threshold",
             "contextCompactThreshold": "context_compact_threshold",
             "contextHardCap": "context_hard_cap",

@@ -27,6 +27,7 @@ class LaneRoleTemplateError(ValueError):
 # 手写同名 role 允许覆盖的非拓扑字段(doc 90 §3.1 白名单)。
 OVERRIDABLE_ROLE_FIELDS = (
     "backend", "model", "model_reasoning_effort", "backends",
+    "transport",
     "skills", "allowed_tools", "plugins",
     "permission_mode", "budget_usd",
     "provider_session", "lifecycle",
@@ -43,12 +44,15 @@ LOCKED_TOPOLOGY_FIELDS = ("role_kind", "flow_kind", "triggers", "publishes")
 
 _KNOWN_TEMPLATE_KEYS = frozenset({
     "backend", "model", "model_reasoning_effort", "permission_mode",
+    "transport",
+    "context_window_tokens",
     "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds", "budget_usd",
     "skills_by_stage", "allowed_tools", "plugins",
     "role_kind_by_stage", "backend_by_stage",
     "provider_session", "provider_session_by_stage",
     "lifecycle", "lifecycle_by_stage",
+    "execution",
     # 真实 hermes 文件暴露的两个声明位(topology 仍归生成层,声明式扩展,
     # 不开手写 role 覆盖口):
     "publishes_extra_by_stage",  # e.g. impl 额外发 dev.blocked
@@ -59,8 +63,10 @@ _KNOWN_TEMPLATE_KEYS = frozenset({
 @dataclass(frozen=True)
 class LaneRoleTemplateSpec:
     backend: str = "claude-code"
+    transport: str = "tmux"
     model: str = ""
     model_reasoning_effort: str = ""
+    context_window_tokens: int = 200_000
     permission_mode: str = "bypass"
     stuck_threshold_seconds: float = 300.0
     spawn_ready_timeout_seconds: float = 0.0
@@ -74,6 +80,7 @@ class LaneRoleTemplateSpec:
     provider_session_by_stage: dict[str, Any] = field(default_factory=dict)
     lifecycle: Any | None = None
     lifecycle_by_stage: dict[str, Any] = field(default_factory=dict)
+    execution: Any | None = None
     publishes_extra_by_stage: dict[str, tuple[str, ...]] = field(
         default_factory=dict,
     )
@@ -120,11 +127,20 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
         raise LaneRoleTemplateError(
             f"{context}.lane_role_template.lifecycle_by_stage must be a mapping"
         )
+    transport = str(raw.get("transport") or "tmux")
+    if transport not in {"tmux", "stream-json"}:
+        raise LaneRoleTemplateError(
+            f"{context}.lane_role_template.transport must be tmux or stream-json"
+        )
     return LaneRoleTemplateSpec(
         backend=str(raw.get("backend") or "claude-code"),
+        transport=transport,
         model=str(raw.get("model") or ""),
         model_reasoning_effort=str(
             raw.get("model_reasoning_effort") or ""
+        ),
+        context_window_tokens=int(
+            raw.get("context_window_tokens") or 200_000
         ),
         permission_mode=str(raw.get("permission_mode") or "bypass"),
         stuck_threshold_seconds=float(raw.get("stuck_threshold_seconds") or 300.0),
@@ -173,6 +189,10 @@ def parse_lane_role_template(raw: Any, *, context: str) -> LaneRoleTemplateSpec 
             )
             for stage, value in lifecycles_raw.items()
         },
+        execution=_parse_execution(
+            raw.get("execution"),
+            context=f"{context}.lane_role_template.execution",
+        ),
         publishes_extra_by_stage={
             str(stage): tuple(str(e) for e in events or [])
             for stage, events in (raw.get("publishes_extra_by_stage") or {}).items()
@@ -250,8 +270,10 @@ def generate_lane_roles(
                     stage.stage_id,
                     template.backend,
                 ),
+                "transport": template.transport,
                 "model": template.model,
                 "model_reasoning_effort": template.model_reasoning_effort,
+                "context_window_tokens": template.context_window_tokens,
                 "role_kind": role_kind,
                 "flow_kind": str(getattr(spec, "flow_kind", "") or ""),
                 "permission_mode": template.permission_mode,
@@ -278,6 +300,8 @@ def generate_lane_roles(
                 role_kwargs["provider_session"] = provider_session
             if lifecycle is not None:
                 role_kwargs["lifecycle"] = lifecycle
+            if template.execution is not None:
+                role_kwargs["execution"] = template.execution
             base = RoleConfig(
                 **role_kwargs,
             )
@@ -340,6 +364,8 @@ def _is_explicit(value: Any, field_name: str) -> bool:
         return False
     if field_name == "context_window_tokens" and value == 200_000:
         return False
+    if field_name == "transport" and value == "tmux":
+        return False
     if field_name == "max_rework_attempts" and value == 3:
         return False
     if field_name == "orphan_warning_seconds" and value == 900.0:
@@ -352,6 +378,10 @@ def _is_explicit(value: Any, field_name: str) -> bool:
         from zf.core.config.schema import RoleLifecycleConfig
 
         return value != RoleLifecycleConfig()
+    if field_name == "execution":
+        from zf.core.config.schema import ExecutionConfig
+
+        return value != ExecutionConfig()
     return True
 
 
@@ -424,6 +454,31 @@ def _parse_lifecycle(raw: Any, *, context: str) -> Any | None:
         )
     except (TypeError, ValueError) as exc:
         raise LaneRoleTemplateError(f"{context}: {exc}") from exc
+
+
+def _parse_execution(raw: Any, *, context: str) -> Any | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise LaneRoleTemplateError(f"{context} must be a mapping")
+    allowed = {"command", "default_profile", "profile_allowlist"}
+    unknown = sorted(str(key) for key in raw if str(key) not in allowed)
+    if unknown:
+        raise LaneRoleTemplateError(f"{context}: unknown key(s) {unknown}")
+    allowlist = raw.get("profile_allowlist", ["direct-v1"])
+    if not isinstance(allowlist, list) or not all(
+        isinstance(item, str) and item.strip() for item in allowlist
+    ):
+        raise LaneRoleTemplateError(
+            f"{context}.profile_allowlist must be a list of non-empty strings"
+        )
+    from zf.core.config.schema import ExecutionConfig
+
+    return ExecutionConfig(
+        command=str(raw.get("command") or ""),
+        default_profile=str(raw.get("default_profile") or "direct-v1"),
+        profile_allowlist=[item.strip() for item in allowlist],
+    )
 
 
 def _strict_bool(value: Any, *, context: str) -> bool:

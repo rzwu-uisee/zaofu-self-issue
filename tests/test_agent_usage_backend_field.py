@@ -65,6 +65,60 @@ def test_synthesized_agent_usage_has_backend_field(tmp_path: Path):
     assert usage_evts[0].payload.get("backend") == "codex"
 
 
+def test_synthesized_orchestrator_usage_binds_running_operation(
+    tmp_path: Path,
+) -> None:
+    from zf.core.config.schema import RoleConfig
+    from zf.core.events.log import EventLog
+    from zf.runtime.orchestrator_lifecycle import LifecycleManagerMixin
+
+    class _Host(LifecycleManagerMixin):
+        def __init__(self, log: EventLog, state_dir: Path):
+            self.event_log = log
+            self.state_dir = state_dir
+            self._synth_usage_seen: set = set()
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    shared = {
+        "workflow_run_id": "run-oa",
+        "operation_id": "wop-oa-plan",
+        "operation_type": "orchestrator_agent_semantic",
+        "role_instance": "orchestrator",
+        "active_attempt_id": "oa-attempt",
+        "lease_id": "oa-attempt",
+        "dispatch_id": "oa-dispatch",
+    }
+    log.append(ZfEvent(type="workflow.operation.requested", payload=shared))
+    log.append(ZfEvent(type="workflow.operation.started", payload=shared))
+    host = _Host(log, state_dir)
+    usage = SimpleNamespace(
+        timestamp=1234,
+        raw={"input_tokens": 100, "output_tokens": 50},
+        effective_input_tokens=100,
+        output_tokens=50,
+        ratio=0.1,
+        model_context_window=200000,
+        model="gpt-5.5-codex",
+    )
+
+    host._synthesize_agent_usage(  # type: ignore[attr-defined]
+        RoleConfig(
+            name="orchestrator",
+            backend="codex",
+            instance_id="orchestrator",
+        ),
+        usage,
+    )
+
+    event = next(item for item in log.read_all() if item.type == "agent.usage")
+    assert event.payload["operation_id"] == "wop-oa-plan"
+    assert event.payload["attempt_id"] == "oa-attempt"
+    assert event.payload["dispatch_id"] == "oa-dispatch"
+    assert event.correlation_id == "run-oa"
+
+
 def test_synthesized_agent_usage_has_active_task_id(tmp_path: Path):
     from zf.core.config.schema import RoleConfig
     from zf.core.events.log import EventLog

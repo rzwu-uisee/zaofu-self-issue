@@ -3,7 +3,7 @@ name: zf-yoke-critic-role-context
 description: "Use for ZaoFu critic or judge roles that need yoke-style adversarial review and anti-rationalization discipline."
 stages: [critic, review, judge]
 tags: [yoke, role-context, critic]
-dependencies: [grill]
+dependencies: [grill, zf-browser-e2e-contract]
 auto_inject: true
 load_on_demand: false
 ---
@@ -60,21 +60,61 @@ AC 或风险。
 5. 每个 mandatory AC 的行为与 evidence 是否有明确 producer，producer 的
    `allowed_paths` 是否覆盖生成 evidence 所需的实现、runner 配置、spec、
    fixture 和输出登记路径；
+   不要把 command registry 的定义 owner、writer 路径 owner 和 verification
+   owner/tier 混为一谈。Authority 可以让同一 AC 同时引用 `task_verify` 与
+   `candidate_verify` command；只要至少一个 command 与该 AC 的 owner/tier
+   同层且 task 有独立 rolling smoke，后层 candidate command 不得被解释为
+   前层阻塞，也不得要求 Planner 删除 authority 明确给出的 command id。
+   `candidate_verify` command 只会在全部 Task Verify 完成、candidate freeze 之后
+   聚合执行；command 定义所在 Task 的 wave 不是该 command 的执行时点，不得因
+   定义 Task 早于某个 producer Task 就判定 command 会提前执行。定义该 command
+   id 的 Task 不必同时拥有所有下游 spec/evidence 路径；应检查每个 repo-relative
+   路径在整个 DAG 中是否恰有一个 writer owner、该 owner 是否在 candidate verify
+   前完成，
+   以及 writable scope 是否无重叠。host/container/tmp 只读操作数属于 Task
+   顶层 `verification_read_paths` 和 canonical command 边界，不属于 writer
+   `allowed_paths`。只有路径无 owner、owner 重叠或依赖顺序不可满足时才 Reject；
 6. Final assembly 是否只聚合已生成的 evidence refs；如果它必须修改上游
    Playwright/测试/仿真配置才能满足 AC，则当前 task map 不可满足，必须 Reject；
 7. `e2e` / `real_e2e` command 是否真的调用合同指定的 application/browser/
    provider/simulation；分析模型、fixture replay 或 mock 不得冒充真实执行；
-8. task 是否纵向可交付、依赖真实、owned paths 不冲突且规模适合单 Agent；
-9. 验证策略是否覆盖高风险面，而不是仅证明进程返回 0；
-10. 风险方法至少考虑无效输入、失败原子性、空值/边界、并发/互斥、
+8. 区分 Plan readiness 与 execution evidence：implementation 前尚未生成的
+   screenshot/trace/receipt 是计划内未来产物，不得据此 Reject。若 producer task
+   已拥有 runner/config/test/evidence paths，且声明的 sanctioned runner 可用，计划
+   可以进入实施；browser 场景按 `zf-browser-e2e-contract` 核对 Docker Playwright。
+   只有 runner 本身不可用或被禁止且无等价方法时才判 environment blocker；
+9. task 是否纵向可交付、依赖真实、owned paths 不冲突且规模适合单 Agent；
+10. 验证策略是否覆盖高风险面，而不是仅证明进程返回 0；
+11. 风险方法至少考虑无效输入、失败原子性、空值/边界、并发/互斥、
    determinism/replay、reset/recovery 和证据真实性；项目 Skill 可扩展该清单。
-11. `required_plan_ports` 是否覆盖下游真实读取的计划级输入，所有 ref 是否显式；
-    Critic 只审核 descriptor/语义，不选择 current Package，也不写 Package lifecycle。
+12. `required_plan_ports` 在语义上是否覆盖下游真实读取的计划级输入。Planner
+    result 只有通过 Kernel 的 pre-submit validator 才会进入 Critic；schema、
+    required-port presence 和 producer identity 的机械闭包属于已准入事实，Critic
+    不重复推导。`goal_claim_set`、`planning_result` 是 Kernel-derived，
+    `task_map_ref` 已提供 `task_map`，Issue Flow 会把 `requirement_spec` 适配为
+    `issue_spec`；不得要求 Planner 在 `plan_ports` 重复提交这些端口。Critic 只审核
+    project-produced descriptor 的语义、来源和下游可用性，不选择 current Package，
+    也不写 Package lifecycle。
+
+先读取 required reads 中的 exact requirement/PRD authority artifact，再审 child
+plan。若 authority 明确规定 task ids、任务边界、依赖或 AC 归属，Critic 必须逐项
+比对；scan summary、derived matrix 或 Planner 自述“已覆盖”不能替代原始决策。
+缺少 exact authority read 时不得对 owner 意图轴做无证据 approve。
 
 Approve 时返回当前 plan/task-map refs、revision、摘要和 residual risks。Reject 时
 返回非空 `fix_items[]`，每项包含 `task_id` 或 `acceptance_id`、`observed_gap`、
 `required_change`、`done_when` 和 evidence refs。不要修改 task map；同一 Planner
 根据这些项修订。
+
+结构化 `findings[].severity` 只能使用 `info|low|medium|high|critical`。Residual
+risk 使用 `info` 或 `low` 并在 message 中说明；不得把 `residual-risk` 当成枚举值。
+
+如果阻断项不能由 Planner 自主修正，而是必须由 owner 选择范围、基线、兼容策略或
+产品取舍，则 Reject 结果还必须返回顶层 `owner_decision_items[]`，不能只把问题写进
+`summary` / `fix_items`。每项使用稳定 `decision_id`、单一 `question`、显式
+`options[]` (`option_id`、`label`，可附 consequences)、`blocking: true` 和
+`evidence_refs`。同一未回答决策不得伪装成新的普通 rework；owner 回答后的确认 ref
+必须作为下一版 Plan 的输入证据。
 
 ## 触发②:critic.gate.requested 升级分诊(区别于 design_critique 正常门)
 

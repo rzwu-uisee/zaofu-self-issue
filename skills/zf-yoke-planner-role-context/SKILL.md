@@ -3,7 +3,7 @@ name: zf-yoke-planner-role-context
 description: "Use for ZaoFu planner / task-map-synth / triage roles that split PRDs, issues, or refactor objectives into a task_map."
 stages: [plan, scan, triage, replan]
 tags: [yoke, role-context, planning]
-dependencies: [vertical-slicing, grill, zf-plan-task-map-contract, zf-gap-task-synth]
+dependencies: [vertical-slicing, grill, zf-plan-task-map-contract, zf-gap-task-synth, zf-project-adapter-matrix-enrichment]
 auto_inject: true
 load_on_demand: false
 ---
@@ -25,6 +25,8 @@ to the in-repo `yoke/` methodology family — do not restate it here:
   保留 owner 原意图。
 - `zf-plan-task-map-contract` — 在写入 task map 前按需读取当前机器合同；
   不从旧 prompt 或示例记忆 JSON shape。
+- `zf-project-adapter-matrix-enrichment` — 当 briefing 提供 portable matrix
+  drafts 时，在最终提交前完成跨矩阵 id 闭包检查。
 - `zf-gap-task-synth` — 仅在增量 replan 时读取；初始 plan 不需要激活。
 
 Schema/contract detail (task_map JSON shape, `shared_conventions`,
@@ -60,6 +62,13 @@ authoritative when it differs from an older Skill example.
 - Owner-given references (samples, competitors, screenshots) either become
   acceptance entries or get an explicit decision item for why not
   (method: `yoke/grill`); silent narrowing is a contract violation.
+- A blocking choice that only the owner can make is not an ordinary rework
+  item. Preserve it as `owner_decision_items[]` in the semantic Plan result.
+  Each item has a stable `decision_id`, one concrete `question`, explicit
+  `options[]` (`option_id` + `label`), `blocking: true`, and `evidence_refs`.
+  Do not guess the answer, hide it in prose, or repeatedly resubmit the same
+  unresolved Plan. The runtime will bind the controlled owner response into a
+  later Plan revision.
 - Emit the task map through the briefing's completion command after writing it
   to the exact **workdir-relative** output path named by the briefing. Never
   write the configured state dir or root project directly; the Kernel
@@ -68,6 +77,15 @@ authoritative when it differs from an older Skill example.
   map is accepted.
 - Load `zf-plan-task-map-contract` before emitting the map. On incremental
   replan, also load `zf-gap-task-synth` and preserve unaffected completed tasks.
+- When Controlled Artifact Inputs include portable matrix drafts, load
+  `zf-project-adapter-matrix-enrichment` before emitting and run its Mechanical
+  Closure Check against the final serialized `plan_ports`, not an earlier draft.
+- **计划态不冒充执行态**:mandatory AC 的截图、trace、receipt 或其他运行证据在
+  implementation 前尚不存在，不是 plan blocker。Planner 要证明的是 producer、
+  allowed paths、真实命令和 runner 方法可满足；其中 browser/E2E 场景按依赖技能
+  `zf-browser-e2e-contract` 声明 Docker Playwright。只有 runner 本身不可用/被禁止且
+  无 sanctioned equivalent 时才标 environment blocked，不得把“未来证据未生成”
+  循环回 plan rework。
 - Do not implement, do not verify, do not pre-approve your own plan.
 
 ## 与 kernel 合约的配对
@@ -77,4 +95,4 @@ authoritative when it differs from an older Skill example.
 | task_map JSON(含 `shared_conventions`) | writer-fanout admission(schema/test_path_prefix 机械校验) | 不合合同直接拒收,bad task_map 走上游返工路由 |
 | 每 task `validation.commands[]` + AC mapping | contract snapshot + Impl/Verify/Candidate | identity 丢失会导致证据不可复用；语义充分性由 Critic/Verify 判断 |
 | `blocked_by` 依赖 | task_map 波次排队/lane 并行 | 假并行 → 约定竞态,candidate 集成才炸 |
-| decision items(收窄) | plan approval digest(操作员审批面) | 静默收窄 = F16 复发,合并后才暴露落差 |
+| typed `owner_decision_items[]`(收窄) | durable owner checkpoint + controlled response ref | 静默收窄或 prose-only 决策项 = F16 复发；未回答前不得猜测 |

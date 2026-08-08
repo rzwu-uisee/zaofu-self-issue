@@ -220,6 +220,7 @@ def test_feishu_create_task_message_emits_normalized_proposal(tmp_path, monkeypa
     proposal = proposed[0].payload["proposal"]
     assert proposal["action"] == "create-task"
     assert proposal["valid"] is True
+    assert proposal["payload"]["execution_mode"] == "workflow"
     contract = proposal["payload"]["contract"]
     # 5fca581c normalization must apply on this surface too
     assert contract["verification"] == "打开页面 3 秒内可开始\n按 ↑ 车辆加速"
@@ -425,6 +426,12 @@ def test_kanban_member_invite_carries_proposal_reply_contract(tmp_path, monkeypa
     assert "subject_type=task_create with two or three options" in member["reply_contract"]
     assert "Do not nest contract or channel_authority" in member["reply_contract"]
     assert "effect.mode=continue, not defer" in member["reply_contract"]
+    assert "do not add payload.workflow_plan or plan_request.payload" in (
+        member["reply_contract"]
+    )
+    assert "parameters may contain only executable adapter keys" in (
+        member["reply_contract"]
+    )
     prompt = _build_channel_system_prompt(member)
     assert KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT in prompt
 

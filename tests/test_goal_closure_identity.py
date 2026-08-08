@@ -261,13 +261,24 @@ def test_goal_closure_dispatch_snapshots_bind_identity(tmp_path) -> None:  # noq
         "plan_artifact_package_digest": "d" * 64,
         "target_commit": "c" * 40,
         "closure_identity": "closure-1",
-        "contract_snapshot_ref": contract["ref"],
-        "contract_snapshot_digest": contract["sha256"],
+        "goal_closure_contract_snapshot_ref": contract["ref"],
+        "goal_closure_contract_snapshot_digest": contract["sha256"],
         "target_snapshot_ref": target["ref"],
         "target_snapshot_digest": target["sha256"],
     }
 
     validate_goal_closure_dispatch_snapshots(tmp_path, payload)
+
+    legacy_payload = {
+        key: value
+        for key, value in payload.items()
+        if not key.startswith("goal_closure_contract_snapshot_")
+    }
+    legacy_payload.update({
+        "contract_snapshot_ref": contract["ref"],
+        "contract_snapshot_digest": contract["sha256"],
+    })
+    validate_goal_closure_dispatch_snapshots(tmp_path, legacy_payload)
 
     with pytest.raises(GoalClosureIdentityError, match="target_commit mismatch"):
         validate_goal_closure_dispatch_snapshots(

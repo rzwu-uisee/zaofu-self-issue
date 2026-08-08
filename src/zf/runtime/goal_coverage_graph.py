@@ -214,7 +214,12 @@ def build_goal_coverage_graph(
                 "kind": "covers",
             })
         closure_row = closure_rows.get(claim_id, {})
-        supporting_refs = _strings(closure_row.get("supporting_result_refs"))
+        supporting_refs = _claim_supporting_result_refs(
+            closure_row=closure_row,
+            covering_task_ids=covering,
+            verification_by_task=verification_by_task,
+            artifact_delivery=bool(current_closure.get("_artifact_delivery")),
+        )
         gap_refs = _claim_gap_refs(closure_row, current_closure)
         node = {
             "node_id": f"claim:{claim_id}",
@@ -836,6 +841,27 @@ def _claim_gap_refs(
     if str(closure_row.get("status") or "") in {"open", "blocked"}:
         return _strings(closure_result.get("open_gap_refs"))
     return []
+
+
+def _claim_supporting_result_refs(
+    *,
+    closure_row: Mapping[str, Any],
+    covering_task_ids: Sequence[str],
+    verification_by_task: Mapping[str, Mapping[str, Any]],
+    artifact_delivery: bool,
+) -> list[str]:
+    declared = _strings(closure_row.get("supporting_result_refs"))
+    if artifact_delivery or not covering_task_ids:
+        return declared
+    task_refs = list(dict.fromkeys(
+        str(verification_by_task.get(task_id, {}).get("result_ref") or "")
+        for task_id in covering_task_ids
+        if str(verification_by_task.get(task_id, {}).get("result_ref") or "")
+    ))
+    if not task_refs:
+        return declared
+    declared_subset = [ref for ref in declared if ref in set(task_refs)]
+    return declared_subset or task_refs
 
 
 def _result_ref(

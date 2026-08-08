@@ -52,6 +52,7 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
             "readiness_digest": "sha256:readiness",
             "readiness_verdict": "ready",
             "implementation_start": True,
+            "prd_revision": 1,
             "source_refs": ["event:requirement"],
         },
     )
@@ -92,6 +93,9 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
         "channel_id": "ch-prd",
         "channel_name": "PRD review",
         "thread_id": "main",
+        "channel_member_id": "product_pm",
+        "leader_revision": 2,
+        "prd_revision": 3,
         "artifact_ref": "channel-artifacts/ch-prd/prd.md",
         "artifact_digest": "canonical",
         "source_ref": "channel:ch-prd/main",
@@ -101,6 +105,9 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
         "readiness_digest": "sha256:readiness",
         "readiness_verdict": "ready",
         "implementation_start": True,
+        "declared_implementation_start": True,
+        "risk_accepted": False,
+        "confirmed_by": "",
         "source_refs": [
             "event:requirement",
             "channel:ch-prd/main",
@@ -137,6 +144,79 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
     assert matched["workflow_parameters"] == authority
     assert mismatched["selection_status"] == "unavailable"
     assert mismatched["workflow_parameters"] == {}
+
+
+def test_context_exposes_exact_owner_accepted_readiness_risk(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    artifact_ref = "channels/ch-risk/prd/r3.json"
+    artifact_digest = "canonical-r3"
+    readiness_ref = "channels/ch-risk/prd/r3-readiness.json"
+    readiness_digest = "readiness-r3"
+    writer.emit(
+        "channel.created",
+        actor="web",
+        payload={"channel_id": "ch-risk", "name": "Risk review"},
+    )
+    common = {
+        "channel_id": "ch-risk",
+        "thread_id": "main",
+        "artifact_ref": artifact_ref,
+        "artifact_digest": artifact_digest,
+        "prd_ref": artifact_ref,
+        "prd_digest": artifact_digest,
+        "prd_revision": 3,
+        "readiness_ref": readiness_ref,
+        "readiness_digest": readiness_digest,
+        "readiness_verdict": "needs_multi_lens",
+        "implementation_start": False,
+    }
+    writer.emit(
+        "channel.synthesis.proposed",
+        actor="synthesizer",
+        correlation_id="ch-risk",
+        payload={**common, "source_refs": ["event:requirement"]},
+    )
+    writer.emit(
+        "channel.consensus.proposed",
+        actor="synthesizer",
+        correlation_id="ch-risk",
+        payload=common,
+    )
+    writer.emit(
+        "channel.consensus.signed",
+        actor="owner:web",
+        correlation_id="ch-risk",
+        payload={
+            **common,
+            "member_id": "owner:web",
+            "risk_accepted": True,
+        },
+    )
+    writer.emit(
+        "channel.consensus.reached",
+        actor="kernel",
+        correlation_id="ch-risk",
+        payload={
+            **common,
+            "confirmed_by": "owner:web",
+            "risk_accepted": True,
+        },
+    )
+
+    context = canonical_channel_prd_context(state_dir)
+
+    assert len(context["items"]) == 1
+    item = context["items"][0]
+    assert item["artifact_ref"] == artifact_ref
+    assert item["prd_revision"] == 3
+    assert item["readiness_verdict"] == "needs_multi_lens"
+    assert item["declared_implementation_start"] is False
+    assert item["implementation_start"] is True
+    assert item["risk_accepted"] is True
+    assert item["confirmed_by"] == "owner:web"
 
 
 def test_workflow_context_from_payload_is_a_defensive_mapping_copy() -> None:

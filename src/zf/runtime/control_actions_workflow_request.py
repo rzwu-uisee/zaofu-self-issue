@@ -15,18 +15,22 @@ from zf.runtime.workflow_delivery import (
 )
 from zf.runtime.workflow_intake import build_flow_intake
 from zf.runtime.workflow_anchor import (
-    bind_workflow_request_to_task,
     is_workflow_managed_task,
     mark_workflow_managed_task,
-    workflow_task_request_binding,
 )
-from zf.runtime.workflow_start import WorkflowStartService
+from zf.runtime.workflow_request_acceptance import inherit_task_acceptance
 from zf.runtime.workflow_origin import (
     WorkflowOriginError,
     assert_same_workflow_origin,
     build_workflow_origin_binding,
-    workflow_origin_digest,
     workflow_origin_from_request,
+)
+from zf.runtime.workflow_start import WorkflowStartService
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_task_request_rotation import (
+    WorkflowTaskRequestRotationError,
+    apply_task_request_binding,
+    fresh_task_request_origin_binding,
 )
 
 
@@ -112,6 +116,7 @@ class WorkflowRequestActionsMixin:
         )
         task_store = TaskStore(self.state_dir / "kanban.json")
         workflow_task = task_store.get(task_id)
+        parameters = inherit_task_acceptance(parameters, workflow_task)
         if (
             workflow_task is not None
             and not is_workflow_managed_task(workflow_task)
@@ -127,6 +132,9 @@ class WorkflowRequestActionsMixin:
                 payload={
                     "source": "workflow_start",
                     "contract": asdict(workflow_task.contract),
+                    "contract_digest": task_workflow_binding_digest(
+                        workflow_task
+                    ),
                     "execution_owner": "workflow",
                 },
             )
@@ -143,11 +151,18 @@ class WorkflowRequestActionsMixin:
         for key in (
             "artifact_refs",
             "channel_id",
+            "conversation_id",
+            "fresh_request",
             "origin_binding",
+            "prior_request_id",
+            "prior_request_revision",
+            "prior_terminal_event_id",
+            "project_id",
             "request_id",
             "request_revision",
             "source_refs",
             "thread_id",
+            "thread_key",
         ):
             value = normalized.get(key)
             if value not in (None, "", [], {}):
@@ -169,6 +184,7 @@ class WorkflowRequestActionsMixin:
             )
         elif adapter in {
             "delivery_request_submit",
+            "light_delivery_request_submit",
             "registered_general",
         }:
             request_result = self._workflow_request(
@@ -333,6 +349,25 @@ class WorkflowRequestActionsMixin:
                     status_code=409,
                     status="origin_binding_mismatch",
                 )
+        elif bool(payload.get("fresh_request")):
+            task_id = _required_text(payload, "task_id")
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+            try:
+                origin_binding = fresh_task_request_origin_binding(
+                    self.state_dir,
+                    task,
+                    payload,
+                )
+            except WorkflowTaskRequestRotationError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="workflow_task_stale",
+                )
         else:
             origin_binding = build_workflow_origin_binding(
                 source=self.source,
@@ -422,7 +457,48 @@ class WorkflowRequestActionsMixin:
             )
 
         request_projection = load_workflow_request(self.state_dir, request_id)
-        if not bool(request_projection.get("confirmed")):
+        if existing_projection:
+            request_projection = revise_workflow_request(
+                self.state_dir,
+                Path(str(intake["workflow_input_manifest_ref"])),
+                actor=self.actor,
+                objective=(
+                    _required_text(payload, "objective") or None
+                ),
+                source_root=(
+                    _required_text(payload, "source_root") or None
+                ),
+                target_root=(
+                    _required_text(payload, "target_root")
+                    or _required_text(payload, "target")
+                    or None
+                ),
+                acceptance=(
+                    _string_list(payload.get("acceptance"))
+                    if "acceptance" in payload
+                    else None
+                ),
+                constraints=(
+                    _string_list(payload.get("constraints"))
+                    if "constraints" in payload
+                    else None
+                ),
+                open_questions=(
+                    _string_list(payload.get("open_questions"))
+                    if "open_questions" in payload
+                    else None
+                ),
+                confirm=True,
+                revision_reason=(
+                    "clarification"
+                    if str(existing_projection.get("status") or "")
+                    == "clarifying"
+                    else "requirement_update"
+                ),
+                source_event_id=requested.id,
+                writer=self.writer,
+            )
+        elif not bool(request_projection.get("confirmed")):
             request_projection = revise_workflow_request(
                 self.state_dir,
                 Path(str(intake["workflow_input_manifest_ref"])),
@@ -650,61 +726,25 @@ class WorkflowRequestActionsMixin:
             task_store = TaskStore(self.state_dir / "kanban.json")
             workflow_task = task_store.get(task_id)
             if workflow_task is not None:
-                canonical_origin = workflow_origin_from_request(
-                    request_projection
-                )
-                request_revision = int(
-                    request_projection.get("revision") or 0
-                )
-                task_request = workflow_task_request_binding(workflow_task)
-                if task_request and (
-                    task_request["request_id"] != request_id
-                    or int(task_request["request_revision"])
-                    != request_revision
-                    or task_request.get("origin_binding_digest")
-                    != workflow_origin_digest(canonical_origin)
-                ):
+                try:
+                    apply_task_request_binding(
+                        self.state_dir,
+                        task_store=task_store,
+                        event_writer=self.writer,
+                        task=workflow_task,
+                        request_projection=request_projection,
+                        requested_event=requested,
+                        actor=self.actor,
+                    )
+                except WorkflowTaskRequestRotationError as exc:
                     return self._failed(
                         requested=requested,
                         action=action,
                         requested_action=requested_action,
                         task_id=task_id,
-                        reason=(
-                            "workflow Task is already bound to another "
-                            "Workflow Request revision"
-                        ),
+                        reason=str(exc),
                         status_code=409,
                         status="workflow_task_stale",
-                    )
-                if not task_request:
-                    bind_workflow_request_to_task(
-                        mark_workflow_managed_task(workflow_task),
-                        request_id=request_id,
-                        request_revision=request_revision,
-                        origin_binding_digest=workflow_origin_digest(
-                            canonical_origin
-                        ),
-                    )
-                    task_store.update(
-                        task_id,
-                        contract=workflow_task.contract,
-                    )
-                    self.writer.emit(
-                        "task.contract.update",
-                        actor=self.actor,
-                        task_id=task_id,
-                        causation_id=requested.id,
-                        correlation_id=requested.correlation_id,
-                        payload={
-                            "source": "workflow_submit",
-                            "contract": asdict(workflow_task.contract),
-                            "execution_owner": "workflow",
-                            "request_id": request_id,
-                            "request_revision": request_revision,
-                            "origin_binding_digest": (
-                                workflow_origin_digest(canonical_origin)
-                            ),
-                        },
                     )
         intake_path = Path(intake_ref).expanduser()
         if not intake_path.is_absolute():

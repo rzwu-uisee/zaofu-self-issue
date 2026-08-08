@@ -91,4 +91,96 @@ def candidate_task_source_commits(
     return commits
 
 
-__all__ = ["candidate_task_source_commits", "same_task_map_generation"]
+def candidate_task_integrated_commits(
+    events: Sequence[ZfEvent],
+    *,
+    workflow_run_id: str,
+    candidate_head_commit: str,
+) -> dict[str, set[str]]:
+    """Return every task commit applied to the selected candidate lineage.
+
+    A task ref can contain several serial repair commits.  The latest source
+    commit identifies the task ref, while ``candidate.task_ref.applied`` keeps
+    the complete commit stack that was actually integrated.  Independent
+    candidate verification may close feedback bound to any commit in that
+    stack, not only the final task-ref tip.
+    """
+
+    integrated = {
+        task_id: {commit}
+        for task_id, commit in candidate_task_source_commits(
+            events,
+            workflow_run_id=workflow_run_id,
+            candidate_head_commit=candidate_head_commit,
+        ).items()
+        if commit
+    }
+    aliases = run_aliases(events)
+    canonical_run_id = resolve_run_id(events, workflow_run_id)
+    candidate_base_by_head: dict[str, str] = {}
+    candidate_index_by_head: dict[str, int] = {}
+    for index, event in enumerate(events):
+        if event.type != "candidate.ready" or not isinstance(event.payload, dict):
+            continue
+        event_run = event_run_id(event, aliases=aliases)
+        if canonical_run_id and event_run != canonical_run_id:
+            continue
+        body = event.payload
+        head = str(body.get("candidate_head_commit") or "").strip()
+        if not head:
+            continue
+        candidate_base_by_head[head] = str(
+            body.get("candidate_base_commit") or ""
+        ).strip()
+        candidate_index_by_head[head] = index
+
+    lineage_head = candidate_head_commit
+    visited: set[str] = set()
+    while lineage_head and lineage_head not in visited:
+        visited.add(lineage_head)
+        candidate_index = candidate_index_by_head.get(lineage_head)
+        if candidate_index is None:
+            break
+        final_apply = next(
+            (
+                event
+                for event in reversed(events[: candidate_index + 1])
+                if event.type == "candidate.task_ref.applied"
+                and isinstance(event.payload, dict)
+                and str(event.payload.get("commit") or "").strip() == lineage_head
+            ),
+            None,
+        )
+        if final_apply is not None:
+            integration_event_id = str(final_apply.causation_id or "").strip()
+            for event in events[: candidate_index + 1]:
+                if event.type != "candidate.task_ref.applied":
+                    continue
+                if integration_event_id and event.causation_id != integration_event_id:
+                    continue
+                if not integration_event_id and event.id != final_apply.id:
+                    continue
+                body = event.payload if isinstance(event.payload, dict) else {}
+                task_id = str(event.task_id or body.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                commits = integrated.setdefault(task_id, set())
+                commits.update(
+                    str(value).strip()
+                    for key in ("source_commit", "task_commits", "applied_commits")
+                    for value in (
+                        body.get(key, [])
+                        if isinstance(body.get(key), list)
+                        else [body.get(key)]
+                    )
+                    if str(value or "").strip()
+                )
+        lineage_head = candidate_base_by_head.get(lineage_head, "")
+    return integrated
+
+
+__all__ = [
+    "candidate_task_integrated_commits",
+    "candidate_task_source_commits",
+    "same_task_map_generation",
+]

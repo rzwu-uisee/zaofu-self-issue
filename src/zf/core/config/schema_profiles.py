@@ -311,6 +311,10 @@ _DURABLE_CALL_RESULT_EVENTS: dict[str, dict[str, Any]] = {
     "workflow.operation.started": _req(
         "schema_version", "workflow_run_id", "operation_id", "request_hash",
     ),
+    "workflow.operation.retry_started": _req(
+        "schema_version", "workflow_run_id", "operation_id", "request_hash",
+        "retry_attempt", "recovery_class", "reason",
+    ),
     "workflow.operation.settled": _req(
         "schema_version", "workflow_run_id", "operation_id", "request_hash",
         "admitted_call_result_ref", "reason",

@@ -33,6 +33,32 @@ OLD_TASK_ID = "TASK-OLD"
 NEW_TASK_ID = "TASK-CORE"
 
 
+def _init_git_base(project_root: Path) -> str:
+    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
+    (project_root / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=project_root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=project_root,
+        check=True,
+    )
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        text=True,
+    ).strip()
+
+
 def _config(*, with_orchestrator: bool = True) -> ZfConfig:
     roles = [
         RoleConfig(name="dev", backend="mock", max_rework_attempts=3),
@@ -175,29 +201,7 @@ def _first_index(events: list[ZfEvent], event_type: str) -> int:
 
 
 def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=ZaoFu Test",
-            "-c",
-            "user.email=zf@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "base",
-        ],
-        cwd=tmp_path,
-        check=True,
-    )
-    base_commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        text=True,
-    ).strip()
+    base_commit = _init_git_base(tmp_path)
     state_dir, log, writer, store = _state(tmp_path)
     store.add(
         Task(

@@ -14,6 +14,7 @@ from typing import Any
 
 from zf.core.config.schema import (
     ConstraintsConfig,
+    ProviderSessionConfig,
     RoleConfig,
     RoleLifecycleConfig,
     ZfConfig,
@@ -66,6 +67,12 @@ def build_resident_run_manager_role(config: ZfConfig) -> RoleConfig | None:
         backend=run_manager.backend,
         model=resident.model,
         model_reasoning_effort=resident.model_reasoning_effort,
+        provider_session=(
+            ProviderSessionConfig(effort=resident.model_reasoning_effort)
+            if run_manager.backend == "claude-code"
+            and resident.model_reasoning_effort
+            else None
+        ),
         role_kind="reader",
         permission_mode="bypass",
         transport=resident.transport,
@@ -203,6 +210,8 @@ def build_resident_run_manager_briefing(
         "- 不自动 merge、不删除分支、不杀 tmux session、不重置 git。",
         "- 不替代 deterministic Run Manager tick、Supervisor、Autoresearch 或 Orchestrator。",
         "- 需要记录观察时,只通过 `zf emit` 写事件。",
+        "- 每轮只做有界 one-shot 读取;不要启动 `Monitor`、`tail -f`、后台 `&`",
+        "  或常驻 shell 循环。唤醒节奏由 Kernel tick 管理,provider 子进程不得越过角色生命周期。",
         "",
         "## Observe Loop",
         "",

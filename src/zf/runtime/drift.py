@@ -10,7 +10,9 @@ _OBSERVATION_EVENT_TYPES = {
     "agent.usage",
     "orchestrator.dispatch_skipped",
     "orchestrator.round.complete",
+    "role.lifecycle.suspend.rejected",
     "skills.materialized",
+    "task.attempt.heartbeat",
     "worker.context.warning",
     "worker.drift.detected",
     "worker.refresh.triggered",
@@ -120,6 +122,7 @@ class DriftDetector:
                         "in last 20 events"
                     ),
                     recommended_action="refresh",
+                    affected_role=actor,
                 )]
         return []
 

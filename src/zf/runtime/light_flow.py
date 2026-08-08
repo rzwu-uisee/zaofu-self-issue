@@ -306,7 +306,7 @@ def maybe_synthesize_light_task_map(
         actor="zf-cli",
         payload={
             **workflow_refs,
-            "task_map_ref": f".zf/artifacts/{pdd_id}/task_map.json",
+            "task_map_ref": f"artifacts/{pdd_id}/task_map.json",
             "pdd_id": pdd_id,
             "flow_kind": flow_kind,
             "source": "light_flow_kernel",

@@ -28,6 +28,7 @@ from zf.runtime.call_result_admission import (
     result_protocol_mode,
 )
 from zf.runtime.call_result_envelope import hydrate_call_result_envelope
+from zf.runtime.candidate_verification_authority import prepare_candidate_verification_authority
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_operation import (
     WorkflowOperationError,
@@ -44,7 +45,10 @@ class PreparedCallOperation:
     operation_id: str
     request_hash: str
     attempt_id: str
+    lease_id: str
     role_instance: str
+    task_id: str
+    parent_task_id: str
     output_profile_id: str
     output_profile_revision: str
     result_scratch_ref: str
@@ -70,6 +74,8 @@ def prepare_call_operation(
     attempt_id_override: str = "",
     causation_id: str = "",
     correlation_id: str = "",
+    workdir_write_scopes: list[str] | None = None,
+    scheduler_attempt_id: str = "",
 ) -> PreparedCallOperation:
     """Pin call identity and immutable inputs before provider dispatch."""
 
@@ -81,6 +87,14 @@ def prepare_call_operation(
         or payload.get("pdd_id")
         or f"legacy-{task_id or stage_id or 'run'}"
     )
+    from zf.runtime.workflow_lineage import bind_workflow_task_lineage
+
+    task_id, parent_task_id = bind_workflow_task_lineage(
+        runtime.event_log.read_all(),
+        workflow_run_id=workflow_run_id,
+        payload=payload,
+        task_id=task_id,
+    )
     # ZF-REVIEW-140-B3(2026-07-16 实弹):verify child 的 payload 派生自
     # 上游 impl manifest child,曾继承 impl 的 operation_id/attempt_id;
     # retrigger fanout 复用 task/child payload 同病。继承身份 + 本段新
@@ -91,6 +105,7 @@ def prepare_call_operation(
     # replay)。同 dispatch 重放输入相同 → 派生结果相同,replay 语义不变。
     attempt_id = str(
         attempt_id_override
+        or scheduler_attempt_id
         or dispatch_id
         or payload.get("attempt_id")
         or payload.get("run_id")
@@ -126,12 +141,25 @@ def prepare_call_operation(
         "result_protocol_mode": mode,
         "_context_delivery_enabled": context_delivery_enabled,
     })
+    feedback_revision = str(
+        payload.get("feedback_revision")
+        or payload.get("rework_feedback_digest")
+        or ""
+    ).strip()
+    if feedback_revision:
+        payload["feedback_revision"] = feedback_revision
     if context_delivery_enabled:
         payload["context_inheritance"] = context_inheritance
     from zf.runtime.attempt_domain import infer_attempt_domain
 
     payload["attempt_domain"] = infer_attempt_domain(
         payload,
+        operation_type=operation_type,
+        stage_id=stage_id,
+    )
+    _pin_plan_candidate_validation_context(
+        runtime,
+        payload=payload,
         operation_type=operation_type,
         stage_id=stage_id,
     )
@@ -162,7 +190,17 @@ def prepare_call_operation(
     )
     execution_profile_projection = resolved_execution_profile.projection()
     result_scratch_ref = (
-        Path("tmp") / "result-submit" / operation_id / (attempt_id or "attempt") / "result.json"
+        (
+            Path("tmp") / "result-submit" / operation_id / "result.json"
+        )
+        if str(payload.get("task_pipeline_stage") or "").strip()
+        else (
+            Path("tmp")
+            / "result-submit"
+            / operation_id
+            / (attempt_id or "attempt")
+            / "result.json"
+        )
     ).as_posix()
     payload.update({
         "output_profile_id": output_profile_id,
@@ -174,6 +212,11 @@ def prepare_call_operation(
         ),
         "result_scratch_ref": result_scratch_ref,
     })
+    if output_profile_id == "candidate-verify":
+        prepare_candidate_verification_authority(
+            runtime, payload=payload, workflow_run_id=workflow_run_id,
+            task_id=task_id, source_event_id=causation_id,
+        )
     payload["handoff_authority_contract"] = build_handoff_authority_contract(
         payload,
         output_profile_id=output_profile_id,
@@ -187,6 +230,59 @@ def prepare_call_operation(
         payload=payload,
     )
     payload["semantic_result_submit_mode"] = semantic_submit_mode
+
+    if output_profile_id == "artifact-delivery":
+        from zf.runtime.generic_workflow_outputs import (
+            resolve_declared_output_artifacts,
+        )
+
+        output_artifacts = resolve_declared_output_artifacts(
+            runtime.state_dir,
+            input_result_refs=[
+                str(item) for item in payload.get("input_result_refs") or []
+                if str(item).strip()
+            ],
+            required_artifacts=[
+                dict(item)
+                for item in payload.get("required_delivery_artifacts") or []
+                if isinstance(item, Mapping)
+            ],
+        )
+        if output_artifacts:
+            payload["artifact_refs"] = [
+                *list(payload.get("artifact_refs") or []),
+                *output_artifacts,
+            ]
+        controlled_inputs = list(payload.get("input_refs") or [])
+        for index, ref in enumerate(payload.get("input_result_refs") or []):
+            normalized_ref = str(ref or "").strip()
+            if normalized_ref:
+                controlled_inputs.append({
+                    "source_id": f"admitted-input-result-{index + 1}",
+                    "kind": "call_result_envelope",
+                    "ref": normalized_ref,
+                    "sha256": Path(normalized_ref).stem,
+                })
+        claim_ref = str(payload.get("goal_claim_set_ref") or "").strip()
+        claim_digest = str(
+            payload.get("goal_claim_set_digest") or ""
+        ).strip()
+        if claim_ref and claim_digest:
+            controlled_inputs.append({
+                "source_id": "goal-claim-set",
+                "kind": "goal_claim_set",
+                "ref": claim_ref,
+                "sha256": claim_digest,
+            })
+        run_contract_ref = str(payload.get("run_contract_ref") or "").strip()
+        if run_contract_ref:
+            controlled_inputs.append({
+                "source_id": "run-contract",
+                "kind": "run_contract_snapshot",
+                "ref": run_contract_ref,
+            })
+        if controlled_inputs:
+            payload["input_refs"] = controlled_inputs
 
     source_manifest, source_descriptor = CanonicalHandoffResolver(
         state_dir=runtime.state_dir,
@@ -248,6 +344,7 @@ def prepare_call_operation(
             payload["handoff_authority_contract"]
         ),
         "task_id": task_id,
+        "parent_task_id": parent_task_id,
         "fanout_id": str(payload.get("fanout_id") or ""),
         "child_id": str(payload.get("child_id") or ""),
         "target_ref": str(payload.get("target_ref") or ""),
@@ -278,14 +375,29 @@ def prepare_call_operation(
         "output_profile_revision": output_profile_revision,
         "semantic_result_submit_mode": semantic_submit_mode,
         "execution_profile": execution_profile_projection,
+        "operation_limits": (
+            dict(payload["operation_limits"])
+            if isinstance(payload.get("operation_limits"), Mapping)
+            else {}
+        ),
         "canonical_success_event": str(payload.get("canonical_success_event") or ""),
         "canonical_failure_event": str(payload.get("canonical_failure_event") or ""),
         "result_scratch_ref": result_scratch_ref,
+        "task_pipeline_stage": str(payload.get("task_pipeline_stage") or ""),
+        "operation_generation": int(payload.get("operation_generation") or 0),
+        "task_map_generation": str(payload.get("task_map_generation") or ""),
+        "workspace_generation": int(payload.get("workspace_generation") or 0),
+        "placement_epoch": int(payload.get("placement_epoch") or 0),
+        "pipeline_key": str(payload.get("pipeline_key") or ""),
+        "task_stage_session_binding": str(
+            payload.get("task_stage_session_binding") or ""
+        ),
         "result_identity": {
             key: payload.get(key)
             for key in (
                 "workflow_run_id",
                 "task_id",
+                "parent_task_id",
                 "fanout_id",
                 "stage_id",
                 "child_id",
@@ -306,6 +418,7 @@ def prepare_call_operation(
                 "base_git_head",
                 "contract_revision",
                 "task_map_generation",
+                "feedback_revision",
                 "workflow_generation",
                 "request_revision",
                 "generic_workflow_contract_digest",
@@ -315,6 +428,7 @@ def prepare_call_operation(
                 "required_delivery_artifacts",
                 "input_result_refs",
                 "generic_workflow_operation",
+                "result_semantics",
                 "workflow_dependencies",
                 "workflow_input_ports",
                 "workflow_output_ports",
@@ -334,6 +448,8 @@ def prepare_call_operation(
                 "target_snapshot_ref",
                 "target_commit",
                 "target_snapshot_digest",
+                "impl_self_check_ref",
+                "impl_self_check_digest",
                 "goal_id",
                 "flow_kind",
                 "objective_ref",
@@ -345,6 +461,20 @@ def prepare_call_operation(
                 "candidate_ref",
                 "closure_fact_ref",
                 "closure_fact_digest",
+                "task_pipeline_stage",
+                "operation_generation",
+                "workspace_generation",
+                "placement_epoch",
+                "pipeline_key",
+                "task_stage_session_binding",
+                "risk_class",
+                "integration_admission_profile",
+                "exact_task_target_commit",
+                "verification_result_ref",
+                "verification_result_digest",
+                "risk_review_timeout_seconds",
+                "risk_review_max_turns",
+                "risk_review_budget_usd",
             )
             if payload.get(key) not in (None, "")
             and not (
@@ -359,6 +489,18 @@ def prepare_call_operation(
             )
         },
     }
+    pinned_write_scopes = list(dict.fromkeys(
+        str(scope).strip()
+        for scope in (workdir_write_scopes or [])
+        if str(scope).strip()
+    ))
+    if pinned_write_scopes:
+        request["workdir_write_scopes"] = pinned_write_scopes
+    plan_candidate_validation = payload.get("plan_candidate_validation")
+    if isinstance(plan_candidate_validation, Mapping):
+        request["plan_candidate_validation"] = dict(
+            plan_candidate_validation
+        )
     if context_delivery_enabled:
         from zf.runtime.context_delivery import CONTEXT_RENDERER_VERSION
 
@@ -376,6 +518,7 @@ def prepare_call_operation(
         parent_stage_id=stage_id,
         parent_attempt_id=str(payload.get("parent_attempt_id") or ""),
         task_id=task_id,
+        parent_task_id=parent_task_id,
         role_instance=role_instance,
         active_attempt_id=attempt_id,
         lease_id=str(payload.get("lease_id") or dispatch_id or attempt_id),
@@ -442,7 +585,10 @@ def prepare_call_operation(
         operation_id=operation_id,
         request_hash=ensured.request_hash,
         attempt_id=attempt_id,
+        lease_id=str(payload.get("lease_id") or dispatch_id or attempt_id),
         role_instance=role_instance,
+        task_id=task_id,
+        parent_task_id=parent_task_id,
         output_profile_id=output_profile_id,
         output_profile_revision=output_profile_revision,
         result_scratch_ref=result_scratch_ref,
@@ -457,6 +603,55 @@ def prepare_call_operation(
     )
 
 
+def _pin_plan_candidate_validation_context(
+    runtime: Any,
+    *,
+    payload: dict[str, Any],
+    operation_type: str,
+    stage_id: str,
+) -> None:
+    if (
+        operation_type != "fanout_reader_child"
+        or isinstance(payload.get("plan_candidate_validation"), Mapping)
+    ):
+        return
+    stage = next((
+        item for item in getattr(runtime.config.workflow, "stages", []) or []
+        if str(getattr(item, "id", "") or "") == stage_id
+    ), None)
+    if str(getattr(stage, "attempt_domain", "") or "") != "plan":
+        return
+    manifest_loader = getattr(runtime, "_fanout_manifest", None)
+    manifest = (
+        manifest_loader(str(payload.get("fanout_id") or "")) or {}
+        if callable(manifest_loader)
+        else {}
+    )
+    trigger_payload = (
+        manifest.get("trigger_payload")
+        if isinstance(manifest.get("trigger_payload"), dict)
+        else payload.get("trigger_payload")
+        if isinstance(payload.get("trigger_payload"), dict)
+        else {}
+    )
+    from zf.core.workflow.flow_metadata import flow_metadata_for
+    from zf.runtime.plan_candidate_preflight import plan_candidate_writer_policy
+
+    payload["plan_candidate_validation"] = {
+        "schema_version": "plan-candidate-validation-context.v1",
+        "manifest": {
+            "fanout_id": str(payload.get("fanout_id") or ""),
+            "stage_id": stage_id,
+            "trigger_payload": dict(trigger_payload),
+        },
+        "metadata": flow_metadata_for(
+            runtime.config,
+            payload=trigger_payload,
+        ),
+        "writer_policy": plan_candidate_writer_policy(runtime.config),
+    }
+
+
 def mark_call_operation_started(
     runtime: Any,
     prepared: PreparedCallOperation,
@@ -466,6 +661,8 @@ def mark_call_operation_started(
     causation_id: str = "",
     correlation_id: str = "",
 ) -> None:
+    from zf.runtime.workflow_budget_guard import usage_meter_snapshot
+
     receipt_descriptor: dict[str, Any] = {}
     receipt_error = ""
     if (
@@ -489,15 +686,19 @@ def mark_call_operation_started(
         operation_id=prepared.operation_id,
         request_hash=prepared.request_hash,
         workflow_run_id=prepared.workflow_run_id,
-        task_id=task_id,
+        task_id=task_id or prepared.task_id,
         dispatch_id=dispatch_id,
         role_instance=prepared.role_instance,
         active_attempt_id=prepared.attempt_id,
-        lease_id=dispatch_id or prepared.attempt_id,
+        lease_id=prepared.lease_id,
         provider_session_id=prepared.provider_session_id,
         context_delivery_envelope_ref=prepared.context_delivery_envelope_ref,
         context_delivery_receipt_ref=receipt_descriptor,
         context_delivery_receipt_error=receipt_error,
+        budget_snapshot=usage_meter_snapshot(
+            runtime,
+            instance_id=prepared.role_instance,
+        ),
         causation_id=causation_id,
         correlation_id=correlation_id or prepared.workflow_run_id,
     )
@@ -572,9 +773,7 @@ def admit_runtime_call_result(
             "request_hash": str(payload.get("request_hash") or ""),
             "result_identity": operation_result_identity,
             "output_profile_id": str(operation_request.get("output_profile_id") or ""),
-            "output_profile_revision": str(
-                operation_request.get("output_profile_revision") or ""
-            ),
+            "output_profile_revision": str(operation_request.get("output_profile_revision") or ""),
         },
         require_semantic_submit=require_semantic_submit,
         semantic_submit=semantic_submit,
@@ -680,6 +879,27 @@ def _has_semantic_submit_provenance(
         == _descriptor_identity(control_ref)
         and _descriptor_identity(body.get("envelope_ref"))
         == _descriptor_identity(envelope_ref)
+    )
+
+
+def has_admitted_semantic_submit_provenance(
+    runtime: Any,
+    event: ZfEvent,
+) -> bool:
+    """Return whether a canonical result is bound to its admitted call."""
+
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    operation_request = _pinned_operation_request(
+        runtime,
+        operation_id=str(payload.get("operation_id") or ""),
+        request_hash=str(payload.get("request_hash") or ""),
+    )
+    if not operation_request:
+        return False
+    return _has_semantic_submit_provenance(
+        runtime,
+        event,
+        operation_request=operation_request,
     )
 
 
@@ -826,12 +1046,6 @@ def _semantic_submit_mode(
     configured = configured if isinstance(configured, Mapping) else {}
     mode = str(configured.get(profile_id) or "off").strip().lower()
     if mode not in {"shadow", "blocking"}:
-        return "off"
-    role = next((
-        item for item in getattr(config, "roles", [])
-        if role_instance in {item.instance_id, item.name}
-    ), None)
-    if role is not None and str(getattr(role, "transport", "tmux") or "tmux") != "tmux":
         return "off"
     return mode
 

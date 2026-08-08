@@ -30,6 +30,7 @@ from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.transport_stream_json import (
     DrainStatus,
     StreamJsonTransport,
+    _complete_context,
 )
 from zf.runtime.transport import DispatchContext
 
@@ -63,6 +64,42 @@ def registry(state_dir: Path) -> RoleSessionRegistry:
     return RoleSessionRegistry(
         state_dir / "role_sessions.yaml", project_root=str(state_dir.parent)
     )
+
+
+def test_complete_context_preserves_durable_operation_identity() -> None:
+    source = DispatchContext(
+        trace_id="TRACE-1",
+        run_id="RUN-1",
+        task_id="TASK-1",
+        parent_task_id="FLOW-1",
+        role_name="verify",
+        instance_id="verify-lane-0",
+        backend="claude-code",
+        briefing_path=Path("briefings/verify.md"),
+        dispatch_id="dispatch-1",
+        operation_id="operation-1",
+        attempt_id="attempt-1",
+        lease_id="lease-1",
+        task_pipeline_stage="verify",
+        operation_generation=2,
+        task_map_generation="generation-1",
+        workspace_generation=3,
+        placement_epoch=4,
+        task_stage_session_binding="binding-1",
+    )
+
+    completed = _complete_context(
+        source,
+        role=RoleConfig(
+            name="verify",
+            instance_id="verify-lane-0",
+            backend="claude-code",
+        ),
+        role_name="verify-lane-0",
+        briefing_path=Path("briefings/fallback.md"),
+    )
+
+    assert completed == source
 
 
 def _query_emitting(messages: list[Any], raise_after: Exception | None = None):

@@ -7,12 +7,12 @@
 
 ```text
 Goal / Requirement
-  -> semantic plan and evidence contract
+  -> semantic plan, Goal Claims, and evidence contract
   -> task-map.v1 + source-index.v1 + coverage-report.v1
-  -> deterministic validation and Task contract materialization
-  -> run admission + Kernel dispatch
+  -> immutable Plan Artifact Package + generation admission
+  -> deterministic Task contract materialization + Kernel dispatch
   -> Worker artifacts/evidence
-  -> verify, replan, and closure
+  -> exact-target verify, replan, Candidate freeze, and closure
 ```
 
 这不是“Kernel 自动理解自然语言并拆任务”。责任边界如下：
@@ -21,6 +21,7 @@ Goal / Requirement
 |---|---|
 | 需求含义、方案、任务切片、验收质量、项目约束 | Planner/Architect/领域 Agent + skill/prompt |
 | schema、引用、依赖、currentness、权限、WIP、lease、dispatch | deterministic Kernel |
+| 预注册语义 checkpoint | 显式 `semantic_control` 下的 Orchestrator Agent；默认仍为 `exception_advisor` |
 | 异常中的语义分诊和 replan 方向 | Agent/Run Manager/Autoresearch 产出 proposal |
 | 批准后的状态变更和外部副作用 | `ControlledActionService` / sanctioned CLI |
 
@@ -96,12 +97,37 @@ Plan 可执行至少意味着：
       "owner_role": "dev",
       "wave": 1,
       "blocked_by": [],
-      "scope": ["src/api/**", "tests/test_api.py"],
+      "allowed_paths": ["src/api/**", "tests/test_api.py"],
+      "allowed_paths_reason": "one vertical slice owns runtime and regression test",
       "exclusive_files": ["src/api/handler.py"],
       "goal_claim_ids": ["CLAIM-A"],
-      "acceptance": ["the compatibility cases pass"],
-      "verification": "uv run pytest tests/test_api.py -q --no-cov",
-      "verification_tiers": ["runtime"]
+      "source_key": "docs/specs/feature.md#api-compatibility",
+      "source_ref": "docs/specs/feature.md#api-compatibility",
+      "source_excerpt": "Preserve the documented API behavior.",
+      "acceptance_criteria": [
+        {
+          "id": "AC-API-COMPAT",
+          "statement": "The compatibility cases pass on the Task target.",
+          "mandatory": true,
+          "verification_owner": "task_verify",
+          "verification_tier": "task_non_smoke",
+          "verification_command_ids": ["api-regression"]
+        }
+      ],
+      "validation": {
+        "commands": [
+          {
+            "id": "api-regression",
+            "command": "uv run pytest tests/test_api.py -q --no-cov",
+            "acceptance_ids": ["AC-API-COMPAT"],
+            "owner": "task_verify",
+            "tier": "task_non_smoke",
+            "deterministic": true,
+            "reusable": true,
+            "timeout_seconds": 120
+          }
+        ]
+      }
     }
   ]
 }
@@ -113,10 +139,11 @@ Plan 可执行至少意味着：
 |---|---|
 | `goal_claims` / `goal_claim_ids` | 建立 Goal -> Claim -> Task 覆盖关系 |
 | `blocked_by` / `wave` | 表达依赖、批次和 fan-in 等待 |
-| `scope` / `allowed_paths` | 声明预期改动范围；参与 scope/evidence 检查 |
+| `allowed_paths` + reason | 声明唯一写入范围并解释 ownership；旧 `scope` 仅作兼容输入 |
 | `exclusive_files` | 防止并行 writer 同时写同一路径 |
 | `shared_files` | 共享只读上下文，不授予写权限 |
-| `verification` / tiers | 可执行验证入口和验证层级 |
+| `acceptance_criteria` | 结构化产品结果，绑定 mandatory、owner、tier 和 command IDs |
+| `validation.commands[]` | canonical 命令注册表；下游按原始 command/digest 执行和回读 |
 | source refs | 让 Task 可以回溯原始 Goal、计划、评审和覆盖报告 |
 
 一个 Task 应对应可独立验证的 vertical slice。公共 schema/API 可以成为早期 wave，但不要仅按
@@ -179,6 +206,45 @@ Transport delivery 之后，Worker 必须经 `zf emit` 或 sanctioned action 报
 result 要与当前 TaskAttempt/dispatch token 对齐。Review、test、judge 或自定义 verifier 应读取
 Task contract、artifact refs 和 git evidence，而不是重新猜 raw prompt。
 
+### 6.1 v3 默认调度与 v4 Task Pipeline canary
+
+当前生产默认仍是 v3 stage/fanout/barrier。PRD、Issue、Refactor 另有默认关闭的 v4 canary：
+
+```text
+Task Pipeline identity (Task + task-map generation)
+  -> Impl operation
+  -> Task Verify operation
+  -> Integration Admission
+  -> serial Candidate Integration receipt
+
+physical Worker Slot
+  -> serves one operation
+  -> settles and becomes reusable
+  -> preserves Task-stage session/workspace affinity separately
+```
+
+v4 的关键变化是调度和 placement，不改写 Stage briefing、Task Contract、required-read、result
+artifact 或 Completion Gate：
+
+- Task A 的 Impl admitted 后可立即进入自己的 Verify，不等待同批 Task；
+- 已空闲 Impl slot 可以承接 Task C，不能把 Task A 的 session 上下文泄漏给 Task C；
+- Verify 失败只对当前 Task 生成有界 rework attempt；
+- Task 只有在 integration receipt admitted 后才 `done`，依赖 Task 才能解锁；
+- 所有局部 receipt 收敛后冻结 exact Candidate，再运行全局 Verify/Discovery/Goal Closure；
+- partial Candidate 禁止 auto-ship；默认 `verify_admitted` 不增加 Agent turn；
+- profile、operation、attempt、lease、workspace、session 和 generation 必须同时 current。
+
+只有 `examples/prod/controller/*-task-pipeline-v4-canary*.yaml` 这类显式 profile 才能启用。
+示例 `preferred: false`，默认 `ZF_TASK_PIPELINE_MODE=shadow`；切到 `blocking` 仍属于 canary，
+当前 rollout 结论是 NO-GO，不应覆盖常规 v3 route。
+
+### 6.2 Orchestrator Agent checkpoint 边界
+
+`workflow.orchestration.mode` 默认是 `exception_advisor`。显式 `semantic_control` 可以为
+`plan_candidate` 等已注册 checkpoint 配置 `shadow` 或受控 `blocking`，但 OA 只提交 typed
+decision/artifact。Kernel 继续拥有 operation、dispatch、TaskAttempt、WIP、状态迁移和副作用。
+正常 `Impl -> Verify` handoff 不增加 OA turn；OA P0-P15 harness 已实现，但真实 canary 仍 HOLD。
+
 ## 7. 执行中 Replan
 
 出现以下信号时，应比较“当前计划是否仍然成立”，而不是机械重复旧任务：
@@ -232,10 +298,13 @@ uv run zf refs verify
 | `src/zf/runtime/product_delivery.py` | accepted task map 到 canonical Task contract |
 | `src/zf/runtime/orchestrator_dispatch.py` | readiness 到 worker instance 的机械派发 |
 | `src/zf/runtime/task_attempt_runtime.py` | attempt/lease/delivery 生命周期 |
+| `src/zf/runtime/task_pipeline_runtime.py`、`task_pipeline_reconciler.py` | v4 Task-local operation、capacity、rework 与 projection |
+| `src/zf/runtime/orchestrator_agent_reactor.py` | 显式 OA semantic checkpoint 的 event/artifact 接力 |
 | `src/zf/runtime/injection.py` | briefing、active-task pin 和 Worker protocol |
 | `src/zf/core/task/contract_validation.py` | dispatch 前 Task contract 校验 |
 | `src/zf/core/verification/scope_ratchet.py` | scope snapshot、diff 和越界检查 |
 | `tests/test_task_map.py`、`tests/test_product_delivery.py` | task map 与 ingest 回归 |
+| `tests/test_task_pipeline_profile.py`、`tests/test_task_pipeline_rollout.py` | v4 profile、默认关闭和 rollout 门禁 |
 
 相关阅读：[Harness 运行流程](04-harness-runtime.md)、[交付控制模型](concepts/delivery-control-model.md)、
 [观察一次交付](operations/observe-delivery.md)。

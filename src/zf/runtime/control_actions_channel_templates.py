@@ -349,6 +349,11 @@ class ChannelTemplateActionsMixin:
                     },
                 )
         discussion = dict(materialized["discussion"])
+        requested_mode = str(payload.get("mode") or "").strip()
+        if requested_mode:
+            discussion["mode"] = normalize_product_discussion_mode(
+                requested_mode
+            )
         event = self.writer.emit(
             "channel.discussion.mode.set",
             actor=self.actor,
@@ -596,9 +601,33 @@ class ChannelTemplateActionsMixin:
             if isinstance(sessions.get(thread_id), dict)
             else {}
         )
-        continuing = bool(payload.get("continue")) or (
+        session_active = (
             bool(session)
             and str(session.get("state") or "idle") != "idle"
+        )
+        restarted = payload.get("restart") is True and session_active
+        if restarted:
+            self.writer.emit(
+                "channel.discussion.closed",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "discussion_id": str(
+                        session.get("discussion_id") or ""
+                    ),
+                    "outcome": "cancelled",
+                    "reason": "explicit_restart",
+                    "revision": int(session.get("revision") or 0),
+                    "source": self.surface,
+                },
+            )
+            session = {}
+        continuing = not restarted and (
+            bool(payload.get("continue")) or session_active
         )
         expected_revision = int(payload.get("expected_revision") or 0)
         current_revision = int(session.get("revision") or 0)
@@ -732,6 +761,13 @@ class ChannelTemplateActionsMixin:
             "discussion_context_digest": context_digest,
             "discussion_product_mode": product_mode,
         })
+        source_requirement_message_id = str(
+            payload.get("requirement_message_id") or ""
+        ).strip()
+        if source_requirement_message_id:
+            refs["source_requirement_message_id"] = (
+                source_requirement_message_id
+            )
         if (
             not continuing
             and discussion_engine_mode(product_mode)
@@ -754,7 +790,11 @@ class ChannelTemplateActionsMixin:
             emit_completion=emit_completion,
         )
         if result.get("ok"):
-            result["status"] = "continued" if continuing else "started"
+            result["status"] = (
+                "restarted"
+                if restarted
+                else "continued" if continuing else "started"
+            )
             result["participants"] = roster
             result["discussion_id"] = discussion_id
             result["revision"] = revision

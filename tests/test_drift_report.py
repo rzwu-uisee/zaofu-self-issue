@@ -117,6 +117,25 @@ def test_assignment_ok_when_final_assignee_is_downstream_stage():
     assert [i for i in report["items"] if i["kind"] == "assignment_drift"] == []
 
 
+def test_assignment_ok_for_task_pipeline_pool_binding():
+    node = _node(
+        "T1",
+        status="done",
+        owner_role="implementation",
+        assigned_to="dev-lane-0",
+        evidence=["evt-build", "evt-test"],
+        instances_history=["dev-lane-0", "verify-lane-0"],
+    )
+    node["actual"]["affinity"].update({
+        "pooled_dispatch": True,
+        "pipeline_stages": ["impl", "verify"],
+    })
+
+    report = build_drift_report(graph=_graph([node]))
+
+    assert [i for i in report["items"] if i["kind"] == "assignment_drift"] == []
+
+
 def test_evidence_drift_done_without_evidence_is_warning_not_error():
     graph = _graph([
         _node("T1", status="done", owner_role="dev", assigned_to="dev-1",

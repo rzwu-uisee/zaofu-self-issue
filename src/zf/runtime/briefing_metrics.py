@@ -65,6 +65,37 @@ def write_briefing_with_metrics(
     return metrics
 
 
+def refresh_briefing_metrics(path: Path) -> dict[str, Any]:
+    """Refresh text-derived metrics after the final briefing envelope."""
+
+    path = Path(path)
+    metrics_path = path.with_suffix(path.suffix + ".metrics.json")
+    if not path.is_file() or not metrics_path.is_file():
+        return {}
+    try:
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(metrics, dict):
+        return {}
+    text = path.read_text(encoding="utf-8")
+    encoded = text.encode("utf-8")
+    budget = int(metrics.get("soft_budget_bytes") or 12 * 1024)
+    metrics.update({
+        "briefing_sha256": hashlib.sha256(encoded).hexdigest(),
+        "briefing_bytes": len(encoded),
+        "estimated_tokens": max(1, (len(encoded) + 3) // 4),
+        "line_count": len(text.splitlines()),
+        "section_bytes": _section_bytes(text),
+        "soft_budget_exceeded": len(encoded) > budget,
+    })
+    atomic_write_text(
+        metrics_path,
+        json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return metrics
+
+
 def _section_bytes(text: str) -> dict[str, int]:
     sections: dict[str, int] = {}
     current = "preamble"
@@ -102,4 +133,8 @@ def _stage_profile(stage: str, role: str, payload: Mapping[str, Any]) -> str:
     return "other"
 
 
-__all__ = ["SCHEMA_VERSION", "write_briefing_with_metrics"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "refresh_briefing_metrics",
+    "write_briefing_with_metrics",
+]

@@ -71,6 +71,8 @@ def maybe_complete_run_goal(runtime: Any, event: ZfEvent) -> None:
 
         events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
         if event.type in _CLAIM_CAUSES:
+            if not _pre_closeout_allows_claim(runtime, event, events):
+                return
             claim = run_goal_completion_claim_event(events, cause=event)
             if claim is not None:
                 runtime.event_writer.append(claim)
@@ -110,6 +112,8 @@ def reconcile_run_goal_completion(runtime: Any) -> None:
         if not run_id or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)
+        if not _pre_closeout_allows_claim(runtime, cause, events):
+            continue
         claim = run_goal_completion_claim_event(events, cause=cause)
         if claim is None:
             continue
@@ -117,6 +121,19 @@ def reconcile_run_goal_completion(runtime: Any) -> None:
         events.append(appended)
         _evaluate_active_claims(runtime, events)
         events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
+
+
+def _pre_closeout_allows_claim(
+    runtime: Any,
+    cause: ZfEvent,
+    events: list[ZfEvent],
+) -> bool:
+    from zf.runtime.orchestrator_agent_aggregation import (
+        pre_closeout_checkpoint_state,
+    )
+
+    state = pre_closeout_checkpoint_state(runtime, cause, events=events)
+    return not state.enabled or not state.blocking or state.satisfied
 
 
 def _evaluate_active_claims(runtime: Any, events: list[ZfEvent]) -> None:
@@ -222,7 +239,12 @@ def _apply_delivery_request(runtime: Any, request: ZfEvent) -> None:
             event_log=runtime.event_log,
         ).ship(
             target_ref=candidate_ref,
-            pdd_id=str(payload.get("goal_id") or ""),
+            pdd_id=str(
+                payload.get("pdd_id")
+                or payload.get("feature_id")
+                or payload.get("goal_id")
+                or ""
+            ),
             event_writer=runtime.event_writer,
             causation_id=request.id,
             correlation_id=run_id,

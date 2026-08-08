@@ -434,3 +434,157 @@ def test_window_per_role_kill_window_still_uses_kill_window():
     tmux.command_log.clear()
     tmux.kill_window("dev")
     assert any("kill-window" in c for c in tmux.command_log)
+
+
+def test_pane_grid_terminate_rejects_stale_cross_role_binding(monkeypatch):
+    """A stale in-memory role binding must never signal another role."""
+
+    layout = PaneGridLayout(window_name="roles")
+    layout._panes["tech-scan"] = "%32"  # type: ignore[attr-defined]
+    tmux = TmuxSession(
+        session_name="zf-t",
+        dry_run=False,
+        layout=layout,
+    )
+    commands: list[list[str]] = []
+    signals: list[tuple[str, str]] = []
+
+    def fake_run(args, *, check=True, capture=False):
+        commands.append(args)
+        if args[:2] == ["tmux", "display-message"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="%32\torchestrator\n",
+                stderr="",
+            )
+        if args[:2] == ["tmux", "list-windows"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="@1\troles\t1\n",
+                stderr="",
+            )
+        if args[:2] == ["tmux", "list-panes"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout=(
+                    "%32\torchestrator\torchestrator\t"
+                    "/tmp/state/workdirs/orchestrator/project\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux, "_run", fake_run)
+    monkeypatch.setattr(
+        tmux,
+        "_signal_pane_process_group",
+        lambda pane_pid, signal_name: signals.append((pane_pid, signal_name)),
+    )
+
+    with pytest.raises(TmuxError, match="does not prove role ownership"):
+        tmux.terminate_window("tech-scan", grace_seconds=0)
+
+    assert signals == []
+    assert not any(cmd[:2] == ["tmux", "kill-pane"] for cmd in commands)
+    assert not any(cmd[:2] == ["tmux", "kill-window"] for cmd in commands)
+
+
+def test_pane_grid_terminate_keeps_exact_target_when_mapping_changes(
+    monkeypatch,
+):
+    """Resolve once: a concurrent mapping update cannot redirect teardown."""
+
+    layout = PaneGridLayout(window_name="roles")
+    layout._panes["dev"] = "%42"  # type: ignore[attr-defined]
+    tmux = TmuxSession(
+        session_name="zf-t",
+        dry_run=False,
+        layout=layout,
+    )
+    commands: list[list[str]] = []
+    waited: list[str] = []
+    signal_count = 0
+
+    def fake_run(args, *, check=True, capture=False):
+        commands.append(args)
+        if args[:2] == ["tmux", "display-message"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout="%42\tdev\n", stderr=""
+            )
+        if args[:2] == ["tmux", "list-panes"]:
+            return subprocess.CompletedProcess(args, 0, stdout="4242\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def fake_signal(pane_pid, signal_name):
+        nonlocal signal_count
+        signal_count += 1
+        if signal_count == 1:
+            layout._panes["dev"] = "%99"  # type: ignore[attr-defined]
+        return True
+
+    def fake_wait(target, *, timeout_seconds, poll_interval):
+        waited.append(target.address())
+        return False
+
+    monkeypatch.setattr(tmux, "_run", fake_run)
+    monkeypatch.setattr(tmux, "_signal_pane_process_group", fake_signal)
+    monkeypatch.setattr(tmux, "_wait_until_target_gone", fake_wait)
+
+    result = tmux.terminate_window("dev", grace_seconds=0)
+
+    assert result.target == "%42"
+    assert waited == ["%42", "%42"]
+    kill = next(cmd for cmd in commands if cmd[:2] == ["tmux", "kill-pane"])
+    assert kill[kill.index("-t") + 1] == "%42"
+    assert layout._panes["dev"] == "%99"  # type: ignore[attr-defined]
+
+
+def test_pane_grid_terminate_handles_tmux_zero_exit_for_gone_pane(monkeypatch):
+    """tmux may return success and blank format fields for a gone pane."""
+
+    layout = PaneGridLayout(window_name="roles")
+    layout._panes["dev"] = "%42"  # type: ignore[attr-defined]
+    tmux = TmuxSession(
+        session_name="zf-t",
+        dry_run=False,
+        layout=layout,
+    )
+    commands: list[list[str]] = []
+    owner_probes = 0
+
+    def fake_run(args, *, check=True, capture=False):
+        nonlocal owner_probes
+        commands.append(args)
+        if args[:2] == ["tmux", "display-message"]:
+            owner_probes += 1
+            if owner_probes <= 2:
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="%42\tdev\n", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args, 0, stdout="\t\n", stderr=""
+            )
+        if args[:2] == ["tmux", "list-panes"]:
+            return subprocess.CompletedProcess(args, 0, stdout="4242\n", stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux, "_run", fake_run)
+    monkeypatch.setattr(
+        tmux,
+        "_signal_pane_process_group",
+        lambda pane_pid, signal_name: True,
+    )
+    monkeypatch.setattr(
+        tmux,
+        "_wait_until_target_gone",
+        lambda target, *, timeout_seconds, poll_interval: False,
+    )
+
+    result = tmux.terminate_window("dev", grace_seconds=0)
+
+    assert result.target == "%42"
+    assert not any(cmd[:2] == ["tmux", "kill-pane"] for cmd in commands)
+    assert "dev" not in layout._panes  # type: ignore[attr-defined]

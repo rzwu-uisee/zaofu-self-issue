@@ -1487,6 +1487,212 @@ def test_candidate_verify_binds_current_candidate_and_integrated_task_refs(
         )
 
 
+def test_candidate_verify_binds_frozen_candidate_not_workflow_anchor_contract(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, _ = _service(tmp_path)
+    package, package_descriptor = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-candidate-anchor",
+        task_map_generation="G3",
+    )
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="FLOW-ANCHOR",
+        title="Workflow anchor",
+        status="in_progress",
+        assigned_to="orchestrator",
+        contract=TaskContract(
+            behavior="track workflow lifecycle",
+            acceptance_criteria=["workflow closes"],
+            verification="",
+        ),
+    ))
+    candidate_commit = "a" * 40
+    task_commit = "b" * 40
+    freeze_receipt = {
+        "schema_version": "candidate-freeze-receipt.v1",
+        "freeze_id": "freeze-g3",
+        "workflow_run_id": "run-candidate-anchor",
+        "task_map_generation": "G3",
+        "candidate_generation": "CG3",
+        "candidate_base_commit": "base-candidate",
+        "candidate_head": candidate_commit,
+        "candidate_head_commit": candidate_commit,
+        "candidate_ref": "refs/heads/candidate/demo",
+        "integration_ledger_digest": "ledger-g3",
+        "completed_task_ids": ["T-delivery"],
+        "task_ids": ["T-delivery"],
+        "status": "frozen",
+    }
+    freeze_descriptor = write_immutable_json_sidecar(
+        state_dir,
+        freeze_receipt,
+        root="candidate-freeze-receipts",
+        kind="candidate_freeze_receipt",
+        schema_version="candidate-freeze-receipt.v1",
+        created_by="test",
+    )
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        id="evt-package-candidate-anchor",
+        type="plan.artifact_package.admitted",
+        correlation_id="run-candidate-anchor",
+        payload=package_event_payload(
+            package,
+            package_descriptor,
+            status="admitted",
+        ),
+    ))
+    log.append(ZfEvent(
+        id="evt-task-ref-delivery",
+        type="task.ref.updated",
+        task_id="T-delivery",
+        correlation_id="run-candidate-anchor",
+        payload={
+            "workflow_run_id": "run-candidate-anchor",
+            "task_id": "T-delivery",
+            "source_commit": task_commit,
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-candidate-anchor",
+        type="candidate.ready",
+        correlation_id="run-candidate-anchor",
+        payload={
+            **freeze_receipt,
+            "freeze_receipt_ref": freeze_descriptor,
+            "freeze_receipt_digest": freeze_descriptor["sha256"],
+        },
+    ))
+    aggregate_contract = {
+        "schema_version": "task-contract-snapshot.v1",
+        "workflow_run_id": "run-candidate-anchor",
+        "task_id": "FLOW-ANCHOR",
+        "contract_revision": "candidate-contract-g3",
+        "task_map_generation": "G3",
+        "base_commit": "base-candidate",
+        "task_ref": "refs/heads/candidate/demo",
+        "plan_artifact_package_id": package_descriptor["package_id"],
+        "plan_artifact_package_ref": package_descriptor["ref"],
+        "plan_artifact_package_digest": package_descriptor["sha256"],
+        "title": "candidate verification",
+        "behavior": "verify the frozen candidate",
+        "allowed_paths": [],
+        "protected_paths": [".zf/**"],
+        "acceptance_criteria": [{
+            "acceptance_id": "candidate-ac-1",
+            "statement": "integrated delivery remains valid",
+            "verification_owner": "candidate_verify",
+            "verification_tier": "integration",
+            "verification_command_ids": [],
+        }],
+        "verification_command": "",
+        "verification_commands": [],
+        "verification_tiers": ["integration"],
+        "required_source_outputs": [],
+        "required_contract_tests": [],
+        "source_refs": {
+            "freeze_receipt_ref": freeze_descriptor["ref"],
+            "freeze_receipt_digest": freeze_descriptor["sha256"],
+        },
+        "evidence_contract": {"authority_scope": "candidate"},
+        "authority_scope": "candidate",
+        "candidate_event_id": "evt-candidate-anchor",
+        "completed_task_ids": ["T-delivery"],
+        "source_ref": freeze_descriptor["ref"],
+        "source_index_ref": "",
+        "product_contract_ref": "",
+        "risk_class": "candidate",
+        "integration_admission_profile": "candidate-wide",
+    }
+    contract_descriptor = write_task_contract_snapshot(
+        state_dir,
+        aggregate_contract,
+    )
+    target_descriptor = write_target_snapshot(
+        state_dir,
+        {
+            **build_target_snapshot(
+                contract_descriptor,
+                target_commit=candidate_commit,
+                contract_snapshot=aggregate_contract,
+            ),
+            "authority_scope": "candidate",
+        },
+    )
+    payload = {
+        "artifact_package_mode": "blocking",
+        "output_profile_id": "candidate-verify",
+        "contract_revision": "candidate-contract-g3",
+        "task_map_generation": "G3",
+        "base_commit": "base-candidate",
+        "task_ref": "refs/heads/candidate/demo",
+        "target_commit": candidate_commit,
+        "contract_snapshot_ref": contract_descriptor["ref"],
+        "contract_snapshot_digest": contract_descriptor["sha256"],
+        "target_snapshot_ref": target_descriptor["ref"],
+        "target_snapshot_digest": target_descriptor["sha256"],
+    }
+    payload["handoff_authority_contract"] = build_handoff_authority_contract(
+        payload,
+        output_profile_id="candidate-verify",
+        stage_id="candidate-verify",
+        operation_type="fanout_reader_child",
+    )
+    resolver = CanonicalHandoffResolver(
+        state_dir=state_dir,
+        project_root=project_root,
+        config=None,
+    )
+
+    manifest, _ = resolver.resolve_payload(
+        payload=payload,
+        workflow_run_id="run-candidate-anchor",
+        task_id="FLOW-ANCHOR",
+        attempt_id="attempt-candidate-anchor",
+        dispatch_id="dispatch-candidate-anchor",
+    )
+
+    assert manifest["handoff_authority_profile"] == "candidate-verify"
+    assert manifest["plan_artifact_package_ref"] == package_descriptor["ref"]
+    assert manifest["candidate_snapshot"]["candidate_event_id"] == (
+        "evt-candidate-anchor"
+    )
+    assert manifest["candidate_snapshot"]["freeze_receipt_digest"] == (
+        freeze_descriptor["sha256"]
+    )
+    assert manifest["candidate_snapshot"]["integrated_task_refs"] == [{
+        "task_id": "T-delivery",
+        "source_commit": task_commit,
+    }]
+    assert "candidate-freeze" in {
+        source["source_id"] for source in manifest["sources"]
+    }
+    assert any(
+        section["source_id"] == "candidate-freeze" and section["required"]
+        for section in manifest["context_sections"]
+    )
+
+    log.append(ZfEvent(
+        id="evt-candidate-anchor-tampered",
+        type="candidate.ready",
+        correlation_id="run-candidate-anchor",
+        payload={
+            **freeze_receipt,
+            "freeze_receipt_ref": freeze_descriptor,
+            "freeze_receipt_digest": "0" * 64,
+        },
+    ))
+    with pytest.raises(ArtifactReadError, match="freeze receipt digest mismatch"):
+        resolver.resolve_payload(
+            payload=payload,
+            workflow_run_id="run-candidate-anchor",
+            task_id="FLOW-ANCHOR",
+            attempt_id="attempt-candidate-anchor-tampered",
+            dispatch_id="dispatch-candidate-anchor-tampered",
+        )
+
+
 def test_handoff_resolver_materializes_current_required_plan_ports(
     tmp_path: Path,
 ) -> None:

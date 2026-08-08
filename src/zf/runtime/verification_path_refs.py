@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 
 
@@ -16,6 +17,10 @@ _CODE_ARGUMENT_FLAGS = {
 }
 _SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&"}
 _RUNTIME_PATH_VALUE_FLAGS = {"--state-dir"}
+_OCI_DIGEST_REF_RE = re.compile(
+    r"^(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)+"
+    r"[A-Za-z0-9._-]+@sha256:[0-9a-fA-F]{64}$"
+)
 
 
 def command_path_refs(command: str) -> list[str]:
@@ -97,6 +102,10 @@ def _clean_path_ref_token(token: str) -> str:
 
 def _looks_like_path_ref(token: str) -> bool:
     if token in {".", ".."}:
+        return False
+    # Content-addressed OCI image names use slash-separated repository names,
+    # but they are runtime identifiers rather than repository filesystem refs.
+    if _OCI_DIGEST_REF_RE.fullmatch(token):
         return False
     if token.startswith(("./", "../", "/")):
         return True

@@ -22,6 +22,7 @@ from zf.runtime.workflow_resume import (
     WORKFLOW_RESUME_PLANNED_EVENT,
     WORKFLOW_RESUME_REJECTED_EVENT,
     WorkflowBatchResumeCheckpoint,
+    WorkflowOperationResumeCheckpoint,
     WorkflowResumeCheckpoint,
     _batch_checkpoint_superseded_reason,
     _payload_has_resume_marker,
@@ -126,6 +127,11 @@ def apply_workflow_resume(
         for item in projection.get("batch_checkpoints", [])
         if isinstance(item, dict)
     ]
+    operation_checkpoints = [
+        WorkflowOperationResumeCheckpoint(**item)
+        for item in projection.get("operation_checkpoints", [])
+        if isinstance(item, dict)
+    ]
     checkpoint_filter = str(checkpoint_id or "").strip()
     if checkpoint_filter:
         checkpoints = [
@@ -134,6 +140,10 @@ def apply_workflow_resume(
         ]
         batch_checkpoints = [
             checkpoint for checkpoint in batch_checkpoints
+            if checkpoint.checkpoint_id == checkpoint_filter
+        ]
+        operation_checkpoints = [
+            checkpoint for checkpoint in operation_checkpoints
             if checkpoint.checkpoint_id == checkpoint_filter
         ]
     results: list[WorkflowResumeApplyResult] = []
@@ -229,12 +239,41 @@ def apply_workflow_resume(
             event for event in writer.event_log.read_all()
             if event.id in set(result.emitted_event_ids)
         )
-    applied_count = sum(1 for item in results if item.applied) + sum(
-        1 for item in batch_results if item.applied
+    operation_results: list[WorkflowResumeApplyResult] = []
+    for checkpoint in operation_checkpoints:
+        if checkpoint.safe_resume_action == "no_action":
+            operation_results.append(WorkflowResumeApplyResult(
+                checkpoint=checkpoint,
+                applied=False,
+                reason="operation still has a live attempt lease",
+            ))
+            continue
+        if dry_run:
+            operation_results.append(WorkflowResumeApplyResult(
+                checkpoint=checkpoint,
+                applied=False,
+                reason="dry run",
+            ))
+            continue
+        result = _apply_operation_checkpoint(
+            store,
+            writer,
+            checkpoint,
+            state_dir=state_dir,
+        )
+        operation_results.append(result)
+        events.extend(
+            event for event in writer.event_log.read_all()
+            if event.id in set(result.emitted_event_ids)
+        )
+    applied_count = (
+        sum(1 for item in results if item.applied)
+        + sum(1 for item in batch_results if item.applied)
+        + sum(1 for item in operation_results if item.applied)
     )
     rejected_count = sum(
         1
-        for item in [*results, *batch_results]
+        for item in [*results, *batch_results, *operation_results]
         if not item.applied and item.reason.startswith("rejected:")
     )
     pending_count = sum(
@@ -243,6 +282,10 @@ def apply_workflow_resume(
     )
     batch_pending_count = sum(
         1 for checkpoint in batch_checkpoints
+        if checkpoint.safe_resume_action != "no_action"
+    )
+    operation_pending_count = sum(
+        1 for checkpoint in operation_checkpoints
         if checkpoint.safe_resume_action != "no_action"
     )
     return {
@@ -254,15 +297,135 @@ def apply_workflow_resume(
         "rejected": rejected_count,
         "no_op_reason": (
             "checkpoint not found"
-            if checkpoint_filter and not checkpoints and not batch_checkpoints
+            if checkpoint_filter
+            and not checkpoints
+            and not batch_checkpoints
+            and not operation_checkpoints
             else
             "no pending resume action"
-            if pending_count == 0 and batch_pending_count == 0
+            if pending_count == 0
+            and batch_pending_count == 0
+            and operation_pending_count == 0
             else ""
         ),
         "results": [item.to_dict() for item in results],
         "batch_results": [item.to_dict() for item in batch_results],
+        "operation_results": [
+            item.to_dict() for item in operation_results
+        ],
     }
+
+
+def _apply_operation_checkpoint(
+    store: TaskStore,
+    writer: EventWriter,
+    checkpoint: WorkflowOperationResumeCheckpoint,
+    *,
+    state_dir: Path,
+) -> WorkflowResumeApplyResult:
+    from zf.runtime.workflow_operation import (
+        WorkflowOperationService,
+        reduce_workflow_operations,
+    )
+
+    current = reduce_workflow_operations(writer.event_log.read_all()).get(
+        checkpoint.operation_id
+    )
+    if current is None:
+        return WorkflowResumeApplyResult(
+            checkpoint=checkpoint,
+            applied=False,
+            reason="operation no longer exists",
+        )
+    if str(current.get("status") or "") in {
+        "settled",
+        "failed",
+        "blocked",
+        "superseded",
+        "cancelled",
+    }:
+        return WorkflowResumeApplyResult(
+            checkpoint=checkpoint,
+            applied=False,
+            reason="operation already terminal",
+        )
+    planned = writer.append(ZfEvent(
+        type=WORKFLOW_RESUME_PLANNED_EVENT,
+        actor="zf-cli",
+        task_id=checkpoint.task_id or checkpoint.parent_task_id or None,
+        payload={
+            **checkpoint.to_dict(),
+            "checkpoint_kind": "workflow_operation",
+        },
+        causation_id=checkpoint.last_event_id or None,
+        correlation_id=checkpoint.workflow_run_id or None,
+    ))
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=writer.event_log,
+        event_writer=writer,
+    )
+    cancelled = service.cancel(
+        operation_id=checkpoint.operation_id,
+        request_hash=checkpoint.request_hash,
+        workflow_run_id=checkpoint.workflow_run_id,
+        task_id=checkpoint.task_id,
+        reason=(
+            "workflow_resume_cancelled_interrupted_operation"
+            if checkpoint.safe_resume_action == "cancel_interrupted_operation"
+            else "workflow_resume_cancelled_stale_operation"
+        ),
+        causation_id=planned.id,
+        correlation_id=checkpoint.workflow_run_id,
+    )
+    emitted = [planned.id]
+    if cancelled is not None:
+        emitted.append(cancelled.id)
+    parent_task_id = checkpoint.parent_task_id or checkpoint.task_id
+    if checkpoint.safe_resume_action == "cancel_stale_operation" and parent_task_id:
+        task = store.get(parent_task_id)
+        if task is not None and task.status == "in_progress":
+            store.update(
+                parent_task_id,
+                status="blocked",
+                blocked_reason=f"stale_workflow_operation:{checkpoint.operation_id}",
+                active_dispatch_id="",
+            )
+            status_event = writer.append(ZfEvent(
+                type="task.status_changed",
+                actor="zf-cli",
+                task_id=parent_task_id,
+                payload={
+                    "from": "in_progress",
+                    "to": "blocked",
+                    "source": "workflow_operation_resume",
+                    "operation_id": checkpoint.operation_id,
+                    "workflow_run_id": checkpoint.workflow_run_id,
+                },
+                causation_id=(cancelled.id if cancelled is not None else planned.id),
+                correlation_id=checkpoint.workflow_run_id or None,
+            ))
+            emitted.append(status_event.id)
+    applied = writer.append(ZfEvent(
+        type=WORKFLOW_RESUME_APPLIED_EVENT,
+        actor="zf-cli",
+        task_id=checkpoint.task_id or checkpoint.parent_task_id or None,
+        payload={
+            **checkpoint.to_dict(),
+            "checkpoint_kind": "workflow_operation",
+            "mode": checkpoint.safe_resume_action,
+            "cancelled_event_id": cancelled.id if cancelled is not None else "",
+        },
+        causation_id=cancelled.id if cancelled is not None else planned.id,
+        correlation_id=checkpoint.workflow_run_id or None,
+    ))
+    emitted.append(applied.id)
+    return WorkflowResumeApplyResult(
+        checkpoint=checkpoint,
+        applied=True,
+        reason="workflow operation cancelled",
+        emitted_event_ids=emitted,
+    )
 
 
 def _apply_checkpoint(
@@ -275,7 +438,7 @@ def _apply_checkpoint(
     gate_dispatcher=None,
     events=None,
     force_gate_dispatch: bool = False,
-) -> WorkflowResumeApplyResult:
+    ) -> WorkflowResumeApplyResult:
     emitted: list[str] = []
 
     planned_event = writer.append(_planned_event(checkpoint))

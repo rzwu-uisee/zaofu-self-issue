@@ -212,6 +212,29 @@ def test_affinity_stage_handoff_is_not_instance_drift():
     assert aff["instances_history"] == ["dev-1", "qa"]
 
 
+def test_affinity_task_pipeline_pool_is_not_assignment_drift():
+    tasks = {"T1": _task("T1", status="done", assigned_to="dev-lane-0", wave=1)}
+    tm = {"schema_version": "task-map.v1", "feature_id": "F-1", "tasks": [
+        {"task_id": "T1", "owner_role": "implementation", "wave": 1}]}
+    events = [
+        (1, ZfEvent(type="task.dispatched", id="d1", task_id="T1", payload={
+            "assignee": "dev-lane-0", "pipeline_key": "tp-T1", "task_pipeline_stage": "impl",
+        })),
+        (2, ZfEvent(type="task.dispatched", id="d2", task_id="T1", payload={
+            "assignee": "verify-lane-0", "pipeline_key": "tp-T1", "task_pipeline_stage": "verify",
+        })),
+    ]
+
+    graph = build_execution_graph(task_map=tm, tasks=tasks, events=events)
+    affinity = graph["nodes"][0]["actual"]["affinity"]
+
+    assert affinity["pooled_dispatch"] is True
+    assert affinity["pipeline_stages"] == ["impl", "verify"]
+    assert affinity["stage_handoff"] is True
+    assert affinity["drift_kind"] == "none"
+    assert affinity["drifted"] is False
+
+
 def test_affinity_stable():
     tasks = {"T1": _task("T1", status="done", assigned_to="dev-1", wave=1)}
     tm = {"schema_version": "task-map.v1", "feature_id": "F-1", "tasks": [

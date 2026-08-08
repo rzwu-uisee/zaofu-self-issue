@@ -61,7 +61,7 @@ def normalize_verification_commands(
             )
         seen_ids.add(command_id)
         timeout = _positive_int(record.get("timeout_seconds"), default=900)
-        records.append({
+        normalized = {
             "id": command_id,
             "command": command,
             "command_digest": command_digest(command),
@@ -73,7 +73,18 @@ def normalize_verification_commands(
             "deterministic": bool(record.get("deterministic", True)),
             "reusable": bool(record.get("reusable", True)),
             "timeout_seconds": timeout,
-        })
+        }
+        producer_paths = _string_list(record.get("producer_paths"))
+        if producer_paths:
+            normalized["producer_paths"] = producer_paths
+        if "rolling_smoke" in record:
+            marker = record["rolling_smoke"]
+            if not isinstance(marker, bool):
+                raise VerificationCommandError(
+                    f"verification command[{index}].rolling_smoke must be a boolean"
+                )
+            normalized["rolling_smoke"] = marker
+        records.append(normalized)
     return records
 
 
@@ -98,6 +109,86 @@ def task_map_verification_commands(raw: Mapping[str, Any]) -> list[dict[str, Any
         verification,
         validation=validation if isinstance(validation, Mapping) else {},
     )
+
+
+def task_map_command_registry(
+    task_map: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return Task Map command definitions keyed by canonical command id.
+
+    Product-flow admission enforces globally unique explicit ids. Legacy task
+    maps synthesize task-local ``contract-verification`` ids, so the projection
+    keeps their first definition; each legacy task still retains its local
+    command before registry inheritance is considered.
+    """
+
+    registry: dict[str, dict[str, Any]] = {}
+    tasks = task_map.get("tasks")
+    for raw in tasks if isinstance(tasks, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        for command in task_map_verification_commands(raw):
+            command_id = str(command["id"])
+            registry.setdefault(command_id, dict(command))
+    return registry
+
+
+def materialize_task_verification_commands(
+    raw: Mapping[str, Any],
+    *,
+    registry: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project globally referenced definitions into one derived Task contract."""
+
+    commands = task_map_verification_commands(raw)
+    command_ids = {str(item["id"]) for item in commands}
+    criteria = raw.get("acceptance_criteria")
+    if not isinstance(criteria, list):
+        criteria = raw.get("acceptance")
+    for criterion in criteria if isinstance(criteria, list) else []:
+        if not isinstance(criterion, Mapping):
+            continue
+        for command_id in _string_list(
+            criterion.get("verification_command_ids")
+            or criterion.get("command_ids")
+            or criterion.get("verification_commands")
+        ):
+            if command_id in command_ids:
+                continue
+            command = registry.get(command_id)
+            if command is None:
+                raise VerificationCommandError(
+                    f"acceptance criterion references unknown command id {command_id!r}"
+                )
+            commands.append(dict(command))
+            command_ids.add(command_id)
+    materialized = dict(raw)
+    if not commands:
+        return materialized
+    validation = raw.get("validation")
+    materialized["validation"] = validation_with_commands(
+        validation if isinstance(validation, Mapping) else {},
+        commands,
+    )
+    return materialized
+
+
+def verification_command_required_for_stage(
+    command: Mapping[str, Any],
+    *,
+    verification_owner: str,
+) -> bool:
+    """Select the canonical command subset required by a verification stage."""
+
+    command_owner = str(command.get("owner") or "impl_self_check").strip()
+    stage_owner = str(verification_owner or "").strip()
+    if stage_owner == "impl_self_check":
+        return command_owner == "impl_self_check"
+    if stage_owner == "task_verify":
+        return command_owner not in {"candidate_verify", "human"}
+    if stage_owner == "candidate_verify":
+        return command_owner != "human"
+    return command_owner == stage_owner
 
 
 def task_map_verification_command_fields(
@@ -196,9 +287,12 @@ __all__ = [
     "command_digest",
     "first_verification_command",
     "normalize_verification_commands",
+    "materialize_task_verification_commands",
+    "task_map_command_registry",
     "task_map_contract_verification_fields",
     "task_map_verification_command_fields",
     "task_map_verification_commands",
     "task_contract_verification_commands",
     "validation_with_commands",
+    "verification_command_required_for_stage",
 ]

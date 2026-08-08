@@ -2,32 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from zf.core.events import EventWriter
 from zf.core.security.redaction import redact_obj
+from zf.runtime.channel_dispatch_claim import ChannelDispatchResult
 from zf.runtime.channel_run_owner import provider_run_fields_for_request
 from zf.runtime.channel_sidecar import channel_message_event_payload
-
-
-@dataclass(frozen=True)
-class ChannelDispatchResult:
-    """Outcome summary for one or more channel reply dispatches."""
-
-    dispatched: list[str] = field(default_factory=list)
-    completed: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    skipped: list[dict[str, str]] = field(default_factory=list)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "dispatched": self.dispatched,
-            "completed": self.completed,
-            "failed": self.failed,
-            "skipped": self.skipped,
-        }
 
 
 def origin_external_refs(message: dict[str, Any]) -> dict[str, Any]:

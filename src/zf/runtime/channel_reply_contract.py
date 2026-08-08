@@ -17,6 +17,7 @@ from zf.runtime.channel_contract_artifacts import (
     typed_items,
     validate_channel_contract,
 )
+from zf.runtime.channel_context import channel_contribution_index
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_deliberation_contract import (
     apply_consensus_review_reply,
@@ -32,6 +33,18 @@ from zf.runtime.channel_question_dedup import apply_question_dedup_reply
 from zf.runtime.channel_reply_prompt import (
     channel_reply_response_contract,
     fake_channel_reply_text,
+)
+from zf.runtime.channel_reply_parsing import (
+    display_value as _display_value,
+    reply_question_texts as _reply_question_texts,
+    string_items as _string_items,
+    structured_reply_payload as _structured_reply_payload,
+    structured_reply_payload_with_error as _structured_reply_payload_with_error,
+)
+from zf.runtime.channel_synthesis_repair import (
+    emit_invalid_contract_finding as _emit_invalid_contract_finding,
+    ignore_stale_synthesis_repair as _ignore_stale_synthesis_repair,
+    reject_synthesis_contract as _reject_synthesis_contract,
 )
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
 
@@ -59,6 +72,14 @@ def emit_structured_reply_events(
         else {}
     )
     synthesis_request_id = str(refs.get("synthesis_request_id") or "")
+    synthesis_repair_id = str(refs.get("synthesis_repair_id") or "")
+    try:
+        synthesis_repair_revision = max(
+            0,
+            int(refs.get("synthesis_repair_revision") or 0),
+        )
+    except (TypeError, ValueError):
+        synthesis_repair_revision = 0
     question_dedup_request_id = str(
         refs.get("question_dedup_request_id") or ""
     )
@@ -150,6 +171,8 @@ def emit_structured_reply_events(
             reply=reply,
             reply_event_id=reply_event_id,
             synthesis_request_id=synthesis_request_id,
+            synthesis_repair_id=synthesis_repair_id,
+            synthesis_repair_revision=synthesis_repair_revision,
             actor=actor,
             source=source,
         )
@@ -183,6 +206,8 @@ def _emit_synthesis(
     reply: str,
     reply_event_id: str,
     synthesis_request_id: str,
+    synthesis_repair_id: str,
+    synthesis_repair_revision: int,
     actor: str,
     source: str,
 ) -> None:
@@ -204,6 +229,8 @@ def _emit_synthesis(
             reply=reply,
             reply_event_id=reply_event_id,
             synthesis_request_id=synthesis_request_id,
+            synthesis_repair_id=synthesis_repair_id,
+            synthesis_repair_revision=synthesis_repair_revision,
             actor=actor,
             source=source,
         )
@@ -221,12 +248,29 @@ def _emit_synthesis_locked(
     reply: str,
     reply_event_id: str,
     synthesis_request_id: str,
+    synthesis_repair_id: str,
+    synthesis_repair_revision: int,
     actor: str,
     source: str,
 ) -> None:
-    synthesis = _structured_reply_payload(reply, "channel_synthesis")
+    if _ignore_stale_synthesis_repair(
+        writer=writer,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        synthesis_request_id=synthesis_request_id,
+        synthesis_repair_id=synthesis_repair_id,
+        synthesis_repair_revision=synthesis_repair_revision,
+        reply_event_id=reply_event_id,
+        task_id=str(request.get("task_id") or ""),
+    ):
+        return
+    synthesis, parse_error = _structured_reply_payload_with_error(
+        reply,
+        "channel_synthesis",
+    )
     if not synthesis:
-        _emit_invalid_contract_finding(
+        _reject_synthesis_contract(
+            state_dir=state_dir,
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -237,6 +281,9 @@ def _emit_synthesis_locked(
             actor=actor,
             source=source,
             status="invalid_missing_channel_synthesis",
+            reason=parse_error,
+            synthesis_request_id=synthesis_request_id,
+            synthesis_repair_revision=synthesis_repair_revision,
         )
         return
     validation_error = validate_channel_contract(
@@ -256,7 +303,8 @@ def _emit_synthesis_locked(
                 f"unknown classification template_id: {classified_template}"
             )
     if validation_error:
-        _emit_invalid_contract_finding(
+        _reject_synthesis_contract(
+            state_dir=state_dir,
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -268,6 +316,8 @@ def _emit_synthesis_locked(
             source=source,
             status="invalid_channel_synthesis",
             reason=validation_error,
+            synthesis_request_id=synthesis_request_id,
+            synthesis_repair_revision=synthesis_repair_revision,
         )
         return
     if any(
@@ -289,7 +339,8 @@ def _emit_synthesis_locked(
         source_kind="synthesis",
     )
     if question_error:
-        _emit_invalid_contract_finding(
+        _reject_synthesis_contract(
+            state_dir=state_dir,
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -301,6 +352,8 @@ def _emit_synthesis_locked(
             source=source,
             status="invalid_channel_synthesis_question_graph",
             reason=question_error,
+            synthesis_request_id=synthesis_request_id,
+            synthesis_repair_revision=synthesis_repair_revision,
         )
         return
     summary = str(synthesis.get("summary") or reply).strip()
@@ -424,6 +477,24 @@ def _emit_synthesis_locked(
             "source": source,
         },
     )
+    if synthesis_repair_revision:
+        writer.emit(
+            "channel.synthesis.repair.completed",
+            actor=member_id or actor,
+            task_id=str(request.get("task_id") or "") or None,
+            causation_id=synthesis_event.id,
+            correlation_id=channel_id,
+            payload={
+                "schema_version": "channel.synthesis.repair.v1",
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "request_id": synthesis_request_id,
+                "repair_id": synthesis_repair_id,
+                "repair_revision": synthesis_repair_revision,
+                "source_reply_event_id": reply_event_id,
+                "source": source,
+            },
+        )
     if question_records:
         for question_record in question_records:
             writer.emit(
@@ -587,7 +658,9 @@ def _emit_contribution(
         f"event:{reply_event_id}",
     ]))
     evidence_refs = string_refs(contribution.get("evidence_refs"))
-    identity = str(request.get("request_id") or reply_event_id)
+    request_identity = str(request.get("request_id") or "reply")
+    event_identity = str(reply_event_id or "event").removeprefix("evt-")
+    identity = f"{request_identity}-{event_identity}"
     descriptor = persist_channel_contract(
         state_dir,
         channel_id=channel_id,
@@ -682,82 +755,6 @@ def _emit_contribution(
 
 
 
-def _structured_reply_payload(
-    reply: str,
-    key: str,
-) -> dict[str, Any]:
-    candidates = [str(reply or "").strip()]
-    candidates.extend(
-        match.group(1).strip()
-        for match in re.finditer(
-            r"```(?:json)?\s*([\s\S]*?)```",
-            reply,
-            re.IGNORECASE,
-        )
-    )
-    decoder = json.JSONDecoder()
-    for candidate in candidates:
-        positions = [
-            0,
-            *[
-                index
-                for index, char in enumerate(candidate)
-                if char == "{"
-            ],
-        ]
-        for position in dict.fromkeys(positions):
-            try:
-                decoded, _ = decoder.raw_decode(
-                    candidate[position:].lstrip()
-                )
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(decoded, dict):
-                continue
-            value = decoded.get(key)
-            if isinstance(value, dict):
-                return value
-    return {}
-
-
-def _reply_question_texts(
-    contribution: dict[str, Any],
-) -> list[str]:
-    questions: list[str] = []
-    for key in ("questions", "open_questions"):
-        for raw in contribution.get(key) or []:
-            if isinstance(raw, dict):
-                text = str(
-                    raw.get("question") or raw.get("text") or ""
-                ).strip()
-            else:
-                text = str(raw or "").strip()
-            if text and text not in questions:
-                questions.append(text)
-    return questions[:16]
-
-
-def _string_items(value: object) -> list[str]:
-    return [
-        _display_value(item)
-        for item in typed_items(value)
-        if _display_value(item)
-    ][:32]
-
-
-def _display_value(value: object) -> str:
-    if value in (None, ""):
-        return ""
-    if isinstance(value, (dict, list)):
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    return str(value).strip()
-
-
 def _template_binding(channel: dict[str, Any]) -> dict[str, str]:
     scope = (
         channel.get("scope")
@@ -786,61 +783,23 @@ def _contribution_contract_refs(
 ) -> tuple[list[str], list[str]]:
     refs: list[str] = []
     digests: list[str] = []
-    for event in channel.get("linked_events") or []:
-        if not isinstance(event, dict):
+    for contribution in channel_contribution_index(
+        channel,
+        thread_id=thread_id,
+    ):
+        if str(contribution.get("contract_status") or "") != "structured":
             continue
-        if str(event.get("type") or "") != "channel.finding.recorded":
-            continue
-        payload = (
-            event.get("payload")
-            if isinstance(event.get("payload"), dict)
-            else {}
-        )
-        if str(payload.get("thread_id") or "main") != thread_id:
-            continue
-        if str(payload.get("contract_status") or "") != "structured":
-            continue
-        artifact_ref = str(payload.get("artifact_ref") or "").strip()
-        artifact_digest = str(payload.get("artifact_digest") or "").strip()
+        artifact_ref = str(
+            contribution.get("artifact_ref") or ""
+        ).strip()
+        artifact_digest = str(
+            contribution.get("artifact_digest") or ""
+        ).strip()
         if artifact_ref:
             refs.append(artifact_ref)
         if artifact_digest:
             digests.append(artifact_digest)
     return list(dict.fromkeys(refs)), list(dict.fromkeys(digests))
-
-
-def _emit_invalid_contract_finding(
-    *,
-    writer: EventWriter,
-    channel_id: str,
-    thread_id: str,
-    member_id: str,
-    request: dict[str, Any],
-    reply: str,
-    reply_event_id: str,
-    actor: str,
-    source: str,
-    status: str,
-    reason: str = "",
-) -> None:
-    writer.emit(
-        "channel.finding.recorded",
-        actor=member_id or actor,
-        task_id=str(request.get("task_id") or "") or None,
-        causation_id=reply_event_id,
-        correlation_id=channel_id,
-        payload={
-            "channel_id": channel_id,
-            "thread_id": thread_id,
-            "member_id": member_id,
-            "summary": str(reply or "").strip(),
-            "source_refs": [f"event:{reply_event_id}"],
-            "evidence_refs": [],
-            "contract_status": status,
-            "contract_error": reason,
-            "source": source,
-        },
-    )
 
 
 def _render_prd_artifact(

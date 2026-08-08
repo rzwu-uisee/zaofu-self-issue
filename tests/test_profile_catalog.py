@@ -11,6 +11,7 @@ def test_controller_examples_are_catalog_entries():
     assert "issue-fanout-v3-codex" in ids
     assert "prd-fanout-v3-codex" in ids
     assert "refactor-lane-v3-codex" in ids
+    assert "general-workflow-v3-codex" in ids
     expected_roles = {
         "issue-fanout-v3-codex": 7,
         "issue-fanout-v3-claude": 7,
@@ -18,6 +19,8 @@ def test_controller_examples_are_catalog_entries():
         "prd-fanout-v3-claude": 11,
         "refactor-lane-v3-codex": 13,
         "refactor-lane-v3-claude": 13,
+        "general-workflow-v3-codex": 6,
+        "general-workflow-v3-claude": 6,
     }
     for flow_id, role_count in expected_roles.items():
         assert entries[flow_id]["roles"] == role_count
@@ -40,3 +43,7 @@ def test_codex_prefers_controller_v3_flows():
     assert flow_id_for_intent("refactor", "claude") == "refactor-lane-v3-claude"
     assert flow_id_for_intent("maintain", "claude") == "issue-fanout-v3-claude"
     assert flow_id_for_intent("review", "claude") == "issue-fanout-v3-claude"
+    assert flow_id_for_intent("research", "codex") == "general-workflow-v3-codex"
+    assert flow_id_for_intent("general", "codex") == "general-workflow-v3-codex"
+    assert flow_id_for_intent("research", "claude") == "general-workflow-v3-claude"
+    assert flow_id_for_intent("general", "claude") == "general-workflow-v3-claude"

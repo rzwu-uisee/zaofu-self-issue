@@ -243,6 +243,56 @@ class TestRefreshTriggered:
         ]
         assert [event.actor for event in triggers] == ["review"]
 
+    def test_unscoped_legacy_drift_does_not_broadcast_refresh(
+        self, state_dir, config, transport,
+    ):
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="worker.drift.detected",
+            actor="zf-cli",
+            payload={
+                "signal": "repeat_decisions",
+                "severity": "medium",
+                "recommended_action": "refresh",
+                "affected_role": "",
+            },
+        ))
+        orch = Orchestrator(state_dir, config, transport)
+
+        orch._check_refresh_triggers()
+
+        assert not any(
+            event.type == "worker.refresh.triggered"
+            and event.payload.get("reason") == "drift"
+            for event in log.read_all()
+        )
+
+    def test_explicit_global_drift_can_broadcast_refresh(
+        self, state_dir, config, transport,
+    ):
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="worker.drift.detected",
+            actor="zf-cli",
+            payload={
+                "signal": "systemic_context_corruption",
+                "severity": "high",
+                "recommended_action": "refresh",
+                "scope": "global",
+            },
+        ))
+        orch = Orchestrator(state_dir, config, transport)
+
+        orch._check_refresh_triggers()
+
+        actors = {
+            event.actor
+            for event in log.read_all()
+            if event.type == "worker.refresh.triggered"
+            and event.payload.get("reason") == "drift"
+        }
+        assert actors == {"dev", "review"}
+
 
 class TestRunOnceIntegration:
     def test_run_once_calls_check_refresh_triggers(

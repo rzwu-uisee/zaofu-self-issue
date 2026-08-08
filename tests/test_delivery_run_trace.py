@@ -7,6 +7,7 @@ from zf.core.config.loader import load_config
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task, TaskContract
 from zf.runtime.delivery_run_trace import build_delivery_run_projection
+from zf.runtime.delivery_projection_common import event_error, event_status
 from zf.runtime.workflow_trace import build_workflow_trace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,3 +170,20 @@ def test_autoresearch_trace_projects_ab_and_bugfix_graphs() -> None:
     assert {node["kind"] for node in graphs["ar-ab"]["nodes"]} >= {"trigger", "baseline", "candidate", "ab_eval"}
     assert graphs["ar-bug"]["comparison_mode"] == "single_candidate"
     assert {node["kind"] for node in graphs["ar-bug"]["nodes"]} >= {"candidate", "repair", "validation"}
+
+
+def test_terminal_duplicate_rejection_is_settled_not_failed() -> None:
+    terminal_duplicate = ZfEvent(
+        id="evt-terminal-duplicate",
+        type="run.result.rejected",
+        payload={"reason": "run_terminal:completed"},
+    )
+    actual_rejection = ZfEvent(
+        id="evt-actual-rejection",
+        type="run.result.rejected",
+        payload={"reason": "invalid_result"},
+    )
+
+    assert event_status(terminal_duplicate) == "settled"
+    assert event_error(terminal_duplicate) == {}
+    assert event_status(actual_rejection) == "failed"

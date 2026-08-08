@@ -202,6 +202,7 @@ def prepare_generic_workflow(
         normalized_tasks.append({
             "name": name,
             "operation": operation_id,
+            "result_semantics": operation.result_semantics,
             "topology": topology,
             "roles": _task_roles(
                 raw,
@@ -286,6 +287,7 @@ def prepare_generic_workflow(
         extensions[name] = {
             "flow_kind": "workflow",
             "operation": str(normalized["operation"]),
+            "result_semantics": str(normalized["result_semantics"]),
             "input_ports": list(normalized["inputs"]),
             "output_ports": list(normalized["outputs"]),
             "dependencies": dependencies,
@@ -349,7 +351,10 @@ def prepare_generic_workflow(
         "result_protocol": {
             "mode": result_protocol_mode,
             "semantic_submit_profiles": (
-                {"artifact-delivery": "blocking"}
+                {
+                    "workflow-read": "blocking",
+                    "artifact-delivery": "blocking",
+                }
                 if completion["id"] == "artifact_delivery"
                 else {}
             ),

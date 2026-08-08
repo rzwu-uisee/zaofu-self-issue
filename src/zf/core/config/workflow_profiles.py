@@ -83,6 +83,7 @@ _COMMON_PRODUCT_FLOW_KEYS = frozenset({
     "planCriticRole", "plan_critic_role",
     "semanticSubmitProfiles", "semantic_submit_profiles",
     "artifactPackageMode", "artifact_package_mode",
+    "taskPipeline", "task_pipeline",
 })
 _KNOWN_ISSUE_FLOW_KEYS = _COMMON_PRODUCT_FLOW_KEYS | frozenset({
     "topology",  # light(default single lane goal loop) | fanout
@@ -117,6 +118,7 @@ _PRD_SCAN_INSTRUCTIONS = [
     "This is the initial PRD scan stage, not implementation verification.",
     "Missing product code is expected before impl; record it as required work, risk, or gap input, not as a blocking scan failure.",
     "Emit success when you can read the PRD/scope and produce a useful product/technical scan report for planning.",
+    "For a complete scan report, set status to passed and recommendation to approve; record downstream product decisions, implementation gaps, and planning work in findings instead of marking this scan operation needs_rework.",
     "Emit failure only when the PRD/scope cannot be read or the scan report cannot be produced.",
 ]
 
@@ -126,12 +128,16 @@ _TASK_MAP_CONTRACT_INSTRUCTIONS = [
     "Task-map hard contract: include `shared_conventions.test_path_prefix` and package/scaffold conventions such as `package_root` and `packaging_file` when more than one task depends on them.",
     "Task-map hard contract: top-level `tasks` must be a non-empty array; each task must have a stable `task_id`, `title`, scoped `allowed_paths`, structured `validation.commands`, `acceptance_criteria`, and `blocked_by` (empty array when none).",
     "Task-map hard contract: when `allowed_paths` is non-empty, include `allowed_paths_reason` or `scope_reason` explaining the ownership boundary.",
+    "Task-map hard contract: `allowed_paths` grants exclusive write ownership. No concrete path or overlapping subtree may appear in multiple tasks, even with `blocked_by`; coarsen tasks or assign one integration owner.",
     "Task-map hard contract: dependencies in `blocked_by` must reference existing task ids and must not point to a later wave.",
-    "Task-map hard contract: new plans use `validation.commands[]`; each command has stable `id`, executable `command`, `acceptance_ids`, `owner`, `tier`, `deterministic`, `reusable`, and `timeout_seconds`. Keep commands independent; do not join them with `&&`. Legacy `verification` remains accepted only as an adapter.",
+    "Task-map hard contract: new plans use `validation.commands[]`; each command has stable `id`, executable `command`, `acceptance_ids`, `owner`, `tier`, `deterministic`, `reusable`, and `timeout_seconds`; commands that produce required files also declare `producer_paths`. Keep commands independent; do not join them with `&&`. Legacy `verification` remains accepted only as an adapter.",
     "Task-map hard contract: downstream gates execute each canonical `command` exactly as stored. Never validate a rewritten or equivalent command; put escape-sensitive assertions in repository test/script files instead of nested `node -e` or `python -c` payloads.",
     "Task-map hard contract: acceptance entries use stable `id`, observable `statement`, `mandatory`, `verification_owner`, `verification_tier`, and `verification_command_ids`. An AC is a product outcome, not a test command or implementation step.",
-    "Task-map hard contract: verification may use `cd <target_root>`, but referenced files must still be represented by repo-relative `allowed_paths` such as `app/tests/...`, not bare `tests/...`.",
+    "Task-map hard contract: verification may read sibling-owned paths; do not duplicate read-only operands in `allowed_paths`. Represent each repo-relative path once (for example `app/tests/...`, not bare `tests/...`).",
     "Task-map hard contract: scaffold owners must list package metadata files they create, including `package.json`, `pyproject.toml`, `setup.py`, `setup.cfg`, `tsconfig.json`, or lockfiles.",
+    "Plan handoff hard contract: produce a non-empty human-readable Markdown plan and expose it as plan_artifact_ref/plan_ref or plan_md.",
+    "Plan handoff hard contract: produce source-index.v1 and expose source_index_ref or a source_index plan port; every task needs source_key, source_ref, and source_excerpt.",
+    "Goal handoff hard contract: explicit mandatory goal_claims must be mapped through task goal_claim_ids to structured acceptance criteria and verification command ids; every command and acceptance criterion needs an owner and tier.",
 ]
 
 _PRD_PLAN_INSTRUCTIONS = [
@@ -145,6 +151,7 @@ _ISSUE_TRIAGE_INSTRUCTIONS = [
     "This is issue triage and task-map synthesis, not fix verification.",
     "The reported bug or missing behavior is expected before fix; turn it into scoped repair tasks and regression checks.",
     "Emit success when you can understand the issue and produce a machine-readable task_map.",
+    "For a complete actionable task_map, set status to passed and recommendation to approve; the unfixed issue and downstream implementation work are task-map content, not a triage-operation rejection.",
     "Emit failure only when the issue/scope cannot be read or no actionable task_map can be produced.",
     *_TASK_MAP_CONTRACT_INSTRUCTIONS,
 ]
@@ -168,6 +175,7 @@ _REFACTOR_SCAN_INSTRUCTIONS = [
     "This is the initial refactor scan stage, not parity completion verification.",
     "Missing target implementation is expected before impl; convert it into source inventory, capability/parity gaps, risks, and planning inputs.",
     "Emit success when the assigned source/scope has been inspected and an evidence-backed scan report can feed the plan stage.",
+    "For a complete scan report, set status to passed and recommendation to approve; preserve parity gaps, risks, and required implementation as findings and planning inputs instead of marking this scan operation needs_rework.",
     "Emit failure only when the assigned scope cannot be inspected or the scan report cannot be produced.",
 ]
 
@@ -232,6 +240,7 @@ def _semantic_submit_profiles_param(params: dict[str, Any]) -> dict[str, str]:
 
 _ROLE_DEFAULT_ALIASES = {
     "modelReasoningEffort": "model_reasoning_effort",
+    "contextWindowTokens": "context_window_tokens",
     "providerSession": "provider_session",
     "providerSessionByStage": "provider_session_by_stage",
     "lifecycleByStage": "lifecycle_by_stage",
@@ -248,6 +257,7 @@ _ROLE_DEFAULT_ALIASES = {
 _ROLE_DEFAULT_FIELDS = (
     "model",
     "model_reasoning_effort",
+    "context_window_tokens",
     "transport",
     "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds",
@@ -256,6 +266,7 @@ _ROLE_DEFAULT_FIELDS = (
     "context_hard_cap",
     "drain_hold_seconds",
     "budget_usd",
+    "execution",
     "provider_session",
     "lifecycle",
 )
@@ -263,9 +274,11 @@ _ROLE_DEFAULT_FIELDS = (
 _LANE_ROLE_DEFAULT_FIELDS = (
     "model",
     "model_reasoning_effort",
+    "context_window_tokens",
     "stuck_threshold_seconds",
     "spawn_ready_timeout_seconds",
     "budget_usd",
+    "execution",
     "provider_session",
     "lifecycle",
     "provider_session_by_stage",
@@ -323,6 +336,21 @@ def _lane_role_template(
     if verify_backend and verify_backend != backend:
         template["backend_by_stage"] = {"verify": verify_backend}
     return template
+
+
+def _apply_task_pipeline_worker_lifecycle(
+    template: dict[str, Any],
+    task_pipeline: dict[str, Any] | None,
+) -> None:
+    if task_pipeline is None:
+        return
+    lifecycle = dict(task_pipeline.get("worker_lifecycle") or {})
+    template["lifecycle"] = {
+        "mode": "on_demand",
+        "idle_seconds": int(lifecycle.get("idle_seconds") or 120),
+        "preserve_session": True,
+        "preserve_workdir": True,
+    }
 
 
 def _list_param(raw: Any, *, name: str) -> list[str]:
@@ -426,6 +454,7 @@ def expand_refactor_flow_v1(params: dict) -> dict[str, Any]:
     stages = [
         {
             "id": "flow-scan",
+            "result_semantics": "artifact_production",
             "trigger": entry,
             "topology": "fanout_reader",
             "roles": scan_roles,
@@ -443,6 +472,7 @@ def expand_refactor_flow_v1(params: dict) -> dict[str, Any]:
         },
         {
             "id": "flow-plan",
+            "attempt_domain": "plan",
             "trigger": "zaofu.refactor.review.ready",
             "topology": "fanout_reader",
             "roles": [scan_synth],
@@ -613,6 +643,7 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
     stages = [
         {
             "id": "flow-scan",
+            "result_semantics": "artifact_production",
             "trigger": entry,
             "topology": "fanout_reader",
             "roles": scan_roles,
@@ -630,6 +661,7 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
         },
         {
             "id": "flow-plan",
+            "attempt_domain": "plan",
             "trigger": "zaofu.refactor.review.ready",
             "topology": "fanout_reader",
             "roles": [scan_synth],
@@ -1005,6 +1037,33 @@ def _controller_metadata(
     }
 
 
+def _compile_product_task_pipeline(
+    params: dict[str, Any],
+    *,
+    flow_kind: str,
+    lanes: int,
+    impl_pattern: str,
+    verify_pattern: str,
+) -> dict[str, Any] | None:
+    from zf.core.config.task_pipeline_profile import (
+        TaskPipelineProfileError,
+        compile_task_pipeline_profile,
+    )
+
+    profile_id = str(_pick(params, "flowProfile", "flow_profile", default=""))
+    raw = _pick(params, "taskPipeline", "task_pipeline")
+    try:
+        return compile_task_pipeline_profile(
+            flow_kind=flow_kind,
+            profile_id=profile_id,
+            raw=raw,
+            default_impl_roles=[impl_pattern.format(lane=index) for index in range(lanes)],
+            default_verify_roles=[verify_pattern.format(lane=index) for index in range(lanes)],
+        )
+    except (KeyError, TaskPipelineProfileError, ValueError) as exc:
+        raise WorkflowProfileError(str(exc)) from exc
+
+
 def _post_verify_discovery_stage(
     *,
     flow_kind: str,
@@ -1055,6 +1114,23 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     if topology not in {"fanout", "light"}:
         raise WorkflowProfileError(
             f"IssueFlow: unknown topology {topology!r} (fanout|light)"
+        )
+    task_pipeline = _compile_product_task_pipeline(
+        params,
+        flow_kind="issue",
+        lanes=lanes,
+        impl_pattern=str(_pick(
+            params, "fixRolePattern", "fix_role_pattern",
+            default="fix-lane-{lane}",
+        )),
+        verify_pattern=str(_pick(
+            params, "verifyRolePattern", "verify_role_pattern",
+            default="verify-lane-{lane}",
+        )),
+    )
+    if task_pipeline is not None and topology != "fanout":
+        raise WorkflowProfileError(
+            "issue-flow-v4-task-pipeline requires topology: fanout"
         )
     if topology == "light":
         return _expand_product_flow_light(
@@ -1154,6 +1230,7 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     stages = [
         {
             "id": "issue-triage",
+            "attempt_domain": "plan",
             "trigger": entry,
             "topology": "fanout_reader",
             "roles": [triage_role],
@@ -1178,6 +1255,7 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
         lane_template["skills_by_stage"]["impl"] = _role_skills(bundles, "fix")
     if _role_skills(bundles, "verify"):
         lane_template["skills_by_stage"]["verify"] = _role_skills(bundles, "verify")
+    _apply_task_pipeline_worker_lifecycle(lane_template, task_pipeline)
     pipeline = _flow_kernel_lane_pipeline(
         pipeline_id="issue-lanes",
         lanes=lanes,
@@ -1210,6 +1288,14 @@ def expand_issue_flow(params: dict) -> dict[str, Any]:
     if discovery_stage:
         stages.append(discovery_stage)
     metadata["issue_ref"] = str(_pick(params, "issueRef", "issue_ref", default=""))
+    if task_pipeline is not None:
+        metadata["controller_profile"] = task_pipeline["profile_id"]
+        metadata["task_pipeline"] = task_pipeline
+        semantic_profiles = metadata["result_protocol"][
+            "semantic_submit_profiles"
+        ]
+        semantic_profiles.setdefault("implementation", "blocking")
+        semantic_profiles.setdefault("task-verify", "blocking")
     return {
         "roles": roles,
         "stages": stages,
@@ -1365,6 +1451,23 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
         raise WorkflowProfileError(
             f"PrdFlow: unknown topology {topology!r} (fanout|light)"
         )
+    task_pipeline = _compile_product_task_pipeline(
+        params,
+        flow_kind="prd",
+        lanes=lanes,
+        impl_pattern=str(_pick(
+            params, "implRolePattern", "impl_role_pattern",
+            default="dev-lane-{lane}",
+        )),
+        verify_pattern=str(_pick(
+            params, "verifyRolePattern", "verify_role_pattern",
+            default="verify-lane-{lane}",
+        )),
+    )
+    if task_pipeline is not None and topology != "fanout":
+        raise WorkflowProfileError(
+            "prd-flow-v4-task-pipeline requires topology: fanout"
+        )
     if topology == "light":
         return _expand_prd_flow_light(
             params,
@@ -1462,6 +1565,7 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
     stages = [
         {
             "id": "prd-scan",
+            "result_semantics": "artifact_production",
             "trigger": entry,
             "topology": "fanout_reader",
             "roles": scan_roles,
@@ -1477,6 +1581,7 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
         },
         {
             "id": "prd-plan",
+            "attempt_domain": "plan",
             "trigger": "prd.scan.completed",
             "topology": "fanout_reader",
             "roles": [plan_role],
@@ -1500,6 +1605,7 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
         lane_template["skills_by_stage"]["impl"] = _role_skills(bundles, "impl")
     if _role_skills(bundles, "verify"):
         lane_template["skills_by_stage"]["verify"] = _role_skills(bundles, "verify")
+    _apply_task_pipeline_worker_lifecycle(lane_template, task_pipeline)
     pipeline = _flow_kernel_lane_pipeline(
         pipeline_id="prd-lanes",
         lanes=lanes,
@@ -1534,6 +1640,14 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
     metadata["prd_ref"] = str(_pick(params, "prdRef", "prd_ref", default=""))
     metadata["target_root"] = str(_pick(params, "targetRoot", "target_root", default=""))
     metadata["stack"] = str(_pick(params, "stack", default=""))
+    if task_pipeline is not None:
+        metadata["controller_profile"] = task_pipeline["profile_id"]
+        metadata["task_pipeline"] = task_pipeline
+        semantic_profiles = metadata["result_protocol"][
+            "semantic_submit_profiles"
+        ]
+        semantic_profiles.setdefault("implementation", "blocking")
+        semantic_profiles.setdefault("task-verify", "blocking")
     return {
         "roles": roles,
         "stages": stages,
@@ -1544,9 +1658,58 @@ def expand_prd_flow(params: dict) -> dict[str, Any]:
     }
 
 
+def expand_refactor_flow_v4_task_pipeline(params: dict) -> dict[str, Any]:
+    """Compile v4 policy while retaining the v3 lane path as shadow baseline."""
+
+    from zf.core.config.task_pipeline_profile import (
+        TaskPipelineProfileError,
+        compile_task_pipeline_profile,
+    )
+
+    profile_id = str(_pick(params, "flowProfile", "flow_profile", default=""))
+    raw = _pick(params, "taskPipeline", "task_pipeline")
+    lanes = int(_pick(params, "lanes", "laneCount", "lane_count", default=5))
+    legacy = dict(params)
+    legacy.pop("taskPipeline", None)
+    legacy.pop("task_pipeline", None)
+    legacy["flowProfile"] = "refactor-flow/v3"
+    expansion = expand_refactor_flow_v3(legacy)
+    try:
+        compiled = compile_task_pipeline_profile(
+            flow_kind="refactor",
+            profile_id=profile_id,
+            raw=raw,
+            default_impl_roles=[f"dev-lane-{index}" for index in range(lanes)],
+            default_verify_roles=[f"verify-lane-{index}" for index in range(lanes)],
+        )
+    except (TaskPipelineProfileError, ValueError) as exc:
+        raise WorkflowProfileError(str(exc)) from exc
+    if compiled is None:
+        raise WorkflowProfileError(
+            "refactor-flow-v4-task-pipeline requires taskPipeline"
+        )
+    for pipeline in expansion.get("pipelines", []):
+        if not isinstance(pipeline, dict):
+            continue
+        template = pipeline.get("lane_role_template")
+        if isinstance(template, dict):
+            _apply_task_pipeline_worker_lifecycle(template, compiled)
+    expansion["metadata"]["controller_profile"] = compiled["profile_id"]
+    expansion["metadata"]["task_pipeline"] = compiled
+    semantic_profiles = expansion["metadata"]["result_protocol"][
+        "semantic_submit_profiles"
+    ]
+    semantic_profiles.setdefault("implementation", "blocking")
+    semantic_profiles.setdefault("task-verify", "blocking")
+    return expansion
+
+
 WORKFLOW_PROFILES = {
     "refactor-flow/v1": expand_refactor_flow_v1,
     "refactor-flow/v3": expand_refactor_flow_v3,
+    "refactor-flow-v4-task-pipeline": lambda params: (
+        expand_refactor_flow_v4_task_pipeline(params)
+    ),
 }
 
 

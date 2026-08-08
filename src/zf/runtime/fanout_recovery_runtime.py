@@ -149,6 +149,8 @@ class FanoutRecoveryRuntimeMixin:
 
     def _recover_writer_fanout_task_bindings(self) -> None:
         """Re-project active writer fanout dispatches into canonical tasks."""
+        from zf.runtime.workdirs import WorkdirManager
+
         try:
             events = self.event_log.read_all()
         except Exception:
@@ -262,21 +264,52 @@ class FanoutRecoveryRuntimeMixin:
                     run_id=run_id,
                 ):
                     continue
+                workdir_sync: dict[str, str] = {}
+                roles = self._fanout_roles([role_instance])
+                if roles:
+                    manager = WorkdirManager(
+                        state_dir=self.state_dir,
+                        project_root=self.project_root,
+                        config=self.config,
+                    )
+                    task_ref = manager.task_ref_metadata(task_id)
+                    task_ref_trace_id = str(
+                        task_ref.get("trace_id") or ""
+                    ).strip()
+                    source_ref = str(
+                        task_ref.get("source_commit")
+                        or task_ref.get("task_ref")
+                        or ""
+                    ).strip()
+                    manifest_trace_id = str(
+                        manifest.get("trace_id") or ""
+                    ).strip()
+                    if (
+                        source_ref
+                        and task_ref_trace_id in {"", manifest_trace_id}
+                    ):
+                        workdir_sync = manager.sync_writer_to_source_ref(
+                            roles[0],
+                            source_ref_override=source_ref,
+                        )
                 self._publish_writer_fanout_task_capsule(
                     task_id=task_id,
                     dispatch_id=run_id,
                 )
+                binding_payload = {
+                    "dispatch_id": run_id,
+                    "role_instance": role_instance,
+                    "fanout_id": fanout_id,
+                    "child_id": str(child.get("child_id") or ""),
+                    "source": "writer_fanout_task_binding_recovery",
+                }
+                if workdir_sync:
+                    binding_payload["workdir_sync"] = workdir_sync
                 self.event_writer.append(ZfEvent(
                     type="task.dispatch_context.bound",
                     actor="zf-cli",
                     task_id=task_id,
-                    payload={
-                        "dispatch_id": run_id,
-                        "role_instance": role_instance,
-                        "fanout_id": fanout_id,
-                        "child_id": str(child.get("child_id") or ""),
-                        "source": "writer_fanout_task_binding_recovery",
-                    },
+                    payload=binding_payload,
                     causation_id=str(child.get("last_event_id") or "") or None,
                     correlation_id=str(manifest.get("trace_id") or "") or None,
                 ))

@@ -172,6 +172,33 @@ assert(
   multiQuestionPlan?.questions.every((question) => question.options[0]?.recommended),
   "Plan projection should retain each recommended option",
 );
+
+const invalidPlanWithoutQuestion = parsePlanRequest({
+  plan_request: {
+    request_event_id: "evt-plan-invalid",
+    request_id: "plan-invalid",
+    revision: 1,
+    header: "Channel setup",
+    question_id: "decision",
+    question: "",
+    options: [
+      { id: "three-rounds", label: "Three rounds" },
+      { id: "two-rounds", label: "Two rounds" },
+    ],
+    valid: false,
+    validation_error: "question is required",
+  },
+});
+assert(invalidPlanWithoutQuestion !== undefined, "invalid Plan should remain visible for discussion");
+assert(invalidPlanWithoutQuestion?.valid === false, "invalid Plan must stay mechanically disabled");
+assert(
+  invalidPlanWithoutQuestion?.question === "This Plan draft needs revision before it can be submitted.",
+  "invalid Plan should get a bounded recovery question",
+);
+assert(
+  invalidPlanWithoutQuestion?.validationError === "question is required",
+  "invalid Plan should retain its validation diagnostics",
+);
 const multiQuestionResponse = parsePlanResponse({
   request_event_id: "evt-plan-multi",
   request_id: "plan-multi",
@@ -315,6 +342,87 @@ assert(
   resultCards[0]?.refs?.artifact_ref === "research/TASK-1/result.md"
   && resultCards[0]?.refs?.artifact_digest === "a".repeat(64),
   "Kanban result card exposes the immutable artifact ref and digest",
+);
+
+// A resumed Plan answer can make the provider reply part of the hidden answer
+// turn while the durable Plan remains bound to the original owner message.
+// Both events carry the same request_event_id; render the canonical request
+// once instead of exposing two independently clickable cards across turns.
+const resumedPlanRequest = {
+  request_event_id: "evt-plan-next",
+  request_id: "plan-next",
+  revision: 1,
+  header: "Channel setup",
+  question_id: "depth",
+  question: "Choose discussion depth",
+  originating_message_event_id: "evt-60",
+  turn_id: "turn-answer",
+  options: [
+    { id: "standard", label: "Standard", recommended: true },
+    { id: "quick", label: "Quick" },
+  ],
+};
+const resumedPlanConversation = buildKanbanConversation({
+  events: [
+    event(60, "user.message", {
+      source: "kanban",
+      target: "kanban-agent",
+      runtime_delivery: "headless",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+      message: "Original requirement",
+    }),
+    event(61, "user.message", {
+      source: "kanban",
+      target: "kanban-agent",
+      runtime_delivery: "headless",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+      message: "Plan answer",
+      request: { plan_response: { request_event_id: "evt-plan-prior" } },
+    }),
+    event(62, "kanban.agent.turn.created", {
+      backend: "codex-headless",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+      turn_id: "turn-answer",
+      message_event_id: "evt-61",
+    }),
+    event(63, "kanban.agent.reply", {
+      backend: "codex-headless",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+      turn_id: "turn-answer",
+      answer: "Next Plan",
+      plan_request: resumedPlanRequest,
+    }),
+    event(64, "kanban.agent.plan.requested", {
+      backend: "codex-headless",
+      project_id: "proj-a",
+      conversation_id: "kanban:proj-a",
+      thread_key: "thread-a",
+      turn_id: "turn-answer",
+      plan_request: resumedPlanRequest,
+    }),
+  ],
+  activeThreadId: "thread-a",
+  conversationId: "kanban:proj-a",
+  projectId: "proj-a",
+});
+const resumedPlanCards = resumedPlanConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.cards)
+  .filter((card) => (
+    card.kind === "plan"
+    && card.planRequest?.requestEventId === "evt-plan-next"
+  ));
+assert(
+  resumedPlanCards.length === 1,
+  `canonical resumed Plan should render once, got ${resumedPlanCards.length}`,
 );
 
 console.log("kanbanSessionEvents.test.ts OK");

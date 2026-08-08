@@ -180,7 +180,8 @@ def _report(
     }, member_ids
     discussion = channel.get("discussion") or {}
     assert discussion.get("max_rounds") == 2, discussion
-    assert discussion.get("mode") == "fanout_then_synthesis", discussion
+    assert discussion.get("mode") == "multi_lens", discussion
+    assert discussion.get("engine_mode") == "fanout_then_synthesis", discussion
 
     prd_context = canonical_channel_prd_context(state_dir)
     matching_prds = [
@@ -192,7 +193,16 @@ def _report(
     canonical_prd = matching_prds[0]
     artifact_ref = str(canonical_prd["artifact_ref"])
     artifact_digest = str(canonical_prd["artifact_digest"])
-    source_ref = str(canonical_prd["source_ref"])
+    prd_path = state_dir / artifact_ref
+    prd_payload = json.loads(prd_path.read_text(encoding="utf-8"))
+    prd_body = (
+        prd_payload.get("body")
+        if isinstance(prd_payload.get("body"), dict)
+        else {}
+    )
+    spec_ref = str(prd_body.get("spec_path") or "")
+    spec_digest = str(prd_body.get("spec_digest") or "")
+    assert spec_ref and spec_digest, prd_body
 
     events = EventLog(state_dir / "events.jsonl").read_all()
     event_order = {
@@ -251,13 +261,17 @@ def _report(
         )
         task = matched_tasks[0]
         contract = asdict(task.contract)
-        assert contract["spec_ref"] == artifact_ref
-        assert contract["source_ref"] == source_ref
+        assert contract["spec_ref"] == spec_ref
+        assert contract["source_ref"] == artifact_ref
+        assert contract["product_contract_ref"] == artifact_ref
         assert artifact_ref in contract["handoff_artifacts"]
         assert (
             contract["evidence_contract"]["channel_prd_digest"]
             == artifact_digest
         )
+        assert contract["evidence_contract"]["spec_digest"] == spec_digest
+        assert contract["verification"] == "test -f README.md"
+        assert contract["acceptance_criteria"]
 
         created = next(
             event
@@ -288,7 +302,7 @@ def _report(
             for event in events
             if event.type == "web.action.requested"
             and event.task_id == task.id
-            and _contains_action(event, "workflow-start")
+            and str(event.payload.get("action") or "") == "workflow-start"
         )
         invoke = next(
             event
@@ -310,15 +324,29 @@ def _report(
         if not manifest_ref.is_absolute():
             manifest_ref = state_dir / manifest_ref
         assert manifest_ref.exists(), manifest_ref
-        assert (
-            event_order[consensus.id]
-            < event_order[created.id]
-            < event_order[plan_requested.id]
-            < event_order[workflow_start_proposal.id]
-            < event_order[plan_answered.id]
-            < event_order[workflow_start_request.id]
-            < event_order[invoke.id]
-        )
+        ordered_events = {
+            "consensus": (consensus.id, event_order[consensus.id]),
+            "task_created": (created.id, event_order[created.id]),
+            "plan_requested": (
+                plan_requested.id,
+                event_order[plan_requested.id],
+            ),
+            "workflow_proposed": (
+                workflow_start_proposal.id,
+                event_order[workflow_start_proposal.id],
+            ),
+            "plan_answered": (
+                plan_answered.id,
+                event_order[plan_answered.id],
+            ),
+            "workflow_requested": (
+                workflow_start_request.id,
+                event_order[workflow_start_request.id],
+            ),
+            "workflow_invoked": (invoke.id, event_order[invoke.id]),
+        }
+        observed_order = [item[1] for item in ordered_events.values()]
+        assert observed_order == sorted(observed_order), ordered_events
         flow_results[flow_kind] = {
             "task_id": task.id,
             "route_id": FLOW_ROUTES[flow_kind],

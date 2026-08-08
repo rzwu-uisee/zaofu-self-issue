@@ -87,7 +87,7 @@ test("creates and applies a registered General Workflow without starting it", as
     exact: true,
   }).first()).toBeVisible({ timeout: 120_000 });
 
-  const apply = page.getByRole("button", { name: "Apply config" });
+  const apply = page.getByTestId("workflow-apply-config");
   await expect(apply).toBeEnabled({ timeout: 120_000 });
   await capture(page, "01-general-workflow-proposal");
   const responsePromise = page.waitForResponse((response) => (
@@ -100,6 +100,6 @@ test("creates and applies a registered General Workflow without starting it", as
   await expect(page.getByTestId("workflow-proposal-feedback")).toContainText(
     "Config applied",
   );
-  await expect(page.getByRole("button", { name: "Approve & Run" })).toBeVisible();
+  await expect(page.getByTestId("workflow-approve-run")).toBeVisible();
   await capture(page, "02-general-workflow-config-applied");
 });

@@ -249,6 +249,10 @@ def test_prod_verify_and_judge_skill_activation_boundaries():
         root / "zf-goal-closure-replan-contract" / "SKILL.md",
         expected_name="zf-goal-closure-replan-contract",
     )
+    matrix = read_skill_metadata(
+        root / "zf-project-adapter-matrix-enrichment" / "SKILL.md",
+        expected_name="zf-project-adapter-matrix-enrichment",
+    )
 
     assert judge.auto_inject is True
     assert judge.load_on_demand is False
@@ -258,6 +262,9 @@ def test_prod_verify_and_judge_skill_activation_boundaries():
         "zf-mechanical-claim-verifier",
     )
     assert replan.dependencies == ("zf-verify-gap-producer-contract",)
+    assert matrix.auto_inject is True
+    assert matrix.load_on_demand is False
+    assert matrix.stages == ("plan", "scan", "triage", "replan", "verify")
 
 
 def test_skill_hash_changes_are_detected(tmp_path: Path):

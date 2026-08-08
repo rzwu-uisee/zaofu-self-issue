@@ -12,6 +12,7 @@ from pathlib import Path
 
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.config.project_context import ProjectContext, resolve_project_context
+from zf.runtime.cli_command import set_default_zf_cli_cmd
 
 
 # doc 78 O-7 fix: single canonical dotenv loader (was duplicated here +
@@ -98,6 +99,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     _load_project_env(context.project_root)
+    set_default_zf_cli_cmd()
     state_dir = context.state_dir
     explicit_state_dir = getattr(args, "state_dir", None)
     workspace_shell = bool(getattr(args, "workspace_only", False))

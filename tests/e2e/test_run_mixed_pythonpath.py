@@ -218,7 +218,7 @@ def test_start_watcher_passes_pinned_env(
         "start_watcher's Popen must pass env explicitly"
     )
     assert captured["kw"]["env"]["PYTHONPATH"] == str(REPO_ROOT / "src")
-    assert captured["kw"].get("start_new_session") is False
+    assert captured["kw"].get("start_new_session") is True
 
 
 def test_owner_sigterm_stops_nested_harness_even_with_no_stop(

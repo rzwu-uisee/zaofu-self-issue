@@ -19,6 +19,7 @@ from zf.runtime.housekeeping import (
     arch_proposal_contract_update_event,
     spec_ingest_suggested_event,
 )
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
 
 
 @pytest.fixture
@@ -194,6 +195,124 @@ def test_materialized_full_contract_update_is_lossless(state_dir: Path):
     assert projected.validation["commands"][0]["id"] == "light-verification-1"
     assert projected.acceptance_criteria[0]["acceptance_id"] == "ac-result"
     assert projected.goal_claim_ids == ["claim-result"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "workflow_start",
+        "workflow_submit",
+        "workflow_request_terminal_rotation",
+    ],
+)
+def test_workflow_binding_audit_replay_preserves_full_contract(
+    state_dir: Path,
+    source: str,
+) -> None:
+    ts = TaskStore(state_dir / "kanban.json")
+    contract = TaskContract(
+        behavior="deliver the approved workflow task",
+        verification="(cd app && npm test) && npm test",
+        validation={
+            "red": {
+                "command": "cd app && node --test tests/server.test.mjs",
+                "expected": "new assertions fail before the fix",
+            },
+            "green": {
+                "command": "cd app && node --test tests/server.test.mjs",
+                "expected": "focused tests pass after the fix",
+            },
+            "full": {
+                "command": "(cd app && npm test) && npm test",
+                "expected": "both suites exit zero",
+            },
+        },
+        acceptance_criteria=[{
+            "id": "AC-01",
+            "ears": "When tests run, the project shall pass npm test.",
+        }],
+        evidence_contract={
+            "execution_owner": "workflow",
+            "workflow_request_id": "workflow-123",
+            "workflow_request_revision": 2,
+        },
+        complexity="standard",
+        risk_class="medium",
+        integration_admission_profile="per-lane",
+        goal_claim_ids=["claim-workflow-task"],
+    )
+    task = Task(id="T1", title="workflow task", contract=contract)
+    ts.add(task)
+    digest_before = task_workflow_binding_digest(task)
+
+    apply_task_contract_event(ts, ZfEvent(
+        type="task.contract.update",
+        actor="web",
+        task_id="T1",
+        payload={
+            "source": source,
+            "contract": asdict(contract),
+            "contract_digest": digest_before,
+        },
+    ))
+
+    projected_task = ts.get("T1")
+    assert projected_task is not None
+    projected = projected_task.contract
+    assert asdict(projected) == asdict(contract)
+    assert task_workflow_binding_digest(projected_task) == digest_before
+    assert projected.verification == "(cd app && npm test) && npm test"
+    assert projected.validation["full"]["command"] == projected.verification
+
+
+def test_writer_owner_binding_audit_replay_preserves_full_contract(
+    state_dir: Path,
+) -> None:
+    ts = TaskStore(state_dir / "kanban.json")
+    contract = TaskContract(
+        behavior="deliver HTTP slice",
+        verification="npm --prefix app test",
+        validation={
+            "commands": [{
+                "id": "PP-CMD-HTTP",
+                "command": "npm --prefix app test",
+                "acceptance_ids": ["PP-AC-002"],
+                "owner": "task_verify",
+                "tier": "e2e",
+                "deterministic": True,
+                "reusable": True,
+                "timeout_seconds": 60,
+            }],
+        },
+        acceptance_criteria=[{
+            "id": "PP-AC-002",
+            "statement": "real HTTP health contract passes",
+            "mandatory": True,
+            "verification_owner": "task_verify",
+            "verification_command_ids": ["PP-CMD-HTTP"],
+        }],
+        goal_claim_ids=["PP-GOAL-002"],
+        owner_role="dev-lane-1",
+        owner_instance="dev-lane-1",
+        contract_revision="contract-r7d98cc469633",
+    )
+    ts.add(Task(id="PP-HTTP-002", title="HTTP slice", contract=contract))
+
+    apply_task_contract_event(ts, ZfEvent(
+        type="task.contract.update",
+        actor="zf-cli",
+        task_id="PP-HTTP-002",
+        payload={
+            "source": "writer_dispatch_owner_binding",
+            "flow_kind": "prd",
+            "owner_role": "dev-lane-1",
+            "owner_instance": "dev-lane-1",
+        },
+    ))
+
+    projected = ts.get("PP-HTTP-002")
+    assert projected is not None
+    assert asdict(projected.contract) == asdict(contract)
 
 
 def test_metadata_only_contract_update_does_not_rewrite_structured_contract(

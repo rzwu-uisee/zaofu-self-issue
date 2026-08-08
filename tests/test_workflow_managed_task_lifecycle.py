@@ -16,13 +16,17 @@ from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.sidecar_refs import write_sidecar_text
 from zf.runtime.workflow_anchor import (
+    WORKFLOW_TASK_REQUEST_ROTATION_SOURCE,
     bind_workflow_request_to_task,
     mark_workflow_managed_task,
 )
 from zf.runtime.workflow_task_lifecycle import (
     RESEARCH_TASK_COMPLETION_SOURCE,
     WORKFLOW_TASK_ACTIVATION_SOURCE,
+    WORKFLOW_TASK_TERMINAL_SOURCE,
+    activate_workflow_managed_task,
     complete_standalone_research_task,
+    settle_workflow_managed_task_from_run_terminal,
 )
 
 
@@ -140,6 +144,7 @@ def test_accepted_workflow_activates_managed_task_once(
     ]
     assert len(status_events) == 1
     assert status_events[0].causation_id == accepted.id
+    assert task.started_at == accepted.ts
 
     store.update("TASK-RESEARCH", status="backlog")
     restarted = Orchestrator(
@@ -172,6 +177,97 @@ def test_accepted_workflow_does_not_take_over_ordinary_task(
         and event.payload.get("source")
         == WORKFLOW_TASK_ACTIVATION_SOURCE
         for event in log.read_all()
+    )
+
+
+def test_blocked_task_requires_terminal_request_rotation_to_reactivate(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    store = TaskStore(state_dir / "kanban.json")
+    origin_digest = "sha256:" + "a" * 64
+    task = bind_workflow_request_to_task(
+        mark_workflow_managed_task(Task(
+            id="TASK-ROTATE",
+            title="Retry blocked workflow",
+            status="blocked",
+            blocked_reason="prior run blocked",
+        )),
+        request_id="REQ-NEW",
+        request_revision=1,
+        origin_binding_digest=origin_digest,
+    )
+    store.add(task)
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    terminal = writer.emit(
+        "run.goal.blocked",
+        actor="orchestrator",
+        task_id=task.id,
+        correlation_id="REQ-OLD",
+        payload={
+            "request_id": "REQ-OLD",
+            "run_id": "RUN-OLD",
+            "workflow_run_id": "RUN-OLD",
+            "reason": "prior run blocked",
+        },
+    )
+    accepted = ZfEvent(
+        type="workflow.invoke.accepted",
+        actor="zf-cli",
+        task_id=task.id,
+        correlation_id="REQ-NEW",
+        payload={
+            "task_id": task.id,
+            "request_id": "REQ-NEW",
+            "request_revision": 1,
+            "workflow_run_id": "RUN-NEW",
+            "pattern_id": "issue-flow",
+        },
+    )
+
+    assert activate_workflow_managed_task(
+        task_store=store,
+        event_writer=writer,
+        accepted_event=accepted,
+    ) is None
+    assert store.get(task.id).status == "blocked"  # type: ignore[union-attr]
+
+    rotation = writer.emit(
+        "task.contract.update",
+        actor="operator",
+        task_id=task.id,
+        payload={
+            "source": WORKFLOW_TASK_REQUEST_ROTATION_SOURCE,
+            "request_id": "REQ-NEW",
+            "request_revision": 1,
+            "origin_binding_digest": origin_digest,
+            "prior_request_id": "REQ-OLD",
+            "prior_request_revision": 2,
+            "prior_run_id": "RUN-OLD",
+            "prior_terminal_event_id": terminal.id,
+            "prior_terminal_type": terminal.type,
+        },
+    )
+    updated = activate_workflow_managed_task(
+        task_store=store,
+        event_writer=writer,
+        accepted_event=accepted,
+    )
+
+    assert updated is not None
+    assert updated.status == "in_progress"
+    assert updated.blocked_reason == ""
+    status_event = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "task.status_changed"
+        and event.payload.get("source") == WORKFLOW_TASK_ACTIVATION_SOURCE
+    )
+    assert status_event.payload["from"] == "blocked"
+    assert status_event.payload["workflow_request_rotation_event_id"] == (
+        rotation.id
     )
 
 
@@ -263,6 +359,7 @@ def test_standalone_research_closes_once_after_bound_artifact(
 
     assert first is not None
     assert first.status == "done"
+    assert first.completed_at == result.ts
     assert replay is None
     assert store.get("TASK-RESEARCH").status == "done"  # type: ignore[union-attr]
     events = writer.event_log.read_all()
@@ -300,3 +397,53 @@ def test_request_bound_research_keeps_parent_task_active(
         event.type == "task.done.evidence"
         for event in writer.event_log.read_all()
     )
+
+
+def test_run_goal_completion_closes_workflow_parent_task(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(mark_workflow_managed_task(Task(
+        id="FLOW-1",
+        title="Deliver workflow",
+        status="in_progress",
+    )))
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit(
+        "workflow.invoke.accepted",
+        actor="zf-cli",
+        task_id="FLOW-1",
+        correlation_id="run-1",
+        payload={"task_id": "FLOW-1", "workflow_run_id": "run-1"},
+    )
+    terminal = writer.emit(
+        "run.goal.completed",
+        actor="zf-cli",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "evidence_refs": ["artifact:goal-dossier"],
+        },
+    )
+
+    settled = settle_workflow_managed_task_from_run_terminal(
+        task_store=store,
+        event_writer=writer,
+        terminal_event=terminal,
+    )
+
+    assert settled is not None and settled.status == "done"
+    assert settled.completed_at == terminal.ts
+    archived = store.get("FLOW-1")
+    assert archived is not None and archived.status == "done"
+    events = writer.event_log.read_all()
+    assert any(
+        event.type == "task.status_changed"
+        and event.payload.get("source") == WORKFLOW_TASK_TERMINAL_SOURCE
+        for event in events
+    )
+    done = next(event for event in events if event.type == "task.done.evidence")
+    assert done.payload["evidence_refs"] == [
+        terminal.id,
+        "artifact:goal-dossier",
+    ]

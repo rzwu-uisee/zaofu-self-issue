@@ -15,6 +15,8 @@ from zf.core.config.schema import (
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.state.session import SessionStore
+from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
@@ -122,6 +124,46 @@ class TestRunOnceDrainsTransport:
         log = EventLog(state_dir / "events.jsonl")
         types = [e.type for e in log.read_all()]
         assert "agent.text" in types
+
+    def test_task_bound_api_blocked_remains_reactive_after_drain(self, state_dir):
+        config = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            roles=[
+                RoleConfig(name="orchestrator", backend="mock"),
+                RoleConfig(name="dev", backend="mock"),
+            ],
+        )
+        TaskStore(state_dir / "kanban.json").add(Task(
+            id="T1",
+            title="recover transport stop",
+            status="in_progress",
+            assigned_to="dev",
+        ))
+        blocked = ZfEvent(
+            type="agent.api_blocked",
+            actor="dev",
+            task_id="T1",
+            payload={
+                "instance_id": "dev",
+                "provider_stop_reason": "transport_error",
+            },
+        )
+        transport = _TransportWithPendingEvents()
+        transport.enqueue(blocked)
+        orch = Orchestrator(state_dir, config, transport)
+
+        orch.run_once()
+
+        assert blocked.id not in orch._processed_event_ids
+        decisions = orch._react_to_events([blocked])
+
+        assert any(decision.action == "dispatch" for decision in decisions)
+        task = TaskStore(state_dir / "kanban.json").get("T1")
+        assert task is not None
+        assert task.status == "backlog"
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert any(event.type == "provider.stop.recovery" for event in events)
 
 
 class TestLayer2Cooldown:

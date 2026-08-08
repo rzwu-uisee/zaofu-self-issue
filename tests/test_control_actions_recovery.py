@@ -63,7 +63,7 @@ def test_child_rebuild_preconditions(tmp_path: Path) -> None:
         requested_action="child-rebuild", payload={"task_id": "T2"},
     )
     assert r2["ok"] is False
-    # 死 child → 放行,发 task.rework.requested 带 rework_of
+    # 死 child → 放行,交给现有 repair action executor 重建承接
     log.append(ZfEvent(type="fanout.child.failed", actor="zf-cli",
                        payload={"task_id": "T1", "fanout_id": "f1", "child_id": "c9"}))
     r3 = svc._child_rebuild_action(
@@ -71,8 +71,11 @@ def test_child_rebuild_preconditions(tmp_path: Path) -> None:
         requested_action="child-rebuild", payload={"task_id": "T1"},
     )
     assert r3["ok"] is True
-    rw = [e for e in log.read_all() if e.type == "task.rework.requested"]
-    assert rw and rw[-1].payload["rework_of"] == "c9"
+    requests = [e for e in log.read_all() if e.type == "repair.action.requested"]
+    assert requests
+    assert requests[-1].payload["kind"] == "rerun_fanout_child"
+    assert requests[-1].payload["fanout_id"] == "f1"
+    assert requests[-1].payload["fanout_child_id"] == "c9"
 
 
 def test_stage_retrigger_idempotent_and_generational(tmp_path: Path) -> None:
@@ -171,6 +174,54 @@ def test_fanout_aggregate_rebuild_requires_terminal_manifest_and_is_idempotent(
     assert requests[0].payload["source_event_id"] == source.id
     assert requests[0].payload["identity_invalid_event_id"] == invalid.id
     assert duplicate["ok"] is False
+
+
+def test_fanout_aggregate_rebuild_accepts_blocked_goal_closure_schema_event(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+    log = svc.writer.event_log
+    fanout_id = "fanout-goal-closure"
+    manifest_path = svc.state_dir / "fanouts" / fanout_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({
+        "fanout_id": fanout_id,
+        "aggregate_config": {
+            "success_event": "goal.closure.synthesized",
+        },
+        "children": [{"child_id": "judge", "status": "completed"}],
+    }), encoding="utf-8")
+    blocked = svc.writer.append(ZfEvent(
+        type="discriminator.failed",
+        actor="zf-cli",
+        correlation_id="run-goal",
+        payload={
+            "fanout_id": fanout_id,
+            "blocked_event_id": "evt-blocked-goal-closure",
+            "blocked_event_type": "goal.closure.synthesized",
+            "blocked_event_payload": {"fanout_id": fanout_id},
+            "failed_d": ["EventSchemaD"],
+        },
+    ))
+
+    result = svc._fanout_aggregate_rebuild_action(
+        requested=_req({}),
+        action="fanout-aggregate-rebuild",
+        requested_action="fanout-aggregate-rebuild",
+        payload={"source_event_id": blocked.id},
+    )
+
+    assert result["ok"] is True
+    request = next(
+        event for event in log.read_all()
+        if event.type == "fanout.aggregate.rebuild.requested"
+    )
+    assert request.payload["source_event_id"] == blocked.id
+    assert request.payload["schema_failure_event_id"] == blocked.id
+    assert request.payload["rebuild_scope"] == "blocked_success_aggregate"
+    assert request.payload["expected_success_event"] == (
+        "goal.closure.synthesized"
+    )
 
 
 def test_goal_lineage_rebuild_targets_upstream_reader_aggregate(

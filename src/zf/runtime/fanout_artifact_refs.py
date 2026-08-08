@@ -73,6 +73,22 @@ def refactor_plan_workdir_refs(fanout_id: str) -> RefactorPlanWorkdirRefs:
     }
 
 
+def plan_artifact_workdir_write_scopes(
+    *,
+    fanout_id: str,
+    success_event: str,
+) -> list[str]:
+    """Return the narrow workdir paths rendered for a plan producer."""
+
+    scopes = ["docs/plans/**"]
+    if success_event in {"zaofu.refactor.plan.ready", "refactor.plan.ready"}:
+        task_map_ref = refactor_plan_workdir_refs(fanout_id)["task_map_ref"]
+        scopes.append(f"{Path(task_map_ref).parent.as_posix()}/**")
+    else:
+        scopes.append("artifacts/plan/**")
+    return scopes
+
+
 def relocate_fanout_artifact_refs(
     *,
     payload: dict[str, Any],

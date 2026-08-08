@@ -83,18 +83,20 @@ def apply_agent_usage_liveness(
         if payload.get("context_usage_ratio") is not None
         else payload.get("ratio")
     )
-    registry.record_heartbeat(
-        instance_id,
-        {
-            "instance_id": instance_id,
-            "state": state,
-            "current_task_id": task_id,
-            "last_action_ts": event.ts,
-            "context_usage_ratio": context_ratio,
-            "source": "agent.usage",
-            "event_id": event.id,
-        },
-    )
+    heartbeat = {
+        "instance_id": instance_id,
+        "state": state,
+        "current_task_id": task_id,
+        "last_action_ts": event.ts,
+        "context_usage_ratio": context_ratio,
+        "source": "agent.usage",
+        "event_id": event.id,
+    }
+    for key in ("operation_id", "attempt_id", "dispatch_id", "lease_id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            heartbeat[key] = value
+    registry.record_heartbeat(instance_id, heartbeat)
 
 
 def _active_task_for_instance(

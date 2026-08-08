@@ -24,6 +24,10 @@ from zf.core.config.schema import (
     ZfConfig,
 )
 from zf.core.events.model import ZfEvent
+from zf.core.state.task_attempts import (
+    TASK_ATTEMPT_IDENTITY_OPERATION_V2,
+    TaskAttemptStore,
+)
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
@@ -392,6 +396,124 @@ def test_impl_dev_failed_backedge_requeues_same_dev_lane_before_global_route(
     assert not (state_dir / "briefings" / "arch-T-IMPL-FAIL-rework.md").exists()
 
 
+def test_operation_v2_failure_does_not_fall_back_to_legacy_rework(
+    state_dir,
+    transport,
+):
+    config = _config(rework_routing={"dev.failed": "dev"})
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="T-V4",
+        title="typed pipeline task",
+        status="in_progress",
+        assigned_to="dev",
+        active_dispatch_id="dispatch-v4",
+        contract=TaskContract(behavior="b"),
+    ))
+    attempt = TaskAttemptStore(
+        state_dir / "task_attempts.json"
+    ).ensure_for_dispatch(
+        run_id="run-v4",
+        task_id="T-V4",
+        dispatch_id="dispatch-v4",
+        role="dev",
+        instance_id="dev",
+        operation_id="operation-v4",
+        briefing_ref="briefings/T-V4.md",
+        created_at="2026-08-07T00:00:00+00:00",
+        lease_expires_at="2026-08-07T00:10:00+00:00",
+        max_attempts=3,
+        identity_version=TASK_ATTEMPT_IDENTITY_OPERATION_V2,
+        placement_epoch=1,
+    ).attempt
+    orch = Orchestrator(state_dir, config, transport)
+    trigger = ZfEvent(
+        type="dev.failed",
+        actor="dev",
+        task_id="T-V4",
+        payload={
+            "workflow_run_id": "run-v4",
+            "operation_id": "operation-v4",
+            "attempt_id": attempt["attempt_id"],
+            "dispatch_id": "dispatch-v4",
+        },
+    )
+    orch.event_log.append(trigger)
+
+    assert orch._dispatch_rework(store.get("T-V4"), trigger) is None
+
+    events = orch.event_log.read_all()
+    assert not [event for event in events if event.type == "task.rework.requested"]
+    skipped = next(
+        event for event in events
+        if event.type == "orchestrator.dispatch_skipped"
+    )
+    assert skipped.payload["reason"] == (
+        "operation_v2_rework_owned_by_task_pipeline"
+    )
+
+
+@pytest.mark.parametrize(
+    "attempt_mode,expected_reason",
+    [
+        ("missing", "operation_v2_identity_missing"),
+        ("store_error", "operation_v2_identity_unavailable"),
+    ],
+)
+def test_operation_v2_identity_failure_is_fail_closed(
+    state_dir,
+    transport,
+    monkeypatch,
+    attempt_mode,
+    expected_reason,
+):
+    config = _config(rework_routing={"dev.failed": "dev"})
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="T-V4-IDENTITY",
+        title="typed pipeline identity failure",
+        status="in_progress",
+        assigned_to="dev",
+        active_dispatch_id="dispatch-v4",
+        contract=TaskContract(behavior="b"),
+    ))
+    if attempt_mode == "store_error":
+        def _raise_store_error(_runtime):
+            raise OSError("attempt store unavailable")
+
+        monkeypatch.setattr(
+            "zf.runtime.task_attempt_runtime.task_attempt_store",
+            _raise_store_error,
+        )
+    orch = Orchestrator(state_dir, config, transport)
+    trigger = ZfEvent(
+        type="dev.failed",
+        actor="dev",
+        task_id="T-V4-IDENTITY",
+        payload={
+            "workflow_run_id": "run-v4",
+            "operation_id": "operation-v4",
+            "attempt_id": "attempt-v4-missing",
+            "lease_id": "lease-v4",
+            "dispatch_id": "dispatch-v4",
+        },
+    )
+    orch.event_log.append(trigger)
+
+    assert orch._dispatch_rework(
+        store.get("T-V4-IDENTITY"),
+        trigger,
+    ) is None
+
+    events = orch.event_log.read_all()
+    assert not [event for event in events if event.type == "task.rework.requested"]
+    skipped = next(
+        event for event in events
+        if event.type == "orchestrator.dispatch_skipped"
+    )
+    assert skipped.payload["reason"] == expected_reason
+
+
 def test_rework_context_recovers_feedback_artifact_ref_from_request(
     state_dir,
     transport,
@@ -542,6 +664,38 @@ def test_stage_backedge_attempt_exhausted_uses_backedge_cap(
     assert not any(event.type == "task.rework.requested" for event in events)
     assert not any(event.type == "impl.rework.requested" for event in events)
     assert not (state_dir / "artifacts" / "rework-feedback" / "T-CAP").exists()
+
+
+def test_shared_backedge_event_selects_stage_by_flow_identity(
+    state_dir,
+    transport,
+):
+    config = _config()
+    config.workflow.stages = [
+        WorkflowStageConfig(
+            id=f"{kind}-verify",
+            flow_kind=kind,
+            on_fail=WorkflowStageBackedgeConfig(
+                event="verify.child.failed",
+                restart_stage=f"{kind}-impl",
+                max_attempts=2,
+            ),
+        )
+        for kind in ("issue", "prd")
+    ]
+    orch = Orchestrator(state_dir, config, transport)
+
+    selected = orch._workflow_stage_backedge_for_event(ZfEvent(
+        type="verify.child.failed",
+        payload={"stage_id": "prd-verify", "flow_kind": "prd"},
+    ))
+    ambiguous = orch._workflow_stage_backedge_for_event(
+        ZfEvent(type="verify.child.failed", payload={}),
+    )
+
+    assert selected is not None
+    assert selected.restart_stage == "prd-impl"
+    assert ambiguous is None
 
 
 def test_resolve_returns_none_for_unknown_role(state_dir, transport):

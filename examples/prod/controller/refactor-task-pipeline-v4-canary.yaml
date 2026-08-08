@@ -1,0 +1,138 @@
+apiVersion: zaofu.dev/v1
+kind: RefactorFlow
+metadata:
+  name: refactor-task-pipeline/v4-shadow
+spec:
+  flowProfile: refactor-flow-v4-task-pipeline
+  lanes: 2
+  assembly: none
+  laneRoleTemplate:
+    backend: codex
+  roleDefaults:
+    backend: codex
+    model_reasoning_effort: high
+    permission_mode: bypass
+  objectiveRef: docs/plans/refactor-goal.md
+  parityScope: [core, cli, api, web, runtime]
+  gapLoop: enabled
+  verifyRescan: module_parity
+  completionThreshold: close_p0_p1
+  deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
+  semanticSubmitProfiles:
+    workflow-read: blocking
+    plan-synth: blocking
+    implementation: blocking
+    task-verify: blocking
+    candidate-verify: blocking
+    thin-judge-goal-closure: blocking
+  taskPipeline:
+    mode: ${ZF_TASK_PIPELINE_MODE:-shadow}
+    maxActiveTaskPipelines: 4
+    maxReworkAttempts: 2
+    pools:
+      impl:
+        capacity: 2
+        roleInstances: [dev-lane-0, dev-lane-1]
+      verify:
+        capacity: 2
+        roleInstances: [verify-lane-0, verify-lane-1]
+    backpressure:
+      maxUnverifiedTasks: 3
+      maxIntegrationQueue: 2
+    workerLifecycle:
+      mode: on_demand
+      idleSeconds: 120
+    affinity:
+      implRework: prefer_previous_session
+      verifyIndependence: different_role
+      sessionBinding: task_stage
+      crossTaskContext: fresh
+    integrationAdmission:
+      default: verify_admitted
+      riskReview:
+        enabled: false
+    candidate:
+      integration: incremental_serial_cas
+      integrationCapacity: 1
+      rollingSmoke: required
+      incrementalEvent: integration.queue.integrated
+      freezeEvent: candidate.ready
+      deliveryEvent: run.delivery.completed
+      partialCandidateAutoShip: forbidden
+      finalVerifyTarget: frozen_exact_commit
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata:
+  name: refactor-task-pipeline-v4-shadow
+  zaofu:
+    catalog:
+      id: refactor-task-pipeline-v4-shadow-codex
+      label: Refactor Task Pipeline v4 (shadow)
+      description: Experimental refactor controller with a shadow Task Pipeline and on-demand coding agents.
+      intent: refactor
+      backend: codex
+      roles: 13
+      recommended_for: [refactor]
+      preferred: false
+      order: 133
+spec:
+  profile_sources: [common/profiles.yaml]
+  uses: [refactor-controller-runtime/v3]
+  version: "1.0"
+  project:
+    name: refactor-task-pipeline-v4-shadow
+  orchestrator:
+    backend: codex
+    wake_min_interval_s: 5
+  roles:
+    # The semantic orchestrator agent is resident. Task Pipeline handoffs remain
+    # Kernel-owned; the role only handles admitted semantic checkpoints.
+    - name: orchestrator
+      instance_id: orchestrator
+      role_kind: reader
+      backend: codex
+      model_reasoning_effort: high
+      permission_mode: bypass
+      transport: tmux
+      execution:
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
+      lifecycle:
+        mode: resident
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
+        - orchestrator.semantic.checkpoint.requested
+      publishes: [orchestrator.rework.triage.recorded]
+      skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
+  runtime:
+    # v4 partial Candidate delivery is fenced. Final delivery is owned by the
+    # scoped Goal Completion operation, not this legacy compatibility switch.
+    git:
+      auto_ship_on_judge_passed: false
+  workflow:
+    orchestration:
+      mode: semantic_control
+      checkpoints: [plan_candidate]
+      checkpoint_policies:
+        plan_candidate: shadow
+      shadow_sample_percent: 25
+      max_plan_revisions: 2
+      no_progress_limit: 2
+      flow_policies:
+        research:
+          mode: exception_advisor
+        workflow:
+          mode: exception_advisor
+    kind_routes:
+      refactor:
+        pattern_id: flow-scan
+        default_tier: standard
+    dag:
+      external_triggers: [refactor.scan.requested]
+    rework_routing:
+      static_gate.failed: dev-lane-0

@@ -17,7 +17,7 @@ from zf.runtime.integration_queue import (
     STATUS_NEEDS_REVIEW,
     build_integration_queue,
 )
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.repair_actions import build_repair_action_projection
 
 
@@ -27,9 +27,9 @@ class RepairActionExecutor:
     task_store: TaskStore
     event_writer: EventWriter
     roles: Sequence[RoleConfig]
-    respawn_worker: Callable[[RoleConfig], OrchestratorDecision]
-    cancel_worker: Callable[[RoleConfig], OrchestratorDecision] | None = None
-    rerun_fanout_child: Callable[[str, str], OrchestratorDecision] | None = None
+    respawn_worker: Callable[[RoleConfig], WorkflowRuntimeDecision]
+    cancel_worker: Callable[[RoleConfig], WorkflowRuntimeDecision] | None = None
+    rerun_fanout_child: Callable[[str, str], WorkflowRuntimeDecision] | None = None
 
     def apply(self, event: ZfEvent) -> None:
         """Apply or reject one repair.action.requested event."""

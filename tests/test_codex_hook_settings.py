@@ -149,7 +149,9 @@ def test_codex_hook_hash_matches_real_codex_values(
 ):
     from zf.runtime.codex_hooks import codex_hook_hash
 
-    monkeypatch.setenv("ZF_CLI_CMD", "zf")
+    # Other launcher tests intentionally persist the process-wide command.
+    # The captured Codex vectors below were recorded with the default `zf`.
+    monkeypatch.delenv("ZF_CLI_CMD", raising=False)
     engine_name, zf_event = _EVENT_META[label]
     assert codex_hook_hash(Path(state_dir), engine_name, zf_event) == \
         _REAL_HASHES[(state_dir, label)]

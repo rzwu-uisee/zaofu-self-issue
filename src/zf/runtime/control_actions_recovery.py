@@ -90,9 +90,9 @@ class RecoveryActionsMixin:
 
     # -- 前置条件所需的账本视图(纯读) --------------------------------
 
-    def _latest_child_state_for_task(self, task_id: str) -> tuple[str, str]:
-        """返回 (state, child_id):inflight/completed/failed/none。"""
-        state, child = "none", ""
+    def _latest_child_state_for_task(self, task_id: str) -> tuple[str, str, str]:
+        """返回 (state, child_id, fanout_id)。"""
+        state, child, fanout = "none", "", ""
         for event in self.writer.event_log.read_all():
             payload = event.payload if isinstance(event.payload, dict) else {}
             tid = str(payload.get("task_id") or event.task_id or "")
@@ -100,11 +100,14 @@ class RecoveryActionsMixin:
                 continue
             if event.type == "fanout.child.dispatched":
                 state, child = "inflight", str(payload.get("child_id") or "")
+                fanout = str(payload.get("fanout_id") or "")
             elif event.type == "fanout.child.completed":
                 state, child = "completed", str(payload.get("child_id") or "")
+                fanout = str(payload.get("fanout_id") or "")
             elif event.type == "fanout.child.failed":
                 state, child = "failed", str(payload.get("child_id") or "")
-        return state, child
+                fanout = str(payload.get("fanout_id") or "")
+        return state, child, fanout
 
     def _task_status(self, task_id: str) -> tuple[str, str]:
         from zf.core.task.store import TaskStore
@@ -131,7 +134,7 @@ class RecoveryActionsMixin:
                 f"precondition failed: task status is {status!r}, not in_progress",
                 409,
             )
-        child_state, child_id = self._latest_child_state_for_task(task_id)
+        child_state, child_id, _fanout_id = self._latest_child_state_for_task(task_id)
         if child_state == "inflight":
             return self._recovery_failed(
                 requested, action, requested_action,
@@ -171,7 +174,7 @@ class RecoveryActionsMixin:
                 f"precondition failed: task status {status!r}",
                 409,
             )
-        child_state, child_id = self._latest_child_state_for_task(task_id)
+        child_state, child_id, fanout_id = self._latest_child_state_for_task(task_id)
         if child_state == "inflight":
             return self._recovery_failed(
                 requested, action, requested_action,
@@ -184,13 +187,20 @@ class RecoveryActionsMixin:
                 "precondition failed: no prior fanout child to rebuild from",
                 409,
             )
+        action_id = f"child-rebuild-{requested.id}"
         emitted = self.writer.append(ZfEvent(
-            type="task.rework.requested",
+            type="repair.action.requested",
             actor=self.actor,
             task_id=task_id,
             payload={
+                "action_id": action_id,
+                "kind": "rerun_fanout_child",
+                "idempotency_key": (
+                    f"child-rebuild:{fanout_id}:{child_id}:{requested.id}"
+                ),
                 "task_id": task_id,
-                "rework_of": child_id,
+                "fanout_id": fanout_id,
+                "fanout_child_id": child_id,
                 "reason": str(
                     payload.get("reason")
                     or f"recovery: rebuild carrier for dead child {child_id}"
@@ -200,7 +210,10 @@ class RecoveryActionsMixin:
             causation_id=requested.id,
         ))
         return self._recovery_ok(requested, emitted, action, requested_action, {
-            "task_id": task_id, "dead_child": child_id,
+            "task_id": task_id,
+            "dead_child": child_id,
+            "fanout_id": fanout_id,
+            "repair_action_id": action_id,
         })
 
     def _stage_retrigger_action(
@@ -269,6 +282,7 @@ class RecoveryActionsMixin:
                 f"source event {source_event_id} not found", 404,
             )
         invalid_event = None
+        schema_failure_event = None
         aggregate_event = source
         if source.type == "goal.closure.identity.invalid":
             invalid_event = source
@@ -282,20 +296,56 @@ class RecoveryActionsMixin:
                 (event for event in events if event.id == aggregate_event_id),
                 None,
             )
-        if aggregate_event is None or aggregate_event.type != "flow.discovery.completed":
+        elif source.type == "discriminator.failed":
+            source_payload = (
+                source.payload if isinstance(source.payload, dict) else {}
+            )
+            blocked_event_type = str(
+                source_payload.get("blocked_event_type") or ""
+            ).strip()
+            blocked_payload = source_payload.get("blocked_event_payload")
+            if (
+                blocked_event_type == "goal.closure.synthesized"
+                and isinstance(blocked_payload, dict)
+            ):
+                schema_failure_event = source
+                aggregate_event = source
+        if (
+            aggregate_event is None
+            or (
+                aggregate_event.type != "flow.discovery.completed"
+                and schema_failure_event is None
+            )
+        ):
             return self._recovery_failed(
                 requested,
                 action,
                 requested_action,
-                "aggregate rebuild only accepts flow.discovery.completed "
-                "or its goal.closure.identity.invalid event",
+                "aggregate rebuild only accepts flow.discovery.completed, "
+                "its goal.closure.identity.invalid event, or a discriminator "
+                "that blocked goal.closure.synthesized",
                 409,
             )
-        aggregate_payload = (
-            aggregate_event.payload
-            if isinstance(aggregate_event.payload, dict)
-            else {}
-        )
+        if schema_failure_event is not None:
+            schema_failure_payload = (
+                schema_failure_event.payload
+                if isinstance(schema_failure_event.payload, dict)
+                else {}
+            )
+            aggregate_payload = (
+                schema_failure_payload.get("blocked_event_payload")
+                if isinstance(
+                    schema_failure_payload.get("blocked_event_payload"),
+                    dict,
+                )
+                else {}
+            )
+        else:
+            aggregate_payload = (
+                aggregate_event.payload
+                if isinstance(aggregate_event.payload, dict)
+                else {}
+            )
         fanout_id = str(aggregate_payload.get("fanout_id") or "").strip()
         if not fanout_id:
             return self._recovery_failed(
@@ -314,7 +364,11 @@ class RecoveryActionsMixin:
                 f"fanout manifest {fanout_id!r} is missing",
                 404,
             )
-        rebuild_scope = "source_aggregate"
+        rebuild_scope = (
+            "blocked_success_aggregate"
+            if schema_failure_event is not None
+            else "source_aggregate"
+        )
         invalid_payload = (
             invalid_event.payload
             if invalid_event is not None
@@ -375,11 +429,23 @@ class RecoveryActionsMixin:
             if isinstance(manifest.get("aggregate_config"), dict)
             else {}
         )
-        if (
-            aggregate_config
-            and str(aggregate_config.get("success_event") or "")
-            != aggregate_event.type
-        ):
+        expected_success_event = str(
+            aggregate_config.get("success_event") or ""
+        )
+        observed_success_event = (
+            str(
+                (
+                    schema_failure_event.payload
+                    if schema_failure_event is not None
+                    and isinstance(schema_failure_event.payload, dict)
+                    else {}
+                ).get("blocked_event_type")
+                or ""
+            )
+            if schema_failure_event is not None
+            else aggregate_event.type
+        )
+        if aggregate_config and expected_success_event != observed_success_event:
             return self._recovery_failed(
                 requested,
                 action,
@@ -448,8 +514,13 @@ class RecoveryActionsMixin:
                 "identity_invalid_event_id": (
                     invalid_event.id if invalid_event is not None else ""
                 ),
+                "schema_failure_event_id": (
+                    schema_failure_event.id
+                    if schema_failure_event is not None
+                    else ""
+                ),
                 "rebuild_scope": rebuild_scope,
-                "expected_success_event": aggregate_event.type,
+                "expected_success_event": expected_success_event,
                 "reason": str(
                     payload.get("reason")
                     or "rebuild aggregate from durable manifest with current reducer"

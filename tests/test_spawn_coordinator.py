@@ -25,6 +25,7 @@ from zf.core.config.schema import (
     ConstraintsConfig,
     FanoutAggregateConfig,
     ProjectConfig,
+    ProviderSessionConfig,
     RoleConfig,
     WorkflowConfig,
     WorkflowStageConfig,
@@ -118,6 +119,8 @@ class TestClaudeFirstSpawn:
         # The uuid should come from registry.get_or_create("dev")
         expected = str(registry.get("dev"))
         assert expected in argv
+        marker = coordinator.state_dir / "workdirs" / "dev" / ".zf-workdir-owner.json"
+        assert json.loads(marker.read_text(encoding="utf-8"))["instance_id"] == "dev"
         # Not a resume on first spawn
         assert "--resume" not in argv
 
@@ -298,6 +301,13 @@ class TestCodexFirstSpawn:
         assert "--dangerously-bypass-approvals-and-sandbox" in argv
         codex_home = Path(codex_home_arg.split("=", 1)[1])
         assert codex_home.name == "codex-home"
+        marker = (
+            coordinator.state_dir
+            / "workdirs"
+            / "dev"
+            / ".zf-workdir-owner.json"
+        )
+        assert json.loads(marker.read_text(encoding="utf-8"))["instance_id"] == "dev"
 
     def test_spawn_injects_runtime_env_for_claude(self, coordinator, transport):
         role = RoleConfig(name="dev", backend="claude-code", permission_mode="bypass")
@@ -309,6 +319,31 @@ class TestCodexFirstSpawn:
         assert f"ZF_PROJECT_ROOT={Path('/tmp/zf').resolve()}" in argv
         assert f"ZF_STATE_DIR={coordinator.state_dir.resolve()}" in argv
         assert "claude" in argv
+        assert not any(
+            item.startswith("CLAUDE_CODE_EFFORT_LEVEL=") for item in argv
+        )
+
+    def test_explicit_claude_effort_overrides_host_environment(
+        self,
+        coordinator,
+        transport,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+        role = RoleConfig(
+            name="dev",
+            backend="claude-code",
+            permission_mode="bypass",
+            provider_session=ProviderSessionConfig(effort="high"),
+        )
+
+        coordinator.spawn(role)
+
+        _, argv, _ = transport.spawn_calls[0]
+        effort_env = "CLAUDE_CODE_EFFORT_LEVEL=high"
+        assert effort_env in argv
+        assert argv.index(effort_env) < argv.index("claude")
+        assert argv[argv.index("--effort") + 1] == "high"
 
     def test_codex_home_does_not_copy_project_hooks(
         self, state_dir, registry, transport, tmp_path,

@@ -176,14 +176,22 @@ def _safe_handoff_summary_projection(
 
 
 def _metrics_snapshot_projection(state_dir: Path) -> dict:
-    """Kernel 12-metric snapshot (MetricsCollector stays the only computer)."""
+    """Kernel metrics plus additive read-only subsystem projections."""
     from zf.core.metrics.collector import MetricsCollector
+    from zf.runtime.orchestrator_agent_metrics import (
+        build_orchestrator_agent_metrics,
+    )
 
-    return MetricsCollector.compute(
-        events=EventLog(state_dir / "events.jsonl"),
+    event_log = EventLog(state_dir / "events.jsonl")
+    snapshot = MetricsCollector.compute(
+        events=event_log,
         tasks=TaskStore(state_dir / "kanban.json"),
         cost=CostTracker(state_dir / "cost.jsonl"),
     ).to_dict()
+    snapshot["orchestrator_agent"] = build_orchestrator_agent_metrics(
+        event_log.read_all() if event_log.path.exists() else []
+    )
+    return snapshot
 
 
 def _features(state_dir: Path, delivery_features: list[dict] | None = None) -> list[dict]:
@@ -463,13 +471,44 @@ def _archive_tasks(state_dir: Path, *, include_active: bool = False) -> list[dic
         tasks = TaskStore(path).list_all_with_archive()
     except Exception:
         return []
+    tasks = [
+        task
+        for task in tasks
+        if include_active or task.status in {"done", "cancelled"}
+    ]
+    if not tasks:
+        return []
+    from zf.web.projections.events import _events_with_seq, payload_search_texts
+    from zf.web.projections.tasks import _workflow_events_with_candidate_context
+
+    all_events = _events_with_seq(state_dir)
+    search_texts = payload_search_texts(state_dir)
+    if len(search_texts) != len(all_events):
+        from zf.web.projections.common import _payload_search_text
+
+        search_texts = [
+            _payload_search_text(getattr(event, "payload", {}) or {})
+            for _, event in all_events
+        ]
     rows = []
     for task in tasks:
-        if not include_active and task.status not in {"done", "cancelled"}:
-            continue
-        workflow = workflow_projection(task).to_dict()
-        projection = kanban_column_projection(task)
         row = redact_obj(asdict(task))
+        task_id = task.id.lower()
+        task_events = [
+            (seq, event)
+            for (seq, event), text in zip(all_events, search_texts)
+            if event.task_id == task.id or (task_id and task_id in text)
+        ]
+        workflow = workflow_projection(
+            task,
+            _workflow_events_with_candidate_context(
+                task,
+                task_events,
+                all_events,
+                state_dir=state_dir,
+            ),
+        ).to_dict()
+        projection = kanban_column_projection(task)
         row["kanban_column"] = projection.column
         row["kanban_column_label"] = projection.label
         row["kanban_column_reason"] = projection.reason

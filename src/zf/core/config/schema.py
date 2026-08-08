@@ -55,6 +55,33 @@ class OrchestratorConfig:
 
 
 @dataclass
+class WorkflowOrchestrationFlowPolicyConfig:
+    """Checkpoint authority for one normalized workflow kind."""
+
+    mode: str = "exception_advisor"
+    checkpoints: list[str] = field(default_factory=list)
+    checkpoint_policies: dict[str, str] = field(default_factory=dict)
+    pilot_id: str = ""
+    shadow_sample_percent: int = 100
+
+
+@dataclass
+class WorkflowOrchestrationConfig(WorkflowOrchestrationFlowPolicyConfig):
+    """Agent-owned semantic control policy for Product Flow.
+
+    Role presence and semantic authority are deliberately separate.  The
+    root policy is the fallback; flow policies can narrow authority for a
+    specific route without turning preparatory Research into Product Flow.
+    """
+
+    flow_policies: dict[str, WorkflowOrchestrationFlowPolicyConfig] = field(
+        default_factory=dict,
+    )
+    max_plan_revisions: int = 2
+    no_progress_limit: int = 2
+
+
+@dataclass
 class ConstraintsConfig:
     allowed_paths: list[str] = field(default_factory=list)
     blocked_paths: list[str] = field(default_factory=list)
@@ -75,6 +102,7 @@ class ExecutionProfileLimitsConfig:
     max_children: int = 0
     max_depth: int = 0
     timeout_seconds: float = 0.0
+    max_usage_samples: int = 0
     token_budget: int = 0
     cost_budget_usd: float = 0.0
 
@@ -90,6 +118,10 @@ class ExecutionProfileLimitsConfig:
         if not 0 <= self.timeout_seconds <= 86_400:
             raise ValueError(
                 "execution profile timeout_seconds must be between 0 and 86400"
+            )
+        if not 0 <= self.max_usage_samples <= 1_000:
+            raise ValueError(
+                "execution profile max_usage_samples must be between 0 and 1000"
             )
         if not 0 <= self.token_budget <= 10_000_000:
             raise ValueError(
@@ -629,6 +661,12 @@ class WorkflowStageConfig:
     flow_kind: str = ""
     topology: str = ""
     operation: str = ""
+    # Explicit attempt ownership avoids inferring semantic scope from a stage
+    # name (for example, issue-triage is a plan producer).
+    attempt_domain: str = ""
+    # Generic operations separate successful artifact production from a
+    # verdict over the produced subject.
+    result_semantics: str = ""
     input_ports: list[WorkflowPortConfig] = field(default_factory=list)
     output_ports: list[WorkflowPortConfig] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
@@ -908,6 +946,29 @@ class WorkflowTaskAttemptConfig:
             )
 
 
+@dataclass(frozen=True)
+class WorkflowRunLimitsConfig:
+    """Mechanical wall-clock and usage ceilings for one admitted Run."""
+
+    timeout_seconds: float = 0.0
+    token_budget: int = 0
+    cost_budget_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.timeout_seconds <= 86_400:
+            raise ValueError(
+                "workflow.run_limits.timeout_seconds must be between 0 and 86400"
+            )
+        if not 0 <= self.token_budget <= 100_000_000:
+            raise ValueError(
+                "workflow.run_limits.token_budget must be between 0 and 100000000"
+            )
+        if not 0 <= self.cost_budget_usd <= 10_000:
+            raise ValueError(
+                "workflow.run_limits.cost_budget_usd must be between 0 and 10000"
+            )
+
+
 @dataclass
 class WorkflowKindRouteConfig:
     pattern_id: str = ""
@@ -962,6 +1023,9 @@ class WorkflowConfig:
     # Require an admitted impl-self-check sidecar before a typed writer handoff.
     # The Agent owns its semantic contents; Runtime only validates bindings.
     impl_self_check_required: bool = False
+    orchestration: WorkflowOrchestrationConfig = field(
+        default_factory=WorkflowOrchestrationConfig,
+    )
 
     # 131-P2-3(Temporal 借鉴条款):thinking backend 闲置宽限,自派发起
     # max(idle_threshold, attempt_lease_grace_s) 内不判 idle。F15 实证值
@@ -996,6 +1060,9 @@ class WorkflowConfig:
     kind_routes: dict[str, WorkflowKindRouteConfig] = field(default_factory=dict)
     execution_profiles: dict[str, ExecutionProfileConfig] = field(
         default_factory=dict,
+    )
+    run_limits: WorkflowRunLimitsConfig = field(
+        default_factory=WorkflowRunLimitsConfig,
     )
     # R28 (doc 93 §1/§5): admission/W1 机械拒 → 自动回 synth 重拆。默认
     # 关闭 = no_action 现状(零迁移);见 WorkflowAdmissionReplanConfig。

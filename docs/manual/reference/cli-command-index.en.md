@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **68** top-level families and **256** addressable command paths.
+The parser currently exposes **68** top-level families and **257** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -525,6 +525,7 @@ Durable call-result commands
 |---|---|
 | `zf result` | Durable call-result commands |
 | `zf result submit` | Submit one operation semantic result |
+| `zf result validate` | Preflight one profiled result without consuming submit capability |
 
 ## `zf rules`
 

@@ -1,6 +1,11 @@
 ---
 name: zf-project-adapter-matrix-enrichment
 description: "Use in ZaoFu issue, PRD, or refactor workflows when scan, plan, verify, or real E2E agents must enrich portable delivery matrix drafts with project-specific facts, commands, evidence, task slices, and parity/acceptance coverage without hard-coding project semantics in runtime."
+stages: [plan, scan, triage, replan, verify]
+tags: [planning, matrix, closure]
+dependencies: [zf-browser-e2e-contract]
+auto_inject: true
+load_on_demand: false
 ---
 
 # ZaoFu Project Adapter Matrix Enrichment
@@ -82,11 +87,128 @@ closed. Do not transfer matrix-authoring authority to the implementation lane.
   TUI, dashboard, API, or browser, declare a real command or attach passing
   evidence.
 
+## Mechanical Closure Check
+
+Before emitting a Plan result, derive these canonical id sets from the final
+serialized bodies and prove their closure. Do not repair one matrix in
+isolation or invent a second id for the same command:
+
+- `T = task_map.tasks[].task_id`
+- `A = task_map.tasks[].acceptance_criteria[].id`
+- `C = task_map.tasks[].validation.commands[].id`
+
+The following identities must hold exactly:
+
+1. `source_index.tasks[].task_id == T`. The list must be non-empty, contain
+   every task, and contain no unknown task.
+2. `acceptance_matrix.acceptance[].id == A`. Every row identifies exactly its
+   owning task through `task_id` or `task_ids`, and its
+   `verification_command_ids` exactly match the corresponding task-map AC.
+3. `test_matrix.commands[].id == C`. This top-level array is the only command
+   registry. Each command's serialized `command` and `acceptance_ids` must
+   exactly equal its task-map producer.
+4. `test_matrix.tests[]` is optional test-case metadata, not another command
+   registry. Every test has a unique `test_id` (or `id`) and references one or
+   more known command ids through `commands`, `command_ids`, or `command_id`.
+   Never copy command bodies or command objects into a test row. A test id is
+   not a command id.
+5. Every capability row links at least one known `task_id`, one known
+   `acceptance_id`, and one known test or command id. Acceptance rows must link
+   a capability either directly or through the capability's reverse refs.
+6. All referenced ids exist, all ids are unique, and required matrices have
+   top-level `status: ready` plus
+   `metadata.enrichment_contract.status: fulfilled`.
+
+Run this check over the final payload, not an earlier draft. A mechanical
+preflight rejection is replan input: preserve the previous valid ids and make
+only the reported set/dangling-reference corrections before re-emitting.
+
+## One Command Registry
+
+`test_matrix.commands[]` is the only command registry. Every command has one
+stable id and one exact command string there. Do not duplicate command
+definitions under `test_matrix.tests[]`; scenario, capability, and acceptance
+rows reference command ids. The Task Map's `validation.commands[]` is the
+producer-side registry and must have the same id, command string, and
+`acceptance_ids` as Test Matrix.
+
+Define each command id under exactly one Task Map task. An acceptance criterion
+owned by another task may reference that global id directly; do not copy the
+command definition into the consumer task. Runtime projects every referenced
+definition into the derived Task Contract while preserving the immutable Task
+Map and Plan-port digests. At least one command linked to a mandatory criterion
+must match that criterion's `verification_owner`; additional linked commands
+may belong to a later layer such as `candidate_verify`.
+
+This is the minimal closed shape used by runtime admission tests:
+
+```json
+{
+  "task_map_task": {
+    "task_id": "TASK-1",
+    "capability_ids": ["CAP-1"],
+    "validation": {"commands": [{
+      "id": "test-command",
+      "command": "pytest -q tests/test_command.py",
+      "acceptance_ids": ["AC-1"],
+      "owner": "task_verify",
+      "tier": "runtime",
+      "deterministic": true,
+      "reusable": true,
+      "timeout_seconds": 60
+    }]},
+    "acceptance_criteria": [{
+      "id": "AC-1",
+      "verification_owner": "task_verify",
+      "verification_tier": "runtime",
+      "verification_command_ids": ["test-command"]
+    }]
+  },
+  "capability_matrix": {
+    "status": "ready",
+    "metadata": {"enrichment_contract": {"status": "fulfilled"}},
+    "capabilities": [{
+    "id": "CAP-1",
+    "task_ids": ["TASK-1"],
+    "acceptance_ids": ["AC-1"]
+  }]},
+  "acceptance_matrix": {
+    "status": "ready",
+    "metadata": {"enrichment_contract": {"status": "fulfilled"}},
+    "acceptance": [{
+    "id": "AC-1",
+    "capability_id": "CAP-1",
+    "task_id": "TASK-1",
+    "verification_command_ids": ["test-command"]
+  }]},
+  "test_matrix": {
+    "status": "ready",
+    "metadata": {"enrichment_contract": {"status": "fulfilled"}},
+    "commands": [{
+    "id": "test-command",
+    "command": "pytest -q tests/test_command.py",
+    "acceptance_ids": ["AC-1"]
+  }]}
+}
+```
+
+The ids, command string, owner, `runtime` tier, and readiness metadata match the
+runtime's passing admission fixture. Preserve those cross-links when adapting
+the command to the target repository.
+
 ## Real E2E Command Rules
 
 - The runner executes only commands declared in `real-e2e-matrix.json`.
 - Use commands that can run from the project root.
 - Prefer Docker Playwright for browser checks when required by the repo.
+- In a Plan artifact, `ready` means the declared producer, paths, command, and
+  runner method are executable after the planned implementation. It does not
+  mean screenshots or receipts already exist. Do not mark a pre-implementation
+  row blocked merely because its future evidence has not been generated yet.
+- For browser rows, load `zf-browser-e2e-contract`; bind the exact Docker command
+  and the task-owned runner/config/test/evidence paths before declaring the Plan
+  ready. A missing host browser is not a blocker when the sanctioned Docker
+  runner is available.
 - Use real provider/env probes when the objective requires live LLM/gateway
   validation.
 - Do not use mock-only commands for release/full-parity validation unless the

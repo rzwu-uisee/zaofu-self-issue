@@ -11,7 +11,35 @@ from pathlib import Path
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
+from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
+from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.transport import DispatchContext
+
+
+def _terminal_event_for_fanout(
+    events: list[ZfEvent],
+    fanout_id: str,
+) -> ZfEvent | None:
+    aliases = run_aliases(events)
+    fanout_runs: set[str] = set()
+    first_fanout_index: int | None = None
+    for index, event in enumerate(events):
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("fanout_id") or "") != fanout_id:
+            continue
+        if first_fanout_index is None:
+            first_fanout_index = index
+        run_id = event_run_id(event, aliases=aliases)
+        if run_id:
+            fanout_runs.add(run_id)
+    if first_fanout_index is None or not fanout_runs:
+        return None
+    for event in reversed(events[first_fanout_index + 1:]):
+        if event.type not in RUN_TERMINAL_EVENT_TYPES:
+            continue
+        if event_run_id(event, aliases=aliases) in fanout_runs:
+            return event
+    return None
 
 
 def _fanout_report_evidence_fallback(payload: dict[str, object]) -> list[str]:
@@ -40,6 +68,7 @@ class FanoutEvidenceQueriesMixin:
         role: RoleConfig,
         briefing_path: Path,
         task_id: str | None = None,
+        parent_task_id: str | None = None,
         trace_id: str | None = None,
         run_id: str | None = None,
         operation_id: str | None = None,
@@ -72,6 +101,7 @@ class FanoutEvidenceQueriesMixin:
             trace_id=trace_id or self._trace_id_for_task(task_id),
             run_id=workflow_run_id or self._current_run_id(),
             task_id=task_id,
+            parent_task_id=parent_task_id,
             role_name=role.name,
             instance_id=role.instance_id,
             backend=role.backend,
@@ -114,8 +144,15 @@ class FanoutEvidenceQueriesMixin:
         try:
             from zf.runtime.fanout_identity import fanout_current_status
 
+            events = self.event_log.read_all()
+            terminal_event = _terminal_event_for_fanout(events, fanout_id)
+            if terminal_event is not None:
+                return (
+                    f"workflow_run_terminal:{terminal_event.type}",
+                    terminal_event.id,
+                )
             status = fanout_current_status(
-                self.event_log.read_all(),
+                events,
                 fanout_id,
             )
         except Exception:

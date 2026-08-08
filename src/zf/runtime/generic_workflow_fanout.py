@@ -25,6 +25,7 @@ GENERIC_WORKFLOW_HANDOFF_KEYS = (
     "goal_claim_set_ref",
     "goal_claim_set_digest",
     "generic_workflow_operation",
+    "result_semantics",
     "workflow_dependencies",
     "workflow_input_ports",
     "workflow_output_ports",
@@ -102,6 +103,9 @@ def apply_generic_workflow_stage_payload(
     stage_payload = {
         "flow_kind": "workflow",
         "generic_workflow_operation": operation,
+        "result_semantics": str(
+            getattr(stage, "result_semantics", "") or ""
+        ),
         "workflow_dependencies": list(
             getattr(stage, "dependencies", []) or []
         ),

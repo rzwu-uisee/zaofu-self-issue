@@ -141,6 +141,26 @@ def write_rework_feedback(
         "allowed_paths": [str(item) for item in allowed_paths or [] if str(item).strip()],
         "required_actions": [str(item) for item in required_actions or [] if str(item).strip()],
         "rework_items": rework_items,
+        "semantic_target": {
+            "stage_id": str(event_payload.get("target_stage_id") or ""),
+            "attempt_id": str(event_payload.get("target_attempt_id") or ""),
+            "role_instance": str(event_payload.get("target_role_instance") or ""),
+        },
+        "semantic_action": str(event_payload.get("semantic_action") or "rework"),
+        "orchestrator_decision_ref": str(
+            event_payload.get("orchestrator_decision_ref") or ""
+        ),
+        "orchestrator_decision_digest": str(
+            event_payload.get("orchestrator_decision_digest") or ""
+        ),
+        "orchestration_delta_ref": str(
+            event_payload.get("orchestration_delta_ref") or ""
+        ),
+        "orchestration_delta_digest": str(
+            event_payload.get("orchestration_delta_digest") or ""
+        ),
+        "reuse_refs": list(event_payload.get("reuse_refs") or []),
+        "invalidate_refs": list(event_payload.get("invalidate_refs") or []),
     }
     _validate_feedback(body)
     stable = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str)
@@ -232,9 +252,11 @@ def descriptor_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def feedback_payload_fields(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    digest = str(descriptor.get("sha256") or "")
     fields: dict[str, Any] = {
         "rework_feedback_ref": str(descriptor.get("ref") or ""),
-        "rework_feedback_digest": str(descriptor.get("sha256") or ""),
+        "rework_feedback_digest": digest,
+        "feedback_revision": digest,
     }
     feedback_id = str(descriptor.get("feedback_id") or "").strip()
     if feedback_id:

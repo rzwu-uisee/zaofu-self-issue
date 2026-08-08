@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -13,7 +12,6 @@ from typing import Any
 
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.config.render import build_config_inspection_report
-from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.runtime.preflight import preflight_ok, run_preflight_checks
 from zf.runtime.run_contract import (
     build_run_contract,
@@ -21,9 +19,15 @@ from zf.runtime.run_contract import (
     load_run_contract,
     required_delivery_artifacts,
 )
-from zf.runtime.workflow_intake import (
-    _now_iso,
-    _project_root_from_intake_path,
+from zf.runtime.workflow_intake import _project_root_from_intake_path
+from zf.runtime.workflow_refactor_preflight import (
+    git_is_work_tree as _git_is_work_tree,
+    git_source_fingerprint as _git_source_fingerprint,
+    is_relative_to as _is_relative_to,
+    is_flow_template_placeholder as _is_flow_template_placeholder,
+    refactor_safety_report as _refactor_safety_report,
+    resolve_declared_root as _resolve_declared_root,
+    target_git_root as _target_git_root,
 )
 
 def _string_list(value: Any) -> list[str]:
@@ -99,6 +103,10 @@ def build_flow_preflight_report(
         or _flow_kind(config)
         or ""
     )
+    diagnostics.extend(_workflow_route_readiness_diagnostics(
+        config,
+        flow_kind=effective_kind,
+    ))
     from zf.core.config.candidate_gate import combined_candidate_gate_gap
 
     candidate_gate_gap = combined_candidate_gate_gap(
@@ -121,8 +129,9 @@ def build_flow_preflight_report(
         })
     from zf.core.workflow.flow_metadata import flow_metadata_for
 
+    configured_metadata = flow_metadata_for(config, effective_kind)
     metadata = _effective_flow_metadata(
-        flow_metadata_for(config, effective_kind),
+        configured_metadata,
         intake_report=intake_report,
     )
     diagnostics.extend(_project_setup_readiness_diagnostics(
@@ -151,6 +160,7 @@ def build_flow_preflight_report(
     refactor_report = _refactor_safety_report(
         project_root=project_root,
         metadata=metadata,
+        configured_metadata=configured_metadata,
         flow_kind=effective_kind,
         intake_report=intake_report,
     )
@@ -194,6 +204,37 @@ def build_flow_preflight_report(
             if str(item.get("severity") or "").upper() == "STOP"
         ],
     }
+
+
+def _workflow_route_readiness_diagnostics(
+    config: Any,
+    *,
+    flow_kind: str,
+) -> list[dict[str, Any]]:
+    from zf.runtime.workflow_route_catalog import (
+        delivery_route_contracts_for_kind,
+    )
+
+    diagnostics: list[dict[str, Any]] = []
+    for contract in delivery_route_contracts_for_kind(config, flow_kind):
+        if contract["ok"]:
+            continue
+        diagnostics.append({
+            "severity": "STOP",
+            "kind": "workflow_route_entry_invalid",
+            "title": "workflow route 入口契约无效",
+            "message": contract["error"],
+            "why_it_matters": (
+                "入口 topology 与 start adapter 不匹配时，运行会被接受却无法形成 "
+                "TaskAttempt、lease 和 transport dispatch。"
+            ),
+            "fix_it": (
+                "blocking/full route 指向 DAG external_triggers 中声明的 "
+                "fanout_reader；light route 保持生成的 light adapter 入口。"
+            ),
+            "safe_auto_fix": False,
+        })
+    return diagnostics
 
 def _project_setup_readiness_diagnostics(
     *,
@@ -446,11 +487,17 @@ def _run_contract_preflight_report(
         project_root=project_root,
         state_dir=state_dir,
     )
+    rotation = _terminal_run_contract_rotation_context(
+        state_dir=state_dir,
+        previous=previous,
+        current_request_id=str(intake_report.get("request_id") or ""),
+    )
     binding = evaluate_run_contract_submit_binding(
         previous,
         contract,
         bootstrap=bootstrap,
         strict=strict,
+        prior_terminal_rotation=bool(rotation),
     )
     diagnostics = list(binding.get("diagnostics") or [])
     return {
@@ -459,8 +506,60 @@ def _run_contract_preflight_report(
         "preview": contract,
         "previous_ref": str(state_dir / "config" / "run-contract.json") if previous else "",
         "initial_binding": bool(binding.get("initial_binding")),
+        "prior_terminal_rotation": bool(binding.get("prior_terminal_rotation")),
+        "prior_run_id": str(rotation.get("prior_run_id") or ""),
+        "prior_terminal_event_id": str(
+            rotation.get("prior_terminal_event_id") or ""
+        ),
         "comparison_basis": str(binding.get("comparison_basis") or "current"),
         "diagnostics": diagnostics,
+    }
+
+
+def _terminal_run_contract_rotation_context(
+    *,
+    state_dir: Path,
+    previous: dict[str, Any] | None,
+    current_request_id: str,
+) -> dict[str, str]:
+    """Prove that the active compatibility contract belongs to a closed Run."""
+
+    previous_digest = str((previous or {}).get("contract_digest") or "").strip()
+    request_id = str(current_request_id or "").strip()
+    if not previous_digest or not request_id:
+        return {}
+
+    from zf.core.events.log import EventLog
+    from zf.runtime.run_admission import build_run_admission_projection
+
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    binding = next(
+        (
+            event
+            for event in reversed(events)
+            if event.type == "config.run_contract.request_bound"
+            and str((event.payload or {}).get("contract_digest") or "").strip()
+            == previous_digest
+        ),
+        None,
+    )
+    if binding is None:
+        return {}
+    payload = binding.payload if isinstance(binding.payload, dict) else {}
+    prior_run_id = str(
+        payload.get("run_id") or binding.correlation_id or ""
+    ).strip()
+    if not prior_run_id or prior_run_id == request_id:
+        return {}
+
+    projection = build_run_admission_projection(events)
+    prior = projection.runs.get(prior_run_id)
+    if prior is None or not prior.terminal or projection.active_run_ids:
+        return {}
+    return {
+        "prior_run_id": prior_run_id,
+        "prior_terminal_event_id": str(prior.terminal_event_id or ""),
+        "prior_terminal_type": str(prior.terminal_type or ""),
     }
 
 def _delivery_refs_for_name(
@@ -559,176 +658,6 @@ def _effective_flow_metadata(
         if value:
             effective[key] = value
     return effective
-
-def _is_flow_template_placeholder(value: str) -> bool:
-    normalized = str(value or "").strip().lower()
-    return normalized.startswith(("todo:", "todo ", "<todo", "${todo"))
-
-def _git_is_work_tree(root: Path) -> bool:
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except OSError:
-        return False
-    return proc.returncode == 0 and proc.stdout.strip() == "true"
-
-def _git_source_fingerprint(root: Path) -> dict[str, str]:
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, timeout=10,
-    )
-    status = subprocess.run(
-        ["git", "-C", str(root), "status", "--porcelain"],
-        capture_output=True, text=True, timeout=30,
-    )
-    return {
-        "head": head.stdout.strip() if head.returncode == 0 else "",
-        "status_sha256": hashlib.sha256(
-            (status.stdout if status.returncode == 0 else "").encode("utf-8")
-        ).hexdigest(),
-    }
-
-def _resolve_declared_root(raw: str, project_root: Path) -> Path | None:
-    if not raw or raw.startswith("TODO"):
-        return None
-    root = Path(raw).expanduser()
-    return root if root.is_absolute() else (project_root / root)
-
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except ValueError:
-        return False
-    return True
-
-def _target_git_root(target_root: Path, project_root: Path) -> Path | None:
-    if _git_is_work_tree(target_root):
-        return target_root
-    if _is_relative_to(target_root, project_root) and _git_is_work_tree(project_root):
-        return project_root
-    return None
-
-def _refactor_safety_report(
-    *,
-    project_root: Path,
-    metadata: dict[str, Any],
-    flow_kind: str,
-    intake_report: dict[str, Any],
-) -> dict[str, Any]:
-    """Mechanical refactor prechecks (doc 125 §6): disjoint source/target,
-    target must be git (r10 target_ref lesson), source baseline must not move
-    within one request (r6 write_violation class). Handwritten configs without
-    flow_metadata get WARN, profile-driven refactor flows fail closed."""
-    if flow_kind != "refactor":
-        return {"status": "not_applicable", "diagnostics": []}
-    diagnostics: list[dict[str, Any]] = []
-    source_raw = str(metadata.get("source_root") or "")
-    target_raw = str(metadata.get("target_root") or "")
-    source_root = _resolve_declared_root(source_raw, project_root)
-    target_root = _resolve_declared_root(target_raw, project_root) or project_root
-    if source_root is None:
-        severity = "STOP" if metadata else "WARN"
-        diagnostics.append({
-            "severity": severity,
-            "kind": "workflow_source_root_undeclared",
-            "title": "refactor source_root 未声明",
-            "message": source_raw or "flow_metadata 无 source_root",
-            "why_it_matters": "没有 source_root 就无法做 source/target 隔离与基线保护。",
-            "fix_it": "在 FlowSpec/intake 中声明真实 sourceRoot(手写配置至少在 prompt 中锚定)。",
-            "safe_auto_fix": False,
-        })
-    elif not source_root.exists():
-        diagnostics.append({
-            "severity": "STOP",
-            "kind": "workflow_source_root_not_found",
-            "title": "refactor source_root 不存在",
-            "message": str(source_root),
-            "why_it_matters": "source 路径无效时 scan/parity 全部建立在空分母上。",
-            "fix_it": "修正 sourceRoot 路径。",
-            "safe_auto_fix": False,
-        })
-    else:
-        try:
-            PathGuard.assert_disjoint(source_root, target_root)
-        except PathGuardError as exc:
-            diagnostics.append({
-                "severity": "STOP",
-                "kind": "workflow_source_target_overlap",
-                "title": "source_root 与 target 重叠",
-                "message": str(exc),
-                "why_it_matters": "重叠时 candidate 写入会直接篡改 source(r6 write_violation 类事故)。",
-                "fix_it": "让 sourceRoot 与 targetRoot 完全互斥。",
-                "safe_auto_fix": False,
-            })
-    target_git_root = _target_git_root(target_root, project_root)
-    if target_git_root is None:
-        diagnostics.append({
-            "severity": "STOP",
-            "kind": "workflow_target_not_git",
-            "title": "refactor target 不是 git 仓库",
-            "message": str(target_root),
-            "why_it_matters": "candidate/worktree 机制需要一个 git 承载根; target 子目录可不存在,但必须在 git project root 内。",
-            "fix_it": "在项目根运行 git init,或使用 `zf project init --kind refactor --git-init`。",
-            "safe_auto_fix": True,
-        })
-    report: dict[str, Any] = {
-        "source_root": str(source_root or ""),
-        "target_root": str(target_root),
-        "target_git_root": str(target_git_root or ""),
-    }
-    if source_root is not None and source_root.exists():
-        if not _git_is_work_tree(source_root):
-            diagnostics.append({
-                "severity": "WARN",
-                "kind": "workflow_source_not_git",
-                "title": "source_root 不是 git 仓库",
-                "message": str(source_root),
-                "why_it_matters": "无法建立 source 基线快照,运行中 source 被改动将不可检测。",
-                "fix_it": "优先使用 git 管理的 source;否则自行保证 source 只读。",
-                "safe_auto_fix": False,
-            })
-        else:
-            fingerprint = _git_source_fingerprint(source_root)
-            manifest_ref = str(intake_report.get("workflow_input_manifest_ref") or "")
-            if manifest_ref:
-                baseline_path = Path(manifest_ref).parent / "source-baseline.json"
-                baseline = _load_json(baseline_path)
-                if baseline:
-                    if (
-                        baseline.get("head") != fingerprint["head"]
-                        or baseline.get("status_sha256") != fingerprint["status_sha256"]
-                    ):
-                        diagnostics.append({
-                            "severity": "STOP",
-                            "kind": "workflow_source_root_modified",
-                            "title": "source_root 相对基线被改动",
-                            "message": (
-                                f"baseline head {baseline.get('head', '')[:12]} -> "
-                                f"{fingerprint['head'][:12]}"
-                            ),
-                            "why_it_matters": "同一 request 内 source 变动会让 parity 分母漂移,结论不可信。",
-                            "fix_it": "恢复 source 到基线,或显式开启新 request 重建基线。",
-                            "safe_auto_fix": False,
-                        })
-                else:
-                    baseline_path.write_text(
-                        json.dumps({
-                            "schema_version": "workflow.source_baseline.v1",
-                            "source_root": str(source_root),
-                            **fingerprint,
-                            "created_at": _now_iso(),
-                        }, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
-                    )
-                report["source_baseline_ref"] = str(baseline_path)
-            report["source_fingerprint"] = fingerprint
-    stop = any(d["severity"] == "STOP" for d in diagnostics)
-    warn = any(d["severity"] == "WARN" for d in diagnostics)
-    report["status"] = "STOP" if stop else "WARN" if warn else "PASS"
-    report["diagnostics"] = diagnostics
-    return report
 
 def _environment_readiness_diagnostics(
     metadata: dict[str, Any],

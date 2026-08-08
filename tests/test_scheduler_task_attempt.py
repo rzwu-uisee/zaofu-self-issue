@@ -998,6 +998,92 @@ def test_accepted_result_settles_attempt_and_shadow_compares(
     assert comparison.payload["match"] is True
 
 
+def test_child_transport_events_wait_for_operation_admission(
+    tmp_path: Path,
+) -> None:
+    runtime, _, state_dir = _runtime(tmp_path)
+    context = _send(runtime, state_dir, dispatch_id="disp-1")
+    assert context is not None
+    identity = dispatch_attempt_payload(context)
+
+    settle_task_attempt_result(runtime, ZfEvent(
+        type="issue.triage.child.completed",
+        actor="issue-triage",
+        task_id="TASK-1",
+        payload=identity,
+    ))
+    settle_task_attempt_result(runtime, ZfEvent(
+        type="issue.triage.child.failed",
+        actor="issue-triage",
+        task_id="TASK-1",
+        payload={**identity, "reason": "semantic output rejected"},
+    ))
+
+    current = TaskAttemptStore(
+        state_dir / "task_attempts.json"
+    ).current(run_id="RUN-1", task_id="TASK-1")
+    assert current is not None
+    assert current["status"] == "sent"
+    assert not any(
+        event.type in {"task.attempt.succeeded", "task.attempt.failed"}
+        for event in runtime.event_log.read_all()
+    )
+
+
+def test_attempt_terminal_is_monotonic_in_shadow_mode(tmp_path: Path) -> None:
+    runtime, _, state_dir = _runtime(tmp_path, mode="shadow")
+    context = _send(runtime, state_dir, dispatch_id="disp-1")
+    assert context is not None
+    identity = dispatch_attempt_payload(context)
+
+    settle_task_attempt_result(runtime, ZfEvent(
+        type="dev.build.done",
+        actor="dev",
+        task_id="TASK-1",
+        payload=identity,
+    ))
+    settle_task_attempt_result(runtime, ZfEvent(
+        type="dev.failed",
+        actor="dev",
+        task_id="TASK-1",
+        payload={**identity, "reason": "late contradictory result"},
+    ))
+
+    current = TaskAttemptStore(
+        state_dir / "task_attempts.json"
+    ).current(run_id="RUN-1", task_id="TASK-1")
+    assert current is not None
+    assert current["status"] == "succeeded"
+    terminals = [
+        event.type
+        for event in runtime.event_log.read_all()
+        if event.type in {"task.attempt.succeeded", "task.attempt.failed"}
+    ]
+    assert terminals == ["task.attempt.succeeded"]
+
+
+def test_attempt_terminal_occurrence_clears_matching_active_dispatch(
+    tmp_path: Path,
+) -> None:
+    runtime, _, state_dir = _runtime(tmp_path)
+    context = _send(runtime, state_dir, dispatch_id="disp-1")
+    assert context is not None
+    terminal = ZfEvent(
+        type="task.attempt.succeeded",
+        actor="orchestrator",
+        origin="kernel",
+        task_id="TASK-1",
+        payload={**dispatch_attempt_payload(context), "status": "succeeded"},
+    )
+
+    settle_task_attempt_result(runtime, terminal)
+
+    task = runtime.task_store.get("TASK-1")
+    assert task is not None
+    assert task.active_dispatch_id == ""
+    assert "TASK-1" not in runtime._active_dispatch_ids
+
+
 def test_admitted_workflow_operation_settles_attempt_without_worker_identity(
     tmp_path: Path,
 ) -> None:
@@ -1046,6 +1132,60 @@ def test_admitted_workflow_operation_settles_attempt_without_worker_identity(
     assert succeeded.payload["source_event_id"] == source.id
     assert succeeded.payload["admission_event_id"] == admitted.id
     assert succeeded.payload["reconciled_shadow_expiry"] is False
+
+
+def test_admitted_plan_synth_result_settles_attempt(
+    tmp_path: Path,
+) -> None:
+    runtime, _, state_dir = _runtime(tmp_path)
+    context = _send(runtime, state_dir, dispatch_id="plan-synth-dispatch")
+    assert context is not None
+    source = ZfEvent(
+        type="fanout.synth.completed",
+        actor="plan-synth",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "RUN-1",
+            "operation_id": context.operation_id,
+            "attempt_id": context.dispatch_id,
+            "status": "completed",
+            "report": {
+                "status": "passed",
+                "recommendation": "approve",
+            },
+        },
+    )
+    runtime.event_writer.append(source)
+    admitted = ZfEvent(
+        type="workflow.operation.settled",
+        actor="zf-cli",
+        origin="kernel",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "RUN-1",
+            "operation_id": context.operation_id,
+            "task_id": "TASK-1",
+            "admitted_call_result_ref": {
+                "ref": "artifacts/call-results/plan-synth.json",
+                "source_event_id": source.id,
+            },
+        },
+    )
+
+    settle_task_attempt_result(runtime, admitted)
+
+    current = TaskAttemptStore(
+        state_dir / "task_attempts.json"
+    ).current(run_id="RUN-1", task_id="TASK-1")
+    assert current is not None
+    assert current["status"] == "succeeded"
+    succeeded = [
+        event
+        for event in runtime.event_log.read_all()
+        if event.type == "task.attempt.succeeded"
+    ]
+    assert len(succeeded) == 1
+    assert succeeded[0].payload["source_event_id"] == source.id
 
 
 def test_operation_service_settlement_reconciles_after_canonical_result(

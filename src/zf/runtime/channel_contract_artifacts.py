@@ -73,6 +73,16 @@ def validate_channel_contract(
         if readiness is not None and not isinstance(readiness, dict):
             return "readiness must be an object"
         if isinstance(readiness, dict):
+            verdict = str(readiness.get("verdict") or "").strip()
+            if verdict and verdict not in {
+                "ready",
+                "needs_owner",
+                "needs_multi_lens",
+            }:
+                return (
+                    "readiness.verdict must be ready, needs_owner, or "
+                    "needs_multi_lens"
+                )
             implementation_start = readiness.get("implementation_start")
             if (
                 implementation_start is not None

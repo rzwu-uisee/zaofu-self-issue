@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
+from typing import Any
 from zf.core.events import ZfEvent
 from zf.core.security.redaction import redact_obj
 from zf.core.task.schema import Task
@@ -59,6 +60,12 @@ from zf.runtime.workflow_requests import (
     WorkflowRequestError,
     require_current_workflow_request,
 )
+from zf.runtime.research_generation import (
+    ResearchGenerationError,
+    materialize_research_generation,
+    supersede_active_research_generations,
+)
+from zf.runtime.research_templates import resolve_research_template
 
 
 class ProductActionsMixin:
@@ -96,6 +103,10 @@ class ProductActionsMixin:
             )
 
         execution_mode = str(payload.get("execution_mode") or "").strip()
+        if not execution_mode and self.source == "kanban-agent":
+            payload = dict(payload)
+            payload["execution_mode"] = "workflow"
+            execution_mode = "workflow"
         if execution_mode and execution_mode not in {"direct", "workflow"}:
             return self._failed(
                 requested=requested,
@@ -763,6 +774,7 @@ class ProductActionsMixin:
     ) -> dict:
         task_id = _required_text(payload, "task_id")
         pattern_id = _required_text(payload, "pattern_id")
+        task = TaskStore(self.state_dir / "kanban.json").get(task_id)
         request_id = _required_text(payload, "request_id")
         try:
             request_revision = int(payload.get("request_revision") or 0)
@@ -786,7 +798,6 @@ class ProductActionsMixin:
                     status_code=409,
                     status="stale_or_missing_request",
                 )
-            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
             task_request = (
                 workflow_task_request_binding(task)
                 if task is not None
@@ -891,6 +902,13 @@ class ProductActionsMixin:
             "workflow_input_manifest_ref": manifest_ref,
             "flow_kind": str(payload.get("flow_kind") or ""),
             "request_kind": str(payload.get("request_kind") or ""),
+            "route_id": str(payload.get("route_id") or ""),
+            "research_template_id": str(
+                payload.get("research_template_id") or ""
+            ),
+            "task_contract_digest": str(
+                payload.get("task_contract_digest") or ""
+            ),
             "artifact_refs": artifact_refs,
             "channel_id": str(
                 origin_binding.get("channel_id")
@@ -914,6 +932,7 @@ class ProductActionsMixin:
         }
         prompt_kind = infer_workflow_prompt_kind(pattern_id, payload)
         workflow_prompt_ref = ""
+        prompt_artifact: dict[str, Any] = {}
         if prompt_kind:
             prompt_artifact = write_workflow_prompt_package(
                 self.state_dir,
@@ -933,6 +952,62 @@ class ProductActionsMixin:
             event.payload["workflow_prompt_ref"] = workflow_prompt_ref
             event.payload["source_refs"] = source_refs
             event.payload["artifact_refs"] = artifact_refs
+        research_identity: dict[str, Any] = {}
+        if str(event.payload.get("request_kind") or "") == "research":
+            template = resolve_research_template(
+                str(event.payload.get("research_template_id") or "")
+            )
+            if task is None or template is None or not prompt_artifact:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason="research generation requires Task, template, and prompt bindings",
+                    status_code=409,
+                    status="preflight_blocked",
+                )
+            try:
+                research_identity = materialize_research_generation(
+                    self.state_dir,
+                    config=self.config,
+                    project_root=self.project_root or self.state_dir.parent,
+                    task=task,
+                    template=template,
+                    workflow_run_id=workflow_run_id,
+                    request_payload=event.payload,
+                    prompt_ref=prompt_artifact,
+                    source_event_id=event.id,
+                )
+            except ResearchGenerationError as exc:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id or None,
+                    reason=str(exc),
+                    status_code=409,
+                    status="preflight_blocked",
+                )
+            event.payload.update(research_identity)
+            source_refs.update({
+                "workflow_generation": str(
+                    research_identity["workflow_generation"]
+                ),
+                "research_generation_contract_ref": str(
+                    research_identity["run_contract_ref"]
+                ),
+            })
+            generation_ref = dict(
+                research_identity["research_generation_contract_ref"]
+            )
+            generation_ref.update({
+                "kind": "research_generation_contract",
+                "source_field": "generated_research_contract",
+            })
+            artifact_refs.append(generation_ref)
+            event.payload["source_refs"] = source_refs
+            event.payload["artifact_refs"] = artifact_refs
         write_workflow_input_manifest(
             self.state_dir,
             workflow_run_id=workflow_run_id,
@@ -943,6 +1018,14 @@ class ProductActionsMixin:
             artifact_refs=artifact_refs,
             request_payload=event.payload,
         )
+        if research_identity:
+            supersede_active_research_generations(
+                self.writer,
+                task_id=task_id,
+                new_generation=str(research_identity["workflow_generation"]),
+                new_run_id=workflow_run_id,
+                source_event_id=requested.id,
+            )
         event = self.writer.append(event)
         channel_id = str(
             origin_binding.get("channel_id")
@@ -971,6 +1054,9 @@ class ProductActionsMixin:
                         "workflow_input_manifest_ref": manifest_ref,
                         "workflow_prompt_ref": workflow_prompt_ref,
                         "prompt_kind": prompt_kind,
+                        "workflow_generation": str(
+                            research_identity.get("workflow_generation") or ""
+                        ),
                     },
                     "source": self.surface,
                 },
@@ -997,6 +1083,15 @@ class ProductActionsMixin:
             "workflow_input_manifest_ref": manifest_ref,
             "workflow_prompt_ref": workflow_prompt_ref,
             "prompt_kind": prompt_kind,
+            "workflow_generation": str(
+                research_identity.get("workflow_generation") or ""
+            ),
+            "effective_config_digest": str(
+                research_identity.get("effective_config_digest") or ""
+            ),
+            "run_contract_digest": str(
+                research_identity.get("run_contract_digest") or ""
+            ),
         }
     def _operator_intent_create(
         self,
@@ -1251,27 +1346,52 @@ class ProductActionsMixin:
             "replan-defer": "deferred",
             "replan-reject": "rejected",
         }[action]
+        decision_payload = redact_obj({
+            "schema_version": "replan-owner-decision.v0",
+            "decision": decision,
+            "proposal_ref": proposal_ref,
+            "eval_ref": eval_ref,
+            "candidate_task_map_ref": _required_text(payload, "candidate_task_map_ref"),
+            "reason": _required_text(payload, "reason"),
+            "decided_by": _required_text(payload, "decided_by") or _required_text(payload, "owner"),
+            "approval_ref": _required_text(payload, "approval_ref"),
+            "checkpoint_id": _required_text(payload, "checkpoint_id"),
+            "workflow_run_id": _required_text(payload, "workflow_run_id"),
+            "fanout_id": _required_text(payload, "fanout_id"),
+            "source_event_id": _required_text(payload, "source_event_id"),
+            "source": self.source,
+            "surface": self.surface,
+            "apply_policy": "decision_only",
+            "direct_adoption": False,
+            "request": payload,
+        })
         event = self.writer.emit(
             f"replan.owner_decision.{decision}",
             actor=self.actor,
             task_id=_task_id_from_payload(payload),
             causation_id=requested.id,
             correlation_id=requested.correlation_id,
-            payload=redact_obj({
-                "schema_version": "replan-owner-decision.v0",
-                "decision": decision,
-                "proposal_ref": proposal_ref,
-                "eval_ref": eval_ref,
-                "candidate_task_map_ref": _required_text(payload, "candidate_task_map_ref"),
-                "reason": _required_text(payload, "reason"),
-                "decided_by": _required_text(payload, "decided_by") or _required_text(payload, "owner"),
-                "source": self.source,
-                "surface": self.surface,
-                "apply_policy": "decision_only",
-                "direct_adoption": False,
-                "request": payload,
-            }),
+            payload=decision_payload,
         )
+        approval_ref = str(decision_payload.get("approval_ref") or "")
+        if approval_ref:
+            self.writer.emit(
+                "approval.resolved",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=event.id,
+                correlation_id=requested.correlation_id,
+                payload=redact_obj({
+                    "schema_version": "approval.resolved.v1",
+                    "approval_ref": approval_ref,
+                    "checkpoint_id": decision_payload.get("checkpoint_id", ""),
+                    "status": decision,
+                    "resolution": decision,
+                    "decision_event_id": event.id,
+                    "source": self.source,
+                    "surface": self.surface,
+                }),
+            )
         self._completed(
             requested=requested,
             event=event,

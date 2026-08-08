@@ -29,10 +29,9 @@ def close_feature_if_all_tasks_done(
 ) -> str | None:
     """Close the parent feature once no linked active tasks remain.
 
-    Feature linkage is intentionally projection-only: the canonical task
-    schema does not carry ``feature_id``. We infer it from the task key
-    prefix used by Layer 2 (``F-xxxx:task-key``), then fall back to task
-    events such as ``task.contract.update`` with ``payload.feature_id``.
+    Canonical linkage comes from ``task.contract.feature_id``. Legacy tasks
+    may still be linked by their Layer 2 key prefix (``F-xxxx:task-key``) or
+    task events such as ``task.contract.update`` with ``payload.feature_id``.
     """
     event_feature_ids = _feature_ids_by_task(event_log)
     feature_id = _feature_id_for_task(task, event_feature_ids)
@@ -91,6 +90,11 @@ def _feature_id_for_task(
     task: Task,
     event_feature_ids: dict[str, str],
 ) -> str:
+    contract_feature_id = str(
+        getattr(getattr(task, "contract", None), "feature_id", "") or ""
+    )
+    if contract_feature_id:
+        return contract_feature_id
     if task.key:
         match = _FEATURE_KEY_RE.match(task.key)
         if match:

@@ -279,6 +279,10 @@ _AUDITED_FIELDS: set[str] = {
     "_stuck_already_reported",
     "_dispatch_heads",
     "_processed_event_ids",
+    # Transient split-phase dedup for transport events. The event ledger and
+    # watcher offset remain authoritative; restart may repeat housekeeping
+    # only for an event that was appended but not yet cursor-consumed.
+    "_transport_housekept_event_ids",
     "_dead_counter",
     "_dead_threshold",
     "_dispatch_epoch",

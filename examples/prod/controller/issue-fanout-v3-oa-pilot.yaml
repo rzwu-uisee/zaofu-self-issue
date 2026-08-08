@@ -1,0 +1,102 @@
+apiVersion: zaofu.dev/v1
+kind: IssueFlow
+metadata:
+  name: issue-fanout-oa-pilot/v3
+spec:
+  topology: fanout
+  lanes: 1
+  backend: codex
+  roleDefaults:
+    model_reasoning_effort: high
+  issueRef: docs/issues/TODO.md
+  qualityFloor: issue-regression
+  evidencePolicy: strict_refs
+  deliveryPolicy: ship_candidate
+  artifactPackageMode: blocking
+  semanticSubmitProfiles:
+    workflow-read: blocking
+    plan-synth: blocking
+    implementation: blocking
+    task-verify: blocking
+    candidate-verify: blocking
+    thin-judge-goal-closure: blocking
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+metadata:
+  name: issue-fanout-v3-oa-pilot
+  zaofu:
+    catalog:
+      id: issue-fanout-v3-oa-pilot-codex
+      label: Issue Fanout v3 OA Pilot
+      description: Issue pilot with one blocking OA plan-candidate checkpoint.
+      intent: maintain
+      backend: codex
+      roles: 7
+      recommended_for: [maintain, issue, pilot]
+      preferred: false
+      order: 40
+spec:
+  profile_sources: [common/profiles.yaml]
+  uses: [prod-runtime/v1]
+  version: "1.0"
+  project:
+    name: issue-fanout-v3-oa-pilot
+  orchestrator:
+    backend: codex
+    wake_min_interval_s: 5
+  roles:
+    - name: orchestrator
+      instance_id: orchestrator
+      role_kind: reader
+      backend: codex
+      model_reasoning_effort: high
+      permission_mode: bypass
+      transport: tmux
+      execution:
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
+      lifecycle:
+        mode: resident
+      stuck_threshold_seconds: 900
+      spawn_ready_timeout_seconds: 240
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
+        - orchestrator.semantic.checkpoint.requested
+      publishes: [orchestrator.rework.triage.recorded]
+      skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
+  runtime:
+    git:
+      auto_ship_on_judge_passed: true
+  workflow:
+    orchestration:
+      mode: exception_advisor
+      max_plan_revisions: 2
+      no_progress_limit: 2
+      flow_policies:
+        issue:
+          mode: semantic_control
+          pilot_id: issue-plan-candidate-v1
+          checkpoints:
+            - plan_candidate
+          checkpoint_policies:
+            plan_candidate: blocking
+        research:
+          mode: exception_advisor
+        workflow:
+          mode: exception_advisor
+    kind_routes:
+      issue:
+        pattern_id: issue-triage
+        default_tier: standard
+    dag:
+      external_triggers: [issue.requested]
+    admission_replan:
+      enabled: true
+      resynth_trigger: issue.requested
+    rework_routing:
+      issue.triage.failed: issue-triage
+      integration.failed: issue-triage
+      static_gate.failed: fix-lane-0
+      test.failed: fix-lane-0

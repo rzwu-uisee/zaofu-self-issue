@@ -143,6 +143,8 @@ def test_provider_readiness_collects_recovery_and_autoresearch_backends():
 
 
 def test_headless_provider_uses_its_underlying_cli_auth_probe(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setattr("zf.runtime.preflight.shutil.which", lambda command: command)
     monkeypatch.setattr(
         "zf.runtime.preflight.subprocess.run",
@@ -154,6 +156,46 @@ def test_headless_provider_uses_its_underlying_cli_auth_probe(monkeypatch):
     )
 
     assert _probe_provider_auth("claude-headless") == (True, "authenticated")
+
+
+def test_claude_auth_probe_accepts_explicit_api_credential(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "configured-secret")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("zf.runtime.preflight.shutil.which", lambda command: command)
+    monkeypatch.setattr(
+        "zf.runtime.preflight.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError(args)),
+    )
+
+    assert _probe_provider_auth("claude-code") == (
+        True,
+        "API credential configured via environment",
+    )
+
+
+def test_claude_auth_probe_summarizes_logged_out_json(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr("zf.runtime.preflight.shutil.which", lambda command: command)
+    monkeypatch.setattr(
+        "zf.runtime.preflight.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1,
+            stdout=(
+                '{\n  "loggedIn": false,\n  "authMethod": "none",\n'
+                '  "apiProvider": "firstParty"\n}'
+            ),
+            stderr="",
+        ),
+    )
+
+    ok, detail = _probe_provider_auth("claude-code")
+
+    assert ok is False
+    assert detail.startswith(
+        "not authenticated (authMethod=none, apiProvider=firstParty)"
+    )
+    assert not detail.startswith("{")
 
 
 def test_codex_headless_uses_codex_cli_auth_probe(monkeypatch):

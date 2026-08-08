@@ -177,6 +177,84 @@ def test_workflow_invoke_replay_of_settled_operation_is_not_a_stall():
     assert detect_structural_stalls(events, stages=stages) == []
 
 
+def test_causally_anchored_operation_lifecycle_owns_trigger_immediately():
+    for operation_event_type in (
+        "workflow.operation.requested",
+        "workflow.operation.started",
+        "workflow.operation.settled",
+    ):
+        trigger = _ev("task_map.ready", {
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g1",
+        })
+        trigger.id = f"evt-task-map-{operation_event_type}"
+        operation = _ev(operation_event_type, {
+            "workflow_run_id": "run-1",
+            "operation_id": "wop-plan-checkpoint",
+        })
+        operation.causation_id = trigger.id
+        events = [trigger, operation, *_pad(8)]
+
+        assert detect_structural_stalls(events, stages=STAGES) == []
+
+
+def test_blocking_orchestrator_checkpoint_owns_trigger_recovery():
+    trigger = _ev("task_map.ready", {
+        "workflow_run_id": "run-1",
+        "task_map_generation": "1",
+    })
+    trigger.id = "evt-trigger"
+    events = [
+        trigger,
+        _ev("run.dispatch.blocked", {
+            "workflow_run_id": "run-1",
+            "source_event_id": trigger.id,
+            "reason": "orchestrator_pre_impl_pending",
+        }),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=STAGES) == []
+
+
+def test_blocking_task_pipeline_generation_admission_owns_trigger_recovery():
+    trigger = _ev("task_map.ready", {
+        "workflow_run_id": "run-1",
+        "task_map_generation": "map-g1",
+    })
+    trigger.id = "evt-task-map"
+    events = [
+        trigger,
+        _ev("task.pipeline.generation.admitted", {
+            "trigger_event_id": trigger.id,
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g1",
+        }),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=STAGES) == []
+
+
+def test_suppressed_task_map_replay_is_not_a_new_structural_stall():
+    trigger = _ev("task_map.ready", {
+        "workflow_run_id": "run-1",
+        "task_map_generation": "map-g1",
+    })
+    trigger.id = "evt-task-map-replay"
+    events = [
+        trigger,
+        _ev("fanout.retrigger.suppressed", {
+            "stage_id": "cj-min-slice-implementation",
+            "trigger_event_id": trigger.id,
+            "reason": "task_pipeline_generation_already_admitted",
+        }),
+        *_pad(8),
+    ]
+
+    assert detect_structural_stalls(events, stages=STAGES) == []
+
+
 def test_lane_handoff_terminal_is_not_reused_as_its_own_verify_trigger():
     """R15: a final lane handoff must not renew the verify stage's stall clock."""
     stages = [("prd-lanes-verify", "lane.stage.completed", "lane.stage.completed")]

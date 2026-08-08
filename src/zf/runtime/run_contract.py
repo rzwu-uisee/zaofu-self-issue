@@ -125,6 +125,11 @@ def build_run_contract(
             str(metadata.get("flow_kind") or manifest.get("kind") or "")
         )
     )
+    root_binding = _workflow_root_binding(
+        metadata=metadata,
+        manifest=manifest,
+        project_root=project_root,
+    )
     contract: dict[str, Any] = {
         "schema_version": RUN_CONTRACT_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -149,6 +154,24 @@ def build_run_contract(
             "gap_loop": str(metadata.get("gap_loop") or ""),
             "post_verify_discovery": str(metadata.get("post_verify_discovery") or ""),
             "completion_threshold": str(metadata.get("completion_threshold") or ""),
+            "root_binding": root_binding,
+            "run_limits": {
+                "timeout_seconds": float(getattr(
+                    getattr(getattr(config, "workflow", None), "run_limits", None),
+                    "timeout_seconds",
+                    0.0,
+                ) or 0.0),
+                "token_budget": int(getattr(
+                    getattr(getattr(config, "workflow", None), "run_limits", None),
+                    "token_budget",
+                    0,
+                ) or 0),
+                "cost_budget_usd": float(getattr(
+                    getattr(getattr(config, "workflow", None), "run_limits", None),
+                    "cost_budget_usd",
+                    0.0,
+                ) or 0.0),
+            },
         },
         "config": {
             "path": str(config_path),
@@ -213,6 +236,41 @@ def build_run_contract(
     }
     contract["contract_digest"] = stable_json_sha256(_stable_contract_body(contract))
     return contract
+
+
+def _workflow_root_binding(
+    *,
+    metadata: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    project_root: Path,
+) -> dict[str, str]:
+    kind = str(metadata.get("flow_kind") or manifest.get("kind") or "").strip()
+    if kind != "refactor":
+        return {}
+
+    def _effective_value(key: str) -> str:
+        configured = str(metadata.get(key) or "").strip()
+        normalized = configured.lower()
+        if configured and not normalized.startswith(
+            ("todo:", "todo ", "<todo", "${todo")
+        ):
+            return configured
+        return str(manifest.get(key) or "").strip()
+
+    def _resolved(value: str) -> str:
+        if not value:
+            return ""
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = project_root / path
+        return str(path.resolve(strict=False))
+
+    body = {
+        "schema_version": "workflow-root-binding.v1",
+        "source_root": _resolved(_effective_value("source_root")),
+        "target_root": _resolved(_effective_value("target_root")),
+    }
+    return {**body, "digest": stable_json_sha256(body)}
 
 
 def write_run_contract(
@@ -495,8 +553,15 @@ def evaluate_run_contract_submit_binding(
     *,
     bootstrap: Mapping[str, Any],
     strict: bool = False,
+    prior_terminal_rotation: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate first request binding without weakening drift detection."""
+    """Evaluate request binding without weakening in-run drift detection.
+
+    A terminal Run may hand the mutable compatibility view to a distinct new
+    Run.  The caller must derive ``prior_terminal_rotation`` from canonical
+    run-bound and terminal events; this pure function never infers lifecycle
+    state from the mutable contract itself.
+    """
 
     previous_bound = _has_workflow_input_manifest(previous)
     current_bound = _has_workflow_input_manifest(current)
@@ -507,7 +572,7 @@ def evaluate_run_contract_submit_binding(
         comparison,
         strict=strict,
     )
-    diagnostics = run_contract_drift_diagnostics(
+    diagnostics = [] if prior_terminal_rotation else run_contract_drift_diagnostics(
         previous,
         comparison,
         strict=effective_strict,
@@ -521,7 +586,12 @@ def evaluate_run_contract_submit_binding(
         ),
         "strict": effective_strict,
         "initial_binding": initial_binding,
-        "comparison_basis": "bootstrap" if initial_binding else "current",
+        "prior_terminal_rotation": bool(prior_terminal_rotation),
+        "comparison_basis": (
+            "prior_terminal_rotation"
+            if prior_terminal_rotation
+            else "bootstrap" if initial_binding else "current"
+        ),
         "diagnostics": diagnostics,
     }
 

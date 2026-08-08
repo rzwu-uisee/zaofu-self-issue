@@ -153,10 +153,10 @@ def _run_workflow(args: argparse.Namespace) -> int:
         gate_dispatcher = None
         if not args.dry_run:
             try:
-                from zf.runtime.orchestrator import Orchestrator
                 from zf.runtime.transport import make_transport
+                from zf.runtime.workflow_runtime import WorkflowRuntimeCoordinator
 
-                _orch = Orchestrator(
+                _orch = WorkflowRuntimeCoordinator(
                     state_dir,
                     config,
                     make_transport(config),

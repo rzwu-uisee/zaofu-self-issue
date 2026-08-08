@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import threading
+import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from zf.core.config.schema import RoleConfig
 from zf.core.state.role_sessions import RoleSessionRegistry
+from zf.runtime.session_tailer import claude_session_path
 from zf.runtime.transport import AttachHandle, DispatchContext
 from zf.runtime.transport_stream_json import StreamJsonTransport
 
@@ -79,9 +84,258 @@ def registry(state_dir: Path) -> RoleSessionRegistry:
     return RoleSessionRegistry(state_dir / "role_sessions.yaml", project_root=str(state_dir.parent))
 
 
-def test_spawn_is_a_noop(state_dir: Path, registry: RoleSessionRegistry):
+def test_spawn_without_launch_env_is_supported(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
     transport = StreamJsonTransport(state_dir, registry, query_fn=_make_fake_query([]))
-    transport.spawn(RoleConfig(name="dev"), argv=["claude"])  # must not raise
+    transport.spawn(RoleConfig(name="dev"), argv=["claude"])
+    assert transport.is_alive("dev") is True
+
+
+def test_register_role_does_not_claim_launch_readiness(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    transport = StreamJsonTransport(state_dir, registry, query_fn=_make_fake_query([]))
+    transport.register_role(RoleConfig(name="dev"))
+
+    assert transport.is_alive("dev") is False
+
+
+def test_background_dispatch_returns_before_provider_turn_completes(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    async def fake_query(*, prompt, options=None, transport=None):
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        yield FakeAssistantMessage(content=[FakeTextBlock(text="done")])
+
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=fake_query,
+        background_dispatch=True,
+    )
+    transport.spawn(RoleConfig(name="dev"), argv=[])
+
+    before = time.monotonic()
+    transport.send_task(
+        "dev",
+        briefing_path=state_dir / "briefings" / "dev.md",
+        prompt="go",
+    )
+
+    assert time.monotonic() - before < 0.2
+    assert started.wait(1.0)
+    assert transport.poll_events() == []
+    release.set()
+
+    events: list[Any] = []
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not events:
+        events = transport.poll_events()
+        time.sleep(0.01)
+    assert any(event.type == "agent.text" for event in events)
+
+
+def test_background_dispatch_serializes_turns_for_one_role(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    calls: list[str] = []
+
+    async def fake_query(*, prompt, options=None, transport=None):
+        calls.append(prompt)
+        if prompt == "first":
+            first_started.set()
+            while not release_first.is_set():
+                await asyncio.sleep(0.01)
+        else:
+            second_started.set()
+        return
+        yield
+
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=fake_query,
+        background_dispatch=True,
+    )
+    transport.spawn(RoleConfig(name="dev"), argv=[])
+    briefing = state_dir / "briefings" / "dev.md"
+
+    with patch.object(transport, "_wait_for_session_file", return_value=True):
+        transport.send_task("dev", briefing, "first")
+        assert first_started.wait(1.0)
+        transport.send_task("dev", briefing, "second")
+
+        assert second_started.wait(0.1) is False
+        with pytest.raises(RuntimeError, match="dispatch queue.*full"):
+            transport.send_task("dev", briefing, "third")
+        release_first.set()
+        assert second_started.wait(2.0)
+    assert calls == ["first", "second"]
+
+
+def test_background_dispatch_surfaces_provider_exception_as_event(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    async def fake_query(*, prompt, options=None, transport=None):
+        raise RuntimeError("simulated transport connection failure")
+        yield
+
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=fake_query,
+        background_dispatch=True,
+    )
+    transport.spawn(RoleConfig(name="dev", backend="claude-code"), argv=[])
+    transport.send_task(
+        "dev",
+        state_dir / "briefings" / "dev.md",
+        "go",
+        context=DispatchContext(
+            trace_id="trace-1",
+            task_id="TASK-1",
+            instance_id="dev",
+        ),
+    )
+
+    events: list[Any] = []
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not events:
+        events = transport.poll_events()
+        time.sleep(0.01)
+    blocked = next(event for event in events if event.type == "agent.api_blocked")
+    assert blocked.task_id == "TASK-1"
+    assert blocked.correlation_id == "trace-1"
+    assert blocked.payload["provider_stop_reason"] == "transport_error"
+
+
+def test_background_dispatch_preserves_claude_api_policy_error(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    async def fake_query(*, prompt, options=None, transport=None):
+        raise RuntimeError("Process exited with code 1")
+        yield
+
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=fake_query,
+        background_dispatch=True,
+    )
+    transport.spawn(RoleConfig(name="dev", backend="claude-code"), argv=[])
+    session_id = str(registry.get_or_create("dev"))
+    transcript = claude_session_path(str(state_dir.parent), session_id)
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        json.dumps({
+            "isApiErrorMessage": True,
+            "apiErrorStatus": 400,
+            "error": "unknown",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "Request was considered high risk and rejected.",
+                }],
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    transport.send_task(
+        "dev",
+        state_dir / "briefings" / "dev.md",
+        "go",
+        context=DispatchContext(
+            trace_id="trace-policy",
+            task_id="TASK-POLICY",
+            instance_id="dev",
+        ),
+    )
+
+    events: list[Any] = []
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not events:
+        events = transport.poll_events()
+        time.sleep(0.01)
+    blocked = next(event for event in events if event.type == "agent.api_blocked")
+    assert blocked.payload["provider_stop_reason"] == "provider_policy_rejected"
+    assert blocked.payload["provider_error_status"] == 400
+    assert blocked.payload["provider_error_kind"] == "unknown"
+    assert blocked.payload["reason"] == (
+        "Request was considered high risk and rejected."
+    )
+    assert blocked.payload["provider_transcript_ref"] == str(transcript)
+    assert "Process exited with code 1" in blocked.payload["transport_error"]
+
+
+def test_spawn_passes_role_scoped_launch_env_to_sdk_without_cross_role_leakage(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    calls: list[tuple[str, Any]] = []
+
+    async def fake_query(*, prompt, options=None, transport=None):
+        calls.append((prompt, options))
+        return
+        yield
+
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=fake_query,
+    )
+    for instance_id, token_name in (("dev-1", "one.token"), ("dev-2", "two.token")):
+        role = RoleConfig(
+            name="dev",
+            instance_id=instance_id,
+            backend="claude-code",
+            transport="stream-json",
+        )
+        transport.register_role(role)
+        transport.spawn(
+            role,
+            argv=[
+                "env",
+                f"ZF_ROLE_INSTANCE={instance_id}",
+                f"ZF_ARTIFACT_READ_TOKEN_FILE={state_dir / token_name}",
+                "claude",
+                "--print",
+                "NOT_LAUNCH_ENV=ignored",
+            ],
+        )
+        transport.send_task(
+            instance_id,
+            briefing_path=state_dir / "briefings" / f"{instance_id}.md",
+            prompt=instance_id,
+        )
+
+    first_env = getattr(calls[0][1], "env")
+    second_env = getattr(calls[1][1], "env")
+    assert first_env == {
+        "ZF_ROLE_INSTANCE": "dev-1",
+        "ZF_ARTIFACT_READ_TOKEN_FILE": str(state_dir / "one.token"),
+    }
+    assert second_env == {
+        "ZF_ROLE_INSTANCE": "dev-2",
+        "ZF_ARTIFACT_READ_TOKEN_FILE": str(state_dir / "two.token"),
+    }
+    assert "NOT_LAUNCH_ENV" not in first_env
+    assert "NOT_LAUNCH_ENV" not in second_env
 
 
 def test_register_role_without_spawn_preserves_config_for_send_task(
@@ -136,7 +390,9 @@ def test_send_task_first_call_uses_session_id_second_uses_resume(
 
     transport = StreamJsonTransport(state_dir, registry, query_fn=fake_query)
     role = RoleConfig(name="dev")
-    transport.spawn(role, argv=[])
+    role_cwd = state_dir / "workdirs" / "dev" / "project"
+    role_cwd.mkdir(parents=True)
+    transport.spawn(role, argv=[], cwd=role_cwd)
     expected_id = str(registry.get_or_create("dev"))
 
     # First call: session-id via extra_args (not resume)
@@ -149,17 +405,62 @@ def test_send_task_first_call_uses_session_id_second_uses_resume(
     assert extra.get("session-id") == expected_id or sid_attr == expected_id
 
     # Simulate Claude CLI having created the session file after first call.
-    escaped = "-" + str(transport.cwd).lstrip("/").replace("/", "-")
-    session_dir = Path.home() / ".claude" / "projects" / escaped
+    session_file = claude_session_path(str(role_cwd), expected_id)
+    session_dir = session_file.parent
     session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / f"{expected_id}.jsonl").write_text("{}\n")
+    session_file.write_text("{}\n")
 
     # Second call: resume (not session_id/extra_args)
     transport.send_task("dev", briefing_path=state_dir / "briefings" / "dev-T2.md", prompt="hello")
     assert calls[1]["options"].resume == expected_id
 
     # Cleanup the test session file
-    (session_dir / f"{expected_id}.jsonl").unlink(missing_ok=True)
+    session_file.unlink(missing_ok=True)
+
+
+def test_second_turn_waits_for_delayed_session_file_before_purge(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    calls: list[Any] = []
+
+    async def fake_query(*, prompt, options=None, transport=None):
+        calls.append(options)
+        return
+        yield
+
+    transport = StreamJsonTransport(state_dir, registry, query_fn=fake_query)
+    transport.spawn(RoleConfig(name="dev"), argv=[])
+
+    with (
+        patch.object(
+            transport,
+            "_session_exists_on_disk",
+            side_effect=[False, False, False, True],
+        ),
+        patch(
+            "zf.runtime.transport_stream_json.purge_stale_claude_session_lock",
+            return_value={},
+        ) as purge,
+        patch("zf.runtime.transport_stream_json.time.sleep") as sleep,
+    ):
+        transport.send_task(
+            "dev",
+            briefing_path=state_dir / "briefings" / "dev-T1.md",
+            prompt="first",
+        )
+        transport.send_task(
+            "dev",
+            briefing_path=state_dir / "briefings" / "dev-T2.md",
+            prompt="second",
+        )
+
+    assert purge.call_count == 1
+    sleep.assert_called_once()
+    assert getattr(calls[0], "resume", None) is None
+    assert getattr(calls[1], "resume", None) == str(
+        registry.get_or_create("dev")
+    )
 
 
 def test_send_task_acquires_session_mutex(
@@ -269,6 +570,42 @@ def test_poll_events_emits_usage_from_result_message(
     u = usage_events[0]
     assert u.payload.get("total_cost_usd") == 0.0042
     assert u.payload["usage"]["input_tokens"] == 1000
+
+
+def test_usage_event_carries_observed_model_and_configured_context_window(
+    state_dir: Path,
+    registry: RoleSessionRegistry,
+):
+    messages = [
+        FakeAssistantMessage(content=[FakeTextBlock(text="ok")], model="k3"),
+        FakeResultMessage(
+            session_id="k3-session",
+            usage={"input_tokens": 1000, "output_tokens": 20},
+        ),
+    ]
+    transport = StreamJsonTransport(
+        state_dir,
+        registry,
+        query_fn=_make_fake_query(messages),
+    )
+    transport.spawn(
+        RoleConfig(
+            name="dev",
+            backend="claude-code",
+            context_window_tokens=1_000_000,
+        ),
+        argv=[],
+    )
+
+    transport.send_task("dev", briefing_path=state_dir / "x.md", prompt="hi")
+
+    usage = next(
+        event for event in transport.poll_events()
+        if event.type == "agent.usage"
+    )
+    assert usage.payload["model"] == "k3"
+    assert usage.payload["model_context_window"] == 1_000_000
+    assert usage.payload["context_usage_ratio"] == 0.001
 
 
 def test_provider_events_carry_dispatch_context(

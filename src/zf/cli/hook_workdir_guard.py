@@ -48,21 +48,129 @@ def bash_command_looks_mutating(command: str) -> bool:
     normalized = f" {_NON_MUTATING_REDIRECTION_RE.sub(' ', command).strip()} "
     if " zf task-doc ingest " in normalized:
         return True
-    if any(marker in normalized for marker in _BASH_MUTATING_MARKERS):
-        return True
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars="<>|&;")
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError:
-        # Fail closed for malformed shell input that still visibly redirects.
-        return bool(re.search(r"(?:^|\s)(?:\d*)>>?(?:\s|[^=])", normalized))
+        # Fail closed for malformed shell input with active side-effect syntax.
+        return _contains_active_shell_substitution(command) or bool(
+            re.search(r"(?:^|\s)(?:\d*)>>?(?:\s|[^=])", normalized)
+        )
+    if _is_simple_controlled_zf_result_command(command, tokens):
+        return False
+    if _contains_active_shell_substitution(command):
+        return True
+    if any(marker in normalized for marker in _BASH_MUTATING_MARKERS):
+        return True
     return any(token in {">", ">>", ">|", "&>", "&>>"} for token in tokens)
+
+
+def _contains_active_shell_substitution(command: str) -> bool:
+    """Return whether shell substitution syntax appears outside single quotes."""
+
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            escaped = True
+            index += 1
+            continue
+        if char == "'" and not quote:
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            if quote == '"':
+                quote = ""
+            elif not quote:
+                quote = '"'
+            index += 1
+            continue
+        if char == "`" or command.startswith("$(", index):
+            return True
+        if not quote and (
+            command.startswith("<(", index)
+            or command.startswith(">(", index)
+        ):
+            return True
+        index += 1
+    return False
+
+
+def _is_simple_controlled_zf_result_command(
+    command: str,
+    tokens: list[str],
+) -> bool:
+    """Recognize one side-effect-controlled zf CLI invocation.
+
+    Semantic JSON is opaque data. Looking for strings such as ``.write_text``
+    inside a quoted ``zf emit``/``zf result submit|validate`` payload incorrectly
+    classifies that data as a Python filesystem mutation. Shell composition
+    remains fail-closed: substitutions, pipes, separators and redirects never
+    enter this exemption.
+    """
+
+    if _contains_active_shell_substitution(command):
+        return False
+    shell_operators = {
+        ";", "|", "||", "&", "&&", ">", ">>", ">|", "&>", "&>>", "<", "<<",
+    }
+    if any(token in shell_operators for token in tokens):
+        return False
+    index = 0
+    while index < len(tokens) and re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*=.*",
+        tokens[index],
+    ):
+        index += 1
+    if index < len(tokens) and tokens[index].rsplit("/", 1)[-1] == "env":
+        index += 1
+        while index < len(tokens) and (
+            tokens[index].startswith("-")
+            or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index])
+        ):
+            index += 1
+    if index + 2 < len(tokens) and (
+        tokens[index].rsplit("/", 1)[-1] == "uv"
+        and tokens[index + 1] == "run"
+    ):
+        index += 2
+    if index >= len(tokens) or tokens[index].rsplit("/", 1)[-1] not in {
+        "zf",
+        "zf-cli",
+    }:
+        return False
+    args = tokens[index + 1:]
+    return bool(
+        args[:1] == ["emit"]
+        or args[:2] in (["result", "submit"], ["result", "validate"])
+    )
 
 
 def write_target_paths(tool_name: str, tool_input: dict) -> list[str]:
     """Return explicit paths targeted by provider-native write tools."""
+    return [path for _operation, path in write_target_operations(tool_name, tool_input)]
+
+
+def write_target_operations(
+    tool_name: str,
+    tool_input: dict,
+) -> list[tuple[str, str]]:
+    """Return normalized operation/path pairs for provider-native writes."""
+
     lower = tool_name.lower().strip()
     if lower in {"write", "edit", "multiedit", "notebookedit"}:
         raw = (
@@ -71,7 +179,7 @@ def write_target_paths(tool_name: str, tool_input: dict) -> list[str]:
             or tool_input.get("notebook_path")
         )
         text = str(raw or "").strip()
-        return [text] if text else []
+        return [(lower, text)] if text else []
     if lower != "apply_patch":
         return []
     command = str(
@@ -80,20 +188,20 @@ def write_target_paths(tool_name: str, tool_input: dict) -> list[str]:
         or tool_input.get("input")
         or ""
     )
-    paths: list[str] = []
+    operations: list[tuple[str, str]] = []
     for line in command.splitlines():
         stripped = line.strip()
-        for marker in (
-            "*** Add File:",
-            "*** Update File:",
-            "*** Delete File:",
-            "*** Move to:",
+        for operation, marker in (
+            ("add", "*** Add File:"),
+            ("update", "*** Update File:"),
+            ("delete", "*** Delete File:"),
+            ("move", "*** Move to:"),
         ):
             if stripped.startswith(marker):
                 target = stripped[len(marker):].strip()
                 if target:
-                    paths.append(target)
-    return paths
+                    operations.append((operation, target))
+    return operations
 
 
 def tool_input_digest(tool_input: dict) -> str:
@@ -164,7 +272,7 @@ def evaluate_workdir_write_guard(
     cwd = Path(str(event_payload.get("cwd") or assigned_root))
     project_roots = {Path(project_root), state_dir.parent}
     offending: list[str] = []
-    for raw_target in write_target_paths(tool_name, tool_input):
+    for operation, raw_target in write_target_operations(tool_name, tool_input):
         target = Path(raw_target)
         target = target if target.is_absolute() else cwd / target
         if (
@@ -176,7 +284,7 @@ def evaluate_workdir_write_guard(
                 event_log,
                 actor=actor,
                 target=target,
-            ):
+            ) and operation in {"update", "write", "edit", "multiedit", "notebookedit"}:
                 continue
             offending.append(str(target))
     if tool_name.lower() in {"bash", "shell"}:

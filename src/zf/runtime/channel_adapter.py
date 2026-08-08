@@ -11,6 +11,10 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter
 from zf.core.security.redaction import redact_obj
 from zf.core.state.session import SessionStore, ZfNotInitialized
+from zf.runtime.channel_dispatch_claim import (
+    ChannelDispatchResult,
+    with_channel_reply_dispatch_claim,
+)
 from zf.runtime.channel_dispatch_capacity import (
     channel_dispatch_capacity,
     channel_dispatch_lock,
@@ -39,7 +43,6 @@ from zf.runtime.channel_run_owner import (
     provider_run_fields_for_request,
 )
 from zf.runtime.channel_reply_completion import (
-    ChannelDispatchResult,
     complete_deterministic_reply as _complete_deterministic_reply,
     origin_external_refs as _origin_external_refs,
 )
@@ -74,6 +77,7 @@ DISPATCHABLE_STATUSES = {"pending", "queued"}
 DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S = 30 * 60.0
 
 
+@with_channel_reply_dispatch_claim
 def dispatch_reply_request(
     *,
     state_dir: Path,

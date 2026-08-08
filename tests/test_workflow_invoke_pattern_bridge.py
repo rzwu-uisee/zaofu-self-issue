@@ -286,6 +286,65 @@ def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(
     assert activation_calls[0]["source_event_id"]
 
 
+def test_workflow_invoke_rejects_declared_writer_entry_before_side_effects(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    config.workflow.stages[0].topology = "fanout_writer_scoped"
+    config.workflow.stages[0].trigger = "task_map.ready"
+    _state_dir, log, transport, orch = _state(tmp_path, config=config)
+
+    decision = orch._on_workflow_invoke_requested(ZfEvent(
+        type="workflow.invoke.requested",
+        actor="web",
+        task_id="TASK-1",
+        payload={
+            "task_id": "TASK-1",
+            "pattern_id": "review-wave",
+            "dispatch_id": "disp-1",
+            "expected_output": "implementation",
+        },
+    ))
+
+    events = log.read_all()
+    assert decision is not None
+    assert decision.action == "block"
+    assert any(event.type == "workflow.invoke.rejected" for event in events)
+    assert not any(event.type == "workflow.invoke.accepted" for event in events)
+    assert not any(event.type == "task.fanout.requested" for event in events)
+    assert transport.sent == []
+
+
+def test_declared_writer_fanout_does_not_fall_back_to_generic_fanout(
+    tmp_path: Path,
+) -> None:
+    config = _config()
+    config.workflow.stages[0].topology = "fanout_writer_scoped"
+    config.workflow.stages[0].trigger = "task_map.ready"
+    _state_dir, log, transport, orch = _state(tmp_path, config=config)
+    requested = ZfEvent(
+        type="task.fanout.requested",
+        actor="zf-cli",
+        task_id="TASK-1",
+        payload={
+            "task_id": "TASK-1",
+            "dispatch_id": "disp-1",
+            "pattern_id": "review-wave",
+            "requested_specialists": ["review-a"],
+            "expected_output": "implementation",
+        },
+    )
+
+    decision = orch._on_task_fanout_requested(requested)
+
+    assert decision is not None
+    assert decision.action == "block"
+    events = log.read_all()
+    assert any(event.type == "task.fanout.rejected" for event in events)
+    assert not any(event.type == "fanout.started" for event in events)
+    assert transport.sent == []
+
+
 def test_workflow_invoke_starts_declared_fanout_only_after_admission(
     tmp_path: Path,
 ) -> None:

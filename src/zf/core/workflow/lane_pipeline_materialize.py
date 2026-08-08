@@ -75,7 +75,11 @@ def _stage_backedge(spec: Any, stage: Any) -> dict[str, Any] | None:
     }
 
 
-def materialize_lane_pipeline_stages(spec: Any) -> list[dict[str, Any]]:
+def materialize_lane_pipeline_stages(
+    spec: Any,
+    *,
+    task_pipeline_blocking: bool = False,
+) -> list[dict[str, Any]]:
     """编译 candidate 级链。spec 须至少 1 个 stage(parse 层已保证)。"""
     stages: list[dict[str, Any]] = []
     profile = lane_profile_name(spec)
@@ -127,11 +131,6 @@ def materialize_lane_pipeline_stages(spec: Any) -> list[dict[str, Any]]:
             "flow_kind": str(getattr(spec, "flow_kind", "") or ""),
             "topology": "fanout_reader",
             "roles": _lane_roles(stage, spec.lane_count),
-            "fanout": {"assignment": {
-                "strategy": "affinity_stage_slots",
-                "lane_profile": profile,
-                "stage_slot": stage.stage_id,
-            }},
             "aggregate": {
                 "mode": "wait_for_all",
                 "child_success_event": stage.success_event,
@@ -141,6 +140,16 @@ def materialize_lane_pipeline_stages(spec: Any) -> list[dict[str, Any]]:
                 "max_retries": retries,
             },
         }
+        # A blocking v4 Task Pipeline has already replaced the legacy writer
+        # fanout, so Candidate-level readers cannot derive children from its
+        # lane manifest. They remain the same global stage/roles, dispatched
+        # as a static fanout against the frozen Candidate exact commit.
+        if not task_pipeline_blocking:
+            entry["fanout"] = {"assignment": {
+                "strategy": "affinity_stage_slots",
+                "lane_profile": profile,
+                "stage_slot": stage.stage_id,
+            }}
         if stage.deadline_seconds:
             entry["timeout_seconds"] = int(stage.deadline_seconds)
         backedge = _stage_backedge(spec, stage)

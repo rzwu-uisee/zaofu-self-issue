@@ -13,6 +13,12 @@ from zf.core.state.locks import locked_path
 
 
 TASK_ATTEMPT_STORE_SCHEMA_VERSION = "task-attempt-store.v1"
+TASK_ATTEMPT_IDENTITY_ROLE_V1 = "role-v1"
+TASK_ATTEMPT_IDENTITY_OPERATION_V2 = "operation-v2"
+_ATTEMPT_IDENTITY_VERSIONS = frozenset({
+    TASK_ATTEMPT_IDENTITY_ROLE_V1,
+    TASK_ATTEMPT_IDENTITY_OPERATION_V2,
+})
 _ACTIVE_STATUSES = frozenset({"prepared", "delivering", "sent"})
 _ATTEMPT_STATUSES = _ACTIVE_STATUSES | frozenset({
     "succeeded",
@@ -122,20 +128,42 @@ class TaskAttemptStore:
         created_at: str,
         lease_expires_at: str,
         max_attempts: int,
+        parent_task_id: str = "",
+        identity_version: str = TASK_ATTEMPT_IDENTITY_ROLE_V1,
+        placement_epoch: int = 0,
     ) -> EnsureTaskAttemptResult:
         run_id = str(run_id or "").strip()
         task_id = str(task_id or "").strip()
         dispatch_id = str(dispatch_id or "").strip()
         if not task_id or not dispatch_id:
             raise ValueError("TaskAttempt requires task_id and dispatch_id")
+        identity_version = str(identity_version or "").strip()
+        if identity_version not in _ATTEMPT_IDENTITY_VERSIONS:
+            raise ValueError(
+                f"unsupported TaskAttempt identity_version {identity_version!r}"
+            )
+        try:
+            placement_epoch = int(placement_epoch)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("TaskAttempt placement_epoch must be an integer") from exc
+        if placement_epoch < 0:
+            raise ValueError("TaskAttempt placement_epoch must be >= 0")
+        if (
+            identity_version == TASK_ATTEMPT_IDENTITY_OPERATION_V2
+            and placement_epoch < 1
+        ):
+            raise ValueError(
+                "operation-v2 TaskAttempt placement_epoch must be >= 1"
+            )
         run_id = run_id or "legacy"
         attempt_id = task_attempt_id(run_id, task_id, dispatch_id)
-        lease_id = _lease_id(attempt_id)
+        lease_id = task_attempt_lease_id(attempt_id)
         attempt_key = _attempt_key(
             run_id,
             task_id,
             str(operation_id or ""),
             str(role or instance_id or ""),
+            identity_version=identity_version,
         )
         with locked_path(self.path):
             data = self._load_unlocked()
@@ -210,11 +238,14 @@ class TaskAttemptStore:
                 "lease_id": lease_id,
                 "run_id": run_id,
                 "task_id": task_id,
+                "parent_task_id": str(parent_task_id or ""),
                 "operation_id": str(operation_id or ""),
                 "attempt_key": attempt_key,
+                "identity_version": identity_version,
                 "dispatch_id": dispatch_id,
                 "role": str(role or ""),
                 "instance_id": str(instance_id or ""),
+                "placement_epoch": placement_epoch,
                 "briefing_ref": str(briefing_ref or ""),
                 "ordinal": ordinal,
                 "series": series,
@@ -551,11 +582,17 @@ def _attempt_row_error(attempt_id: str, row: dict[str, Any]) -> str:
         return f"{attempt_id} has unsupported schema"
     if str(row.get("attempt_id") or "") != attempt_id:
         return f"{attempt_id} identity does not match its key"
+    identity_version = str(
+        row.get("identity_version") or TASK_ATTEMPT_IDENTITY_ROLE_V1
+    )
+    if identity_version not in _ATTEMPT_IDENTITY_VERSIONS:
+        return f"{attempt_id} has unsupported identity_version {identity_version!r}"
     expected_key = _attempt_key(
         str(row.get("run_id") or ""),
         str(row.get("task_id") or ""),
         str(row.get("operation_id") or ""),
         str(row.get("role") or row.get("instance_id") or ""),
+        identity_version=identity_version,
     )
     if str(row.get("attempt_key") or "") != expected_key:
         return f"{attempt_id} attempt_key does not match its identity"
@@ -569,6 +606,17 @@ def _attempt_row_error(attempt_id: str, row: dict[str, Any]) -> str:
         return f"{attempt_id} ordinal/series must be integers"
     if ordinal < 1 or series < 1:
         return f"{attempt_id} ordinal/series must be positive"
+    try:
+        placement_epoch = int(row.get("placement_epoch") or 0)
+    except (TypeError, ValueError):
+        return f"{attempt_id} placement_epoch must be an integer"
+    if placement_epoch < 0:
+        return f"{attempt_id} placement_epoch must be >= 0"
+    if (
+        identity_version == TASK_ATTEMPT_IDENTITY_OPERATION_V2
+        and placement_epoch < 1
+    ):
+        return f"{attempt_id} operation-v2 placement_epoch must be >= 1"
     return ""
 
 
@@ -586,14 +634,19 @@ def _attempt_key(
     task_id: str,
     operation_id: str,
     role: str,
+    *,
+    identity_version: str = TASK_ATTEMPT_IDENTITY_ROLE_V1,
 ) -> str:
+    identity_parts = [run_id, task_id, operation_id]
+    if identity_version == TASK_ATTEMPT_IDENTITY_ROLE_V1:
+        identity_parts.append(role)
     digest = hashlib.sha256(
-        f"{run_id}|{task_id}|{operation_id}|{role}".encode("utf-8")
+        "|".join(identity_parts).encode("utf-8")
     ).hexdigest()[:20]
     return f"tak-{digest}"
 
 
-def _lease_id(attempt_id: str) -> str:
+def task_attempt_lease_id(attempt_id: str) -> str:
     digest = hashlib.sha256(
         f"lease|{attempt_id}".encode("utf-8")
     ).hexdigest()[:20]
@@ -602,9 +655,12 @@ def _lease_id(attempt_id: str) -> str:
 
 __all__ = [
     "EnsureTaskAttemptResult",
+    "TASK_ATTEMPT_IDENTITY_OPERATION_V2",
+    "TASK_ATTEMPT_IDENTITY_ROLE_V1",
     "TASK_ATTEMPT_STORE_SCHEMA_VERSION",
     "TaskAttemptLimitError",
     "TaskAttemptStore",
     "TaskAttemptStoreError",
     "task_attempt_id",
+    "task_attempt_lease_id",
 ]

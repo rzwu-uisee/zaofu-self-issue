@@ -15,10 +15,18 @@ from zf.runtime.artifact_read_ledger import (
     seal_read_ledger,
     validate_required_reads,
 )
+from zf.runtime.call_result_limits import (
+    operation_budget_ceiling,
+    operation_parallel_ceiling,
+)
 from zf.runtime.call_result_adapters import (
     AdaptedControlResult,
     ControlResultAdapterError,
     ControlResultAdapterRegistry,
+)
+from zf.runtime.call_result_correction import (
+    build_correction_briefing,
+    repair_instruction,
 )
 from zf.runtime.call_result_envelope import (
     envelope_identity_key,
@@ -31,6 +39,7 @@ from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.provider_operation_summary import (
     prepare_provider_operation_summary,
 )
+from zf.runtime.typed_result_admission import typed_admission_issues_for
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     load_workflow_operation,
@@ -121,8 +130,8 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                 source_payload=payload,
                 workflow_run_id=operation_identity["workflow_run_id"],
                 operation_id=operation_identity["operation_id"],
-                max_parallel_agents=_operation_parallel_ceiling(operation),
-                budget_usd=_operation_budget_ceiling(operation),
+                max_parallel_agents=operation_parallel_ceiling(operation),
+                budget_usd=operation_budget_ceiling(operation),
                 source_event_id=event.id,
             )
         )
@@ -138,6 +147,16 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                     "read_ledger_digest": str(ledger_descriptor.get("sha256") or ""),
                     "input_consumption_status": "satisfied",
                 })
+        from zf.runtime.task_pipeline_call_result import (
+            bind_integration_acceptance_ledger,
+        )
+
+        adapted = bind_integration_acceptance_ledger(
+            adapted,
+            ledger_descriptor,
+            state_dir=self.state_dir,
+            source_event_id=event.id,
+        )
         control_ref = {
             "schema_version": adapted.schema_version,
             "ref": str(adapted.descriptor.get("ref") or ""),
@@ -158,6 +177,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
         )
         issues = [dict(item) for item in adapted.issues]
         issues.extend(provider_summary_issues)
+        issues.extend(typed_admission_issues_for(self.state_dir, adapted, semantic_submit))
         if require_semantic_submit and not semantic_submit:
             issues.append({
                 "field": "result_submit",
@@ -191,7 +211,6 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             from zf.runtime.artifact_delivery_result import (
                 artifact_delivery_admission_issues,
             )
-
             artifact_issues = artifact_delivery_admission_issues(
                 self.state_dir,
                 adapted.payload,
@@ -608,12 +627,12 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             "plan_synth_contract_ref",
             "plan_synth_contract_digest",
             "contract_revision",
-            "task_map_generation",
+            "task_map_generation", "feedback_revision",
             "workflow_generation",
             "request_revision",
             "generic_workflow_contract_digest",
             "workflow_template",
-            "completion_profile",
+            "completion_profile", "result_semantics",
             "plan_artifact_package_id",
             "plan_artifact_package_ref",
             "plan_artifact_package_digest",
@@ -819,6 +838,14 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             "invalid_control_result_ref": adapted.descriptor,
             "required_schema": adapted.schema_version,
             "issues": issues,
+            "field_repairs": [
+                {
+                    "field": str(issue.get("field") or "control_result"),
+                    "code": str(issue.get("code") or "schema_invalid"),
+                    "instruction": repair_instruction(issue),
+                }
+                for issue in issues
+            ],
             "repair_round": repair_round,
             "instruction": "Correct only the result protocol; do not restart implementation work or change product semantics.",
         }
@@ -878,20 +905,15 @@ def dispatch_call_result_correction(
     briefing_dir.mkdir(parents=True, exist_ok=True)
     path = briefing_dir / f"{role.instance_id}-{task_id or 'call'}-result-correction-{outcome.repair_round}.md"
     path.write_text(
-        "\n".join([
-            f"Active task: {task_id or '(none)'}",
-            "",
-            "# Call Result Protocol Correction",
-            "",
-            "The previous provider turn completed work but returned an invalid control result.",
-            "Do not redo implementation or change verdict/evidence semantics.",
-            f"Correction packet: `{outcome.correction_ref.get('ref', '')}`",
-            f"Operation: `{outcome.operation_id}`",
-            f"Request hash: `{outcome.request_hash}`",
-            "",
-            "Read the correction packet and emit one corrected terminal result using the same task/attempt/dispatch identity.",
-            "",
-        ]),
+        build_correction_briefing(
+            state_dir=Path(runtime.state_dir),
+            source_payload=payload,
+            task_id=task_id,
+            operation_id=outcome.operation_id,
+            request_hash=outcome.request_hash,
+            correction_ref=outcome.correction_ref,
+            issues=outcome.issues,
+        ),
         encoding="utf-8",
     )
     from zf.runtime.injection import build_task_prompt
@@ -923,7 +945,6 @@ def _wait_for_source_turn_stop(
     paste its text while dropping Enter. Other backends and synthetic tests do
     not expose a per-turn stop hook, so they keep the existing fast path.
     """
-
     stop_type = {
         "codex": "codex.hook.stop",
         "claude-code": "claude.hook.stop",
@@ -958,34 +979,6 @@ def _wait_for_source_turn_stop(
 
 def _semantic_verdict(control_result: Mapping[str, Any]) -> str:
     return str(control_result.get("verdict") or "pending")
-
-
-def _operation_parallel_ceiling(operation: Mapping[str, Any] | None) -> int:
-    operation = operation or {}
-    raw = operation.get("provider_session_max_parallel_agents")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = 6
-    return max(1, min(6, value))
-
-
-def _operation_budget_ceiling(
-    operation: Mapping[str, Any] | None,
-) -> float | None:
-    operation = operation or {}
-    snapshot = operation.get("budget_snapshot")
-    if not isinstance(snapshot, Mapping):
-        return None
-    for key in ("remaining_usd", "hard_limit_usd", "budget_usd"):
-        raw = snapshot.get(key)
-        if raw is None:
-            continue
-        try:
-            return max(0.0, float(raw))
-        except (TypeError, ValueError):
-            return None
-    return None
 
 
 __all__ = [

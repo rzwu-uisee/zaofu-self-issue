@@ -405,7 +405,7 @@ def test_entry_trigger_synthesizes_and_emits(tmp_path: Path) -> None:
     assert emitted is not None and emitted.type == "task_map.ready"
     assert emitted.payload["source"] == "light_flow_kernel"
     assert emitted.payload["flow_kind"] == "prd"
-    assert emitted.payload["task_map_ref"] == ".zf/artifacts/default/task_map.json"
+    assert emitted.payload["task_map_ref"] == "artifacts/default/task_map.json"
     assert emitted.payload["requirement_spec_ref"] == (
         "artifacts/requirements/r2.json"
     )

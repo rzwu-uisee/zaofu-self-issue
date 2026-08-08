@@ -1,10 +1,11 @@
 import { useEffect } from "react";
 
-import { getEventsPage, getIntegrationQueue, getRepairActions } from "../api/client";
+import { getEventsPage, getIntegrationQueue, getRepairActions, getTaskPipeline } from "../api/client";
 import type {
   EventsPage,
   IntegrationQueueProjection,
   RepairActionProjection,
+  TaskPipelineProjection,
 } from "../api/types";
 import type { ProjectRequestScope } from "./projectRequestScope";
 import { isObservabilityPage, parseEventFilter } from "./shared";
@@ -17,6 +18,7 @@ interface ProjectObservabilityDataOptions {
   onEventsPage: (page: EventsPage) => void;
   onIntegrationQueue: (queue: IntegrationQueueProjection | null) => void;
   onRepairActions: (actions: RepairActionProjection | null) => void;
+  onTaskPipeline: (pipeline: TaskPipelineProjection | null) => void;
   page: PageId;
   scope: ProjectRequestScope;
   selectedTaskId: string | null;
@@ -30,6 +32,7 @@ export function useProjectObservabilityData({
   onEventsPage,
   onIntegrationQueue,
   onRepairActions,
+  onTaskPipeline,
   page,
   scope,
   selectedTaskId,
@@ -66,16 +69,19 @@ export function useProjectObservabilityData({
     void Promise.all([
       getIntegrationQueue(activeProjectId || undefined),
       getRepairActions(activeProjectId || undefined),
-    ]).then(([queue, actions]) => {
+      getTaskPipeline(activeProjectId || undefined),
+    ]).then(([queue, actions, pipeline]) => {
       if (cancelled || !scope.isCurrent(ticket)) return;
       onIntegrationQueue(queue);
       onRepairActions(actions);
+      onTaskPipeline(pipeline);
     }).catch((error) => {
       if (cancelled || !scope.isCurrent(ticket)) return;
       onIntegrationQueue(null);
       onRepairActions(null);
+      onTaskPipeline(null);
       onError(error instanceof Error ? error.message : String(error));
     });
     return () => { cancelled = true; };
-  }, [activeProjectId, onError, onIntegrationQueue, onRepairActions, page, scope, snapshotSeq]);
+  }, [activeProjectId, onError, onIntegrationQueue, onRepairActions, onTaskPipeline, page, scope, snapshotSeq]);
 }

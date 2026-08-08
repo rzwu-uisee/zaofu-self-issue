@@ -40,7 +40,7 @@ def test_kept_events_still_wake():
 def test_wake_list_changes_are_explicit():
     # 快照锁:数量带 ±0 容差——增删唤醒源必须改本测试(显式决策)。
     assert len(WAKE_PATTERNS) == len(set(WAKE_PATTERNS))  # 无重复
-    assert len(WAKE_PATTERNS) == 159, (
+    assert len(WAKE_PATTERNS) == 171, (
         f"WAKE_PATTERNS={len(WAKE_PATTERNS)}; 唤醒面变更需同步本快照"
         f"(K2 基线 103-7=96;B14 plan 审核门显式 +3:plan.approval.requested /"
         f" plan.approved / plan.rejected —— 均 workflow 控制事件需唤醒"
@@ -74,12 +74,19 @@ def test_wake_list_changes_are_explicit():
             f"provider.turn.closed → 148; Channel question dedup request/"
             f"apply lifecycle +2 → 150; typed Channel question update, "
             f"cross-review request/result, and consensus-review rejection "
-            f"lifecycle +5 → 155; controlled run cancellation wake edge "
-            f"+1:run.cancelled → 156; channel reply provider failure remediation "
-            f"wake edge +1:channel.agent.reply.failed → 157"
-            f"; Channel dedup rejection/remediation exhaustion +2:"
+            f"lifecycle +5 → 155; controlled run cancellation +1:"
+            f"run.cancelled → 156; OA semantic checkpoint/failure/rework, "
+            f"decision submit/fail, owner narrative submit/fail +7 → 163; "
+            f"OA admitted Run Plan restart-safe redrive +1 → 164; "
+            f"typed stage barrier/pre-closeout redrive +2 → 166; "
+            f"channel reply provider failure remediation wake edge +1:"
+            f"channel.agent.reply.failed → 167; "
+            f"Channel dedup rejection/remediation exhaustion +2:"
             f"channel.question.dedup.rejected / "
-            f"channel.question.dedup.remediation.exhausted → 159"
+            f"channel.question.dedup.remediation.exhausted → 169; durable "
+            f"provider operation failure redrive +1:"
+            f"workflow.operation.failed → 170; bounded Channel synthesis "
+            f"repair dispatch +1:channel.synthesis.repair.requested → 171"
         )
 
 

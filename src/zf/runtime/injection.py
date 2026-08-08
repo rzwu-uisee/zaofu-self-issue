@@ -189,8 +189,9 @@ def generate_role_instructions(
         if auto_lines:
             sections.append("## Auto-Injected Skills")
             sections.append(
-                "These skills are already injected for this role. Use only "
-                "the listed skills when their description matches the task:"
+                "Activation is required: invoke or read every listed skill "
+                "before substantive work. This index carries metadata only; "
+                "the materialized `SKILL.md` body is authoritative:"
             )
             sections.extend(auto_lines)
             sections.append("")
@@ -1052,25 +1053,12 @@ def _render_recursion_guard(role: RoleConfig) -> str:
     return (
         "## Recursion Guard (强制)\n"
         "\n"
-        "Three hard boundaries for this worker role:\n"
-        "\n"
         f"1. **No nested {role.name} sub-agent.** Do not spawn another "
-        f"`{role.name}` instance via your provider's sub-agent tool "
-        "(Codex sub-agent, Claude Code `Task`, etc.). All same-role "
-        "work is dispatched by the orchestrator. If you think the task "
-        f"needs parallel `{role.name}` work, emit a follow-up event and "
-        "let the orchestrator decide.\n"
-        "2. **No direct truth mutation.** TaskStore / FeatureStore / "
-        "SessionStore / MemoryStore and `.zf/events.jsonl` are "
-        "kernel-managed. Use `zf emit` to report intent. Do not write "
-        "those files directly.\n"
-        "3. **No self-declared release.** You cannot emit `ship.*`, "
-        "`release.*`, or `candidate.integration.*` — those transitions "
-        "are kernel-driven from gate evidence. Emit your role's "
-        "completion event only.\n"
-        "\n"
-        "Violation will be detected by Layer 1 verification and may "
-        "result in the dispatch being rolled back.\n"
+        f"`{role.name}` through provider tools; request orchestrator fanout.\n"
+        "2. **No direct truth mutation.** Do not write TaskStore, FeatureStore, "
+        "SessionStore, MemoryStore, or `.zf/events.jsonl`; report via `zf`.\n"
+        "3. **No self-declared release.** Emit only the assigned completion; "
+        "`ship.*`, `release.*`, and `candidate.integration.*` are Kernel-owned.\n"
     )
 
 
@@ -1780,13 +1768,20 @@ def build_task_prompt(
     positional-compatible because older dispatch sites may pass it as the third
     argument.
     """
-    instructions_path = briefing_path.parent.parent / "instructions" / f"{role_name}.md"
+    briefings_root = next(
+        (parent for parent in briefing_path.parents if parent.name == "briefings"),
+        briefing_path.parent,
+    )
+    instructions_path = briefings_root.parent / "instructions" / f"{role_name}.md"
     if prompt_kind == "fanout_child":
         return (
             f"Read the fanout child briefing at {briefing_path}. Use its "
             "fanout_id, run_id, target_ref, success command, failure command, "
             "and output contract as the authoritative workflow-child contract; "
             "do not look for a task.md unless the briefing explicitly names one. "
+            "A reader workflow child does not own the root canonical Task: do "
+            "not apply a role-instruction `zf guard ownership` or generic Task "
+            "completion protocol to it. "
             f"Also read your role instructions at {instructions_path} for constraints."
         )
     if prompt_kind == "fanout_synth":

@@ -23,6 +23,74 @@ class GoalClaimSetError(ValueError):
     """Accepted planning truth contains an ambiguous Goal claim set."""
 
 
+def mandatory_claim_continuity(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+    *,
+    claim_waivers: Mapping[str, str] | None = None,
+    active_waiver_refs: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Mechanically reject silent mandatory-claim loss across plan generations."""
+
+    previous_claims = {
+        str(item.get("goal_claim_id") or ""): dict(item)
+        for item in (previous or {}).get("claims", [])
+        if isinstance(item, Mapping)
+        and str(item.get("goal_claim_id") or "").strip()
+        and bool(item.get("mandatory", True))
+    }
+    current_claims = {
+        str(item.get("goal_claim_id") or ""): dict(item)
+        for item in current.get("claims", [])
+        if isinstance(item, Mapping)
+        and str(item.get("goal_claim_id") or "").strip()
+    }
+    waivers = {
+        str(claim_id): str(ref)
+        for claim_id, ref in (claim_waivers or {}).items()
+        if str(claim_id).strip() and str(ref).strip()
+    }
+    active = {str(ref) for ref in active_waiver_refs if str(ref).strip()}
+    findings: list[dict[str, Any]] = []
+    waived: list[dict[str, str]] = []
+    for claim_id, before in previous_claims.items():
+        after = current_claims.get(claim_id)
+        reason = ""
+        if after is None:
+            reason = "mandatory_claim_removed"
+        elif not bool(after.get("mandatory", True)):
+            reason = "mandatory_claim_downgraded"
+        elif str(after.get("text") or "").strip() != str(
+            before.get("text") or ""
+        ).strip():
+            reason = "mandatory_claim_rewritten"
+        if not reason:
+            continue
+        waiver_ref = waivers.get(claim_id, "")
+        if waiver_ref and waiver_ref in active:
+            waived.append({
+                "goal_claim_id": claim_id,
+                "waiver_ref": waiver_ref,
+                "reason": reason,
+            })
+            continue
+        findings.append({
+            "code": reason,
+            "goal_claim_id": claim_id,
+            "previous_text": str(before.get("text") or ""),
+            "current_text": str((after or {}).get("text") or ""),
+            "waiver_ref": waiver_ref,
+        })
+    return {
+        "schema_version": "goal-claim-continuity.v1",
+        "status": "passed" if not findings else "rejected",
+        "previous_mandatory_count": len(previous_claims),
+        "current_claim_count": len(current_claims),
+        "findings": findings,
+        "waived": waived,
+    }
+
+
 def canonical_task_map_generation(
     *,
     task_map_generation: object = "",
@@ -461,6 +529,7 @@ __all__ = [
     "build_goal_claim_set",
     "canonical_task_map_generation",
     "hydrate_pinned_goal_claim_set",
+    "mandatory_claim_continuity",
     "pin_goal_claim_set_from_requirement",
     "pin_goal_claim_set_from_task_map",
     "validate_goal_claim_set",

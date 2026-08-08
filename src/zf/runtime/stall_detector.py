@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from zf.core.events.model import ZfEvent
 from zf.core.workflow.flow_metadata import flow_kind_from_payload, normalize_flow_kind
 from zf.runtime.terminal_events import terminal_after_event
+from zf.runtime.workflow_operation import OPERATION_EVENT_TYPES
 
 # Events with no stage_id that nonetheless mean "the kernel handled the trigger".
 _FANOUT_START = "fanout.started"
@@ -149,14 +150,62 @@ def _trigger_replays_handled_operation(trigger_event, events) -> bool:
         or payload.get("parent_operation_id")
         or ""
     ).strip()
-    if not operation_id:
+    trigger_id = str(getattr(trigger_event, "id", "") or "").strip()
+    expected_run = str(
+        payload.get("workflow_run_id") or payload.get("run_id") or ""
+    )
+    expected_trace = str(
+        payload.get("trace_id")
+        or getattr(trigger_event, "correlation_id", "")
+        or ""
+    )
+    for event in events:
+        if getattr(event, "type", "") not in OPERATION_EVENT_TYPES:
+            continue
+        event_payload = _payload(event)
+        matching_operation = operation_id and str(
+            event_payload.get("operation_id") or ""
+        ) == operation_id
+        causally_anchored = trigger_id and str(
+            getattr(event, "causation_id", "") or ""
+        ) == trigger_id
+        if not matching_operation and not causally_anchored:
+            continue
+        observed_run = str(
+            event_payload.get("workflow_run_id")
+            or event_payload.get("run_id")
+            or ""
+        )
+        if expected_run and observed_run and expected_run != observed_run:
+            continue
+        observed_trace = str(
+            event_payload.get("trace_id")
+            or getattr(event, "correlation_id", "")
+            or ""
+        )
+        if expected_trace and observed_trace and expected_trace != observed_trace:
+            continue
+        return True
+    return False
+
+
+_ORCHESTRATOR_CHECKPOINT_PENDING_REASONS = frozenset({
+    "orchestrator_pre_impl_pending",
+    "orchestrator_stage_barrier_pending",
+})
+
+
+def _trigger_owned_by_orchestrator_checkpoint(trigger_event, events) -> bool:
+    """A blocking OA checkpoint owns recovery after fencing this trigger."""
+
+    trigger_id = str(getattr(trigger_event, "id", "") or "")
+    if not trigger_id:
         return False
     return any(
-        getattr(event, "type", "") in {
-            "workflow.operation.started",
-            "workflow.operation.settled",
-        }
-        and str(_payload(event).get("operation_id") or "") == operation_id
+        getattr(event, "type", "") == "run.dispatch.blocked"
+        and str(_payload(event).get("source_event_id") or "") == trigger_id
+        and str(_payload(event).get("reason") or "")
+        in _ORCHESTRATOR_CHECKPOINT_PENDING_REASONS
         for event in events
     )
 
@@ -184,6 +233,19 @@ def _trigger_task_is_superseded(trigger_event, events) -> bool:
         }:
             return True
     return False
+
+
+def _trigger_admitted_by_task_pipeline(trigger_event, events) -> bool:
+    """A blocking v4 generation is the dispatch receipt for task_map.ready."""
+
+    trigger_id = str(getattr(trigger_event, "id", "") or "")
+    if not trigger_id:
+        return False
+    return any(
+        getattr(event, "type", "") == "task.pipeline.generation.admitted"
+        and str(_payload(event).get("trigger_event_id") or "") == trigger_id
+        for event in events
+    )
 
 
 def detect_structural_stalls(
@@ -245,7 +307,15 @@ def detect_structural_stalls(
                 trigger_event,
                 [event for _, event in seq],
             )
+            or _trigger_owned_by_orchestrator_checkpoint(
+                trigger_event,
+                [event for _, event in seq],
+            )
             or _trigger_task_is_superseded(
+                trigger_event,
+                [event for _, event in seq],
+            )
+            or _trigger_admitted_by_task_pipeline(
                 trigger_event,
                 [event for _, event in seq],
             )
@@ -268,6 +338,14 @@ def detect_structural_stalls(
                 ):
                     handled = True
                     break
+            if (
+                etype == "fanout.retrigger.suppressed"
+                and str(_payload(event).get("stage_id") or "") == stage_id
+                and str(_payload(event).get("trigger_event_id") or "")
+                == str(getattr(trigger_event, "id", "") or "")
+            ):
+                handled = True
+                break
             # B14-S4 (doc 93 §6): awaiting_approval 是合法 hold 态 —
             # 审批门 hold 不是 stall,re-arm 重发会绕过人批(自愈机制
             # "修复"掉审核门是必须显式排除的失效模式)。approved/

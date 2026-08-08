@@ -18,6 +18,7 @@ from zf.runtime.stage_failure_replan import (
 def _config():
     stage = SimpleNamespace(
         id="issue-triage",
+        attempt_domain="plan",
         topology="fanout_reader",
         trigger="issue.requested",
         failure_event="",
@@ -43,7 +44,59 @@ def test_replan_re_emits_trigger_with_feedback() -> None:
     assert replan.payload["issue_ref"] == "docs/issues/TODO.md"
     assert replan.payload["rework_attempt"] == 1
     assert replan.payload["rework_feedback"][0]["message"] == "root paths unowned"
+    assert replan.payload["attempt_domain"] == "plan"
     assert replan.causation_id == failure.id
+
+
+def test_replan_cap_is_scoped_to_current_workflow_run() -> None:
+    previous_run = "run-previous"
+    current_run = "run-current"
+    events = [
+        ZfEvent(
+            type="issue.requested",
+            correlation_id=previous_run,
+            payload={
+                "workflow_run_id": previous_run,
+                "issue_ref": "docs/issues/previous.md",
+            },
+        ),
+        *[
+            ZfEvent(
+                type="issue.triage.failed",
+                correlation_id=previous_run,
+                payload={
+                    "workflow_run_id": previous_run,
+                    "reason": "previous plan rejected",
+                },
+            )
+            for _ in range(STAGE_REPLAN_CAP + 1)
+        ],
+        ZfEvent(
+            type="issue.requested",
+            correlation_id=current_run,
+            payload={
+                "workflow_run_id": current_run,
+                "issue_ref": "docs/issues/current.md",
+            },
+        ),
+    ]
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=current_run,
+        payload={
+            "workflow_run_id": current_run,
+            "reason": "current plan rejected once",
+        },
+    )
+    events.append(failure)
+
+    replan, note = plan_reader_stage_replan(_config(), events, failure)
+
+    assert replan is not None
+    assert "cap exhausted" not in note
+    assert replan.correlation_id == current_run
+    assert replan.payload["issue_ref"] == "docs/issues/current.md"
+    assert replan.payload["rework_attempt"] == 1
 
 
 def test_semantic_scan_rejection_requires_changed_canonical_input() -> None:
@@ -121,6 +174,54 @@ def test_semantic_scan_rejection_replans_after_input_digest_changes() -> None:
     assert replan is not None
     assert "prd-scan" in note
     assert replan.payload["requirement_spec_digest"] == "digest-r2"
+
+
+def test_replan_preserves_compile_gate_diagnostics_for_next_synth() -> None:
+    origin = ZfEvent(
+        type="issue.requested",
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        payload={
+            "reason": (
+                "plan compile gate failed: allowed_paths overlap: "
+                "app/server.mjs"
+            ),
+            "trigger_event_id": "evt-origin",
+            "diagnostics_ref": "artifacts/plan/artifact-gate-diagnostics.json",
+            "plan_compile_gate": "failed",
+            "artifact_gate": "failed",
+            "findings": [{
+                "severity": "high",
+                "category": "semantic_review",
+                "message": "Keep the public API stable.",
+            }],
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["diagnostics_ref"].endswith(
+        "artifact-gate-diagnostics.json"
+    )
+    assert replan.payload["plan_compile_gate"] == "failed"
+    assert replan.payload["artifact_gate"] == "failed"
+    assert any(
+        finding.get("category") == "semantic_review"
+        for finding in replan.payload["rework_feedback"]
+    )
+    compile_finding = next(
+        finding for finding in replan.payload["rework_feedback"]
+        if finding.get("category") == "plan_compile_gate"
+    )
+    assert "app/server.mjs" in compile_finding["message"]
+    assert compile_finding["path"].endswith("artifact-gate-diagnostics.json")
 
 
 def test_contract_critic_finding_reaches_next_plan_rework_context(
@@ -216,6 +317,69 @@ def test_replan_preserves_plan_admission_incident_identity() -> None:
     assert replan is not None
     assert replan.payload["plan_admission_incident_id"] == "plan-admission-123"
     assert replan.payload["task_map_digest"] == "abc123"
+
+
+def test_replan_preserves_complete_previous_plan_candidate_refs() -> None:
+    candidate_refs = [{
+        "ref": "plan-synth/child-results/planner.json",
+        "sha256": "a" * 64,
+        "kind": "fanout_child_result",
+    }]
+    origin = ZfEvent(
+        type="issue.requested",
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    )
+    failure = _failure(findings=[{
+        "severity": "high",
+        "message": "task map producers disagree",
+    }])
+    failure.payload["previous_plan_candidate_refs"] = candidate_refs
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["previous_plan_candidate_refs"] == candidate_refs
+
+
+def test_replan_recovers_plan_package_identity_from_rejected_trigger() -> None:
+    origin = ZfEvent(
+        type="issue.requested",
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    )
+    rejected = ZfEvent(
+        id="evt-rejected-task-map",
+        type="task_map.ready",
+        payload={
+            "plan_artifact_package_id": "planpkg-current",
+            "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+            "plan_artifact_package_digest": "package-digest",
+        },
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        causation_id=rejected.id,
+        payload={
+            "reason": "overlapping allowed paths",
+            "trigger_event_id": rejected.id,
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, rejected, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["plan_artifact_package_id"] == "planpkg-current"
+    assert replan.payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert replan.payload["plan_artifact_package_digest"] == "package-digest"
 
 
 def test_replan_preserves_failure_target_ref_without_origin_trigger() -> None:
@@ -389,6 +553,75 @@ def test_cap_exhausted_escalates() -> None:
         _config(), [origin, *priors, failure], failure,
     )
     assert replan is None and note == "cap_exhausted"
+
+
+def test_intermediate_plan_success_does_not_reset_rework_lineage() -> None:
+    run_id = "run-plan"
+    origin = ZfEvent(
+        type="issue.requested",
+        correlation_id=run_id,
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    )
+    first_failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        payload={"reason": "critic rejected candidate"},
+    )
+    first_replan = ZfEvent(
+        type="issue.requested",
+        correlation_id=run_id,
+        causation_id=first_failure.id,
+        payload={
+            "issue_ref": "docs/issues/TODO.md",
+            "rework_of": first_failure.id,
+            "rework_attempt": 1,
+        },
+    )
+    intermediate_success = ZfEvent(
+        type="task_map.ready",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id},
+    )
+    writer_failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        payload={"reason": "writer admission rejected candidate"},
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, first_failure, first_replan, intermediate_success, writer_failure],
+        writer_failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["rework_attempt"] == 2
+
+    second_success = ZfEvent(
+        type="task_map.ready",
+        correlation_id=run_id,
+        payload={"workflow_run_id": run_id},
+    )
+    final_failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        payload={"reason": "writer admission rejected replacement again"},
+    )
+    events = [
+        origin,
+        first_failure,
+        first_replan,
+        intermediate_success,
+        writer_failure,
+        replan,
+        second_success,
+        final_failure,
+    ]
+
+    exhausted, note = plan_reader_stage_replan(_config(), events, final_failure)
+
+    assert exhausted is None
+    assert note == "cap_exhausted"
 
 
 def test_cap_ignores_failures_from_other_workflow_runs() -> None:
@@ -596,6 +829,77 @@ def test_stage_replan_keeps_failure_from_canonical_flow() -> None:
     assert "issue-triage" in note
 
 
+def test_shared_failure_event_selects_scoped_reader_stage() -> None:
+    stages = [
+        SimpleNamespace(
+            id="issue-verify",
+            flow_kind="issue",
+            topology="fanout_reader",
+            trigger="issue.verify.requested",
+            aggregate=SimpleNamespace(
+                failure_event="test.failed",
+                success_event="test.passed",
+            ),
+        ),
+        SimpleNamespace(
+            id="prd-verify",
+            flow_kind="prd",
+            topology="fanout_reader",
+            trigger="prd.verify.requested",
+            aggregate=SimpleNamespace(
+                failure_event="test.failed",
+                success_event="test.passed",
+            ),
+        ),
+    ]
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=stages))
+    origin = ZfEvent(
+        type="prd.verify.requested",
+        correlation_id="run-prd",
+        payload={"workflow_run_id": "run-prd", "flow_kind": "prd"},
+    )
+    failure = ZfEvent(
+        type="test.failed",
+        correlation_id="run-prd",
+        payload={
+            "workflow_run_id": "run-prd",
+            "flow_kind": "prd",
+            "stage_id": "prd-verify",
+            "reason": "acceptance mismatch",
+        },
+    )
+
+    replan, note = plan_reader_stage_replan(
+        config,
+        [origin, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.type == "prd.verify.requested"
+    assert note == "replan prd-verify"
+
+
+def test_shared_failure_event_without_identity_fails_closed() -> None:
+    stages = [
+        SimpleNamespace(
+            id=f"{kind}-verify",
+            flow_kind=kind,
+            topology="fanout_reader",
+            trigger=f"{kind}.verify.requested",
+            aggregate=SimpleNamespace(failure_event="test.failed"),
+        )
+        for kind in ("issue", "prd")
+    ]
+    config = SimpleNamespace(workflow=SimpleNamespace(stages=stages))
+    failure = ZfEvent(type="test.failed", payload={"reason": "unknown flow"})
+
+    replan, note = plan_reader_stage_replan(config, [failure], failure)
+
+    assert replan is None
+    assert note == "ambiguous_reader_stage_for_failure"
+
+
 def test_lane_verify_failure_is_not_generic_reader_stage_replan() -> None:
     """Lane Verify owns its bounded back-edge; reader replan must not race it."""
     stage = SimpleNamespace(
@@ -737,6 +1041,98 @@ def test_layer2_active_reader_stage_failure_replans_in_kernel(tmp_path) -> None:
     ]
     assert len(replans) == 1
     assert replans[0].payload["rework_attempt"] == 1
+
+
+def test_layer2_reader_stage_cap_converges_run_and_parent_task(
+    tmp_path,
+) -> None:
+    from zf.core.config.schema import (
+        FanoutAggregateConfig,
+        ProjectConfig,
+        RoleConfig,
+        SessionConfig,
+        WorkflowConfig,
+        WorkflowStageConfig,
+        ZfConfig,
+    )
+    from zf.core.events.log import EventLog
+    from zf.core.state.session import SessionStore
+    from zf.core.task.schema import Task
+    from zf.core.task.store import TaskStore
+    from zf.runtime.orchestrator import Orchestrator
+    from zf.runtime.tmux import TmuxSession
+    from zf.runtime.transport import TmuxTransport
+    from zf.runtime.workflow_anchor import mark_workflow_managed_task
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "memory").mkdir()
+    SessionStore(state_dir / "session.yaml").create(
+        project_root=str(tmp_path)
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(mark_workflow_managed_task(Task(
+        id="TASK-PLAN",
+        title="Issue workflow",
+        status="in_progress",
+    )))
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        type="run.goal.started",
+        task_id="TASK-PLAN",
+        correlation_id="run-cap",
+        payload={"run_id": "run-cap", "objective": "fix issue"},
+    ))
+    log.append(ZfEvent(
+        type="issue.requested",
+        task_id="TASK-PLAN",
+        correlation_id="run-cap",
+        payload={"issue_ref": "docs/issues/TODO.md"},
+    ))
+    for _ in range(STAGE_REPLAN_CAP):
+        log.append(ZfEvent(
+            type="issue.triage.failed",
+            task_id="TASK-PLAN",
+            correlation_id="run-cap",
+            payload={"reason": "bad task map"},
+        ))
+    current = ZfEvent(
+        type="issue.triage.failed",
+        task_id="TASK-PLAN",
+        correlation_id="run-cap",
+        payload={"reason": "bad task map again"},
+    )
+    log.append(current)
+    cfg = ZfConfig(
+        project=ProjectConfig(name="stage-cap"),
+        session=SessionConfig(tmux_session="stage-cap"),
+        roles=[RoleConfig(name="planner", backend="mock")],
+        workflow=WorkflowConfig(stages=[WorkflowStageConfig(
+            id="issue-triage",
+            trigger="issue.requested",
+            topology="fanout_reader",
+            aggregate=FanoutAggregateConfig(
+                success_event="task_map.ready",
+                failure_event="issue.triage.failed",
+            ),
+        )]),
+    )
+    orch = Orchestrator(
+        state_dir,
+        cfg,
+        TmuxTransport(TmuxSession(session_name="stage-cap", dry_run=True)),
+    )
+
+    orch.run_once(events=[current])
+
+    events = log.read_all()
+    types = [event.type for event in events]
+    assert types.index("run.goal.blocked") < types.index("task.status_changed")
+    assert types.index("task.status_changed") < types.index(
+        "run.manager.autoresearch.requested"
+    )
+    task = store.get("TASK-PLAN")
+    assert task is not None and task.status == "blocked"
 
 
 def test_workflow_resume_replays_reader_stage_failure_as_stage_replan(

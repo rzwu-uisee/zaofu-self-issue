@@ -3,22 +3,35 @@
 from __future__ import annotations
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.candidate_rework_identity import (
+    _candidate_rework_identity_payload,
+)
 from zf.runtime.goal_closure_bridge import GoalClosureBridgeMixin
 from zf.runtime.flow_discovery_context import build_flow_discovery_context
 from zf.runtime.flow_verification_identity import (
     latest_flow_verification_for_candidate,
 )
 from zf.runtime.module_parity_identity import module_parity_identity_payload
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
 class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     """Deterministic verify -> parity scan -> gap amend bridge."""
 
+    @staticmethod
+    def _gap_workflow_identity(payload: dict) -> dict:
+        identity = _candidate_rework_identity_payload(payload)
+        flow_kind = str(
+            payload.get("flow_kind") or payload.get("goal_kind") or ""
+        ).strip()
+        if flow_kind:
+            identity.setdefault("flow_kind", flow_kind)
+        return identity
+
     def _reject_flow_judge_evidence_gap(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Block taskless final judge success when declared flow evidence is absent."""
 
         from zf.core.workflow.flow_metadata import flow_metadata_for
@@ -84,7 +97,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                     "source": "flow_judge_evidence_gate",
                 },
             ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             reason=(
                 f"judge.passed missing {quality_floor} evidence refs: "
@@ -95,7 +108,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     def _bridge_verify_passed_to_flow_discovery(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Emit flow-neutral post-verify discovery for Issue/PRD controllers.
 
         Refactor keeps the stronger module-parity bridge below. Issue/PRD
@@ -157,7 +170,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             if closed is None:
                 return None
             self._maybe_start_reader_fanout(closed)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="bridge",
                 reason=f"{event.type} closed {flow_kind} flow without discovery",
             )
@@ -196,7 +209,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
         if event.type in {"verify.passed", "test.passed"} and (
             candidate_ref and not candidate_head_commit
         ):
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="wait",
                 reason=(
                     f"{event.type} awaits materialized candidate before "
@@ -214,7 +227,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             payload=request_payload,
         ))
         self._maybe_start_reader_fanout(requested)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="bridge",
             reason=(
                 f"{event.type} requested {flow_kind} "
@@ -234,7 +247,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     def _bridge_verify_passed_to_parity_scan(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Require a module parity scan after candidate-level verify passes."""
 
         if event.type != "verify.passed":
@@ -300,7 +313,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                     "reason": "active gap work already owns this candidate scope",
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="suppress",
                 reason="active gap work suppresses duplicate module parity scan",
             )
@@ -341,7 +354,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             payload=request_payload,
         ))
         self._maybe_start_reader_fanout(requested)
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="bridge",
             reason="verify.passed requested module parity scan",
         )
@@ -392,7 +405,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     def _bridge_flow_discovery_completed(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Close a flow goal or convert discovery gaps into canonical gap work."""
 
         if self._has_bridge_output(
@@ -427,6 +440,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
         dispatch_base_commit = str(
             payload.get("dispatch_base_commit") or candidate_head_commit
         ).strip()
+        workflow_identity = self._gap_workflow_identity(payload)
         ref_payload = {
             key: list(value)
             for key in (
@@ -455,6 +469,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                 causation_id=event.id,
                 correlation_id=trace_id,
                 payload={
+                    **workflow_identity,
                     "schema_version": "goal-gap-plan.v1",
                     "pdd_id": pdd_id,
                     "feature_id": feature_id,
@@ -489,7 +504,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             decision = self._bridge_gap_plan_ready_to_task_map(gap_event)
             if decision:
                 return decision
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="bridge",
                 reason=f"flow discovery produced {len(gap_tasks)} gap task(s)",
             )
@@ -513,7 +528,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                     "source": "flow_discovery_bridge",
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason="flow discovery missing gap_tasks for open gaps",
             )
@@ -539,7 +554,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             if closed is None:
                 return None
             self._maybe_start_reader_fanout(closed)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="bridge",
                 reason="flow discovery closed without open P0/P1 gaps",
             )
@@ -564,7 +579,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                 "source": "flow_discovery_bridge",
             },
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             reason="flow discovery lacks closure/gap evidence",
         )
@@ -572,7 +587,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     def _bridge_module_parity_scan_completed(
         self,
         event: ZfEvent,
-    ) -> OrchestratorDecision | None:
+    ) -> WorkflowRuntimeDecision | None:
         """Close parity or turn scan findings into a canonical gap task-map."""
 
         if self._has_bridge_output(
@@ -636,7 +651,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             decision = self._bridge_gap_plan_ready_to_task_map(gap_event)
             if decision:
                 return decision
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="bridge",
                 reason=f"module parity scan produced {len(gap_tasks)} gap task(s)",
             )
@@ -658,7 +673,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                     "source": "module_parity_scan_bridge",
                 },
             ))
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="block",
                 reason="module parity scan missing gap_tasks for open gaps",
             )
@@ -690,7 +705,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
             if closed is None:
                 return None
             self._maybe_start_reader_fanout(closed)
-            return OrchestratorDecision(
+            return WorkflowRuntimeDecision(
                 action="bridge",
                 reason="module parity scan closed without open P0/P1 gaps",
             )
@@ -713,7 +728,7 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
                 "source": "module_parity_scan_bridge",
             },
         ))
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="block",
             reason="module parity scan lacks closure/gap evidence",
         )

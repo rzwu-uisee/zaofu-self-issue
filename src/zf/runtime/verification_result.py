@@ -131,6 +131,41 @@ def validate_verification_result(
         return
     if verdict not in COMPLETED_VERDICTS:
         raise VerificationResultError("completed verifier must pass, reject, or block")
+    if strict and verdict == "passed":
+        if not _string_list(result.get("evidence_refs")):
+            raise VerificationResultError(
+                "passed verdict requires top-level report evidence_refs"
+            )
+        reused = _string_list(result.get("reused_command_receipt_ids"))
+        probes = result.get("probe_receipts")
+        probes = probes if isinstance(probes, list) else []
+        if not reused and not probes:
+            raise VerificationResultError(
+                "passed verdict requires a reused command or probe receipt"
+            )
+        seen_probe_ids: set[str] = set()
+        for index, probe in enumerate(probes):
+            if not isinstance(probe, Mapping):
+                raise VerificationResultError(
+                    f"probe_receipts[{index}] must be an object"
+                )
+            probe_id = str(
+                probe.get("probe_id") or probe.get("command_id") or ""
+            ).strip()
+            if not probe_id or probe_id in seen_probe_ids:
+                raise VerificationResultError(
+                    f"probe_receipts[{index}] id is missing or duplicated"
+                )
+            seen_probe_ids.add(probe_id)
+            status = str(probe.get("status") or "").strip()
+            if status not in {"passed", "failed", "blocked"}:
+                raise VerificationResultError(
+                    f"probe_receipts[{index}] has invalid status"
+                )
+            if not _string_list(probe.get("evidence_refs")):
+                raise VerificationResultError(
+                    f"probe_receipts[{index}] requires evidence_refs"
+                )
     matrix = result.get("requirement_results")
     if not isinstance(matrix, list) or not matrix:
         raise VerificationResultError("completed verdict requires a requirement matrix")

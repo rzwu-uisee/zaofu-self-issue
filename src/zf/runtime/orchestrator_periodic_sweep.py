@@ -25,16 +25,20 @@ def run_replay_sweep(
             "writer_fanout_task_bindings",
             runtime._recover_writer_fanout_task_bindings,
         )
-    if event_batch:
+    provider_turn_closed = any(
+        event.type == "provider.turn.closed" for event in event_batch
+    )
+    if event_batch and not provider_turn_closed:
         return
-    runtime._safe_housekeeping(
-        "writer_fanout_result_replay",
-        runtime._recover_unrecorded_writer_fanout_results,
-    )
-    runtime._safe_housekeeping(
-        "reader_fanout_trigger_replay",
-        runtime._reconcile_reader_fanout_triggers,
-    )
+    if not event_batch:
+        runtime._safe_housekeeping(
+            "writer_fanout_result_replay",
+            runtime._recover_unrecorded_writer_fanout_results,
+        )
+        runtime._safe_housekeeping(
+            "reader_fanout_trigger_replay",
+            runtime._reconcile_reader_fanout_triggers,
+        )
     runtime._safe_housekeeping(
         "reader_fanout_result_replay",
         lambda: _recover_reader_results_and_goal(runtime),
@@ -53,8 +57,21 @@ def run_context_sweep(runtime: Any) -> None:
     )
     runtime._safe_housekeeping(
         "pending_recycles",
-        runtime._check_pending_recycles,
+        lambda: _recover_provider_lifecycle(runtime),
     )
+
+
+def _recover_provider_lifecycle(runtime: Any) -> None:
+    """Run existing recycle recovery plus taskless OA operation liveness."""
+
+    try:
+        runtime._check_pending_recycles()
+    finally:
+        from zf.runtime.orchestrator_agent_recovery import (
+            reconcile_orchestrator_agent_operation_liveness,
+        )
+
+        reconcile_orchestrator_agent_operation_liveness(runtime)
 
 
 def run_post_dispatch_sweep(

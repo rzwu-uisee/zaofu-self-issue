@@ -37,6 +37,7 @@ care which backend produced the report.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -111,6 +112,13 @@ class UsageReport:
     """Model id of the most recent turn (e.g. ``claude-opus-4-8``). Carried
     so the cost tracker can pick a per-model rate on the token-priced
     fallback path; empty when the session file doesn't report one."""
+
+    usage_semantics: str = "incremental"
+    """Accounting semantics for ``raw``: ``incremental`` for one provider
+    turn, or ``cumulative`` for a monotonically increasing session total."""
+
+    usage_series_id: str = ""
+    """Stable provider-session identity for cumulative accounting."""
 
 
 # Claude 4.x large-context models report a 1M context window. The 200k
@@ -509,6 +517,7 @@ class CodexSessionReader(BackendSessionReader):
             return None
         latest_info: dict | None = None
         latest_ts: str = ""
+        session_id: str = ""
         try:
             text = session_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -520,6 +529,11 @@ class CodexSessionReader(BackendSessionReader):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "session_meta":
+                payload = obj.get("payload") or {}
+                if isinstance(payload, dict):
+                    session_id = str(payload.get("id") or session_id)
                 continue
             if obj.get("type") != "event_msg":
                 continue
@@ -534,6 +548,9 @@ class CodexSessionReader(BackendSessionReader):
         if latest_info is None:
             return None
         last_usage = latest_info.get("last_token_usage") or {}
+        total_usage = latest_info.get("total_token_usage")
+        cumulative = isinstance(total_usage, dict)
+        accounting_usage = total_usage if cumulative else last_usage
         effective = int(last_usage.get("input_tokens", 0))
         output_tokens = int(last_usage.get("output_tokens", 0))
         # Codex self-reports window; fallback only if missing
@@ -547,8 +564,17 @@ class CodexSessionReader(BackendSessionReader):
             model_context_window=window,
             ratio=ratio,
             timestamp=latest_ts,
-            raw=dict(last_usage),
+            raw=dict(accounting_usage),
             model=str(latest_info.get("model", "")),
+            usage_semantics="cumulative" if cumulative else "incremental",
+            usage_series_id=(
+                f"codex:{session_id}"
+                if session_id
+                else "codex-path:"
+                + hashlib.sha256(
+                    str(session_path.resolve()).encode("utf-8")
+                ).hexdigest()[:24]
+            ),
         )
 
 

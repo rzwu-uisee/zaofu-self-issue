@@ -156,11 +156,28 @@ def validate_goal_closure_dispatch_snapshots(
 ) -> None:
     """Validate Thin Judge snapshots without treating them as task contracts."""
 
+    typed_contract = any(
+        key in payload
+        for key in (
+            "goal_closure_contract_snapshot_ref",
+            "goal_closure_contract_snapshot_digest",
+        )
+    )
+    contract_ref_key = (
+        "goal_closure_contract_snapshot_ref"
+        if typed_contract
+        else "contract_snapshot_ref"
+    )
+    contract_digest_key = (
+        "goal_closure_contract_snapshot_digest"
+        if typed_contract
+        else "contract_snapshot_digest"
+    )
     contract = _hydrate_snapshot(
         state_dir,
         payload,
-        ref_key="contract_snapshot_ref",
-        digest_key="contract_snapshot_digest",
+        ref_key=contract_ref_key,
+        digest_key=contract_digest_key,
     )
     target = _hydrate_snapshot(
         state_dir,

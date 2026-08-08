@@ -23,18 +23,98 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("result", help="Durable call-result commands")
     nested = parser.add_subparsers(dest="result_command")
     submit = nested.add_parser("submit", help="Submit one operation semantic result")
-    submit.add_argument("--operation", required=True, help="Pinned workflow operation id")
-    source = submit.add_mutually_exclusive_group(required=True)
-    source.add_argument("--stdin", action="store_true", help="Read result JSON from stdin")
-    source.add_argument("--result-file", type=Path, help="Kernel-issued result scratch path")
-    submit.add_argument("--state-dir", type=Path, default=None)
+    _add_result_input_arguments(submit)
     submit.set_defaults(func=_run_submit)
+    validate = nested.add_parser(
+        "validate",
+        help="Preflight one profiled result without consuming submit capability",
+    )
+    _add_result_input_arguments(validate)
+    validate.set_defaults(func=_run_validate)
     parser.set_defaults(func=_run_help)
 
 
+def _add_result_input_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--operation",
+        required=True,
+        help="Pinned workflow operation id",
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read result JSON from stdin",
+    )
+    source.add_argument(
+        "--result-file",
+        type=Path,
+        help="Kernel-issued result scratch path",
+    )
+    source.add_argument(
+        "--scratch",
+        action="store_true",
+        help="Read the Kernel-issued scratch bound to this operation",
+    )
+    parser.add_argument("--state-dir", type=Path, default=None)
+
+
 def _run_help(_args: argparse.Namespace) -> int:
-    print("usage: zf result submit --operation ID (--stdin|--result-file PATH)")
+    print(
+        "usage: zf result {validate,submit} --operation ID "
+        "(--stdin|--result-file PATH|--scratch)"
+    )
     return 0
+
+
+def _print_error(exc: Exception, *, fallback_code: str) -> None:
+    code = str(getattr(exc, "code", fallback_code))
+    print(f"Error [{code}]: {exc}", file=sys.stderr)
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details:
+        print(json.dumps({
+            "schema_version": "result-submit-error.v1",
+            "status": "error",
+            "code": code,
+            "message": str(exc),
+            "details": details,
+        }, ensure_ascii=False, sort_keys=True), file=sys.stderr)
+
+
+def _run_validate(args: argparse.Namespace) -> int:
+    try:
+        context = resolve_project_context(
+            explicit_state_dir=args.state_dir,
+            load_config_with_explicit=args.state_dir is not None,
+        )
+        log = event_log_from_project(
+            context.state_dir,
+            config=context.config,
+            warn=False,
+        )
+        role, credential = credential_from_environment()
+        semantic_result = (
+            parse_semantic_result_bytes(sys.stdin.buffer.read())
+            if args.stdin else None
+        )
+        outcome = SemanticResultSubmitService(
+            state_dir=context.state_dir,
+            event_log=log,
+            event_writer=EventWriter(log),
+        ).validate_plan_candidate(
+            operation_id=str(args.operation),
+            semantic_result=semantic_result,
+            result_file=args.result_file,
+            use_operation_scratch=bool(args.scratch),
+            role_instance=role,
+            credential=credential,
+            project_root=Path.cwd(),
+        )
+    except (ConfigError, ResultSubmitError, OSError, ValueError) as exc:
+        _print_error(exc, fallback_code="result_validate_failed")
+        return 1
+    print(json.dumps(outcome, ensure_ascii=False, sort_keys=True))
+    return 0 if outcome.get("status") == "passed" else 1
 
 
 def _run_submit(args: argparse.Namespace) -> int:
@@ -61,12 +141,12 @@ def _run_submit(args: argparse.Namespace) -> int:
             operation_id=str(args.operation),
             semantic_result=semantic_result,
             result_file=args.result_file,
+            use_operation_scratch=bool(args.scratch),
             role_instance=role,
             credential=credential,
         )
     except (ConfigError, ResultSubmitError, OSError, ValueError) as exc:
-        code = getattr(exc, "code", "result_submit_failed")
-        print(f"Error [{code}]: {exc}", file=sys.stderr)
+        _print_error(exc, fallback_code="result_submit_failed")
         return 1
     print(json.dumps({
         "status": "admitted",

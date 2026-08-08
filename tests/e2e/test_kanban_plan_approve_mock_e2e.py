@@ -175,11 +175,13 @@ def test_channel_prd_context_enters_task_workflow_plan_before_ignition(
         contract=TaskContract(
             behavior="Implement the accepted Channel requirement.",
             verification="Run the Task acceptance checks.",
+            verification_tiers=["runtime"],
             spec_ref="channel-artifacts/ch-prd/prd.md",
             source_ref="channel-artifacts/ch-prd/prd.md",
             source_revision="1",
             source_mode="channel_prd",
             evidence_contract={
+                "execution_owner": "workflow",
                 "channel_id": "ch-prd",
                 "thread_id": "main",
                 "channel_member_id": "product-pm",

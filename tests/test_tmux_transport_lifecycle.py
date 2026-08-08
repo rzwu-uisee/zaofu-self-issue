@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
+from zf.core.config.schema import RoleConfig
 from zf.runtime.tmux import TmuxError
-from zf.runtime.transport import DispatchContext, TmuxTransport, transport_error_diagnostics
+from zf.runtime.transport import (
+    DispatchContext,
+    TmuxTransport,
+    transport_error_diagnostics,
+    transport_readiness_error,
+)
 
 
 class _FakeTmux:
@@ -121,6 +129,38 @@ def test_tmux_transport_wait_ready_allows_brief_shell_to_provider_handoff(
     assert transport.wait_ready("dev-1", r"[❯>]", timeout=1.0) is True
 
 
+def test_tmux_transport_wait_ready_rejects_claude_oauth_prompt() -> None:
+    class _OAuthTmux(_FakeTmux):
+        def capture_pane(self, role_name: str, *, lines: int = 120) -> str:
+            return (
+                "Browser didn't open? Use the url below\n"
+                "Paste code here if prompted >\n"
+                "OAuth error: Invalid code. Press Enter to retry."
+            )
+
+    transport = TmuxTransport(
+        _OAuthTmux(
+            pid="4242",
+            command="claude",
+            path="/workspace/project",
+        )  # type: ignore[arg-type]
+    )
+    transport._launch_records["run-manager"] = {
+        "backend": "claude-code",
+        "command": "claude",
+        "launch_attempts": 1,
+    }
+
+    assert transport.wait_ready(
+        "run-manager",
+        r"[❯>]",
+        timeout=1.0,
+    ) is False
+    diagnostics = transport.readiness_diagnostics("run-manager")
+    assert diagnostics["failure_class"] == "provider_auth_interactive"
+    assert diagnostics["interactive_prompt_marker"] == "login_required"
+
+
 def test_tmux_transport_send_task_allows_normal_node_tui(tmp_path) -> None:
     tmux = _FakeTmux(pid="4242", command="node", path="/workspace/project")
     transport = TmuxTransport(tmux)  # type: ignore[arg-type]
@@ -223,3 +263,124 @@ def test_tmux_transport_terminate_uses_controlled_shutdown() -> None:
 
     assert tmux.terminate_window_calls == ["dev-1"]
     assert tmux.kill_window_calls == []
+
+
+class _SpawnLayout:
+    def create_slot(self, tmux, role) -> None:  # noqa: ANN001
+        return None
+
+    def record_cwd(self, tmux, instance_id, expected) -> None:  # noqa: ANN001
+        return None
+
+
+class _HandshakeTmux(_FakeTmux):
+    def __init__(self, *, execute_probe: bool = True) -> None:
+        super().__init__(command="bash")
+        self.layout = _SpawnLayout()
+        self.execute_probe = execute_probe
+        self.screen = ""
+
+    def capture_pane(self, role_name: str, *, lines: int = 120) -> str:
+        return self.screen
+
+    def send_keys(
+        self,
+        role_name: str,
+        command: str,
+        *,
+        submit_delay_s: float = 0.5,
+    ) -> None:
+        self.sent.append((role_name, command))
+        if self.execute_probe and command.startswith("printf "):
+            tokens = shlex.split(command)
+            self.screen = "".join(tokens[2:])
+
+
+def test_tmux_spawn_proves_shell_input_before_provider_argv() -> None:
+    tmux = _HandshakeTmux()
+    transport = TmuxTransport(tmux)  # type: ignore[arg-type]
+    role = RoleConfig(name="dev", backend="codex", instance_id="dev-1")
+
+    transport.spawn(role, ["codex", "--enable", "hooks"])
+
+    assert tmux.sent[0][1].startswith("printf ")
+    assert tmux.sent[-1][0] == "dev-1"
+    assert tmux.sent[-1][1].endswith("codex --enable hooks")
+
+
+def test_tmux_ready_retries_one_lost_launch_enter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmux = _HandshakeTmux()
+    transport = TmuxTransport(tmux)  # type: ignore[arg-type]
+    transport._launch_records["dev-1"] = {
+        "backend": "codex",
+        "command": "codex",
+        "launch_attempts": 1,
+    }
+    monkeypatch.setattr(TmuxTransport, "_AGENT_LAUNCH_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(TmuxTransport, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+
+    def submit_pending_enter(
+        role_name: str,
+        command: str,
+        *,
+        submit_delay_s: float = 0.5,
+    ) -> None:
+        tmux.sent.append((role_name, command))
+        if command == "":
+            tmux._command = "codex"
+
+    tmux.send_keys = submit_pending_enter  # type: ignore[method-assign]
+
+    assert transport.wait_ready("dev-1", r"[›>]", timeout=240.0) is True
+    assert tmux.sent == [("dev-1", "")]
+    assert transport._launch_records["dev-1"]["launch_attempts"] == 2
+
+
+def test_codex_ready_timeout_is_bounded_and_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmux = _HandshakeTmux()
+    transport = TmuxTransport(tmux)  # type: ignore[arg-type]
+    transport._launch_records["dev-1"] = {
+        "backend": "codex",
+        "command": "codex",
+        "launch_attempts": 2,
+    }
+    monkeypatch.setattr(TmuxTransport, "_CODEX_READY_TIMEOUT_CAP_SECONDS", 0.01)
+    monkeypatch.setattr(TmuxTransport, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+
+    assert transport.wait_ready("dev-1", r"[›>]", timeout=240.0) is False
+    error = transport_readiness_error(
+        transport,
+        "dev-1",
+        backend="codex",
+    )
+    diagnostics = transport_error_diagnostics(error)
+
+    assert diagnostics["failure_class"] == "provider_ready_pattern_timeout"
+    assert diagnostics["pane_alive"] is True
+    assert diagnostics["current_command"] == "bash"
+    assert diagnostics["requested_timeout_seconds"] == 240.0
+    assert diagnostics["effective_timeout_seconds"] == 0.01
+    assert "process_probe" in diagnostics
+    assert "last_screen_excerpt" in diagnostics
+
+
+def test_shell_handshake_timeout_has_explicit_failure_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmux = _HandshakeTmux(execute_probe=False)
+    transport = TmuxTransport(tmux)  # type: ignore[arg-type]
+    role = RoleConfig(name="dev", backend="codex", instance_id="dev-1")
+    monkeypatch.setattr(TmuxTransport, "_SHELL_HANDSHAKE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(TmuxTransport, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+
+    with pytest.raises(TmuxError) as caught:
+        transport.spawn(role, ["codex"])
+
+    diagnostics = transport_error_diagnostics(caught.value)
+    assert diagnostics["failure_class"] == "shell_handshake_timeout"
+    assert diagnostics["pane_alive"] is True
+    assert diagnostics["current_command"] == "bash"

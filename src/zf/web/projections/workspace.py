@@ -268,7 +268,12 @@ def _workspace_automation_summary(
         return {"error": str(exc)}
 
 
-def _project_action_envelope(project_id: str, raw: dict[str, Any]) -> dict[str, Any]:
+def _project_action_envelope(
+    project_id: str,
+    raw: dict[str, Any],
+    *,
+    canonical_project_id: str = "",
+) -> dict[str, Any]:
     route_project_id = str(project_id or "").strip()
     body_project_id = str(raw.get("project_id") or "").strip()
     if not body_project_id:
@@ -294,7 +299,20 @@ def _project_action_envelope(project_id: str, raw: dict[str, Any]) -> dict[str, 
             "reason": "payload object is required in project-scoped action envelope",
         }
     payload = dict(inner)
-    payload["project_id"] = route_project_id
+    payload_project_id = str(payload.get("project_id") or "").strip()
+    allowed_payload_ids = {
+        item
+        for item in (route_project_id, str(canonical_project_id or "").strip())
+        if item
+    }
+    if payload_project_id and payload_project_id not in allowed_payload_ids:
+        return {
+            "_status_code": 422,
+            "ok": False,
+            "status": "project_mismatch",
+            "reason": "payload project_id does not identify the routed project",
+        }
+    payload["project_id"] = payload_project_id or route_project_id
     for key in ("action_id", "actor", "source_session_id", "evidence_refs"):
         if key in raw:
             payload[key] = raw[key]

@@ -12,17 +12,13 @@ from zf.runtime.fanout_recovery_runtime import (
 )
 from zf.runtime.task_contract_snapshot import snapshot_payload_fields
 from zf.runtime.writer_fanout_data import _FANOUT_AFFINITY_METADATA_KEYS
+from zf.runtime.writer_fanout_retry import (
+    WriterFanoutRetryMixin,
+    fanout_operation_key,
+)
 
 
-def _fanout_operation_key(*, context: Any, child: Any, payload: dict[str, Any]) -> str:
-    if str(payload.get("flow_kind") or "") == "workflow":
-        return f"{child.child_id}@fanout:{context.fanout_id}"
-    if context.trigger_event_id:
-        return f"{child.child_id}@trig:{context.trigger_event_id[:12]}"
-    return child.child_id
-
-
-class DurableCallFanoutMixin:
+class DurableCallFanoutMixin(WriterFanoutRetryMixin):
     """Host methods for selected durable reader/writer fanout calls."""
 
     def _recover_pending_writer_fanout_dispatches(
@@ -302,6 +298,25 @@ class DurableCallFanoutMixin:
         child_success_event, child_failure_event = self._fanout_child_result_events(
             aggregate or {},
         )
+        aggregate_success_event = self._fanout_config_value(
+            aggregate or {},
+            "success_event",
+        )
+        workdir_write_scopes: list[str] = []
+        if self._is_plan_artifact_stage(
+            role=role,
+            stage_id=context.stage_id,
+            success_event=aggregate_success_event,
+            child_success_event=child_success_event,
+        ):
+            from zf.runtime.fanout_artifact_refs import (
+                plan_artifact_workdir_write_scopes,
+            )
+
+            workdir_write_scopes = plan_artifact_workdir_write_scopes(
+                fanout_id=context.fanout_id,
+                success_event=aggregate_success_event,
+            )
         child.payload.update({
             "fanout_id": context.fanout_id,
             "trace_id": context.trace_id,
@@ -329,7 +344,7 @@ class DurableCallFanoutMixin:
                 # child 键 → 与已注册 op 撞身份(request_hash_divergence)。
                 # 键掺触发事件 id:同触发重放=同 id(replay 语义保持),
                 # 新触发=天然新代。
-                operation_key=_fanout_operation_key(
+                operation_key=fanout_operation_key(
                     context=context,
                     child=child,
                     payload=child.payload,
@@ -339,6 +354,7 @@ class DurableCallFanoutMixin:
                 dispatch_id=run_id,
                 causation_id=causation_id,
                 correlation_id=context.trace_id,
+                workdir_write_scopes=workdir_write_scopes,
             )
         return {
             "skip": False,
@@ -900,7 +916,7 @@ class DurableCallFanoutMixin:
                 payload=operation_payload,
                 operation_type="fanout_writer_child",
                 # ZF-GEN-SCOPE-01:同上,writer 路径(task_map 重触发场景)
-                operation_key=_fanout_operation_key(
+                operation_key=fanout_operation_key(
                     context=context,
                     child=child,
                     payload=operation_payload,

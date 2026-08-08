@@ -1,4 +1,4 @@
-"""Bounded mechanical retry for rejected Channel question dedup plans."""
+"""Bounded mechanical retry for incomplete Channel question dedup plans."""
 
 from __future__ import annotations
 
@@ -35,15 +35,32 @@ def repair_rejected_question_dedup(
     ):
         return []
     latest = requests[-1]
-    if str(latest.get("status") or "") != "rejected":
+    latest_status = str(latest.get("status") or "")
+    failed_reply: dict[str, Any] = {}
+    if latest_status == "requested":
+        failed_reply = _failed_reply_for_dedup_request(
+            channel,
+            str(latest.get("request_id") or ""),
+        )
+        if not failed_reply:
+            return []
+    elif latest_status != "rejected":
         return []
     generation = max(
         int(item.get("generation") or index)
         for index, item in enumerate(requests, 1)
     )
     prior_request_id = str(latest.get("request_id") or "")
-    repair_reason = str(latest.get("reason") or "dedup_rejected")
-    causation_id = str(latest.get("result_event_id") or "") or None
+    repair_reason = (
+        "dedup_reply_failed"
+        if failed_reply
+        else str(latest.get("reason") or "dedup_rejected")
+    )
+    causation_id = str(
+        failed_reply.get("event_id")
+        or latest.get("result_event_id")
+        or ""
+    ) or None
     if generation >= MAX_QUESTION_DEDUP_ATTEMPTS:
         writer.emit(
             "channel.question.dedup.remediation.exhausted",
@@ -98,6 +115,34 @@ def repair_rejected_question_dedup(
         },
     )
     return ["channel.question.dedup.requested"]
+
+
+def _failed_reply_for_dedup_request(
+    channel: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    if not request_id:
+        return {}
+    message_ids = {
+        str(message.get("message_id") or "")
+        for message in channel.get("messages") or []
+        if isinstance(message, dict)
+        and str(
+            (message.get("refs") or {}).get("question_dedup_request_id")
+            if isinstance(message.get("refs"), dict)
+            else ""
+        ) == request_id
+    }
+    if not message_ids:
+        return {}
+    failures = [
+        reply
+        for reply in channel.get("reply_requests") or []
+        if isinstance(reply, dict)
+        and str(reply.get("message_id") or "") in message_ids
+        and str(reply.get("status") or "") == "failed"
+    ]
+    return failures[-1] if failures else {}
 
 
 __all__ = ["repair_rejected_question_dedup"]

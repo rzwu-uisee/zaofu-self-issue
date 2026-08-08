@@ -66,6 +66,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "task_map.ready",
     "workflow.invoke.requested",
     "channel.synthesis.requested",
+    "channel.synthesis.repair.requested",
     "channel.question.dedup.requested",
     "channel.question.dedup.applied",
     "channel.question.dedup.rejected",
@@ -74,6 +75,9 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",
     "fanout.aggregate.rebuild.requested",
+    # Provider terminals may be emitted after the transport callback cycle.
+    # Wake fanout reconciliation so a failed reader cannot strand its child.
+    "workflow.operation.failed",
     # Tier-2 诊断(task 2026-07-06-0930):requested 唤醒诊断 stage 派发,
     # completed 唤醒结论消费(rework feedback / needs_owner 升级)。
     "diagnosis.requested",
@@ -136,6 +140,16 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "flow.discovery.failed",
     "task.done.blocked",
     "orchestrator.evidence_rework.requested",
+    "orchestrator.semantic.checkpoint.requested",
+    "orchestrator.semantic.failure.requested",
+    "orchestrator.semantic.rework.requested",
+    "orchestrator.run_plan.admitted",
+    "orchestrator.stage_barrier.admitted",
+    "orchestrator.pre_closeout.admitted",
+    "orchestrator.semantic.decision.submitted",
+    "orchestrator.semantic.decision.failed",
+    "owner.delivery.narrative.submitted",
+    "owner.delivery.narrative.failed",
     # G-LIFE-3: stuck detector emits when a worker's pane output stops
     # changing for too long. Wakes Layer 1 to process the escalation.
     "worker.stuck",

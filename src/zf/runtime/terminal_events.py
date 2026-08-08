@@ -47,6 +47,11 @@ LEGACY_STAGE_PROGRESS_EVENTS = frozenset({
     "design.critique.done",
     "gate.failed",
     "discriminator.failed",
+    "task.pipeline.verify.completed",
+    "task.pipeline.verify.failed",
+    "task.pipeline.acceptance.completed",
+    "task.pipeline.acceptance.failed",
+    "task.pipeline.acceptance.blocked",
 })
 
 
@@ -56,6 +61,7 @@ RUN_TERMINAL_EVENT_TYPES = frozenset({
     "ship.completed",
     "ship.done",
     "judge.passed",
+    "workflow.result.available",
 })
 
 # These facts establish that the previously terminal run has fresh work.  The
@@ -109,6 +115,11 @@ def is_successful_run_terminal(event: ZfEvent) -> bool:
         # A per-task judge success is normal stage progress.  Only a
         # candidate/run-level judge result may quiesce the whole workflow.
         return not bool(getattr(event, "task_id", "") or payload.get("task_id"))
+    if event.type == "workflow.result.available":
+        return (
+            str(payload.get("result_kind") or "") == "research_report"
+            and str(payload.get("status") or "") == "available"
+        )
     if event.type != "run.completed":
         return True
     status = str(

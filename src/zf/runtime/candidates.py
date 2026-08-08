@@ -92,6 +92,36 @@ class CandidateRebuilder:
             trigger_event=event,
         )
 
+    def integrate_task_pipeline_task(
+        self,
+        *,
+        task_id: str,
+        workflow_run_id: str,
+        task_map_generation: str,
+        operation_generation: int,
+        pipeline_key: str,
+        dispatch_base_commit: str,
+        contract_revision: str,
+        event_writer: EventWriter,
+        causation_id: str = "",
+    ) -> CandidateResult:
+        """Apply one v4 TaskRef without invoking legacy full-candidate events."""
+
+        from zf.runtime.candidate_incremental import integrate_task_candidate
+
+        return integrate_task_candidate(
+            self,
+            task_id=task_id,
+            workflow_run_id=workflow_run_id,
+            task_map_generation=task_map_generation,
+            operation_generation=operation_generation,
+            pipeline_key=pipeline_key,
+            dispatch_base_commit=dispatch_base_commit,
+            contract_revision=contract_revision,
+            event_writer=event_writer,
+            causation_id=causation_id,
+        )
+
     def rebuild(
         self,
         pdd_id: str,
@@ -885,6 +915,14 @@ class CandidateRebuilder:
                 )
                 quality_payload["mechanical_repairs"] = [repair]
             if quality_payload["status"] == "failed":
+                from zf.runtime.candidate_integration import (
+                    candidate_failed_task_ids,
+                )
+
+                failed_task_ids = candidate_failed_task_ids({
+                    "quality": quality_payload,
+                })
+                quality_payload["failed_task_ids"] = failed_task_ids
                 payload = {
                     **manifest_base,
                     "status": "quality_failed",
@@ -892,6 +930,7 @@ class CandidateRebuilder:
                     "commit": commit,
                     "quality_status": "failed",
                     "quality": quality_payload,
+                    "failed_task_ids": failed_task_ids,
                     "candidate_environment": candidate_environment,
                     "materialized_config_refs": materialized_config_refs,
                     "updated_at": _now(),

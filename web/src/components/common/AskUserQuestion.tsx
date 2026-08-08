@@ -231,6 +231,7 @@ export function AskUserQuestion({
                   <input
                     aria-label={option.label}
                     checked={currentSelected === option.id}
+                    data-testid={`ask-user-option-${option.id}`}
                     name={`ask-${requestId}-${question.id}`}
                     type="radio"
                     value={option.id}
@@ -261,6 +262,7 @@ export function AskUserQuestion({
                   <input
                     aria-label={otherLabel}
                     checked={currentSelected === "other"}
+                    data-testid="ask-user-option-other"
                     name={`ask-${requestId}-${question.id}`}
                     type="radio"
                     value="other"
@@ -350,6 +352,7 @@ export function AskUserQuestion({
         )}
         <button
           className="agent-inline-button primary ask-user-submit"
+          data-testid="ask-user-submit"
           disabled={!canContinue}
           type="button"
           onClick={continueQuestion}

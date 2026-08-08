@@ -355,6 +355,61 @@ def test_writer_task_items_normalizes_verification_command_list():
     ]
 
 
+def test_writer_task_items_inherits_globally_referenced_command_definition():
+    task_map = {
+        "tasks": [
+            {
+                "task_id": "producer",
+                "allowed_paths": ["src/producer.py"],
+                "validation": {"commands": [{
+                    "id": "shared-contract",
+                    "command": "pytest -q tests/test_shared.py",
+                    "acceptance_ids": ["AC-P", "AC-C"],
+                    "owner": "candidate_verify",
+                    "tier": "real_e2e",
+                }]},
+                "acceptance_criteria": [{
+                    "id": "AC-P",
+                    "statement": "Producer works.",
+                    "verification_command_ids": ["shared-contract"],
+                }],
+            },
+            {
+                "task_id": "consumer",
+                "allowed_paths": ["src/consumer.py"],
+                "validation": {"commands": [{
+                    "id": "consumer-smoke",
+                    "command": "pytest -q tests/test_consumer.py",
+                    "acceptance_ids": ["AC-C"],
+                    "owner": "task_verify",
+                    "tier": "task_non_smoke",
+                }]},
+                "acceptance_criteria": [{
+                    "id": "AC-C",
+                    "statement": "Consumer preserves the contract.",
+                    "verification_command_ids": [
+                        "consumer-smoke",
+                        "shared-contract",
+                    ],
+                }],
+            },
+        ],
+    }
+
+    items = writer_task_items(task_map)
+
+    consumer = next(item for item in items if item["task_id"] == "consumer")
+    assert [
+        item["id"] for item in consumer["validation"]["commands"]
+    ] == ["consumer-smoke", "shared-contract"]
+    assert [
+        item["id"] for item in consumer["raw_task"]["validation"]["commands"]
+    ] == ["consumer-smoke", "shared-contract"]
+    assert [
+        item["id"] for item in task_map["tasks"][1]["validation"]["commands"]
+    ] == ["consumer-smoke"]
+
+
 def test_writer_task_items_accepts_issue_style_path_field():
     items = writer_task_items({
         "tasks": [{

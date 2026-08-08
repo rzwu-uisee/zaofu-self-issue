@@ -36,6 +36,38 @@ def test_loop_stop_closes_prior_codex_turn_generation(
     assert active["turn_id"] == "turn-new"
 
 
+def test_worker_respawn_closes_prior_codex_turn_generation(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    writer.append(ZfEvent(
+        type="codex.hook.user_prompt_submit",
+        actor="dev",
+        payload={"session_id": "session-old", "turn_id": "turn-old"},
+    ))
+
+    writer.append(ZfEvent(
+        type="worker.respawned",
+        actor="dev",
+        payload={"instance_id": "dev", "reason": "manual_restart"},
+    ))
+
+    assert active_codex_turn(log, state_dir, "dev") is None
+
+    writer.append(ZfEvent(
+        type="codex.hook.user_prompt_submit",
+        actor="dev",
+        payload={"session_id": "session-new", "turn_id": "turn-new"},
+    ))
+
+    active = active_codex_turn(log, state_dir, "dev")
+    assert active is not None
+    assert active["turn_id"] == "turn-new"
+
+
 def test_worker_launch_closes_prior_codex_turn_generation(
     tmp_path: Path,
 ) -> None:
@@ -69,5 +101,42 @@ def test_worker_launch_closes_prior_codex_turn_generation(
     ))
 
     active = active_codex_turn(log, state_dir, "dev")
+    assert active is not None
+    assert active["turn_id"] == "turn-new"
+
+
+def test_on_demand_dormant_closes_prior_codex_turn_generation(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    writer.append(ZfEvent(
+        type="codex.hook.user_prompt_submit",
+        actor="reader",
+        payload={"session_id": "session-old", "turn_id": "turn-old"},
+    ))
+
+    writer.append(ZfEvent(
+        type="role.lifecycle.dormant",
+        actor="orchestrator",
+        payload={
+            "instance_id": "reader",
+            "from": "active",
+            "to": "dormant",
+            "preserve_session": True,
+        },
+    ))
+
+    assert active_codex_turn(log, state_dir, "reader") is None
+
+    writer.append(ZfEvent(
+        type="codex.hook.user_prompt_submit",
+        actor="reader",
+        payload={"session_id": "session-old", "turn_id": "turn-new"},
+    ))
+
+    active = active_codex_turn(log, state_dir, "reader")
     assert active is not None
     assert active["turn_id"] == "turn-new"

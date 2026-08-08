@@ -66,6 +66,10 @@ class CostTracker:
         provider_cost_usd: float | None = None,
         source_event_id: str = "",
         usage_sample_id: str = "",
+        usage_semantics: str = "",
+        usage_series_id: str = "",
+        cumulative_usage: dict[str, int | float] | None = None,
+        accounting_baseline: bool = False,
     ) -> float:
         """Record token usage. Returns cost in USD.
 
@@ -144,10 +148,161 @@ class CostTracker:
             entry["usage_sample_id"] = usage_sample_id
         if dedupe_key:
             entry["dedupe_key"] = dedupe_key
+        if usage_semantics:
+            entry["usage_semantics"] = usage_semantics
+        if usage_series_id:
+            entry["usage_series_id"] = usage_series_id
+        if cumulative_usage is not None:
+            entry["cumulative_usage"] = dict(cumulative_usage)
+        if accounting_baseline:
+            entry["accounting_baseline"] = True
         with self.cost_path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
 
         return cost
+
+    def record_cumulative_usage(
+        self,
+        *,
+        role: str,
+        instance_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        model: str = "default",
+        backend: str = "",
+        cache_creation_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        provider_cost_usd: float | None = None,
+        source_event_id: str = "",
+        usage_sample_id: str = "",
+        usage_series_id: str = "",
+    ) -> float:
+        """Record one cumulative provider snapshot as a restart-safe delta."""
+
+        series_id = usage_series_id or ":".join((
+            "cumulative",
+            str(instance_id or role),
+            str(backend or "unknown"),
+            str(model or "default"),
+        ))
+        current: dict[str, int | float] = {
+            "input_tokens": max(0, int(input_tokens or 0)),
+            "output_tokens": max(0, int(output_tokens or 0)),
+            "cache_creation_tokens": max(0, int(cache_creation_tokens or 0)),
+            "cache_read_tokens": max(0, int(cache_read_tokens or 0)),
+        }
+        if provider_cost_usd is not None:
+            current["provider_cost_usd"] = max(0.0, float(provider_cost_usd))
+
+        entries = self._read_entries()
+        previous: dict[str, int | float] = {}
+        for entry in reversed(entries):
+            if (
+                str(entry.get("usage_semantics") or "") == "cumulative"
+                and str(entry.get("usage_series_id") or "") == series_id
+                and isinstance(entry.get("cumulative_usage"), dict)
+            ):
+                previous = dict(entry["cumulative_usage"])
+                break
+
+        if not previous and self._is_legacy_series_migration(
+            entries,
+            instance_id=instance_id,
+            backend=backend,
+            series_id=series_id,
+        ):
+            return self.record_usage(
+                role=role,
+                instance_id=instance_id,
+                input_tokens=0,
+                output_tokens=0,
+                model=model,
+                backend=backend,
+                cache_creation_tokens=0,
+                cache_read_tokens=0,
+                source_event_id=source_event_id,
+                usage_sample_id=usage_sample_id,
+                usage_semantics="cumulative",
+                usage_series_id=series_id,
+                cumulative_usage=current,
+                accounting_baseline=True,
+            )
+
+        token_keys = (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_tokens",
+            "cache_read_tokens",
+        )
+        deltas = {
+            key: (
+                int(current[key])
+                if not previous
+                or int(current[key]) < int(previous.get(key, 0) or 0)
+                else int(current[key]) - int(previous.get(key, 0) or 0)
+            )
+            for key in token_keys
+        }
+        provider_delta: float | None = None
+        if provider_cost_usd is not None:
+            provider_delta = (
+                float(current["provider_cost_usd"])
+                if not previous
+                or float(current["provider_cost_usd"])
+                < float(previous.get("provider_cost_usd", 0.0) or 0.0)
+                else float(current["provider_cost_usd"])
+                - float(previous.get("provider_cost_usd", 0.0) or 0.0)
+            )
+        if not any(deltas.values()) and not (provider_delta and provider_delta > 0):
+            return 0.0
+        return self.record_usage(
+            role=role,
+            instance_id=instance_id,
+            input_tokens=deltas["input_tokens"],
+            output_tokens=deltas["output_tokens"],
+            model=model,
+            backend=backend,
+            cache_creation_tokens=deltas["cache_creation_tokens"],
+            cache_read_tokens=deltas["cache_read_tokens"],
+            provider_cost_usd=provider_delta,
+            source_event_id=source_event_id,
+            usage_sample_id=usage_sample_id,
+            usage_semantics="cumulative",
+            usage_series_id=series_id,
+            cumulative_usage=current,
+        )
+
+    @staticmethod
+    def _is_legacy_series_migration(
+        entries: list[dict],
+        *,
+        instance_id: str,
+        backend: str,
+        series_id: str,
+    ) -> bool:
+        """Recognize the one-time disk-reader series-identity upgrade.
+
+        Older ZaoFu releases grouped Codex cumulative snapshots under a
+        ``...:default`` series. The first provider-session-scoped snapshot
+        contains the whole historical transcript; charging it again would
+        make a new Workflow inherit the previous run's token spend.
+        """
+
+        prefix = ":".join((
+            "disk_reader",
+            str(instance_id),
+            str(backend or "unknown"),
+        )) + ":"
+        if not series_id.startswith(prefix) or series_id == prefix + "default":
+            return False
+        return any(
+            str(entry.get("usage_semantics") or "") == "cumulative"
+            and str(entry.get("usage_series_id") or "") == prefix + "default"
+            and str(entry.get("instance_id") or entry.get("role") or "")
+            == instance_id
+            and isinstance(entry.get("cumulative_usage"), dict)
+            for entry in entries
+        )
 
     @classmethod
     def rebuild_from_events(
@@ -188,6 +343,8 @@ class CostTracker:
         """
         totals: dict[str, CostSummary] = {}
         for entry in self._read_entries(last_days=last_days):
+            if entry.get("accounting_baseline") is True:
+                continue
             key = entry.get("backend") or "unknown"
             if key not in totals:
                 totals[key] = CostSummary(role=key)
@@ -206,6 +363,8 @@ class CostTracker:
         """
         totals: dict[str, CostSummary] = {}
         for entry in self._read_entries(last_days=last_days):
+            if entry.get("accounting_baseline") is True:
+                continue
             role = entry["role"]
             if role not in totals:
                 totals[role] = CostSummary(role=role)
@@ -228,6 +387,8 @@ class CostTracker:
         """
         totals: dict[str, CostSummary] = {}
         for entry in self._read_entries(last_days=last_days):
+            if entry.get("accounting_baseline") is True:
+                continue
             key = entry.get("instance_id") or entry["role"]
             if key not in totals:
                 totals[key] = CostSummary(role=key)
@@ -241,6 +402,58 @@ class CostTracker:
     def total_usd(self, *, last_days: int | None = None) -> float:
         """Get total cost across all roles."""
         return sum(s.total_usd for s in self.per_role_totals(last_days=last_days).values())
+
+    def usage_totals(
+        self,
+        *,
+        instance_id: str = "",
+        last_days: int | None = None,
+    ) -> dict[str, int | float]:
+        """Return one restart-safe token/cost meter snapshot.
+
+        ``instance_id`` narrows the meter to one physical provider role. The
+        snapshot is persisted on Run/Operation start events and later used as
+        the baseline for active budget enforcement.
+        """
+
+        totals: dict[str, int | float] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cache_read_tokens": 0,
+            "total_tokens": 0,
+            "total_usd": 0.0,
+            "entries": 0,
+        }
+        for entry in self._read_entries(last_days=last_days):
+            if entry.get("accounting_baseline") is True:
+                continue
+            entry_instance = str(
+                entry.get("instance_id") or entry.get("role") or ""
+            )
+            if instance_id and entry_instance != instance_id:
+                continue
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_tokens",
+                "cache_read_tokens",
+            ):
+                totals[key] = int(totals[key]) + int(entry.get(key, 0) or 0)
+            totals["total_usd"] = float(totals["total_usd"]) + float(
+                entry.get("cost_usd", 0.0) or 0.0
+            )
+            totals["entries"] = int(totals["entries"]) + 1
+        totals["total_tokens"] = sum(
+            int(totals[key])
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_tokens",
+                "cache_read_tokens",
+            )
+        )
+        return totals
 
     def check_budget(self, budget: float) -> bool:
         """Return True if within budget, False if exceeded."""
@@ -311,6 +524,8 @@ class CostTracker:
                 {"input_tokens": 0, "output_tokens": 0, "total_usd": 0.0, "entries": 0},
             )
             for e in entries:
+                if e.get("accounting_baseline") is True:
+                    continue
                 bucket["input_tokens"] += e.get("input_tokens", 0)
                 bucket["output_tokens"] += e.get("output_tokens", 0)
                 bucket["total_usd"] += e.get("cost_usd", 0.0)

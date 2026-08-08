@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref, write_sidecar_json
 from zf.runtime.task_contract_snapshot import TaskContractSnapshotError
+from zf.runtime.verification_commands import verification_command_required_for_stage
 
 
 SCHEMA_VERSION = "impl-self-check.v1"
@@ -60,11 +61,20 @@ def normalize_impl_self_check(
         for item in contract_snapshot.get("verification_commands") or []
         if isinstance(item, Mapping) and str(item.get("command_id") or "")
     }
+    impl_command_specs = {
+        command_id: item
+        for command_id, item in command_specs.items()
+        if verification_command_required_for_stage(
+            item,
+            verification_owner="impl_self_check",
+        )
+    }
     receipts = _normalize_receipts(
         body.get("command_receipts"),
         command_specs=command_specs,
         target_commit=expected["target_commit"],
         strict=strict,
+        require_receipts=bool(impl_command_specs),
     )
     body["command_receipts"] = receipts
     receipt_ids = {str(item["receipt_id"]) for item in receipts}
@@ -119,9 +129,13 @@ def normalize_impl_self_check(
                 raise ImplSelfCheckError(
                     f"{item['acceptance_id']} passed without evidence_refs"
                 )
-            required_commands = set(criteria.get(
-                str(item["acceptance_id"]), {}
-            ).get("verification_command_ids") or [])
+            required_commands = {
+                command_id
+                for command_id in criteria.get(
+                    str(item["acceptance_id"]), {}
+                ).get("verification_command_ids") or []
+                if command_id in impl_command_specs
+            }
             referenced_receipts = [
                 receipt_by_id[receipt_id]
                 for receipt_id in item["command_receipt_ids"]
@@ -280,7 +294,19 @@ def completion_payload_template(
         or task_item.get("dispatch_id")
         or f"{run_id}:{child_id}"
     )
-    commands = contract_snapshot.get("verification_commands") or []
+    commands = [
+        item
+        for item in contract_snapshot.get("verification_commands") or []
+        if isinstance(item, Mapping)
+        and verification_command_required_for_stage(
+            item,
+            verification_owner="impl_self_check",
+        )
+    ]
+    command_ids = {
+        str(item.get("command_id") or "")
+        for item in commands
+    }
     return {
         "attempt_id": attempt_id,
         "impl_self_check": {
@@ -316,6 +342,7 @@ def completion_payload_template(
                     "command_receipt_ids": [
                         f"receipt-{command_id}"
                         for command_id in item.get("verification_command_ids") or []
+                        if str(command_id) in command_ids
                     ],
                     "evidence_refs": ["<durable AC evidence ref>"],
                     "residual_risks": [],
@@ -354,6 +381,7 @@ def _normalize_receipts(
     command_specs: Mapping[str, Mapping[str, Any]],
     target_commit: str,
     strict: bool,
+    require_receipts: bool,
 ) -> list[dict[str, Any]]:
     source = raw if isinstance(raw, list) else []
     out: list[dict[str, Any]] = []
@@ -371,11 +399,18 @@ def _normalize_receipts(
             raise ImplSelfCheckError(f"unknown command id {command_id!r}")
         seen.add(receipt_id)
         status = _status(receipt.get("status"), receipt=True)
+        declared_digest = str(receipt.get("command_digest") or "")
+        declared_target = str(receipt.get("target_commit") or "")
         normalized = {
             "receipt_id": receipt_id,
             "command_id": command_id,
-            "command_digest": str(receipt.get("command_digest") or ""),
-            "target_commit": str(receipt.get("target_commit") or ""),
+            # Both values are already frozen by the command registry and the
+            # enclosing self-check target. Bind omissions mechanically while
+            # continuing to reject any explicit conflicting value below.
+            "command_digest": declared_digest or str(
+                spec.get("command_digest") or ""
+            ),
+            "target_commit": declared_target or target_commit,
             "status": status,
             "exit_code": int(receipt.get("exit_code", 0 if status == "passed" else 1)),
             "evidence_refs": _string_list(receipt.get("evidence_refs")),
@@ -387,7 +422,7 @@ def _normalize_receipts(
         if strict and status == "passed" and not normalized["evidence_refs"]:
             raise ImplSelfCheckError(f"command receipt {receipt_id} passed without evidence")
         out.append(normalized)
-    if strict and command_specs and not out:
+    if strict and require_receipts and not out:
         raise ImplSelfCheckError("impl self-check has no command receipts")
     return out
 

@@ -28,6 +28,10 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.workflow_operation import (
+    TERMINAL_OPERATION_STATUSES,
+    reduce_workflow_operations,
+)
 
 RUN_STALLED_EVENT = "run.stalled"
 
@@ -76,6 +80,16 @@ def _event_epoch(event: ZfEvent) -> float:
         return 0.0
 
 
+def _is_recovery_driver(event: ZfEvent, payload: dict) -> bool:
+    """Recovery receipts consume a root trigger; they are not new roots."""
+
+    return bool(
+        str(event.actor or "") == "zf-stall-redispatch"
+        or payload.get("redispatch_fingerprint")
+        or payload.get("redrive_of")
+    )
+
+
 def audit_stillness(
     events: Iterable[ZfEvent],
     *,
@@ -110,8 +124,13 @@ def audit_stillness(
             trigger = str(payload.get("trigger_event_id") or "")
             if trigger:
                 consumed_triggers.add(trigger)
+        elif etype == "task.pipeline.generation.admitted":
+            trigger = str(payload.get("trigger_event_id") or "")
+            if trigger:
+                consumed_triggers.add(trigger)
         elif etype in _DRIVING_EVENT_TYPES:
-            driving[event.id] = event
+            if not _is_recovery_driver(event, payload):
+                driving[event.id] = event
         elif etype == "human.escalate":
             open_escalations += 1
         elif etype == "human.escalation.acknowledged":
@@ -136,6 +155,16 @@ def audit_stillness(
 
     if inflight_fanouts:
         return StillnessReport(state="active", reason="inflight_fanouts")
+    operations = reduce_workflow_operations(events)
+    if any(
+        str(operation.get("status") or "")
+        not in TERMINAL_OPERATION_STATUSES
+        for operation in operations.values()
+    ):
+        return StillnessReport(
+            state="active",
+            reason="inflight_workflow_operations",
+        )
 
     # 未消费的推进事件(过宽限窗)
     breakpoints: list[dict] = []

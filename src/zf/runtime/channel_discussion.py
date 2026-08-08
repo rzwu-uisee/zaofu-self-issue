@@ -31,6 +31,7 @@ from zf.runtime.channel_contracts import (
     discussion_engine_mode,
     normalize_product_discussion_mode,
 )
+from zf.runtime.channel_consensus_identity import consensus_reached_payload
 from zf.runtime.channel_question_dedup import (
     question_ledger,
     question_ledger_digest,
@@ -469,16 +470,21 @@ def advance_discussion(
         )
         if dedup_repair:
             return dedup_repair
+        late_blockers = _open_unseen_consensus_blockers(
+            writer,
+            channel,
+            _thread_consensus(channel, thread_id),
+            actor=actor,
+            source=source,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
+        if late_blockers:
+            return late_blockers
         emitted.extend(_reject_invalid_resolutions(
             writer, channel, actor=actor, source=source,
             channel_id=channel_id, thread_id=thread_id,
         ))
-        if overdue:
-            emitted.extend(_close_stalled(
-                writer, actor=actor, source=source,
-                channel_id=channel_id, thread_id=thread_id, phase=state,
-            ))
-            return emitted
         if _ledger_converged(channel, session, thread_id):
             synthesizer = str(session.get("synthesizer") or "")
             request_id = _stable_synthesis_request_id(
@@ -516,6 +522,12 @@ def advance_discussion(
                 },
             )
             emitted.append("channel.discussion.phase.changed")
+            return emitted
+        if overdue:
+            emitted.extend(_close_stalled(
+                writer, actor=actor, source=source,
+                channel_id=channel_id, thread_id=thread_id, phase=state,
+            ))
         return emitted
 
     if state == "phase3_synthesis":
@@ -527,25 +539,16 @@ def advance_discussion(
             ))
             return emitted
         blocked = consensus.get("blocked") or []
+        emitted.extend(_open_unseen_consensus_blockers(
+            writer,
+            channel,
+            consensus,
+            actor=actor,
+            source=source,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        ))
         if blocked and not consensus.get("reopened"):
-            for item in blocked:
-                question_id = str(item.get("blocker_question_id") or "")
-                if question_id and not _question_exists(channel, question_id):
-                    writer.emit(
-                        "channel.question.opened",
-                        actor=actor,
-                        correlation_id=channel_id,
-                        payload={
-                            "channel_id": channel_id,
-                            "thread_id": thread_id,
-                            "question_id": question_id,
-                            "question": str(item.get("blocker_question") or ""),
-                            "category": "blocker",
-                            "asked_by": str(item.get("member_id") or ""),
-                            "source": source,
-                        },
-                    )
-                    emitted.append("channel.question.opened")
             writer.emit(
                 "channel.discussion.phase.changed",
                 actor=actor,
@@ -582,13 +585,12 @@ def advance_discussion(
                     "channel.consensus.reached",
                     actor=actor,
                     correlation_id=channel_id,
-                    payload={
-                        "channel_id": channel_id,
-                        "thread_id": thread_id,
-                        "artifact_ref": artifact_ref,
-                        "signed_by": sorted((consensus.get("signed") or {}).keys()),
-                        "source": source,
-                    },
+                    payload=consensus_reached_payload(
+                        consensus,
+                        channel_id=channel_id,
+                        thread_id=thread_id,
+                        source=source,
+                    ),
                 )
                 emitted.append("channel.consensus.reached")
             writer.emit(
@@ -674,6 +676,39 @@ def _thread_consensus(channel: dict[str, Any], thread_id: str) -> dict[str, Any]
         if isinstance(item, dict):
             return item
     return {}
+
+
+def _open_unseen_consensus_blockers(
+    writer: EventWriter,
+    channel: dict[str, Any],
+    consensus: dict[str, Any],
+    *,
+    actor: str,
+    source: str,
+    channel_id: str,
+    thread_id: str,
+) -> list[str]:
+    emitted: list[str] = []
+    for item in consensus.get("blocked") or []:
+        question_id = str(item.get("blocker_question_id") or "")
+        if not question_id or _question_exists(channel, question_id):
+            continue
+        writer.emit(
+            "channel.question.opened",
+            actor=actor,
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "question_id": question_id,
+                "question": str(item.get("blocker_question") or ""),
+                "category": "blocker",
+                "asked_by": str(item.get("member_id") or ""),
+                "source": source,
+            },
+        )
+        emitted.append("channel.question.opened")
+    return emitted
 
 
 def _consensus_reached(

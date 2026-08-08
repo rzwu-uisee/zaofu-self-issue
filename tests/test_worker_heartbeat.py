@@ -302,7 +302,13 @@ def test_agent_usage_keeps_latest_fanout_dispatch_task_when_lane_has_old_tasks(
         ZfEvent(
             type="agent.usage",
             actor="dev-lane-1",
-            payload={"context_usage_ratio": 0.42},
+            payload={
+                "context_usage_ratio": 0.42,
+                "operation_id": "wop-task-new",
+                "attempt_id": "attempt-task-new",
+                "dispatch_id": "run-new",
+                "lease_id": "lease-task-new",
+            },
         ),
         tasks=[old_task, new_task],
     )
@@ -311,6 +317,10 @@ def test_agent_usage_keeps_latest_fanout_dispatch_task_when_lane_has_old_tasks(
     assert last_payload["current_task_id"] == "TASK-NEW"
     assert last_payload["state"] == "busy"
     assert last_payload["source"] == "agent.usage"
+    assert last_payload["operation_id"] == "wop-task-new"
+    assert last_payload["attempt_id"] == "attempt-task-new"
+    assert last_payload["dispatch_id"] == "run-new"
+    assert last_payload["lease_id"] == "lease-task-new"
 
 
 def test_agent_usage_ignores_terminal_fanout_task_id(

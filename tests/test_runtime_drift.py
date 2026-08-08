@@ -79,6 +79,31 @@ class TestRepeatDecisions:
         signals = d.check(events)
         assert not any(s.signal == "repeat_decisions" for s in signals)
 
+    def test_orchestrator_attempt_heartbeats_are_not_agent_drift(self):
+        events = [
+            {"type": "task.attempt.heartbeat", "actor": "orchestrator"}
+        ] * 10
+        signals = DriftDetector(repeat_threshold=3).check(events)
+        assert not any(s.signal == "repeat_decisions" for s in signals)
+
+    def test_orchestrator_decisions_still_trigger_drift(self):
+        events = [
+            {"type": "task.dispatched", "actor": "orchestrator"}
+        ] * 8
+        signals = DriftDetector(repeat_threshold=3).check(events)
+        assert any(s.signal == "repeat_decisions" for s in signals)
+        assert signals[0].affected_role == "orchestrator"
+
+    def test_role_suspend_deferrals_are_observations_not_agent_drift(self):
+        events = [
+            {
+                "type": "role.lifecycle.suspend.rejected",
+                "actor": "orchestrator",
+            }
+        ] * 8
+        signals = DriftDetector(repeat_threshold=3).check(events)
+        assert not any(s.signal == "repeat_decisions" for s in signals)
+
     def test_fanout_contract_synthesis_is_not_agent_drift(self):
         """B-NEW-5 regression: P0 stage ④ orchestrator-driven backlog
         synthesis writes one task.contract.update per fanout task,

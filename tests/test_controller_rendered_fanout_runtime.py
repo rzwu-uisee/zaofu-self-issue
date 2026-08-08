@@ -176,6 +176,12 @@ def test_rendered_controller_queue_releases_next_impl_task(
         tmp_path / kind / "zf.yaml",
     )
     config = load_config(rendered)
+    # Queue release is a Kernel/WRC contract; OA blocking adoption has its own
+    # semantic-control integration suite and must not consume this fixture.
+    config.workflow.orchestration.mode = "exception_advisor"
+    config.workflow.flow_metadata["result_protocol"][
+        "semantic_submit_profiles"
+    ] = {}
     config.project.root = str(project)
     config.project.state_dir = str(project / f".zf-{kind}-rendered-sim")
     config.workflow.plan_approval_enabled = False

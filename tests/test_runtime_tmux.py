@@ -14,8 +14,10 @@ class TestTmuxSessionDryRun:
     def test_create_session_records_command(self):
         self.tmux.create_session()
         assert len(self.tmux.command_log) >= 1
-        cmd = self.tmux.command_log[0]
-        assert "new-session" in cmd or "new" in cmd
+        cmd = next(
+            item for item in self.tmux.command_log
+            if "new-session" in item or " new " in item
+        )
         assert "test-zf" in cmd
 
     def test_kill_session_records_command(self):
@@ -32,7 +34,11 @@ class TestTmuxSessionDryRun:
         assert any("kill-window" in cmd for cmd in self.tmux.command_log)
 
     def test_terminate_window_records_term_kill_and_hard_kill(self, monkeypatch):
-        monkeypatch.setattr(self.tmux, "pane_pid", lambda window: "4242")
+        monkeypatch.setattr(
+            self.tmux,
+            "_pane_pid_for_target",
+            lambda target: "4242",
+        )
 
         result = self.tmux.terminate_window("dev-1", grace_seconds=0)
 
@@ -52,7 +58,11 @@ class TestTmuxSessionDryRun:
         # kill(-1, SIG) and SIGTERMing every uid process — killed the whole
         # session (tmux + ssh + systemd --user manager) 4× before this fix. The
         # runtime now calls os.killpg directly and never shells out to `kill`.
-        monkeypatch.setattr(self.tmux, "pane_pid", lambda window: "1731963")
+        monkeypatch.setattr(
+            self.tmux,
+            "_pane_pid_for_target",
+            lambda target: "1731963",
+        )
 
         self.tmux.terminate_window("dev-1", grace_seconds=0)
 
@@ -62,7 +72,11 @@ class TestTmuxSessionDryRun:
         assert any("os.killpg(1731963, SIGTERM)" in c for c in signal_cmds)
 
     def test_terminate_window_skips_signal_without_valid_pid(self, monkeypatch):
-        monkeypatch.setattr(self.tmux, "pane_pid", lambda window: "")
+        monkeypatch.setattr(
+            self.tmux,
+            "_pane_pid_for_target",
+            lambda target: "",
+        )
 
         result = self.tmux.terminate_window("dev-1", grace_seconds=0)
 

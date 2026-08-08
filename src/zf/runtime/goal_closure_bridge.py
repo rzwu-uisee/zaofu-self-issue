@@ -531,6 +531,14 @@ class GoalClosureBridgeMixin:
             "plan_artifact_package_digest": str(
                 identity.get("plan_artifact_package_digest") or ""
             ),
+            "goal_closure_contract_snapshot_ref": str(
+                contract_descriptor.get("ref") or ""
+            ),
+            "goal_closure_contract_snapshot_digest": str(
+                contract_descriptor.get("sha256") or ""
+            ),
+            # Compatibility for admitted Goal Closure call-result identities
+            # written before snapshot fields became type-specific.
             "contract_snapshot_ref": str(contract_descriptor.get("ref") or ""),
             "contract_snapshot_digest": str(contract_descriptor.get("sha256") or ""),
             "target_snapshot_ref": str(target_descriptor.get("ref") or ""),

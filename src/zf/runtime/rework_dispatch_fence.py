@@ -6,6 +6,7 @@ from typing import Any
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
+from zf.core.state.task_attempts import TASK_ATTEMPT_IDENTITY_OPERATION_V2
 from zf.core.task.schema import Task
 
 
@@ -24,6 +25,13 @@ def rework_dispatch_block_reason(
         and isinstance(trigger_event.payload, dict)
         else {}
     )
+    operation_v2_reason = _operation_v2_block_reason(
+        runtime,
+        task,
+        trigger_payload,
+    )
+    if operation_v2_reason:
+        return operation_v2_reason
     trigger_dispatch_ids = {
         str(trigger_payload.get(key) or "")
         for key in ("dispatch_id", "attempt_id", "run_id")
@@ -77,3 +85,43 @@ def rework_dispatch_block_reason(
     if active_others:
         return "rework_target_busy:" + ",".join(sorted(active_others))
     return ""
+
+
+def _operation_v2_block_reason(
+    runtime: Any,
+    task: Task,
+    trigger_payload: dict[str, Any],
+) -> str:
+    attempt_id = str(trigger_payload.get("attempt_id") or "").strip()
+    if not attempt_id:
+        return ""
+    claims_operation_v2 = any(
+        str(trigger_payload.get(key) or "").strip()
+        for key in ("operation_id", "lease_id", "operation_generation")
+    )
+    try:
+        from zf.runtime.task_attempt_runtime import task_attempt_store
+
+        attempt = task_attempt_store(runtime).get(attempt_id)
+    except Exception:
+        return (
+            "operation_v2_identity_unavailable"
+            if claims_operation_v2
+            else ""
+        )
+    if not attempt:
+        return "operation_v2_identity_missing" if claims_operation_v2 else ""
+    if str(attempt.get("identity_version") or "") != (
+        TASK_ATTEMPT_IDENTITY_OPERATION_V2
+    ):
+        return "operation_v2_identity_mismatch" if claims_operation_v2 else ""
+    if str(attempt.get("task_id") or "") != str(task.id):
+        return "operation_v2_identity_mismatch"
+    trigger_operation_id = str(
+        trigger_payload.get("operation_id") or ""
+    ).strip()
+    if trigger_operation_id and trigger_operation_id != str(
+        attempt.get("operation_id") or ""
+    ):
+        return "operation_v2_identity_mismatch"
+    return "operation_v2_rework_owned_by_task_pipeline"

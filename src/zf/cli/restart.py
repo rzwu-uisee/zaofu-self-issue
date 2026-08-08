@@ -11,7 +11,7 @@ from zf.core.config.project_context import resolve_project_context
 from zf.core.events import EventLog, ZfEvent
 from zf.runtime.cli_command import set_default_zf_cli_cmd
 from zf.runtime.transport import make_transport
-from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.workflow_runtime import WorkflowRuntimeCoordinator
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -140,7 +140,7 @@ def _restart_role(
         print(f"Error: Role '{role_name}' not found. Available: {[r.name for r in config.roles]}", file=sys.stderr)
         return 1
 
-    orchestrator = Orchestrator(
+    orchestrator = WorkflowRuntimeCoordinator(
         state_dir,
         config,
         transport,

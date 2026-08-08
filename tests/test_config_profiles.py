@@ -345,6 +345,22 @@ def test_prod_controller_profiles_wire_yoke_and_enforcement():
         prod["flow_defaults"]["issue"]["roleDefaults"]["lifecycle"]["mode"]
         == "on_demand"
     )
+    assert prod["workflow"]["run_limits"]["timeout_seconds"] == 3000
+    assert (
+        prod["workflow"]["execution_profiles"]["bounded-direct-v1"]
+        ["limits"]["token_budget"]
+        == 1_500_000
+    )
+    assert (
+        prod["workflow"]["execution_profiles"]["bounded-direct-v1"]
+        ["limits"]["max_usage_samples"]
+            == 60
+        )
+    assert (
+        prod["flow_defaults"]["prd"]["roleDefaults"]["execution"]
+        ["default_profile"]
+        == "bounded-direct-v1"
+    )
     prd_bundles = prod["flow_defaults"]["prd"]["roleSkillBundles"]
     issue_bundles = prod["flow_defaults"]["issue"]["roleSkillBundles"]
     assert "zf-yoke-dev-worker-role-context" in prd_bundles["impl"]
@@ -364,6 +380,12 @@ def test_prod_controller_profiles_wire_yoke_and_enforcement():
             "mode"
         ]
         == "on_demand"
+    )
+    assert refactor["workflow"]["run_limits"]["cost_budget_usd"] == 40
+    assert (
+        refactor["flow_defaults"]["refactor"]["roleDefaults"]["execution"]
+        ["default_profile"]
+        == "bounded-direct-v1"
     )
     ref_bundles = refactor["flow_defaults"]["refactor"]["roleSkillBundles"]
     assert "zf-yoke-dev-worker-role-context" in ref_bundles["impl"]
@@ -435,7 +457,7 @@ def test_refactor_controller_uses_project_neutral_dynamic_skill_overlay():
 
 
 def test_controller_entries_use_goal_scoped_delivery():
-    """8 个 controller 入口统一走 Goal claim 的 scoped delivery。"""
+    """Product controller 按各自 flow 声明 Goal-scoped delivery。"""
     from pathlib import Path as _Path
 
     from zf.core.config.loader import load_config as _load
@@ -449,6 +471,8 @@ def test_controller_entries_use_goal_scoped_delivery():
         assert cfg.goal.rework_fingerprint is True, path.name
         assert cfg.goal.quiescent_after_escalate is True, path.name
         assert cfg.workflow.strict_triggers.rework_attempts_gte == 2, path.name
-        assert cfg.workflow.flow_metadata["delivery_policy"] == "ship_candidate"
+        is_general = path.name.startswith("general-workflow")
+        expected_delivery = "report_only" if is_general else "ship_candidate"
+        assert cfg.workflow.flow_metadata["delivery_policy"] == expected_delivery
         # Legacy active runs remain resumable during the authority cutover.
-        assert cfg.runtime.git.auto_ship_on_judge_passed is True, path.name
+        assert cfg.runtime.git.auto_ship_on_judge_passed is (not is_general), path.name

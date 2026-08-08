@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from zf.core.events.model import ZfEvent
-from zf.runtime.orchestrator_types import OrchestratorDecision
+from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
 def handle_autoresearch_stuck_injection(
     runtime: Any,
     event: ZfEvent,
-) -> OrchestratorDecision | None:
+) -> WorkflowRuntimeDecision | None:
     persisted_events = runtime.event_log.read_all()
     persisted = next(
         (
@@ -84,7 +84,7 @@ def handle_autoresearch_stuck_injection(
 
     active_task = runtime._active_task_for_instance(role.instance_id)
     if active_task is None:
-        return OrchestratorDecision(
+        return WorkflowRuntimeDecision(
             action="skip",
             task_id=event.task_id,
             role=role.instance_id,
@@ -173,8 +173,8 @@ def _block(
     reason: str,
     *,
     role: str = "",
-) -> OrchestratorDecision:
-    return OrchestratorDecision(
+) -> WorkflowRuntimeDecision:
+    return WorkflowRuntimeDecision(
         action="block",
         task_id=event.task_id,
         role=role or None,

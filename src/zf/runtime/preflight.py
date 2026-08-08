@@ -21,6 +21,7 @@ mock-backend pipeline e2e (dispatch→aggregate→transition) is a future extens
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -244,6 +245,11 @@ def _probe_provider_auth(backend: str) -> tuple[bool, str]:
     command, login_hint = command_and_hint
     if shutil.which(command[0]) is None:
         return False, f"command missing: {command[0]!r}"
+    if probe_backend == "claude-code" and any(
+        str(os.environ.get(name) or "").strip()
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    ):
+        return True, "API credential configured via environment"
     try:
         result = subprocess.run(
             command,
@@ -262,14 +268,24 @@ def _probe_provider_auth(backend: str) -> tuple[bool, str]:
     )
     if probe_backend == "claude-code":
         logged_in = False
+        payload: dict[str, object] = {}
         if result.stdout.strip():
             try:
-                payload = json.loads(result.stdout)
+                parsed = json.loads(result.stdout)
             except (TypeError, ValueError):
-                payload = {}
+                parsed = {}
+            payload = parsed if isinstance(parsed, dict) else {}
             logged_in = bool(payload.get("loggedIn"))
         if result.returncode == 0 and logged_in:
             return True, "authenticated"
+        if payload:
+            auth_method = str(payload.get("authMethod") or "none")
+            api_provider = str(payload.get("apiProvider") or "unknown")
+            return False, (
+                "not authenticated "
+                f"(authMethod={auth_method}, apiProvider={api_provider}); "
+                f"authenticate with {login_hint}"
+            )
     elif result.returncode == 0 and "logged in" in output.lower():
         return True, "authenticated"
     detail = output.splitlines()[0] if output else "not authenticated"

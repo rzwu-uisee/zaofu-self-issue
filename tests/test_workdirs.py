@@ -619,6 +619,11 @@ def test_task_ref_scope_uses_dependency_after_from_writer_workdir(tmp_path: Path
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["dependency_after"] = dependency_after
         meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    manager.prepare(config.roles[0])
+    preserved_meta = json.loads(
+        (Path(plan.workdir) / "meta.json").read_text(encoding="utf-8")
+    )
+    assert preserved_meta["dependency_after"] == dependency_after
     (project_path / "server.mjs").write_text(
         "import { statuses } from './data.mjs';\n"
         "export function render() { return statuses.join(','); }\n",
@@ -655,6 +660,115 @@ def test_task_ref_scope_uses_dependency_after_from_writer_workdir(tmp_path: Path
         "rev-parse",
         "refs/heads/task/http-server",
     ) == server_commit
+
+
+def test_task_ref_scope_recovers_combined_dependency_base_without_metadata(
+    tmp_path: Path,
+) -> None:
+    base_head = _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    store = TaskStore(state_dir / "kanban.json")
+    for task_id, scope in (
+        ("data-module", "data.mjs"),
+        ("config-module", "config.mjs"),
+    ):
+        store.add(Task(
+            id=task_id,
+            title=task_id,
+            status="done",
+            contract=TaskContract(scope=[scope]),
+        ))
+    store.add(Task(
+        id="http-server",
+        title="http server",
+        status="in_progress",
+        assigned_to="dev",
+        blocked_by=["data-module", "config-module"],
+        contract=TaskContract(scope=["server.mjs"]),
+    ))
+    config = ZfConfig(
+        project=ProjectConfig(name="test"),
+        roles=[RoleConfig(name="dev", backend="mock", role_kind="writer")],
+        runtime=RuntimeConfig(
+            workdirs=WorkdirConfig(enabled=True, mode="worktree"),
+        ),
+    )
+    main_branch = _git_output(tmp_path, "branch", "--show-current")
+    dependency_commits: dict[str, str] = {}
+    for task_id, path, body in (
+        ("data-module", "data.mjs", "export const data = [];\n"),
+        ("config-module", "config.mjs", "export const config = {};\n"),
+    ):
+        _git(tmp_path, "checkout", "-q", "-b", f"task/{task_id}", base_head)
+        (tmp_path / path).write_text(body, encoding="utf-8")
+        _git(tmp_path, "add", path)
+        _git(tmp_path, "commit", "-q", "-m", task_id)
+        dependency_commits[task_id] = _git_output(tmp_path, "rev-parse", "HEAD")
+        _git(tmp_path, "checkout", "-q", main_branch)
+    refs_dir = state_dir / "refs"
+    refs_dir.mkdir()
+    (refs_dir / "task-index.json").write_text(json.dumps({
+        task_id: {
+            "task_id": task_id,
+            "task_ref": f"task/{task_id}",
+            "source_commit": commit,
+        }
+        for task_id, commit in dependency_commits.items()
+    }), encoding="utf-8")
+
+    manager = WorkdirManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+    )
+    plan = manager.prepare(config.roles[0])
+    project_path = Path(plan.project_path)
+    manager.sync_writer_to_source_ref(config.roles[0], source_ref_override=base_head)
+    manager.apply_dependency_task_refs(
+        config.roles[0],
+        ["data-module", "config-module"],
+    )
+    meta_path = Path(plan.workdir) / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    for key in (
+        "dependency_base_before",
+        "dependency_after",
+        "dependency_refs",
+        "dependency_refs_skipped",
+        "dependency_refs_updated_at",
+    ):
+        meta.pop(key, None)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (project_path / "server.mjs").write_text(
+        "export function serve() { return 'ok'; }\n",
+        encoding="utf-8",
+    )
+    _git(project_path, "add", "server.mjs")
+    _git(project_path, "commit", "-q", "-m", "server task")
+    server_commit = _git_output(project_path, "rev-parse", "HEAD")
+
+    result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+    ).process_dev_build_done(ZfEvent(
+        type="impl.child.completed",
+        actor="dev",
+        task_id="http-server",
+        payload={
+            "dispatch_id": "disp-server",
+            "source_commit": server_commit,
+            "source_branch": "worker/dev",
+            "workdir": str(project_path),
+            "changed_files": ["server.mjs"],
+            "files_touched": ["server.mjs"],
+        },
+    ))
+
+    assert result is not None
+    assert result.status == "updated"
+    assert result.payload["changed_files"] == ["server.mjs"]
 
 
 def test_writer_worktree_dependency_ref_missing_fails_closed(tmp_path: Path):

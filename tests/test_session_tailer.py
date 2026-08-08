@@ -33,6 +33,15 @@ class TestPathConstruction:
         p = claude_session_path("/tmp/my-proj", "abc-def")
         assert str(p).endswith("/-tmp-my-proj/abc-def.jsonl")
 
+    def test_claude_session_path_escapes_hidden_runtime_directory(self):
+        p = claude_session_path(
+            "/tmp/project/.zf/workdirs/dev/project",
+            "abc-def",
+        )
+        assert str(p).endswith(
+            "/-tmp-project--zf-workdirs-dev-project/abc-def.jsonl"
+        )
+
 
 class TestAssistantMessageEvents:
     def _write(self, path: Path, lines: list[dict]):

@@ -91,7 +91,7 @@ flowchart LR
     direction TB
     EVENTS["EventWriter / EventLog<br/>append occurrence / causation / verdict / ref"]
     WATCH["EventWatcher<br/>wake-worthy event / periodic tick"]
-    ORCH["Orchestrator.run_once()"]
+    ORCH["WorkflowRuntimeCoordinator.run_once()"]
     ROUTE["Registered Topology / Profile<br/>dependency / readiness / WIP / barrier"]
     ADMIT["Mechanical Admission<br/>schema / identity / currentness / scope / budget"]
     ATTEMPT["WorkflowOperation / TaskAttempt<br/>generation / lease / dispatch"]
@@ -141,26 +141,28 @@ flowchart LR
   EVENTS -. "stall / operational signal" .-> SUPERVISOR
 ```
 
-图中的人工批准是 profile/policy 控制的分支，不是每条 Workflow 的固定阶段。本文只画
-当前 `dev` 路径：确定性主实体仍是 Python `Orchestrator`；候选的
-`WorkflowRuntimeCoordinator` 命名、OA blocking semantic-control，以及 Task-centric
-Pipeline / 可复用 Stage Worker Slot 都不作为当前能力进入此图。Worker 结果与已批准的恢复
-动作只能通过 sanctioned event/artifact 路径进入下一次 EventWatcher reconciliation。
+图中的人工批准是 profile/policy 控制的分支，不是每条 Workflow 的固定阶段。确定性主实体
+已经命名为 Python `WorkflowRuntimeCoordinator`；`Orchestrator` 只保留为同一类的兼容 alias。
+当前代码已经包含两类默认关闭的执行增强：配置化 OA semantic checkpoint，以及
+PRD/Issue/Refactor Task Pipeline v4 canary。它们复用同一个 Kernel、EventLog、Store、Artifact
+和 controlled-action 边界，不创建第二个状态机。Worker 结果与已批准的恢复动作只能通过
+sanctioned event/artifact 路径进入下一次 EventWatcher reconciliation。
 
 | 组件 | 当前职责 |
 |---|---|
-| Kernel / Python `Orchestrator` runtime | 配置加载、identity、机械 dispatch、schema/gate、replay、状态迁移和外部副作用 |
+| Kernel / Python `WorkflowRuntimeCoordinator` | 配置加载、identity、机械 dispatch、schema/gate、replay、状态迁移和外部副作用；`Orchestrator` 是兼容 alias |
 | Worker Agents + Skills | 计划、实现、评审、验证、诊断和产品判断；只报告 typed 结果或意图 |
-| configured `orchestrator` role Agent | 稳定 session identity、异常语义分诊、replan/proposal；在当前 Product Flow 中不是全程 blocking 的 semantic run owner |
+| configured `orchestrator` role Agent | 默认 `exception_advisor`；显式 `semantic_control` profile 可在预注册 checkpoint 上做 shadow/blocking 语义判断，但不拥有 dispatch、Task/Run 状态或外部副作用 |
 | Supervisor | 观察、关联和 attention；不直接修复 |
 | Run Manager | 处理 operational liveness，选择有界恢复动作并要求 post-verification |
 | Autoresearch | 复现重复 harness fingerprint，产出隔离 diagnosis/repair proposal |
 | ControlledActionService | 应用已批准、可审计的确定性副作用 |
 | Web / CLI / Feishu | 读取 projection、提交 intent、请求 token-gated controlled action |
 
-确定性 Python `Orchestrator` 与名为 `orchestrator` 的 Agent role 是两个不同对象。当前代码
-仍以前者作为 Workflow 快乐路径执行协调器；候选设计中的 OA 全程 semantic-control 或
-blocking checkpoint 不能当作现行生产默认。
+确定性 Python `WorkflowRuntimeCoordinator` 与名为 `orchestrator` 的 Agent role 是两个不同
+对象。当前代码仍以前者作为 Workflow 快乐路径执行协调器。OA P0-P15 harness 已接线，但真实 canary 仍为
+HOLD，未显式配置的项目继续使用 `exception_advisor`；不能把 canary 中的 blocking checkpoint
+写成生产默认。
 
 ## 5. 两种编排模式
 
@@ -201,12 +203,16 @@ ZaoFu 支持“蜂群”，但这里的蜂群是 **bounded, typed, observable sw
 | Channel Group 多角色讨论 | 已实现 | 人与多个 Agent 可自然讨论或显式 `multi_lens`，Owner 确认 PRD；讨论不自动创建 Task 或点火 Workflow |
 | Reader fanout/fan-in | 已实现 | 多个只读角色并行研究/扫描，按 `wait_for_all` 或 synth contract 聚合 |
 | Writer fanout | 已实现 | Task Map 中独立 Task 可进入隔离 branch/worktree，冲突、scope 和 candidate admission fail-closed |
-| Task Map wave/lane | 已实现 | Kernel 根据依赖、wave、WIP 和 currentness释放工作，不由主 Agent逐条手工派发 |
+| Task Map wave/lane（v3） | 已实现、仍是默认 | Kernel 根据依赖、wave、WIP 和 currentness 释放工作，不由主 Agent 逐条手工派发 |
 | 静态 replicas 与兼容 role autoscale | 已实现、需配置 | `zf.yaml` 声明上下限；Runtime 按 ready Task、cooldown 和 worker health 扩缩，dirty workdir 阻止回收 |
 | On-demand Worker lifecycle | 已实现、需 Provider 支持 resume | dormant role 在 dispatch 前激活，settled/idle 后按准入条件 suspend |
 | 跨 Provider 协作 | 已实现 | Codex、Claude Code 等按 role/backend 组合，独立 verify 不复用实现者自述 |
 | Provider-native compound children | opt-in Research pilot | 仅 root 是 ZaoFu protocol actor；当前 pilot 最多 4 个、深度 1、只读 child，不能创建 canonical Task |
-| Task-centric 弹性 Stage Worker Pool | 尚未实现 | 逻辑 Task、attempt、session、worktree 与物理 placement 尚未完全解耦，不能把 generic autoscale 冒充弹性 lane pipeline |
+| OA semantic checkpoint | Harness 已实现、发布 HOLD | 仅显式 profile 可启用；正常 Task handoff 不增加 OA turn，Kernel 保持唯一调度权 |
+| Task-centric 弹性 Stage Worker Pool（v4） | 实现完成、默认关闭、rollout NO-GO | canary 将 Task Pipeline identity 与物理 Worker Slot 解耦；只允许 PRD/Issue/Refactor 的显式 shadow/blocking profile |
+| Research generation freshness | 确定性实现完成、真实 E2E 待签收 | prompt/config/route/role/Task/run contract 共同冻结 generation；启动前隔离旧 generation |
+| Recovery Coordinator 收敛 | 候选、未实施 | Supervisor 与 Run Manager 当前仍是分离组件，不得按统一入口操作 |
+| OpenCode Provider SPI | 候选、未实施 | 当前公开 Provider 路径不应宣称已有 OpenCode native session |
 
 当前 topology/profile 可以按 DAG 组合以下执行形态。它们不是一条所有 Workflow 都必须
 依次经过的 Reader -> Writer -> Verifier 固定流水线：
@@ -254,8 +260,24 @@ flowchart TB
 ```
 
 同一个 profile 可以让 Reader aggregate 成为下一 Stage 的输入，也可以让 Candidate 触发
-exact-target Verify；顺序来自已准入 DAG，而不是图中硬编码的全局 barrier。当前 Writer
-fanout 也不等于持久 Task Pipeline identity 或可跨 Stage 复用的 Worker Slot。
+exact-target Verify；顺序来自已准入 DAG，而不是图中硬编码的全局 barrier。v3 Writer
+fanout 本身不等于持久 Task Pipeline identity；只有显式 v4 profile 才启用下面的 Task-local
+pipeline 与可复用 Worker Slot：
+
+```text
+Task A: Impl -> Task Verify -> Integration Admission -> serial Candidate Integration
+              | failed -> bounded Task A rework
+              | passed -> Impl slot may serve Task C immediately
+
+all admitted Task receipts
+  -> freeze exact Candidate
+  -> Global Candidate Verify / Discovery / Goal Closure
+```
+
+v4 的 `verify_admitted` 默认是零 Agent turn 的机械准入；高风险 `risk_review` 是独立、默认关闭的
+canary。局部 Task 通过不能替代 frozen exact Candidate 的全局签收，partial Candidate 禁止
+auto-ship。当前可用示例位于 `examples/prod/controller/*-task-pipeline-v4-canary*.yaml`，且
+`preferred: false`。
 
 ### 受控动态 Workflow
 
@@ -288,10 +310,13 @@ Issue、Refactor 使用稳定 controller，长尾场景使用 static-safe Generi
 ```text
 zf start
   -> load zf.yaml + project.state_dir
+  -> reconcile stale Research generations before transport startup
   -> start tmux and/or stream-json transports and sidecars
   -> EventWatcher tails events.jsonl
-  -> wake-worthy event calls Orchestrator.run_once()
+  -> wake-worthy event calls WorkflowRuntimeCoordinator.run_once()
   -> topology/profile selects mechanical next work
+     -> v3: declared stage/fanout/barrier route
+     -> v4 blocking canary: Task-local Impl/Verify/Integration operations
   -> briefing + contract + required inputs reach worker
   -> worker emits facts/results/evidence
   -> reducers/gates update sanctioned state

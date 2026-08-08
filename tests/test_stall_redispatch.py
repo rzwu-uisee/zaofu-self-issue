@@ -146,6 +146,29 @@ def test_emit_stall_recoveries_escalates_at_cap(tmp_path):
     assert "autoresearch.invocation.requested" not in types
 
 
+def test_emit_stall_recoveries_does_not_redispatch_oa_owned_trigger(tmp_path):
+    trigger = _ev(
+        "candidate.ready",
+        feature_id="F1",
+        workflow_run_id="run-1",
+    )
+    events = [
+        trigger,
+        _ev(
+            "run.dispatch.blocked",
+            workflow_run_id="run-1",
+            source_event_id=trigger.id,
+            reason="orchestrator_stage_barrier_pending",
+        ),
+        *[_ev("orchestrator.decision.recorded") for _ in range(8)],
+    ]
+    log = EventLog(tmp_path / "e.jsonl")
+    writer = EventWriter(log)
+
+    assert emit_stall_recoveries(events, writer, stages=STAGES) == 0
+    assert log.read_all() == []
+
+
 # --- B-FIX-06 (R32 双派发): trigger 已起 active fanout 则抑制重发 ---
 
 def test_redispatch_suppressed_when_trigger_already_has_active_fanout():

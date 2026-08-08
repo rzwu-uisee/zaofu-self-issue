@@ -13,6 +13,7 @@ from zf.core.events.writer import EventWriter
 from zf.core.workspace import WorkspaceProject
 from zf.core.workspace import stable_project_id
 from zf.web.headless_agent import canonical_headless_backend
+from zf.web.channel_task_plan import scope_entry_is_path_like as _scope_entry_is_path_like
 import hashlib
 import json
 import os
@@ -438,31 +439,6 @@ def _payload_hash(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _scope_entry_is_path_like(entry: object) -> bool:
-    """A writer-fanout scope entry is a path or glob, never a prose sentence.
-
-    Path scopes are consumed as globs downstream; whitespace or the absence of
-    any path marker (``/``, ``*``, or a short file extension) means the entry
-    is prose, not a path.
-    """
-    text = str(entry or "").strip()
-    if not text or any(ch.isspace() for ch in text):
-        return False
-    has_extension = _has_short_file_extension(text)
-    if any("一" <= ch <= "鿿" for ch in text):
-        # CJK prose carries no whitespace, so "修改src/core下的文件" would
-        # otherwise pass on its "/" alone. Require a stronger path signal.
-        return "*" in text or has_extension
-    if "/" in text or "*" in text:
-        return True
-    return has_extension
-
-
-def _has_short_file_extension(text: str) -> bool:
-    dot = text.rfind(".")
-    return 0 < dot < len(text) - 1 and text[dot + 1:].isalnum() and len(text) - dot - 1 <= 5
-
-
 # LLMs drift on the verification field name (chat-e2e F3: an `acceptance`
 # list was silently dropped and the task landed with no acceptance criteria).
 _CONTRACT_VERIFICATION_SYNONYMS = (
@@ -518,6 +494,17 @@ def normalize_proposed_task_contract(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     payload = dict(payload)
     contract = dict(contract)
+    for key in (
+        "acceptance",
+        "acceptance_criteria",
+        "behavior",
+        "explicit_non_goals",
+        "scope",
+        "verification",
+        "verification_tiers",
+    ):
+        if key in payload and key not in contract:
+            contract[key] = payload.pop(key)
     if "behavior" in contract:
         contract["behavior"] = _contract_text(contract.get("behavior"))
     if "verification" in contract:
@@ -551,6 +538,12 @@ def normalize_proposed_task_contract(payload: dict[str, Any]) -> dict[str, Any]:
             if text:
                 contract["verification"] = text
                 break
+    if "verification_tiers" not in contract and str(
+        contract.get("verification") or ""
+    ).strip():
+        # A concrete verification contract is mechanically a runtime tier.
+        # Infer it only after compatibility synonyms have been normalized.
+        contract["verification_tiers"] = ["runtime"]
     scope = contract.get("scope")
     if scope is not None:
         entries = list(scope) if isinstance(scope, (list, tuple)) else [scope]

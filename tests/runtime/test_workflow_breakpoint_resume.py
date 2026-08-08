@@ -1961,6 +1961,72 @@ def test_resume_gate_dispatch_is_done_after_fanout_child_result(
     )
 
 
+def test_resume_defers_to_dispatched_task_pipeline_verify(
+    tmp_path: Path,
+) -> None:
+    state_dir, store, log = _state(tmp_path)
+    cfg = _lane_config()
+    cfg.quality_gates = {
+        "static": QualityGateConfig(enabled=True, required_checks=["true"]),
+    }
+    task_id = "PIPELINE-VERIFY-001"
+    store.add(Task(
+        id=task_id,
+        title="pipeline verify",
+        status="in_progress",
+        assigned_to="verify-lane-3",
+    ))
+    log.append(ZfEvent(
+        type="task.pipeline.generation.admitted",
+        actor="zf-cli",
+        payload={
+            "generation_id": "tpg-pipeline-verify",
+            "task_ids": [task_id],
+        },
+        origin="kernel",
+    ))
+    dev_done = ZfEvent(
+        type="dev.build.done",
+        actor="dev-lane-3",
+        task_id=task_id,
+        payload={"dispatch_id": "tpd-impl"},
+        origin="kernel",
+    )
+    log.append(dev_done)
+    log.append(ZfEvent(
+        type="task.ref.updated",
+        actor="zf-cli",
+        task_id=task_id,
+        payload={"trigger_event_id": dev_done.id},
+        causation_id=dev_done.id,
+        origin="kernel",
+    ))
+    log.append(ZfEvent(
+        type="task.pipeline.stage.dispatched",
+        actor="orchestrator",
+        task_id=task_id,
+        payload={
+            "task_id": task_id,
+            "stage_id": "verify",
+            "task_pipeline_stage": "verify",
+            "operation_id": "wop-pipeline-verify",
+            "attempt_id": "ta-pipeline-verify",
+            "lease_id": "lease-pipeline-verify",
+        },
+        causation_id=dev_done.id,
+        origin="kernel",
+    ))
+
+    checkpoints = build_workflow_resume_checkpoints(state_dir, cfg)
+    projection = build_workflow_resume_projection(state_dir, cfg)
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0].safe_resume_action == "no_action"
+    assert checkpoints[0].last_trusted_event_id == dev_done.id
+    assert checkpoints[0].reason == "next action already exists after checkpoint"
+    assert projection["summary"]["pending"] == 0
+
+
 def test_resume_gate_dispatch_is_done_after_static_gate_upstream_child_result(
     tmp_path: Path,
 ) -> None:

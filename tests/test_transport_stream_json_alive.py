@@ -4,9 +4,9 @@ Previously is_alive() hardcoded False because stream-json has no long-lived
 process. That broke any watchdog that asks "is this role still functional?"
 — they get a false positive every time, firing escalations.
 
-New semantics: is_alive returns True by default; flips to False when the
-most recent send_task raised an exception; flips back to True on next
-successful send_task.
+New semantics: registration alone is not alive. A prepared spawn is
+optimistically alive, flips to False when the most recent send_task raises,
+and flips back to True on the next successful send_task.
 """
 
 from __future__ import annotations
@@ -52,6 +52,11 @@ class TestIsAliveDefault:
         t = StreamJsonTransport(state_dir, registry, query_fn=_make_query_fn())
         t.spawn(RoleConfig(name="dev"), argv=[])
         assert t.is_alive("dev") is True
+
+    def test_registered_but_unspawned_role_is_not_alive(self, state_dir, registry):
+        t = StreamJsonTransport(state_dir, registry, query_fn=_make_query_fn())
+        t.register_role(RoleConfig(name="dev"))
+        assert t.is_alive("dev") is False
 
 
 class TestIsAliveAfterFailure:
@@ -122,3 +127,11 @@ class TestIsAliveUnknownRole:
         """Role that was never spawned should return False (no capacity)."""
         t = StreamJsonTransport(state_dir, registry, query_fn=_make_query_fn())
         assert t.is_alive("ghost") is False
+
+    def test_terminated_role_is_not_alive(self, state_dir, registry):
+        t = StreamJsonTransport(state_dir, registry, query_fn=_make_query_fn())
+        t.spawn(RoleConfig(name="dev"), argv=[])
+
+        t.terminate("dev")
+
+        assert t.is_alive("dev") is False

@@ -6,11 +6,20 @@ spec:
   topology: fanout
   lanes: 1
   backend: codex
+  roleDefaults:
+    model_reasoning_effort: high
   issueRef: docs/issues/TODO.md
   qualityFloor: issue-regression
   evidencePolicy: strict_refs
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  semanticSubmitProfiles:
+    workflow-read: blocking
+    plan-synth: blocking
+    implementation: blocking
+    task-verify: blocking
+    candidate-verify: blocking
+    thin-judge-goal-closure: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig
@@ -41,13 +50,20 @@ spec:
       instance_id: orchestrator
       role_kind: reader
       backend: codex
+      model_reasoning_effort: high
       permission_mode: bypass
       transport: tmux
+      execution:
+        default_profile: bounded-direct-v1
+        profile_allowlist: [bounded-direct-v1]
       lifecycle:
         mode: resident
       stuck_threshold_seconds: 900
       spawn_ready_timeout_seconds: 240
-      triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested]
+      triggers:
+        - dispatch.silent_stall
+        - orchestrator.rework.triage.requested
+        - orchestrator.semantic.checkpoint.requested
       publishes: [orchestrator.rework.triage.recorded]
       skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]
   # prod-runtime/v1 使用 task_contract_required:planner 必须在每个 writer
@@ -65,6 +81,20 @@ spec:
     git:
       auto_ship_on_judge_passed: true
   workflow:
+    orchestration:
+      mode: semantic_control
+      checkpoints:
+        - plan_candidate
+      checkpoint_policies:
+        plan_candidate: shadow
+      shadow_sample_percent: 25
+      max_plan_revisions: 2
+      no_progress_limit: 2
+      flow_policies:
+        research:
+          mode: exception_advisor
+        workflow:
+          mode: exception_advisor
     # 分级声明(doc133 tier;141 §19.5):intake/submit 链路的
     # workflow_tier 缺省值。micro/light/standard/full 之外的值
     # 会被 schema fail-closed 拒绝。

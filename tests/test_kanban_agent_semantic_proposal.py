@@ -53,11 +53,25 @@ def test_agent_semantic_intent_is_language_independent(
     assert proposal is not None
     assert proposal["valid"] is True
     assert proposal["action"] == "create-task"
+    assert proposal["payload"]["execution_mode"] == "workflow"
     assert proposal["intent"] == {
         "decision": "propose_action",
         "source_quote": source_quote,
         "source_message_event_id": "evt-user",
     }
+
+
+def test_explicit_direct_create_task_mode_is_preserved() -> None:
+    decoded = json.loads(_create_task_answer(source_quote="立即执行"))
+    decoded["action_proposal"]["payload"]["execution_mode"] = "direct"
+
+    proposal = extract_action_proposal(
+        json.dumps(decoded, ensure_ascii=False),
+        user_message="创建任务并立即执行",
+    )
+
+    assert proposal is not None and proposal["valid"] is True
+    assert proposal["payload"]["execution_mode"] == "direct"
 
 
 @pytest.mark.parametrize(
@@ -173,6 +187,110 @@ def test_bare_action_object_is_not_an_agent_proposal() -> None:
     )
 
     assert extract_action_proposal(answer, user_message="创建task") is None
+
+
+def test_final_fenced_bare_action_is_normalized_as_a_proposal() -> None:
+    answer = """已完成只读核对，以下仅提出待批准登记。
+```json
+{
+  "action": "create-task",
+  "intent": {
+    "decision": "propose_action",
+    "source_quote": "提出一个待批准的 create-task action proposal"
+  },
+  "payload": {
+    "title": "修复非对称坐标解析",
+    "execution_mode": "workflow",
+    "scope": ["src/grid-parser.js", "tests/grid-parser.test.js"],
+    "contract": {
+      "behavior": "按 row,column 顺序解析。",
+      "verification": "npm test",
+      "spec_skip_reason": "这是边界明确的缺陷修复，没有上游产品规格。"
+    }
+  },
+  "reason": "仅登记 workflow-managed Task。"
+}
+```"""
+
+    proposal = extract_action_proposal(
+        answer,
+        user_message="请提出一个待批准的 create-task action proposal",
+    )
+
+    assert proposal is not None and proposal["valid"] is True
+    assert proposal["payload"]["execution_mode"] == "workflow"
+    assert proposal["payload"]["contract"]["scope"] == [
+        "src/grid-parser.js",
+        "tests/grid-parser.test.js",
+    ]
+    assert proposal["payload"]["contract"]["verification_tiers"] == ["runtime"]
+    assert "scope" not in proposal["payload"]
+
+
+def test_scoped_workflow_task_requires_source_precedence_before_approval() -> None:
+    decoded = json.loads(_create_task_answer(source_quote="创建task"))
+    decoded["action_proposal"]["payload"]["workflow_plan"] = {
+        "question": "如何执行这个 Task？",
+        "options": [],
+    }
+    decoded["action_proposal"]["payload"]["contract"]["scope"] = [
+        "src/grid-parser.js",
+    ]
+
+    proposal = extract_action_proposal(
+        json.dumps(decoded, ensure_ascii=False),
+        user_message="基于这个创建task",
+    )
+
+    assert proposal is not None
+    assert proposal["valid"] is False
+    assert (
+        proposal["validation_error"]
+        == "scoped workflow Task requires a source contract ref or "
+        "contract.spec_skip_reason"
+    )
+
+
+@pytest.mark.parametrize(
+    ("missing_field", "validation_error"),
+    [
+        ("behavior", "contract.behavior is required"),
+        ("verification", "contract.verification is required"),
+    ],
+)
+def test_workflow_plan_requires_complete_task_contract_before_approval(
+    missing_field: str,
+    validation_error: str,
+) -> None:
+    decoded = json.loads(_create_task_answer(source_quote="创建task"))
+    decoded["action_proposal"]["payload"]["workflow_plan"] = {
+        "question": "如何执行这个 Task？",
+        "options": [],
+    }
+    decoded["action_proposal"]["payload"]["contract"].pop(missing_field)
+
+    proposal = extract_action_proposal(
+        json.dumps(decoded, ensure_ascii=False),
+        user_message="基于这个创建task",
+    )
+
+    assert proposal is not None
+    assert proposal["valid"] is False
+    assert validation_error in proposal["validation_error"]
+
+
+def test_bare_action_example_inside_prose_is_not_extracted() -> None:
+    answer = """Example only:
+```json
+{
+  "action": "create-task",
+  "intent": {"decision": "propose_action", "source_quote": "创建task"},
+  "payload": {"title": "Do not create"}
+}
+```
+Do not present this example for approval."""
+
+    assert extract_action_proposal(answer, user_message="解释如何创建task") is None
 
 
 def test_idea_to_product_uses_the_same_semantic_intent_contract() -> None:

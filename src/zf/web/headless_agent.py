@@ -29,6 +29,10 @@ from zf.runtime.channel_contracts import (
     normalize_permission_profile,
     permission_profile_write_policy,
 )
+from zf.runtime.cli_command import (
+    ZF_CLI_CMD_ENV,
+    default_zf_cli_cmd,
+)
 from zf.runtime.provider_permissions import (
     build_provider_permission_snapshot,
     claude_permission_mode_for_profile,
@@ -36,6 +40,7 @@ from zf.runtime.provider_permissions import (
     provider_permission_drift,
     snapshot_with_provider_session,
 )
+from zf.runtime.task_workflow_plans import TASK_WORKFLOW_PARAMETER_KEYS
 from zf.web.agent_session_runtime import (
     agent_session_process,
     agent_session_run_cancelled,
@@ -49,6 +54,9 @@ SessionCallback = Callable[[str], None]
 
 DEFAULT_KANBAN_AGENT_HEADLESS_IDLE_TIMEOUT_S = 30 * 60.0
 DEFAULT_CODEX_HEADLESS_TOOL_TIMEOUT_S = 2 * 60 * 60.0
+TASK_WORKFLOW_PARAMETER_KEYS_TEXT = ", ".join(
+    sorted(TASK_WORKFLOW_PARAMETER_KEYS)
+)
 
 
 def _headless_subprocess_env() -> dict[str, str]:
@@ -59,7 +67,12 @@ def _headless_subprocess_env() -> dict[str, str]:
             for marker in ("TOKEN", "PASSCODE", "SECRET", "ENCRYPT_KEY")
         ):
             env.pop(key, None)
+    env[ZF_CLI_CMD_ENV] = _headless_zf_cli_cmd()
     return env
+
+
+def _headless_zf_cli_cmd() -> str:
+    return os.environ.get(ZF_CLI_CMD_ENV, "").strip() or default_zf_cli_cmd()
 
 
 @dataclass(frozen=True)
@@ -964,6 +977,7 @@ class KanbanHeadlessAgent:
 
     def _system_prompt(self, permission_profile: str = "read_only") -> str:
         profile = normalize_permission_profile(permission_profile)
+        cli_command = _headless_zf_cli_cmd()
         execution_contract = {
             "read_only": (
                 "This turn is read-only. Inspect and explain, but do not edit files "
@@ -1007,6 +1021,10 @@ class KanbanHeadlessAgent:
             "Never mutate .zf truth, events.jsonl, kanban.json, feature_list.json, "
             "session state, or other Kernel-owned canonical state directly; request "
             "a sanctioned CLI or controlled action for those effects. "
+            "For every ZaoFu CLI invocation, use the exact active-runtime command "
+            f"`{cli_command}` followed by its arguments. Do not use a bare `zf` "
+            "unless that exact command is literally `zf`; examples in skills that "
+            "show bare `zf` are abbreviations, not executable authority. "
             "Read-only requests such as introduce yourself, explain, analyze, debug, "
             "diagnose, inspect, review a task, or ask why something happened must be "
             "answered without action_proposal or plan_request JSON. Do not include example "
@@ -1015,8 +1033,12 @@ class KanbanHeadlessAgent:
             "or parameters, end the turn with exactly one compact fenced JSON object "
             "containing plan_request. A single question may use {header, id, question, "
             "options, allow_other, reason}; multiple pure clarification questions use "
-            "questions with one to three entries in that same shape. Each question "
-            "has two or three mutually exclusive options, exactly one recommended "
+            "questions with one to three entries in that same shape. Set "
+            "subject_type to exactly one of channel_setup, clarification, "
+            "task_create, or task_workflow. Pure business/research/issue/refactor "
+            "questions always use clarification; never invent a family-specific "
+            "subject_type. Each question has two or three mutually exclusive "
+            "options, exactly one recommended "
             "option first, and an optional free-form answer. Multi-question Plans "
             "cannot bind an action. Do not request secrets. A plan_request ends the turn and "
             "must never appear with action_proposal. Do not use a synchronous "
@@ -1048,8 +1070,11 @@ class KanbanHeadlessAgent:
             "a no-run choice uses mode=defer. Do not put Channel creation in "
             "workflow_plan. The runtime creates the Task first, injects its real "
             "task_id, and publishes the Workflow Plan; Task approval does not start "
-            "a Workflow. Omit workflow_plan only when the operator explicitly asks "
-            "for tracking without execution. When proposing "
+            "a Workflow. Every create-task proposal must set "
+            "payload.execution_mode=workflow by default. Use execution_mode=direct "
+            "only when the operator explicitly requests immediate legacy/direct "
+            "dispatch. When the operator asks for tracking without execution, keep "
+            "execution_mode=workflow and omit workflow_plan. When proposing "
             "an action, end the reply with exactly one compact fenced JSON object "
             "with action_proposal: {action, intent, payload, reason}; do not place "
             "action proposal JSON earlier in prose. For create-task and "
@@ -1079,24 +1104,50 @@ class KanbanHeadlessAgent:
             "acceptance, acceptance_criteria, scope, explicit_non_goals, "
             "skills_required, priority, and optional task_id; priority must be "
             "an integer from 1 through 5. Put mode, action, and payload inside "
-            "the option's effect object. Do not nest a "
+            "the option's effect object. Copy the selected canonical item's "
+            "artifact_ref and artifact_digest into top-level plan_request fields "
+            "channel_prd_ref and channel_prd_digest. Also set top-level "
+            'channel_prd_intent={"decision":"bind_channel_prd",'
+            '"source_quote":"<exact verbatim substring from the current user '
+            'requirement chain explicitly requesting this PRD handoff>"}. '
+            "Selectors and channel_prd_intent must appear together. Never add "
+            "them for an unrelated Issue, Refactor, General, or Research Task "
+            "merely because canonical_channel_prds is available. Do not nest a "
             "contract or channel_authority in that payload; the runtime binds "
             "the exact authority. Include a second no-action alternative with "
             "effect.mode=continue, not defer, and do not emit action_proposal "
-            "in the same turn. For a "
-            "direct Task without an artifact, contract still "
-            "needs behavior, verification, and acceptance. When a requirement would benefit from "
+            "in the same turn. scope may contain only raw repo-relative paths "
+            "or globs; put all scope prose in objective. The scope must cover "
+            "every mandatory acceptance criterion's implementation plus its "
+            "test, runner/config, and evidence-producer paths, including planned "
+            "paths that do not exist yet. Do not bind browser acceptance only to "
+            "unit/build files or omit Playwright/evidence paths. task_create Plan is "
+            "reserved for this authorized Channel PRD handoff. For an unrelated "
+            "direct Task without an artifact, never use subject_type=task_create; "
+            "emit a create-task action_proposal whose contract still needs "
+            "behavior, verification, verification_tiers, and acceptance. "
+            "verification must be an executable shell command from the repository "
+            "root with no prose prefix. verification_tiers must contain one or "
+            "more of static, runtime, e2e, or manual_evidence. When scope or "
+            "affected_files changes product code, preserve an available product, "
+            "spec, or source ref; if none exists, set a non-empty spec_skip_reason "
+            "that explains why the bounded Task contract is the source authority. "
+            "When a requirement would benefit from "
             "a new multi-role collaboration Channel, do not directly propose a "
             "low-level create action. Return one action-bound Channel setup Plan "
             "with submit_action=channel-create-and-start, submit_label='Create & "
             "start', allow_other=false, and two or three options. Every option must "
-            "have an exact submit_payload containing template_id plus optional "
-            "name/overrides; use overrides.budget.max_rounds for the requested "
-            "discussion turns. Templates default to conversation, which wakes one "
-            "facilitator rather than every listed member. Set "
-            "overrides.discussion_mode=multi_lens only when the operator explicitly "
-            "asks for independent multi-role review; use clarification for an "
-            "owner-question-led pass. Add top-level discussion_seed containing only the "
+            "have a label, description, and an exact option-level submit_payload "
+            "containing template_id plus optional name/overrides/mode. Include a "
+            "non-empty top-level question. Do not wrap Channel options in effect; "
+            "do not put submit_payload under effect. Templates default to conversation, "
+            "which wakes one facilitator rather than every listed member. Use "
+            "mode=multi_lens only inside submit_payload when the operator "
+            "explicitly requests independent multi-role input or parallel review, "
+            "never as effect.mode or submit_mode, and otherwise preserve the "
+            "template mode; use clarification for an owner-question-led pass. Use "
+            "overrides.budget.max_rounds for the requested "
+            "discussion turns. Add top-level discussion_seed containing only the "
             "business requirement the Channel should discuss; exclude setup "
             "instructions, option labels, and Plan JSON. Use each option "
             "description for its tradeoff; the "
@@ -1115,7 +1166,14 @@ class KanbanHeadlessAgent:
             "mode=propose, action=workflow-start, and exact payload "
             "{task_id,route_id,objective,config_digest,parameters}; the runtime "
             "binds the current task_contract_digest before display. The runtime turns "
-            "the selected route into a separate Approve proposal. If source/input "
+            "the selected route into a separate Approve proposal. Put the question "
+            "and options directly in top-level plan_request; do not add "
+            "payload.workflow_plan or plan_request.payload. A no-action alternative "
+            "uses effect.mode=continue with no action or payload, never defer. "
+            "parameters may contain only executable adapter keys from this list: "
+            f"{TASK_WORKFLOW_PARAMETER_KEYS_TEXT}. Keep business requirements, "
+            "non-goals, verification prose, and output descriptions in the Task "
+            "contract or objective instead of inventing parameter keys. If source/input "
             "refs, expected output, or another required route parameter is unresolved, "
             "ask one bounded clarification Plan with up to three questions before "
             "emitting the task_workflow choice. A new topology must use the "
@@ -1156,6 +1214,7 @@ class KanbanHeadlessAgent:
             f"state_dir: {self.state_dir}",
             f"task_id: {task_id or ''}",
             f"thread_key: {str(context.get('thread_key') or '')}",
+            f"zf_cli_cmd: {_headless_zf_cli_cmd()}",
             f"context: {json.dumps(context, ensure_ascii=False, sort_keys=True)}",
             "",
             "User message:",
