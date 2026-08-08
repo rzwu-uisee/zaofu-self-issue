@@ -58,14 +58,14 @@ Trace、Loop、SQLite、Web summary 是这些对象的查询和表达方式，�
 - [08 创建 Task、Assignment Intent 与 Agent 协作](08-new-task-agent-squad.md)
 - [09 CLI 使用参考](09-zaofu-cli-usage.md)
 - [10 Autoresearch](10-autoresearch-usage.md)
-- [11 Feishu Automation](11-feishu-automation-kanban-sync.md)
+- [11 Feishu Automation、Kanban 与 Project 协作群](11-feishu-automation-kanban-sync.md)
 - [12 Supervisor Inspection](12-supervisor-inspection-usage.md)
 - [13 Plan、Task Map 与调度](13-plan-task-map-orchestrator-dispatch.md)
 - [14 Delivery Trace](14-delivery-trace-usage.md)
 - [15 Channel 协作](15-channel-collaboration.md)
 - [16 真实 Provider Preflight](16-real-codex-provider-preflight.md)
 - [18 Product Fanout E2E](18-product-fanout-real-e2e.md)
-- [19 Feishu AI-Native Bridge](19-feishu-ai-native-direct-bridge.md)
+- [19 Feishu AI-Native Bridge、实时会话与审批](19-feishu-ai-native-direct-bridge.md)
 - [20 Project、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
 
 ## 文档状态

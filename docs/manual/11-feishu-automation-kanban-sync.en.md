@@ -69,7 +69,96 @@ secret, ZaoFu mints and briefly reuses a tenant token; an explicit
 callbacks, and approvals still use `FeishuHttpTransport`. Only the former
 native Docx/Base projection clients were removed.
 
-## 3. Initialize Targets
+## 3. Project Collaboration Groups and Workspace Bridge
+
+In addition to Automation and Kanban projections, ZaoFu can manage one Feishu
+collaboration group for each Project. `bot_purposes` currently supports only
+`kanban_agent` (the Kanban Agent App bot) and `run_manager` (the Run Manager App
+bot), so a managed group contains the Owner and those two bots. Codex, Claude
+Code, and OpenClaw are internal Channel members; they are not impersonated as
+Feishu users.
+
+Configure the Project in `zf.yaml` or its merged `feishu.yaml`:
+
+```yaml
+runtime:
+  feishu_inbound:
+    enabled: true
+
+integrations:
+  feishu_project_group:
+    enabled: true
+    auto_provision: false
+    name_template: "ZaoFu - {project_name}"
+    owner_open_id_env: ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID
+    provisioner_purpose: run_manager
+    bot_purposes: [kanban_agent, run_manager]
+    primary_responder: kanban_agent
+```
+
+Set the Owner identity as visible to the provisioner App and configure the two
+bot applications:
+
+```bash
+export ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID="ou_xxx"
+export FEISHU_RUNM="cli_run_manager_app"
+export FEISHU_RUNM_SECRET="..."
+export FEISHU_KANBAN="cli_kanban_app"
+export FEISHU_KANBAN_SECRET="..."
+```
+
+`auto_provision: false` is the default. `zf init` then registers the Project and
+creates a pending binding only; it does not call Feishu. Create or attach a real
+group only through one of these explicit paths:
+
+```bash
+# Inspect the locally durable Project binding.
+uv run zf init --workspace default
+uv run zf feishu group status
+
+# Create a collaboration group, add members, and verify them.
+uv run zf feishu group provision --workspace default --confirm
+
+# Reuse an existing group and verify/add the required members.
+uv run zf feishu group attach --chat-id oc_xxx --confirm
+```
+
+With `auto_provision: true`, the same create-and-verify sequence runs during
+`zf init`. This is an explicitly configured external write, not ordinary local
+initialization. The resolved `chat_id` and member verification stay in a project
+runtime binding, while the Workspace builds the exact `(app_id, chat_id) ->
+Project` route.
+
+| Binding state | Meaning | Operator action |
+|---|---|---|
+| `pending` | Desired topology exists but Feishu has not been called | Enable auto-provision and initialize again, or run `group provision --confirm` |
+| `provisioning` | Group creation/attachment and membership verification are in progress | Wait for the command; do not provision concurrently |
+| `active` | Owner and every configured bot were read back successfully, and the Workspace route index rebuilt successfully | Use `zf start` to maintain the inbound sidecar |
+| `repair_required` | Credentials, scopes, app-scoped Owner identity, members, or route uniqueness did not verify | Read `error` in `group status`, fix it, then provision again |
+
+Provisioning requires `im:chat:create`, `im:chat.members:read`, and
+`im:chat.members:write_only` on the provisioner bot, and `lark-cli >= 1.0.64`
+for member readback. The Owner `open_id` must be observable by the provisioner
+App; an ID copied from another App yields `open_id cross app`. Existing groups
+are never deleted merely by disabling configuration. To adopt a group, use
+`group attach --chat-id ... --confirm` rather than manually writing a runtime
+`chat_id`.
+
+After activation, run `zf start`. Projects sharing a Feishu App share one
+host-level WebSocket and are selected by the exact binding index. Do not run one
+bridge per Project. For diagnosis, stop the managed sidecar first, then use the
+single explicit route:
+
+```bash
+uv run zf feishu bridge --watch --all-workspaces --app-id "$FEISHU_APP_ID"
+```
+
+Unmentioned group messages route to `primary_responder`; an explicit mention of
+the Kanban Agent or Run Manager routes to that bot. For the conversational
+surface and long-output limits, see
+[Feishu AI-Native Direct Bridge](19-feishu-ai-native-direct-bridge.en.md).
+
+## 4. Initialize Targets
 
 Create external resources explicitly rather than during scheduled sync:
 
@@ -111,7 +200,7 @@ If only `base:view:write_only` is missing, full-sync commands may use
 changing layout. The resident projector requires its configured structure
 permissions and never silently falls back or switches applications.
 
-## 4. Dry Run
+## 5. Dry Run
 
 ```bash
 uv run zf feishu sync-automations --dry-run
@@ -121,7 +210,7 @@ uv run zf feishu sync-kanban-table --dry-run
 
 Filter one automation with `--automation daily-brief`.
 
-## 5. Real Synchronization
+## 6. Real Synchronization
 
 Append Automation reports to a document:
 
@@ -179,7 +268,7 @@ uv run zf feishu sync-kanban-table \
   --field assigned_to=Owner
 ```
 
-## 6. Event-Driven Kanban Projection
+## 7. Event-Driven Kanban Projection
 
 Enable the managed projector for low-latency `task.status_changed` projection:
 
@@ -248,7 +337,7 @@ When the local ledger is missing, sync performs an exact remote lookup by
 `Task ID` or `Row Key`. One match repairs the ledger, no match creates a row,
 and duplicate exact matches fail closed.
 
-## 7. Cron
+## 8. Cron
 
 ```bash
 uv run zf feishu cron-template --daily-time 09:00 --hourly-minute 5

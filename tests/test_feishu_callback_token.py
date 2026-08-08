@@ -91,6 +91,28 @@ def test_attach_action_token_signs_buttons():
     assert ok
 
 
+def test_attach_action_token_signs_form_nested_button():
+    card = {"elements": [{
+        "tag": "form",
+        "elements": [{"tag": "action", "actions": [
+            {"tag": "button", "value": {"action": "kanban-plan-answer:evt~form"}},
+        ]}],
+    }]}
+
+    attach_action_token(card, secret=SECRET, chat_id="c1", ttl_seconds=100, now=1000.0)
+
+    token = card["elements"][0]["elements"][0]["actions"][0]["value"]["t"]
+    ok, _ = verify_action(
+        token,
+        secrets_by_version=VERS,
+        expect_action="kanban-plan-answer",
+        expect_target="evt~form",
+        expect_chat_id="c1",
+        now=1050.0,
+    )
+    assert ok
+
+
 # --- gated inbound flow (compat flag) --------------------------------------
 
 def _project(tmp_path, monkeypatch, *, require_signed):

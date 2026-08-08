@@ -61,14 +61,14 @@ the outcome routes above first.
 - [08 Create Tasks, Assignment Intent, and Agent Collaboration](08-new-task-agent-squad.en.md)
 - [09 CLI usage reference](09-zaofu-cli-usage.en.md)
 - [10 Autoresearch](10-autoresearch-usage.en.md)
-- [11 Feishu Automation](11-feishu-automation-kanban-sync.en.md)
+- [11 Feishu Automation, Kanban, and Project collaboration groups](11-feishu-automation-kanban-sync.en.md)
 - [12 Supervisor inspection](12-supervisor-inspection-usage.en.md)
 - [13 Plan, Task Map, and dispatch](13-plan-task-map-orchestrator-dispatch.en.md)
 - [14 Delivery Trace](14-delivery-trace-usage.en.md)
 - [15 Channel collaboration](15-channel-collaboration.en.md)
 - [16 Real-provider preflight](16-real-codex-provider-preflight.en.md)
 - [18 Product fanout E2E](18-product-fanout-real-e2e.en.md)
-- [19 Feishu AI-Native Bridge](19-feishu-ai-native-direct-bridge.en.md)
+- [19 Feishu AI-Native Bridge, live conversations, and approvals](19-feishu-ai-native-direct-bridge.en.md)
 - [20 Project, bootstrap, and Workflow start](20-project-bootstrap-workflow-ignition.en.md)
 
 ## Documentation Status

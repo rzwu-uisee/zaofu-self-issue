@@ -57,16 +57,18 @@ def _inbound_idempotency_key(event) -> str:
     """Dedup key for one inbound message. message_id when Feishu provides it;
     otherwise a content digest so a re-delivered message-id-less WS frame
     cannot double-fire (2026-07-03 audit B2)."""
+    app_id = str(event.payload.get("app_id") or "")
+    prefix = f"feishu:{app_id}:" if app_id else "feishu:"
     message_id = str(event.payload.get("message_id") or "")
     if message_id:
-        return f"feishu:msg:{message_id}"
+        return f"{prefix}msg:{message_id}"
     digest = hashlib.sha1("|".join((
         str(event.chat_id or ""),
         str(event.user_id or ""),
         str(event.payload.get("create_time") or ""),
         str(event.payload.get("text") or ""),
     )).encode("utf-8")).hexdigest()[:16]
-    return f"feishu:msg-fallback:{digest}"
+    return f"{prefix}msg-fallback:{digest}"
 
 
 def _sender_blocked(event, *, context) -> bool:
@@ -123,7 +125,7 @@ def _route_sender_blocked(event, route, *, context) -> bool:
 
 
 def _route_inbound_message(event, *, context) -> dict:
-    route = resolve_feishu_route(
+    route = getattr(event, "route", None) or resolve_feishu_route(
         context.config,
         event.chat_id,
         bot_open_id=str(event.payload.get("bot_open_id") or ""),
@@ -224,7 +226,7 @@ def bridge_inbound_message(event, *, context) -> dict:
     from zf.integrations.feishu import catchup
     from zf.integrations.feishu.routing import resolve_feishu_route
 
-    route = resolve_feishu_route(
+    route = getattr(event, "route", None) or resolve_feishu_route(
         context.config,
         event.chat_id,
         bot_open_id=str(event.payload.get("bot_open_id") or ""),
@@ -327,8 +329,13 @@ def bridge_inbound_message(event, *, context) -> dict:
     # W5: advance the per-chat cursor so a restart only replays the gap after this
     # message (live path); create_time rides in on the payload (catchup replay) or
     # is absent for a live WS frame that didn't carry it (cursor then stays put).
-    catchup.record(context.state_dir, event.chat_id, message_id,
-                   event.payload.get("create_time"))
+    catchup.record(
+        context.state_dir,
+        event.chat_id,
+        message_id,
+        event.payload.get("create_time"),
+        app_id=str(event.payload.get("app_id") or ""),
+    )
     return {"status": "replied", "target": route.target, "channel_id": channel_id,
             "reply_requests": list(turn["route"].reply_requests),
             "dispatched": len(turn["dispatched"])}
@@ -355,6 +362,28 @@ def dispatch_inbound_async(event, *, context, transport=None, executor=None):
                 max_workers=4, thread_name_prefix="feishu-bridge")
         pool = _BRIDGE_EXECUTOR
 
+    # The async stream ticker starts before the inbound route produces a reply.
+    # Resolve its stable member once so the fast path and bridge projection loop
+    # share the same per-Bot derived ledgers in a multi-Bot group.
+    route = getattr(event, "route", None)
+    if route is None:
+        try:
+            from zf.integrations.feishu.routing import resolve_feishu_route
+
+            route = resolve_feishu_route(
+                context.config,
+                event.chat_id,
+                bot_open_id=str(event.payload.get("bot_open_id") or ""),
+                app_id=str(event.payload.get("app_id") or ""),
+            )
+            if route is not None:
+                setattr(event, "route", route)
+        except (AttributeError, TypeError, ValueError):
+            route = None
+    projection_member = str(
+        getattr(route, "default_member", "") or ""
+    ).strip()
+
     def _work():
         if transport is None:
             return bridge_inbound_message(event, context=context)
@@ -363,15 +392,20 @@ def dispatch_inbound_async(event, *, context, transport=None, executor=None):
 
         from zf.integrations.feishu.stream_card import push_stream_card_once
 
-        def _push() -> None:
+        def _push() -> dict:
             try:
-                push_stream_card_once(context.state_dir, transport,
-                                      receive_id=event.chat_id)
+                return push_stream_card_once(
+                    context.state_dir,
+                    transport,
+                    receive_id=event.chat_id,
+                    member=projection_member,
+                )
             except Exception as exc:  # noqa: BLE001 — a push failure (e.g. a card
                 # the Feishu API rejects) must be VISIBLE, not silently swallowed
                 # by the background future (this hid a 400 "unknown property").
                 print(f"[bridge] stream-card push failed chat={event.chat_id}: "
                       f"{exc!r}", file=sys.stderr, flush=True)
+                return {}
 
         # Push the streaming card WHILE the reply runs (bbc-style Thinking→stream),
         # not once at the end: the synchronous reply writes part.delta to
@@ -408,7 +442,28 @@ def dispatch_inbound_async(event, *, context, transport=None, executor=None):
                 print(f"[bridge] kanban-card push failed chat={event.chat_id}: "
                       f"{exc!r}", file=sys.stderr, flush=True)
         elif result.get("status") == "replied":
-            _push()
+            stream_result = _push()
+            # A fake/non-streaming backend has no stream card to carry its
+            # canonical assistant body.  Project the readable delivery card
+            # immediately; a real streamed reply supplies its stable visible
+            # request ids, so the fallback cannot duplicate that card.
+            try:
+                from zf.integrations.feishu.delivery_card import (
+                    push_delivery_cards_once,
+                )
+
+                push_delivery_cards_once(
+                    context.state_dir,
+                    transport,
+                    receive_id=event.chat_id,
+                    skip_request_ids=set(
+                        stream_result.get("visible_request_ids", [])
+                    ),
+                    member=projection_member,
+                )
+            except Exception as exc:  # noqa: BLE001 — projection never changes reply truth.
+                print(f"[bridge] delivery-card push failed chat={event.chat_id}: "
+                      f"{exc!r}", file=sys.stderr, flush=True)
         return result
 
     return pool.submit(_work)
@@ -446,14 +501,21 @@ def run_bridge(args) -> int:
         from zf.integrations.feishu.bridge_watch import run_bridge_watch
         return run_bridge_watch(args)
 
-    try:
-        context = resolve_project_context(
-            explicit_state_dir=getattr(args, "state_dir", None),
-            load_config_with_explicit=True,
-        )
-    except ConfigError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    workspace = str(getattr(args, "workspace", "") or "").strip()
+    all_workspaces = bool(getattr(args, "all_workspaces", False))
+    if workspace and all_workspaces:
+        print("Error: --workspace and --all-workspaces are mutually exclusive.", file=sys.stderr)
+        return 2
+    context = None
+    if not workspace and not all_workspaces:
+        try:
+            context = resolve_project_context(
+                explicit_state_dir=getattr(args, "state_dir", None),
+                load_config_with_explicit=True,
+            )
+        except ConfigError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
     raw = getattr(args, "event_json", "") or "{}"
     try:
         data = json.loads(raw) if raw.strip().startswith("{") else json.loads(
@@ -465,6 +527,41 @@ def run_bridge(args) -> int:
     if event is None:
         print("ignored: unsupported event", file=sys.stderr)
         return 0
+    if workspace or all_workspaces:
+        from zf.core.workspace.feishu_binding_index import (
+            ProviderFeishuBindingConflict,
+            ProviderFeishuInboundResolver,
+            WorkspaceFeishuBindingConflict,
+            WorkspaceFeishuInboundResolver,
+        )
+
+        app_id = str(
+            getattr(args, "app_id", "")
+            or event.payload.get("app_id")
+            or ""
+        )
+        try:
+            resolver = (
+                ProviderFeishuInboundResolver()
+                if all_workspaces
+                else WorkspaceFeishuInboundResolver(workspace=workspace)
+            )
+            resolver.refresh()
+            resolved = resolver.resolve(app_id=app_id, chat_id=event.chat_id)
+        except (ProviderFeishuBindingConflict, WorkspaceFeishuBindingConflict) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if resolved is None:
+            print(
+                "Error: no active exact Feishu project-group binding "
+                f"for {app_id}:{event.chat_id}.",
+                file=sys.stderr,
+            )
+            return 1
+        context = resolved.context
+        setattr(event, "route", resolved.route)
+        setattr(event, "feishu_binding_id", resolved.binding.binding_id)
+    assert context is not None
     if event.event_type == "button_action":
         from zf.cli.feishu import _handle_event_data
         result = _handle_event_data(data, context=context, user_levels={})
@@ -490,15 +587,29 @@ def run_consume(args) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    # Project-group bindings require the workspace-aware in-process bridge so
+    # the single WS lock and exact `(app_id, chat_id)` resolver stay in force.
+    # Letting the legacy project-local lark-cli consumer start here would
+    # reintroduce the App-level event stealing this feature closes.
+    from zf.integrations.feishu.project_group_binding import configured_project_group
+
+    if configured_project_group(context.config) is not None:
+        print(
+            "Error: project Feishu group bindings require `zf feishu bridge "
+            "--watch --all-workspaces --app-id <app>` (normally `zf start`).",
+            file=sys.stderr,
+        )
+        return 2
+
     # NB: avoid the attr name `command` — it collides with the top-level
     # subparser dest (args.command == "feishu"). Tests inject via _consume_cmd.
     # P0-3 single-instance guard: refuse a second WS consumer for this app, else
     # Feishu load-balances events across connections and a zombie steals them.
-    from zf.integrations.feishu.single_instance import acquire_ws_lock
+    from zf.integrations.feishu.single_instance import acquire_provider_ws_lock
 
     app_id = os.environ.get("FEISHU_APP_ID", "") or os.environ.get(
         "LARKSUITE_CLI_APP_ID", "")
-    _ws_lock = acquire_ws_lock(context.state_dir, app_id)
+    _ws_lock = acquire_provider_ws_lock(app_id)
     if _ws_lock is None:
         print("Error: another Feishu WS consumer is already running for this "
               "app (single-instance guard). Stop it first.", file=sys.stderr)

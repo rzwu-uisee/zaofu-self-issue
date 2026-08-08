@@ -3,12 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from zf.core.config.schema import (
+    FeishuProjectGroupConfig,
     FeishuRouteConfig,
     IntegrationsConfig,
     RuntimeConfig,
     RuntimeFeishuInboundConfig,
     ZfConfig,
 )
+from zf.integrations.feishu.project_group_binding import (
+    FeishuProjectGroupBotBinding,
+    ProjectFeishuGroupBinding,
+    ProjectFeishuGroupBindingStore,
+)
+from zf.integrations.feishu.workspace_bridge_lease import register_provider_bridge
 from zf.runtime.feishu_inbound_sidecar import (
     build_feishu_inbound_command,
     start_feishu_inbound_sidecar,
@@ -204,3 +211,140 @@ def test_feishu_inbound_sidecar_starts_one_bridge_per_bot(
         event for event in events.events
         if event.type == "feishu.inbound_bridge.stopped"
     ]) == 2
+
+
+def test_feishu_inbound_sidecar_uses_provider_binding_singleton_command(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ZF_CLI_CMD", "zf")
+    monkeypatch.setenv("FEISHU_KANBAN", "cli_pm")
+    monkeypatch.setenv("FEISHU_KANBAN_SECRET", "secret_pm")
+    started = {}
+
+    def fake_popen(command, **kwargs):
+        started["command"] = command
+        started["env"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "zf.runtime.feishu_inbound_sidecar._start_bridge_process",
+        fake_popen,
+    )
+    state_dir = tmp_path / ".zf"
+    binding = ProjectFeishuGroupBinding(
+        binding_id="project-collaboration",
+        workspace_id="team",
+        project_id="project-1",
+        group_kind="collaboration",
+        display_name="ZaoFu · test",
+        status="active",
+        chat_id="oc_group",
+        owner_open_id="ou_owner",
+        owner_open_id_env="ZF_OWNER",
+        provisioner_purpose="kanban_agent",
+        primary_responder="kanban_agent",
+        channel_id="zaofu",
+        bots=(FeishuProjectGroupBotBinding(
+            purpose="kanban_agent",
+            app_id="cli_pm",
+            target="kanban_agent",
+            default_member="zf-product-manager",
+            membership_status="active",
+        ),),
+        config_digest="digest",
+    )
+    ProjectFeishuGroupBindingStore(state_dir).upsert(binding)
+    cfg = ZfConfig(
+        runtime=RuntimeConfig(
+            feishu_inbound=RuntimeFeishuInboundConfig(enabled=True),
+        ),
+        integrations=IntegrationsConfig(
+            feishu_project_group=FeishuProjectGroupConfig(enabled=True),
+        ),
+    )
+
+    sidecar = start_feishu_inbound_sidecar(
+        config=cfg,
+        state_dir=state_dir,
+        project_root=tmp_path,
+        event_log=EventSink(),
+    )
+
+    assert sidecar is not None
+    assert "--all-workspaces" in started["command"]
+    assert "--workspace" not in started["command"]
+    assert started["command"][started["command"].index("--app-id") + 1] == "cli_pm"
+    stop_feishu_inbound_sidecar(sidecar)
+
+
+def test_feishu_inbound_sidecar_joins_existing_provider_bridge_across_workspaces(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("ZF_CLI_CMD", "zf")
+    monkeypatch.setenv("FEISHU_KANBAN", "cli_pm")
+    monkeypatch.setenv("FEISHU_KANBAN_SECRET", "secret_pm")
+    monkeypatch.setenv("ZF_WORKSPACE_HOME", str(tmp_path / "workspace-home"))
+    monkeypatch.setattr(
+        "zf.integrations.feishu.workspace_bridge_lease._pid_alive",
+        lambda _pid: True,
+    )
+    started = []
+    monkeypatch.setattr(
+        "zf.runtime.feishu_inbound_sidecar._start_bridge_process",
+        lambda *args, **kwargs: started.append((args, kwargs)),
+    )
+    register_provider_bridge(
+        workspace_id="team",
+        app_id="cli_pm",
+        project_id="project-owner",
+        pid=4242,
+        log_path=tmp_path / "owner.log",
+    )
+    state_dir = tmp_path / ".zf"
+    ProjectFeishuGroupBindingStore(state_dir).upsert(ProjectFeishuGroupBinding(
+        binding_id="project-collaboration",
+        workspace_id="other",
+        project_id="project-joiner",
+        group_kind="collaboration",
+        display_name="ZaoFu · test",
+        status="active",
+        chat_id="oc_group",
+        owner_open_id="ou_owner",
+        owner_open_id_env="ZF_OWNER",
+        provisioner_purpose="kanban_agent",
+        primary_responder="kanban_agent",
+        channel_id="zaofu",
+        bots=(FeishuProjectGroupBotBinding(
+            purpose="kanban_agent",
+            app_id="cli_pm",
+            target="kanban_agent",
+            default_member="zf-product-manager",
+            membership_status="active",
+        ),),
+        config_digest="digest",
+    ))
+    cfg = ZfConfig(
+        runtime=RuntimeConfig(
+            feishu_inbound=RuntimeFeishuInboundConfig(enabled=True),
+        ),
+        integrations=IntegrationsConfig(
+            feishu_project_group=FeishuProjectGroupConfig(enabled=True),
+        ),
+    )
+    events = EventSink()
+
+    sidecar = start_feishu_inbound_sidecar(
+        config=cfg,
+        state_dir=state_dir,
+        project_root=tmp_path,
+        event_log=events,
+    )
+
+    assert sidecar is not None
+    assert sidecar.process is None
+    assert started == []
+    assert events.events[-1].type == "feishu.inbound_bridge.shared"
+    stop_feishu_inbound_sidecar(sidecar, event_log=events)
+    assert events.events[-1].type == "feishu.inbound_bridge.detached"

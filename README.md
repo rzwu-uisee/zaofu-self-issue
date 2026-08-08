@@ -214,6 +214,11 @@ Controller selection and composition details live in the
   provider conversations, and Plan Ready approval cards through the same
   controlled-action boundary as Web. See the
   [Feishu direct bridge manual](docs/manual/19-feishu-ai-native-direct-bridge.en.md).
+- **Feishu project collaboration groups**: Opt-in `auto_provision` creates a
+  project-owned group, verifies its Owner and product bots, then indexes its
+  `(workspace, app_id, chat_id)` route. This requires `lark-cli >= 1.0.64`
+  for member readback; `1.0.85` is the currently verified version. See the
+  [project-group setup guide](docs/manual/11-feishu-automation-kanban-sync.md).
 
 ### Recovery and Autoresearch
 

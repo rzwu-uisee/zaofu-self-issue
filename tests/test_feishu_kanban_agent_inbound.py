@@ -45,12 +45,28 @@ def _intent_created(state_dir):
             if e.type == "operator.intent.created"]
 
 
-def test_status_text_enters_agent_conversation(tmp_path, monkeypatch):
+def test_status_text_uses_canonical_projection_without_provider_run(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     ctx = _project(tmp_path)
+    writer = EventWriter(EventLog(ctx.state_dir / "events.jsonl"))
+    writer.emit(
+        "channel.created",
+        actor="test",
+        payload={
+            "channel_id": "ch-prd",
+            "name": "Feishu PRD",
+        },
+    )
+    writer.emit(
+        "channel.discussion.started",
+        actor="test",
+        correlation_id="ch-prd",
+        payload={"channel_id": "ch-prd", "thread_id": "main", "source": "test"},
+    )
     before = len(EventLog(ctx.state_dir / "events.jsonl").read_all())
     r = bridge_inbound_message(_event("项目当前状态如何?"), context=ctx)
-    assert r["status"] == "replied" and r["kind"] == "kanban_agent_conversation"
+    assert r["status"] == "replied" and r["kind"] == "kanban_agent_canonical_status"
+    assert r["reply_mode"] == "deterministic"
     assert not _intent_created(ctx.state_dir)
     after = len(EventLog(ctx.state_dir / "events.jsonl").read_all())
     assert after > before
@@ -61,6 +77,24 @@ def test_status_text_enters_agent_conversation(tmp_path, monkeypatch):
     )
     assert member["channel_role"] == "owner_delegate"
     assert member["permission_profile"] == "read_only"
+    events = EventLog(ctx.state_dir / "events.jsonl").read_all()
+    replies = [
+        event for event in events
+        if event.type == "channel.message.posted"
+        and event.payload.get("role") == "assistant"
+    ]
+    assert replies
+    reply = hydrate_channel_message_text(ctx.state_dir, replies[-1].payload)
+    assert "ch-prd" in reply
+    assert "已启动讨论" in reply
+    assert not [
+        event for event in events
+        if event.type.startswith("agent.session.run.")
+    ]
+    assert not [
+        event for event in events
+        if event.type == "operator.action.proposed"
+    ]
 
 
 def test_action_text_also_enters_agent_conversation(tmp_path, monkeypatch):

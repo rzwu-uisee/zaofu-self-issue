@@ -115,6 +115,19 @@ def normalize_plan_request(
             context_task_id,
             context_task_digest,
         )
+    workflow_route_eligibility = {
+        str(task_id): {
+            str(route_id): str(reason)
+            for route_id, reason in routes.items()
+            if str(route_id).strip() and str(reason).strip()
+        }
+        for task_id, routes in (
+            context.get("workflow_route_eligibility", {}).items()
+            if isinstance(context.get("workflow_route_eligibility"), dict)
+            else []
+        )
+        if str(task_id).strip() and isinstance(routes, dict)
+    }
     workflow_context = context.get("workflow_parameters")
     if workflow_context is None:
         workflow_context = {}
@@ -227,19 +240,32 @@ def normalize_plan_request(
                     if isinstance(item.get("effect"), dict)
                     else {}
                 )
-                option_submit_action = str(
+                explicit_option_action = str(
                     effect.get("action")
                     or item.get("submit_action")
                     or item.get("action")
-                    or submit_action
                     or ""
                 ).strip()
-                if is_workflow_start_action(option_submit_action):
-                    option_submit_action = "workflow-start"
-                option_submit_mode = str(
+                explicit_option_mode = str(
                     effect.get("mode")
                     or item.get("submit_mode")
                     or item.get("mode")
+                    or ""
+                ).strip().lower()
+                # A provider often puts a no-op alternative next to a
+                # top-level action-bound Plan as ``effect: {mode: continue}``.
+                # That explicit continue must not inherit the request action;
+                # otherwise a cancel option becomes an invalid hidden apply.
+                option_submit_action = (
+                    ""
+                    if explicit_option_mode == "continue"
+                    and not explicit_option_action
+                    else explicit_option_action or submit_action
+                )
+                if is_workflow_start_action(option_submit_action):
+                    option_submit_action = "workflow-start"
+                option_submit_mode = str(
+                    explicit_option_mode
                     or ("apply" if option_submit_action == submit_action and submit_action else "continue")
                 ).strip().lower()
                 raw_submit_payload = (
@@ -347,6 +373,7 @@ def normalize_plan_request(
                         raw_submit_payload,
                         config=config,
                         task_binding_digests=task_binding_digests,
+                        workflow_route_eligibility=workflow_route_eligibility,
                     )
                 )
                 if submit_error:
@@ -629,6 +656,7 @@ def _normalize_plan_submit_payload(
     *,
     config: Any | None = None,
     task_binding_digests: dict[str, str] | None = None,
+    workflow_route_eligibility: dict[str, dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     if not isinstance(raw_payload, dict):
         return {}, {}, "submit_payload must be a mapping"
@@ -637,6 +665,7 @@ def _normalize_plan_submit_payload(
             raw_payload,
             config=config,
             task_binding_digests=task_binding_digests or {},
+            workflow_route_eligibility=workflow_route_eligibility or {},
         )
     if action == "create-task":
         return normalize_channel_task_submit_payload(raw_payload)
@@ -711,6 +740,7 @@ def _normalize_plan_submit_payload(
         ),
         "member_count": len(members),
         "members": members,
+        "product_mode": str(discussion.get("mode") or "conversation"),
         "max_rounds": int(discussion.get("max_rounds") or 0),
     }
     return payload, details, ""
@@ -721,6 +751,7 @@ def _normalize_task_workflow_submit_payload(
     *,
     config: Any | None,
     task_binding_digests: dict[str, str],
+    workflow_route_eligibility: dict[str, dict[str, str]],
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     allowed_keys = {
         "config_digest",
@@ -780,6 +811,11 @@ def _normalize_task_workflow_submit_payload(
     )
     if route is None:
         return {}, {}, f"workflow route {route_id!r} is stale or unavailable"
+    eligibility_error = str(
+        workflow_route_eligibility.get(task_id, {}).get(route_id) or ""
+    )
+    if eligibility_error:
+        return {}, {}, eligibility_error
     missing = workflow_route_missing_parameters(
         route,
         objective=objective,
@@ -887,6 +923,8 @@ def _subject_action_error(
     action: str,
 ) -> str:
     if subject_type == "channel_setup":
+        if mode == "continue" and not action:
+            return ""
         if mode != "apply" or action != "channel-create-and-start":
             return "channel_setup only allows direct channel-create-and-start"
     elif subject_type == "task_workflow":

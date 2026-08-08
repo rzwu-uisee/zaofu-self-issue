@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from zf.runtime.channel_projection import project_channels
+from zf.runtime.channel_projection import project_channel, project_channels
 
 
 def canonical_channel_prd_context(
@@ -115,6 +115,53 @@ def canonical_channel_prd_context(
     }
 
 
+def canonical_channel_prd_authority(
+    state_dir: Path,
+    *,
+    channel_id: str,
+    thread_id: str = "main",
+) -> dict[str, Any]:
+    """Return the exact mechanical authority for one ready canonical PRD."""
+
+    normalized_thread = str(thread_id or "main")
+    ready = canonical_channel_prd_context(Path(state_dir), limit=20)
+    item = next(
+        (
+            candidate
+            for candidate in ready.get("items") or []
+            if isinstance(candidate, dict)
+            and str(candidate.get("channel_id") or "") == channel_id
+            and str(candidate.get("thread_id") or "main") == normalized_thread
+        ),
+        None,
+    )
+    channel = project_channel(Path(state_dir), channel_id) or {}
+    consensus = (
+        channel.get("consensus", {}).get(normalized_thread)
+        if isinstance(channel.get("consensus"), dict)
+        else None
+    )
+    if item is None or not isinstance(consensus, dict):
+        return {}
+    try:
+        leader_revision = int(channel.get("leader_revision") or 0)
+        prd_revision = int(consensus.get("prd_revision") or 0)
+    except (TypeError, ValueError):
+        return {}
+    authority = {
+        "channel_id": channel_id,
+        "thread_id": normalized_thread,
+        "channel_member_id": str(channel.get("leader_member_id") or ""),
+        "leader_revision": leader_revision,
+        "prd_revision": prd_revision,
+        "source_ref": str(item.get("artifact_ref") or ""),
+        "source_digest": str(item.get("artifact_digest") or ""),
+    }
+    if any(value in (None, "", 0) for value in authority.values()):
+        return {}
+    return authority
+
+
 def _bare_digest(value: object) -> str:
     return str(value or "").strip().removeprefix("sha256:")
 
@@ -139,6 +186,7 @@ def workflow_context_for_project(
 
 
 __all__ = [
+    "canonical_channel_prd_authority",
     "canonical_channel_prd_context",
     "workflow_context_for_project",
     "workflow_context_from_payload",

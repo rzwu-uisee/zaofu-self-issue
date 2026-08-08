@@ -35,6 +35,9 @@ class ProjectInitResult:
     )
     feishu_channel_binding: str = ""
     feishu_channel_bootstrap: str = ""
+    # Project-owned Feishu collaboration-group binding status.  The durable
+    # body lives below project.state_dir, never in the workspace registry.
+    feishu_project_group_binding: str = ""
     # Backward-compatible alias for older callers. New code should use
     # feishu_channel_binding because the default route now targets a channel.
     feishu_kanban_agent_binding: str = ""
@@ -155,13 +158,27 @@ class ProjectInitializer:
             str(item.root) == str(project_root)
             for item in registry.list_projects()
         )
-        if already_registered or self._should_register(
+        project_group_enabled = _feishu_project_group_enabled(context.config)
+        if already_registered or project_group_enabled or self._should_register(
             context, requested=workspace_register,
         ):
             registered = registry.upsert_context(
                 context,
                 display_name=os.environ.get("ZF_WORKSPACE_PROJECT_DISPLAY_NAME", ""),
             )
+
+        feishu_project_group_binding = ""
+        if project_group_enabled and registered is not None:
+            from zf.integrations.feishu.project_group_binding import (
+                ensure_project_feishu_group_binding,
+            )
+
+            binding = ensure_project_feishu_group_binding(
+                context,
+                workspace_id=registry.workspace,
+                project_id=registered.project_id,
+            )
+            feishu_project_group_binding = binding.status if binding else ""
 
         return ProjectInitResult(
             ok=True,
@@ -172,6 +189,7 @@ class ProjectInitializer:
             instruction_docs=instruction_docs,
             feishu_channel_binding=feishu_channel_binding,
             feishu_channel_bootstrap=feishu_channel_bootstrap,
+            feishu_project_group_binding=feishu_project_group_binding,
             feishu_kanban_agent_binding=feishu_channel_binding,
             git_hook_status=git_hook_status,
             setup_suggestion=setup_suggestion,
@@ -240,6 +258,12 @@ def _feishu_inbound_enabled(config: object | None) -> bool:
     return bool(inbound and bool(getattr(inbound, "enabled", False)))
 
 
+def _feishu_project_group_enabled(config: object | None) -> bool:
+    integrations = getattr(config, "integrations", None)
+    group = getattr(integrations, "feishu_project_group", None)
+    return bool(group and bool(getattr(group, "enabled", False)))
+
+
 def ensure_feishu_kanban_agent_binding(
     project_root: Path,
     *,
@@ -251,7 +275,7 @@ def ensure_feishu_kanban_agent_binding(
     binding. Only opt-in projects with runtime.feishu_inbound.enabled get this
     template, so ordinary projects are not silently wired to Feishu.
     """
-    if not _feishu_inbound_enabled(config):
+    if not _feishu_inbound_enabled(config) or _feishu_project_group_enabled(config):
         return ""
 
     feishu_path = project_root / "feishu.yaml"

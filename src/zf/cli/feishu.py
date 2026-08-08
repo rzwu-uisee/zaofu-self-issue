@@ -39,6 +39,11 @@ from zf.integrations.feishu.controls import ControlHandler
 from zf.integrations.feishu.channel_result_card import (
     push_channel_result_cards_once,
 )
+from zf.integrations.feishu.channel_progress_card import (
+    CHANNEL_PROGRESS_COMMANDS,
+    handle_channel_progress_action,
+    push_channel_progress_cards_once,
+)
 from zf.integrations.feishu.delivery_card import push_delivery_cards_once
 from zf.integrations.feishu.gateway import (
     AuthLevel,
@@ -51,6 +56,8 @@ from zf.integrations.feishu.kanban_proposal_card import (
 )
 from zf.integrations.feishu.kanban_plan_card import (
     KANBAN_PLAN_COMMANDS,
+    PLAN_FORM_OPTION_ID,
+    form_answers_from_values,
     parse_plan_answer_target,
     push_kanban_plan_cards_once,
 )
@@ -123,6 +130,7 @@ SIGNED_ACTION_COMMANDS = (
     | CHANNEL_QUESTION_COMMANDS
     | KANBAN_PLAN_COMMANDS
     | KANBAN_PROPOSAL_COMMANDS
+    | CHANNEL_PROGRESS_COMMANDS
     | ATTENTION_ACK_COMMANDS
 )
 ATTENTION_COMMANDS = {"attention"}
@@ -210,7 +218,34 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     bridge.add_argument("--debounce-ms", type=int, default=600,
                         help="Per-chat debounce window for --watch (default 600)")
     bridge.add_argument("--state-dir", default=None)
+    bridge.add_argument(
+        "--workspace",
+        default="",
+        help="Use the workspace project-group binding index for --watch",
+    )
+    bridge.add_argument(
+        "--all-workspaces",
+        action="store_true",
+        help=(
+            "Route a single provider App WS across every registered workspace "
+            "project-group binding"
+        ),
+    )
+    bridge.add_argument(
+        "--app-id",
+        default="",
+        help="Expected Feishu App ID for routed --watch (must match env)",
+    )
+    bridge.add_argument(
+        "--projection-interval",
+        type=float,
+        default=1.0,
+        help="Bridge projection tick interval in seconds",
+    )
     bridge.set_defaults(func=_run_bridge)
+
+    from zf.cli import feishu_project_group
+    feishu_project_group.register(feishu_subparsers)
 
     serve = feishu_subparsers.add_parser(
         "serve",
@@ -719,29 +754,6 @@ def run_push(args: argparse.Namespace) -> int:
                     f"replan push failed (decision unaffected): {exc}",
                     file=sys.stderr,
                 )
-        # Delivery projector (feishu-C): fold channel reply lifecycle into one
-        # Working/Done/Failed/Interrupted card per request. Same fallback rule —
-        # feishu errors never break the tick; Web Channel stays the truth.
-        delivery_sent = delivery_updated = 0
-        if plan_target:
-            try:
-                delivery_result = push_delivery_cards_once(
-                    context.state_dir,
-                    transport,
-                    receive_id=plan_target,
-                    receive_id_type=str(
-                        getattr(args, "receive_id_type", "chat_id") or "chat_id"
-                    ),
-                    action_secret=_action_secret,
-                    action_ttl_seconds=_action_ttl,
-                )
-                delivery_sent = len(delivery_result.get("sent", []))
-                delivery_updated = len(delivery_result.get("updated", []))
-            except Exception as exc:  # feishu unreachable → channel unaffected
-                print(
-                    f"delivery push failed (channel unaffected): {exc}",
-                    file=sys.stderr,
-                )
         channel_result_sent = 0
         try:
             channel_result = push_channel_result_cards_once(
@@ -757,10 +769,26 @@ def run_push(args: argparse.Namespace) -> int:
                 f"channel result push failed (receipt unaffected): {exc}",
                 file=sys.stderr,
             )
+        channel_progress_sent = channel_progress_updated = 0
+        try:
+            channel_progress = push_channel_progress_cards_once(
+                context.state_dir,
+                transport,
+                action_secret=_action_secret,
+                action_ttl_seconds=_action_ttl,
+            )
+            channel_progress_sent = len(channel_progress.get("sent", []))
+            channel_progress_updated = len(channel_progress.get("updated", []))
+        except Exception as exc:
+            print(
+                f"channel progress push failed (workflow unaffected): {exc}",
+                file=sys.stderr,
+            )
         # Streaming Q&A cards (feishu-stream P0-1): fold a reply's part.delta into
         # one typewriter card per request. Same fallback rule; §5.1 — deltas drive
         # the card only, never events.jsonl.
         stream_sent = stream_updated = 0
+        stream_result: dict[str, Any] = {}
         if plan_target:
             try:
                 stream_result = push_stream_card_once(
@@ -776,6 +804,32 @@ def run_push(args: argparse.Namespace) -> int:
             except Exception as exc:  # feishu unreachable → reply unaffected
                 print(
                     f"stream push failed (reply unaffected): {exc}",
+                    file=sys.stderr,
+                )
+        # Delivery is the readable fallback for replies that did not stream.
+        # Stream projection runs first and returns stable request ids so both
+        # projectors cannot emit a second card for the same answer.
+        delivery_sent = delivery_updated = 0
+        if plan_target:
+            try:
+                delivery_result = push_delivery_cards_once(
+                    context.state_dir,
+                    transport,
+                    receive_id=plan_target,
+                    receive_id_type=str(
+                        getattr(args, "receive_id_type", "chat_id") or "chat_id"
+                    ),
+                    action_secret=_action_secret,
+                    action_ttl_seconds=_action_ttl,
+                    skip_request_ids=set(
+                        stream_result.get("visible_request_ids", [])
+                    ),
+                )
+                delivery_sent = len(delivery_result.get("sent", []))
+                delivery_updated = len(delivery_result.get("updated", []))
+            except Exception as exc:  # feishu unreachable → channel unaffected
+                print(
+                    f"delivery push failed (channel unaffected): {exc}",
                     file=sys.stderr,
                 )
         # Run Manager cards: one live status card plus one human-decision card
@@ -887,6 +941,8 @@ def run_push(args: argparse.Namespace) -> int:
             f"replan_cards_sent={replan_sent} replan_cards_updated={replan_updated}; "
             f"delivery_cards_sent={delivery_sent} delivery_cards_updated={delivery_updated}; "
             f"channel_result_cards_sent={channel_result_sent}; "
+            f"channel_progress_cards_sent={channel_progress_sent} "
+            f"channel_progress_cards_updated={channel_progress_updated}; "
             f"stream_cards_sent={stream_sent} stream_cards_updated={stream_updated}; "
             f"run_manager_status_sent={run_manager_status_sent} "
             f"run_manager_status_updated={run_manager_status_updated}; "
@@ -1354,6 +1410,17 @@ def _handle_event_data(
             message = f"Duplicate: {envelope.idempotency_key}"
             return {"ok": True, "status": "duplicate", "message": message}
 
+    # A Feishu form can be submitted once with missing fields and then fixed in
+    # place. Validate its presentation values before consuming the signed nonce;
+    # only a syntactically complete Plan answer becomes a one-shot callback.
+    form_preflight = _preflight_kanban_plan_form(
+        envelope,
+        context.state_dir,
+        config=context.config,
+    )
+    if form_preflight is not None:
+        return form_preflight
+
     # feishu-A2: mutation buttons must carry a valid signed action token bound to
     # (action, target, chat, expiry, nonce). Composes with the identity gate
     # above — both must pass. The nonce store also makes a signed click single-use.
@@ -1458,6 +1525,16 @@ def _handle_event_data(
             context.state_dir,
             config=context.config,
             project_root=context.project_root,
+        )
+    if envelope.command in CHANNEL_PROGRESS_COMMANDS:
+        target = envelope.args[0] if envelope.args else ""
+        return handle_channel_progress_action(
+            command=envelope.command,
+            target=target,
+            context=context,
+            user_id=envelope.user_id,
+            chat_id=envelope.chat_id,
+            message_id=envelope.message_id,
         )
 
     if envelope.command in APPROVAL_COMMANDS:
@@ -2466,13 +2543,30 @@ def _handle_kanban_plan_result(
             "message": "missing Plan request or option",
         }
     event_log = event_log_from_project(state_dir, config=config)
+    request = _kanban_plan_request(event_log, request_event_id)
+    answers = None
+    answer = ""
+    if option_id == PLAN_FORM_OPTION_ID:
+        answers, form_error = form_answers_from_values(
+            request,
+            envelope.form_values,
+        )
+        if form_error:
+            return {
+                "ok": False,
+                "status": form_error,
+                "message": f"Plan answer rejected: {form_error}",
+            }
+    elif option_id == "other":
+        answer = "Customize this plan"
     result = continue_kanban_plan_response(
         state_dir=state_dir,
         config=config,
         writer=EventWriter(event_log),
         request_event_id=request_event_id,
         option_id=option_id,
-        answer="Customize this plan" if option_id == "other" else "",
+        answer=answer,
+        answers=answers,
         user_id=envelope.user_id,
         chat_id=envelope.chat_id,
         message_id=envelope.message_id,
@@ -2486,6 +2580,67 @@ def _handle_kanban_plan_result(
             else f"Plan answer rejected: {result.get('status')}"
         ),
     }
+
+
+def _preflight_kanban_plan_form(
+    envelope: FeishuCommandEnvelope,
+    state_dir: Path,
+    *,
+    config: object | None,
+) -> dict | None:
+    """Reject incomplete Feishu form input without consuming its signed nonce."""
+    if envelope.command != "kanban-plan-answer":
+        return None
+    target = envelope.args[0] if envelope.args else ""
+    request_event_id, option_id = parse_plan_answer_target(target)
+    if option_id != PLAN_FORM_OPTION_ID:
+        return None
+    if not request_event_id:
+        return {
+            "ok": False,
+            "status": "invalid_payload",
+            "message": "missing Plan request or option",
+        }
+    event_log = event_log_from_project(state_dir, config=config)
+    request = _kanban_plan_request(event_log, request_event_id)
+    if not request:
+        return {
+            "ok": False,
+            "status": "plan_request_not_found",
+            "message": "Plan answer rejected: plan_request_not_found",
+        }
+    _answers, form_error = form_answers_from_values(
+        request,
+        envelope.form_values,
+    )
+    if form_error:
+        return {
+            "ok": False,
+            "status": form_error,
+            "message": f"Plan answer rejected: {form_error}",
+        }
+    return None
+
+
+def _kanban_plan_request(event_log, request_event_id: str) -> dict:
+    request_event = next(
+        (
+            event
+            for event in event_log.read_all()
+            if event.id == request_event_id
+            and event.type == "kanban.agent.plan.requested"
+        ),
+        None,
+    )
+    payload = (
+        request_event.payload
+        if request_event is not None and isinstance(request_event.payload, dict)
+        else {}
+    )
+    request = payload.get("plan_request")
+    if not isinstance(request, dict):
+        request = payload.get("request")
+    return request if isinstance(request, dict) else {}
 
 
 def _handle_human_decision_result(

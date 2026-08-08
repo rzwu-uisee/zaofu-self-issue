@@ -206,6 +206,50 @@ def test_channel_task_create_plan_accepts_provider_option_aliases() -> None:
     assert keep_discussing.get("submit_action", "") == ""
 
 
+def test_channel_setup_continue_effect_does_not_inherit_top_level_action() -> None:
+    request = extract_plan_request(
+        json.dumps({
+            "plan_request": {
+                "subject_type": "channel_setup",
+                "header": "Channel Setup",
+                "id": "channel_setup",
+                "question": "Create and start a Channel?",
+                "discussion_seed": "Add an integer add function with pytest coverage.",
+                "submit_action": "channel-create-and-start",
+                "submit_label": "Create and start",
+                "allow_other": False,
+                "options": [
+                    {
+                        "id": "create",
+                        "label": "Create and start (Recommended)",
+                        "recommended": True,
+                        "submit_payload": {
+                            "template_id": "prd-clarification",
+                            "name": "feishu-add-function-e2e",
+                            "overrides": {
+                                "discussion_mode": "conversation",
+                                "budget": {"max_rounds": 1},
+                            },
+                        },
+                    },
+                    {
+                        "id": "cancel",
+                        "label": "Do not create a Channel",
+                        "effect": {"mode": "continue"},
+                    },
+                ],
+            },
+        }),
+    )
+
+    assert request is not None
+    assert request["valid"] is True, request["validation_error"]
+    create, cancel = request["options"]
+    assert create["submit_payload"]["overrides"]["discussion_mode"] == "conversation"
+    assert cancel["submit_mode"] == "continue"
+    assert "submit_action" not in cancel
+
+
 def _requested(event_id: str = "evt-plan") -> ZfEvent:
     request = extract_plan_request(
         _request_answer(),
@@ -405,6 +449,7 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
         member["role"] for member in quick["submit_details"]["members"]
     ] == ["tech_leader", "dev_reviewer", "qa_analyst"]
     assert quick["submit_details"]["max_rounds"] == 4
+    assert quick["submit_details"]["product_mode"] == "conversation"
     assert len(quick["submit_details"]["materialization_digest"]) == 64
 
     source = ZfEvent(

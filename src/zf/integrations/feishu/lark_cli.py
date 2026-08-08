@@ -16,6 +16,10 @@ from zf.integrations.feishu.transport import FeishuHttpTransport, FeishuTranspor
 
 
 _MIN_VERSION = (1, 0, 47)
+# ``im +chat-members-list`` is the readback operation that makes project-group
+# membership activation fail closed.  It landed in lark-cli v1.0.64; the older
+# general projection surface remains supported from v1.0.47.
+_MIN_PROJECT_GROUP_VERSION = (1, 0, 64)
 _ALLOWED_COMMANDS = {
     ("docs", "+create"),
     ("docs", "+update"),
@@ -33,6 +37,11 @@ _ALLOWED_COMMANDS = {
     ("base", "+record-search"),
     ("base", "+record-get"),
     ("base", "+record-upsert"),
+    # Project Feishu group provisioning is intentionally limited to this small,
+    # auditable IM surface.  Do not turn the runner into a generic CLI proxy.
+    ("im", "+chat-create"),
+    ("im", "+chat-members-list"),
+    ("im", "chat.members", "create"),
 }
 _IDEMPOTENT_NO_OP_COMMANDS = {
     ("base", "+view-set-visible-fields"),
@@ -82,6 +91,7 @@ class LarkCliRunner:
         )
         self._minted_tenant_token = ""
         self._minted_tenant_token_at = 0.0
+        self.version: tuple[int, int, int] | None = None
         self._resolved = (
             shutil.which(executable) if os.path.sep not in executable else executable
         )
@@ -97,9 +107,9 @@ class LarkCliRunner:
         input_text: str | None = None,
     ) -> LarkCliResult:
         command_tuple = tuple(str(value) for value in command)
-        if len(command_tuple) < 2 or command_tuple[:2] not in _ALLOWED_COMMANDS:
+        if not _command_is_allowed(command_tuple):
             raise FeishuTransportError(
-                f"lark-cli command is not allowed: {' '.join(command_tuple[:2])}"
+                f"lark-cli command is not allowed: {' '.join(command_tuple[:3])}"
             )
         argv = [
             self._resolved,
@@ -176,12 +186,33 @@ class LarkCliRunner:
         if completed.returncode != 0 or match is None:
             raise FeishuTransportError("unable to parse lark-cli version")
         version = tuple(int(part) for part in match.groups())
+        self.version = version
         if version < _MIN_VERSION:
             required = ".".join(str(part) for part in _MIN_VERSION)
             found = ".".join(str(part) for part in version)
             raise FeishuTransportError(
                 f"lark-cli {found} is unsupported; require >= {required}"
             )
+
+    def require_minimum_version(
+        self,
+        required: tuple[int, int, int],
+        *,
+        capability: str,
+    ) -> None:
+        """Fail closed when an opt-in adapter needs a newer CLI feature.
+
+        ``check_version=False`` is an explicit test/offline escape hatch, so
+        callers using it retain an unknown version rather than a fabricated
+        compatibility claim.
+        """
+        if self.version is None or self.version >= required:
+            return
+        found = ".".join(str(part) for part in self.version)
+        minimum = ".".join(str(part) for part in required)
+        raise FeishuTransportError(
+            f"lark-cli {found} lacks {capability}; require >= {minimum}"
+        )
 
     def _child_env(self, *, require_token: bool) -> dict[str, str]:
         env = dict(self.environ)
@@ -238,6 +269,19 @@ def _json_object_from_output(text: str) -> dict[str, Any]:
         if isinstance(payload, dict):
             return payload
     return {}
+
+
+def _command_is_allowed(command: tuple[str, ...]) -> bool:
+    """Return true only for a registered fixed command prefix.
+
+    Most shortcuts are two words, while the generated IM member-create API is
+    three.  Prefix matching permits flags after the exact command but never an
+    arbitrary `lark-cli im ...` operation.
+    """
+    return any(
+        len(command) >= len(allowed) and command[: len(allowed)] == allowed
+        for allowed in _ALLOWED_COMMANDS
+    )
 
 
 class LarkCliDocumentClient:
@@ -315,6 +359,155 @@ class LarkCliDocumentClient:
             if blocks is not None
             else max(1, append_content.count("\n## ") + 1),
         }
+
+
+class LarkCliChatAdminClient:
+    """Narrow, argv-only adapter for a project collaboration group lifecycle.
+
+    It deliberately owns only create/list/add operations.  It cannot remove
+    people, discover arbitrary chats, or execute an opaque command supplied by
+    a caller.  The binding service verifies every desired member after a write
+    before it marks a project binding active.
+    """
+
+    def __init__(self, runner: LarkCliRunner | None = None) -> None:
+        self.runner = runner or LarkCliRunner()
+        if isinstance(self.runner, LarkCliRunner):
+            self.runner.require_minimum_version(
+                _MIN_PROJECT_GROUP_VERSION,
+                capability="im +chat-members-list required for project-group verification",
+            )
+
+    def create_group(
+        self,
+        *,
+        name: str,
+        owner_open_id: str,
+        bot_app_ids: Sequence[str],
+        provisioner_app_id: str,
+    ) -> dict[str, Any]:
+        group_name = _required(name, "group name")
+        owner = _required(owner_open_id, "owner_open_id")
+        normalized_bots = _unique_values(bot_app_ids)
+        if len(normalized_bots) > 5:
+            raise ValueError("at most five bot app ids can be invited at creation")
+        command = [
+            "im",
+            "+chat-create",
+            "--name",
+            group_name,
+            "--owner",
+            owner,
+            "--set-bot-manager",
+        ]
+        # The acting bot is already in the chat.  Passing it again is rejected
+        # by some tenants, so only invite the other configured product bots.
+        invited_bots = [
+            app_id for app_id in normalized_bots if app_id != provisioner_app_id
+        ]
+        if invited_bots:
+            command.extend(["--bots", ",".join(invited_bots)])
+        payload = self.runner.run(command).payload
+        chat = _first_mapping(payload, "chat") or _first_mapping(payload, "data")
+        chat_id = _first_string(chat or payload, "chat_id", "open_chat_id")
+        if not chat_id:
+            raise FeishuTransportError(
+                "lark-cli chat create response has no chat_id"
+            )
+        return {
+            **chat,
+            "chat_id": chat_id,
+            "name": str((chat or payload).get("name") or group_name),
+            "owner_open_id": str((chat or payload).get("owner_id") or owner),
+        }
+
+    def list_members(self, chat_id: str) -> dict[str, set[str]]:
+        chat = _required(chat_id, "chat_id")
+        payload = self.runner.run(
+            ["im", "+chat-members-list", "--chat-id", chat, "--page-all"]
+        ).payload
+        users = _member_ids(payload, bucket="users")
+        bots = _member_ids(payload, bucket="bots")
+        return {"users": users, "bots": bots}
+
+    def add_members(
+        self,
+        chat_id: str,
+        *,
+        user_open_ids: Sequence[str] = (),
+        bot_app_ids: Sequence[str] = (),
+    ) -> dict[str, list[str]]:
+        chat = _required(chat_id, "chat_id")
+        users = _unique_values(user_open_ids)
+        bots = _unique_values(bot_app_ids)
+        added = {"users": [], "bots": []}
+        if users:
+            self._create_members(chat, users, member_id_type="open_id")
+            added["users"] = users
+        if bots:
+            self._create_members(chat, bots, member_id_type="app_id")
+            added["bots"] = bots
+        return added
+
+    def ensure_members(
+        self,
+        chat_id: str,
+        *,
+        owner_open_id: str,
+        bot_app_ids: Sequence[str],
+    ) -> dict[str, Any]:
+        desired_owner = _required(owner_open_id, "owner_open_id")
+        desired_bots = _unique_values(bot_app_ids)
+        before = self.list_members(chat_id)
+        missing_users = (
+            [desired_owner] if desired_owner not in before["users"] else []
+        )
+        missing_bots = [app_id for app_id in desired_bots if app_id not in before["bots"]]
+        added = self.add_members(
+            chat_id,
+            user_open_ids=missing_users,
+            bot_app_ids=missing_bots,
+        )
+        after = self.list_members(chat_id)
+        still_missing_users = (
+            [desired_owner] if desired_owner not in after["users"] else []
+        )
+        still_missing_bots = [
+            app_id for app_id in desired_bots if app_id not in after["bots"]
+        ]
+        return {
+            "members": after,
+            "added": added,
+            "missing_users": still_missing_users,
+            "missing_bots": still_missing_bots,
+            "verified": not still_missing_users and not still_missing_bots,
+        }
+
+    def _create_members(
+        self,
+        chat_id: str,
+        ids: Sequence[str],
+        *,
+        member_id_type: str,
+    ) -> None:
+        self.runner.run(
+            [
+                "im",
+                "chat.members",
+                "create",
+                "--params",
+                json.dumps(
+                    {
+                        "chat_id": chat_id,
+                        "member_id_type": member_id_type,
+                        "succeed_type": 1,
+                    },
+                    separators=(",", ":"),
+                ),
+                "--data",
+                json.dumps({"id_list": list(ids)}, separators=(",", ":")),
+            ]
+        )
 
 
 class LarkCliBitableClient:
@@ -737,6 +930,41 @@ def _first_list_string(payload: Mapping[str, Any], *keys: str) -> str:
                     if isinstance(item, str) and item.strip():
                         return item.strip()
     return ""
+
+
+def _unique_values(values: Sequence[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique
+
+
+def _member_ids(payload: Mapping[str, Any], *, bucket: str) -> set[str]:
+    """Extract member IDs from lark-cli's separate users/bots result buckets."""
+    keys = (
+        ("app_id", "member_id", "id")
+        if bucket == "bots"
+        else ("member_id", "open_id", "id")
+    )
+    values: set[str] = set()
+    for mapping in _all_mappings(payload):
+        members = mapping.get(bucket)
+        if not isinstance(members, list):
+            continue
+        for item in members:
+            if isinstance(item, str) and item.strip():
+                values.add(item.strip())
+                continue
+            if not isinstance(item, dict):
+                continue
+            for key in keys:
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.add(value.strip())
+                    break
+    return values
 
 
 def _required(value: str, label: str) -> str:

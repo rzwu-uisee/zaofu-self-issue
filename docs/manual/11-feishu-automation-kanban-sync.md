@@ -73,6 +73,114 @@ Backend 含义:
 `FeishuHttpTransport`,不会经过 `lark-cli`。已经移除的只是 Docx/Base 原生
 投影 client；实时消息 transport 仍是必要组件。
 
+## Project 协作群与 Workspace Bridge
+
+Automation / Kanban 投影之外，ZaoFu 可以为一个 Project 显式管理一个 Feishu
+协作群。当前 `bot_purposes` 仅支持 `kanban_agent`（Kanban Agent App bot）和
+`run_manager`（Run Manager App bot），真实群因此只包含 Owner 与这两个 bot；
+Codex、Claude Code、OpenClaw 等内部 Channel member 由这些 bot 代理，不会伪装成
+Feishu 群成员。
+
+项目 `zf.yaml`（或被 loader 合并的 `feishu.yaml`）配置如下。默认
+`auto_provision: false`，`zf init` 只注册项目并创建 pending binding，不会调用
+飞书创建群：
+
+```yaml
+runtime:
+  feishu_inbound:
+    enabled: true
+
+integrations:
+  feishu_project_group:
+    enabled: true
+    auto_provision: false
+    name_template: "ZaoFu - {project_name}"
+    owner_open_id_env: ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID
+    provisioner_purpose: run_manager
+    bot_purposes: [kanban_agent, run_manager]
+    primary_responder: kanban_agent
+```
+
+配置所需环境变量：
+
+```bash
+export ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID="ou_xxx"
+export FEISHU_RUNM="cli_run_manager_app"
+export FEISHU_RUNM_SECRET="..."
+export FEISHU_KANBAN="cli_kanban_app"
+export FEISHU_KANBAN_SECRET="..."
+```
+
+先初始化并检查本地 binding：
+
+```bash
+uv run zf init --workspace default
+uv run zf feishu group status
+```
+
+只有下面两种路径会写入真实飞书：配置明确设置 `auto_provision: true`，或者
+操作员执行带 `--confirm` 的命令。两条路径都会在 create / attach 后回读成员；
+Owner 和全部 bot 没有同时验证成功时状态保持 `repair_required`：
+
+```bash
+# 创建新的协作群并验证成员
+uv run zf feishu group provision --workspace default --confirm
+
+# 使用一个已有群，补齐并验证成员
+uv run zf feishu group attach --chat-id oc_xxx --confirm
+```
+
+已存在 binding 时，省略 `--workspace` 会沿用 binding 记录的 Workspace，避免
+把多项目路由错误迁回 `default`。首次为非默认 Workspace 显式 provision 时仍应传入
+`--workspace <workspace-id>`。
+
+### 自动建群的状态与回读
+
+`auto_provision: true` 会让 `zf init` 变成一次**明确配置过的外部写操作**，而不是普通的
+本地初始化。它按如下状态收敛；可以随时用 `zf feishu group status` 回读：
+
+| binding 状态 | 含义 | 操作员动作 |
+|---|---|---|
+| `pending` | 已保存 desired topology，尚未调用飞书 | 设置 `auto_provision: true` 后重新 init，或执行 `group provision --confirm` |
+| `provisioning` | 正在创建/附着群并验证成员 | 等待本次命令结束；不要并发再起一个 provision |
+| `active` | Owner、全部配置 bot 已回读验证，且 Workspace route index 已成功重建 | 用 `zf start` 启动/维持入站 sidecar |
+| `repair_required` | 凭据、权限、跨 App open_id、成员或路由冲突未通过验证 | 查看 `status` 中的 `error`，修正后重新执行 `group provision --confirm` |
+
+禁用配置不会删除已有飞书群，也不会删除 canonical event 或项目 binding；群的创建、附着和
+成员补齐始终是受控外部副作用。需要把已有群交给 ZaoFu 时，用 `group attach --chat-id ... --confirm`
+回读验证，而不是手工填写运行时 `chat_id`。
+
+项目群需要 `im:chat:create`、`im:chat.members:read`、
+`im:chat.members:write_only` 权限，并要求 `lark-cli >= 1.0.64`（这是
+`im +chat-members-list` 成员回读命令的首个版本）。`lark-cli` 仅被允许执行群
+创建、成员列表和成员添加的固定 argv；secret 不会进入状态文件或命令参数。
+这些群管理权限必须由 `provisioner_purpose` 对应的 Bot 获批。`owner_open_id_env`
+中的值也必须是该 Bot 可见的 app-scoped open_id，不能复用另一个飞书 App 看到的
+ID；否则飞书会返回 `open_id cross app`，ZaoFu 会保持 `repair_required`。
+
+binding 激活后执行 `zf start`。同一主机上，任意 Workspace 的多个 Project 若复用
+同一个 Feishu App，只会保留一条 `(host, app_id)` WebSocket；入站消息由精确
+`(app_id, chat_id)` binding index 聚合后选择正确 Project。历史项目未启用这个配置
+时，继续使用既有 `integrations.feishu_routing` 路径，但也不能与已有 App bridge
+并发连接。协作群中未 @ bot 的普通消息由 `primary_responder` 处理；显式 @ Kanban
+Agent 或 Run Manager 时由对应 bot 处理。
+
+后启动的 Project 只加入 provider bridge 租约，先启动的 Project 停止时若还有其他
+Workspace/Project 租约，连接会继续服务；只有最后一个租约释放时才停止共享
+WebSocket。不要另行手工启动同 App 的 bridge；若需要诊断，先停止 managed
+sidecar，然后使用以下唯一入口：
+
+```bash
+uv run zf feishu bridge --watch --all-workspaces --app-id "$FEISHU_APP_ID"
+```
+
+每个项目的 restart catch-up cursor 按 `(app_id, chat_id)` 保存，因此同一协作群内
+的不同 bot 不会互相跳过未处理消息。
+
+群内回复是面向人的投影：未 @ bot 的普通消息由 `primary_responder` 处理，显式 @ ZF 产品经理或
+ZF 架构师才进入对应 target。长 PRD、评审和扫描结果不应依赖一张聊天卡完整承载；详情与长文输出
+边界见 [19-feishu-ai-native-direct-bridge.md](19-feishu-ai-native-direct-bridge.md)。
+
 ## 初始化飞书目标
 
 如果还没有文档或多维表格,先用显式初始化命令创建目标,不要让 daily/hourly

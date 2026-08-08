@@ -84,6 +84,8 @@ def build_kanban_proposal_card(item: dict[str, Any]) -> dict[str, Any]:
             },
         ],
         "_card_key": f"kanban-proposal-{proposal_id}",
+        "_target_chat_id": _proposal_target(item),
+        "_target_thread_id": _proposal_thread(item),
     }
 
 
@@ -114,6 +116,8 @@ def build_kanban_proposal_result_card(
             f"kanban-proposal-"
             f"{str(item.get('proposal_id') or item.get('proposal_event_id') or '')}"
         ),
+        "_target_chat_id": _proposal_target(item),
+        "_target_thread_id": _proposal_thread(item),
     }
 
 
@@ -225,12 +229,20 @@ def push_kanban_proposal_cards_once(
     except (OSError, ValueError):
         ledger = {}
 
+    def target_for(card: dict[str, Any]) -> str:
+        return str(card.get("_target_chat_id") or receive_id)
+
+    def thread_for(card: dict[str, Any]) -> str:
+        return str(card.get("_target_thread_id") or "")
+
     def prepare_card(card: dict[str, Any]) -> dict[str, Any]:
+        target = target_for(card)
+        card = {key: value for key, value in card.items() if not key.startswith("_")}
         if action_secret:
             attach_action_token(
                 card,
                 secret=action_secret,
-                chat_id=receive_id,
+                chat_id=target,
                 ttl_seconds=action_ttl_seconds,
                 now=issued_at,
                 key_version=action_key_version,
@@ -238,9 +250,12 @@ def push_kanban_proposal_cards_once(
         return card
 
     def send_card(card: dict[str, Any]) -> str | None:
+        target = target_for(card)
+        thread_id = thread_for(card)
         card = prepare_card(card)
         return transport.send_card(FeishuMessage(
-            chat_id=receive_id,
+            chat_id=target,
+            thread_id=thread_id,
             content=json.dumps(card, ensure_ascii=False),
             msg_type="interactive",
             receive_id_type=receive_id_type,
@@ -277,6 +292,7 @@ def _proposal_items(events) -> dict[str, dict[str, Any]]:
             **proposal,
             "proposal_event_id": event.id,
             "proposal_id": proposal_id,
+            "refs": payload.get("refs") or {},
         }
         prior = items.get(proposal_id)
         if prior is None or int(item.get("revision") or 1) >= int(
@@ -301,3 +317,20 @@ def _proposal_resolution(events, item: dict[str, Any]) -> str:
             if str(request.get("proposal_event_id") or "") == proposal_event_id:
                 return "executed"
     return "dismissed"
+
+
+def _proposal_target(item: dict[str, Any]) -> str:
+    refs = item.get("refs") if isinstance(item.get("refs"), dict) else {}
+    feishu = refs.get("feishu") if isinstance(refs.get("feishu"), dict) else {}
+    return str(feishu.get("chat_id") or "")
+
+
+def _proposal_thread(item: dict[str, Any]) -> str:
+    refs = item.get("refs") if isinstance(item.get("refs"), dict) else {}
+    feishu = refs.get("feishu") if isinstance(refs.get("feishu"), dict) else {}
+    return str(
+        feishu.get("root_message_id")
+        or feishu.get("parent_message_id")
+        or feishu.get("message_id")
+        or ""
+    )

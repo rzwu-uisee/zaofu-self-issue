@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 import os
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,8 @@ from zf.runtime.channel_reply_contract import (
 )
 from zf.runtime.channel_reply_remediation import emit_channel_reply_failed
 from zf.runtime.channel_contracts import (
+    active_channel_resolved_skill_refs,
+    active_channel_skill_refs,
     normalize_permission_profile,
     permission_profile_write_policy,
 )
@@ -35,6 +37,11 @@ from zf.runtime.channel_provider_profile import (
 from zf.runtime.channel_run_owner import (
     active_reply_for_target,
     provider_run_fields_for_request,
+)
+from zf.runtime.channel_reply_completion import (
+    ChannelDispatchResult,
+    complete_deterministic_reply as _complete_deterministic_reply,
+    origin_external_refs as _origin_external_refs,
 )
 from zf.runtime.channel_sidecar import (
     channel_message_event_payload,
@@ -67,22 +74,6 @@ DISPATCHABLE_STATUSES = {"pending", "queued"}
 DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S = 30 * 60.0
 
 
-@dataclass(frozen=True)
-class ChannelDispatchResult:
-    dispatched: list[str] = field(default_factory=list)
-    completed: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    skipped: list[dict[str, str]] = field(default_factory=list)
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "dispatched": self.dispatched,
-            "completed": self.completed,
-            "failed": self.failed,
-            "skipped": self.skipped,
-        }
-
-
 def dispatch_reply_request(
     *,
     state_dir: Path,
@@ -96,6 +87,8 @@ def dispatch_reply_request(
     headless_backends: dict[str, Any] | None = None,
     config: ZfConfig | None = None,
     openclaw_client: OpenClawGatewayClient | None = None,
+    deterministic_reply: str | None = None,
+    deterministic_reason: str = "",
 ) -> ChannelDispatchResult:
     state_dir = Path(state_dir)
     with channel_dispatch_lock(state_dir, channel_id):
@@ -180,6 +173,21 @@ def dispatch_reply_request(
         return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
     if hydrated_text:
         message = {**message, "text": hydrated_text}
+
+    if deterministic_reply is not None:
+        return _complete_deterministic_reply(
+            state_dir=state_dir,
+            writer=writer,
+            channel=channel,
+            message=message,
+            request=request,
+            request_id=request_id,
+            started_event_id=started.id,
+            actor=actor,
+            source=source,
+            reply=deterministic_reply,
+            reason=deterministic_reason,
+        )
 
     worker_session_id = _worker_session(member) or str(request.get("worker_session_id") or "")
     if worker_session_id:
@@ -347,6 +355,8 @@ def dispatch_pending_replies(
     headless_backends: dict[str, Any] | None = None,
     config: ZfConfig | None = None,
     openclaw_client: OpenClawGatewayClient | None = None,
+    deterministic_reply: str | None = None,
+    deterministic_reason: str = "",
 ) -> ChannelDispatchResult:
     channel = project_channel(Path(state_dir), channel_id) or {}
     candidates = [
@@ -393,6 +403,8 @@ def dispatch_pending_replies(
             headless_backends=headless_backends,
             config=config,
             openclaw_client=openclaw_client,
+            deterministic_reply=deterministic_reply,
+            deterministic_reason=deterministic_reason,
         )
 
     results = dispatch_candidate_waves(
@@ -460,17 +472,6 @@ def _message_by_id(channel: dict[str, Any], message_id: str) -> dict[str, Any]:
         if isinstance(item, dict) and str(item.get("message_id") or "") == message_id:
             return item
     return {}
-
-
-def _origin_external_refs(message: dict[str, Any]) -> dict[str, Any]:
-    """feishu-C #2: carry the triggering message's external origin (refs.feishu /
-    refs.openclaw) onto the agent reply, so the bridge can route the reply back
-    to the originating chat instead of the default bound target."""
-    refs = message.get("refs") if isinstance(message, dict) else None
-    if not isinstance(refs, dict):
-        return {}
-    return {ns: refs[ns] for ns in ("feishu", "openclaw")
-            if isinstance(refs.get(ns), dict)}
 
 
 def _worker_session(member: dict[str, Any]) -> str:
@@ -775,7 +776,7 @@ def _run_headless_reply(
         result = adapter.run_turn(
             prompt=_build_channel_prompt(channel=channel, member=member, message=message, request=request),
             cwd=project_root,
-            system_prompt=_build_channel_system_prompt(member),
+            system_prompt=_build_channel_system_prompt(member, channel=channel),
             thread_id=thread_id,
             provider_session_id=provider_session_id,
             on_session_id=pin,
@@ -842,7 +843,11 @@ def _channel_provider_headless_timeout_s() -> float:
     return timeout_s if timeout_s > 0 else DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S
 
 
-def _build_channel_system_prompt(member: dict[str, Any]) -> str:
+def _build_channel_system_prompt(
+    member: dict[str, Any],
+    *,
+    channel: dict[str, Any] | None = None,
+) -> str:
     member_id = str(member.get("member_id") or "agent")
     role = str(member.get("channel_role") or member.get("role") or "channel member")
     provider = str(member.get("backend") or member.get("provider") or "agent")
@@ -852,16 +857,21 @@ def _build_channel_system_prompt(member: dict[str, Any]) -> str:
         if isinstance(member.get("write_policy"), dict)
         else permission_profile_write_policy(permission_profile)
     )
-    skill_refs = [
-        str(item)
-        for item in (member.get("skill_refs") or [])
-        if str(item).strip()
-    ][:8]
-    resolved_skill_refs = [
-        item
-        for item in (member.get("resolved_skill_refs") or [])
-        if isinstance(item, dict)
-    ][:8]
+    discussion = (
+        channel.get("discussion")
+        if isinstance(channel, dict)
+        and isinstance(channel.get("discussion"), dict)
+        else {}
+    )
+    mode = discussion.get("mode") or discussion.get("product_mode") or "conversation"
+    skill_refs = active_channel_skill_refs(
+        member.get("skill_refs") or [],
+        discussion_mode=mode,
+    )
+    resolved_skill_refs = active_channel_resolved_skill_refs(
+        member.get("resolved_skill_refs") or [],
+        discussion_mode=mode,
+    )
     prompt = (
         f"You are {member_id}, a {provider} agent participating in a ZaoFu Agent Channel. "
         f"Your channel role is {role}. Reply as a channel teammate. Keep the answer concise, "
@@ -900,6 +910,21 @@ def _build_channel_prompt(
         request,
         message,
     )
+    discussion = (
+        channel.get("discussion")
+        if isinstance(channel.get("discussion"), dict)
+        else {}
+    )
+    mode = discussion.get("mode") or discussion.get("product_mode") or "conversation"
+    skill_refs = active_channel_skill_refs(
+        member.get("skill_refs") or [],
+        discussion_mode=mode,
+    )
+    agent_context = (
+        context_pack.get("agent_context")
+        if isinstance(context_pack.get("agent_context"), dict)
+        else {}
+    )
     return "\n".join([
         "ZaoFu Agent Channel reply request",
         f"channel_id: {channel_id}",
@@ -909,8 +934,9 @@ def _build_channel_prompt(
         f"visibility_profile: {member.get('visibility_profile') or ''}",
         f"permission_profile: {normalize_permission_profile(member.get('permission_profile'))}",
         f"write_policy: {redact_obj(member.get('write_policy') if isinstance(member.get('write_policy'), dict) else permission_profile_write_policy(member.get('permission_profile')))}",
-        f"skill_refs: {redact_obj(member.get('skill_refs') or [])}",
+        f"skill_refs: {redact_obj(skill_refs)}",
         f"context_pack: {redact_obj(context_pack)}",
+        f"agent_context: {redact_obj(agent_context)}",
         f"response_contract: {response_contract}",
         "",
         "Trigger message:",

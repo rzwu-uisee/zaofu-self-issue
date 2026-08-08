@@ -140,6 +140,10 @@ CHANNEL_PROVIDER_BINDING_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 CHANNEL_SKILL_REF_RE = re.compile(
     r"^skills/[A-Za-z0-9][A-Za-z0-9_.-]*/SKILL\.md$"
 )
+CHANNEL_MULTI_LENS_SKILL_REFS = frozenset({
+    "skills/zf-channel-discussion-participant/SKILL.md",
+    "skills/zf-channel-discussion-synthesizer/SKILL.md",
+})
 CHANNEL_ROLE_VISIBILITY_DEFAULTS = {
     "arch": "planner",
     "facilitator": "planner",
@@ -270,6 +274,42 @@ def normalize_channel_skill_refs(value: object, *, max_refs: int = 8) -> list[st
         if len(refs) >= max_refs:
             break
     return refs
+
+
+def active_channel_skill_refs(
+    value: object,
+    *,
+    discussion_mode: object,
+) -> list[str]:
+    """Select runtime skills without mutating the member capability profile."""
+
+    refs = normalize_channel_skill_refs(value)
+    if discussion_engine_mode(discussion_mode) == "fanout_then_synthesis":
+        return refs
+    return [ref for ref in refs if ref not in CHANNEL_MULTI_LENS_SKILL_REFS]
+
+
+def active_channel_resolved_skill_refs(
+    value: object,
+    *,
+    discussion_mode: object,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    active = set(active_channel_skill_refs(
+        [
+            str(item.get("logical_ref") or "")
+            for item in value
+            if isinstance(item, dict)
+        ],
+        discussion_mode=discussion_mode,
+    ))
+    return [
+        dict(item)
+        for item in value
+        if isinstance(item, dict)
+        and str(item.get("logical_ref") or "") in active
+    ][:8]
 
 
 def normalize_permissions(value: object, *, member_type: str = "") -> list[str]:

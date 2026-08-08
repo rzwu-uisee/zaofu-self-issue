@@ -25,6 +25,7 @@ class FeishuCommandEnvelope:
     message_id: str = ""
     idempotency_key: str = field(default_factory=lambda: uuid.uuid4().hex)
     source: str = "text"  # text, button, approval
+    form_values: dict[str, str] = field(default_factory=dict)
 
 
 # Commands and their required auth levels
@@ -72,6 +73,10 @@ _COMMAND_AUTH: dict[str, AuthLevel] = {
     "kanban-plan-answer": AuthLevel.OPERATOR,
     "kanban-proposal-approve": AuthLevel.APPROVER,
     "kanban-proposal-dismiss": AuthLevel.OPERATOR,
+    "channel-progress-finalize": AuthLevel.OPERATOR,
+    "channel-progress-confirm": AuthLevel.APPROVER,
+    "channel-progress-create-task": AuthLevel.OPERATOR,
+    "channel-progress-plan-workflow": AuthLevel.OPERATOR,
 }
 
 _WHITELIST = set(_COMMAND_AUTH.keys())
@@ -149,6 +154,14 @@ class CommandGateway:
             message_id=message_id,
             idempotency_key=_idempotency_key(event, "button", command, args),
             source="button",
+            form_values={
+                str(key): str(value)
+                for key, value in (
+                    event.payload.get("form_values", {}).items()
+                    if isinstance(event.payload.get("form_values"), dict)
+                    else []
+                )
+            },
         )
 
 

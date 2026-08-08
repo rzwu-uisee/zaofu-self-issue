@@ -6,6 +6,7 @@ import glob
 import hashlib
 import os
 import re
+import string
 from pathlib import Path
 
 import yaml
@@ -137,6 +138,7 @@ from zf.core.config.schema import (  # noqa: E402
     ChannelConfig,
     FeishuIdentityConfig,
     FeishuIdentityUserConfig,
+    FeishuProjectGroupConfig,
     FeishuRouteConfig,
     OpenClawFeishuBridgeBindingConfig,
     OpenClawFeishuBridgeConfig,
@@ -3546,7 +3548,11 @@ def _build_openclaw_binding(
     )
 
 
-_FEISHU_YAML_KEYS = ("feishu_routing", "feishu_identity")
+_FEISHU_YAML_KEYS = (
+    "feishu_routing",
+    "feishu_identity",
+    "feishu_project_group",
+)
 
 
 def _merge_feishu_yaml(raw: dict, zf_yaml_path: Path) -> dict:
@@ -3595,6 +3601,9 @@ def _build_integrations(data: object) -> IntegrationsConfig:
             data.get("openclaw_feishu_bridge")
         ),
         feishu_identity=_build_feishu_identity(data.get("feishu_identity")),
+        feishu_project_group=_build_feishu_project_group(
+            data.get("feishu_project_group")
+        ),
         feishu_routing=_build_feishu_routing(data.get("feishu_routing")),
     )
 
@@ -3696,6 +3705,139 @@ _FEISHU_PERMISSION_PROFILES = {
     "isolated_writer",
     "dangerous_full",
 }
+_FEISHU_PROJECT_GROUP_PURPOSES = {
+    "run_manager",
+    "kanban_agent",
+    "default",
+}
+_FEISHU_PROJECT_GROUP_KINDS = {"collaboration"}
+_KNOWN_FEISHU_PROJECT_GROUP_KEYS = frozenset({
+    "enabled",
+    "auto_provision",
+    "binding_id",
+    "group_kind",
+    "name_template",
+    "owner_open_id_env",
+    "provisioner_purpose",
+    "bot_purposes",
+    "primary_responder",
+    "channel_id",
+})
+
+
+def _build_feishu_project_group(data: object) -> FeishuProjectGroupConfig:
+    """Validate project Feishu collaboration-group desired topology.
+
+    Provisioning remains disabled by default.  Enabling it is an explicit
+    control-plane opt-in; the resolved chat and verified members are stored in
+    the project runtime binding sidecar, never in this config object.
+    """
+    if data in (None, ""):
+        return FeishuProjectGroupConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("integrations.feishu_project_group must be a mapping")
+    _reject_unknown_keys(
+        data,
+        _KNOWN_FEISHU_PROJECT_GROUP_KEYS,
+        "integrations.feishu_project_group",
+    )
+    enabled = _bool_value(data.get("enabled"), False)
+    auto_provision = _bool_value(data.get("auto_provision"), False)
+    if auto_provision and not enabled:
+        raise ConfigError(
+            "integrations.feishu_project_group.auto_provision requires enabled=true"
+        )
+    binding_id = str(data.get("binding_id") or "project-collaboration").strip()
+    if not _CHANNEL_PROFILE_ID_RE.match(binding_id):
+        raise ConfigError(
+            "integrations.feishu_project_group.binding_id must start with a "
+            "letter and contain only letters, digits, dot, underscore, or hyphen"
+        )
+    group_kind = str(data.get("group_kind") or "collaboration").strip()
+    if group_kind not in _FEISHU_PROJECT_GROUP_KINDS:
+        raise ConfigError(
+            "integrations.feishu_project_group.group_kind must be one of "
+            f"{sorted(_FEISHU_PROJECT_GROUP_KINDS)}"
+        )
+    name_template = str(
+        data.get("name_template") or "ZaoFu - {project_name}"
+    ).strip()
+    if not name_template:
+        raise ConfigError("integrations.feishu_project_group.name_template is required")
+    try:
+        fields = list(string.Formatter().parse(name_template))
+        if any(
+            field_name is not None
+            and (field_name != "project_name" or format_spec or conversion)
+            for _literal, field_name, format_spec, conversion in fields
+        ):
+            raise ValueError("unsupported template field")
+        rendered_name = name_template.format(project_name="project")
+    except (KeyError, ValueError) as exc:
+        raise ConfigError(
+            "integrations.feishu_project_group.name_template only supports "
+            "the {project_name} placeholder"
+        ) from exc
+    if not rendered_name.strip() or len(rendered_name) > 60:
+        raise ConfigError(
+            "integrations.feishu_project_group.name_template must render a "
+            "non-empty group name of at most 60 characters"
+        )
+    owner_open_id_env = str(
+        data.get("owner_open_id_env") or "ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID"
+    ).strip()
+    if not _ENV_NAME_RE.match(owner_open_id_env):
+        raise ConfigError(
+            "integrations.feishu_project_group.owner_open_id_env must be an "
+            "uppercase environment variable name"
+        )
+    raw_purposes = data.get("bot_purposes")
+    if raw_purposes in (None, ""):
+        raw_purposes = ["kanban_agent", "run_manager"]
+    if not isinstance(raw_purposes, list):
+        raise ConfigError("integrations.feishu_project_group.bot_purposes must be a list")
+    bot_purposes = [str(item).strip() for item in raw_purposes if str(item).strip()]
+    if not bot_purposes or len(bot_purposes) != len(set(bot_purposes)):
+        raise ConfigError(
+            "integrations.feishu_project_group.bot_purposes must be a non-empty "
+            "unique list"
+        )
+    invalid = sorted(set(bot_purposes) - _FEISHU_PROJECT_GROUP_PURPOSES)
+    if invalid:
+        raise ConfigError(
+            "integrations.feishu_project_group.bot_purposes contains unsupported "
+            f"purpose(s): {', '.join(invalid)}"
+        )
+    provisioner_purpose = str(
+        data.get("provisioner_purpose") or "run_manager"
+    ).strip()
+    primary_responder = str(
+        data.get("primary_responder") or "kanban_agent"
+    ).strip()
+    for field_name, value in (
+        ("provisioner_purpose", provisioner_purpose),
+        ("primary_responder", primary_responder),
+    ):
+        if value not in bot_purposes:
+            raise ConfigError(
+                f"integrations.feishu_project_group.{field_name} must be one of "
+                "bot_purposes"
+            )
+    channel_id = str(data.get("channel_id") or "zaofu").strip()
+    if not channel_id:
+        raise ConfigError("integrations.feishu_project_group.channel_id is required")
+    return FeishuProjectGroupConfig(
+        enabled=enabled,
+        auto_provision=auto_provision,
+        binding_id=binding_id,
+        group_kind=group_kind,
+        name_template=name_template,
+        owner_open_id_env=owner_open_id_env,
+        provisioner_purpose=provisioner_purpose,
+        bot_purposes=bot_purposes,
+        primary_responder=primary_responder,
+        channel_id=channel_id,
+    )
 
 
 def _build_feishu_routing(data: object) -> dict[str, FeishuRouteConfig]:

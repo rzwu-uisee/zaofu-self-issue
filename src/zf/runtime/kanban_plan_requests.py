@@ -12,6 +12,9 @@ from zf.core.security.redaction import redact_obj
 
 PLAN_REQUESTED_EVENT = "kanban.agent.plan.requested"
 PLAN_ANSWERED_EVENT = "kanban.agent.plan.answered"
+PLAN_REPAIR_REQUESTED_EVENT = "kanban.agent.plan.repair.requested"
+PLAN_REPAIR_COMPLETED_EVENT = "kanban.agent.plan.repair.completed"
+PLAN_REPAIR_EXHAUSTED_EVENT = "kanban.agent.plan.repair.exhausted"
 PLAN_REQUEST_SCHEMA_VERSION = "kanban-plan-request.v3"
 PLAN_RESPONSE_SCHEMA_VERSION = "kanban-plan-response.v2"
 PLAN_DIRECT_APPLY_ACTIONS = frozenset({"channel-create-and-start"})
@@ -537,6 +540,9 @@ def _revision(value: object) -> int:
 
 __all__ = [
     "PLAN_ANSWERED_EVENT",
+    "PLAN_REPAIR_COMPLETED_EVENT",
+    "PLAN_REPAIR_EXHAUSTED_EVENT",
+    "PLAN_REPAIR_REQUESTED_EVENT",
     "PLAN_APPLY_ALLOWED_ACTIONS",
     "PLAN_DIRECT_APPLY_ACTIONS",
     "PLAN_PROPOSAL_ACTIONS",

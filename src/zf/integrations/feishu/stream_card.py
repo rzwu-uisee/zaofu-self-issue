@@ -15,8 +15,11 @@ Pure functions; the transport + throttled flush loop live in the delivery wiring
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from zf.core.state.atomic_io import atomic_write_text
+from zf.core.state.locks import locked_path
 from zf.integrations.feishu.tool_render import tool_body, tool_header
 
 _REASONING_CAP = 1500       # truncate reasoning to defeat the ~30KB element limit
@@ -95,6 +98,9 @@ def reduce(state: dict[str, Any], event: Any) -> dict[str, Any]:
 
     terminal = _TERMINAL_BY_EVENT.get(etype)
     if terminal:
+        final_text = str(payload.get("final_text") or "")
+        if final_text and final_text != state["text"]:
+            _replace_final_text(state, final_text)
         state["terminal"] = terminal
         state["footer"] = None
         state["reasoning_active"] = False
@@ -134,6 +140,18 @@ def reduce(state: dict[str, Any], event: Any) -> dict[str, Any]:
     if not state["provider"]:
         state["provider"] = str(payload.get("provider") or payload.get("backend") or "")
     return state
+
+
+def _replace_final_text(state: dict[str, Any], final_text: str) -> None:
+    """Replace ephemeral text fragments with one committed semantic body."""
+
+    state["blocks"] = [
+        block for block in state["blocks"]
+        if isinstance(block, dict) and block.get("kind") != "text"
+    ]
+    if final_text:
+        state["blocks"].append({"kind": "text", "content": final_text})
+    state["text"] = final_text
 
 
 def _has_content(state: dict[str, Any]) -> bool:
@@ -305,6 +323,60 @@ def _render_signature(state: dict[str, Any]) -> str:
 
 
 _STREAM_EVENT_TYPES = {"agent.session.part.delta"} | set(_TERMINAL_BY_EVENT)
+_INTERNAL_PLAN_REPAIR_SOURCE = "feishu-plan-repair"
+
+
+def _internal_plan_repair_request_ids(events: list) -> set[str]:
+    """Return reply ids triggered by the hidden Plan-repair control message.
+
+    Plan repair is a real, bounded provider turn and must stay in the event
+    ledger.  Its control prompt is not a second user conversation, though, so
+    projecting its token stream as an ordinary Feishu chat card makes the owner
+    see two concurrent "thinking" cards for one request.  The durable inbound
+    message id ties the reply lifecycle to that internal control turn.
+    """
+
+    repair_message_ids = {
+        str(payload.get("message_id") or "")
+        for event in events
+        if str(getattr(event, "type", "") or "") == "channel.message.posted"
+        for payload in [
+            getattr(event, "payload", None)
+            if isinstance(getattr(event, "payload", None), dict)
+            else {}
+        ]
+        if str(payload.get("source") or "") == _INTERNAL_PLAN_REPAIR_SOURCE
+    }
+    if not repair_message_ids:
+        return set()
+    return {
+        str(payload.get("request_id") or "")
+        for event in events
+        for payload in [
+            getattr(event, "payload", None)
+            if isinstance(getattr(event, "payload", None), dict)
+            else {}
+        ]
+        if str(payload.get("message_id") or "") in repair_message_ids
+        and str(payload.get("request_id") or "")
+    }
+
+
+def _render_internal_plan_repair_card() -> dict[str, Any]:
+    """Replace a previously sent internal stream with a compact status card."""
+
+    return {
+        "schema": "2.0",
+        "config": {
+            "streaming_mode": False,
+            "summary": {"content": "计划已修正"},
+        },
+        "body": {
+            "elements": [
+                _markdown("计划已由系统自动修正。请使用最新的 Plan 卡继续。")
+            ]
+        },
+    }
 
 
 def _fold_stream_states(events: list, member: str = "") -> dict[str, dict[str, Any]]:
@@ -372,9 +444,58 @@ def sync_stream_card(state_dir, *, send_card, update_card, ledger: dict | None =
             )
     except Exception:
         pass
+    repair_request_ids = _internal_plan_repair_request_ids(events)
     states = _fold_stream_states(events, member=member)
-    sent, updated = [], []
+    from zf.integrations.feishu.channel_reply_presentation import (
+        collect_channel_reply_presentations,
+    )
+
+    presentations = collect_channel_reply_presentations(
+        Path(state_dir),
+        events,
+        member=member,
+    )
     for request_id, state in states.items():
+        presentation = presentations.get(request_id)
+        final_text = presentation.text if presentation is not None else ""
+        if (
+            state["terminal"] in _TERMINAL
+            and final_text
+            and final_text != state["text"]
+        ):
+            _replace_final_text(state, final_text)
+        if presentation is not None:
+            state["origin_chat_id"] = presentation.chat_id
+            state["origin_thread_id"] = presentation.thread_id
+    sent, updated, suppressed = [], [], []
+    visible_request_ids = {
+        key.removeprefix("stream-")
+        for key, entry in ledger.items()
+        if key.startswith("stream-")
+        and isinstance(entry, dict)
+        and entry.get("message_id")
+        and key.removeprefix("stream-") not in repair_request_ids
+    }
+    # Older Bridge processes may already have emitted the transient repair
+    # stream. Replace that card in place once, while keeping all repair events
+    # and the dedicated Plan repair card intact.
+    for request_id in sorted(repair_request_ids):
+        key = f"stream-{request_id}"
+        entry = ledger.get(key) or {}
+        if entry.get("message_id") and not entry.get("suppressed"):
+            seq = int(entry.get("seq", 0)) + 1
+            update_card(entry["message_id"], _render_internal_plan_repair_card(), seq)
+            ledger[key] = {
+                **entry,
+                "seq": seq,
+                "suppressed": True,
+                "terminal": "suppressed",
+            }
+            updated.append(request_id)
+        suppressed.append(request_id)
+    for request_id, state in states.items():
+        if request_id in repair_request_ids:
+            continue
         key = f"stream-{request_id}"
         entry = ledger.get(key) or {}
         card = render_streaming_card(state)
@@ -387,12 +508,14 @@ def sync_stream_card(state_dir, *, send_card, update_card, ledger: dict | None =
             # with no content yet keeps its thinking card.
             if state["terminal"] in _TERMINAL and not has_content:
                 continue
-            message_id = send_card(card)
+            message_id = send_card(card, state)
             ledger[key] = {"message_id": str(message_id), "seq": 0,
                            "sig": sig, "terminal": state["terminal"],
                            "had_content": has_content}
             sent.append(request_id)
+            visible_request_ids.add(request_id)
             continue
+        visible_request_ids.add(request_id)
         # Never downgrade a card that already rendered content to an empty
         # "（未返回内容）" terminal. Streaming deltas live on the ephemeral
         # LiveDeltaBus and terminal events carry no text (feishu e2e): once the
@@ -408,11 +531,18 @@ def sync_stream_card(state_dir, *, send_card, update_card, ledger: dict | None =
                            "terminal": state["terminal"],
                            "had_content": entry.get("had_content") or has_content}
             updated.append(request_id)
-    return {"sent": sent, "updated": updated, "ledger": ledger}
+    return {
+        "sent": sent,
+        "updated": updated,
+        "suppressed": sorted(suppressed),
+        "visible_request_ids": sorted(visible_request_ids),
+        "ledger": ledger,
+    }
 
 
 def push_stream_card_once(state_dir, transport, *, receive_id: str,
-                          receive_id_type: str = "chat_id") -> dict:
+                          receive_id_type: str = "chat_id",
+                          member: str = "") -> dict:
     """Production caller: build send/update closures from a transport + a
     persistent ledger and run one streaming-card sync pass."""
     import json
@@ -424,26 +554,51 @@ def push_stream_card_once(state_dir, transport, *, receive_id: str,
     # Per-bot isolation: when several bridges (one per Feishu app) share a
     # state_dir, scope each bridge to its own member's replies AND give it a
     # member-suffixed ledger file, so they never cross-update each other's cards.
-    member = os.environ.get("ZF_FEISHU_STREAM_MEMBER", "").strip()
+    member = member or os.environ.get("ZF_FEISHU_STREAM_MEMBER", "").strip()
     suffix = f"-{member}" if member else ""
     ledger_path = (Path(state_dir) / "integrations" / "feishu"
                    / f"stream_ledger{suffix}.json")
-    try:
-        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        ledger = {}
 
-    def send_card(card: dict) -> str | None:
+    def read_ledger(path: Path) -> dict[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def send_card(card: dict, state: dict) -> str | None:
+        chat_id = str(state.get("origin_chat_id") or receive_id)
+        thread_id = str(state.get("origin_thread_id") or "") or None
         return transport.send_card(FeishuMessage(
-            chat_id=receive_id, content=json.dumps(card, ensure_ascii=False),
+            chat_id=chat_id,
+            thread_id=thread_id,
+            content=json.dumps(card, ensure_ascii=False),
             msg_type="interactive", receive_id_type=receive_id_type))
 
     def update_card(message_id: str, card: dict, sequence: int = 0) -> bool:
         return transport.update_card(message_id, card, sequence)
 
-    result = sync_stream_card(state_dir, send_card=send_card,
-                              update_card=update_card, ledger=ledger, member=member)
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(json.dumps(result["ledger"], ensure_ascii=False, indent=2),
-                           encoding="utf-8")
+    # ``dispatch_inbound_async`` has its own fast ticker while the Bridge
+    # projection loop also flushes this card.  They can otherwise both read an
+    # empty ledger and send duplicate "正在思考" cards for one request.  The
+    # external send/update and its idempotency record form one critical section.
+    with locked_path(ledger_path):
+        scoped_ledger_missing = bool(member) and not ledger_path.exists()
+        ledger = read_ledger(ledger_path)
+        if scoped_ledger_missing:
+            # A pre-isolation bridge used the shared ledger. Seed a new
+            # per-member ledger from it once so a bridge restart does not
+            # replay every historical thinking card into the group.
+            ledger = read_ledger(ledger_path.with_name("stream_ledger.json"))
+        result = sync_stream_card(
+            state_dir,
+            send_card=send_card,
+            update_card=update_card,
+            ledger=ledger,
+            member=member,
+        )
+        atomic_write_text(
+            ledger_path,
+            json.dumps(result["ledger"], ensure_ascii=False, indent=2) + "\n",
+        )
     return result

@@ -7,6 +7,7 @@ import pytest
 
 from zf.integrations.feishu.lark_cli import (
     LarkCliBitableClient,
+    LarkCliChatAdminClient,
     LarkCliDocumentClient,
     LarkCliResult,
     LarkCliRunner,
@@ -123,6 +124,84 @@ def test_runner_rejects_commands_outside_allowlist():
 
     with pytest.raises(FeishuTransportError, match="not allowed"):
         runner.run(["im", "+send"])
+
+
+def test_runner_accepts_restricted_project_group_im_commands(monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    runner = LarkCliRunner(executable="/bin/true", check_version=False)
+
+    runner.run(["im", "+chat-create", "--name", "ZaoFu"])
+    runner.run(["im", "chat.members", "create", "--params", "{}", "--data", "{}"])
+
+    assert calls[0][1:3] == ["im", "+chat-create"]
+    assert calls[1][1:4] == ["im", "chat.members", "create"]
+
+
+def test_chat_admin_client_creates_and_verifies_required_members():
+    runner = StubRunner([
+        {"chat_id": "oc_project", "name": "ZaoFu · project"},
+        {"users": [{"member_id": "ou_owner"}], "bots": [{"app_id": "cli_runm"}]},
+        {},
+        {"users": [{"member_id": "ou_owner"}], "bots": [
+            {"app_id": "cli_runm"}, {"app_id": "cli_kanban"},
+        ]},
+    ])
+    client = LarkCliChatAdminClient(runner)
+
+    created = client.create_group(
+        name="ZaoFu · project",
+        owner_open_id="ou_owner",
+        bot_app_ids=["cli_runm", "cli_kanban"],
+        provisioner_app_id="cli_runm",
+    )
+    verified = client.ensure_members(
+        created["chat_id"],
+        owner_open_id="ou_owner",
+        bot_app_ids=["cli_runm", "cli_kanban"],
+    )
+
+    assert created["chat_id"] == "oc_project"
+    create_command = runner.calls[0][0]
+    assert create_command[:2] == ["im", "+chat-create"]
+    assert create_command[create_command.index("--bots") + 1] == "cli_kanban"
+    assert verified["verified"] is True
+    member_create = runner.calls[2][0]
+    assert member_create[:3] == ["im", "chat.members", "create"]
+    assert '"member_id_type":"app_id"' in member_create[member_create.index("--params") + 1]
+
+
+def test_chat_admin_client_uses_bot_app_id_not_member_id_for_verification():
+    client = LarkCliChatAdminClient(
+        StubRunner([
+            {
+                "users": [{"member_id": "ou_owner"}],
+                "bots": [{"member_id": "ou_bot_identity", "app_id": "cli_kanban"}],
+            }
+        ])
+    )
+
+    members = client.list_members("oc_project")
+
+    assert members == {"users": {"ou_owner"}, "bots": {"cli_kanban"}}
+
+
+def test_chat_admin_client_requires_members_list_capability(monkeypatch):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout="lark-cli version 1.0.56\n", stderr=""
+        ),
+    )
+
+    with pytest.raises(FeishuTransportError, match="require >= 1.0.64"):
+        LarkCliChatAdminClient(LarkCliRunner(executable="/bin/true"))
 
 
 def test_runner_parses_success_json(monkeypatch):

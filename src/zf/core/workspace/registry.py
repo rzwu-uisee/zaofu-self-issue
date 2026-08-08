@@ -256,9 +256,18 @@ class WorkspaceRegistry:
 
 
 def registry_path(*, workspace: str = "default", home: Path | None = None) -> Path:
+    return workspace_home(home) / "workspaces" / _safe_segment(workspace) / "projects.json"
+
+
+def workspace_home(home: Path | None = None) -> Path:
+    """Return the local workspace registry root.
+
+    Feishu provider bridges use this same root to discover every registered
+    workspace.  Keeping the lookup here avoids a second interpretation of
+    ``ZF_WORKSPACE_HOME`` in integration code.
+    """
     env_home = os.environ.get("ZF_WORKSPACE_HOME", "").strip()
-    root = Path(env_home).expanduser() if env_home else (home or Path.home()) / ".zaofu"
-    return root / "workspaces" / _safe_segment(workspace) / "projects.json"
+    return Path(env_home).expanduser() if env_home else (home or Path.home()) / ".zaofu"
 
 
 def stable_project_id(*, name: str, root: Path) -> str:

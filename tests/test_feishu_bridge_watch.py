@@ -10,6 +10,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -18,11 +19,16 @@ from zf.cli.main import main
 from zf.core.config.project_context import resolve_project_context
 from zf.core.events.log import EventLog
 from zf.integrations.feishu.bridge_watch import (
+    BridgeProjectionLoop,
     BridgeWatch,
     _catchup_chat_id,
     _catchup_on_start,
+    _configured_projection_targets,
     merge_batch,
+    push_bridge_projections_once,
     sdk_log_level,
+    should_ignore_inbound_message,
+    workspace_message_is_addressed,
 )
 from zf.integrations.feishu.transport import MockFeishuTransport
 from zf.runtime.channel_projection import project_channel
@@ -80,6 +86,336 @@ def test_sdk_log_level_avoids_info_urls():
         LogLevel = FakeLogLevel
 
     assert sdk_log_level(FakeLark) == "warning"
+
+
+def test_bridge_ignores_app_cards_but_keeps_user_content() -> None:
+    assert should_ignore_inbound_message(
+        text="",
+        message_type="interactive",
+        sender_type="app",
+    )
+    assert should_ignore_inbound_message(
+        text="",
+        message_type="system",
+        sender_type="user",
+    )
+    assert not should_ignore_inbound_message(
+        text="附件说明",
+        message_type="post",
+        sender_type="user",
+    )
+
+
+def test_workspace_primary_responder_accepts_unmentioned_group_message() -> None:
+    resolution = SimpleNamespace(
+        binding=SimpleNamespace(primary_responder="kanban_agent"),
+        index_route=SimpleNamespace(purpose="kanban_agent"),
+    )
+    secondary = SimpleNamespace(
+        binding=SimpleNamespace(primary_responder="kanban_agent"),
+        index_route=SimpleNamespace(purpose="run_manager"),
+    )
+
+    assert workspace_message_is_addressed(
+        mention_ids=[],
+        bot_open_id="ou_kanban",
+        chat_type="group",
+        resolution=resolution,
+    ) is True
+    assert workspace_message_is_addressed(
+        mention_ids=[],
+        bot_open_id="ou_runm",
+        chat_type="group",
+        resolution=secondary,
+    ) is False
+    assert workspace_message_is_addressed(
+        mention_ids=["ou_runm"],
+        bot_open_id="ou_runm",
+        chat_type="group",
+        resolution=secondary,
+    ) is True
+
+
+def test_bridge_projection_loop_is_wakeable_and_stoppable():
+    calls: list[str] = []
+    loop = BridgeProjectionLoop(calls.append, interval_seconds=10)
+    assert loop.tick_once() is False
+    loop.add_target("oc_owner")
+    assert loop.tick_once() is True
+    assert calls == ["oc_owner"]
+    loop.start()
+    loop.stop()
+
+
+def test_bridge_projection_loop_round_robins_multiple_targets():
+    calls: list[str] = []
+    loop = BridgeProjectionLoop(calls.append, interval_seconds=10)
+    loop.add_target("oc_second")
+    loop.add_target("oc_first")
+
+    assert loop.tick_once() is True
+    assert loop.tick_once() is True
+    assert loop.tick_once() is True
+    assert calls == ["oc_first", "oc_second", "oc_first"]
+
+
+def test_configured_projection_targets_respect_app_scope():
+    context = SimpleNamespace(config=SimpleNamespace(
+        integrations=SimpleNamespace(feishu_routing={
+            "cli_this:oc_owner": SimpleNamespace(target="kanban_agent"),
+            "cli_other:oc_other": SimpleNamespace(target="kanban_agent"),
+            "oc_shared#ou_bot": SimpleNamespace(target="channel"),
+            "*": SimpleNamespace(target="channel"),
+        }),
+    ))
+    assert _configured_projection_targets(context, "cli_this") == [
+        "oc_owner",
+        "oc_shared",
+    ]
+
+
+def test_bridge_projection_pump_includes_control_loop_cards(tmp_path, monkeypatch):
+    calls: list[tuple[str, str]] = []
+    delivery_skips: list[set[str]] = []
+
+    def fake(name):
+        def run(state_dir, transport, **kwargs):
+            calls.append((name, str(kwargs.get("receive_id") or "exact")))
+            if name == "delivery":
+                delivery_skips.append(set(kwargs.get("skip_request_ids") or ()))
+            result = {"sent": [name], "updated": []}
+            if name == "stream":
+                result["visible_request_ids"] = ["reply-stream"]
+            return result
+        return run
+
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_plan_card.push_kanban_plan_cards_once",
+        fake("plan"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_proposal_card.push_kanban_proposal_cards_once",
+        fake("proposal"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_question_card.push_channel_question_cards_once",
+        fake("question"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_progress_card.push_channel_progress_cards_once",
+        fake("progress"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_result_card.push_channel_result_cards_once",
+        fake("result"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.delivery_card.push_delivery_cards_once",
+        fake("delivery"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.stream_card.push_stream_card_once",
+        fake("stream"),
+    )
+    context = SimpleNamespace(
+        state_dir=tmp_path / ".zf",
+        config=SimpleNamespace(integrations=SimpleNamespace(feishu_identity=None)),
+    )
+
+    counts = push_bridge_projections_once(context, object(), "oc_owner")
+
+    assert counts == {
+        "plans": 1,
+        "proposals": 1,
+        "questions": 1,
+        "progress": 1,
+        "results": 1,
+        "delivery": 1,
+        "stream": 1,
+    }
+    assert calls == [
+        ("plan", "oc_owner"),
+        ("proposal", "oc_owner"),
+        ("question", "oc_owner"),
+        ("progress", "exact"),
+        ("result", "exact"),
+        ("stream", "oc_owner"),
+        ("delivery", "oc_owner"),
+    ]
+    assert delivery_skips == [{"reply-stream"}]
+
+
+def test_bridge_projection_failure_does_not_starve_later_cards(tmp_path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_plan_card.push_kanban_plan_cards_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("plan offline")),
+    )
+
+    def succeeding(name):
+        def run(*args, **kwargs):
+            calls.append(name)
+            return {"sent": [], "updated": []}
+        return run
+
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_proposal_card.push_kanban_proposal_cards_once",
+        succeeding("proposal"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_question_card.push_channel_question_cards_once",
+        succeeding("question"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_progress_card.push_channel_progress_cards_once",
+        succeeding("progress"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_result_card.push_channel_result_cards_once",
+        succeeding("result"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.delivery_card.push_delivery_cards_once",
+        succeeding("delivery"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.stream_card.push_stream_card_once",
+        succeeding("stream"),
+    )
+    context = SimpleNamespace(
+        state_dir=tmp_path / ".zf",
+        config=SimpleNamespace(integrations=SimpleNamespace(feishu_identity=None)),
+    )
+
+    counts = push_bridge_projections_once(context, object(), "oc_owner")
+
+    assert counts["plans"] == 0
+    assert calls == [
+        "proposal",
+        "question",
+        "progress",
+        "result",
+        "stream",
+        "delivery",
+    ]
+
+
+def test_bridge_projection_skips_kanban_controls_when_disabled(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fake(name):
+        def run(*args, **kwargs):
+            calls.append(name)
+            return {"sent": [], "updated": []}
+        return run
+
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_plan_card.push_kanban_plan_cards_once",
+        fake("plan"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_proposal_card.push_kanban_proposal_cards_once",
+        fake("proposal"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_question_card.push_channel_question_cards_once",
+        fake("question"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_progress_card.push_channel_progress_cards_once",
+        fake("progress"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_result_card.push_channel_result_cards_once",
+        fake("result"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.delivery_card.push_delivery_cards_once",
+        fake("delivery"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.stream_card.push_stream_card_once",
+        fake("stream"),
+    )
+    context = SimpleNamespace(
+        state_dir=tmp_path / ".zf",
+        config=SimpleNamespace(integrations=SimpleNamespace(feishu_identity=None)),
+    )
+
+    counts = push_bridge_projections_once(
+        context,
+        object(),
+        "oc_owner",
+        include_kanban_controls=False,
+    )
+
+    assert counts["plans"] == 0
+    assert counts["proposals"] == 0
+    assert calls == ["question", "progress", "result", "stream", "delivery"]
+
+
+def test_bridge_projection_skips_channel_controls_when_disabled(tmp_path, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake(name):
+        def run(*args, **kwargs):
+            calls.append((name, kwargs))
+            return {"sent": [], "updated": []}
+        return run
+
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_plan_card.push_kanban_plan_cards_once",
+        fake("plan"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.kanban_proposal_card.push_kanban_proposal_cards_once",
+        fake("proposal"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_question_card.push_channel_question_cards_once",
+        fake("question"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_progress_card.push_channel_progress_cards_once",
+        fake("progress"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.channel_result_card.push_channel_result_cards_once",
+        fake("result"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.delivery_card.push_delivery_cards_once",
+        fake("delivery"),
+    )
+    monkeypatch.setattr(
+        "zf.integrations.feishu.stream_card.push_stream_card_once",
+        fake("stream"),
+    )
+    context = SimpleNamespace(
+        state_dir=tmp_path / ".zf",
+        config=SimpleNamespace(integrations=SimpleNamespace(feishu_identity=None)),
+    )
+
+    counts = push_bridge_projections_once(
+        context,
+        object(),
+        "oc_owner",
+        include_kanban_controls=False,
+        include_channel_controls=False,
+        member_id="run-manager",
+    )
+
+    assert counts == {
+        "plans": 0,
+        "proposals": 0,
+        "questions": 0,
+        "progress": 0,
+        "results": 0,
+        "stream": 0,
+        "delivery": 0,
+    }
+    assert [name for name, _kwargs in calls] == ["stream", "delivery"]
+    assert all(kwargs.get("member") == "run-manager" for _name, kwargs in calls)
 
 
 def test_catchup_chat_id_extracts_multi_bot_route_keys():
@@ -344,7 +680,7 @@ def test_kanban_agent_route_enters_agent_conversation(tmp_path: Path, monkeypatc
 
     result = dispatch_inbound_async(ev, context=ctx, transport=transport).result(5)
 
-    assert result["kind"] == "kanban_agent_conversation"
+    assert result["kind"] == "kanban_agent_canonical_status"
     channel = project_channel(ctx.state_dir, "feishu-kanban_agent-oc_group") or {}
     member = next(
         member for member in channel.get("members", [])

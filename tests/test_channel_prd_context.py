@@ -4,9 +4,13 @@ from pathlib import Path
 
 from zf.core.events import EventLog, EventWriter
 from zf.runtime.channel_prd_context import (
+    canonical_channel_prd_authority,
     canonical_channel_prd_context,
     workflow_context_for_project,
     workflow_context_from_payload,
+)
+from zf.integrations.feishu.kanban_context import (
+    build_feishu_kanban_planning_context,
 )
 
 
@@ -18,7 +22,22 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
     writer.emit(
         "channel.created",
         actor="test",
-        payload={"channel_id": "ch-prd", "name": "PRD review"},
+        payload={
+            "channel_id": "ch-prd",
+            "name": "PRD review",
+            "leader_member_id": "product_pm",
+            "leader_revision": 2,
+            "origin_binding": {
+                "schema_version": "channel-origin-binding.v1",
+                "surface": "feishu",
+                "channel_id": "ch-prd",
+                "thread_id": "main",
+                "chat_id": "oc_prd",
+                "origin_message_id": "om_prd_root",
+                "root_message_id": "om_prd_root",
+                "source_message_id": "om_prd_source",
+            },
+        },
     )
     synthesis = writer.emit(
         "channel.synthesis.proposed",
@@ -49,6 +68,7 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
             "readiness_digest": "readiness",
             "readiness_verdict": "ready",
             "implementation_start": True,
+            "prd_revision": 3,
             "source_refs": ["channel:ch-prd/main"],
         },
     )
@@ -87,6 +107,36 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
         ],
         "updated_at": reached.ts,
     }]
+    authority = canonical_channel_prd_authority(
+        state_dir,
+        channel_id="ch-prd",
+        thread_id="main",
+    )
+    assert authority == {
+        "channel_id": "ch-prd",
+        "thread_id": "main",
+        "channel_member_id": "product_pm",
+        "leader_revision": 2,
+        "prd_revision": 3,
+        "source_ref": "channel-artifacts/ch-prd/prd.md",
+        "source_digest": "canonical",
+    }
+    matched = build_feishu_kanban_planning_context(
+        state_dir,
+        None,
+        chat_id="oc_prd",
+        root_message_id="om_prd_root",
+    )
+    mismatched = build_feishu_kanban_planning_context(
+        state_dir,
+        None,
+        chat_id="oc_prd",
+        root_message_id="om_other_root",
+    )
+    assert matched["selection_status"] == "exact"
+    assert matched["workflow_parameters"] == authority
+    assert mismatched["selection_status"] == "unavailable"
+    assert mismatched["workflow_parameters"] == {}
 
 
 def test_workflow_context_from_payload_is_a_defensive_mapping_copy() -> None:

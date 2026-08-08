@@ -30,6 +30,7 @@ ALLOWED_OVERRIDE_KEYS = {
     "writer_role",
     "writer_scope",
     "budget",
+    "discussion_mode",
 }
 ALLOWED_ROLE_OVERRIDE_KEYS = {"backend", "model", "enabled"}
 ALLOWED_BUDGET_KEYS = {"max_rounds", "max_parallel_replies", "phase_deadline_seconds"}
@@ -287,6 +288,13 @@ def materialize_channel_template(
         return None, f"unsupported channel template override: {', '.join(unknown)}"
 
     result = deepcopy(CHANNEL_TEMPLATES[template_id])
+    discussion_mode = str(override_map.get("discussion_mode") or "").strip()
+    if discussion_mode:
+        if discussion_mode not in {"conversation", "clarification", "multi_lens"}:
+            return None, (
+                "discussion_mode must be conversation, clarification, or multi_lens"
+            )
+        result.setdefault("discussion", {})["mode"] = discussion_mode
     members = result["members"]
     by_role = {str(member["channel_role"]): member for member in members}
     backend = str(override_map.get("backend") or "codex").strip()

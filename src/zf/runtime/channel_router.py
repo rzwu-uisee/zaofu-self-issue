@@ -14,6 +14,8 @@ from zf.core.events.model import ZfEvent
 from zf.runtime.channel_adapter import dispatch_reply_request
 from zf.runtime.channel_contracts import (
     MAX_CHANNEL_PARALLEL_REPLIES,
+    active_channel_resolved_skill_refs,
+    active_channel_skill_refs,
     channel_max_parallel_replies,
     default_debate_max_rounds,
     discussion_engine_mode,
@@ -110,6 +112,9 @@ def route_channel_message(
     config: ZfConfig | None = None,
     openclaw_client: OpenClawGatewayClient | None = None,
     dispatch_inline: bool = True,
+    agent_context: dict[str, Any] | None = None,
+    deterministic_reply: str | None = None,
+    deterministic_reason: str = "",
 ) -> ChannelRouteResult:
     channel_id = str(message_payload.get("channel_id") or "").strip()
     thread_id = str(message_payload.get("thread_id") or "main").strip() or "main"
@@ -379,6 +384,16 @@ def route_channel_message(
             skipped.append({"target_member_id": target_member_id, "reason": "context_pack_rejected"})
             continue
         member = _member_by_id(channel, target_member_id)
+        discussion = (
+            channel.get("discussion")
+            if isinstance(channel.get("discussion"), dict)
+            else {}
+        )
+        discussion_mode = (
+            discussion.get("mode")
+            or discussion.get("product_mode")
+            or "conversation"
+        )
         try:
             context_pack = build_channel_context_pack(
                 channel,
@@ -389,10 +404,17 @@ def route_channel_message(
                 visibility_profile=str(member.get("visibility_profile") or ""),
                 channel_role=str(member.get("channel_role") or ""),
                 role_context_ref=str(member.get("role_context_ref") or ""),
-                skill_refs=member.get("skill_refs", []),
-                resolved_skill_refs=member.get("resolved_skill_refs", []),
+                skill_refs=active_channel_skill_refs(
+                    member.get("skill_refs", []),
+                    discussion_mode=discussion_mode,
+                ),
+                resolved_skill_refs=active_channel_resolved_skill_refs(
+                    member.get("resolved_skill_refs", []),
+                    discussion_mode=discussion_mode,
+                ),
                 permission_profile=str(member.get("permission_profile") or ""),
                 profile_binding=member,
+                agent_context=agent_context,
                 state_dir=Path(state_dir),
                 project_root=project_root,
             )
@@ -545,6 +567,8 @@ def route_channel_message(
                 headless_backends=headless_backends,
                 config=config,
                 openclaw_client=openclaw_client,
+                deterministic_reply=deterministic_reply,
+                deterministic_reason=deterministic_reason,
             )
     if (
         relay_decision is not None

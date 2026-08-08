@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **68** top-level families and **252** addressable command paths.
+The parser currently exposes **68** top-level families and **256** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -265,6 +265,10 @@ Handle Feishu bridge commands
 | `zf feishu bridge` | One-shot turnkey reply: inbound message to channel to real agent reply |
 | `zf feishu consume` | Ingest live Feishu events via lark-cli (WS long-conn, no webhook) |
 | `zf feishu cron-template` | Print crontab entries for daily Automation and hourly Kanban sync |
+| `zf feishu group` | Inspect or explicitly provision a project Feishu collaboration group |
+| `zf feishu group attach` | Verify and attach an existing Feishu chat to the configured binding |
+| `zf feishu group provision` | Create/verify the configured Feishu project group (external write) |
+| `zf feishu group status` | Show project group binding state |
 | `zf feishu handle` | Handle one Feishu webhook/message fixture |
 | `zf feishu init-targets` | Create Feishu Docx/Base/Table targets for Automation and Kanban sync |
 | `zf feishu live-smoke` | Run a cleanup-safe smoke against the real Feishu API |

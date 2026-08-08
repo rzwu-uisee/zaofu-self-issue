@@ -145,6 +145,7 @@ def workflow_route_catalog(config: Any | None) -> dict[str, Any]:
                 else "fixed_research"
             ),
             "rollout": template.rollout,
+            "task_binding_policy": "workflow_request_for_channel_prd",
             "available": True,
         })
 

@@ -207,7 +207,7 @@ def test_empty_terminal_refold_does_not_stomp_good_card(tmp_path, monkeypatch):
         return st
 
     calls = {"sent": [], "updated": []}
-    send = lambda card: (calls["sent"].append(card), "om_msg_1")[1]
+    send = lambda card, state: (calls["sent"].append(card), "om_msg_1")[1]
     update = lambda mid, card, seq=0: calls["updated"].append((mid, card, seq))
     ledger: dict = {}
 
@@ -236,7 +236,7 @@ def test_empty_terminal_first_send_is_skipped(tmp_path, monkeypatch):
     st = new_stream_state("R9"); st["terminal"] = "done"  # empty + terminal
 
     calls = {"sent": []}
-    send = lambda card: (calls["sent"].append(card), "om_x")[1]
+    send = lambda card, state: (calls["sent"].append(card), "om_x")[1]
     update = lambda *a, **k: None
     monkeypatch.setattr(sc, "_fold_stream_states",
                         lambda events, member="": {"R9": st})
@@ -256,6 +256,70 @@ def test_running_empty_reply_still_gets_thinking_card(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(sc, "_fold_stream_states",
                         lambda events, member="": {"R8": st})
-    sc.sync_stream_card(tmp_path, send_card=lambda c: (sent.append(c), "om")[1],
+    sc.sync_stream_card(tmp_path, send_card=lambda c, state: (sent.append(c), "om")[1],
                         update_card=lambda *a, **k: None, ledger={})
     assert len(sent) == 1
+
+
+def test_terminal_hydrates_canonical_reply_after_live_delta_race(
+    tmp_path,
+    monkeypatch,
+):
+    """The thinking card may be sent before any text delta is observed. Once
+    the ephemeral bus rotates, the committed assistant message is the final
+    source of truth and must close the existing card with real content."""
+    from zf.core.events import EventLog, EventWriter
+    from zf.integrations.feishu import stream_card as sc
+    from zf.runtime.channel_sidecar import channel_message_event_payload
+
+    writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    payload = channel_message_event_payload(
+        tmp_path,
+        {
+            "channel_id": "ch-stream",
+            "thread_id": "main",
+            "message_id": "msg-final",
+            "member_id": "kanban-agent",
+            "role": "assistant",
+            "source": "runtime",
+            "text": "Canonical final reply from the committed sidecar.",
+            "refs": {"request_id": "R10"},
+        },
+        created_by="test",
+    )
+    writer.emit(
+        "channel.message.posted",
+        actor="kanban-agent",
+        correlation_id="ch-stream",
+        payload=payload,
+    )
+    state = new_stream_state("R10")
+    state["terminal"] = "done"
+    monkeypatch.setattr(
+        sc,
+        "_fold_stream_states",
+        lambda events, member="": {"R10": state},
+    )
+    updated = []
+    ledger = {
+        "stream-R10": {
+            "message_id": "om-thinking",
+            "seq": 0,
+            "sig": "running|thinking|0",
+            "terminal": "running",
+            "had_content": False,
+        },
+    }
+
+    result = sc.sync_stream_card(
+        tmp_path,
+        send_card=lambda card, state: "unused",
+        update_card=lambda message_id, card, seq=0: updated.append(
+            (message_id, card, seq)
+        ),
+        ledger=ledger,
+    )
+
+    assert result["updated"] == ["R10"]
+    assert ledger["stream-R10"]["had_content"] is True
+    assert "Canonical final reply" in json.dumps(updated[0][1])

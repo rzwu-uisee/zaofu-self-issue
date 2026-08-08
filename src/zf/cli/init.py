@@ -151,6 +151,12 @@ def run(args: argparse.Namespace) -> int:
             "  + feishu default channel bootstrap "
             f"{result.feishu_channel_bootstrap}: zaofu"
         )
+    if result.feishu_project_group_binding:
+        print(
+            "  + feishu project collaboration group binding "
+            f"{result.feishu_project_group_binding}; inspect with "
+            "`zf feishu group status`"
+        )
     if result.git_hook_status == "installed":
         print("  + git pre-commit hook installed (runtime truth guard and large-stage circuit breaker)")
     elif result.git_hook_status == "exists":

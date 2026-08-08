@@ -16,7 +16,10 @@ from zf.runtime.kanban_proposals import (
     canonical_proposal_action,
     proposal_payload_digest,
 )
-from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.task_workflow_plans import (
+    task_workflow_binding_digest,
+    workflow_route_task_eligibility_error,
+)
 from zf.runtime.workflow_anchor import workflow_task_request_binding
 from zf.runtime.workflow_origin import workflow_origin_digest
 from zf.runtime.workflow_requests import (
@@ -77,6 +80,13 @@ class WorkflowStartService:
                 status_code=409,
                 task_id=task_id,
             )
+        routes = [dict(route) for route in catalog.get("routes") or []]
+        for route in routes:
+            reason = workflow_route_task_eligibility_error(route, task)
+            if reason:
+                route["available"] = False
+                route["task_eligibility"] = "blocked"
+                route["task_eligibility_reason"] = reason
         return {
             "ok": True,
             "status": "ready",
@@ -86,6 +96,7 @@ class WorkflowStartService:
             "task_title": task.title,
             "task_contract_digest": task_workflow_binding_digest(task),
             **catalog,
+            "routes": routes,
         }
 
     def preview(
@@ -278,6 +289,14 @@ class WorkflowStartService:
                 "workflow_route_unavailable",
                 f"workflow route {route_id!r} is stale or unavailable",
                 status_code=409,
+                task_id=task_id,
+            )
+        eligibility_error = workflow_route_task_eligibility_error(route, task)
+        if eligibility_error:
+            return _failure(
+                "workflow_route_ineligible",
+                eligibility_error,
+                status_code=422,
                 task_id=task_id,
             )
         if str(route.get("family") or "") == "delivery":

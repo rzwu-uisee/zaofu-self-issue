@@ -35,6 +35,51 @@ def channel_plan_discussion_seed_digest(seed: str) -> str:
     return "sha256:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def channel_plan_feishu_origin(
+    request_event: ZfEvent,
+    *,
+    channel_id: str,
+    thread_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Derive an external return target from runtime-owned Plan refs."""
+
+    payload = request_event.payload if isinstance(request_event.payload, dict) else {}
+    refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+    raw = refs.get("feishu") if isinstance(refs.get("feishu"), dict) else {}
+    allowed = (
+        "agent_kind",
+        "chat_id",
+        "message_id",
+        "parent_message_id",
+        "quote_message_id",
+        "root_message_id",
+        "thread_id",
+    )
+    feishu = {
+        key: str(raw.get(key) or "")
+        for key in allowed
+        if str(raw.get(key) or "")
+    }
+    chat_id = str(feishu.get("chat_id") or "")
+    source_message_id = str(feishu.get("message_id") or "")
+    if not chat_id or not source_message_id:
+        return {}, {}
+    root_message_id = str(feishu.get("root_message_id") or "")
+    parent_message_id = str(feishu.get("parent_message_id") or "")
+    return {
+        "schema_version": "channel-origin-binding.v1",
+        "surface": "feishu",
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "chat_id": chat_id,
+        "origin_message_id": (
+            root_message_id or parent_message_id or source_message_id
+        ),
+        "root_message_id": root_message_id,
+        "source_message_id": source_message_id,
+    }, {"feishu": feishu}
+
+
 def originating_plan_message(
     state_dir: Path,
     events: list[ZfEvent],
@@ -150,6 +195,7 @@ def shared_workflow_parameters(value: object) -> dict[str, Any]:
 __all__ = [
     "channel_plan_discussion_seed",
     "channel_plan_discussion_seed_digest",
+    "channel_plan_feishu_origin",
     "latest_plan_revision",
     "latest_task_binding_event_id",
     "originating_plan_message",

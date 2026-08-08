@@ -252,10 +252,14 @@ capabilities:
         - docs/manual/19-feishu-ai-native-direct-bridge.en.md
     code:
       - src/zf/integrations/feishu/lark_cli.py
+      - src/zf/integrations/feishu/project_group_binding.py
       - src/zf/runtime/feishu_projection_sidecar.py
+      - src/zf/runtime/feishu_inbound_sidecar.py
     tests:
       - tests/test_feishu_ai_native_loop_e2e.py
+      - tests/test_feishu_project_group_binding.py
       - tests/test_feishu_projection_sidecar.py
+      - tests/test_workspace_feishu_bridge.py
     release:
       activation: Configure sanctioned Feishu targets/credentials and start the enabled projection/inbound sidecars.
       readback: Verify outbound topic/thread projection, inbound identity/intent refs, queue status, and event causation.

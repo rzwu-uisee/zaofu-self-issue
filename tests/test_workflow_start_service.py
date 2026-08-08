@@ -194,6 +194,48 @@ def test_service_rejects_missing_route_and_stale_bindings(
     assert stale_config["status"] == "workflow_route_unavailable"
 
 
+def test_channel_prd_task_marks_unbound_research_route_ineligible(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir = _project(tmp_path)
+    config = load_config(project_root / "zf.yaml")
+    store = TaskStore(state_dir / "kanban.json")
+    task = store.get("TASK-WORKFLOW-START")
+    assert task is not None
+    task.contract.source_mode = "channel_prd"
+    task.contract.source_ref = "channel-artifacts/ch-prd/prd.md"
+    task.contract.source_revision = "1"
+    task.contract.evidence_contract = {
+        "channel_id": "ch-prd",
+        "thread_id": "main",
+        "channel_member_id": "product_pm",
+        "leader_revision": 1,
+        "prd_revision": 1,
+        "source_digest": "sha256:canonical",
+    }
+    store.update(task.id, contract=task.contract)
+    service = WorkflowStartService(state_dir, config)
+
+    routes = service.routes(task_id=task.id)
+    preview = service.preview(
+        {
+            "task_id": task.id,
+            "route_id": "research:fixed",
+            "objective": "Research the confirmed PRD.",
+        },
+        require_bindings=False,
+    )
+
+    research = next(
+        route for route in routes["routes"]
+        if route["route_id"] == "research:fixed"
+    )
+    assert research["available"] is False
+    assert research["task_eligibility"] == "blocked"
+    assert preview["status"] == "workflow_route_ineligible"
+    assert "Workflow Request binding" in preview["reason"]
+
+
 def test_delivery_route_rejects_incomplete_task_contract_before_invoke(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,10 @@ from zf.runtime.channel_contracts import (
     permission_profile_write_policy,
 )
 from zf.integrations.feishu.thread_scope import feishu_thread_id
+from zf.integrations.feishu.kanban_context import (
+    build_feishu_kanban_planning_context,
+)
+from zf.integrations.feishu.plan_repair import repair_invalid_feishu_plan
 from zf.runtime.kanban_proposals import PROPOSAL_EVENT
 
 
@@ -34,6 +38,8 @@ def run_specialist_conversation(
     default_member: str,
     display_name: str,
     source: str,
+    deterministic_reply: str | None = None,
+    deterministic_reason: str = "",
 ) -> dict[str, Any]:
     """Route one Feishu message to the selected specialist agent.
 
@@ -60,6 +66,17 @@ def run_specialist_conversation(
         getattr(route, "permission_profile", "read_only")
     )
     dangerous_ack = bool(getattr(route, "dangerous_ack", False))
+    planning_context = (
+        build_feishu_kanban_planning_context(
+            state,
+            config,
+            chat_id=chat_id,
+            root_message_id=str(payload.get("root_message_id") or ""),
+            parent_message_id=str(payload.get("parent_message_id") or ""),
+        )
+        if agent_kind == "kanban_agent"
+        else {}
+    )
 
     _ensure_channel(
         state,
@@ -119,20 +136,30 @@ def run_specialist_conversation(
         actor=source,
         source=source,
         project_root=project_root,
+        agent_context=planning_context,
+        deterministic_reply=deterministic_reply,
+        deterministic_reason=deterministic_reason,
     )
     result = {
         "status": "replied",
-        "kind": f"{agent_kind}_conversation",
+        "kind": (
+            f"{agent_kind}_canonical_status"
+            if deterministic_reply is not None
+            else f"{agent_kind}_conversation"
+        ),
         "target": agent_kind,
         "channel_id": channel_id,
         "member_id": member_id,
         "backend": backend,
         "thread_id": thread_id,
         "permission_profile": permission_profile,
+        "reply_mode": (
+            "deterministic" if deterministic_reply is not None else "provider"
+        ),
         "reply_requests": list(turn["route"].reply_requests),
         "dispatched": len(turn["dispatched"]),
     }
-    if agent_kind == "kanban_agent":
+    if agent_kind == "kanban_agent" and deterministic_reply is None:
         interaction = _emit_kanban_interaction(
             state,
             writer,
@@ -147,6 +174,8 @@ def run_specialist_conversation(
             source=source,
             backend=backend,
             permission_profile=permission_profile,
+            planning_context=planning_context,
+            project_root=project_root,
         )
         result.update(interaction)
     return result
@@ -160,6 +189,7 @@ def continue_kanban_plan_response(
     request_event_id: str,
     option_id: str,
     answer: str = "",
+    answers: list[dict[str, str]] | None = None,
     user_id: str = "",
     chat_id: str = "",
     message_id: str = "",
@@ -202,6 +232,11 @@ def continue_kanban_plan_response(
         if isinstance(source_payload.get("refs"), dict)
         else {}
     )
+    planning_context = (
+        source_payload.get("planning_context")
+        if isinstance(source_payload.get("planning_context"), dict)
+        else {}
+    )
     feishu_refs = (
         refs.get("feishu")
         if isinstance(refs.get("feishu"), dict)
@@ -228,6 +263,7 @@ def continue_kanban_plan_response(
         question_id=str(request.get("question_id") or ""),
         option_id=option_id,
         answer=answer,
+        answers=answers,
     )
     if not gate.get("ok"):
         return {
@@ -252,6 +288,7 @@ def continue_kanban_plan_response(
             "question_id": str(gate.get("question_id") or ""),
             "option_id": str(gate.get("option_id") or ""),
             "answer": str(gate.get("answer") or ""),
+            "answers": list(gate.get("answers") or []),
         }
         requested = writer.emit(
             "runtime.action.requested",
@@ -293,6 +330,7 @@ def continue_kanban_plan_response(
         "question_id": str(gate.get("question_id") or ""),
         "option_id": str(gate.get("option_id") or ""),
         "answer": str(gate.get("answer") or ""),
+        "answers": list(gate.get("answers") or []),
         "source": "feishu",
         "channel_id": channel_id,
         "conversation_id": str(
@@ -303,6 +341,7 @@ def continue_kanban_plan_response(
         "member_id": member_id,
         "refs": {
             "feishu": {
+                **feishu_refs,
                 "chat_id": chat_id or expected_chat_id,
                 "message_id": message_id,
             },
@@ -315,9 +354,9 @@ def continue_kanban_plan_response(
         correlation_id=request_event.correlation_id or channel_id,
         payload=response_payload,
     )
-    continuation_text = (
-        f"Plan: {str(request.get('question') or '').strip()}\n"
-        f"Answer: {str(gate.get('answer') or '').strip()}"
+    continuation_text = _plan_continuation_text(
+        request,
+        list(gate.get("answers") or []),
     )
     msg = writer.emit(
         "channel.message.posted",
@@ -349,6 +388,7 @@ def continue_kanban_plan_response(
         actor=source,
         source=source,
         project_root=project_root,
+        agent_context=planning_context,
     )
     interaction = _emit_kanban_interaction(
         Path(state_dir),
@@ -374,6 +414,8 @@ def continue_kanban_plan_response(
             request,
             continuation_text,
         ),
+        planning_context=planning_context,
+        project_root=project_root,
     )
     return {
         "ok": True,
@@ -386,6 +428,33 @@ def continue_kanban_plan_response(
         "dispatched": len(turn["dispatched"]),
         **interaction,
     }
+
+
+def _plan_continuation_text(
+    request: dict[str, Any],
+    answers: list[dict[str, Any]],
+) -> str:
+    questions = request.get("questions")
+    if not isinstance(questions, list) or not questions:
+        questions = [{
+            "id": str(request.get("question_id") or ""),
+            "question": str(request.get("question") or ""),
+        }]
+    answer_by_id = {
+        str(item.get("question_id") or ""): str(item.get("answer") or "")
+        for item in answers
+        if isinstance(item, dict)
+    }
+    lines = ["Plan answers:"]
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        question_id = str(question.get("id") or "")
+        lines.append(
+            f"- {str(question.get('question') or '').strip()}: "
+            f"{answer_by_id.get(question_id, '')}"
+        )
+    return "\n".join(lines)
 
 
 def _emit_kanban_interaction(
@@ -405,6 +474,9 @@ def _emit_kanban_interaction(
     permission_profile: str = "read_only",
     originating_message_event_id: str = "",
     proposal_user_text: str = "",
+    planning_context: dict[str, Any] | None = None,
+    repair_attempt: int = 0,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     from zf.runtime.kanban_plan_requests import (
         PLAN_REQUESTED_EVENT,
@@ -413,6 +485,7 @@ def _emit_kanban_interaction(
     )
     from zf.core.task.store import TaskStore
     from zf.runtime.task_workflow_plans import (
+        task_workflow_route_eligibility_map,
         task_workflow_binding_digest,
     )
     from zf.web.plan_extraction import extract_plan_request
@@ -429,10 +502,14 @@ def _emit_kanban_interaction(
         return {}
     thread_key = f"channel:{channel_id}:{thread_id}:{member_id}"
     origin_event_id = originating_message_event_id or trigger_event.id
+    tasks = TaskStore(state_dir / "kanban.json").list_all()
     task_binding_digests = {
         task.id: task_workflow_binding_digest(task)
-        for task in TaskStore(state_dir / "kanban.json").list_all()
+        for task in tasks
     }
+    bounded_context = (
+        planning_context if isinstance(planning_context, dict) else {}
+    )
     plan_request = extract_plan_request(
         reply_text,
         plan_context={
@@ -443,6 +520,16 @@ def _emit_kanban_interaction(
             "backend": backend,
             "originating_message_event_id": origin_event_id,
             "task_binding_digests": task_binding_digests,
+            "workflow_route_eligibility": (
+                task_workflow_route_eligibility_map(tasks, config)
+            ),
+            "workflow_parameters": (
+                bounded_context.get("workflow_parameters")
+                if isinstance(
+                    bounded_context.get("workflow_parameters"), dict
+                )
+                else {}
+            ),
         },
         config=config,
     )
@@ -470,8 +557,24 @@ def _emit_kanban_interaction(
             ),
         }
         proposal = None
+    trigger_payload = (
+        trigger_event.payload
+        if isinstance(getattr(trigger_event, "payload", None), dict)
+        else {}
+    )
+    trigger_refs = (
+        trigger_payload.get("refs")
+        if isinstance(trigger_payload.get("refs"), dict)
+        else {}
+    )
+    trigger_feishu = (
+        trigger_refs.get("feishu")
+        if isinstance(trigger_refs.get("feishu"), dict)
+        else {}
+    )
     refs = {
         "feishu": {
+            **trigger_feishu,
             "chat_id": chat_id,
             "message_id": feishu_message_id,
             "thread_id": thread_id,
@@ -500,12 +603,35 @@ def _emit_kanban_interaction(
             "backend": backend,
             "permission_profile": permission_profile,
             "originating_message_event_id": origin_event_id,
+            "planning_context": bounded_context,
             "plan_request": plan_request,
             "request": plan_request,
             "refs": refs,
         }
         writer.append(plan_event)
         result["plan_request"] = plan_request
+        if not bool(plan_request.get("valid")):
+            result["plan_repair"] = repair_invalid_feishu_plan(
+                state_dir,
+                writer,
+                config=config,
+                channel_id=channel_id,
+                member_id=member_id,
+                chat_id=chat_id,
+                feishu_message_id=feishu_message_id,
+                thread_id=thread_id,
+                source=source,
+                backend=backend,
+                permission_profile=permission_profile,
+                planning_context=bounded_context,
+                originating_message_event_id=origin_event_id,
+                plan_event=plan_event,
+                plan_request=plan_request,
+                repair_attempt=repair_attempt,
+                project_root=project_root,
+                run_reply_turn=run_channel_reply_turn,
+                emit_interaction=_emit_kanban_interaction,
+            )
     if proposal is not None:
         proposal_event = writer.emit(
             PROPOSAL_EVENT,

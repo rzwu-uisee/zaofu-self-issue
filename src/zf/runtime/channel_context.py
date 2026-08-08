@@ -39,6 +39,7 @@ def build_channel_context_pack(
     resolved_skill_refs: object = None,
     permission_profile: str = "",
     profile_binding: object = None,
+    agent_context: object = None,
     state_dir: Path | None = None,
     project_root: Path | None = None,
     max_messages: int = 8,
@@ -180,6 +181,9 @@ def build_channel_context_pack(
         "resolved_skill_refs": safe_resolved_skill_refs,
         "skill_metadata": _skill_metadata(safe_skill_refs),
         "collaboration_contract": collaboration_contract,
+        "agent_context": (
+            redact_obj(agent_context) if isinstance(agent_context, dict) else {}
+        ),
         "role_definition": role_definition,
         "summary": str((channel or {}).get("summary") or ""),
         "message_refs": [

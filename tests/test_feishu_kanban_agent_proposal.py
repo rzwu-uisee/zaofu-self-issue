@@ -20,6 +20,10 @@ from types import SimpleNamespace
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.integrations.feishu import agent_conversation
+from zf.integrations.feishu.kanban_proposal_card import (
+    push_kanban_proposal_cards_once,
+)
+from zf.integrations.feishu.transport import MockFeishuTransport
 
 
 CHAT_ID = "oc_feishu_chat_42"
@@ -89,6 +93,40 @@ def _plan_reply_json() -> str:
     }, ensure_ascii=False)
 
 
+def _task_create_plan_reply_json() -> str:
+    return json.dumps({
+        "plan_request": {
+            "subject_type": "task_create",
+            "header": "Create task",
+            "id": "create-task",
+            "question": "Create the confirmed PRD Task?",
+            "options": [
+                {
+                    "id": "create",
+                    "label": "Create (Recommended)",
+                    "recommended": True,
+                    "description": "Create one workflow-managed Task.",
+                    "effect": {
+                        "mode": "propose",
+                        "action": "create-task",
+                        "payload": {
+                            "title": "Implement the confirmed PRD",
+                            "objective": "Deliver the exact confirmed Channel PRD.",
+                        },
+                    },
+                },
+                {
+                    "id": "continue",
+                    "label": "Continue discussion",
+                    "description": "Do not create a Task yet.",
+                    "effect": {"mode": "continue"},
+                },
+            ],
+            "allow_other": False,
+        },
+    }, ensure_ascii=False)
+
+
 def _patch_reply_turn(monkeypatch, state_dir: Path, writer: EventWriter, reply_text: str):
     """Stand in for the synchronous dispatch: fold the agent's reply before
     run_specialist_conversation projects the channel for extraction."""
@@ -111,6 +149,43 @@ def _patch_reply_turn(monkeypatch, state_dir: Path, writer: EventWriter, reply_t
         return {"route": SimpleNamespace(reply_requests=["req-1"]), "dispatched": [("req-1", None)]}
 
     monkeypatch.setattr(agent_conversation, "run_channel_reply_turn", fake_turn)
+
+
+def test_proposal_card_uses_exact_feishu_origin_over_fallback(tmp_path: Path):
+    state_dir, writer = _writer(tmp_path)
+    writer.emit(
+        "operator.action.proposed",
+        actor="feishu-kanban-agent",
+        payload={
+            "source": "feishu",
+            "refs": {
+                "feishu": {
+                    "chat_id": CHAT_ID,
+                    "root_message_id": "om_exact_root",
+                },
+            },
+            "proposal": {
+                "proposal_id": "proposal-exact-origin",
+                "proposal_digest": "a" * 64,
+                "revision": 1,
+                "valid": True,
+                "action": "create-task",
+                "reason": "owner requested work",
+                "payload": {"title": "Exact origin task"},
+            },
+        },
+    )
+    transport = MockFeishuTransport()
+
+    result = push_kanban_proposal_cards_once(
+        state_dir,
+        transport,
+        receive_id="oc_wrong_fallback",
+    )
+
+    assert result["sent"] == ["proposal-exact-origin"]
+    assert transport.sent_messages[0].chat_id == CHAT_ID
+    assert transport.sent_messages[0].thread_id == "om_exact_root"
 
 
 def _run(state_dir: Path, writer: EventWriter, *, text: str, agent_kind: str = "kanban_agent"):
@@ -184,6 +259,107 @@ def test_feishu_plan_reply_emits_durable_request_with_channel_context(
     assert payload["refs"]["feishu"]["chat_id"] == CHAT_ID
     assert result["plan_request"]["request_id"] == request["request_id"]
     assert "action_proposal" not in result
+
+
+def test_feishu_task_plan_uses_exact_canonical_prd_authority(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir, writer = _writer(tmp_path)
+    authority = {
+        "channel_id": "ch-prd",
+        "thread_id": "main",
+        "channel_member_id": "product_pm",
+        "leader_revision": 3,
+        "prd_revision": 2,
+        "source_ref": "channel-artifacts/ch-prd/prd-v2.md",
+        "source_digest": "sha256:canonical-prd",
+    }
+    planning_context = {
+        "schema_version": "feishu-kanban-planning-context.v1",
+        "selection_status": "exact",
+        "workflow_route_catalog": {"routes": []},
+        "canonical_channel_prds": {"items": [{"channel_id": "ch-prd"}]},
+        "workflow_parameters": authority,
+    }
+    monkeypatch.setattr(
+        agent_conversation,
+        "build_feishu_kanban_planning_context",
+        lambda *args, **kwargs: planning_context,
+    )
+    captured = {}
+
+    def fake_turn(state, w, config, *, message_event, message_payload, **kwargs):
+        captured["agent_context"] = kwargs.get("agent_context")
+        w.emit(
+            "channel.message.posted",
+            actor="kanban-agent",
+            correlation_id=message_payload["channel_id"],
+            payload={
+                "channel_id": message_payload["channel_id"],
+                "thread_id": "main",
+                "message_id": "msg-agent-task-plan",
+                "member_id": "kanban-agent",
+                "role": "assistant",
+                "source": "runtime",
+                "text": _task_create_plan_reply_json(),
+            },
+        )
+        return {
+            "route": SimpleNamespace(reply_requests=["req-1"]),
+            "dispatched": [("req-1", None)],
+        }
+
+    monkeypatch.setattr(agent_conversation, "run_channel_reply_turn", fake_turn)
+
+    result = _run(
+        state_dir,
+        writer,
+        text="Create a Task from the confirmed PRD",
+    )
+
+    assert captured["agent_context"] == planning_context
+    request = result["plan_request"]
+    assert request["valid"] is True
+    create = next(
+        option for option in request["options"]
+        if option.get("submit_action") == "create-task"
+    )
+    assert create["submit_payload"]["channel_authority"] == authority
+    assert create["submit_payload"]["contract"]["source_mode"] == "channel_prd"
+
+
+def test_feishu_task_plan_fails_closed_without_exact_prd_authority(
+    tmp_path,
+    monkeypatch,
+):
+    state_dir, writer = _writer(tmp_path)
+    monkeypatch.setattr(
+        agent_conversation,
+        "build_feishu_kanban_planning_context",
+        lambda *args, **kwargs: {
+            "schema_version": "feishu-kanban-planning-context.v1",
+            "selection_status": "ambiguous",
+            "workflow_route_catalog": {"routes": []},
+            "canonical_channel_prds": {"items": []},
+            "workflow_parameters": {},
+        },
+    )
+    _patch_reply_turn(
+        monkeypatch,
+        state_dir,
+        writer,
+        _task_create_plan_reply_json(),
+    )
+
+    result = _run(
+        state_dir,
+        writer,
+        text="Create a Task from the confirmed PRD",
+    )
+
+    assert result["plan_request"]["valid"] is False
+    assert "missing authority field" in result["plan_request"]["validation_error"]
 
 
 def test_feishu_readonly_message_keeps_invalid_agent_proposal_visible(

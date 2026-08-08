@@ -2,8 +2,8 @@
 
 [English](README.en.md) · [手册首页](../00-index.md)
 
-- [Feishu AI-Native 直连 Bridge](../19-feishu-ai-native-direct-bridge.md): 群聊、单聊、审批和 provider 会话。
-- [Feishu Automation / Kanban Sync](../11-feishu-automation-kanban-sync.md): Daily、Weekly、Project 报告与看板投影。
+- [Feishu AI-Native 直连 Bridge](../19-feishu-ai-native-direct-bridge.md): 群聊、单聊、Project 自动建群、审批和 provider 会话。
+- [Feishu Automation / Kanban Sync](../11-feishu-automation-kanban-sync.md): Daily、Weekly、Project 报告、看板投影与 Project 协作群生命周期。
 - [Channel 到 PRD](../workflows/channel-to-prd.md): Channel canonical 模型及飞书来源回传。
 - [真实 Provider Preflight](../16-real-codex-provider-preflight.md): Codex/Claude CLI、sandbox 与认证边界。
 

@@ -92,6 +92,35 @@ def test_parse_card_action_uses_context_chat_and_message_id():
     assert event.payload["open_message_id"] == "om_card"
 
 
+def test_parse_card_action_preserves_form_values():
+    transport = FeishuHttpTransport(tenant_access_token="token")
+    event = transport.parse_webhook({
+        "schema": "2.0",
+        "header": {"event_type": "card.action.trigger", "event_id": "evt-form"},
+        "event": {
+            "action": {
+                "tag": "button",
+                "value": {"action": "kanban-plan-answer:evt~form"},
+                "form_value": {
+                    "plan_option_route": "direct",
+                    "plan_option_depth": ["focused"],
+                },
+            },
+            "operator": {"operator_id": {"open_id": "ou_owner"}},
+            "context": {
+                "open_chat_id": "oc_1",
+                "open_message_id": "om_card",
+            },
+        },
+    })
+
+    assert event is not None
+    assert event.payload["form_values"] == {
+        "plan_option_route": "direct",
+        "plan_option_depth": "focused",
+    }
+
+
 def test_real_transport_send_message_supports_open_id_receive_type():
     requests = []
 
@@ -151,6 +180,43 @@ def test_real_transport_card_reply_uses_exact_origin_message():
     assert body["msg_type"] == "interactive"
     assert body["reply_in_thread"] is True
     assert "receive_id" not in body
+
+
+def test_real_transport_strips_private_card_projection_metadata():
+    requests = []
+
+    def fake_urlopen(request, timeout=15):
+        requests.append(request)
+        return FakeResponse({
+            "code": 0,
+            "msg": "ok",
+            "data": {"message_id": "om_result"},
+        })
+
+    transport = FeishuHttpTransport(
+        base_url="https://open.feishu.cn/open-apis",
+        tenant_access_token="tenant-token",
+        request_func=fake_urlopen,
+    )
+    transport.send_card(FeishuMessage(
+        chat_id="oc_exact",
+        msg_type="interactive",
+        content=json.dumps({
+            "config": {"wide_screen_mode": True},
+            "elements": [],
+            "_card_key": "kanban-plan-plan-1",
+        }),
+    ))
+    transport.update_card("om_result", {
+        "config": {"wide_screen_mode": True},
+        "elements": [],
+        "_card_key": "kanban-plan-plan-1",
+    })
+
+    sent = json.loads(requests[0].data.decode("utf-8"))
+    updated = json.loads(requests[1].data.decode("utf-8"))
+    assert "_card_key" not in json.loads(sent["content"])
+    assert "_card_key" not in json.loads(updated["content"])
 
 
 def test_real_transport_delete_message_uses_recall_endpoint():

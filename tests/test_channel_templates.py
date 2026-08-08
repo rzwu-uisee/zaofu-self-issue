@@ -116,6 +116,57 @@ def test_template_role_skill_mappings_are_method_scoped():
     assert "skills/zf-refactor-plan-synth/SKILL.md" not in research_refs
 
 
+def test_provider_prompts_filter_phase_skills_by_discussion_mode() -> None:
+    from zf.runtime.channel_adapter import (
+        _build_channel_prompt,
+        _build_channel_system_prompt,
+    )
+
+    participant = "skills/zf-channel-discussion-participant/SKILL.md"
+    synthesizer = "skills/zf-channel-discussion-synthesizer/SKILL.md"
+    generic = "skills/zf-fmea-risk-gate/SKILL.md"
+    member = {
+        "member_id": "product_pm",
+        "channel_role": "product_pm",
+        "backend": "codex",
+        "permission_profile": "read_only",
+        "skill_refs": [participant, synthesizer, generic],
+        "resolved_skill_refs": [
+            {"logical_ref": ref, "resolved_path": f"/tmp/{index}/SKILL.md"}
+            for index, ref in enumerate((participant, synthesizer, generic))
+        ],
+    }
+    message = {"text": "Review the requirement."}
+    request = {"thread_id": "main", "target_member_id": "product_pm"}
+    conversation = {"channel_id": "ch-prd", "discussion": {"mode": "conversation"}}
+    multi_lens = {"channel_id": "ch-prd", "discussion": {"mode": "multi_lens"}}
+
+    conversation_prompt = _build_channel_prompt(
+        channel=conversation,
+        member=member,
+        message=message,
+        request=request,
+    )
+    conversation_system = _build_channel_system_prompt(
+        member,
+        channel=conversation,
+    )
+    multi_lens_prompt = _build_channel_prompt(
+        channel=multi_lens,
+        member=member,
+        message=message,
+        request=request,
+    )
+
+    assert participant not in conversation_prompt
+    assert synthesizer not in conversation_prompt
+    assert participant not in conversation_system
+    assert generic in conversation_prompt
+    assert generic in conversation_system
+    assert participant in multi_lens_prompt
+    assert synthesizer in multi_lens_prompt
+
+
 def test_prd_template_persists_version_digest_roles_and_discussion(
     tmp_path: Path,
 ):
@@ -352,6 +403,23 @@ def test_quick_change_is_read_only_and_grants_only_leader_proposal():
     )
     assert invalid is None
     assert invalid_error == "unsupported phase deadline: unknown_phase"
+
+
+def test_template_discussion_mode_override_is_explicit_and_bounded():
+    materialized, error = materialize_channel_template(
+        "prd-clarification",
+        overrides={"discussion_mode": "multi_lens"},
+    )
+    assert error == ""
+    assert materialized is not None
+    assert materialized["discussion"]["mode"] == "multi_lens"
+
+    invalid, error = materialize_channel_template(
+        "prd-clarification",
+        overrides={"discussion_mode": "auto"},
+    )
+    assert invalid is None
+    assert error == "discussion_mode must be conversation, clarification, or multi_lens"
 
 
 def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(

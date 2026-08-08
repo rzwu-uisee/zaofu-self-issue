@@ -2247,3 +2247,40 @@ def test_project_scripts_setup_must_be_string(tmp_path: Path):
     )
     with pytest.raises(ConfigError, match="must be a string"):
         load_config(cfg_path)
+
+
+def test_load_feishu_project_group_opt_in_and_rejects_unsafe_topology(
+    tmp_path: Path,
+):
+    path = tmp_path / "zf.yaml"
+    path.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: demo\n"
+        "integrations:\n"
+        "  feishu_project_group:\n"
+        "    enabled: true\n"
+        "    auto_provision: true\n"
+        "    owner_open_id_env: ZF_OWNER_OPEN_ID\n"
+        "    bot_purposes: [kanban_agent, run_manager]\n"
+        "    primary_responder: kanban_agent\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_config(path)
+
+    group = cfg.integrations.feishu_project_group
+    assert group.enabled is True
+    assert group.auto_provision is True
+    assert group.owner_open_id_env == "ZF_OWNER_OPEN_ID"
+    assert group.bot_purposes == ["kanban_agent", "run_manager"]
+
+    path.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: demo\n"
+        "integrations:\n"
+        "  feishu_project_group:\n"
+        "    auto_provision: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="auto_provision requires enabled=true"):
+        load_config(path)

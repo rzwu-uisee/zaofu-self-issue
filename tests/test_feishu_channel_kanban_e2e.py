@@ -299,12 +299,12 @@ def test_s4_delivery_working_then_done_no_delta_spam(project: Path):
     _emit(sd, "channel.agent.reply.requested", {"request_id": "R1", "member_id": "dev"})
     r1 = push_delivery_cards_once(sd, t, receive_id=CHAT, action_secret=SECRET.encode())
     assert r1["sent"] == ["R1"]
-    assert "⏹️ Interrupt" in t.sent_messages[-1].content  # Working card w/ interrupt
+    assert "停止回复" in t.sent_messages[-1].content  # Working card w/ interrupt
 
     _emit(sd, "channel.agent.reply.completed", {"request_id": "R1"})
     r2 = push_delivery_cards_once(sd, t, receive_id=CHAT, action_secret=SECRET.encode())
     assert r2["updated"] == ["R1"] and not r2["sent"]
-    assert "✅ Done" in t.updated_messages[-1][1]
+    assert "已回复" in t.updated_messages[-1][1]
 
     for i in range(50):
         _emit(sd, "agent.session.part.delta", {"request_id": "R1", "seq": i})

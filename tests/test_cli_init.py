@@ -12,6 +12,7 @@ from zf.cli.main import main
 from zf.core.agents_md import extract_managed_block, render_canonical_block
 from zf.core.config.loader import load_config
 from zf.integrations.feishu.routing import resolve_feishu_route
+from zf.integrations.feishu.project_group_binding import ProjectFeishuGroupBindingStore
 from zf.runtime.channel_projection import project_channels
 
 
@@ -270,6 +271,34 @@ def test_init_does_not_scaffold_feishu_route_by_default(
 
     assert result == 0
     assert not (tmp_path / "feishu.yaml").exists()
+
+
+def test_init_registers_pending_project_feishu_group_without_static_route(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ZF_WORKSPACE_HOME", str(tmp_path / "workspace-home"))
+    (tmp_path / "zf.yaml").write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n  feishu_inbound:\n    enabled: true\n"
+        "integrations:\n"
+        "  feishu_project_group:\n"
+        "    enabled: true\n"
+        "    owner_open_id_env: ZF_TEST_OWNER\n",
+        encoding="utf-8",
+    )
+
+    assert main(["init", "--workspace", "team"]) == 0
+
+    assert not (tmp_path / "feishu.yaml").exists()
+    binding = ProjectFeishuGroupBindingStore(tmp_path / ".zf").get(
+        "project-collaboration"
+    )
+    assert binding is not None
+    assert binding.workspace_id == "team"
+    assert binding.status == "pending"
 
 
 def test_init_kanban_is_valid_json(tmp_path: Path, monkeypatch):

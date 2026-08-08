@@ -1554,12 +1554,38 @@ class FeishuRouteConfig:
 
 
 @dataclass
+class FeishuProjectGroupConfig:
+    """Opt-in desired topology for one project-owned Feishu collaboration chat.
+
+    The config expresses intent only.  The resolved ``chat_id`` and membership
+    verification are runtime state in ``project.state_dir`` so a recreated chat
+    never mutates the control plane or a workspace registry's descriptor data.
+    """
+
+    enabled: bool = False
+    auto_provision: bool = False
+    binding_id: str = "project-collaboration"
+    group_kind: str = "collaboration"
+    name_template: str = "ZaoFu - {project_name}"
+    owner_open_id_env: str = "ZF_FEISHU_PROVISIONER_OWNER_OPEN_ID"
+    provisioner_purpose: str = "run_manager"
+    bot_purposes: list[str] = field(
+        default_factory=lambda: ["kanban_agent", "run_manager"]
+    )
+    primary_responder: str = "kanban_agent"
+    channel_id: str = "zaofu"
+
+
+@dataclass
 class IntegrationsConfig:
     openclaw_feishu_bridge: OpenClawFeishuBridgeConfig = field(
         default_factory=OpenClawFeishuBridgeConfig
     )
     feishu_identity: FeishuIdentityConfig = field(
         default_factory=FeishuIdentityConfig
+    )
+    feishu_project_group: FeishuProjectGroupConfig = field(
+        default_factory=FeishuProjectGroupConfig
     )
     # doc 98 §4: chat_id → route. Unmapped chat = no route (caller drops).
     feishu_routing: dict[str, FeishuRouteConfig] = field(default_factory=dict)

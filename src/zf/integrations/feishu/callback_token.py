@@ -128,28 +128,35 @@ def attach_action_token(
 ) -> dict:
     """Sign every action button in a card, binding it to its target+chat.
 
-    Walks ``card["elements"]`` for action buttons carrying ``value.action`` of
-    the form ``<action>:<target>`` and injects a ``value.t`` token. Mutates the
-    button value in place (the card is freshly built per send, not shared).
+    Walks nested card containers for action buttons carrying ``value.action``
+    of the form ``<action>:<target>`` and injects a ``value.t`` token. This
+    includes form-contained buttons used by durable Plan questions. Mutates
+    freshly built card payloads in place.
     """
-    for element in card.get("elements", []):
-        if not isinstance(element, dict) or element.get("tag") != "action":
-            continue
-        for button in element.get("actions", []):
-            value = button.get("value") if isinstance(button, dict) else None
-            if not isinstance(value, dict):
-                continue
-            raw_action = str(value.get("action") or "")
-            if ":" not in raw_action:
-                continue
-            action, _, target = raw_action.partition(":")
-            value["t"] = sign_action(
-                secret,
-                action=action,
-                target=target,
-                chat_id=chat_id,
-                ttl_seconds=ttl_seconds,
-                now=now,
-                key_version=key_version,
-            )
+    def walk(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("tag") == "button":
+            payload = value.get("value")
+            if isinstance(payload, dict):
+                raw_action = str(payload.get("action") or "")
+                if ":" in raw_action:
+                    action, _, target = raw_action.partition(":")
+                    payload["t"] = sign_action(
+                        secret,
+                        action=action,
+                        target=target,
+                        chat_id=chat_id,
+                        ttl_seconds=ttl_seconds,
+                        now=now,
+                        key_version=key_version,
+                    )
+        for child in value.values():
+            walk(child)
+
+    walk(card)
     return card

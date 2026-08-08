@@ -21,6 +21,9 @@ from zf.runtime.workflow_route_catalog import (
     workflow_route_catalog,
 )
 from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.channel_workflow_authority import (
+    channel_authority_context_from_task,
+)
 
 
 TASK_WORKFLOW_PLAN_SCHEMA_VERSION = "task-workflow-plan.v1"
@@ -77,6 +80,45 @@ def workflow_route_missing_parameters(
         source_root=str(parameters.get("source_root") or ""),
         target_root=str(parameters.get("target_root") or ""),
     )
+
+
+def workflow_route_task_eligibility_error(
+    route: dict[str, Any],
+    task: Task,
+) -> str:
+    """Reject route/task combinations that cannot pass apply preflight."""
+
+    if (
+        str(route.get("family") or "") == "research"
+        and channel_authority_context_from_task(task)
+        and not workflow_task_request_binding(task)
+    ):
+        return (
+            "research route requires a canonical Workflow Request binding "
+            "for a Channel PRD Task"
+        )
+    return ""
+
+
+def task_workflow_route_eligibility_map(
+    tasks: list[Task],
+    config: Any | None,
+) -> dict[str, dict[str, str]]:
+    routes = [
+        route
+        for route in workflow_route_catalog(config).get("routes") or []
+        if isinstance(route, dict) and str(route.get("route_id") or "")
+    ]
+    result: dict[str, dict[str, str]] = {}
+    for task in tasks:
+        blocked = {
+            str(route["route_id"]): reason
+            for route in routes
+            if (reason := workflow_route_task_eligibility_error(route, task))
+        }
+        if blocked:
+            result[task.id] = blocked
+    return result
 
 
 def build_task_workflow_plan_request(
@@ -139,6 +181,10 @@ def build_task_workflow_plan_request(
             errors.append(
                 f"option {index} route {route_id!r} is not active"
             )
+            continue
+        eligibility_error = workflow_route_task_eligibility_error(route, task)
+        if eligibility_error:
+            errors.append(f"option {index}: {eligibility_error}")
             continue
         raw_parameters = raw_option.get("parameters")
         nested_objective = ""
@@ -398,5 +444,7 @@ __all__ = [
     "build_task_workflow_plan_request",
     "normalize_task_workflow_parameters",
     "task_workflow_binding_digest",
+    "task_workflow_route_eligibility_map",
     "workflow_route_missing_parameters",
+    "workflow_route_task_eligibility_error",
 ]

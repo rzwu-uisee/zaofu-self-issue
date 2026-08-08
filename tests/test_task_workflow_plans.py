@@ -245,6 +245,39 @@ def test_builder_rejects_delivery_option_that_cannot_execute_after_approve() -> 
     assert "missing executable parameter(s): target_root" in warning
 
 
+def test_channel_prd_task_rejects_research_without_workflow_request_binding() -> None:
+    config = load_config(ROOT / "zf.yaml")
+    task = Task(
+        id="TASK-CHANNEL-RESEARCH",
+        title="Research a confirmed Channel PRD",
+        contract=TaskContract(
+            behavior="Research the confirmed PRD.",
+            verification="Produce an evidence-backed report.",
+            source_mode="channel_prd",
+            source_ref="channel-artifacts/ch-prd/prd.md",
+            source_revision="1",
+            evidence_contract={
+                "channel_id": "ch-prd",
+                "thread_id": "main",
+                "channel_member_id": "product_pm",
+                "leader_revision": 1,
+                "prd_revision": 1,
+                "source_digest": "sha256:canonical",
+            },
+        ),
+    )
+
+    request, warning = build_task_workflow_plan_request(
+        _workflow_plan(),
+        task=task,
+        task_event_id="evt-channel-task-created",
+        config=config,
+    )
+
+    assert request is None
+    assert "research route requires a canonical Workflow Request binding" in warning
+
+
 def test_create_task_keeps_task_when_workflow_plan_is_invalid(
     tmp_path: Path,
 ) -> None:

@@ -112,7 +112,10 @@ from zf.runtime.channel_workflow_authority import (
     bind_task_channel_authority,
     channel_workflow_authority_error,
 )
-from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.task_workflow_plans import (
+    task_workflow_binding_digest,
+    task_workflow_route_eligibility_map,
+)
 from zf.runtime.workflow_route_catalog import workflow_route_catalog
 from zf.runtime.operator_reliability import (
     project_agent_cockpit,
@@ -7608,6 +7611,10 @@ def _run_headless_kanban_agent_turn(
                 state_dir / "kanban.json"
             ).list_all()
         },
+        workflow_route_eligibility=task_workflow_route_eligibility_map(
+            TaskStore(state_dir / "kanban.json").list_all(),
+            config,
+        ),
         workflow_context=workflow_context,
         correlation_id=user_message.correlation_id,
         config=config,

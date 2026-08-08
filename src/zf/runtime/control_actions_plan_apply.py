@@ -33,6 +33,7 @@ from zf.runtime.kanban_plan_requests import (
 from zf.runtime.control_actions_plan_apply_helpers import (
     channel_plan_discussion_seed,
     channel_plan_discussion_seed_digest,
+    channel_plan_feishu_origin,
     latest_plan_revision as _latest_plan_revision,
     latest_task_binding_event_id as _latest_task_binding_event_id,
     originating_plan_message as _originating_plan_message,
@@ -47,6 +48,7 @@ from zf.runtime.kanban_proposals import (
 from zf.runtime.task_workflow_plans import (
     build_task_workflow_plan_request,
     task_workflow_binding_digest,
+    workflow_route_task_eligibility_error,
 )
 from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
@@ -286,17 +288,25 @@ class PlanApplyActionsMixin:
 
         request_id = str(gate.get("request_id") or "")
         template_id = str(submit_payload.get("template_id") or "")
+        child_channel_id = str(
+            submit_payload.get("channel_id")
+            or _normal_channel_id(
+                f"{template_id}-{request_id.removeprefix('plan-')[-10:]}"
+            )
+        )
+        child_thread_id = str(submit_payload.get("thread_id") or "main")
+        origin_binding, external_refs = channel_plan_feishu_origin(
+            request_event,
+            channel_id=child_channel_id,
+            thread_id=child_thread_id,
+        )
         child_payload = {
             **submit_payload,
-            "channel_id": str(
-                submit_payload.get("channel_id")
-                or _normal_channel_id(
-                    f"{template_id}-{request_id.removeprefix('plan-')[-10:]}"
-                )
-            ),
-            "thread_id": str(submit_payload.get("thread_id") or "main"),
+            "channel_id": child_channel_id,
+            "thread_id": child_thread_id,
             "message_id": f"msg-{request_id}",
             "message": discussion_seed,
+            **({"origin_binding": origin_binding} if origin_binding else {}),
             "expected_materialization_digest": str(
                 submit_details.get("materialization_digest") or ""
             ),
@@ -313,6 +323,7 @@ class PlanApplyActionsMixin:
                     if isinstance(submit_payload.get("refs"), dict)
                     else {}
                 ),
+                **external_refs,
                 "plan_requirement_event_ids": [
                     str(item)
                     for item in request.get(
@@ -534,17 +545,21 @@ class PlanApplyActionsMixin:
                     ),
                 },
             )
-        if (
-            not validation_error
-            and is_workflow_start_action(submit_action)
-            and resolve_workflow_route(
+        workflow_route = (
+            resolve_workflow_route(
                 self.config,
                 str(submit_payload.get("route_id") or ""),
                 expected_config_digest=str(
                     submit_payload.get("config_digest") or ""
                 ),
             )
-            is None
+            if is_workflow_start_action(submit_action)
+            else None
+        )
+        if (
+            not validation_error
+            and is_workflow_start_action(submit_action)
+            and workflow_route is None
         ):
             replacement = self._remint_workflow_plan(
                 requested=requested,
@@ -578,6 +593,25 @@ class PlanApplyActionsMixin:
                     ),
                 },
             )
+        if (
+            not validation_error
+            and workflow_route is not None
+            and task is not None
+        ):
+            validation_error = workflow_route_task_eligibility_error(
+                workflow_route,
+                task,
+            )
+            if validation_error:
+                return self._failed(
+                    requested=requested,
+                    action=action,
+                    requested_action=requested_action,
+                    task_id=task_id,
+                    reason=validation_error,
+                    status_code=422,
+                    status="workflow_route_ineligible",
+                )
         if validation_error:
             extra = {}
             status = "invalid_plan_action"

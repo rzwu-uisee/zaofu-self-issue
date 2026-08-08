@@ -38,6 +38,21 @@ def test_record_is_noop_without_id_or_time(tmp_path):
     assert catchup.read_cursor(tmp_path, "oc_x") == {}
 
 
+def test_app_scoped_cursors_do_not_cross_advance_in_one_group(tmp_path):
+    catchup.record(tmp_path, "oc_x", "pm-1", str(_BASE), app_id="cli_pm")
+    catchup.record(
+        tmp_path,
+        "oc_x",
+        "runm-1",
+        str(_BASE + _MIN),
+        app_id="cli_runm",
+    )
+
+    assert catchup.read_cursor(tmp_path, "oc_x", app_id="cli_pm")["message_id"] == "pm-1"
+    assert catchup.read_cursor(tmp_path, "oc_x", app_id="cli_runm")["message_id"] == "runm-1"
+    assert catchup.read_cursor(tmp_path, "oc_x", app_id="cli_other") == {}
+
+
 def test_to_epoch_ms_shapes():
     assert catchup._to_epoch_ms("1700000400000") == 1700000400000
     assert catchup._to_epoch_ms("2026-05-06 14:08") > 0
@@ -139,6 +154,66 @@ def test_catchup_skips_messages_at_other_bot(tmp_path):
     out = catchup.pending_events(tmp_path, "oc_x", list_fn=lambda: msgs,
                                  bot_open_id="ou_me")
     assert [e["payload"]["message_id"] for e in out] == ["m7"]
+
+
+def test_group_catchup_recovers_rich_text_mentions_when_rest_omits_metadata(tmp_path):
+    catchup.record(tmp_path, "oc_x", "m5", str(_BASE + 5 * _MIN))
+    msgs = [
+        {
+            **_msg(
+                "m6",
+                _BASE + 6 * _MIN,
+                text='<at user_id="ou_kanban"/> status',
+            ),
+            "mentions": [],
+            "chat_type": "",
+        },
+        {
+            **_msg(
+                "m7",
+                _BASE + 7 * _MIN,
+                text='<at user_id="ou_run_manager"/> status',
+            ),
+            "mentions": [],
+            "chat_type": "",
+        },
+    ]
+
+    out = catchup.pending_events(
+        tmp_path,
+        "oc_x",
+        list_fn=lambda: msgs,
+        bot_open_id="ou_run_manager",
+        fallback_chat_type="group",
+    )
+
+    assert [event["payload"]["message_id"] for event in out] == ["m7"]
+    assert out[0]["payload"]["mentions"] == ["ou_run_manager"]
+
+
+def test_group_catchup_keeps_unmentioned_message_for_primary_responder(tmp_path):
+    catchup.record(tmp_path, "oc_x", "m5", str(_BASE + 5 * _MIN))
+    msgs = [{
+        **_msg("m6", _BASE + 6 * _MIN, text="please summarize"),
+        "mentions": [],
+        "chat_type": "",
+    }]
+
+    assert catchup.pending_events(
+        tmp_path,
+        "oc_x",
+        list_fn=lambda: msgs,
+        bot_open_id="ou_kanban",
+        fallback_chat_type="group",
+        allow_unmentioned_group=True,
+    )
+    assert not catchup.pending_events(
+        tmp_path,
+        "oc_x",
+        list_fn=lambda: msgs,
+        bot_open_id="ou_run_manager",
+        fallback_chat_type="group",
+    )
 
 
 # --- C3: bridge inbound dedup + live cursor advance --------------------------

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 from zf.cli.feishu import _handle_event_data
@@ -13,8 +15,11 @@ from zf.integrations.feishu.channel_question_card import (
     build_question_card,
     fold_open_questions,
     handle_question_decision,
+    push_channel_question_cards_once,
     sync_channel_question_cards,
 )
+from zf.integrations.feishu.callback_token import verify_action
+from zf.integrations.feishu.transport import MockFeishuTransport
 
 CH = "ch-q"
 
@@ -25,13 +30,28 @@ def _writer(tmp_path: Path) -> tuple[Path, EventWriter]:
     return state_dir, EventWriter(EventLog(state_dir / "events.jsonl"))
 
 
-def _open(writer: EventWriter, qid: str, question: str) -> None:
+def _open(
+    writer: EventWriter,
+    qid: str,
+    question: str,
+    *,
+    recommended_answer: str = "",
+) -> None:
+    payload = {
+        "channel_id": CH,
+        "thread_id": "main",
+        "question_id": qid,
+        "question": question,
+        "category": "scope",
+        "asked_by": "arch-1",
+    }
+    if recommended_answer:
+        payload["recommended_answer"] = recommended_answer
     writer.emit(
         "channel.question.opened",
         actor="arch-1",
         correlation_id=CH,
-        payload={"channel_id": CH, "thread_id": "main", "question_id": qid,
-                 "question": question, "category": "scope", "asked_by": "arch-1"},
+        payload=payload,
     )
 
 
@@ -45,6 +65,35 @@ def test_fold_and_card_shape(tmp_path: Path) -> None:
     assert "channel-question-adopt:q-1" in blob  # suggestion present -> adopt button
     assert "channel-question-oos:q-1" in blob
     assert card["_card_key"] == "channel-question-q-1"
+
+
+def test_structured_recommendation_is_actionable_and_becomes_the_answer(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _open(
+        writer,
+        "q-structured",
+        "是否采用独立审批？",
+        recommended_answer="Task 与 workflow 分别审批。",
+    )
+    question = fold_open_questions(EventLog(state_dir / "events.jsonl").read_all())["q-structured"]
+    assert question["recommended_answer"] == "Task 与 workflow 分别审批。"
+    assert "采纳推荐答案" in str(build_question_card(question))
+
+    result = handle_question_decision(
+        command="channel-question-adopt",
+        question_id="q-structured",
+        state_dir=state_dir,
+        writer=writer,
+        user_id="ou_owner",
+    )
+    assert result["ok"] is True
+    resolved = [
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.question.resolved"
+    ][-1]
+    assert "Task 与 workflow 分别审批。" in resolved.payload["answer"]
 
 
 def test_sync_sends_once_and_flips_receipt(tmp_path: Path) -> None:
@@ -80,6 +129,54 @@ def test_sync_sends_once_and_flips_receipt(tmp_path: Path) -> None:
         state_dir, send_card=send_card, update_card=update_card,
         ledger=result2["ledger"])
     assert result3["updated"] == ["q-1"] and updated_cards[0][0] == "om-1"
+
+
+def test_sync_upgrades_open_legacy_card_when_presentation_changes(tmp_path: Path) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _open(writer, "q-1", "是否采用独立审批？", recommended_answer="采用独立审批")
+    updated_cards = []
+
+    result = sync_channel_question_cards(
+        state_dir,
+        send_card=lambda card: "unexpected",
+        update_card=lambda message_id, card: updated_cards.append((message_id, card)),
+        ledger={"channel-question-q-1": {"message_id": "om-legacy", "state": "open"}},
+    )
+
+    assert result["sent"] == []
+    assert result["updated"] == ["q-1"]
+    assert updated_cards[0][0] == "om-legacy"
+    assert "采纳推荐答案" in str(updated_cards[0][1])
+
+
+def test_push_question_card_signs_actions_with_origin_chat(tmp_path: Path) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _open(writer, "q-1", "范围问题")
+    transport = MockFeishuTransport()
+
+    result = push_channel_question_cards_once(
+        state_dir,
+        transport,
+        receive_id="oc_owner",
+        action_secret=b"question-secret",
+        action_ttl_seconds=120,
+    )
+
+    assert result["sent"] == ["q-1"]
+    message = transport.sent_messages[-1]
+    assert message.chat_id == "oc_owner"
+    assert message.msg_type == "interactive"
+    card = json.loads(message.content)
+    token = card["elements"][1]["actions"][0]["value"]["t"]
+    ok, reason = verify_action(
+        token,
+        secrets_by_version={"1": b"question-secret"},
+        expect_action="channel-question-oos",
+        expect_target="q-1",
+        expect_chat_id="oc_owner",
+        now=time.time(),
+    )
+    assert ok, reason
 
 
 def test_handle_adopt_emits_answered_with_suggestion(tmp_path: Path) -> None:

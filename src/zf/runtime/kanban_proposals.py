@@ -111,6 +111,7 @@ def pending_kanban_proposals(events: Iterable[ZfEvent]) -> list[dict[str, Any]]:
                 "turn_id": str(payload.get("turn_id") or ""),
                 "conversation_id": str(payload.get("conversation_id") or ""),
                 "thread_key": str(payload.get("thread_key") or ""),
+                "refs": payload.get("refs") if isinstance(payload.get("refs"), dict) else {},
             }
             prior = pending.get(proposal_id)
             if prior is None or (

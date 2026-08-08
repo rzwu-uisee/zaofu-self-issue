@@ -44,6 +44,19 @@ integrations:
     assert resolve_feishu_route(cfg, "oc_y").backend == "claude-code"
 
 
+def test_feishu_yaml_merges_project_group_topology(tmp_path):
+    cfg = _write(tmp_path, feishu="""\
+feishu_project_group:
+  enabled: true
+  owner_open_id_env: ZF_PROJECT_OWNER_OPEN_ID
+  bot_purposes: [kanban_agent, run_manager]
+""")
+
+    group = cfg.integrations.feishu_project_group
+    assert group.enabled is True
+    assert group.owner_open_id_env == "ZF_PROJECT_OWNER_OPEN_ID"
+
+
 def test_inline_in_zf_yaml_still_works_without_feishu_yaml(tmp_path):
     cfg = _write(tmp_path, zf_extra="""\
 integrations:

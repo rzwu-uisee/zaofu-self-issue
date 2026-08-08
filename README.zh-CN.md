@@ -197,6 +197,10 @@ Controller 选择与组合规则见 [catalog guide](examples/prod/controller/REA
 - **Feishu / ChatOps**：Channel、Kanban Agent、Run Manager 决策、流式 provider
   conversation 和 Plan Ready 审批卡片，共用 Web 的 controlled-action 边界。
   参见 [Feishu 直连 Bridge 手册](docs/manual/19-feishu-ai-native-direct-bridge.md)。
+- **飞书项目协作群**：可选的 `auto_provision` 会创建项目专属群、校验 Owner 与
+  产品 Bot，并建立 `(workspace, app_id, chat_id)` 路由索引。成员回读要求
+  `lark-cli >= 1.0.64`；当前已验证版本为 `1.0.85`。参见
+  [项目协作群配置](docs/manual/11-feishu-automation-kanban-sync.md)。
 
 ### 任务恢复与 Autoresearch
 

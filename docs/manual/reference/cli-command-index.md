@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **68** 个顶层命令 family、**252** 条可寻址命令路径。
+当前共 **68** 个顶层命令 family、**256** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -265,6 +265,10 @@ Handle Feishu bridge commands
 | `zf feishu bridge` | One-shot turnkey reply: inbound message to channel to real agent reply |
 | `zf feishu consume` | Ingest live Feishu events via lark-cli (WS long-conn, no webhook) |
 | `zf feishu cron-template` | Print crontab entries for daily Automation and hourly Kanban sync |
+| `zf feishu group` | Inspect or explicitly provision a project Feishu collaboration group |
+| `zf feishu group attach` | Verify and attach an existing Feishu chat to the configured binding |
+| `zf feishu group provision` | Create/verify the configured Feishu project group (external write) |
+| `zf feishu group status` | Show project group binding state |
 | `zf feishu handle` | Handle one Feishu webhook/message fixture |
 | `zf feishu init-targets` | Create Feishu Docx/Base/Table targets for Automation and Kanban sync |
 | `zf feishu live-smoke` | Run a cleanup-safe smoke against the real Feishu API |

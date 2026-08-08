@@ -237,7 +237,7 @@ class FeishuHttpTransport(FeishuTransport):
         return message_id or None
 
     def update_card(self, message_id: str, card: dict, sequence: int = 0) -> bool:
-        body = {"content": json.dumps(card, ensure_ascii=False)}
+        body = {"content": json.dumps(_public_card_payload(card), ensure_ascii=False)}
         # feishu-stream B2: carry the monotonic sequence for CardKit streaming
         # updates so the server can drop/reorder stale frames. Omitted when 0
         # (non-streaming in-place updates keep the plain text-PATCH shape).
@@ -443,6 +443,7 @@ def parse_webhook_payload(data: dict) -> FeishuWebhookEvent | None:
                 # otherwise drops everything but .action.
                 "action_value": value,
                 "action_token": str(value.get("t") or ""),
+                "form_values": _card_form_values(event, action),
                 "message_id": message_id,
                 "open_message_id": message_id,
                 "action_id": str(action.get("tag") or header.get("event_id") or ""),
@@ -455,10 +456,58 @@ def parse_webhook_payload(data: dict) -> FeishuWebhookEvent | None:
     return None
 
 
+def _card_form_values(event: dict[str, Any], action: dict[str, Any]) -> dict[str, str]:
+    """Normalize old/new Feishu card form callback shapes at the edge."""
+    raw = (
+        action.get("form_value")
+        or action.get("form_values")
+        or event.get("form_value")
+        or event.get("form_values")
+        or {}
+    )
+    values: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(value, list):
+                value = value[0] if value else ""
+            if isinstance(value, (str, int, float, bool)):
+                values[str(key)] = str(value)
+    input_value = action.get("input_value")
+    input_name = str(
+        action.get("name") or action.get("element_id") or ""
+    ).strip()
+    if input_name and isinstance(input_value, (str, int, float, bool)):
+        values[input_name] = str(input_value)
+    return values
+
+
 def _message_content(message: FeishuMessage) -> str:
     if message.msg_type == "text":
         return json.dumps({"text": message.content}, ensure_ascii=False)
+    if message.msg_type == "interactive":
+        try:
+            payload = json.loads(message.content)
+        except (TypeError, json.JSONDecodeError):
+            return message.content
+        return json.dumps(_public_card_payload(payload), ensure_ascii=False)
     return message.content
+
+
+def _public_card_payload(payload: Any) -> Any:
+    """Strip local projection metadata before an interactive card reaches Feishu.
+
+    Projectors use ``_card_key`` for their local delivery ledgers. Feishu card
+    schemas reject unknown top-level fields, so that key must never cross the
+    transport boundary.
+    """
+
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if not str(key).startswith("_")
+    }
 
 
 def _content_text(content: Any) -> str:

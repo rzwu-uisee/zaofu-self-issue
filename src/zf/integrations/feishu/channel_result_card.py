@@ -13,6 +13,22 @@ from zf.integrations.feishu.transport import FeishuMessage
 
 _RECEIPT_EVENT = "channel.result.receipt.recorded"
 _LEDGER_SCHEMA_VERSION = "feishu-channel-result-ledger.v1"
+_STATUS_LABEL = {
+    "available": "已就绪",
+    "completed": "已完成",
+    "confirmed": "已确认",
+    "done": "已完成",
+    "passed": "已通过",
+    "blocked": "已阻塞",
+    "failed": "未完成",
+    "rejected": "未通过",
+}
+_KIND_LABEL = {
+    "workflow_terminal": "工作流已完成",
+    "task_created": "已创建任务",
+    "task_terminal": "任务状态已更新",
+    "goal_dossier": "已生成交付摘要",
+}
 
 
 def build_channel_result_card(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -26,35 +42,28 @@ def build_channel_result_card(receipt: dict[str, Any]) -> dict[str, Any]:
         if status in {"blocked", "failed", "rejected"}
         else "blue"
     )
-    rows = [
-        f"kind: {str(receipt.get('receipt_kind') or '-')}",
-        f"status: {status}",
-    ]
+    status_label = _STATUS_LABEL.get(status, "状态已更新")
+    kind_label = _KIND_LABEL.get(
+        str(receipt.get("receipt_kind") or ""),
+        "交付状态已更新",
+    )
     task_id = str(receipt.get("task_id") or "")
-    workflow_run_id = str(receipt.get("workflow_run_id") or "")
-    artifact_ref = str(receipt.get("artifact_ref") or "")
-    receipt_ref = str(receipt.get("receipt_ref") or "")
     if task_id:
-        rows.append(f"task: {task_id}")
-    if workflow_run_id:
-        rows.append(f"run: {workflow_run_id}")
-    if artifact_ref:
-        rows.append(f"artifact: {artifact_ref}")
-    if receipt_ref:
-        rows.append(f"receipt: {receipt_ref}")
+        body = f"{kind_label}：任务 **{task_id}** {status_label}。"
+    else:
+        body = f"{kind_label}，当前状态：{status_label}。"
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "Channel result"},
+            "title": {"tag": "plain_text", "content": "交付结果"},
             "template": template,
         },
         "elements": [
             {
                 "tag": "div",
-                "text": {"tag": "lark_md", "content": "\n".join(rows)},
+                "text": {"tag": "lark_md", "content": body},
             },
         ],
-        "_card_key": f"channel-result-{receipt.get('receipt_id')}",
     }
 
 

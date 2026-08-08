@@ -14,6 +14,8 @@ card is the pager, not the whole conversation.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,7 @@ def fold_open_questions(events: list) -> dict[str, dict[str, Any]]:
                 "question": str(payload.get("question") or ""),
                 "category": str(payload.get("category") or ""),
                 "asked_by": str(payload.get("asked_by") or ""),
+                "recommended_answer": str(payload.get("recommended_answer") or ""),
                 "status": "open",
             }
         elif etype == "channel.question.resolved" and question_id in questions:
@@ -68,6 +71,14 @@ def extract_suggestion(question: str) -> str:
     return ""
 
 
+def question_recommendation(question: dict[str, Any]) -> str:
+    """Prefer the structured recommendation emitted by channel participants."""
+    return (
+        str(question.get("recommended_answer") or "").strip()
+        or extract_suggestion(str(question.get("question") or ""))
+    )
+
+
 def build_question_card(question: dict[str, Any], *, state: str = "open") -> dict[str, Any]:
     question_id = str(question.get("question_id") or "")
     body = (
@@ -76,14 +87,14 @@ def build_question_card(question: dict[str, Any], *, state: str = "open") -> dic
         f"提问人: `{question.get('asked_by')}`  类别: `{question.get('category') or '-'}`\n\n"
         f"{question.get('question')}"
     )
-    suggestion = extract_suggestion(str(question.get("question") or ""))
+    suggestion = question_recommendation(question)
     elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": body}},
     ]
     if state == "open":
         actions = []
         if suggestion:
-            actions.append(_button("采纳建议", "primary", f"{ADOPT_COMMAND}:{question_id}"))
+            actions.append(_button("采纳推荐答案", "primary", f"{ADOPT_COMMAND}:{question_id}"))
         actions.append(_button("标记 Out of Scope", "danger", f"{OOS_COMMAND}:{question_id}"))
         elements.append({"tag": "action", "actions": actions})
         elements.append({
@@ -112,6 +123,12 @@ def build_question_card(question: dict[str, Any], *, state: str = "open") -> dic
     }
 
 
+def _card_digest(card: dict[str, Any]) -> str:
+    """Stable presentation fingerprint, excluding per-delivery action tokens."""
+    encoded = json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def sync_channel_question_cards(
     state_dir,
     *,
@@ -134,17 +151,28 @@ def sync_channel_question_cards(
         key = f"channel-question-{question_id}"
         status = str(question.get("status") or "open")
         entry = ledger.get(key)
+        card = build_question_card(question, state=status)
+        card_digest = _card_digest(card)
         if entry is None:
             if status != "open":
                 continue  # resolved before ever paged — no card needed
-            card = build_question_card(question, state="open")
             message_id = send_card(card)
-            ledger[key] = {"message_id": message_id, "state": "open"}
+            ledger[key] = {
+                "message_id": message_id,
+                "state": "open",
+                "card_digest": card_digest,
+            }
             sent.append(question_id)
             continue
+        if status == "open" and entry.get("card_digest") != card_digest:
+            update_card(str(entry["message_id"]), card)
+            entry["card_digest"] = card_digest
+            updated.append(question_id)
+            continue
         if status != "open" and entry.get("state") == "open":
-            update_card(str(entry["message_id"]), build_question_card(question, state=status))
+            update_card(str(entry["message_id"]), card)
             entry["state"] = status
+            entry["card_digest"] = card_digest
             updated.append(question_id)
     return {"sent": sent, "updated": updated, "ledger": ledger}
 
@@ -160,11 +188,14 @@ def push_channel_question_cards_once(
     action_key_version: str = "1",
 ) -> dict:
     import json
+    import time
 
+    from zf.core.state.atomic_io import atomic_write_text
     from zf.integrations.feishu.callback_token import attach_action_token
     from zf.integrations.feishu.transport import FeishuMessage
 
     state_dir = Path(state_dir)
+    issued_at = time.time()
     ledger_path = state_dir / "integrations" / "feishu" / "question_ledger.json"
     try:
         ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
@@ -177,16 +208,19 @@ def push_channel_question_cards_once(
             card = attach_action_token(
                 card,
                 secret=action_secret,
+                chat_id=receive_id,
                 ttl_seconds=action_ttl_seconds,
+                now=issued_at,
                 key_version=action_key_version,
             )
         return card
 
     def send_card(card: dict) -> str:
         return transport.send_card(FeishuMessage(
-            receive_id=receive_id,
+            chat_id=receive_id,
             receive_id_type=receive_id_type,
-            content=_prepare(card),
+            content=json.dumps(_prepare(card), ensure_ascii=False),
+            msg_type="interactive",
         ))
 
     def update_card(message_id: str, card: dict):
@@ -195,9 +229,9 @@ def push_channel_question_cards_once(
     result = sync_channel_question_cards(
         state_dir, send_card=send_card, update_card=update_card, ledger=ledger,
     )
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(
-        json.dumps(result["ledger"], ensure_ascii=False, indent=2), encoding="utf-8",
+    atomic_write_text(
+        ledger_path,
+        json.dumps(result["ledger"], ensure_ascii=False, indent=2) + "\n",
     )
     return result
 
@@ -224,7 +258,7 @@ def handle_question_decision(
     if question.get("status") != "open":
         return {"ok": True, "reason": "already_resolved", "question_id": question_id}
     if command == ADOPT_COMMAND:
-        suggestion = extract_suggestion(str(question.get("question") or ""))
+        suggestion = question_recommendation(question)
         resolution = "answered"
         answer = f"(owner 采纳提问内嵌建议) {suggestion}" if suggestion else "(owner 采纳建议)"
         extra: dict[str, Any] = {"answer": answer}
