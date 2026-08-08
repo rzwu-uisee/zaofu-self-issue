@@ -5,9 +5,34 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 ## Unreleased
 
-- v0.0.3 发布草案：[中文](docs/releases/v0.0.3.md) |
-  [English](docs/releases/v0.0.3.en.md)。当前包元数据仍为 `0.0.2`；完成版本升级、最终验证
-  和 tag 前，这不是已发布版本。
+- 暂无。
+
+## v0.0.3 - 2026-08-08
+
+Release notes: [中文](docs/releases/v0.0.3.md) |
+[English](docs/releases/v0.0.3.en.md)
+
+Developer Preview Feishu 协作版本，将 v0.0.2 的 Channel、PRD、Task 和受控 Workflow
+路径延伸到 Project 级 Feishu 协作群。
+
+### Added
+
+- Project-scoped Feishu collaboration group binding、成员回读、route index 和 workspace
+  bridge lease。
+- Kanban Agent / Run Manager 的群消息路由、项目状态回复、Plan 审批卡、进度卡和交付卡。
+- Feishu Project group、bridge lease、catch-up、stream convergence 和 controlled workflow
+  start 的回归测试。
+
+### Changed
+
+- Feishu 入站消息、卡片回调和流式回复统一回到 EventWriter、controlled action 和
+  auditable artifact 边界。
+- 文档补充 Feishu AI-native direct bridge、Automation / Kanban sync、CLI command index 和
+  capability coverage。
+
+### Validation
+
+- 目标 Feishu / Project group 回归：209 passed。
 
 ## v0.0.2 - 2026-08-05
 
