@@ -11,7 +11,10 @@ from zf.runtime.fanout_recovery_runtime import (
     reader_fanout_superseding_goal_claim,
 )
 from zf.runtime.reader_fanout_recovery_snapshot import event_log_snapshot_token
-from zf.runtime.task_contract_snapshot import snapshot_payload_fields
+from zf.runtime.task_contract_snapshot import (
+    contract_snapshot_identity_fields,
+    snapshot_payload_fields,
+)
 from zf.runtime.writer_fanout_data import _FANOUT_AFFINITY_METADATA_KEYS
 from zf.runtime.writer_fanout_retry import (
     WriterFanoutRetryMixin,
@@ -969,16 +972,27 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
         task_id = str(task_item.get("task_id") or "")
         task = self.task_store.get(task_id) if task_id else None
         if task is not None:
-            from zf.runtime.writer_fanout_admission import (
-                bind_writer_task_dispatch_owner,
+            from zf.runtime.task_contract_authority_runtime import (
+                bind_writer_dispatch_contract,
             )
-            contract = bind_writer_task_dispatch_owner(
+
+            mutation = bind_writer_dispatch_contract(
+                task_store=self.task_store,
+                event_writer=self.event_writer,
+                state_dir=self.state_dir,
                 task=task,
                 role=role,
                 config=self.config,
-                event_writer=self.event_writer,
+                task_item=task_item,
             )
-            self.task_store.update(task_id, contract=contract)
+            from zf.runtime.contract_authority import apply_contract_authority
+
+            task_item.update(
+                apply_contract_authority(task_item, self.task_store)
+            )
+            task_item["contract_authority_revision"] = (
+                mutation.authority_revision
+            )
             task_item["owner_role"] = role.name
             task_item["owner_instance"] = role.instance_id
         run_id = f"run-{context.fanout_id}-{child.child_id}"
@@ -1038,19 +1052,7 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
             )
             contract_dispatch_fields = {
                 **snapshot_payload_fields(contract_descriptor),
-                "workflow_run_id": str(contract_snapshot["workflow_run_id"]),
-                "contract_revision": str(contract_snapshot["contract_revision"]),
-                "task_map_generation": str(contract_snapshot["task_map_generation"]),
-                "base_commit": str(contract_snapshot["base_commit"]),
-                "plan_artifact_package_id": str(
-                    contract_snapshot.get("plan_artifact_package_id") or ""
-                ),
-                "plan_artifact_package_ref": str(
-                    contract_snapshot.get("plan_artifact_package_ref") or ""
-                ),
-                "plan_artifact_package_digest": str(
-                    contract_snapshot.get("plan_artifact_package_digest") or ""
-                ),
+                **contract_snapshot_identity_fields(contract_snapshot),
             }
         operation_payload = {
             **(child.payload if isinstance(child.payload, dict) else {}),

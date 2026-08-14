@@ -337,6 +337,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # without waiting for a periodic tick.
     "artifact.manifest.published",
     "task.contract.update",
+    "task.contract.change.requested",
     "task.contract.invalid",
     # 1202-T3: Codex hook engine (`--enable hooks`) bridges
     # through hook_recv under the codex.hook.* namespace. All five wake

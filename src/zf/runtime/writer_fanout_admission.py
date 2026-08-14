@@ -127,12 +127,15 @@ def bind_writer_task_dispatch_owner(
     role: Any,
     config: Any,
     event_writer: Any,
+    task_item: Mapping[str, Any] | None = None,
 ) -> object:
     """Pin a canonical writer task to the Flow-local lane being dispatched."""
 
     from zf.runtime.flow_roles import role_configs_for_flow
 
     contract = deepcopy(task.contract)
+    if not str(getattr(task, "contract_authority_revision", "") or ""):
+        contract = _bootstrap_legacy_writer_contract(contract, task_item or {})
     evidence = (
         dict(contract.evidence_contract)
         if isinstance(contract.evidence_contract, dict)
@@ -149,26 +152,80 @@ def bind_writer_task_dispatch_owner(
                 "flow_owner_cross_flow: dispatch role "
                 f"{role.instance_id!r} is outside Flow {flow_kind!r}"
             )
-    changed = (
-        contract.owner_role != role.name
-        or contract.owner_instance != role.instance_id
-    )
     contract.owner_role = role.name
     contract.owner_instance = role.instance_id
     contract.evidence_contract = evidence
-    if changed:
-        event_writer.append(ZfEvent(
-            type="task.contract.update",
-            actor="zf-cli",
-            task_id=task.id,
-            payload={
-                "source": "writer_dispatch_owner_binding",
-                "flow_kind": flow_kind,
-                "owner_role": role.name,
-                "owner_instance": role.instance_id,
-                "contract": asdict(contract),
-            },
-        ))
+    return contract
+
+
+def _bootstrap_legacy_writer_contract(contract: Any, task_item: Mapping[str, Any]) -> Any:
+    """Fill a legacy scheduler placeholder from its admitted Task Map once."""
+
+    raw = (
+        task_item.get("raw_task")
+        if isinstance(task_item.get("raw_task"), Mapping)
+        else {}
+    )
+    payload = (
+        task_item.get("payload")
+        if isinstance(task_item.get("payload"), Mapping)
+        else {}
+    )
+
+    def pick(key: str, default: Any = None) -> Any:
+        value = task_item.get(key)
+        if value in (None, "", [], {}):
+            value = raw.get(key)
+        return default if value in (None, "", [], {}) else value
+
+    if not contract.behavior:
+        contract.behavior = str(
+            pick("behavior")
+            or payload.get("instruction")
+            or pick("summary")
+            or ""
+        )
+    if not contract.scope:
+        contract.scope = _string_list(
+            pick("allowed_paths") or pick("scope") or []
+        )
+    if not contract.verification:
+        contract.verification = str(pick("verification") or "")
+    if not contract.verification_tiers:
+        contract.verification_tiers = _string_list(
+            pick("verification_tiers") or []
+        )
+    if not contract.validation:
+        contract.validation = dict(pick("validation", {}) or {})
+    if not contract.acceptance_criteria:
+        contract.acceptance_criteria = _acceptance_criteria_list(
+            pick("acceptance_criteria") or pick("acceptance") or []
+        )
+    if contract.acceptance in {"", "exit_code=0"}:
+        acceptance = pick("acceptance")
+        if isinstance(acceptance, list):
+            contract.acceptance = "\n".join(_string_list(acceptance))
+        elif acceptance not in (None, ""):
+            contract.acceptance = str(acceptance)
+    if not contract.exclusions:
+        contract.exclusions = _string_list(pick("exclusions") or [])
+    if not contract.explicit_non_goals:
+        contract.explicit_non_goals = _string_list(
+            pick("explicit_non_goals") or []
+        )
+    evidence = dict(contract.evidence_contract or {})
+    source_refs = (
+        dict(evidence.get("source_refs") or {})
+        if isinstance(evidence.get("source_refs"), Mapping)
+        else {}
+    )
+    for key in ("task_map_ref", "task_map_generation", "source_index_ref"):
+        value = str(task_item.get(key) or raw.get(key) or "").strip()
+        if value and not source_refs.get(key):
+            source_refs[key] = value
+    if source_refs:
+        evidence["source_refs"] = source_refs
+    contract.evidence_contract = evidence
     return contract
 
 

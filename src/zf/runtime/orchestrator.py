@@ -88,6 +88,11 @@ from zf.runtime.terminal_events import is_stage_progress_event
 from zf.runtime.task_pipeline_result import (
     is_admitted_task_pipeline_stage_result,
 )
+from zf.runtime.task_contract_authority_runtime import (
+    apply_contract_change_request,
+    refresh_writer_task_contract,
+    update_contract_artifact_refs,
+)
 from zf.runtime.worker_state_runtime import WorkerStateRuntimeMixin
 from zf.runtime.writer_fanout_data import WriterFanoutDataMixin
 from zf.core.cost.tracker import CostTracker
@@ -2961,30 +2966,16 @@ class WorkflowRuntimeCoordinator(
         ))
         if result.status != "updated":
             return
-        contract_refs = result.payload.get("contract_refs")
-        if not isinstance(contract_refs, dict) or not contract_refs:
-            return
-        contract = dict(contract_refs)
-        artifact_paths = [
-            str(ref.get("path") or "")
-            for ref in result.payload.get("artifact_refs", [])
-            if isinstance(ref, dict) and str(ref.get("path") or "").strip()
-        ]
-        if artifact_paths:
-            contract["handoff_artifacts"] = artifact_paths
-        update_event = self.event_writer.append(ZfEvent(
-            type="task.contract.update",
-            actor="zf-cli",
-            task_id=task_id or None,
-            payload={
-                "source": "task.artifact_refs.updated",
-                "artifact_refs_event_id": emitted.id,
-                "contract": contract,
-            },
+        update_contract_artifact_refs(
+            task_store=self.task_store,
+            event_writer=self.event_writer,
+            state_dir=self.state_dir,
+            task_id=task_id,
+            contract_refs=result.payload.get("contract_refs"),
+            artifact_refs=result.payload.get("artifact_refs"),
             causation_id=emitted.id,
-            correlation_id=event.correlation_id,
-        ))
-        apply_task_contract_event(self.task_store, update_event)
+            correlation_id=event.correlation_id or "",
+        )
 
     def _fanout_liveness_events_for_agent_usage(self) -> list[ZfEvent]:
         event_types = {
@@ -3041,6 +3032,7 @@ class WorkflowRuntimeCoordinator(
                 )
             except Exception:
                 pass
+
         if event.type == "run.cancelled":
             from zf.runtime.run_cancel_reconciliation import (
                 reconcile_cancelled_run_resources,
@@ -3134,6 +3126,14 @@ class WorkflowRuntimeCoordinator(
                 apply_memory_note_event(self.memory_store, event)
             elif event.type == "task.contract.update":
                 apply_task_contract_event(self.task_store, event)
+            elif event.type == "task.contract.change.requested":
+                apply_contract_change_request(
+                    task_store=self.task_store,
+                    event_writer=self.event_writer,
+                    state_dir=self.state_dir,
+                    config=self.config,
+                    event=event,
+                )
             elif event.type in {"task.dispatched", "fanout.child.dispatched"}:
                 # Seed a fresh busy heartbeat from kernel dispatch truth.
                 # Without this, a rework/fanout dispatch can inherit an old
@@ -3849,47 +3849,18 @@ class WorkflowRuntimeCoordinator(
                 pending_new_tasks.append(refreshed_task)
             elif self._can_refresh_writer_task(existing, loaded):
                 old_ref = self._task_contract_task_map_ref(existing.contract)
-                old_status = str(getattr(existing, "status", "") or "")
-                reset_for_replan = bool(
-                    getattr(loaded, "is_replan", False)
-                    and old_status in {
-                        "done",
-                        "blocked",
-                        "failed",
-                        "review",
-                        "test",
-                    }
+                refresh_writer_task_contract(
+                    task_store=self.task_store,
+                    event_writer=self.event_writer,
+                    state_dir=self.state_dir,
+                    existing=existing,
+                    refreshed_task=refreshed_task,
+                    source=self._writer_task_refresh_source(existing, loaded),
+                    feature_id=feature_id,
+                    old_task_map_ref=old_ref,
+                    new_task_map_ref=loaded.task_map_ref,
+                    is_replan=bool(getattr(loaded, "is_replan", False)),
                 )
-                if reset_for_replan:
-                    self.task_store.reopen(refreshed_task)
-                    reopened = old_status == "done"
-                else:
-                    self.task_store.update(
-                        task_id, title=scope,
-                        skills_required=list(refreshed_task.skills_required),
-                        blocked_by=blocked_by,
-                        contract=contract,
-                    )
-                    reopened = False
-                self.event_writer.append(ZfEvent(
-                    type="task.contract.update",
-                    actor="zf-cli",
-                    task_id=task_id,
-                    payload={
-                        "source": self._writer_task_refresh_source(
-                            existing,
-                            loaded,
-                        ),
-                        "feature_id": feature_id,
-                        "old_task_map_ref": old_ref,
-                        "new_task_map_ref": loaded.task_map_ref,
-                        "replan": bool(getattr(loaded, "is_replan", False)),
-                        "old_status": old_status,
-                        "reopened_from_terminal": reopened,
-                        "reset_for_replan": reset_for_replan,
-                        "contract": asdict(contract),
-                    },
-                ))
         from zf.runtime.writer_task_materialization import materialize_writer_tasks
         materialize_writer_tasks(self, pending_new_tasks, loaded)
         from zf.runtime.writer_task_map_supersede import (

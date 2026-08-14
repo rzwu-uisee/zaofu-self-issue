@@ -9,6 +9,8 @@ def typed_task_contract_handoff_enabled(
     config: Any,
     task_item: Mapping[str, Any],
 ) -> bool:
+    if str(task_item.get("contract_authority_revision") or "").strip():
+        return True
     if str(task_item.get("contract_snapshot_ref") or "").strip():
         return True
 

@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **68** top-level families and **258** addressable command paths.
+The parser currently exposes **68** top-level families and **259** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -198,6 +198,7 @@ Run operator diagnostics
 | Command | Parser description |
 |---|---|
 | `zf doctor` | Run operator diagnostics |
+| `zf doctor contract-authority` | Check canonical Task contract CAS lineage and receipts |
 | `zf doctor event-contract` | Check workflow event producer/consumer contracts |
 | `zf doctor panes` | Check pane-grid role bindings |
 | `zf doctor provider` | Check provider CLI preflight |

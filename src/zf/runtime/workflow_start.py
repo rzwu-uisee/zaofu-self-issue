@@ -21,6 +21,7 @@ from zf.runtime.task_workflow_plans import (
     workflow_route_task_eligibility_error,
 )
 from zf.runtime.workflow_anchor import workflow_task_request_binding
+from zf.runtime.task_contract_authority import task_execution_binding
 from zf.runtime.workflow_origin import workflow_origin_digest
 from zf.runtime.workflow_request_acceptance import bind_task_workflow_inputs
 from zf.runtime.workflow_requests import (
@@ -148,14 +149,21 @@ class WorkflowStartService:
                 task_id=task_id,
             )
         task_digest = task_workflow_binding_digest(task)
+        task_request = workflow_task_request_binding(task)
         expected_task_digest = str(
             payload.get("task_contract_digest") or ""
         ).strip()
+        execution_binding = task_execution_binding(task)
+        active_replay_origin = str(execution_binding.origin_task_digest or "")
         if (
             (require_bindings and not expected_task_digest)
             or (
                 expected_task_digest
                 and expected_task_digest != task_digest
+                and not (
+                    execution_binding.owner == "workflow"
+                    and active_replay_origin == expected_task_digest
+                )
             )
         ):
             return _failure(
@@ -165,7 +173,6 @@ class WorkflowStartService:
                 task_id=task_id,
             )
 
-        task_request = workflow_task_request_binding(task)
         payload_request_id = str(
             payload.get("request_id")
             or parameters.get("request_id")

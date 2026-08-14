@@ -10,7 +10,13 @@ from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
-from zf.runtime.task_doc import TaskDocResult, task_doc_path, write_task_doc
+from zf.runtime.task_doc import (
+    TaskDocResult,
+    task_doc_contract_metadata,
+    task_doc_path,
+    write_task_doc,
+)
+from zf.runtime.task_contract_authority import TaskContractAuthorityService
 
 
 @dataclass(frozen=True)
@@ -43,20 +49,27 @@ def ingest_task_doc(
 
     updated_fields = _apply_parsed_contract(task, parsed)
     active_dispatch_cleared = bool(task.active_dispatch_id)
-    if active_dispatch_cleared:
-        task.active_dispatch_id = ""
-    updated = store.update(
-        task.id,
+    mutation = TaskContractAuthorityService(
+        task_store=store,
+        event_writer=event_writer,
+        state_dir=state_dir,
+    ).replace(
+        task,
         contract=task.contract,
-        active_dispatch_id=task.active_dispatch_id,
-    ) or task
+        source="task_doc_ingest",
+        task_updates={"active_dispatch_id": ""} if active_dispatch_cleared else {},
+    )
+    updated = mutation.task
     result = write_task_doc(
         state_dir,
         updated,
         dispatch_id="",
         source_event="task_doc_ingest",
     )
-    store.update(updated.id, contract=updated.contract)
+    store.patch_contract_fields(
+        updated.id,
+        task_doc_contract_metadata(result),
+    )
     if event_writer is not None:
         event_writer.append(ZfEvent(
             type="task.doc.updated",

@@ -14,6 +14,7 @@ from zf.runtime.candidate_result_binding import (
 )
 from zf.runtime.task_contract_snapshot import (
     build_target_snapshot,
+    current_task_contract_identity,
     hydrate_target_snapshot,
     hydrate_task_contract_snapshot,
     snapshot_payload_fields,
@@ -147,6 +148,26 @@ def prepare_candidate_verification_authority(
             contract_descriptor,
             expected=expected_contract,
         )
+        snapshot_authority = str(
+            contract_snapshot.get("contract_authority_revision") or ""
+        )
+        if snapshot_authority:
+            current_task = runtime.task_store.get(child_task_id)
+            if current_task is None:
+                raise CandidateVerificationAuthorityError(
+                    f"candidate task {child_task_id!r} has no current TaskStore authority"
+                )
+            try:
+                current_identity = current_task_contract_identity(current_task)
+            except Exception as exc:
+                raise CandidateVerificationAuthorityError(
+                    f"candidate task {child_task_id!r} authority is unreadable: {exc}"
+                ) from exc
+            for key, expected in current_identity.items():
+                if str(contract_snapshot.get(key) or "") != str(expected):
+                    raise CandidateVerificationAuthorityError(
+                        f"candidate task {child_task_id!r} uses stale {key}"
+                    )
         hydrate_target_snapshot(
             Path(runtime.state_dir),
             target_descriptor,
@@ -184,6 +205,20 @@ def prepare_candidate_verification_authority(
             "verification_result_digest": _nested_digest(
                 child_payload.get("control_result_ref")
             ),
+            **{
+                key: str(contract_snapshot.get(key))
+                for key in (
+                    "contract_authority_revision",
+                    "execution_owner",
+                    "workflow_request_id",
+                    "workflow_request_revision",
+                    "workflow_run_id",
+                    "origin_binding_digest",
+                    "contract_revision",
+                    "task_map_generation",
+                )
+                if contract_snapshot.get(key) not in (None, "", 0)
+            },
         })
         child_snapshots.append(contract_snapshot)
 

@@ -6749,7 +6749,7 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         if task is None:
             return
         try:
-            from zf.runtime.task_doc import write_task_doc
+            from zf.runtime.task_doc import task_doc_contract_metadata, write_task_doc
 
             result = write_task_doc(
                 self.state_dir,
@@ -6758,7 +6758,9 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
                 source_event=source_event,
             )
             if task.contract is not None and result.capsule_revision:
-                self.task_store.update(task.id, contract=task.contract)
+                self.task_store.patch_contract_fields(
+                    task.id, task_doc_contract_metadata(result)
+                )
             self.event_writer.append(ZfEvent(
                 type="task.doc.updated",
                 actor="zf-cli",

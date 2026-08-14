@@ -27,6 +27,9 @@ from zf.core.task.store import TaskStore
 from zf.core.workflow.lane_pipeline import parse_lane_pipeline
 from zf.runtime.delivery_trace import build_delivery_trace
 from zf.runtime.orchestrator import Orchestrator
+from zf.runtime.task_contract_snapshot import TASK_CONTRACT_CURRENTNESS_FIELDS
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.task_pipeline_briefing import verification_result_template
 
 
 class _RecordingTransport:
@@ -332,6 +335,18 @@ def _complete_writer(
         content if content is not None else f"{task_id}\n",
         task_id,
     )
+    dispatch_payload = (
+        child.get("payload") if isinstance(child.get("payload"), dict) else {}
+    )
+    identity = {
+        key: dispatch_payload[key]
+        for key in (
+            *TASK_CONTRACT_CURRENTNESS_FIELDS,
+            "contract_snapshot_ref",
+            "contract_snapshot_digest",
+        )
+        if dispatch_payload.get(key) not in (None, "", [], {})
+    }
     orch.run_once(events=[ZfEvent(
         type="dev.build.done",
         actor=child["role_instance"],
@@ -346,6 +361,7 @@ def _complete_writer(
             "source_commit": commit,
             "source_branch": child["source_branch"],
             "workdir": child["workdir"],
+            **identity,
         },
     )])
 
@@ -353,6 +369,37 @@ def _complete_writer(
 def _complete_verify(orch: Orchestrator, *, state_dir: Path, fanout_id: str) -> None:
     manifest = _manifest(state_dir, fanout_id)
     child = manifest["children"][0]
+    dispatch_payload = (
+        child.get("payload") if isinstance(child.get("payload"), dict) else {}
+    )
+    identity = {
+        key: dispatch_payload[key]
+        for key in (
+            *TASK_CONTRACT_CURRENTNESS_FIELDS,
+            "contract_snapshot_ref",
+            "contract_snapshot_digest",
+            "target_snapshot_ref",
+            "target_snapshot_digest",
+            "target_commit",
+        )
+        if dispatch_payload.get(key) not in (None, "", [], {})
+    }
+    contract_snapshot = hydrate_sidecar_ref(
+        state_dir,
+        {
+            "ref": dispatch_payload["contract_snapshot_ref"],
+            "sha256": dispatch_payload["contract_snapshot_digest"],
+        },
+    ).payload
+    verification_result = verification_result_template(contract_snapshot)
+    verification_result.update(identity)
+    verification_result["evidence_refs"] = ["mock://lane-verify/report"]
+    for receipt in verification_result.get("probe_receipts") or []:
+        receipt["target_commit"] = str(dispatch_payload.get("target_commit") or "")
+        receipt["evidence_refs"] = ["mock://lane-verify/probe"]
+    for requirement in verification_result.get("requirement_results") or []:
+        if requirement.get("status") == "passed":
+            requirement["evidence_refs"] = ["mock://lane-verify/ac"]
     orch.run_once(events=[ZfEvent(
         type="verify.child.completed",
         actor=child["role_instance"],
@@ -363,6 +410,16 @@ def _complete_verify(orch: Orchestrator, *, state_dir: Path, fanout_id: str) -> 
             "run_id": child["run_id"],
             "role_instance": child["role_instance"],
             "status": "completed",
+            "evidence_refs": ["mock://lane-verify/report"],
+            "report": {
+                "status": "passed",
+                "summary": "lane verification passed",
+                "findings": [],
+                "recommendation": "approve",
+                "evidence_refs": ["mock://lane-verify/report"],
+            },
+            "verification_result": verification_result,
+            **identity,
         },
     )])
 
@@ -370,17 +427,59 @@ def _complete_verify(orch: Orchestrator, *, state_dir: Path, fanout_id: str) -> 
 def _fail_verify(orch: Orchestrator, *, state_dir: Path, fanout_id: str) -> None:
     manifest = _manifest(state_dir, fanout_id)
     child = manifest["children"][0]
+    child_payload = (
+        child.get("payload") if isinstance(child.get("payload"), dict) else {}
+    )
+    contract_snapshot = hydrate_sidecar_ref(
+        state_dir,
+        {
+            "ref": child_payload["contract_snapshot_ref"],
+            "sha256": child_payload["contract_snapshot_digest"],
+        },
+    ).payload
+    criterion = contract_snapshot["acceptance_criteria"][0]
+    verification_result = verification_result_template(contract_snapshot)
+    verification_result.update({
+        "verdict": "rejected",
+        "summary": "regression still fails",
+        "evidence_refs": ["mock://lane-verify/rejection"],
+        "requirement_results": [{
+            "acceptance_id": criterion["acceptance_id"],
+            "status": "failed",
+            "verification_owner": criterion["verification_owner"],
+            "verification_tier": criterion["verification_tier"],
+            "findings": [{"message": "regression still fails"}],
+            "reproduction_commands": ["test -f task-1.txt"],
+            "evidence_refs": ["mock://lane-verify/rejection"],
+        }],
+        "rework_items": [{
+            "rework_item_id": "rework-regression",
+            "acceptance_id": criterion["acceptance_id"],
+            "status": "incorrect",
+            "expected": criterion["statement"],
+            "observed": "regression still fails",
+            "required_delta": "repair the task output",
+            "done_when": "the task verification command passes",
+            "next_gate": "task_verify",
+            "owner": "implementation_owner",
+            "reproduction_command_ids": [],
+            "allowed_scope": list(contract_snapshot.get("allowed_paths") or []),
+        }],
+    })
     orch.run_once(events=[ZfEvent(
-        type="verify.child.failed",
+        type="verify.child.completed",
         actor=child["role_instance"],
         correlation_id="trace-1",
         payload={
+            **child_payload,
             "fanout_id": fanout_id,
             "child_id": child["child_id"],
             "run_id": child["run_id"],
             "role_instance": child["role_instance"],
-            "status": "failed",
+            "status": "completed",
             "reason": "regression still fails",
+            "evidence_refs": ["mock://lane-verify/rejection"],
+            "verification_result": verification_result,
         },
     )])
 

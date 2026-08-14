@@ -7,7 +7,10 @@ from typing import Any, Mapping
 
 from zf.core.events.model import ZfEvent
 from zf.core.state.task_attempts import task_attempt_id, task_attempt_lease_id
-from zf.runtime.task_contract_snapshot import snapshot_payload_fields
+from zf.runtime.task_contract_snapshot import (
+    contract_snapshot_identity_fields,
+    snapshot_payload_fields,
+)
 from zf.runtime.transport import DispatchContext
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
@@ -283,7 +286,7 @@ def dispatch_task_pipeline_stage(
         "external_evidence_bindings": external_evidence_bindings,
         "skills": list(role.skills),
         **snapshot_payload_fields(contract_descriptor),
-        "contract_revision": str(contract_snapshot.get("contract_revision") or ""),
+        **contract_snapshot_identity_fields(contract_snapshot),
         **package_identity,
         **target_fields,
     }

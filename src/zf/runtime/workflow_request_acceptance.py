@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
+from zf.core.task.authority import without_execution_binding_evidence
 from zf.runtime.task_contract_snapshot import criterion_text
 
 
@@ -161,12 +162,9 @@ def build_task_workflow_input_contract(
     task_contract_digest: str,
 ) -> dict[str, Any]:
     contract = workflow_task.contract
-    evidence_contract = (
-        dict(contract.evidence_contract)
-        if isinstance(contract.evidence_contract, dict)
-        else {}
+    evidence_contract = without_execution_binding_evidence(
+        contract.evidence_contract
     )
-    evidence_contract.pop("execution_owner", None)
     return {
         "schema_version": TASK_INPUT_CONTRACT_SCHEMA_VERSION,
         "task_id": str(workflow_task.id or ""),

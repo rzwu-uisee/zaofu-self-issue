@@ -88,6 +88,12 @@ def _same_contract_authority(
     target = binding(target_manifest, target_child)
     identity_fields = (
         "task_map_ref",
+        "contract_authority_revision",
+        "execution_owner",
+        "workflow_request_id",
+        "workflow_request_revision",
+        "workflow_run_id",
+        "origin_binding_digest",
         "contract_revision",
         "task_map_generation",
         "contract_snapshot_digest",
@@ -96,9 +102,12 @@ def _same_contract_authority(
     source_is_typed = any(str(source.get(key) or "") for key in identity_fields[1:])
     if target_is_typed and not source_is_typed:
         return False
+    strict_authority = bool(str(target.get("contract_authority_revision") or ""))
     for key in identity_fields:
         left = str(source.get(key) or "")
         right = str(target.get(key) or "")
+        if strict_authority and right and left != right:
+            return False
         if left and right and left != right:
             return False
     return True

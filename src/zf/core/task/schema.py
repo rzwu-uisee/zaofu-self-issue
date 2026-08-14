@@ -218,6 +218,18 @@ class TaskEvidence:
 
 
 @dataclass
+class TaskExecutionBinding:
+    """Mechanical owner/request identity, separate from the semantic contract."""
+
+    owner: str = ""
+    request_id: str = ""
+    request_revision: int = 0
+    workflow_run_id: str = ""
+    origin_binding_digest: str = ""
+    origin_task_digest: str = ""
+
+
+@dataclass
 class Task:
     title: str = ""
     id: str = field(default_factory=_new_task_id)
@@ -228,6 +240,14 @@ class Task:
     skills_required: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
     contract: TaskContract = field(default_factory=TaskContract)
+    execution_binding: TaskExecutionBinding = field(
+        default_factory=TaskExecutionBinding
+    )
+    # A CAS lineage for complete semantic-contract / execution-binding writes.
+    # Task capsule refs and acceptance evidence are field-level metadata and do
+    # not advance this identity.
+    contract_authority_revision: str = ""
+    contract_authority_sequence: int = 0
     evidence: TaskEvidence | None = None
     created_at: str = field(default_factory=_now_iso)
     dispatched_at: str | None = None

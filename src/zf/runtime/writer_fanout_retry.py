@@ -198,6 +198,10 @@ class WriterFanoutRetryMixin:
                 [],
                 {},
             ):
+                if key in {"base_commit", "dispatch_base_commit"} and str(
+                    task_item.get(key) or ""
+                ).strip():
+                    continue
                 task_item[key] = value
         retry_child = FanoutChild(
             child_id=child_id,

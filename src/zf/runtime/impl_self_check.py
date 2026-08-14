@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref, write_sidecar_json
-from zf.runtime.task_contract_snapshot import TaskContractSnapshotError
+from zf.runtime.task_contract_snapshot import (
+    TASK_CONTRACT_AUTHORITY_FIELDS,
+    TaskContractSnapshotError,
+)
 from zf.runtime.verification_commands import verification_command_required_for_stage
 
 
@@ -49,6 +52,10 @@ def normalize_impl_self_check(
         "contract_snapshot_ref": str(target_snapshot.get("contract_snapshot_ref") or ""),
         "contract_snapshot_digest": str(target_snapshot.get("contract_snapshot_digest") or ""),
     }
+    for key in TASK_CONTRACT_AUTHORITY_FIELDS:
+        value = contract_snapshot.get(key)
+        if value not in (None, "", 0):
+            expected[key] = str(value)
     body.setdefault("schema_version", SCHEMA_VERSION)
     if not strict:
         for key, value in expected.items():
@@ -324,6 +331,11 @@ def completion_payload_template(
             "contract_snapshot_digest": str(
                 task_item.get("contract_snapshot_digest") or ""
             ),
+            **{
+                key: str(contract_snapshot.get(key))
+                for key in TASK_CONTRACT_AUTHORITY_FIELDS
+                if contract_snapshot.get(key) not in (None, "", 0)
+            },
             "command_receipts": [
                 {
                     "receipt_id": f"receipt-{item.get('command_id')}",

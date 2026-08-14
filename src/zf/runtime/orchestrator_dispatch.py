@@ -2501,7 +2501,12 @@ class DispatchMixin(
                     "task capsule preflight failed: "
                     + ", ".join(preflight_errors)
                 )
-            updated_task = self.task_store.update(task.id, contract=task.contract)
+            from zf.runtime.task_doc import task_doc_contract_metadata
+
+            updated_task = self.task_store.patch_contract_fields(
+                task.id,
+                task_doc_contract_metadata(task_doc),
+            )
             if updated_task is not None:
                 task = updated_task
             self.event_writer.append(ZfEvent(

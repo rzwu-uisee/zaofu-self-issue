@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from dataclasses import asdict
 from pathlib import Path
 
 from zf.cli.main import main
@@ -11,7 +12,7 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.security.signing import EventSigner
 from zf.core.state.task_attempts import TaskAttemptStore
-from zf.core.task.schema import Task
+from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 
 
@@ -633,6 +634,74 @@ def test_emit_task_contract_update_projects_blocked_by_to_task(
     task = store.get("T2")
     assert task.blocked_by == ["T1"]
     assert task.contract.behavior == "Follow base."
+
+
+def test_emit_contract_change_request_applies_synchronously_and_rejects_stale(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "zf.yaml").write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "roles:\n"
+        "  - {name: orchestrator, backend: mock, role_kind: reader}\n",
+        encoding="utf-8",
+    )
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    store = TaskStore(tmp_path / ".zf" / "kanban.json")
+    store.add(Task(
+        id="TASK-CHANGE",
+        title="Change",
+        contract=TaskContract(behavior="R1", verification="pytest"),
+    ))
+    payload = {
+        "contract": asdict(TaskContract(
+            behavior="R2",
+            verification="pytest tests/test_current.py",
+        )),
+        "expected_authority_revision": "",
+        "source": "orchestrator_replan",
+    }
+
+    result = main([
+        "emit",
+        "task.contract.change.requested",
+        "--task",
+        "TASK-CHANGE",
+        "--actor",
+        "orchestrator",
+        "--payload",
+        json.dumps(payload),
+    ])
+
+    assert result == 0
+    current = store.get("TASK-CHANGE")
+    assert current is not None
+    assert current.contract.behavior == "R2"
+    assert current.contract_authority_sequence == 1
+    capsys.readouterr()
+
+    payload["contract"]["behavior"] = "stale R3"
+    stale = main([
+        "emit",
+        "task.contract.change.requested",
+        "--task",
+        "TASK-CHANGE",
+        "--actor",
+        "orchestrator",
+        "--payload",
+        json.dumps(payload),
+    ])
+
+    assert stale == 2
+    assert "was not applied" in capsys.readouterr().err
+    unchanged = store.get("TASK-CHANGE")
+    assert unchanged is not None
+    assert unchanged.contract.behavior == "R2"
+    assert unchanged.contract_authority_sequence == 1
 
 
 def test_emit_signs_when_event_signing_enabled(tmp_path: Path, monkeypatch):

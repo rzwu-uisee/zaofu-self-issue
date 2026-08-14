@@ -70,6 +70,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     task_attempt.set_defaults(func=_run_task_attempt)
 
+    contract_authority = sub.add_parser(
+        "contract-authority",
+        help="Check canonical Task contract CAS lineage and receipts",
+    )
+    contract_authority.add_argument(
+        "--path", type=str, default=None, help="Path to zf.yaml"
+    )
+    contract_authority.add_argument("--json", action="store_true", dest="as_json")
+    contract_authority.set_defaults(func=_run_contract_authority)
+
     parser.set_defaults(func=_run)
 
 
@@ -250,6 +260,29 @@ def _run_task_attempt(args: argparse.Namespace) -> int:
         report.get("promotion_candidate")
         or report.get("decision") == "already_enforced"
     ) else 1
+
+
+def _run_contract_authority(args: argparse.Namespace) -> int:
+    try:
+        project_root, state_dir, config = _load_runtime_from_path(
+            Path(args.path) if getattr(args, "path", None) else None
+        )
+        events = event_log_from_project(state_dir, config=config).read_all()
+        from zf.runtime.task_contract_authority_doctor import (
+            build_task_contract_authority_report,
+        )
+
+        report = build_task_contract_authority_report(state_dir, events)
+    except (ConfigError, RuntimeError, OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    report["project_root"] = str(project_root)
+    report["state_dir"] = str(state_dir)
+    if args.as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_contract_authority_report(report)
+    return 0 if report["ok"] else 1
 
 
 def _load_runtime():
@@ -457,6 +490,37 @@ def _print_task_attempt_report(report: dict[str, Any]) -> None:
         print("OK: mechanical promotion evidence is complete")
     elif report.get("decision") == "already_enforced":
         print("OK: TaskAttempt is already enforced")
+
+
+def _print_contract_authority_report(report: dict[str, Any]) -> None:
+    print("ZF Task Contract Authority Doctor")
+    print(f"project_root: {report.get('project_root', '')}")
+    print(f"state_dir: {report.get('state_dir', '')}")
+    print(
+        "summary: "
+        f"tasks={report.get('task_count', 0)} "
+        f"stamped={report.get('stamped_task_count', 0)} "
+        f"legacy={report.get('legacy_task_count', 0)} "
+        f"prepared={report.get('prepared_count', 0)} "
+        f"applied={report.get('applied_count', 0)}"
+    )
+    if report.get("issues"):
+        print("Issues:")
+        for issue in report["issues"]:
+            print(
+                f"  - {issue.get('code', 'unknown')} "
+                f"task={issue.get('task_id', '')} "
+                f"{issue.get('message', '')}".rstrip()
+            )
+    if report.get("warnings"):
+        print("Warnings:")
+        for warning in report["warnings"]:
+            print(
+                f"  - {warning.get('code', 'unknown')} "
+                f"task={warning.get('task_id', '')}"
+            )
+    if report.get("ok"):
+        print("OK: Task contract authority is consistent")
 
 
 def _run_probe(argv: list[str], *, timeout_s: float) -> dict[str, Any]:

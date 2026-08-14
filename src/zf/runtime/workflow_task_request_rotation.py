@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -220,21 +220,28 @@ def apply_task_request_binding(
         request_revision=request_revision,
         origin_binding_digest=origin_digest,
     )
-    task_store.update(task.id, contract=task.contract)
     rotation = decision.rotation
-    event_writer.emit(
-        "task.contract.update",
+    from zf.runtime.task_contract_authority import (
+        TaskContractAuthorityService,
+    )
+
+    TaskContractAuthorityService(
+        task_store=task_store,
+        event_writer=event_writer,
+        state_dir=state_dir,
+    ).replace(
+        task,
+        contract=task.contract,
+        execution_binding=task.execution_binding,
+        source=(
+            WORKFLOW_TASK_REQUEST_ROTATION_SOURCE
+            if rotation
+            else "workflow_submit"
+        ),
         actor=actor,
-        task_id=task.id,
         causation_id=requested_event.id,
         correlation_id=requested_event.correlation_id,
-        payload={
-            "source": (
-                WORKFLOW_TASK_REQUEST_ROTATION_SOURCE
-                if rotation
-                else "workflow_submit"
-            ),
-            "contract": asdict(task.contract),
+        audit_payload={
             "contract_digest": task_workflow_binding_digest(task),
             "execution_owner": "workflow",
             "request_id": request_id,

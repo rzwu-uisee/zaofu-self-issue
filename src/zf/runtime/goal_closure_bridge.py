@@ -370,6 +370,7 @@ class GoalClosureBridgeMixin:
         )
         admitted_refs: list[str] = []
         admitted_index = 0
+        candidate_child_authorities: dict[str, dict] = {}
         product_report: dict = {}
         product_report_descriptor: dict = {}
         for event in reversed(events):
@@ -425,6 +426,66 @@ class GoalClosureBridgeMixin:
                 source_id=f"admitted-result-{admitted_index}",
                 kind="admitted_call_result",
             )
+            if (
+                str(body.get("control_result_schema") or "")
+                == "verification-result.v1"
+                and result_target
+                == str(identity.get("candidate_head_commit") or "")
+            ):
+                contract_ref = str(
+                    envelope_identity.get("contract_snapshot_ref") or ""
+                )
+                contract_digest = str(
+                    envelope_identity.get("contract_snapshot_digest") or ""
+                )
+                if contract_ref and contract_digest:
+                    try:
+                        from zf.runtime.task_contract_snapshot import (
+                            hydrate_task_contract_snapshot,
+                        )
+
+                        candidate_contract = hydrate_task_contract_snapshot(
+                            self.state_dir,
+                            {"ref": contract_ref, "sha256": contract_digest},
+                        )
+                    except (OSError, ValueError):
+                        candidate_contract = {}
+                    if str(candidate_contract.get("authority_scope") or "") == "candidate":
+                        for item in candidate_contract.get("child_authorities") or []:
+                            if isinstance(item, dict) and str(item.get("task_id") or ""):
+                                candidate_child_authorities[str(item["task_id"])] = dict(item)
+                    else:
+                        child_task_id = str(
+                            candidate_contract.get("task_id")
+                            or envelope_identity.get("task_id")
+                            or ""
+                        )
+                        authority_revision = str(
+                            candidate_contract.get("contract_authority_revision")
+                            or ""
+                        )
+                        if child_task_id and authority_revision:
+                            candidate_child_authorities[child_task_id] = {
+                                "task_id": child_task_id,
+                                "target_commit": result_target,
+                                "verification_event_id": event.id,
+                                "contract_snapshot_ref": contract_ref,
+                                "contract_snapshot_digest": contract_digest,
+                                **{
+                                    key: str(candidate_contract.get(key))
+                                    for key in (
+                                        "contract_authority_revision",
+                                        "execution_owner",
+                                        "workflow_request_id",
+                                        "workflow_request_revision",
+                                        "workflow_run_id",
+                                        "origin_binding_digest",
+                                        "contract_revision",
+                                        "task_map_generation",
+                                    )
+                                    if candidate_contract.get(key) not in (None, "", 0)
+                                },
+                            }
             if (
                 not product_report_descriptor
                 and str(body.get("control_result_schema") or "")
@@ -598,6 +659,11 @@ class GoalClosureBridgeMixin:
             "provider_qualification_status": str(
                 provider_qualification.get("status") or "not_required"
             ),
+            "task_authority_required": bool(candidate_child_authorities),
+            "child_authorities": [
+                candidate_child_authorities[task_id]
+                for task_id in sorted(candidate_child_authorities)
+            ],
         }
         contract_descriptor = write_immutable_json_sidecar(
             self.state_dir,

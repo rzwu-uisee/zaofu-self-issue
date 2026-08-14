@@ -736,25 +736,33 @@ def _run_handoff(args: argparse.Namespace) -> int:
         trigger_event_id=trigger_event_id,
     )
 
-    updated = store.update(args.task_id, contract=contract, assigned_to=args.assign)
+    writer = _event_writer(args)
+    from zf.runtime.task_contract_authority import (
+        TaskContractAuthorityService,
+    )
+
+    mutation = TaskContractAuthorityService(
+        task_store=store,
+        event_writer=writer,
+        state_dir=_state_dir(args),
+    ).replace(
+        task,
+        contract=contract,
+        source=_HANDOFF_SOURCE,
+        task_updates={"assigned_to": args.assign},
+        audit_payload=_handoff_payload(
+            assignee=args.assign,
+            trigger_event_id=trigger_event_id,
+        ),
+    )
+    updated = mutation.task
     if updated is None:
         print(f"Error: Task {args.task_id} not found. To fix: run 'zf kanban' to list tasks", file=sys.stderr)
         return 1
 
-    writer = _event_writer(args)
     emitted: list[str] = []
-    if not contract_seen:
-        event = writer.append(ZfEvent(
-            type="task.contract.update",
-            actor="zf-cli",
-            task_id=args.task_id,
-            payload=_handoff_payload(
-                assignee=args.assign,
-                trigger_event_id=trigger_event_id,
-                contract=asdict(contract),
-            ),
-        ))
-        emitted.append(event.id)
+    if not contract_seen and mutation.changed:
+        emitted.append(mutation.authority_revision)
     if not assigned_seen:
         event = writer.append(ZfEvent(
             type="task.assigned",
@@ -872,6 +880,20 @@ def _run_show(args: argparse.Namespace) -> int:
     print(f"Status:   {task.status}")
     print(f"Assigned: {task.assigned_to or '(none)'}")
     print(f"Key:      {task.key or '(none)'}")
+    print(
+        "Authority: "
+        f"{task.contract_authority_revision or '(legacy/unset)'} "
+        f"(sequence={task.contract_authority_sequence})"
+    )
+    binding = getattr(task, "execution_binding", None)
+    if binding and any(vars(binding).values()):
+        print(
+            "Execution: "
+            f"owner={binding.owner or '(none)'} "
+            f"request={binding.request_id or '(none)'} "
+            f"revision={binding.request_revision} "
+            f"run={binding.workflow_run_id or '(none)'}"
+        )
     if task.blocked_by:
         print(f"Blocked:  {', '.join(task.blocked_by)}")
     if task.contract.behavior:

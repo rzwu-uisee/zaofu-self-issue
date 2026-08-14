@@ -51,6 +51,11 @@ def normalize_verification_result(
     for key in (
         "workflow_run_id",
         "task_id",
+        "contract_authority_revision",
+        "execution_owner",
+        "workflow_request_id",
+        "workflow_request_revision",
+        "origin_binding_digest",
         "contract_revision",
         "task_map_generation",
         "base_commit",
@@ -118,6 +123,11 @@ def validate_verification_result(
         "verification_owner",
         "verification_tier",
     )
+    if str(result.get("contract_authority_revision") or ""):
+        identity = (
+            *identity,
+            "contract_authority_revision",
+        )
     missing = [key for key in identity if not str(result.get(key) or "").strip()]
     if missing:
         raise VerificationResultError("verification result missing: " + ", ".join(missing))

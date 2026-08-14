@@ -15,6 +15,7 @@ from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
     build_target_snapshot,
     build_task_contract_snapshot,
+    contract_snapshot_identity_fields,
     current_task_contract_identity,
     descriptor_from_payload,
     hydrate_target_snapshot,
@@ -453,11 +454,7 @@ class WriterContractHandoffMixin:
                 source_event_id=event.id,
             )
         base_payload.update({
-            "workflow_run_id": str(snapshot["workflow_run_id"]),
-            "contract_revision": str(snapshot["contract_revision"]),
-            "task_map_generation": str(snapshot["task_map_generation"]),
-            "base_commit": str(snapshot["base_commit"]),
-            "task_ref": str(snapshot["task_ref"]),
+            **contract_snapshot_identity_fields(snapshot),
             "target_commit": target_commit,
             **snapshot_payload_fields(descriptor),
             **target_payload_fields(target_descriptor),

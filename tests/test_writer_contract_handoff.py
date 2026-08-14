@@ -8,10 +8,12 @@ from zf.core.events.writer import EventWriter
 from zf.core.task.schema import TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.task_contract_snapshot import (
+    TASK_CONTRACT_AUTHORITY_FIELDS,
     build_task_contract_snapshot,
     effective_contract_revision,
     task_map_generation,
 )
+from zf.runtime.task_contract_authority import TaskContractAuthorityService
 from tests.test_writer_fanout_runtime import (
     _child,
     _commit,
@@ -53,6 +55,20 @@ def _typed_contract(*, behavior: str = "") -> TaskContract:
     )
 
 
+def _replace_contract(
+    state_dir: Path,
+    store: TaskStore,
+    contract: TaskContract,
+) -> None:
+    task = store.get("TASK-1")
+    assert task is not None
+    TaskContractAuthorityService(
+        task_store=store,
+        event_writer=None,
+        state_dir=state_dir,
+    ).replace(task, contract=contract, source="test_contract_revision")
+
+
 def _impl_self_check_body(
     snapshot: dict,
     *,
@@ -71,6 +87,11 @@ def _impl_self_check_body(
         "task_map_generation": snapshot["task_map_generation"],
         "source_commit": source_commit,
         "target_commit": source_commit,
+        **{
+            key: str(snapshot[key])
+            for key in TASK_CONTRACT_AUTHORITY_FIELDS
+            if snapshot.get(key) not in (None, "", 0)
+        },
         "command_receipts": [{
             "receipt_id": "receipt-CMD-TASK-1",
             "command_id": command["command_id"],
@@ -109,7 +130,7 @@ def test_adopted_task_ref_recovers_source_generation_dispatch_base(
     orch._typed_task_contract_handoff_enabled = lambda _payload: True  # type: ignore[method-assign]
     _seed_tasks(state_dir)
     store = TaskStore(state_dir / "kanban.json")
-    store.update("TASK-1", contract=_typed_contract())
+    _replace_contract(state_dir, store, _typed_contract())
     _start(orch)
     started = next(event for event in log.read_all() if event.type == "fanout.started")
     source_fanout_id = started.payload["fanout_id"]
@@ -240,13 +261,13 @@ def test_stale_contract_completion_is_not_adopted_into_untyped_replacement(
     orch._typed_task_contract_handoff_enabled = lambda _payload: True  # type: ignore[method-assign]
     _seed_tasks(state_dir)
     store = TaskStore(state_dir / "kanban.json")
-    store.update("TASK-1", contract=_typed_contract(behavior="revision one"))
+    _replace_contract(state_dir, store, _typed_contract(behavior="revision one"))
     _start(orch)
     started = next(event for event in log.read_all() if event.type == "fanout.started")
     source_fanout_id = started.payload["fanout_id"]
     source_child = _child(_manifest(state_dir, source_fanout_id), "TASK-1")
 
-    store.update("TASK-1", contract=_typed_contract(behavior="revision two"))
+    _replace_contract(state_dir, store, _typed_contract(behavior="revision two"))
     current_task = store.get("TASK-1")
     assert current_task is not None
     assert effective_contract_revision(current_task) != source_child["contract_revision"]
@@ -329,7 +350,7 @@ def test_current_contract_completion_recovers_identity_failed_child_once(
     orch.config.workflow.impl_self_check_required = True
     _seed_tasks(state_dir)
     store = TaskStore(state_dir / "kanban.json")
-    store.update("TASK-1", contract=_typed_contract(behavior="revision one"))
+    _replace_contract(state_dir, store, _typed_contract(behavior="revision one"))
     _start(orch)
     fanout_id = _fanout_id(log)
     child = _child(_manifest(state_dir, fanout_id), "TASK-1")
@@ -344,7 +365,7 @@ def test_current_contract_completion_recovers_identity_failed_child_once(
         "contract_snapshot_ref": descriptor["ref"],
         "contract_snapshot_digest": descriptor["sha256"],
     })
-    store.update("TASK-1", contract=_typed_contract(behavior="revision two"))
+    _replace_contract(state_dir, store, _typed_contract(behavior="revision two"))
     current_task = store.get("TASK-1")
     assert current_task is not None
     current_revision = effective_contract_revision(current_task)

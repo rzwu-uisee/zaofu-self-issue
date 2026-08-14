@@ -26,6 +26,7 @@ from zf.runtime.product_acceptance import (
 )
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.simulation_lifecycle import emit_simulation_done
+from zf.runtime.task_contract_snapshot import TASK_CONTRACT_AUTHORITY_FIELDS
 from zf.runtime.result_submit import (
     SemanticResultSubmitService,
     provision_role_submit_credential,
@@ -473,6 +474,11 @@ def test_light_profile_mock_e2e_exact_verify(
             "target_commit": source_commit,
             "contract_snapshot_ref": child["contract_snapshot_ref"],
             "contract_snapshot_digest": child["contract_snapshot_digest"],
+            **{
+                key: str(contract[key])
+                for key in TASK_CONTRACT_AUTHORITY_FIELDS
+                if contract.get(key) not in (None, "", 0)
+            },
             "command_receipts": [{
                 "receipt_id": receipt_id,
                 "command_id": command["command_id"],

@@ -311,7 +311,12 @@ class FanoutRecoveryRuntimeMixin:
                 "writer fanout task capsule preflight failed: "
                 + ", ".join(preflight_errors)
             )
-        self.task_store.update(task_id, contract=task.contract)
+        from zf.runtime.task_doc import task_doc_contract_metadata
+
+        self.task_store.patch_contract_fields(
+            task_id,
+            task_doc_contract_metadata(task_doc),
+        )
         self.event_writer.append(ZfEvent(
             type="task.source.published",
             actor="orchestrator",

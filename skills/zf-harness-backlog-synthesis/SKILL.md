@@ -191,23 +191,30 @@ contract = {
             "static": "pnpm tsc -b --noEmit; pnpm biome ci",
             "runtime": "pnpm vitest run test/unit/state/run-state-machine.test.ts"
         }
-    }
+    },
+    # Newly created Task. For an existing Task, copy the full token from
+    # `zf kanban show <task_id>` instead of reusing a remembered value.
+    "expected_authority_revision": "",
+    "source": "orchestrator_backlog_synthesis",
+    "reason": "critic-approved backlog synthesis",
 }
 open('.zf/tmp/contract.json', 'w', encoding='utf-8').write(json.dumps(contract, ensure_ascii=False))
 PY
 ```
 
-### Step 3: Emit task.contract.update
+### Step 3: Request the canonical contract CAS
 
 ```bash
-zf emit task.contract.update --task "$task_id" --payload-file .zf/tmp/contract.json
+zf emit task.contract.change.requested --task "$task_id" --actor orchestrator \
+  --payload-file .zf/tmp/contract.json
 ```
 
-This updates kanban.json with the synthesized contract. Kernel's
-`apply_task_contract_event` (`src/zf/runtime/housekeeping.py`) handles this
-(legitimate housekeeping — it's responding to a Layer-2 directive, not
-auto-projecting). The old `sprint_contract` naming is retired by the CLAUDE.md
-hard rule; the field is `contract` and the function is `apply_task_contract_event`.
+The payload must contain the complete `contract`, `source`, `reason`, and
+`expected_authority_revision`. Use `""` only for a newly created, unstamped
+Task. For an existing Task, read the exact token from `zf kanban show <task_id>`.
+The command returns non-zero when the actor or CAS token is stale; do not assign
+the worker until the Kernel emits `task.contract.revision.applied`. The old
+`sprint_contract` naming remains retired; `contract` is the single semantic body.
 
 ### Step 4: Assign to the configured implementation role
 
@@ -342,7 +349,7 @@ critic for a corrected task-map, or emit a blocking contract update.
    - critic_event_id = "evt-5f58a46b90c3"
    - critic_gate_ref = "approve: 4 fixes applied"
    - evidence_contract = {static: tsc + biome, runtime: vitest}
-5. zf emit task.contract.update + zf kanban assign `<implementation-role-from-zf.yaml>`
+5. zf emit task.contract.change.requested + zf kanban assign `<implementation-role-from-zf.yaml>`
 6. Single implementation task (scope small enough; no fanout)
 
 The configured worker gets a briefing with all 6 refs, builds, and hands off
@@ -352,13 +359,14 @@ to the next zf.yaml stage.
 
 After your synthesis, the worker briefing must contain references to all 6
 fields. If kernel returns `task.contract.invalid`, you missed a field —
-read the event payload's `errors` list and re-emit task.contract.update
+read the event payload's `errors` list, re-read the current authority token,
+and re-emit `task.contract.change.requested`
 with the missing fields.
 
 ## Anti-patterns
 
 - ❌ Synthesizing contract before critic.approve
-- ❌ Dispatching any downstream worker before emitting task.contract.update
+- ❌ Dispatching any downstream worker before the contract change request is applied
 - ❌ Inventing a `dev` stage when zf.yaml is plan-only or uses another role name
 - ❌ Treating arch draft/proposed artifact status as automatic runtime truth
 - ❌ Empty / placeholder strings for any of the 6 refs

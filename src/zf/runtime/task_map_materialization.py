@@ -11,7 +11,8 @@ from zf.core.events.writer import EventWriter
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
-from zf.runtime.task_doc import write_task_doc
+from zf.runtime.task_doc import task_doc_contract_metadata, write_task_doc
+from zf.runtime.task_contract_authority import TaskContractAuthorityService
 
 
 MATERIALIZATION_PLAN_SCHEMA = "task-map-materialization-plan.v1"
@@ -115,51 +116,61 @@ def commit_task_map_materialization(
             ))
         raise RuntimeError("injected materialization fault after TaskStore write")
     existing_created_events = _created_task_event_ids(writer) if writer is not None else set()
+    authority = TaskContractAuthorityService(
+        task_store=store,
+        event_writer=writer,
+        state_dir=state_dir,
+    )
     task_doc_failures: list[str] = []
     for task in tasks:
+        created_event = None
+        if writer is not None and task.id not in existing_created_events:
+            created_event = writer.append(ZfEvent(
+                type="task.created",
+                actor=actor,
+                task_id=task.id,
+                causation_id=causation_id or None,
+                correlation_id=correlation_id or None,
+                payload={
+                    "source": "task_map_materialization",
+                    "task_map_ref": str(plan.get("task_map_ref") or ""),
+                    "source_index_ref": str(plan.get("source_index_ref") or ""),
+                    "plan_artifact_package_ref": str(
+                        plan.get("plan_artifact_package_ref") or ""
+                    ),
+                    "plan_artifact_package_digest": str(
+                        plan.get("plan_artifact_package_digest") or ""
+                    ),
+                    "task": asdict(task),
+                },
+            ))
+        current = store.get(task.id)
+        if current is not None:
+            mutation = authority.replace(
+                current,
+                contract=task.contract,
+                source="task_map_materialization",
+                actor=actor,
+                causation_id=(created_event.id if created_event else causation_id),
+                correlation_id=correlation_id,
+                audit_payload={
+                    "task_map_ref": str(plan.get("task_map_ref") or ""),
+                },
+            )
+            task = mutation.task
         try:
-            write_task_doc(
+            task_doc = write_task_doc(
                 state_dir,
                 task,
                 source_event="task_map_materialization",
                 project_root=project_root or state_dir.parent,
             )
-            store.update(task.id, contract=task.contract)
+            store.patch_contract_fields(
+                task.id,
+                task_doc_contract_metadata(task_doc),
+            )
         except Exception as exc:
             task_doc_failures.append(f"{task.id}: {exc}")
-        if writer is None or task.id in existing_created_events:
-            continue
-        created_event = writer.append(ZfEvent(
-            type="task.created",
-            actor=actor,
-            task_id=task.id,
-            causation_id=causation_id or None,
-            correlation_id=correlation_id or None,
-            payload={
-                "source": "task_map_materialization",
-                "task_map_ref": str(plan.get("task_map_ref") or ""),
-                "source_index_ref": str(plan.get("source_index_ref") or ""),
-                "plan_artifact_package_ref": str(
-                    plan.get("plan_artifact_package_ref") or ""
-                ),
-                "plan_artifact_package_digest": str(
-                    plan.get("plan_artifact_package_digest") or ""
-                ),
-                "task": asdict(task),
-            },
-        ))
-        writer.append(ZfEvent(
-            type="task.contract.update",
-            actor=actor,
-            task_id=task.id,
-            causation_id=created_event.id,
-            correlation_id=created_event.correlation_id,
-            payload={
-                "source": "task_map_materialization",
-                "task_map_ref": str(plan.get("task_map_ref") or ""),
-                "contract": asdict(task.contract),
-            },
-        ))
     result = {
         "status": "committed",
         "materialization_plan_ref": str(descriptor.get("ref") or ""),

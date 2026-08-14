@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict
 from pathlib import Path
 
 from zf.core.events.model import ZfEvent
@@ -50,28 +49,31 @@ def claim_submitted_workflow_task(
         return
     if not was_managed:
         mark_workflow_managed_task(task)
-    store.update(
-        task_id,
-        contract=task.contract,
-        assigned_to=None,
-        active_dispatch_id="",
+    from zf.runtime.task_contract_authority import (
+        TaskContractAuthorityService,
     )
-    writer.append(ZfEvent(
-        type="task.contract.update",
+
+    TaskContractAuthorityService(
+        task_store=store,
+        event_writer=writer,
+        state_dir=state_dir,
+    ).replace(
+        task,
+        contract=task.contract,
+        execution_binding=task.execution_binding,
+        source="workflow_submit",
         actor=actor,
-        task_id=task_id,
         causation_id=source_event.id,
         correlation_id=source_event.correlation_id,
-        payload={
-            "source": "workflow_submit",
-            "contract": asdict(task.contract),
+        task_updates={"assigned_to": None, "active_dispatch_id": ""},
+        audit_payload={
             "contract_digest": task_workflow_binding_digest(task),
             "execution_owner": "workflow",
             "previous_assigned_to": previous_assigned_to,
             "assignment_released": bool(previous_assigned_to),
             "previous_dispatch_id": previous_dispatch_id,
         },
-    ))
+    )
 
 
 def activate_workflow_managed_task(

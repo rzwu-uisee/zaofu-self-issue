@@ -657,33 +657,20 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
                 blocked_by=_coerce_contract_list(event.payload.get("blocked_by")),
             )
         return
-    if event.payload.get("source") in _TASK_CONTRACT_AUDIT_REPLAY_SOURCES:
-        # Controlled actions persist the canonical TaskContract before
-        # emitting this audit event.  A cold-start watcher can nevertheless
-        # replay an older task.contract.update after that direct write.  The
-        # audit event is therefore also the lossless replay source: restore
-        # its complete contract directly instead of routing it through the
-        # legacy partial-update adapter.
-        try:
-            materialized = TaskContract(**dict(contract_data))
-        except (TypeError, ValueError):
-            return
-        store.update(event.task_id, contract=materialized)
+    source = str(event.payload.get("source") or "")
+    if (
+        event.payload.get("authority_receipt") is True
+        or source in _TASK_CONTRACT_AUDIT_REPLAY_SOURCES
+        or source in _CANONICAL_TASK_CONTRACT_SOURCES
+    ):
+        # These events are receipts emitted after a canonical Store mutation.
+        # They record occurrence and causation; they are not replay commands.
+        # Re-applying an older receipt would let cold-start ordering overwrite
+        # a newer workflow owner/replan contract.
         return
-    if event.actor == "zf-cli" and event.payload.get(
-        "source"
-    ) in _CANONICAL_TASK_CONTRACT_SOURCES:
-        # Task-map materialization and adoption publish complete canonical
-        # TaskContracts. Re-running them through the legacy partial-update
-        # adapter is lossy: it drops validation.commands[] and structured
-        # acceptance/claim fields. Old metadata-only events are audit records;
-        # treating them as contract bodies would degrade current TaskStore
-        # state, so leave them as a no-op.
-        try:
-            materialized = TaskContract(**dict(contract_data))
-        except (TypeError, ValueError):
-            return
-        store.update(event.task_id, contract=materialized)
+    if str(getattr(task, "contract_authority_revision", "") or ""):
+        # Authority-stamped tasks reject the legacy last-write-wins adapter.
+        # New semantic changes must enter through TaskContractAuthorityService.
         return
     behavior = contract_data.get("behavior", existing.behavior)
     if not behavior:
@@ -1313,11 +1300,10 @@ def apply_acceptance_evidence_event(
     )
     if new_evidence == contract.acceptance_evidence:
         return  # idempotent no-op
-    new_contract = TaskContract(**{
-        **asdict(contract),
-        "acceptance_evidence": new_evidence,
-    })
-    store.update(event.task_id, contract=asdict(new_contract))
+    store.patch_contract_fields(
+        event.task_id,
+        {"acceptance_evidence": new_evidence},
+    )
 
 
 def _normalize_handoff_artifact_refs(

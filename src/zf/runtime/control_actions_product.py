@@ -878,6 +878,38 @@ class ProductActionsMixin:
             task_id=task_id,
             pattern_id=pattern_id,
         )
+        if task is not None:
+            from dataclasses import replace
+
+            from zf.runtime.task_contract_authority import (
+                TaskContractAuthorityService,
+                task_execution_binding,
+            )
+
+            binding = task_execution_binding(task)
+            if binding.workflow_run_id != workflow_run_id:
+                mutation = TaskContractAuthorityService(
+                    task_store=TaskStore(self.state_dir / "kanban.json"),
+                    event_writer=self.writer,
+                    state_dir=self.state_dir,
+                ).replace(
+                    task,
+                    contract=task.contract,
+                    execution_binding=replace(
+                        binding,
+                        workflow_run_id=workflow_run_id,
+                    ),
+                    source="workflow_invoke_run_binding",
+                    actor=self.actor,
+                    causation_id=requested.id,
+                    correlation_id=workflow_run_id,
+                    audit_payload={
+                        "request_id": request_id,
+                        "request_revision": request_revision,
+                        "workflow_run_id": workflow_run_id,
+                    },
+                )
+                task = mutation.task
         manifest_ref = workflow_input_manifest_ref(workflow_run_id)
         artifact_refs = normalize_artifact_refs(payload)
         source_refs = normalize_source_refs(

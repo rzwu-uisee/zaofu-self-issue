@@ -243,15 +243,7 @@ def test_workflow_binding_audit_replay_preserves_full_contract(
     )
     task = Task(id="T1", title="workflow task", contract=contract)
     digest_before = task_workflow_binding_digest(task)
-    ts.add(Task(
-        id="T1",
-        title="workflow task",
-        contract=TaskContract(
-            behavior="stale pre-workflow contract",
-            verification="echo stale",
-            evidence_contract={"target_commit_required": True},
-        ),
-    ))
+    ts.add(task)
 
     apply_task_contract_event(ts, ZfEvent(
         type="task.contract.update",
@@ -259,8 +251,12 @@ def test_workflow_binding_audit_replay_preserves_full_contract(
         task_id="T1",
         payload={
             "source": source,
-            "contract": asdict(contract),
-            "contract_digest": digest_before,
+            "contract": asdict(TaskContract(
+                behavior="stale pre-workflow contract",
+                verification="echo stale",
+                evidence_contract={"target_commit_required": True},
+            )),
+            "contract_digest": "stale-audit-digest",
         },
     ))
 

@@ -170,10 +170,45 @@ class RuntimeAuthorityMixin:
         reason = reject_late_run_result(self, event)
         if not reason:
             return None
+        if reason.startswith("run_terminal:"):
+            self._audit_late_fanout_result(event)
         return WorkflowRuntimeDecision(
             action="block",
             task_id=event.task_id,
             reason=f"{event.type} rejected: {reason}",
+        )
+
+    def _audit_late_fanout_result(self, event: ZfEvent) -> None:
+        """Retain fanout-local stale evidence when Run admission fences a result."""
+
+        payload = self._fanout_result_payload(event)
+        fanout_id = str(payload.get("fanout_id") or "").strip()
+        child_id = str(
+            payload.get("child_id") or payload.get("child_run") or ""
+        ).strip()
+        if not fanout_id or not child_id:
+            return
+        manifest = self._fanout_manifest(fanout_id)
+        if not manifest or manifest.get("topology") not in {
+            "fanout_reader",
+            "fanout_writer_scoped",
+        }:
+            return
+        from zf.runtime.terminal_events import successful_terminal_before_event
+
+        terminal = successful_terminal_before_event(
+            self.event_log.read_all(),
+            event,
+        )
+        if terminal is None:
+            return
+        self._emit_fanout_identity_stale_completion(
+            event=event,
+            payload=payload,
+            manifest=manifest,
+            child=self._fanout_child(manifest, child_id),
+            reason="run_terminal",
+            superseded_by=terminal.id,
         )
 
     def _run_fanout_dispatch_blocked(self, event: ZfEvent) -> bool:

@@ -102,6 +102,7 @@ from zf.runtime.task_contract_snapshot import (
     TaskContractSnapshotError,
     build_target_snapshot,
     build_task_contract_snapshot,
+    contract_snapshot_identity_fields,
     current_task_contract_identity,
     descriptor_from_payload as contract_descriptor_from_payload,
     hydrate_task_contract_snapshot,
@@ -112,6 +113,9 @@ from zf.runtime.task_contract_snapshot import (
     task_map_generation,
     write_task_contract_snapshot,
     write_target_snapshot,
+)
+from zf.runtime.task_contract_authority_runtime import (
+    bind_writer_dispatch_contract,
 )
 from zf.runtime.attempt_ledger import failure_fingerprint
 from zf.runtime.canonical_recovery import (
@@ -4155,13 +4159,25 @@ class FanoutCoordinationMixin(
                 ),
             )
         else:
-            from zf.runtime.orchestrator_dispatch import _capture_head
+            from zf.runtime.orchestrator_dispatch import (
+                _capture_head,
+                _git_rev_parse,
+            )
 
-            base_commit = str(
+            base_ref = str(
                 task_item.get("base_commit")
                 or task_item.get("source_commit")
+                or task_item.get("dispatch_base_commit")
+                or getattr(context, "target_ref", "")
                 or ""
-            ).strip() or _capture_head(Path(project_path))
+            ).strip()
+            base_commit = (
+                _git_rev_parse(self.project_root, base_ref)
+                if base_ref
+                else ""
+            ) or _capture_head(Path(project_path)) or _capture_head(
+                self.project_root
+            )
             snapshot = build_task_contract_snapshot(
                 task,
                 workflow_run_id=str(
@@ -4183,14 +4199,7 @@ class FanoutCoordinationMixin(
             )
         fields = {
             **snapshot_payload_fields(descriptor),
-            "task_ref": str(snapshot["task_ref"]),
-            "workflow_run_id": str(snapshot["workflow_run_id"]),
-            "contract_revision": str(snapshot["contract_revision"]),
-            "task_map_generation": str(snapshot["task_map_generation"]),
-            "base_commit": str(snapshot["base_commit"]),
-            "plan_artifact_package_id": str(snapshot.get("plan_artifact_package_id") or ""),
-            "plan_artifact_package_ref": str(snapshot.get("plan_artifact_package_ref") or ""),
-            "plan_artifact_package_digest": str(snapshot.get("plan_artifact_package_digest") or ""),
+            **contract_snapshot_identity_fields(snapshot),
         }
         task_item.update(fields)
         task_payload = task_item.get("payload")
@@ -4268,14 +4277,7 @@ class FanoutCoordinationMixin(
                 source_event_id=str(payload.get("trigger_event_id") or ""),
             )
         payload.update({
-            "task_ref": str(snapshot["task_ref"]),
-            "workflow_run_id": str(snapshot["workflow_run_id"]),
-            "contract_revision": str(snapshot["contract_revision"]),
-            "task_map_generation": str(snapshot["task_map_generation"]),
-            "base_commit": str(snapshot["base_commit"]),
-            "plan_artifact_package_id": str(snapshot.get("plan_artifact_package_id") or ""),
-            "plan_artifact_package_ref": str(snapshot.get("plan_artifact_package_ref") or ""),
-            "plan_artifact_package_digest": str(snapshot.get("plan_artifact_package_digest") or ""),
+            **contract_snapshot_identity_fields(snapshot),
             "target_snapshot": target,
             "target_commit": str(target["target_commit"]),
             **target_payload_fields(target_descriptor),
@@ -4373,8 +4375,7 @@ class FanoutCoordinationMixin(
             )
             if not prepared_dispatch or prepared_dispatch.get("skip"):
                 return False
-            # Bind the canonical kanban task to this fanout dispatch, mirroring
-            # the normal dispatch path. The fanout-writer child completes via
+            # Bind the canonical task to this fanout dispatch. The child completes via
             # task.ref.updated, not the normal dispatch lifecycle, so without
             # this the task keeps active_dispatch_id="" and the Stop-guard
             # (provider.stop.check) is unsatisfiable: the worker cannot cleanly
@@ -4385,21 +4386,19 @@ class FanoutCoordinationMixin(
             if current_task is not None:
                 if current_task.status == "backlog":
                     self._move_task(task_id, "in_progress")
-                from zf.runtime.writer_fanout_admission import (
-                    bind_writer_task_dispatch_owner,
-                )
-                contract = bind_writer_task_dispatch_owner(
+                claimed_task = bind_writer_dispatch_contract(
+                    task_store=self.task_store,
+                    event_writer=self.event_writer,
+                    state_dir=self.state_dir,
                     task=current_task,
                     role=role,
                     config=self.config,
-                    event_writer=self.event_writer,
-                )
-                claimed_task = self.task_store.update(
-                    task_id,
-                    assigned_to=role.instance_id,
-                    active_dispatch_id=run_id,
-                    contract=contract,
-                )
+                    task_item=task_item,
+                    task_updates={
+                        "assigned_to": role.instance_id,
+                        "active_dispatch_id": run_id,
+                    },
+                ).task
                 if claimed_task is not None:
                     self._publish_writer_fanout_task_capsule(
                         task_id=task_id,
@@ -5336,6 +5335,21 @@ class FanoutCoordinationMixin(
             value = self._fanout_payload_metadata_value(payload, child, key)
             if value:
                 base_payload[key] = value
+        if event.type in {"dev.build.done", "task.ref.updated"}:
+            early_completion_gate = writer_completion_admission(
+                task_store=self.task_store,
+                task_id=base_payload["task_id"],
+                task_map_ref=base_payload["task_map_ref"],
+            )
+            if early_completion_gate.reason == "superseded_task_map":
+                self._record_writer_fanout_child_failed(
+                    fanout_id=fanout_id,
+                    base_payload=base_payload,
+                    failure_payload=early_completion_gate.failure_payload(),
+                    event=event,
+                    manifest=manifest,
+                )
+                return
         if event.type in {"dev.build.done", "task.ref.updated"}:
             try:
                 self._ensure_writer_completion_contract_identity(

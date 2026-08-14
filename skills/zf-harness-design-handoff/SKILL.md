@@ -212,7 +212,7 @@ fabricating values.
 - **arch emits empty file_plan and no candidate plan artifact** — orchestrator can't fill `plan_ref` with concrete files. Re-dispatch arch with a more explicit briefing.
 - **critic emits gate.failed with no fix_items** — arch v2 has nothing concrete to address. Re-dispatch critic asking for specific fixes.
 - **arch v2 doesn't reference `evt-<critic_event_id>` in its proposal** — orchestrator can't trace which critique was addressed. Re-dispatch arch with explicit `previous_critique_event_id` in the briefing.
-- **candidate artifact status is misunderstood as final truth** — keep the artifact indexed, but do not dispatch implementation until orchestrator writes `task.contract.update` with final 6 refs.
+- **candidate artifact status is misunderstood as final truth** — keep the artifact indexed, but do not dispatch implementation until the Kernel admits orchestrator's `task.contract.change.requested` and the applied contract contains the final 6 refs.
 
 ## Related skills
 

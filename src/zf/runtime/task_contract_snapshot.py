@@ -30,6 +30,30 @@ VERIFICATION_TIERS = frozenset({
 })
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]+")
 
+TASK_CONTRACT_CURRENTNESS_FIELDS = (
+    "workflow_run_id",
+    "task_id",
+    "contract_authority_revision",
+    "execution_owner",
+    "workflow_request_id",
+    "workflow_request_revision",
+    "origin_binding_digest",
+    "contract_revision",
+    "task_map_generation",
+    "base_commit",
+    "task_ref",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+)
+TASK_CONTRACT_AUTHORITY_FIELDS = (
+    "contract_authority_revision",
+    "execution_owner",
+    "workflow_request_id",
+    "workflow_request_revision",
+    "origin_binding_digest",
+)
+
 
 class TaskContractSnapshotError(ValueError):
     """Raised when a snapshot is incomplete, stale, or has been tampered with."""
@@ -187,7 +211,9 @@ def current_task_contract_identity(
 ) -> dict[str, str]:
     """Return the TaskStore-owned identity used to reject stale snapshots."""
 
-    return {
+    from zf.runtime.task_contract_authority import task_execution_binding
+
+    identity = {
         "task_id": str(task.id or "").strip(),
         "contract_revision": effective_contract_revision(task),
         "task_map_generation": task_map_generation(
@@ -195,6 +221,22 @@ def current_task_contract_identity(
             task_map_ref=task_map_ref,
         ),
     }
+    authority_revision = str(
+        getattr(task, "contract_authority_revision", "") or ""
+    ).strip()
+    if authority_revision:
+        identity["contract_authority_revision"] = authority_revision
+    binding = task_execution_binding(task)
+    for key, value in (
+        ("execution_owner", binding.owner),
+        ("workflow_request_id", binding.request_id),
+        ("workflow_request_revision", binding.request_revision),
+        ("workflow_run_id", binding.workflow_run_id),
+        ("origin_binding_digest", binding.origin_binding_digest),
+    ):
+        if value not in (None, "", 0):
+            identity[key] = str(value)
+    return identity
 
 
 def build_task_contract_snapshot(
@@ -205,15 +247,45 @@ def build_task_contract_snapshot(
     base_commit: str,
     task_ref: str,
 ) -> dict[str, Any]:
+    from zf.runtime.task_contract_authority import task_execution_binding
+
+    binding = task_execution_binding(task)
+    canonical_run_id = str(binding.workflow_run_id or "").strip()
+    supplied_run_id = str(workflow_run_id or "").strip()
+    if canonical_run_id and supplied_run_id != canonical_run_id:
+        raise TaskContractSnapshotError(
+            "task contract snapshot workflow_run_id differs from execution binding"
+        )
     identity = {
-        "workflow_run_id": str(workflow_run_id or "").strip(),
+        "workflow_run_id": supplied_run_id,
         "task_id": str(task.id or "").strip(),
         "contract_revision": effective_contract_revision(task),
         "task_map_generation": str(task_map_generation_id or "").strip(),
         "base_commit": str(base_commit or "").strip(),
         "task_ref": str(task_ref or "").strip(),
     }
-    missing = [key for key, value in identity.items() if not value]
+    authority_revision = str(
+        getattr(task, "contract_authority_revision", "") or ""
+    ).strip()
+    if authority_revision:
+        identity["contract_authority_revision"] = authority_revision
+        for key, value in (
+            ("execution_owner", binding.owner),
+            ("workflow_request_id", binding.request_id),
+            ("workflow_request_revision", binding.request_revision),
+            ("origin_binding_digest", binding.origin_binding_digest),
+        ):
+            if value not in (None, "", 0):
+                identity[key] = str(value)
+    required_identity = (
+        "workflow_run_id",
+        "task_id",
+        "contract_revision",
+        "task_map_generation",
+        "base_commit",
+        "task_ref",
+    )
+    missing = [key for key in required_identity if not identity.get(key)]
     if missing:
         raise TaskContractSnapshotError(
             "task contract snapshot missing identity: " + ", ".join(missing)
@@ -413,6 +485,18 @@ def snapshot_payload_fields(descriptor: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def contract_snapshot_identity_fields(
+    snapshot: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return the non-empty currentness identity pinned by one snapshot."""
+
+    return {
+        key: str(snapshot.get(key))
+        for key in TASK_CONTRACT_CURRENTNESS_FIELDS
+        if snapshot.get(key) not in (None, "", 0)
+    }
+
+
 def build_target_snapshot(
     descriptor: Mapping[str, Any],
     *,
@@ -429,6 +513,11 @@ def build_target_snapshot(
         for key in (
             "workflow_run_id",
             "task_id",
+            "contract_authority_revision",
+            "execution_owner",
+            "workflow_request_id",
+            "workflow_request_revision",
+            "origin_binding_digest",
             "contract_revision",
             "task_map_generation",
             "base_commit",
@@ -700,11 +789,14 @@ __all__ = [
     "VERIFICATION_OWNERS",
     "VERIFICATION_TIERS",
     "TaskContractSnapshotError",
+    "TASK_CONTRACT_CURRENTNESS_FIELDS",
+    "TASK_CONTRACT_AUTHORITY_FIELDS",
     "acceptance_contract_errors",
     "build_target_snapshot",
     "build_task_contract_snapshot",
     "canonical_verification_owner",
     "canonical_verification_tier",
+    "contract_snapshot_identity_fields",
     "criterion_text",
     "descriptor_from_payload",
     "effective_contract_revision",

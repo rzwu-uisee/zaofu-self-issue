@@ -28,7 +28,7 @@ from zf.runtime.writer_fanout_admission import (
 )
 
 
-def test_dispatch_owner_binding_emits_replayable_full_contract(tmp_path):
+def test_dispatch_owner_binding_is_a_pure_contract_builder(tmp_path):
     event_writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
     task = Task(
         id="WRL-EDITOR-002",
@@ -50,15 +50,14 @@ def test_dispatch_owner_binding_emits_replayable_full_contract(tmp_path):
         event_writer=event_writer,
     )
 
-    event = EventLog(tmp_path / "events.jsonl").read_all()[-1]
     assert bound.owner_instance == "prd-dev-lane-1"
-    assert event.payload["contract"]["owner_instance"] == "prd-dev-lane-1"
-    assert event.payload["contract"]["acceptance_criteria"] == [
+    assert bound.acceptance_criteria == [
         {
             "id": "WRL-T2-AC1",
             "statement": "Grid conflicts are atomic.",
         }
     ]
+    assert EventLog(tmp_path / "events.jsonl").read_all() == []
 
 
 def _item(task_id: str, allowed: list[str], scope: str | None = None) -> dict:

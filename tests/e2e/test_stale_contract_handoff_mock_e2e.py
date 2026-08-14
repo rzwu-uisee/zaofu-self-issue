@@ -25,6 +25,7 @@ from zf.runtime.result_submit import (
 from zf.runtime.run_contract import stable_json_sha256, write_run_contract
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_contract_snapshot import (
+    TASK_CONTRACT_AUTHORITY_FIELDS,
     build_target_snapshot,
     effective_contract_revision,
     write_target_snapshot,
@@ -215,6 +216,11 @@ def _impl_completion(
                 "target_commit": source_commit,
                 "contract_snapshot_ref": child["contract_snapshot_ref"],
                 "contract_snapshot_digest": child["contract_snapshot_digest"],
+                **{
+                    key: str(contract[key])
+                    for key in TASK_CONTRACT_AUTHORITY_FIELDS
+                    if contract.get(key) not in (None, "", 0)
+                },
                 "command_receipts": [{
                     "receipt_id": receipt_id,
                     "command_id": command["command_id"],
@@ -815,6 +821,20 @@ def test_stale_contract_results_cannot_advance_current_generation(tmp_path: Path
     )
     judge_payload = _dispatch_payload(judge_child)
     assert judge_payload["required_reads"]
+    judge_contract = hydrate_sidecar_ref(
+        state_dir,
+        {
+            "ref": judge_payload["contract_snapshot_ref"],
+            "sha256": judge_payload["contract_snapshot_digest"],
+        },
+    ).payload
+    assert judge_contract["task_authority_required"] is True
+    assert [
+        child["task_id"] for child in judge_contract["child_authorities"]
+    ] == [TASK_ID]
+    assert judge_contract["child_authorities"][0][
+        "contract_authority_revision"
+    ] == r2_contract["contract_authority_revision"]
     _record_required_reads(state_dir, judge_payload)
     judge_briefing = next(
         event for event in reversed(log.read_all())

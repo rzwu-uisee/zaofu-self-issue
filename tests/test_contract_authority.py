@@ -52,7 +52,9 @@ def test_dispatch_payload_prefers_kanban_contract(tmp_path: Path) -> None:
         "npm test -- --config tests/scene/vitest.config.ts --run tests/scene"
     )
     assert fixed["verification_source"] == "kanban_contract"
-    assert fixed["allowed_paths"] == ["src/scenario/**"]  # 其余字段不动
+    # A current canonical Task cannot be mixed with stale task-map scope.
+    assert fixed["allowed_paths"] == []
+    assert fixed["canonical_contract"]["scope"] == []
 
 
 def test_authority_noop_without_canonical_task(tmp_path: Path) -> None:

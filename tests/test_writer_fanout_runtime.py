@@ -36,7 +36,7 @@ from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_fanout import _writer_task_dependencies_satisfied
 from zf.runtime.orchestrator_types import OrchestratorDecision
 from zf.runtime.fanout import FanoutChild, FanoutContext
-from zf.runtime.candidates import CandidateRebuilder, CandidateTask
+from zf.runtime.candidates import CandidateRebuilder, CandidateResult, CandidateTask
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
 from zf.runtime.light_flow import synthesize_light_task_map
 from zf.runtime.product_delivery import ingest_task_map_to_kanban
@@ -59,6 +59,7 @@ from zf.runtime.task_contract_snapshot import (
     task_map_generation,
     write_task_contract_snapshot,
 )
+from zf.runtime.task_contract_authority import TaskContractAuthorityService
 from zf.runtime.task_ref_repair_operation import (
     prepare_task_ref_repair_operation,
 )
@@ -90,6 +91,21 @@ class _FanoutPayloadProbe(WriterFanoutDataMixin):
             for child in manifest.get("children", [])
             if isinstance(child, dict)
         ]
+
+
+def _replace_task_contract(
+    state_dir: Path,
+    store: TaskStore,
+    task_id: str,
+    contract: TaskContract,
+) -> None:
+    task = store.get(task_id)
+    assert task is not None
+    TaskContractAuthorityService(
+        task_store=store,
+        event_writer=None,
+        state_dir=state_dir,
+    ).replace(task, contract=contract, source="test_contract_revision")
 
 
 def test_fanout_operation_key_scopes_workflow_and_triggered_calls() -> None:
@@ -1098,6 +1114,61 @@ def _seed_tasks(
                 }},
             ),
         ))
+
+
+def _patch_task_map(
+    state_dir: Path,
+    *,
+    add_allowed_path: str = "",
+    clear_task_verification: bool = False,
+) -> None:
+    path = state_dir / "artifacts" / "F-11111111" / "task_map.json"
+    body = json.loads(path.read_text(encoding="utf-8"))
+    for task in body["tasks"]:
+        if add_allowed_path:
+            allowed = list(task.get("allowed_paths") or [])
+            if add_allowed_path not in allowed:
+                allowed.append(add_allowed_path)
+            task["allowed_paths"] = allowed
+        if clear_task_verification:
+            task.pop("verification", None)
+            task.pop("validation", None)
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def _force_first_candidate_conflict(monkeypatch) -> None:  # noqa: ANN001
+    original = CandidateRebuilder.rebuild
+    calls = 0
+
+    def rebuild(self, pdd_id, **kwargs):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            return original(self, pdd_id, **kwargs)
+        payload = {
+            "pdd_id": pdd_id,
+            "status": "conflict",
+            "task_id": "TASK-2",
+            "task_ref": "task/TASK-2",
+            "conflicting_task_id": "TASK-1",
+            "conflicting_task_ref": "task/TASK-1",
+            "conflict_files": ["simulated-conflict.txt"],
+            "error": "deterministic candidate conflict fixture",
+        }
+        event_writer = kwargs.get("event_writer")
+        if event_writer is not None:
+            event_writer.append(ZfEvent(
+                type="candidate.conflict",
+                actor="zf-cli",
+                payload=payload,
+            ))
+        return CandidateResult(
+            status="conflict",
+            event_type="candidate.conflict",
+            payload=payload,
+        )
+
+    monkeypatch.setattr(CandidateRebuilder, "rebuild", rebuild)
 
 
 def _manifest(state_dir: Path, fanout_id: str) -> dict:
@@ -4732,9 +4803,11 @@ def test_task_ref_repair_rotates_blocking_writer_operation(
     store = TaskStore(state_dir / "kanban.json")
     task = store.get("TASK-1")
     assert task is not None
-    store.update(
+    _replace_task_contract(
+        state_dir,
+        store,
         task.id,
-        contract=replace(
+        replace(
             task.contract,
             behavior=task.contract.behavior + " Current contract revision.",
         ),
@@ -6869,9 +6942,12 @@ def test_writer_fanout_does_not_repeat_failed_result_for_same_event(
     _start(orch)
     fanout_id = _fanout_id(log)
     task1 = _child(_manifest(state_dir, fanout_id), "TASK-1")
-    TaskStore(state_dir / "kanban.json").update(
+    store = TaskStore(state_dir / "kanban.json")
+    _replace_task_contract(
+        state_dir,
+        store,
         "TASK-1",
-        contract=TaskContract(
+        TaskContract(
             feature_id="F-11111111",
             evidence_contract={
                 "source_refs": {
@@ -6905,7 +6981,8 @@ def test_writer_fanout_does_not_repeat_failed_result_for_same_event(
         and event.causation_id == progress.id
     ]
     assert len(failed) == 1
-    assert failed[0].payload["reason"] == "stale_task_map"
+    assert failed[0].payload["failure_class"] == "verifier_contract_failure"
+    assert "contract_revision mismatch" in failed[0].payload["reason"]
 
 
 def test_static_gate_reconcile_completes_writer_fanout_child_from_trigger_event(
@@ -8370,9 +8447,11 @@ def test_writer_candidate_ready_payload_matches_schema_contract(tmp_path: Path):
     )
     assert payload["completed_task_ids"] == ["TASK-1", "TASK-2"]
     assert payload["task_map_ref"] == ".zf/artifacts/F-11111111/task_map.json"
-    assert payload["quality_status"] == "skipped"
-    assert payload["quality_check_count"] == 0
-    assert payload["quality_gates_passed"] == []
+    assert payload["quality_status"] == "passed"
+    assert payload["quality_check_count"] == 1
+    assert payload["quality_gates_passed"] == [
+        "task_contract:TASK-1:contract-verification",
+    ]
     assert payload["quality_gates_failed"] == []
     assert payload["request_id"] == "req-prd"
     assert payload["workflow_run_id"] == "run-prd"
@@ -8437,8 +8516,12 @@ def test_lane_final_ready_targets_candidate_ref_from_root_aggregate(
     assert ready_event.payload["diff_ref"] == "base123..head456"
 
 
-def test_writer_candidate_conflict_fails_fanout_aggregate(tmp_path: Path):
+def test_writer_candidate_conflict_fails_fanout_aggregate(
+    tmp_path: Path,
+    monkeypatch,
+):
     state_dir, log, _transport, orch = _state(tmp_path)
+    _force_first_candidate_conflict(monkeypatch)
     _seed_tasks(state_dir)
     _start(orch)
     fanout_id = _fanout_id(log)
@@ -8446,8 +8529,8 @@ def test_writer_candidate_conflict_fails_fanout_aggregate(tmp_path: Path):
     task1 = _child(manifest, "TASK-1")
     task2 = _child(manifest, "TASK-2")
     commits = {
-        "TASK-1": _commit(Path(task1["workdir"]), "README.md", "one\n", "TASK-1"),
-        "TASK-2": _commit(Path(task2["workdir"]), "README.md", "two\n", "TASK-2"),
+        "TASK-1": _commit(Path(task1["workdir"]), "a.txt", "one\n", "TASK-1"),
+        "TASK-2": _commit(Path(task2["workdir"]), "b.txt", "two\n", "TASK-2"),
     }
 
     for task in (task1, task2):
@@ -8477,8 +8560,10 @@ def test_writer_candidate_conflict_fails_fanout_aggregate(tmp_path: Path):
 
 def test_failed_writer_candidate_aggregate_retries_after_new_task_ref(
     tmp_path: Path,
+    monkeypatch,
 ):
     state_dir, log, _transport, orch = _state(tmp_path)
+    _force_first_candidate_conflict(monkeypatch)
     _seed_tasks(state_dir)
     _start(orch)
     fanout_id = _fanout_id(log)
@@ -8486,8 +8571,8 @@ def test_failed_writer_candidate_aggregate_retries_after_new_task_ref(
     task1 = _child(manifest, "TASK-1")
     task2 = _child(manifest, "TASK-2")
     commits = {
-        "TASK-1": _commit(Path(task1["workdir"]), "README.md", "one\n", "TASK-1"),
-        "TASK-2": _commit(Path(task2["workdir"]), "README.md", "two\n", "TASK-2"),
+        "TASK-1": _commit(Path(task1["workdir"]), "a.txt", "one\n", "TASK-1"),
+        "TASK-2": _commit(Path(task2["workdir"]), "b.txt", "two\n", "TASK-2"),
     }
 
     for task in (task1, task2):
@@ -8564,6 +8649,7 @@ def test_writer_candidate_quality_failure_blocks_candidate_ready(tmp_path: Path)
             ),
         },
     )
+    _patch_task_map(state_dir, clear_task_verification=True)
     _seed_tasks(state_dir)
     _start(orch)
     fanout_id = _fanout_id(log)

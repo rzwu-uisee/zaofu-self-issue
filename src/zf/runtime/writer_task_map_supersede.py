@@ -120,7 +120,7 @@ def reconcile_retained_task_dependencies(
         refreshed.blocked_by = desired
         from zf.runtime.task_doc import write_task_doc
 
-        write_task_doc(
+        task_doc = write_task_doc(
             state_dir,
             refreshed,
             source_event="gap_task_map_dependency_adoption",
@@ -129,10 +129,15 @@ def reconcile_retained_task_dependencies(
         updated = task_store.update(
             task_id,
             blocked_by=desired,
-            contract=refreshed.contract,
         )
         if updated is None:
             continue
+        from zf.runtime.task_doc import task_doc_contract_metadata
+
+        updated = task_store.patch_contract_fields(
+            task_id,
+            task_doc_contract_metadata(task_doc),
+        ) or updated
         updated_ids.append(task_id)
         event_writer.append(ZfEvent(
             type="task.updated",

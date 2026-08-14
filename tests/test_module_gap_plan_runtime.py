@@ -108,6 +108,8 @@ def _state(
     *,
     writer_instances: int = 1,
 ) -> tuple[Path, EventLog, _RecordingTransport, Orchestrator]:
+    if not (tmp_path / ".git").exists():
+        _init_git_base(tmp_path)
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
@@ -2126,9 +2128,10 @@ def test_multi_task_semantic_replan_replaces_one_node_without_assembly_gap(
     assert any(decision.action == "bridge" for decision in decisions)
     assert not any(event.type == "task_map.amend.failed" for event in events)
     amended = next(event for event in events if event.type == "task_map.amended")
-    task_map = json.loads(Path(amended.payload["task_map_ref"].replace(
-        ".zf/", f"{state_dir}/", 1,
-    )).read_text(encoding="utf-8"))
+    amended_ref = str(amended.payload["task_map_ref"])
+    task_map = json.loads((
+        state_dir / amended_ref.removeprefix(".zf/")
+    ).read_text(encoding="utf-8"))
     tasks = {task["task_id"]: task for task in task_map["tasks"]}
     assert tasks["API-SAMPLE-DOC"]["blocked_by"] == ["API-BASE"]
     assert tasks["WEB-NEW"]["blocked_by"] == ["API-SAMPLE-DOC"]

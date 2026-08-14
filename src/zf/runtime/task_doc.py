@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -343,6 +344,10 @@ def write_task_doc(
     project_root: Path | None = None,
 ) -> TaskDocResult:
     """Write Task Capsule files for the current kernel task state."""
+    # Rendering may attach projection refs/revisions, but callers can hold an
+    # older Task object across a replan. Never mutate that object and invite a
+    # later full-contract writeback over the current canonical contract.
+    task = deepcopy(task)
     generated_at = _now_iso()
     revisions = apply_task_capsule_revisions(task)
     base = task_doc_dir(state_dir, task.id)
@@ -451,6 +456,20 @@ def write_task_doc(
         contract_revision=revisions["contract_revision"],
         capsule_revision=revisions["capsule_revision"],
     )
+
+
+def task_doc_contract_metadata(result: TaskDocResult) -> dict[str, str]:
+    """Return the bounded TaskContract projection fields for Store merge."""
+
+    return {
+        "task_doc_ref": str(result.path),
+        "source_doc_ref": str(result.source_path),
+        "progress_doc_ref": str(result.progress_path),
+        "evidence_doc_ref": str(result.evidence_path),
+        "source_revision": result.source_revision,
+        "contract_revision": result.contract_revision,
+        "capsule_revision": result.capsule_revision,
+    }
 
 
 def verify_task_capsule(state_dir: Path, task: Task) -> list[str]:

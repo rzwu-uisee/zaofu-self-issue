@@ -286,8 +286,17 @@ def _run_ingest(args: argparse.Namespace) -> int:
             try:
                 from zf.runtime.task_doc import write_task_doc
 
-                write_task_doc(state_dir, existing, source_event="spec_ingest_existing")
-                task_store.update(task_id, contract=existing.contract)
+                from zf.runtime.task_doc import task_doc_contract_metadata
+
+                result = write_task_doc(
+                    state_dir,
+                    existing,
+                    source_event="spec_ingest_existing",
+                )
+                task_store.patch_contract_fields(
+                    task_id,
+                    task_doc_contract_metadata(result),
+                )
             except Exception:
                 pass
             skipped_count += 1
@@ -335,11 +344,17 @@ def _run_ingest(args: argparse.Namespace) -> int:
         try:
             from zf.runtime.task_doc import write_task_doc
 
+            from zf.runtime.task_doc import task_doc_contract_metadata
+
             task_doc = write_task_doc(state_dir, task, source_event="spec_ingest")
         except Exception as exc:
             print(f"FAIL task-doc-materialize: {task_id}: {exc}", file=sys.stderr)
             return 1
         task_store.add(task)
+        task_store.patch_contract_fields(
+            task.id,
+            task_doc_contract_metadata(task_doc),
+        )
 
         create_event = writer.emit(
             "task.created",
@@ -352,16 +367,23 @@ def _run_ingest(args: argparse.Namespace) -> int:
                 "spec_path": str(spec_path),
             },
         )
-        writer.emit(
-            "task.contract.update",
-            actor="zf-cli",
-            task_id=task_id,
-            payload={
-                "contract": _contract_dict(contract),
-                "source": "spec_ingest",
-            },
+        from zf.runtime.task_contract_authority import (
+            TaskContractAuthorityService,
+        )
+
+        current = task_store.get(task_id)
+        if current is None:
+            raise RuntimeError(f"task disappeared after spec ingest: {task_id}")
+        TaskContractAuthorityService(
+            task_store=task_store,
+            event_writer=writer,
+            state_dir=state_dir,
+        ).replace(
+            current,
+            contract=current.contract,
+            source="spec_ingest",
             causation_id=create_event.id,
-            correlation_id=create_event.correlation_id,
+            correlation_id=create_event.correlation_id or "",
         )
         writer.emit(
             "task.doc.updated",

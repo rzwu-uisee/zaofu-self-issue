@@ -13,6 +13,11 @@ KERNEL_BOUND_WRITER_RESULT_FIELDS = (
     "child_id",
     "run_id",
     "workflow_run_id",
+    "contract_authority_revision",
+    "execution_owner",
+    "workflow_request_id",
+    "workflow_request_revision",
+    "origin_binding_digest",
     "contract_revision",
     "task_map_generation",
     "base_commit",
@@ -70,6 +75,9 @@ def bind_blocking_writer_result_identity(
             "workflow_run_id": canonical.get("workflow_run_id"),
             "task_id": canonical.get("task_id"),
             "attempt_id": canonical.get("attempt_id"),
+            "contract_authority_revision": canonical.get(
+                "contract_authority_revision"
+            ),
             "contract_revision": canonical.get("contract_revision"),
             "task_map_generation": canonical.get("task_map_generation"),
             "contract_snapshot_ref": canonical.get("contract_snapshot_ref"),

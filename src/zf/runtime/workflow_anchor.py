@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
-from zf.core.task.schema import Task
+from zf.core.task.schema import Task, TaskExecutionBinding
 from zf.core.task.store import TaskStore
 
 
@@ -145,9 +145,27 @@ def _event_targets_task(
 
 def mark_workflow_managed_task(task: Task) -> Task:
     """Reserve an ordinary parent Task for its selected Workflow."""
+    current = getattr(task, "execution_binding", TaskExecutionBinding())
+    origin_task_digest = str(
+        getattr(current, "origin_task_digest", "") or ""
+    )
+    if not origin_task_digest:
+        from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+
+        origin_task_digest = task_workflow_binding_digest(task)
     evidence = dict(getattr(task.contract, "evidence_contract", {}) or {})
     evidence["execution_owner"] = WORKFLOW_MANAGED_EXECUTION_OWNER
     task.contract.evidence_contract = evidence
+    task.execution_binding = TaskExecutionBinding(
+        owner=WORKFLOW_MANAGED_EXECUTION_OWNER,
+        request_id=str(getattr(current, "request_id", "") or ""),
+        request_revision=int(getattr(current, "request_revision", 0) or 0),
+        workflow_run_id=str(getattr(current, "workflow_run_id", "") or ""),
+        origin_binding_digest=str(
+            getattr(current, "origin_binding_digest", "") or ""
+        ),
+        origin_task_digest=origin_task_digest,
+    )
     return task
 
 
@@ -157,6 +175,7 @@ def bind_workflow_request_to_task(
     request_id: str,
     request_revision: int,
     origin_binding_digest: str,
+    workflow_run_id: str = "",
 ) -> Task:
     """Pin one workflow-managed Task to the Request revision it executes."""
 
@@ -169,10 +188,34 @@ def bind_workflow_request_to_task(
         ).strip(),
     })
     task.contract.evidence_contract = evidence
+    current = getattr(task, "execution_binding", TaskExecutionBinding())
+    task.execution_binding = TaskExecutionBinding(
+        owner=WORKFLOW_MANAGED_EXECUTION_OWNER,
+        request_id=str(request_id or "").strip(),
+        request_revision=int(request_revision),
+        workflow_run_id=str(workflow_run_id or "").strip(),
+        origin_binding_digest=str(origin_binding_digest or "").strip(),
+        origin_task_digest=str(
+            getattr(current, "origin_task_digest", "") or ""
+        ),
+    )
     return task
 
 
 def workflow_task_request_binding(task: Task) -> dict[str, Any]:
+    binding = getattr(task, "execution_binding", None)
+    if (
+        binding is not None
+        and str(getattr(binding, "request_id", "") or "").strip()
+        and int(getattr(binding, "request_revision", 0) or 0) > 0
+    ):
+        return {
+            "request_id": str(binding.request_id).strip(),
+            "request_revision": int(binding.request_revision),
+            "origin_binding_digest": str(
+                binding.origin_binding_digest or ""
+            ).strip(),
+        }
     contract = getattr(task, "contract", None)
     evidence = getattr(contract, "evidence_contract", {}) if contract else {}
     if not isinstance(evidence, dict):
@@ -196,6 +239,13 @@ def workflow_task_request_binding(task: Task) -> dict[str, Any]:
 
 
 def is_workflow_managed_task(task: Task) -> bool:
+    binding = getattr(task, "execution_binding", None)
+    if (
+        binding is not None
+        and str(getattr(binding, "owner", "") or "")
+        == WORKFLOW_MANAGED_EXECUTION_OWNER
+    ):
+        return True
     contract = getattr(task, "contract", None)
     evidence = getattr(contract, "evidence_contract", {}) if contract else {}
     return (

@@ -22,7 +22,14 @@ from pathlib import Path
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
 from zf.core.state.rotation import list_archives
-from zf.core.task.schema import Task, TaskContract, TaskEvidence
+from zf.core.task.authority import CONTRACT_METADATA_FIELDS
+from zf.core.task.schema import (
+    Task,
+    TaskContract,
+    TaskEvidence,
+    TaskExecutionBinding,
+    task_contract_from_mapping,
+)
 
 
 TERMINAL_STATES = {"done", "cancelled"}
@@ -145,10 +152,21 @@ class TaskStore:
     def _to_task(self, data: dict) -> Task:
         data = dict(data)
         contract_data = data.pop("contract", None) or {}
+        binding_data = data.pop("execution_binding", None) or {}
         evidence_data = data.pop("evidence", None)
-        contract = TaskContract(**contract_data) if contract_data else TaskContract()
+        contract = task_contract_from_mapping(contract_data)
+        binding = (
+            TaskExecutionBinding(**binding_data)
+            if isinstance(binding_data, dict)
+            else TaskExecutionBinding()
+        )
         evidence = TaskEvidence(**evidence_data) if evidence_data else None
-        return Task(**data, contract=contract, evidence=evidence)
+        return Task(
+            **data,
+            contract=contract,
+            execution_binding=binding,
+            evidence=evidence,
+        )
 
     # ---- public API ----
 
@@ -274,6 +292,21 @@ class TaskStore:
             raw = self._load_raw()
             for i, d in enumerate(raw):
                 if d["id"] == task_id:
+                    authority_fields = {
+                        "contract",
+                        "execution_binding",
+                        "contract_authority_revision",
+                        "contract_authority_sequence",
+                    }
+                    attempted = authority_fields.intersection(kwargs)
+                    if attempted and str(
+                        d.get("contract_authority_revision") or ""
+                    ):
+                        raise ValueError(
+                            "authority-stamped Task fields require "
+                            "TaskContractAuthorityService: "
+                            + ", ".join(sorted(attempted))
+                        )
                     for key, value in kwargs.items():
                         if hasattr(value, "__dataclass_fields__"):
                             value = asdict(value)
@@ -297,6 +330,171 @@ class TaskStore:
                     else:
                         self._save_raw(raw)
                     return self._to_task(dict(d))
+        return None
+
+    def compare_and_update_contract(
+        self,
+        task_id: str,
+        *,
+        expected_authority_revision: str,
+        expected_legacy_contract: dict | None = None,
+        expected_legacy_binding: dict | None = None,
+        contract: TaskContract,
+        execution_binding: TaskExecutionBinding,
+        contract_authority_revision: str,
+        contract_authority_sequence: int,
+        task_updates: dict | None = None,
+        reopen_terminal: bool = False,
+    ) -> tuple[Task | None, bool]:
+        """Atomically replace one complete contract when its CAS token matches."""
+
+        with self._locked():
+            raw = self._load_raw()
+            record = next((d for d in raw if d.get("id") == task_id), None)
+            reopening = False
+            if record is None and reopen_terminal:
+                date = self._load_terminal_index().get(task_id)
+                archive_paths = (
+                    [self._archive_file(date)]
+                    if date
+                    else list(reversed(list_archives(
+                        self._archive_dir,
+                        suffix=".json",
+                    )))
+                )
+                for archive_path in archive_paths:
+                    archived = self._load_archive_file(archive_path)
+                    record = next(
+                        (
+                            d for d in reversed(archived)
+                            if d.get("id") == task_id
+                        ),
+                        None,
+                    )
+                    if record is not None:
+                        break
+                reopening = record is not None
+            if record is not None:
+                d = dict(record) if reopening else record
+                current = str(d.get("contract_authority_revision") or "")
+                if current != str(expected_authority_revision or ""):
+                    return self._to_task(dict(d)), False
+                if not current and expected_legacy_contract is not None:
+                    normalized_contract = asdict(task_contract_from_mapping(
+                        dict(d.get("contract") or {})
+                    ))
+                    if normalized_contract != expected_legacy_contract:
+                        return self._to_task(dict(d)), False
+                    raw_binding = dict(d.get("execution_binding") or {})
+                    normalized_binding = asdict(TaskExecutionBinding(**{
+                        key: value
+                        for key, value in raw_binding.items()
+                        if key in TaskExecutionBinding.__dataclass_fields__
+                    }))
+                    if normalized_binding != dict(expected_legacy_binding or {}):
+                        return self._to_task(dict(d)), False
+                d["contract"] = asdict(contract)
+                d["execution_binding"] = asdict(execution_binding)
+                d["contract_authority_revision"] = contract_authority_revision
+                d["contract_authority_sequence"] = int(
+                    contract_authority_sequence
+                )
+                for key, value in (task_updates or {}).items():
+                    if is_dataclass(value):
+                        value = asdict(value)
+                    d[key] = value
+                if reopening:
+                    if str(d.get("status") or "") in TERMINAL_STATES:
+                        raise ValueError(
+                            "reopened contract mutation must set non-terminal status"
+                        )
+                    raw.append(d)
+                    # Preserve the crash-safe ordering used by ``reopen``:
+                    # publish the active record before removing the terminal
+                    # lookup.  A crash can then leave a harmless duplicate,
+                    # never a task that is reachable through neither source.
+                    self._save_raw(raw)
+                    index = self._load_terminal_index()
+                    index.pop(task_id, None)
+                    self._save_terminal_index(index)
+                else:
+                    self._save_raw(raw)
+                return self._to_task(dict(d)), True
+        return None, False
+
+    def compare_and_update_fields(
+        self,
+        task_id: str,
+        *,
+        expected_authority_revision: str,
+        updates: dict,
+    ) -> tuple[Task | None, bool]:
+        """Patch non-authority Task fields only while the contract CAS token matches."""
+
+        protected = {
+            "contract",
+            "execution_binding",
+            "contract_authority_revision",
+            "contract_authority_sequence",
+        }
+        invalid = protected.intersection(updates)
+        if invalid:
+            raise ValueError(
+                "task field CAS cannot mutate authority fields: "
+                + ", ".join(sorted(invalid))
+            )
+        with self._locked():
+            raw = self._load_raw()
+            for index, record in enumerate(raw):
+                if record.get("id") != task_id:
+                    continue
+                current = str(record.get("contract_authority_revision") or "")
+                if current != str(expected_authority_revision or ""):
+                    return self._to_task(dict(record)), False
+                for key, value in updates.items():
+                    if is_dataclass(value):
+                        value = asdict(value)
+                    record[key] = value
+                if str(record.get("status") or "") in TERMINAL_STATES:
+                    today = self._today()
+                    self._append_archive(today, record)
+                    self._mark_terminal(task_id, today)
+                    raw.pop(index)
+                self._save_raw(raw)
+                return self._to_task(dict(record)), True
+        return None, False
+
+    def patch_contract_fields(
+        self,
+        task_id: str,
+        updates: dict,
+    ) -> Task | None:
+        """Merge projection/evidence fields without replacing a stale contract."""
+
+        if not updates:
+            return self.get(task_id)
+        unknown = set(updates) - CONTRACT_METADATA_FIELDS
+        if unknown:
+            raise ValueError(
+                "contract metadata patch contains semantic fields: "
+                + ", ".join(sorted(unknown))
+            )
+        with self._locked():
+            raw = self._load_raw()
+            for d in raw:
+                if d.get("id") != task_id:
+                    continue
+                contract = dict(d.get("contract") or {})
+                for key, value in updates.items():
+                    if key == "acceptance_evidence":
+                        merged = dict(contract.get(key) or {})
+                        merged.update(dict(value or {}))
+                        contract[key] = merged
+                    else:
+                        contract[key] = value
+                d["contract"] = contract
+                self._save_raw(raw)
+                return self._to_task(dict(d))
         return None
 
     def ready(self) -> list[Task]:

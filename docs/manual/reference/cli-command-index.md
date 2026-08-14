@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **68** 个顶层命令 family、**258** 条可寻址命令路径。
+当前共 **68** 个顶层命令 family、**259** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -198,6 +198,7 @@ Run operator diagnostics
 | Command | Parser description |
 |---|---|
 | `zf doctor` | Run operator diagnostics |
+| `zf doctor contract-authority` | Check canonical Task contract CAS lineage and receipts |
 | `zf doctor event-contract` | Check workflow event producer/consumer contracts |
 | `zf doctor panes` | Check pane-grid role bindings |
 | `zf doctor provider` | Check provider CLI preflight |

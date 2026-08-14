@@ -46,7 +46,7 @@ class CallResultAuthorityMixin:
         task_id = str(identity.get("task_id") or adapted.payload.get("task_id") or "")
         contract_ref = str(identity.get("contract_snapshot_ref") or "")
         contract_digest = str(identity.get("contract_snapshot_digest") or "")
-        if not task_id or not contract_ref or not contract_digest:
+        if not task_id:
             return []
         if (
             adapted.schema_version == "verification-result.v1"
@@ -63,6 +63,17 @@ class CallResultAuthorityMixin:
 
         task = TaskStore(self.state_dir / "kanban.json").get(task_id)
         if task is None:
+            return []
+        strict_authority = bool(
+            str(getattr(task, "contract_authority_revision", "") or "")
+        )
+        if strict_authority and (not contract_ref or not contract_digest):
+            return [_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "contract_snapshot_required",
+                "authority-stamped Task result lacks contract snapshot ref/digest",
+            )]
+        if not contract_ref or not contract_digest:
             return []
         if str(task.status or "") in {"cancelled", "superseded"}:
             return [_currentness_issue(
@@ -81,6 +92,12 @@ class CallResultAuthorityMixin:
             )]
         issues: list[dict[str, str]] = []
         for field, code in (
+            ("contract_authority_revision", "stale_contract_authority"),
+            ("execution_owner", "stale_execution_binding"),
+            ("workflow_request_id", "stale_execution_binding"),
+            ("workflow_request_revision", "stale_execution_binding"),
+            ("workflow_run_id", "stale_execution_binding"),
+            ("origin_binding_digest", "stale_execution_binding"),
             ("contract_revision", "stale_contract_revision"),
             ("task_map_generation", "stale_task_map_generation"),
         ):
@@ -143,6 +160,11 @@ class CallResultAuthorityMixin:
                         for key in (
                             "workflow_run_id",
                             "task_id",
+                            "contract_authority_revision",
+                            "execution_owner",
+                            "workflow_request_id",
+                            "workflow_request_revision",
+                            "origin_binding_digest",
                             "contract_revision",
                             "task_map_generation",
                             "base_commit",
@@ -424,6 +446,44 @@ class CallResultAuthorityMixin:
                 "stale_contract_snapshot",
                 "candidate contract completed_task_ids do not match current freeze",
             ))
+        task_store = TaskStore(self.state_dir / "kanban.json")
+        for child in contract_snapshot.get("child_authorities") or []:
+            if not isinstance(child, Mapping):
+                continue
+            authority_revision = str(
+                child.get("contract_authority_revision") or ""
+            )
+            if not authority_revision:
+                continue
+            child_task_id = str(child.get("task_id") or "")
+            current_task = task_store.get(child_task_id)
+            if current_task is None:
+                issues.append(_currentness_issue(
+                    "control_result.contract_snapshot_ref",
+                    "stale_task_authority",
+                    f"candidate child {child_task_id!r} is absent from TaskStore",
+                ))
+                continue
+            try:
+                current_identity = current_task_contract_identity(current_task)
+            except TaskContractSnapshotError as exc:
+                issues.append(_currentness_issue(
+                    "control_result.contract_snapshot_ref",
+                    "stale_task_authority",
+                    str(exc),
+                ))
+                continue
+            for field, expected in current_identity.items():
+                actual = str(child.get(field) or "")
+                if str(expected) != actual:
+                    issues.append(_currentness_issue(
+                        f"control_result.child_authorities.{field}",
+                        "stale_task_authority",
+                        (
+                            f"candidate child {child_task_id!r} expects "
+                            f"{expected}, got {actual or '<missing>'}"
+                        ),
+                    ))
         return issues
 
     def _plan_package_currentness_issues(
@@ -566,6 +626,27 @@ class CallResultAuthorityMixin:
                 "plan_synth_contract_digest",
                 "stale_plan_revision",
             ),
+            (
+                "contract_authority_revision",
+                "contract_authority_revision",
+                "stale_contract_authority",
+            ),
+            ("execution_owner", "execution_owner", "stale_execution_binding"),
+            (
+                "workflow_request_id",
+                "workflow_request_id",
+                "stale_execution_binding",
+            ),
+            (
+                "workflow_request_revision",
+                "workflow_request_revision",
+                "stale_execution_binding",
+            ),
+            (
+                "origin_binding_digest",
+                "origin_binding_digest",
+                "stale_execution_binding",
+            ),
             ("contract_revision", "contract_revision", "stale_contract_revision"),
             ("task_map_generation", "task_map_generation", "stale_task_map_generation"),
             (
@@ -658,6 +739,7 @@ class CallResultAuthorityMixin:
         from zf.runtime.sidecar_refs import SidecarRefError
 
         issues: list[dict[str, str]] = []
+        issues.extend(self._goal_closure_task_authority_issues(result))
         claim_ref = str(result.get("goal_claim_set_ref") or "")
         claim_digest = str(result.get("goal_claim_set_digest") or "")
         try:
@@ -832,6 +914,77 @@ class CallResultAuthorityMixin:
                         "code": "stale_closure_identity",
                         "message": f"expected {expected}, got {actual}",
                     })
+        return issues
+
+    def _goal_closure_task_authority_issues(
+        self,
+        result: Mapping[str, Any],
+    ) -> list[dict[str, str]]:
+        """Recheck the Candidate Verify authority set at Thin Judge submit."""
+
+        ref = str(result.get("contract_snapshot_ref") or "")
+        digest = str(result.get("contract_snapshot_digest") or "")
+        if not ref or not digest:
+            return []
+        try:
+            hydrated = hydrate_sidecar_ref(
+                self.state_dir,
+                {"ref": ref, "sha256": digest},
+            )
+            snapshot = (
+                hydrated.payload if isinstance(hydrated.payload, dict) else {}
+            )
+        except (OSError, ValueError) as exc:
+            return [_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_task_authority",
+                str(exc),
+            )]
+        if str(snapshot.get("schema_version") or "") != (
+            "goal-closure-contract-snapshot.v1"
+        ):
+            return []
+        children = snapshot.get("child_authorities")
+        if bool(snapshot.get("task_authority_required")) and not children:
+            return [_currentness_issue(
+                "control_result.contract_snapshot_ref",
+                "stale_task_authority",
+                "Goal closure snapshot requires a non-empty Task authority set",
+            )]
+        issues: list[dict[str, str]] = []
+        store = TaskStore(self.state_dir / "kanban.json")
+        for child in children if isinstance(children, list) else []:
+            if not isinstance(child, Mapping):
+                continue
+            task_id = str(child.get("task_id") or "")
+            task = store.get(task_id) if task_id else None
+            if task is None:
+                issues.append(_currentness_issue(
+                    "control_result.contract_snapshot_ref",
+                    "stale_task_authority",
+                    f"Goal closure child {task_id!r} is absent from TaskStore",
+                ))
+                continue
+            try:
+                current = current_task_contract_identity(task)
+            except TaskContractSnapshotError as exc:
+                issues.append(_currentness_issue(
+                    "control_result.contract_snapshot_ref",
+                    "stale_task_authority",
+                    str(exc),
+                ))
+                continue
+            for field, expected in current.items():
+                actual = str(child.get(field) or "")
+                if str(expected) != actual:
+                    issues.append(_currentness_issue(
+                        f"control_result.child_authorities.{field}",
+                        "stale_task_authority",
+                        (
+                            f"Goal closure child {task_id!r} expects "
+                            f"{expected}, got {actual or '<missing>'}"
+                        ),
+                    ))
         return issues
 
 

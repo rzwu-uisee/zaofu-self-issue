@@ -24,7 +24,8 @@ dispatch 后自动 attest state packet，并对 `state-packet.json` 做
 verify-before-overwrite）。agent 的职责是：
 
 1. **保证 spec 落盘**（artifact，不是聊天记忆）
-2. **把 `spec_ref` 写进 task contract**（经 `task.contract.update` 事件，
+2. **把 `spec_ref` 写进 task contract**（Agent 经
+   `task.contract.change.requested` + 当前 authority token 请求 CAS，
    不直改 `kanban.json`）
 3. **发现 `task.contract.invalid`（`reason=state_packet_hash_mismatch`）
    审计事件时停手上报**（emit `memory.note category=attestation_mismatch`
@@ -39,7 +40,9 @@ verify-before-overwrite）。agent 的职责是：
 
 1. 把 spec 落盘到 `docs/specs/<task_id>-spec.md`（如尚未存在）
 2. 把 `spec_ref` 写进 `task.contract.spec_ref`（经
-   `zf emit task.contract.update --task <task_id> --payload-file ...`）
+   `zf emit task.contract.change.requested --task <task_id> --actor orchestrator
+   --payload-file ...`；既有 Task 先从 `zf kanban show` 读取
+   `expected_authority_revision`）
 3. attestation 由 kernel dispatch 路径自动完成。如需在 kernel 侧代码 /
    白名单工具中直接调用，API 参考（file / object 两个入口按场景选，
    勿混用 import 与调用）：

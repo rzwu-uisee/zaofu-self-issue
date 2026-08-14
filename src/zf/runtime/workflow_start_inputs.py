@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,19 +35,24 @@ def ensure_workflow_managed_task(
     if workflow_task is None or is_workflow_managed_task(workflow_task):
         return
     mark_workflow_managed_task(workflow_task)
-    TaskStore(state_dir / "kanban.json").update(
-        workflow_task.id,
-        contract=workflow_task.contract,
+    from zf.runtime.task_contract_authority import (
+        TaskContractAuthorityService,
     )
-    writer.emit(
-        "task.contract.update",
+
+    store = TaskStore(state_dir / "kanban.json")
+    TaskContractAuthorityService(
+        task_store=store,
+        event_writer=writer,
+        state_dir=state_dir,
+    ).replace(
+        workflow_task,
+        contract=workflow_task.contract,
+        execution_binding=workflow_task.execution_binding,
+        source="workflow_start",
         actor=actor,
-        task_id=workflow_task.id,
         causation_id=causation_id,
         correlation_id=correlation_id,
-        payload={
-            "source": "workflow_start",
-            "contract": asdict(workflow_task.contract),
+        audit_payload={
             "contract_digest": task_workflow_binding_digest(workflow_task),
             "execution_owner": "workflow",
         },

@@ -795,6 +795,17 @@ def _legacy_verification_result(event: ZfEvent) -> dict[str, Any]:
         "failure_class": failure_class,
         "workflow_run_id": _text(payload, "workflow_run_id", "trace_id"),
         "task_id": str(event.task_id or _text(payload, "task_id", "upstream_task_id")),
+        "contract_authority_revision": _text(
+            payload,
+            "contract_authority_revision",
+        ),
+        "execution_owner": _text(payload, "execution_owner"),
+        "workflow_request_id": _text(payload, "workflow_request_id"),
+        "workflow_request_revision": _text(
+            payload,
+            "workflow_request_revision",
+        ),
+        "origin_binding_digest": _text(payload, "origin_binding_digest"),
         "contract_revision": _text(payload, "contract_revision"),
         "task_map_generation": _text(payload, "task_map_generation"),
         "feedback_revision": _text(

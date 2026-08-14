@@ -153,7 +153,8 @@ def build_orchestrator_briefing(
     sections.append("- If the trigger is `human.escalate`: this is a meta-event about a stall, NOT a fresh failure.")
     sections.append("  Read the escalation payload (reason, origin/task id), find the original failure, and emit ONE")
     sections.append("  concrete follow-up action THIS turn: `critic.gate.requested` for ambiguous triage,")
-    sections.append("  `task.contract.update` to reduce scope, `task.cancel` on retry exhaustion, or")
+    sections.append("  `task.contract.change.requested` with the current authority token to reduce scope,")
+    sections.append("  `task.cancel` on retry exhaustion, or")
     sections.append("  `worker.respawn.requested` when the worker is offline. See skill")
     sections.append("  `zf-yoke-orchestrator-role-context` for the routing table. Do NOT wait for a human steer.")
     sections.append(
@@ -191,7 +192,8 @@ def build_orchestrator_briefing(
         "或聊天 transcript 当成唯一 plan_ref。若缺 "
         "manifest/event refs,先要求 arch/critic 补发 manifest。若候选 artifact 已被 "
         "critic approve,你可以接受原件、合并成新的最终 artifact,或拆成 task-map；"
-        "只有 orchestrator 写入的 `task.contract.update` 才是下游交付 contract。"
+        "只有 Kernel 接纳 orchestrator 的 `task.contract.change.requested` 并返回 applied receipt 后,"
+        "当前 TaskStore contract 才是下游交付 contract。"
     )
     sections.append("")
     sections.extend(_render_backlog_synthesis_commands(config))
@@ -205,7 +207,7 @@ def build_orchestrator_briefing(
     sections.append("```bash")
     sections.append('state_tmp="${ZF_STATE_DIR:-.zf}/tmp"')
     sections.append(f"task_id=$({cli} kanban add \"$feature_id\" \"Task title\" --id-only)")
-    sections.append(f'{cli} emit task.contract.update --task "$task_id" --payload-file "$state_tmp/contract.json"')
+    sections.append(f'{cli} emit task.contract.change.requested --task "$task_id" --actor orchestrator --payload-file "$state_tmp/contract.json"')
     sections.append(f"{cli} kanban assign \"$task_id\" <role-name>   # 传 role.name (例如 dev / arch / review), 不要传 instance_id")
     sections.append("```")
     sections.append("")
@@ -219,12 +221,12 @@ def build_orchestrator_briefing(
     sections.append("import json")
     sections.append("import os")
     sections.append("from pathlib import Path")
-    sections.append("payload = {\"contract\": {\"behavior\": \"...\", \"verification\": \"...\", \"verification_tiers\": [\"runtime\"], \"owner_role\": \"<role-name>\", \"scope\": [\"src/file.py\"]}}")
+    sections.append("payload = {\"contract\": {\"behavior\": \"...\", \"verification\": \"...\", \"verification_tiers\": [\"runtime\"], \"owner_role\": \"<role-name>\", \"scope\": [\"src/file.py\"]}, \"expected_authority_revision\": \"\", \"source\": \"orchestrator_task_creation\", \"reason\": \"initial contract\"}")
     sections.append("state_tmp = Path(os.environ['STATE_TMP'])")
     sections.append("state_tmp.mkdir(parents=True, exist_ok=True)")
     sections.append("(state_tmp / 'contract.json').write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')")
     sections.append("PY")
-    sections.append(f'{cli} emit task.contract.update --task "$task_id" --payload-file "$state_tmp/contract.json"')
+    sections.append(f'{cli} emit task.contract.change.requested --task "$task_id" --actor orchestrator --payload-file "$state_tmp/contract.json"')
     sections.append("```")
     sections.append("")
     sections.append("strict contract 必填字段:")
@@ -240,7 +242,9 @@ def build_orchestrator_briefing(
         sections.append(initial_guidance)
     sections.append("")
     sections.append("创建任务给脚本变量时必须用 `--id-only` 或 `--json`; 不要在命令替换里 `printf` / `tee` 人类可读输出,")
-    sections.append("否则变量会变成多行文本并污染 `task.contract.update --task`。")
+    sections.append("否则变量会变成多行文本并污染 `task.contract.change.requested --task`。")
+    sections.append("刚创建且尚未签发 authority 的 Task 使用 `expected_authority_revision=\"\"`; 修改既有 Task 前先从上方 Kanban 行或")
+    sections.append(f"`{cli} kanban show <task_id>` 读取完整 Authority token。缺失或 stale token 会同步返回非零,此时重新读取后重新规划,不得盲重放旧合同。")
     sections.append("")
     sections.append("**`<role-name>` 用 role.name 就够了** — Layer 1 dispatcher 会在该 role 的 replicas")
     sections.append("里按 WIP 自动挑空闲实例 (1 忙 1 闲必选闲; 全忙 defer 到下一轮). 只有在你确实需要")
@@ -444,13 +448,16 @@ def _render_backlog_synthesis_commands(config: ZfConfig) -> list[str]:
         "        \"critic_event_id\": \"<design.critique.done.id>\",",
         "        \"critic_gate_ref\": \"approve: <fix_items summary>\",",
         "        \"evidence_contract\": {\"static\": \"...\", \"runtime\": \"...\"},",
-        "    }",
+        "    },",
+        "    \"expected_authority_revision\": \"\",  # 新 Task;既有 Task 填 zf kanban show 的完整 Authority",
+        "    \"source\": \"orchestrator_backlog_synthesis\",",
+        "    \"reason\": \"critic-approved backlog synthesis\",",
         "}",
         "state_tmp = Path(os.environ['STATE_TMP'])",
         "state_tmp.mkdir(parents=True, exist_ok=True)",
         "(state_tmp / 'contract.json').write_text(json.dumps(contract, ensure_ascii=False), encoding='utf-8')",
         "PY",
-        f'{cli} emit task.contract.update --task "$task_id" --payload-file "$state_tmp/contract.json"',
+        f'{cli} emit task.contract.change.requested --task "$task_id" --actor orchestrator --payload-file "$state_tmp/contract.json"',
         f"{cli} kanban assign \"$task_id\" {target}",
         "```",
         "",
@@ -461,7 +468,7 @@ def _render_backlog_synthesis_commands(config: ZfConfig) -> list[str]:
         "# scope 按包/文件切分:",
         f"sub_task=$({cli} kanban add \"$feature_id\" \"Subtask: file_A\" --id-only)",
         "# 给每个 sub_task 写自己子集的 contract (scope 不重叠,共享 6 refs)",
-        f'{cli} emit task.contract.update --task "$sub_task" --payload-file "$state_tmp/contract-sub.json"',
+        f'{cli} emit task.contract.change.requested --task "$sub_task" --actor orchestrator --payload-file "$state_tmp/contract-sub.json"',
         f"{cli} kanban assign \"$sub_task\" {target}",
         "```",
     ]
@@ -743,8 +750,10 @@ def _render_kanban(state_dir: Path) -> str:
         assignee = f"@{t.assigned_to}" if t.assigned_to else "(unassigned)"
         phase = derive_phase(t, events) if events else None
         phase_tag = f" phase={phase}" if phase else ""
+        authority = t.contract_authority_revision or "<legacy/unset>"
         lines.append(
-            f"- `{t.id}` [{t.status}{phase_tag}] {assignee} — {t.title}"
+            f"- `{t.id}` [{t.status}{phase_tag}] {assignee} "
+            f"authority=`{authority}` seq={t.contract_authority_sequence} — {t.title}"
         )
     return "\n".join(lines)
 

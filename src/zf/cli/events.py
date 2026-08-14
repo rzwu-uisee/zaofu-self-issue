@@ -199,12 +199,29 @@ def run_emit(args: argparse.Namespace) -> int:
     )
 
     written = event_writer.append(event)
+    kernel_writer = EventWriter(
+        event_log,
+        schema_registry=_schema_registry if _schema_registry.rule_count() else None,
+        schema_mode=_schema_mode,
+        default_origin="kernel",
+    )
+    side_effect_ok = _apply_emit_side_effect(
+        state_dir,
+        written,
+        event_writer=kernel_writer,
+        config=context.config,
+    )
     event_log.close()
-    _apply_emit_side_effect(state_dir, written)
     print(f"Emitted: {written.type} ({written.id})")
     if written.type == "discriminator.failed" and written.id != event.id:
         print(
             f"Blocked: {event.type} ({event.id}) violated the event schema",
+            file=sys.stderr,
+        )
+        return 2
+    if side_effect_ok is False:
+        print(
+            f"Rejected: {written.type} ({written.id}) was not applied",
             file=sys.stderr,
         )
         return 2
@@ -344,8 +361,32 @@ def _autofill_completion_revisions(
     }
 
 
-def _apply_emit_side_effect(state_dir, event: ZfEvent) -> None:
+def _apply_emit_side_effect(
+    state_dir: Path,
+    event: ZfEvent,
+    *,
+    event_writer: EventWriter | None = None,
+    config: Any = None,
+) -> bool | None:
     """Apply deterministic write-through side effects for selected events."""
+    if event.type == "task.contract.change.requested":
+        if event_writer is None:
+            return False
+        from zf.core.task.store import TaskStore
+        from zf.runtime.task_contract_authority import (
+            TaskContractAuthorityService,
+            allowed_task_contract_change_actors,
+        )
+
+        result = TaskContractAuthorityService(
+            task_store=TaskStore(state_dir / "kanban.json"),
+            event_writer=event_writer,
+            state_dir=state_dir,
+        ).apply_change_request(
+            event,
+            allowed_actors=allowed_task_contract_change_actors(config),
+        )
+        return result is not None
     if event.type != "task.contract.update":
         return
     try:
@@ -355,6 +396,7 @@ def _apply_emit_side_effect(state_dir, event: ZfEvent) -> None:
         apply_task_contract_event(TaskStore(state_dir / "kanban.json"), event)
     except Exception:
         return
+    return True
 
 
 def run_events(args: argparse.Namespace) -> int:

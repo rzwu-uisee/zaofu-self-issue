@@ -182,6 +182,7 @@ def _evaluate_active_claims(runtime: Any, events: list[ZfEvent]) -> None:
             required_operation_ids=required_operation_ids,
             delivery_policy=delivery_policy,
             run_contract=contract,
+            state_dir=runtime.state_dir,
         )
         if outcome is None:
             continue

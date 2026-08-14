@@ -22,7 +22,16 @@ from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.run_manager import run_manager_tick
 from zf.runtime.run_manager_rework_triage import TRIAGE_RECORDED, TRIAGE_REQUESTED
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.supervisor_inspection import run_supervisor_inspection
+from zf.runtime.task_contract_snapshot import (
+    build_target_snapshot,
+    contract_snapshot_identity_fields,
+    snapshot_payload_fields,
+    target_payload_fields,
+    write_target_snapshot,
+)
+from zf.runtime.task_pipeline_briefing import verification_result_template
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
 
@@ -369,6 +378,24 @@ def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> 
     )
     restarted_store.update(NEW_TASK_ID, status="done")
     restarted_log.append(impl_done)
+    contract_descriptor = {
+        "ref": impl_dispatch[0].payload["contract_snapshot_ref"],
+        "sha256": impl_dispatch[0].payload["contract_snapshot_digest"],
+    }
+    impl_contract_snapshot = hydrate_sidecar_ref(
+        state_dir,
+        contract_descriptor,
+    ).payload
+    target_snapshot = build_target_snapshot(
+        contract_descriptor,
+        target_commit=base_commit,
+        contract_snapshot=impl_contract_snapshot,
+    )
+    target_descriptor = write_target_snapshot(
+        state_dir,
+        target_snapshot,
+        source_event_id=impl_done.id,
+    )
     candidate = ZfEvent(
         id="candidate-ready",
         type="candidate.ready",
@@ -381,6 +408,10 @@ def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> 
             "feature_id": FEATURE_ID,
             "candidate_ref": f"candidate/{FEATURE_ID}",
             "completed_task_ids": [NEW_TASK_ID],
+            **contract_snapshot_identity_fields(impl_contract_snapshot),
+            **snapshot_payload_fields(contract_descriptor),
+            **target_payload_fields(target_descriptor),
+            "target_commit": base_commit,
         },
     )
     _append_and_run(restarted_log, restarted_orchestrator, candidate)
@@ -390,6 +421,26 @@ def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> 
         if event.type == "fanout.child.dispatched"
         and event.payload.get("stage_id") == "issue-gap-verify"
     ][-1]
+    contract_snapshot = hydrate_sidecar_ref(
+        state_dir,
+        {
+            "ref": verify_dispatch.payload["contract_snapshot_ref"],
+            "sha256": verify_dispatch.payload["contract_snapshot_digest"],
+        },
+    ).payload
+    verification_result = verification_result_template(contract_snapshot)
+    verification_result["summary"] = "replacement task verified after restart"
+    verification_result["evidence_refs"] = [
+        "artifacts/serial-recovery/verify.json"
+    ]
+    for receipt in verification_result.get("probe_receipts") or []:
+        receipt["target_commit"] = verify_dispatch.payload["target_commit"]
+        receipt["evidence_refs"] = ["artifacts/serial-recovery/verify.json"]
+    for requirement in verification_result.get("requirement_results") or []:
+        if requirement.get("status") == "passed":
+            requirement["evidence_refs"] = [
+                "artifacts/serial-recovery/verify.json"
+            ]
     verify_completed = ZfEvent(
         id="verify-child-completed",
         type="verify.child.completed",
@@ -397,11 +448,13 @@ def test_serial_recovery_chain_replans_restarts_and_verifies(tmp_path: Path) -> 
         causation_id=verify_dispatch.id,
         correlation_id=request_id,
         payload={
+            **verify_dispatch.payload,
             "fanout_id": verify_dispatch.payload["fanout_id"],
             "child_id": verify_dispatch.payload["child_id"],
             "run_id": verify_dispatch.payload["run_id"],
             "role_instance": "verify",
             "status": "completed",
+            "verification_result": verification_result,
             "report": {
                 "status": "passed",
                 "summary": "replacement task verified after restart",

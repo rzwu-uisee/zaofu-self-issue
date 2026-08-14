@@ -2415,6 +2415,9 @@ def run_goal_completion_claim_event(
         "completion_profile": str(
             result.get("completion_profile") or ""
         ),
+        "contract_snapshot_digest": str(
+            result.get("contract_snapshot_digest") or ""
+        ),
     }
     claim_id = "goal-claim-" + hashlib.sha256(
         json.dumps(
@@ -2487,6 +2490,12 @@ def run_goal_completion_claim_event(
             ),
             "target_commit": target_commit,
             "candidate_ref": str(result.get("candidate_ref") or payload.get("candidate_ref") or ""),
+            "contract_snapshot_ref": str(
+                result.get("contract_snapshot_ref") or ""
+            ),
+            "contract_snapshot_digest": str(
+                result.get("contract_snapshot_digest") or ""
+            ),
             "goal_claim_set_ref": str(result.get("goal_claim_set_ref") or ""),
             "goal_claim_set_digest": str(result.get("goal_claim_set_digest") or ""),
             "goal_coverage": [
@@ -2563,6 +2572,7 @@ def run_goal_completion_gate_event(
     required_operation_ids: list[str] | tuple[str, ...] = (),
     delivery_policy: str = "report_only",
     run_contract: Mapping[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> ZfEvent | None:
     """Evaluate one active claim against current mechanical truth.
 
@@ -2712,6 +2722,7 @@ def run_goal_completion_gate_event(
         scoped_events,
         claim_payload=claim_payload,
         run_contract=run_contract,
+        state_dir=state_dir,
     )
     if canonical_claim and verification_reason:
         invalid_reasons.append(verification_reason)
@@ -2776,6 +2787,12 @@ def run_goal_completion_gate_event(
             claim_payload.get("candidate_ref")
             or candidate_identity.get("candidate_ref")
             or ""
+        ),
+        "contract_snapshot_ref": str(
+            claim_payload.get("contract_snapshot_ref") or ""
+        ),
+        "contract_snapshot_digest": str(
+            claim_payload.get("contract_snapshot_digest") or ""
         ),
         "fanout_id": str(candidate_identity.get("fanout_id") or ""),
         "upstream_fanout_id": str(
@@ -3130,6 +3147,7 @@ def _completion_claim_invalid_reasons(
     *,
     claim_payload: Mapping[str, Any],
     run_contract: Mapping[str, Any] | None = None,
+    state_dir: Path | None = None,
 ) -> list[str]:
     claim_type = str(claim_payload.get("claim_type") or "")
     if claim_type == "legacy_semantic_judge_verdict":
@@ -3310,6 +3328,71 @@ def _completion_claim_invalid_reasons(
     for claim_key, closure_key in identity_fields:
         if str(claim_payload.get(claim_key) or "") != str(current.get(closure_key) or ""):
             invalid.append(f"stale_{claim_key}")
+    if state_dir is not None:
+        invalid.extend(
+            _completion_task_authority_invalid_reasons(
+                state_dir,
+                claim_payload=claim_payload,
+            )
+        )
+    return list(dict.fromkeys(invalid))
+
+
+def _completion_task_authority_invalid_reasons(
+    state_dir: Path,
+    *,
+    claim_payload: Mapping[str, Any],
+) -> list[str]:
+    """Recheck immutable Judge inputs immediately before terminal emission."""
+
+    ref = str(claim_payload.get("contract_snapshot_ref") or "")
+    digest = str(claim_payload.get("contract_snapshot_digest") or "")
+    if not ref or not digest:
+        return []
+    try:
+        from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+        hydrated = hydrate_sidecar_ref(
+            state_dir,
+            {"ref": ref, "sha256": digest},
+        )
+        snapshot = (
+            hydrated.payload if isinstance(hydrated.payload, dict) else {}
+        )
+    except (OSError, ValueError):
+        return ["task_authority_snapshot_unreadable"]
+    if str(snapshot.get("schema_version") or "") != (
+        "goal-closure-contract-snapshot.v1"
+    ):
+        return []
+    children = snapshot.get("child_authorities")
+    if bool(snapshot.get("task_authority_required")) and not children:
+        return ["task_authority_set_missing"]
+    from zf.runtime.task_contract_snapshot import (
+        TaskContractSnapshotError,
+        current_task_contract_identity,
+    )
+
+    store = TaskStore(state_dir / "kanban.json")
+    invalid: list[str] = []
+    for child in children if isinstance(children, list) else []:
+        if not isinstance(child, Mapping):
+            continue
+        task_id = str(child.get("task_id") or "")
+        task = store.get(task_id) if task_id else None
+        if task is None:
+            invalid.append("stale_task_authority")
+            continue
+        try:
+            current = current_task_contract_identity(task)
+        except TaskContractSnapshotError:
+            invalid.append("stale_task_authority")
+            continue
+        if any(
+            str(child.get(field) or "") != str(expected)
+            for field, expected in current.items()
+        ):
+            invalid.append("stale_task_authority")
     return list(dict.fromkeys(invalid))
 
 
