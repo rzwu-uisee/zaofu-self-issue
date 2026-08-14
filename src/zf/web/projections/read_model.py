@@ -345,20 +345,34 @@ def ensure_requested(
 ) -> dict[str, Any]:
     status = projection_status(state_dir)
     if status["projection_state"] == "ready":
-        # Archive layout is stable. If the active tail grew since the last build
-        # (plain appends), incrementally catch up — this decodes ONLY the new
-        # rows (old rows are skipped by start_seq), so it is read-your-writes
-        # consistent without the full re-decode that the old always-stale gate
-        # forced on every request. When nothing was appended (idle / repeated
-        # requests) this is skipped entirely and we serve straight from sqlite.
+        # Ordinary reads serve the last-known projection. A tail append only
+        # schedules the existing per-DB single-flight job; request threads do
+        # not join the rebuild or wait behind its file/SQLite locks.
         if status.get("tail_behind"):
-            _rebuild_single_flight(state_dir, config=config)
-            return projection_status(state_dir)
+            request_catch_up(state_dir, config=config)
         return status
     if synchronous_if_missing and status["projection_state"] == "missing":
         _rebuild_single_flight(state_dir, config=config)
         return projection_status(state_dir)
     request_catch_up(state_dir, config=config)
+    return status
+
+
+def _ensure_for_read(
+    state_dir: Path,
+    *,
+    config: ZfConfig | None,
+    require_fresh: bool,
+) -> dict[str, Any]:
+    if not require_fresh:
+        return ensure_requested(state_dir, config=config)
+    status = projection_status(state_dir)
+    if (
+        status.get("projection_state") != "ready"
+        or status.get("tail_behind")
+    ):
+        _rebuild_single_flight(state_dir, config=config)
+        status = projection_status(state_dir)
     return status
 
 
@@ -384,7 +398,7 @@ def request_catch_up(state_dir: Path, *, config: ZfConfig | None = None) -> None
 
 def _catch_up_job(state_dir: Path, config: ZfConfig | None, key: str) -> None:
     try:
-        rebuild(state_dir, config=config)
+        _rebuild_single_flight(state_dir, config=config)
     finally:
         with _JOBS_LOCK:
             current = _JOBS.get(key)
@@ -548,13 +562,15 @@ def events_page(
     failed: bool = False,
     blocked: bool = False,
     config: ZfConfig | None = None,
+    require_fresh: bool = False,
 ) -> dict[str, Any] | None:
-    status = ensure_requested(state_dir, config=config)
+    status = _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
     if not db_path(state_dir).exists():
         return None
-    if status.get("projection_state") != "ready":
-        rebuild(state_dir, config=config)
-        status = projection_status(state_dir)
     limit = max(1, min(int(limit or 100), 500))
     where: list[str] = []
     args: list[Any] = []
@@ -577,6 +593,9 @@ def events_page(
         where.append("(type LIKE '%.failed' OR type LIKE '%.rejected' OR status IN ('failed', 'rejected'))")
     if blocked:
         where.append("(type LIKE '%.blocked' OR status = 'blocked')")
+    selected_seq = int(status.get("projected_seq") or status.get("source_seq") or 0)
+    where.append("seq <= ?")
+    args.append(selected_seq)
     sql_where = f"WHERE {' AND '.join(where)}" if where else ""
     order = "ASC" if cursor is not None else "DESC"
     with _connect(db_path(state_dir)) as conn:
@@ -597,10 +616,11 @@ def events_page(
     return {
         "items": items,
         "next_cursor": next_cursor,
-        "current_seq": int(status.get("projected_seq") or status.get("source_seq") or 0),
+        "current_seq": selected_seq,
         "limit": limit,
         "projection_state": status.get("projection_state", "unknown"),
         "projection_lag": status.get("projection_lag"),
+        "tail_behind": bool(status.get("tail_behind")),
         "source": "read_model.sqlite",
     }
 
@@ -611,11 +631,13 @@ def task_timeline(
     *,
     limit: int,
     config: ZfConfig | None = None,
+    require_fresh: bool = True,
 ) -> dict[str, Any] | None:
-    status = ensure_requested(state_dir, config=config)
-    if status.get("projection_state") != "ready":
-        rebuild(state_dir, config=config)
-        status = projection_status(state_dir)
+    status = _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
     if not db_path(state_dir).exists():
         return None
     limit = max(1, min(int(limit or 200), 1000))
@@ -643,6 +665,7 @@ def task_timeline(
         "current_seq": int(status.get("projected_seq") or status.get("source_seq") or 0),
         "projection_state": status.get("projection_state", "unknown"),
         "projection_lag": status.get("projection_lag"),
+        "tail_behind": bool(status.get("tail_behind")),
         "source": "read_model.sqlite",
     }
 
@@ -810,14 +833,17 @@ def hydrate_events(
     type_prefixes: Sequence[str] | None = None,
     task_id: str | None = None,
     channel_id: str | None = None,
+    max_seq: int | None = None,
     limit: int | None = None,
     config: ZfConfig | None = None,
     require_fresh: bool = True,
     slim: bool = False,
 ) -> list[ZfEvent]:
-    status = ensure_requested(state_dir, config=config)
-    if require_fresh and status.get("projection_state") != "ready":
-        rebuild(state_dir, config=config)
+    _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
     where: list[str] = []
     args: list[Any] = []
     type_filters: list[str] = []
@@ -839,6 +865,9 @@ def hydrate_events(
     if channel_id:
         where.append("channel_id = ?")
         args.append(channel_id)
+    if max_seq is not None:
+        where.append("seq <= ?")
+        args.append(max(0, int(max_seq)))
     sql_where = f"WHERE {' AND '.join(where)}" if where else ""
     sql_limit = "LIMIT ?" if limit is not None else ""
     if limit is not None:
@@ -899,9 +928,11 @@ def hydrate_events_by_ref(
     if not kind or not identity:
         return []
     try:
-        status = ensure_requested(state_dir, config=config)
-        if require_fresh and status.get("projection_state") != "ready":
-            rebuild(state_dir, config=config)
+        _ensure_for_read(
+            state_dir,
+            config=config,
+            require_fresh=require_fresh,
+        )
     except (OSError, sqlite3.Error):
         return None
     if not db_path(state_dir).exists():
@@ -978,15 +1009,17 @@ def agent_session_history(
     backend: str = "",
     task_id: str = "",
     config: ZfConfig | None = None,
+    require_fresh: bool = False,
 ) -> dict[str, Any] | None:
     """Page full agent-session events for a conversation surface."""
 
     if surface != "kanban_agent":
         return None
-    status = ensure_requested(state_dir, config=config)
-    if status.get("projection_state") != "ready":
-        rebuild(state_dir, config=config)
-        status = projection_status(state_dir)
+    status = _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
     if not db_path(state_dir).exists():
         return None
     limit = max(1, min(int(limit or 120), 500))
@@ -1002,6 +1035,9 @@ def agent_session_history(
     if before is not None:
         where.append("seq < ?")
         args.append(before)
+    selected_seq = int(status.get("projected_seq") or status.get("source_seq") or 0)
+    where.append("seq <= ?")
+    args.append(selected_seq)
     sql_where = f"WHERE {' AND '.join(where)}"
     try:
         with _connect(db_path(state_dir)) as conn:
@@ -1055,6 +1091,7 @@ def agent_session_history(
         backend=backend,
         task_id=task_id,
         config=config,
+        max_seq=selected_seq,
     )
     items = _merge_full_events_by_seq(context_items, primary_items)
     next_before_seq = primary_oldest_seq if primary_items else before
@@ -1067,9 +1104,10 @@ def agent_session_history(
         "next_before_seq": next_before_seq,
         "has_more": bool(primary_items and len(primary_items) >= limit),
         "context_event_count": len(context_items),
-        "current_seq": int(status.get("projected_seq") or status.get("source_seq") or 0),
+        "current_seq": selected_seq,
         "projection_state": status.get("projection_state", "unknown"),
         "projection_lag": status.get("projection_lag"),
+        "tail_behind": bool(status.get("tail_behind")),
         "source": "read_model.sqlite",
     }
 
@@ -1143,10 +1181,11 @@ def current_projected_seq(
     config: ZfConfig | None = None,
     require_fresh: bool = True,
 ) -> int:
-    status = ensure_requested(state_dir, config=config)
-    if require_fresh and status.get("projection_state") != "ready":
-        rebuild(state_dir, config=config)
-        status = projection_status(state_dir)
+    status = _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
     return int(status.get("projected_seq") or status.get("source_seq") or 0)
 
 
@@ -1154,6 +1193,7 @@ def channel_summary(
     state_dir: Path,
     *,
     config: ZfConfig | None = None,
+    require_fresh: bool = False,
 ) -> dict[str, Any] | None:
     from zf.runtime.channel_projection import CHANNEL_EVENT_TYPES, project_channels
 
@@ -1163,25 +1203,58 @@ def channel_summary(
     # projected seq: a request with no new events since the last build returns
     # the cached payload without touching the event log. A new channel event
     # advances projected_seq (via ensure_requested/rebuild) and invalidates it.
-    source_seq = current_projected_seq(state_dir, config=config)
+    status = _ensure_for_read(
+        state_dir,
+        config=config,
+        require_fresh=require_fresh,
+    )
+    if not db_path(state_dir).exists():
+        return None
+    source_seq = int(status.get("projected_seq") or 0)
     cache_key = "channel_summary"
     cached = get_cached_projection(state_dir, cache_key, source_seq=source_seq)
     if cached is not None:
-        return None if cached.get("_channel_summary_empty") else cached
+        cached["projected_seq"] = source_seq
+        cached["projection_lag"] = status.get("projection_lag")
+        cached["tail_behind"] = bool(status.get("tail_behind"))
+        return cached
 
-    events = hydrate_events(state_dir, types=sorted(CHANNEL_EVENT_TYPES), config=config)
+    # Materialize from the already selected projected watermark. If the tail
+    # is behind this remains a last-known row; the selected page issues one
+    # explicit fresh follow-up without blocking the initial response.
+    events = hydrate_events(
+        state_dir,
+        types=sorted(CHANNEL_EVENT_TYPES),
+        config=config,
+        require_fresh=False,
+        max_seq=source_seq,
+    )
     if not events:
+        empty = {
+            "schema_version": "channels.v1",
+            "generated_at": _now(),
+            "seq": source_seq,
+            "source": "read_model.sqlite",
+            "channels": [],
+            "projected_seq": source_seq,
+            "projection_state": status.get("projection_state", "unknown"),
+            "projection_lag": status.get("projection_lag"),
+            "tail_behind": bool(status.get("tail_behind")),
+        }
         set_cached_projection(
             state_dir,
             cache_key,
             kind="channel_summary",
             source_seq=source_seq,
-            payload={"_channel_summary_empty": True},
+            payload=empty,
         )
-        return None
+        return empty
     projected = project_channels(state_dir, events=events)
     projected["source"] = "read_model.sqlite"
-    projected["projection_state"] = projection_status(state_dir).get("projection_state", "unknown")
+    projected["projection_state"] = status.get("projection_state", "unknown")
+    projected["projected_seq"] = source_seq
+    projected["projection_lag"] = status.get("projection_lag")
+    projected["tail_behind"] = bool(status.get("tail_behind"))
     set_cached_projection(
         state_dir,
         cache_key,
@@ -1272,6 +1345,7 @@ def _kanban_agent_context_events(
     backend: str,
     task_id: str,
     config: ZfConfig | None,
+    max_seq: int,
 ) -> list[dict[str, Any]]:
     if not primary_items:
         return []
@@ -1287,11 +1361,11 @@ def _kanban_agent_context_events(
                 f"""
                 SELECT seq, raw_segment, raw_offset, raw_length
                 FROM event_index
-                WHERE type IN ({type_placeholders})
+                WHERE type IN ({type_placeholders}) AND seq <= ?
                 ORDER BY seq DESC
                 LIMIT ?
                 """,
-                (*KANBAN_AGENT_CONTEXT_TYPES, 5000),
+                (*KANBAN_AGENT_CONTEXT_TYPES, max_seq, 5000),
             ).fetchall()
     except sqlite3.Error:
         return []

@@ -1607,6 +1607,51 @@ def test_candidate_runs_declared_setup_before_quality_gate(tmp_path: Path):
     assert result.payload["quality"]["gates_passed"] == ["candidate"]
 
 
+def test_candidate_quality_gate_uses_declared_worktree_virtualenv(tmp_path: Path):
+    _init_repo(tmp_path)
+    state_dir, _, log = _state(tmp_path)
+    config = _config(
+        state_dir,
+        setup_script=(
+            "mkdir -p .venv/bin && "
+            "printf '#!/bin/sh\\nprintf candidate-venv\\n' > .venv/bin/candidate-tool && "
+            "chmod +x .venv/bin/candidate-tool"
+        ),
+        quality_gates={
+            "candidate": QualityGateConfig(
+                enabled=True,
+                required_checks=["test \"$(candidate-tool)\" = candidate-venv"],
+            ),
+        },
+    )
+    commit = _task_commit(
+        tmp_path,
+        branch="worker/TASK-1",
+        file_name="a.txt",
+        content="TASK-1\n",
+        message="TASK-1",
+    )
+    _record_task_ref(
+        tmp_path,
+        state_dir,
+        config,
+        task_id="TASK-1",
+        commit=commit,
+        branch="worker/TASK-1",
+    )
+    _add_task(state_dir, log, task_id="TASK-1")
+    _approve(log, "TASK-1")
+
+    result = _rebuilder(tmp_path, state_dir, config, log).rebuild(
+        "F-11111111",
+        event_writer=EventWriter(log),
+    )
+
+    assert result is not None and result.status == "updated"
+    assert result.payload["candidate_environment"]["setup_ran"] is True
+    assert result.payload["quality"]["gates_passed"] == ["candidate"]
+
+
 def test_candidate_setup_failure_blocks_quality_gate(tmp_path: Path):
     _init_repo(tmp_path)
     state_dir, _, log = _state(tmp_path)

@@ -95,11 +95,22 @@ AC 或风险。
     `issue_spec`；不得要求 Planner 在 `plan_ports` 重复提交这些端口。Critic 只审核
     project-produced descriptor 的语义、来源和下游可用性，不选择 current Package，
     也不写 Package lifecycle。
+13. 若 profile 要求 `product_acceptance_spec`，检查其 mandatory user journeys
+    是否覆盖 owner Goal/AC、每个 assertion 是否可观察且有 verify tier、entrypoint
+    start/health 是否真实可运行、assembly owner 是否与 task map 唯一 owner 一致，
+    deterministic Product E2E 与 Provider qualification 是否分层。此处只审核
+    Planner 语义；run/revision/generation/ref/digest 由 Kernel Package admission 绑定，
+    不得因计划期尚未产生 screenshot/receipt 而 Reject。
 
 先读取 required reads 中的 exact requirement/PRD authority artifact，再审 child
 plan。若 authority 明确规定 task ids、任务边界、依赖或 AC 归属，Critic 必须逐项
 比对；scan summary、derived matrix 或 Planner 自述“已覆盖”不能替代原始决策。
 缺少 exact authority read 时不得对 owner 意图轴做无证据 approve。
+
+若 `plan-rework-context` 含 `human_resolution`，其因果绑定的 `response` 是当前轮
+owner authority。必须逐字核对 plan/task map/matrices 是否满足该 response，并在
+evidence refs 中引用 `events.jsonl#<source_event_id>`；不得用更早的 owner
+confirmation、已批准计划或 Planner 摘要覆盖它。缺失引用或任一约束未落实时 Reject。
 
 Approve 时返回当前 plan/task-map refs、revision、摘要和 residual risks。Reject 时
 返回非空 `fix_items[]`，每项包含 `task_id` 或 `acceptance_id`、`observed_gap`、

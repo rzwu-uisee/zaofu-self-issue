@@ -382,6 +382,141 @@ def test_replan_recovers_plan_package_identity_from_rejected_trigger() -> None:
     assert replan.payload["plan_artifact_package_digest"] == "package-digest"
 
 
+def test_replan_replaces_plan_identity_groups_without_mixing_revisions() -> None:
+    origin = ZfEvent(
+        type="issue.requested",
+        payload={
+            "issue_ref": "docs/issues/TODO.md",
+            "task_map_ref": "artifacts/plan/old-task-map.json",
+            "task_map_digest": "old-task-map-digest",
+            "plan_artifact_package_id": "planpkg-old",
+            "plan_artifact_package_ref": "artifacts/plan-packages/old.json",
+            "plan_artifact_package_digest": "old-package-digest",
+        },
+    )
+    rejected = ZfEvent(
+        id="evt-current-task-map",
+        type="task_map.ready",
+        payload={
+            "task_map_ref": "artifacts/plan/current-task-map.json",
+            "task_map_digest": "stale-event-digest",
+            "plan_artifact_package_id": "planpkg-current",
+            "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+            "plan_artifact_package_digest": "current-package-digest",
+        },
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        causation_id=rejected.id,
+        payload={
+            "reason": "task map digest mismatch",
+            "trigger_event_id": rejected.id,
+            "task_map_ref": "artifacts/plan/current-task-map.json",
+            "task_map_digest": "current-task-map-digest",
+            "plan_artifact_package_id": "planpkg-current",
+            "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+            "plan_artifact_package_digest": "current-package-digest",
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, rejected, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["task_map_ref"] == (
+        "artifacts/plan/current-task-map.json"
+    )
+    assert replan.payload["task_map_digest"] == "current-task-map-digest"
+    assert replan.payload["plan_artifact_package_id"] == "planpkg-current"
+    assert replan.payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert replan.payload["plan_artifact_package_digest"] == (
+        "current-package-digest"
+    )
+
+def test_replan_rebinds_rejected_package_to_canonical_current() -> None:
+    run_id = "issue-run"
+    origin = ZfEvent(
+        type="issue.requested",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "issue_ref": "docs/issues/TODO.md",
+            "task_map_generation": "generation-rejected",
+            "plan_artifact_package_id": "planpkg-rejected",
+            "plan_artifact_package_ref": "artifacts/plan-packages/rejected.json",
+            "plan_artifact_package_digest": "rejected-digest",
+        },
+    )
+    rejected = ZfEvent(
+        id="evt-rejected-task-map",
+        type="task_map.ready",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "plan_artifact_package_id": "planpkg-rejected",
+            "plan_artifact_package_ref": "artifacts/plan-packages/rejected.json",
+            "plan_artifact_package_digest": "rejected-digest",
+            "goal_claim_set_ref": "artifacts/claims/rejected.json",
+            "goal_claim_set_digest": "rejected-claims-digest",
+        },
+    )
+    current_claims = ZfEvent(
+        id="evt-current-claims",
+        type="goal.claim_set.pinned",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "task_map_generation": "generation-current",
+            "goal_claim_set_ref": "artifacts/claims/current.json",
+            "goal_claim_set_digest": "current-claims-digest",
+        },
+    )
+    current = ZfEvent(
+        id="evt-current-package",
+        type="plan.artifact_package.admitted",
+        correlation_id=run_id,
+        payload={
+            "workflow_run_id": run_id,
+            "package_slot": "execution_plan",
+            "task_map_generation": "generation-current",
+            "package_id": "planpkg-current",
+            "package_ref": "artifacts/plan-packages/current.json",
+            "package_digest": "current-digest",
+        },
+    )
+    failure = ZfEvent(
+        type="issue.triage.failed",
+        correlation_id=run_id,
+        causation_id=rejected.id,
+        payload={
+            "workflow_run_id": run_id,
+            "reason": "rejected package cannot continue",
+            "trigger_event_id": rejected.id,
+        },
+    )
+
+    replan, _ = plan_reader_stage_replan(
+        _config(),
+        [origin, rejected, current_claims, current, failure],
+        failure,
+    )
+
+    assert replan is not None
+    assert replan.payload["task_map_generation"] == "generation-current"
+    assert replan.payload["plan_artifact_package_id"] == "planpkg-current"
+    assert replan.payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert replan.payload["plan_artifact_package_digest"] == "current-digest"
+    assert replan.payload["goal_claim_set_ref"] == "artifacts/claims/current.json"
+    assert replan.payload["goal_claim_set_digest"] == "current-claims-digest"
+
+
 def test_replan_preserves_failure_target_ref_without_origin_trigger() -> None:
     failure = ZfEvent(type="issue.triage.failed", payload={
         "reason": "bad task_map",

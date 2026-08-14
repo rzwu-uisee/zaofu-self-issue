@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 from typing import Any, Mapping
+
+from zf.core.events.model import ZfEvent
 
 
 def repair_instruction(issue: Mapping[str, Any]) -> str:
@@ -84,6 +87,49 @@ def build_correction_briefing(
     ])
 
 
+def wait_for_source_turn_stop(
+    runtime: Any,
+    *,
+    source_event: ZfEvent,
+    actor: str,
+    backend: str,
+    timeout_seconds: float = 30.0,
+    poll_interval: float = 0.1,
+) -> bool:
+    """Wait until a provider stop hook makes correction input safe."""
+
+    stop_type = {
+        "codex": "codex.hook.stop",
+        "claude-code": "claude.hook.stop",
+    }.get(backend)
+    event_log = getattr(runtime, "event_log", None)
+    if not stop_type or event_log is None:
+        return True
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    source_seen = False
+    while True:
+        try:
+            events = event_log.read_all()
+        except Exception:
+            return False
+        for event in events:
+            if event.id == source_event.id:
+                source_seen = True
+                continue
+            if (
+                source_seen
+                and event.type == stop_type
+                and str(event.actor or "") == actor
+            ):
+                return True
+        if not source_seen:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, poll_interval))
+
+
 def _result_submit_command(
     *,
     state_dir: Path,
@@ -109,4 +155,8 @@ def _result_submit_command(
     return command, str(scratch)
 
 
-__all__ = ["build_correction_briefing", "repair_instruction"]
+__all__ = [
+    "build_correction_briefing",
+    "repair_instruction",
+    "wait_for_source_turn_stop",
+]

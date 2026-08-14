@@ -179,6 +179,7 @@ from zf.web.provider_dev_chat import (
     handle_agent_session_cancel,
     handle_provider_dev_chat,
 )
+from zf.web.long_run_truth_routes import read_long_run_truth as _read_long_run_truth
 from zf.web.headless_recovery import reconcile_kanban_startup
 from zf.web.collaboration_action_validation import validate_collaboration_action_payload
 from zf.web.channel_workflow_legacy_route import (
@@ -255,6 +256,7 @@ from zf.web.projections.common import (  # noqa: F401
     _matches_event_filters,
     _read_events_with_seq,
     _line_count,
+    _event_global_seq,
 )
 from zf.web.projections.request_util import (  # noqa: F401
     _request_json,
@@ -637,6 +639,8 @@ _ACTION_ALIASES = {
     "failure-closeout-activate",
     "failure.closeout.activate",
     "failure.activate.closeout",
+    "stage-replan-new-generation",
+    "stage.replan.new_generation",
     "real-e2e-run",
     "real.e2e.run",
     "real_e2e.run",
@@ -1533,13 +1537,12 @@ def create_app(
             queued = 0
         events_path = sd / "events.jsonl"
         last_event_age_s: float | None = None
-        seq = 0
+        seq = _event_global_seq(sd)
         if events_path.exists():
             try:
                 import time as _time
 
                 last_event_age_s = round(_time.time() - events_path.stat().st_mtime, 1)
-                seq = _line_count(events_path)
             except OSError:
                 pass
         try:
@@ -1974,6 +1977,7 @@ def create_app(
         prefix: str | None = None,
         failed: bool = False,
         blocked: bool = False,
+        require_fresh: bool = False,
     ) -> JSONResponse:
         context = _resolve_api_project(
             project_id,
@@ -1993,6 +1997,7 @@ def create_app(
             failed=failed,
             blocked=blocked,
             config=context.config,
+            require_fresh=require_fresh,
         ))
 
     @app.get("/api/projects/{project_id}/events/{event_id}")
@@ -2020,6 +2025,7 @@ def create_app(
         task_id: str = "",
         limit: int = 160,
         before_seq: int | None = None,
+        require_fresh: bool = False,
     ) -> JSONResponse:
         from zf.web.projections import read_model
 
@@ -2041,6 +2047,7 @@ def create_app(
             limit=limit,
             before_seq=before_seq,
             config=context.config,
+            require_fresh=require_fresh,
         )
         if page is None:
             raise HTTPException(404, f"agent session history surface {surface!r} not found")
@@ -2109,7 +2116,10 @@ def create_app(
         })
 
     @app.get("/api/projects/{project_id}/channels")
-    def project_channels(project_id: str) -> JSONResponse:
+    def project_channels(
+        project_id: str,
+        require_fresh: bool = False,
+    ) -> JSONResponse:
         from zf.runtime.channel_projection import project_channels as _project_channels
         from zf.web.projections import read_model
 
@@ -2124,6 +2134,7 @@ def create_app(
             projected = read_model.channel_summary(
                 context.state_dir,
                 config=context.config,
+                require_fresh=require_fresh,
             )
             if projected is not None:
                 return JSONResponse(projected)
@@ -3078,45 +3089,6 @@ def create_app(
             web_session_token=_web_session_cookie(request),
         ))
 
-    @app.get("/api/run-manager")
-    def run_manager_projection() -> JSONResponse:
-        from zf.runtime.run_manager import build_run_manager_projection
-
-        return JSONResponse(build_run_manager_projection(
-            state_dir,
-            config=config,
-            project_root=project_root,
-        ))
-
-    @app.get("/api/run-contract")
-    def run_contract_projection() -> JSONResponse:
-        from zf.runtime.delivery_projection import project_run_contract
-
-        return JSONResponse(project_run_contract(state_dir))
-
-    @app.get("/api/failure-candidates")
-    def failure_candidates_projection() -> JSONResponse:
-        from zf.runtime.delivery_projection import project_failure_candidates
-
-        return JSONResponse(project_failure_candidates(state_dir))
-
-    @app.get("/api/real-e2e-matrix")
-    def real_e2e_matrix_projection() -> JSONResponse:
-        from zf.runtime.delivery_projection import project_real_e2e_matrix
-
-        return JSONResponse(project_real_e2e_matrix(
-            state_dir,
-            project_root=project_root,
-        ))
-
-    @app.get("/api/run-goal")
-    def run_goal_projection() -> JSONResponse:
-        from zf.runtime.run_manager import build_run_goal_projection
-
-        return JSONResponse(build_run_goal_projection(
-            EventLog(state_dir / "events.jsonl").read_all(),
-        ))
-
     @app.get("/api/gate-projection")
     def gate_projection() -> JSONResponse:
         configured_backend = _canonical_operator_backend(
@@ -3159,12 +3131,16 @@ def create_app(
         return JSONResponse(project_execution_patterns(config, state_dir=state_dir))
 
     @app.get("/api/channels")
-    def channels() -> JSONResponse:
+    def channels(require_fresh: bool = True) -> JSONResponse:
         from zf.runtime.channel_projection import project_channels
         from zf.web.projections import read_model
 
         try:
-            projected = read_model.channel_summary(state_dir, config=config)
+            projected = read_model.channel_summary(
+                state_dir,
+                config=config,
+                require_fresh=require_fresh,
+            )
             if projected is not None:
                 return JSONResponse(projected)
         except Exception:
@@ -3569,10 +3545,6 @@ def create_app(
             raise HTTPException(404, f"no briefing {name}")
         return path.read_text(encoding="utf-8")
 
-    @app.get("/api/cost")
-    def cost() -> JSONResponse:
-        return JSONResponse(_cost(state_dir))
-
     # ---- SSE ----
 
     @app.get("/api/stream")
@@ -3623,6 +3595,15 @@ def create_app(
 
     app.include_router(build_measure_loop_router(resolve_ctx=_delivery_trace_ctx))
 
+    from zf.web.long_run_truth_routes import build_long_run_truth_router
+
+    app.include_router(build_long_run_truth_router(
+        resolve_ctx=_delivery_trace_ctx,
+        default_state_dir=state_dir,
+        default_config=config,
+        default_project_root=project_root,
+    ))
+
     from zf.web.task_pipeline_routes import build_task_pipeline_router
 
     app.include_router(build_task_pipeline_router(
@@ -3630,6 +3611,13 @@ def create_app(
         default_state_dir=state_dir,
         default_project_root=project_root,
         default_config=config,
+    ))
+
+    from zf.web.cost_routes import build_cost_router
+
+    app.include_router(build_cost_router(
+        resolve_ctx=_delivery_trace_ctx,
+        default_state_dir=state_dir,
     ))
 
     # B15 (doc 93 §7): plan 审核 pending + operator inbox + plan preview
@@ -4022,6 +4010,11 @@ def _snapshot(
         "metrics_snapshot": _safe_snapshot_projection(
             "metrics_snapshot", {}, lambda: _metrics_snapshot_projection(state_dir)
         ),
+        "long_run_truth": _safe_snapshot_projection(
+            "long_run_truth",
+            {},
+            lambda: _read_long_run_truth(state_dir, config=config),
+        ),
         "fleet_stats": _safe_snapshot_projection(
             "fleet_stats", {}, lambda: _fleet_stats_projection(state_dir, config=config)
         ),
@@ -4299,6 +4292,7 @@ def _snapshot_empty_defaults() -> dict:
         "features": [],
         "delivery_features": [],
         "metrics_snapshot": {},
+        "long_run_truth": {},
         "fleet_stats": {},
         "provider_health": {},
         "traces": [],

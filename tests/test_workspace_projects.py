@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from zf.cli.main import main
 from zf.core.config.loader import load_config
 from zf.core.config.project_context import resolve_project_context
+from zf.core.cost.tracker import CostTracker
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.task.schema import Task
@@ -207,6 +208,43 @@ def test_zf_init_can_register_or_skip_workspace(
 
     assert main(["init", "--no-workspace-register"]) == 0
     assert len(WorkspaceRegistry().list_projects()) == 1
+
+
+def test_project_scoped_cost_is_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZF_WORKSPACE_HOME", str(tmp_path / "workspace-home"))
+    root_a = tmp_path / "project-a"
+    root_b = tmp_path / "project-b"
+    state_a = _make_project(root_a, name="alpha")
+    state_b = _make_project(root_b, name="beta")
+    CostTracker(state_a / "cost.jsonl").record_usage(
+        role="dev",
+        input_tokens=100,
+        output_tokens=10,
+        model="default",
+    )
+    CostTracker(state_b / "cost.jsonl").record_usage(
+        role="review",
+        input_tokens=500,
+        output_tokens=50,
+        model="default",
+    )
+
+    project_a = WorkspaceRegistry().upsert_context(resolve_project_context(cwd=root_a))
+    project_b = WorkspaceRegistry().upsert_context(resolve_project_context(cwd=root_b))
+    client = TestClient(
+        create_app(state_a, config=load_config(root_a / "zf.yaml"), project_root=root_a),
+    )
+
+    cost_a = client.get(f"/api/projects/{project_a.project_id}/cost").json()
+    cost_b = client.get(f"/api/projects/{project_b.project_id}/cost").json()
+
+    assert set(cost_a["per_role"]) == {"dev"}
+    assert cost_a["per_role"]["dev"]["input_tokens"] == 100
+    assert set(cost_b["per_role"]) == {"review"}
+    assert cost_b["per_role"]["review"]["input_tokens"] == 500
 
 
 def test_project_scoped_snapshot_action_and_automations_are_isolated(

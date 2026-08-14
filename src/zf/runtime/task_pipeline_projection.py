@@ -42,13 +42,18 @@ def read_task_pipeline_projection(
 
     state_dir = Path(state_dir)
     events = EventLog(state_dir / "events.jsonl").read_all()
-    tasks = TaskStore(state_dir / "kanban.json").list_all_with_archive()
+    task_store = TaskStore(state_dir / "kanban.json")
     attempts = TaskAttemptStore(state_dir / "task_attempts.json").current_rows()
     bindings = RoleSessionRegistry(
         state_dir / "role_sessions.yaml",
         project_root=str(project_root),
     ).task_stage_bindings()
     contexts = task_pipeline_generation_contexts(events)
+    tasks = [
+        task
+        for task_id in sorted(contexts)
+        if (task := task_store.get(task_id)) is not None
+    ]
     partitions = task_pipeline_policy_partitions(
         config,
         contexts,
@@ -59,6 +64,16 @@ def read_task_pipeline_projection(
         for partition in partitions
         for task_id in partition["task_ids"]
     }
+    from zf.runtime.task_pipeline_entry import (
+        task_pipeline_satisfied_external_gate_ids,
+    )
+
+    satisfied_external_gate_ids = task_pipeline_satisfied_external_gate_ids(
+        events=events,
+        tasks=tasks,
+        generation_contexts=contexts,
+        project_root=Path(project_root),
+    )
     return build_task_pipeline_projection(
         policy=None,
         policy_by_task=policy_by_task,
@@ -66,6 +81,7 @@ def read_task_pipeline_projection(
         events=events,
         attempts=attempts,
         session_bindings=bindings,
+        external_gate_satisfied_task_ids=satisfied_external_gate_ids,
     )
 
 
@@ -78,15 +94,18 @@ def build_task_pipeline_projection(
     attempts: Iterable[Mapping[str, Any]] = (),
     session_bindings: Mapping[str, Mapping[str, Any]]
     | Iterable[Mapping[str, Any]] = (),
+    external_gate_satisfied_task_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Build a deterministic projection suitable for live and archive replay."""
 
     event_rows = list(events)
-    contexts = task_pipeline_generation_contexts(event_rows)
-    task_by_id = {
-        str(getattr(task, "id", "") or _mapping_value(task, "id")): task
-        for task in tasks
+    external_gate_satisfied_ids = {
+        str(task_id).strip()
+        for task_id in external_gate_satisfied_task_ids
+        if str(task_id).strip()
     }
+    contexts = task_pipeline_generation_contexts(event_rows)
+    task_by_id = _task_by_id_prefer_active(tasks)
     managed_tasks = [
         task_by_id[task_id]
         for task_id in sorted(contexts)
@@ -129,6 +148,7 @@ def build_task_pipeline_projection(
             operations=operation_rows,
             attempts=attempt_rows,
             impl_rework_requests=impl_rework_requests,
+            external_gate_satisfied_task_ids=external_gate_satisfied_ids,
         )
     else:
         scheduler = _scheduler_projection(
@@ -137,6 +157,7 @@ def build_task_pipeline_projection(
             operations=operation_rows,
             attempts=attempt_rows,
             impl_rework_requests=impl_rework_requests,
+            external_gate_satisfied_task_ids=external_gate_satisfied_ids,
         )
     selected_policies = [
         dict(row["policy"])
@@ -293,6 +314,7 @@ def _scheduler_projection(
     operations: list[dict[str, Any]],
     attempts: list[dict[str, Any]],
     impl_rework_requests: Mapping[str, Mapping[str, Any]] | None = None,
+    external_gate_satisfied_task_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     if not policy:
         return {}
@@ -309,7 +331,37 @@ def _scheduler_projection(
         attempts=attempts,
         terminal_task_ids=terminal_ids,
         impl_rework_requests=impl_rework_requests,
+        external_gate_satisfied_task_ids=external_gate_satisfied_task_ids,
     )
+
+
+def _task_by_id_prefer_active(tasks: Iterable[Any]) -> dict[str, Any]:
+    """Keep a current non-terminal Task over an older archived duplicate."""
+
+    rows: dict[str, Any] = {}
+    for task in tasks:
+        task_id = str(
+            getattr(task, "id", "") or _mapping_value(task, "id")
+        ).strip()
+        if not task_id:
+            continue
+        existing = rows.get(task_id)
+        if existing is None:
+            rows[task_id] = task
+            continue
+        existing_status = str(
+            getattr(existing, "status", "")
+            or _mapping_value(existing, "status")
+        )
+        status = str(
+            getattr(task, "status", "") or _mapping_value(task, "status")
+        )
+        if (
+            existing_status in _TERMINAL_TASK_STATUSES
+            and status not in _TERMINAL_TASK_STATUSES
+        ):
+            rows[task_id] = task
+    return rows
 
 
 def _partitioned_scheduler_projection(
@@ -319,6 +371,7 @@ def _partitioned_scheduler_projection(
     operations: list[dict[str, Any]],
     attempts: list[dict[str, Any]],
     impl_rework_requests: Mapping[str, Mapping[str, Any]],
+    external_gate_satisfied_task_ids: Iterable[str] = (),
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     task_by_id = {
         str(getattr(task, "id", "") or _mapping_value(task, "id")): task
@@ -357,6 +410,9 @@ def _partitioned_scheduler_projection(
                 for task_id, request in impl_rework_requests.items()
                 if task_id in task_id_set
             },
+            external_gate_satisfied_task_ids=(
+                task_id_set.intersection(external_gate_satisfied_task_ids)
+            ),
         )
         schedulers.append(scheduler)
         partitions.append({

@@ -729,6 +729,76 @@ def _kanban_display_projection(
     }
 
 
+def task_card_projection(
+    task: Task,
+    *,
+    display_status: str,
+    projection_reconciled: bool,
+    phase: str | None = None,
+    latest: dict[str, Any] | None = None,
+    display_column: str = "",
+    current_attention_label: str = "",
+) -> dict[str, Any]:
+    """Build the terminal-aware, rebuildable Board summary contract."""
+
+    canonical_status = str(task.status or "").strip().lower()
+    projected_status = str(display_status or canonical_status).strip().lower()
+    effective_terminal = projected_status in _TERMINAL_TASK_STATUSES
+    outcome = (
+        "success"
+        if projected_status == "done"
+        else projected_status
+        if projected_status in {"cancelled", "superseded", "archived"}
+        else ""
+    )
+    attention_label = ""
+    if not effective_terminal and display_column == "blocked":
+        attention_label = str(
+            task.blocked_reason
+            or current_attention_label
+            or "task requires operator attention"
+        ).strip()
+    attention_required = bool(attention_label)
+    attention = {
+        "required": attention_required,
+        "severity": "error" if attention_required else "none",
+        "code": "task_blocked" if attention_required else "",
+        "label": attention_label if attention_required else "",
+        "since": str((latest or {}).get("ts") or "") if attention_required else "",
+        "source_ref": str((latest or {}).get("id") or "") if attention_required else "",
+    }
+    activity_at = (
+        task.completed_at
+        or task.cancelled_at
+        or str((latest or {}).get("ts") or "")
+        or task.created_at
+    )
+    return {
+        "schema_version": "task-card.v1",
+        "task_id": task.id,
+        "title": task.title,
+        "lifecycle": {
+            "canonical_status": canonical_status,
+            "display_status": projected_status,
+            "effective_terminal": effective_terminal,
+            "outcome": outcome,
+            "reconciled": projection_reconciled,
+            "canonical_drift": projection_reconciled,
+        },
+        "owner": {
+            "actor_id": task.assigned_to or "",
+            "role": str(task.assigned_to or "").split("-", 1)[0],
+        },
+        "current_stage": None if effective_terminal else (phase or canonical_status),
+        "progress": None,
+        "attention": attention,
+        "activity": {
+            "kind": "completed" if effective_terminal else "active",
+            "at": activity_at,
+        },
+    }
+
+
 def _workflow_has_failure(workflow: dict[str, Any]) -> bool:
     return any(
         str(workflow.get(key) or "") == "failed"
@@ -1427,6 +1497,27 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
                     projection_reconcile_reason,
                 ])),
             }
+        card_latest = (
+            {
+                "id": completed_closeout.id,
+                "ts": completed_closeout.ts,
+            }
+            if projection_reconciled and completed_closeout is not None
+            else latest
+        )
+        card_projection = task_card_projection(
+            t,
+            display_status=display_status,
+            projection_reconciled=projection_reconciled,
+            phase=phase,
+            latest=card_latest,
+            display_column=str(kanban_display.get("column") or ""),
+            current_attention_label=(
+                _workflow_failure_reason(workflow)
+                if _workflow_has_failure(workflow)
+                else str(kanban_display.get("reason") or "")
+            ),
+        )
         out.append({
             "id": t.id,
             "title": t.title,
@@ -1442,6 +1533,10 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
                 if projection_reconciled and completed_closeout is not None
                 else ""
             ),
+            "effective_terminal": card_projection["lifecycle"]["effective_terminal"],
+            "canonical_drift": card_projection["lifecycle"]["canonical_drift"],
+            "attention": card_projection["attention"],
+            "task_card": card_projection,
             "kanban_column": kanban_display["column"],
             "kanban_column_label": kanban_display["label"],
             "kanban_column_reason": kanban_display["reason"],

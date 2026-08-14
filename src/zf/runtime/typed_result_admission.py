@@ -105,6 +105,7 @@ def _implementation_issues(
             owner="implementation_owner",
             action="result_repair",
         )]
+
     self_check = result.get("self_check")
     if not isinstance(self_check, Mapping):
         return [_issue(
@@ -182,6 +183,22 @@ def _verification_issues(
             code="verification_target_invalid",
             message=str(exc),
             owner="task_verify",
+            action="result_repair",
+        )]
+
+    expected_owner = str(
+        contract.get("verification_owner") or "task_verify"
+    )
+    actual_owner = str(result.get("verification_owner") or "task_verify")
+    if actual_owner != expected_owner:
+        return [_issue(
+            field="control_result.verification_owner",
+            code="verification_owner_mismatch",
+            message=(
+                f"verification owner {actual_owner!r} does not match "
+                f"contract route {expected_owner!r}"
+            ),
+            owner=expected_owner,
             action="result_repair",
         )]
 
@@ -264,6 +281,7 @@ def _verification_issues(
         contract=contract,
         target=target,
         reused_receipts=reused_receipts,
+        verification_owner=expected_owner,
     )
     return [command_issue] if command_issue else []
 
@@ -274,6 +292,7 @@ def _passed_verification_command_issue(
     contract: Mapping[str, Any],
     target: Mapping[str, Any],
     reused_receipts: list[dict[str, Any]],
+    verification_owner: str,
 ) -> dict[str, str] | None:
     specs = {
         str(item.get("command_id") or ""): item
@@ -289,7 +308,8 @@ def _passed_verification_command_issue(
         if command_id in specs
         and verification_command_required_for_stage(
             specs[command_id],
-            verification_owner="task_verify",
+            verification_owner=verification_owner,
+            task_id=str(contract.get("task_id") or ""),
         )
     }
     covered = {

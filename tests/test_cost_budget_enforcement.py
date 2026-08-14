@@ -125,6 +125,56 @@ class TestNoBudgetMeansNoBlocking:
 
 
 class TestGlobalBudgetBlocking:
+    def test_fail_closed_blocks_unpriced_usage(
+        self, state_dir, transport
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            global_budget_usd=100.0,
+            budget_fail_closed=True,
+            roles=[RoleConfig(name="dev", backend="mock")],
+        )
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(id="T1", title="x", assigned_to="dev"))
+        CostTracker(state_dir / "cost.jsonl").record_usage(
+            "dev", 100, 20, model="unknown-future-model", backend="codex",
+            usage_sample_id="usage-unpriced-1",
+        )
+
+        Orchestrator(state_dir, cfg, transport).run_once()
+
+        assert store.get("T1").status == "backlog"
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert any(
+            event.type == "cost.budget.exceeded"
+            and event.payload.get("scope") == "global_pricing_unavailable"
+            and event.payload.get("meter_snapshot", {}).get(
+                "latest_usage_ref"
+            )
+            for event in events
+        )
+
+    def test_fail_open_allows_unpriced_usage_below_known_cost_cap(
+        self, state_dir, transport
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            global_budget_usd=100.0,
+            budget_fail_closed=False,
+            roles=[RoleConfig(name="dev", backend="mock")],
+        )
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(id="T1", title="x", assigned_to="dev"))
+        CostTracker(state_dir / "cost.jsonl").record_usage(
+            "dev", 100, 20, model="unknown-future-model", backend="codex"
+        )
+
+        Orchestrator(state_dir, cfg, transport).run_once()
+
+        assert store.get("T1").status == "in_progress"
+
     def test_dispatch_proceeds_when_budget_enforcement_disabled(
         self, state_dir, transport
     ):
@@ -211,6 +261,33 @@ class TestGlobalBudgetBlocking:
 
 
 class TestPerRoleBudgetBlocking:
+    def test_role_unpriced_block_keeps_role_identity(
+        self, state_dir, transport
+    ):
+        cfg = ZfConfig(
+            project=ProjectConfig(name="t"),
+            session=SessionConfig(tmux_session="t"),
+            budget_fail_closed=True,
+            roles=[RoleConfig(
+                name="dev", backend="mock", budget_usd=100.0
+            )],
+        )
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(id="T1", title="x", assigned_to="dev"))
+        CostTracker(state_dir / "cost.jsonl").record_usage(
+            "dev", 100, 20, model="unknown-future-model", backend="codex"
+        )
+
+        Orchestrator(state_dir, cfg, transport).run_once()
+
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        assert any(
+            event.type == "cost.budget.exceeded"
+            and event.payload.get("scope") == "role_pricing_unavailable"
+            and event.payload.get("role") == "dev"
+            for event in events
+        )
+
     def test_dispatch_blocked_when_role_budget_exceeded(
         self, state_dir, transport
     ):

@@ -199,6 +199,40 @@ assert(
   invalidPlanWithoutQuestion?.validationError === "question is required",
   "invalid Plan should retain its validation diagnostics",
 );
+const explicitChannelPlan = parsePlanRequest({
+  plan_request: {
+    request_event_id: "evt-channel-plan",
+    request_id: "plan-channel",
+    revision: 1,
+    header: "Channel setup",
+    question_id: "mode",
+    question: "Which discussion mode?",
+    options: [{
+      id: "multi-lens",
+      label: "Multi-lens",
+      submit_details: {
+        template_id: "prd-clarification",
+        member_count: 5,
+        members: [{ role: "product_pm" }, { role: "arch" }],
+        max_rounds: 4,
+        mode: "multi_lens",
+        engine_mode: "fanout_then_synthesis",
+        routing_strategy: "blind_fanout_then_synthesis",
+        first_pass_reply_count: 5,
+      },
+    }],
+  },
+});
+const explicitChannelDetails = explicitChannelPlan?.options[0]?.submitDetails;
+assert(explicitChannelDetails?.mode === "multi_lens", "Channel Plan retains explicit mode");
+assert(
+  explicitChannelDetails?.engineMode === "fanout_then_synthesis",
+  "Channel Plan retains engine mapping",
+);
+assert(
+  explicitChannelDetails?.firstPassReplyCount === 5,
+  "Channel Plan retains first-pass fanout count",
+);
 const multiQuestionResponse = parsePlanResponse({
   request_event_id: "evt-plan-multi",
   request_id: "plan-multi",

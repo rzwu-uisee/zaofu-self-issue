@@ -75,6 +75,48 @@ def test_gate_checkpoint_files_for_true_stall(tmp_path: Path):
     assert _actionable(checkpoints, "T-1")
 
 
+def test_task_pipeline_impl_result_does_not_file_legacy_gate_checkpoint(
+    tmp_path: Path,
+):
+    events = [
+        ZfEvent(
+            id="generation-1",
+            type="task.pipeline.generation.admitted",
+            payload={
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-1",
+                "task_ids": ["T-1"],
+            },
+        ),
+        ZfEvent(
+            id="build-1",
+            type="dev.build.done",
+            actor="dev-lane-0",
+            task_id="T-1",
+            payload={
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-1",
+                "task_pipeline_stage": "impl",
+                "source_commit": "a" * 40,
+            },
+        ),
+    ]
+
+    checkpoints = build_workflow_resume_checkpoints(
+        tmp_path,
+        _config(),
+        events=events,
+        tasks=[_task("T-1")],
+    )
+
+    assert not _actionable(checkpoints, "T-1")
+    assert any(
+        "Task Pipeline owns the next stage" in checkpoint.reason
+        for checkpoint in checkpoints
+        if checkpoint.task_id == "T-1"
+    )
+
+
 def test_closeout_evidence_suppresses_filing(tmp_path: Path):
     # Completion evidence exists (verify.passed terminal success) with no
     # later failure — a stall signal after it must not re-file work.

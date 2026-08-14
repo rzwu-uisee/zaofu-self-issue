@@ -175,7 +175,12 @@ class TestCodexReader:
         assert report.effective_input_tokens == 33000
         assert report.output_tokens == 400
         assert report.raw["input_tokens"] == 45000
+        assert report.raw["cached_input_tokens"] == 35000
         assert report.raw["output_tokens"] == 700
+        assert report.model == "gpt-5.6-sol"
+        assert report.provider == "openai"
+        assert report.accounting_mode == "subscription"
+        assert report.input_semantics == "combined_includes_cache"
         assert report.usage_semantics == "cumulative"
         assert report.usage_series_id == "codex:22222222-2222-2222-2222-222222222222"
         # Codex self-reports window = 258400

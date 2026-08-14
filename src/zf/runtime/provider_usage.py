@@ -38,6 +38,64 @@ def normalize_provider_usage(
         "turn": turn,
         "cumulative": cumulative,
         "budget_usage": dict(turn),
+        "receipt": canonical_usage_tokens(
+            turn,
+            backend=backend,
+        ),
+    }
+
+
+def canonical_usage_tokens(
+    usage: dict[str, Any] | None,
+    *,
+    backend: str = "",
+    input_semantics: str = "",
+) -> dict[str, Any]:
+    """Return non-overlapping token classes for accounting.
+
+    Codex reports ``input_tokens`` as a combined counter that already includes
+    cache reads/writes. Claude reports fresh input separately. Callers may pin
+    ``input_semantics`` when the provider receipt is explicit; otherwise the
+    backend and presence of cache counters select the conservative shape.
+    """
+
+    raw = usage if isinstance(usage, dict) else {}
+    normalized = _normalize_bucket(raw)
+    combined_input = int(normalized.get("input_tokens", 0) or 0)
+    cache_read = int(normalized.get("cached_input_tokens", 0) or 0)
+    cache_write = int(
+        normalized.get("cache_creation_input_tokens", 0) or 0
+    )
+    semantics = str(input_semantics or "").strip()
+    codex_like = str(backend or "").startswith("codex")
+    if semantics == "combined_includes_cache" or (
+        not semantics and codex_like and (cache_read or cache_write)
+    ):
+        fresh_input = max(combined_input - cache_read - cache_write, 0)
+        semantics = "combined_includes_cache"
+    else:
+        fresh_input = combined_input
+        semantics = semantics or (
+            "combined_cache_unknown" if codex_like else "fresh_plus_cache"
+        )
+    total_input = fresh_input + cache_read + cache_write
+    output = int(normalized.get("output_tokens", 0) or 0)
+    return {
+        "schema_version": "provider-usage-receipt.v1",
+        "input_semantics": semantics,
+        "fresh_input_tokens": fresh_input,
+        "combined_input_tokens": (
+            combined_input
+            if semantics.startswith("combined_")
+            else total_input
+        ),
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "output_tokens": output,
+        "reasoning_output_tokens": int(
+            normalized.get("reasoning_tokens", 0) or 0
+        ),
+        "total_tokens": total_input + output,
     }
 
 
@@ -88,10 +146,14 @@ def _normalize_bucket(value: dict[str, Any]) -> dict[str, int]:
         "cache_creation_input_tokens": (
             "cache_creation_input_tokens",
             "cacheCreationInputTokens",
+            "cache_write_input_tokens",
+            "cacheWriteInputTokens",
         ),
         "reasoning_tokens": (
             "reasoning_tokens",
             "reasoningTokens",
+            "reasoning_output_tokens",
+            "reasoningOutputTokens",
         ),
         "total_tokens": (
             "total_tokens",
@@ -123,4 +185,8 @@ def _dict_value(value: dict[str, Any], key: str) -> dict[str, Any]:
     return item if isinstance(item, dict) else {}
 
 
-__all__ = ["normalize_provider_usage", "sum_turn_usage"]
+__all__ = [
+    "canonical_usage_tokens",
+    "normalize_provider_usage",
+    "sum_turn_usage",
+]

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from zf.core.events.model import ZfEvent
@@ -24,6 +25,7 @@ RECOVERY_ACTIONS = (
     "task-requeue",
     "child-rebuild",
     "stage-retrigger",
+    "stage-replan-new-generation",
     "fanout-aggregate-rebuild",
     "rescan-grant",
 )
@@ -261,6 +263,190 @@ class RecoveryActionsMixin:
             "retriggered_event_id": emitted.id,
             "source_event_id": source_event_id,
             "event_type": source.type,
+        })
+
+    def _stage_replan_new_generation_action(
+        self, *, requested: ZfEvent, action: str, requested_action: str, payload: dict,
+    ) -> dict:
+        escalation_event_id = str(
+            payload.get("escalation_event_id") or ""
+        ).strip()
+        approval_ref = str(payload.get("approval_ref") or "").strip()
+        if not escalation_event_id or not approval_ref:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "escalation_event_id and approval_ref are required",
+            )
+        events = self.writer.event_log.read_all()
+        escalation = next(
+            (event for event in events if event.id == escalation_event_id),
+            None,
+        )
+        escalation_payload = (
+            escalation.payload
+            if escalation is not None and isinstance(escalation.payload, dict)
+            else {}
+        )
+        if escalation is None or escalation.type != "human.escalate":
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                f"human escalation {escalation_event_id!r} was not found",
+                404,
+            )
+        if str(escalation_payload.get("failure_class") or "") != (
+            "stage_replan_cap_exhausted"
+        ):
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "escalation is not a stage_replan_cap_exhausted failure",
+                409,
+            )
+        if "start_new_generation" not in {
+            str(item) for item in escalation_payload.get("allowed_actions") or []
+        }:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "escalation does not authorize start_new_generation",
+                409,
+            )
+        source_event_id = str(
+            escalation_payload.get("source_event_id")
+            or escalation.causation_id
+            or ""
+        ).strip()
+        source = next(
+            (event for event in events if event.id == source_event_id),
+            None,
+        )
+        if source is None:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                f"stage failure {source_event_id!r} was not found",
+                404,
+            )
+        from zf.runtime.run_scope import resolve_run_for_event
+
+        run_id = resolve_run_for_event(events, escalation) or (
+            resolve_run_for_event(events, source)
+        )
+        if not run_id:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                "stage failure has no canonical workflow Run",
+                409,
+            )
+        generation = "stage-replan-" + hashlib.sha256(
+            f"{run_id}|{escalation.id}".encode("utf-8")
+        ).hexdigest()[:20]
+        existing_trigger = next(
+            (
+                event for event in events
+                if str((event.payload or {}).get("stage_replan_generation") or "")
+                == generation
+                and event.type not in {
+                    "run.goal.updated",
+                    "task.status_changed",
+                }
+            ),
+            None,
+        )
+        if existing_trigger is not None:
+            return self._recovery_ok(
+                requested,
+                existing_trigger,
+                action,
+                requested_action,
+                {
+                    "replayed": True,
+                    "run_id": run_id,
+                    "stage_replan_generation": generation,
+                    "stage_trigger_event_id": existing_trigger.id,
+                },
+            )
+        from zf.runtime.stage_failure_replan import plan_reader_stage_replan
+
+        stage_trigger, note = plan_reader_stage_replan(
+            self.config,
+            events,
+            source,
+            authorized_generation=generation,
+            generation_source_event_id=escalation.id,
+            authorization_event_id=requested.id,
+            authorization_ref=approval_ref,
+        )
+        if stage_trigger is None:
+            return self._recovery_failed(
+                requested,
+                action,
+                requested_action,
+                f"new stage generation rejected: {note}",
+                409,
+            )
+        goal_update = next(
+            (
+                event for event in events
+                if event.type == "run.goal.updated"
+                and str((event.payload or {}).get("stage_replan_generation") or "")
+                == generation
+            ),
+            None,
+        )
+        task_id = str(
+            payload.get("task_id")
+            or escalation.task_id
+            or source.task_id
+            or ""
+        ).strip()
+        if goal_update is None:
+            goal_update = self.writer.append(ZfEvent(
+                type="run.goal.updated",
+                actor=self.actor,
+                task_id=task_id or None,
+                causation_id=requested.id,
+                correlation_id=run_id,
+                payload={
+                    "schema_version": "run-goal.update.v1",
+                    "run_id": run_id,
+                    "workflow_run_id": run_id,
+                    "status": "active",
+                    "reason": "authorized_stage_replan_new_generation",
+                    "stage_replan_generation": generation,
+                    "stage_replan_generation_source_event_id": escalation.id,
+                    "source_failure_event_id": source.id,
+                    "approval_ref": approval_ref,
+                },
+            ))
+        from zf.core.task.store import TaskStore
+        from zf.runtime.workflow_task_lifecycle import (
+            reopen_workflow_managed_task_from_run_recovery,
+        )
+
+        reopen_workflow_managed_task_from_run_recovery(
+            task_store=TaskStore(self.state_dir / "kanban.json"),
+            event_writer=self.writer,
+            recovery_event=goal_update,
+        )
+        emitted = self.writer.append(stage_trigger)
+        return self._recovery_ok(requested, emitted, action, requested_action, {
+            "replayed": False,
+            "run_id": run_id,
+            "stage_replan_generation": generation,
+            "run_goal_update_event_id": goal_update.id,
+            "stage_trigger_event_id": emitted.id,
+            "source_failure_event_id": source.id,
+            "escalation_event_id": escalation.id,
         })
 
     def _fanout_aggregate_rebuild_action(

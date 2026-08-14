@@ -469,6 +469,10 @@ class TestCodexRespawnUsesCachedUuid:
         self, state_dir: Path, codex_review_config,
         tmp_path, monkeypatch,
     ):
+        # Preload the ownership helper so this test also covers dynamic
+        # registry-root updates after module import.
+        import zf.runtime.codex_session_ownership  # noqa: F401
+
         # Prime a fake codex session directory
         fake_codex = tmp_path / "codex_home"
         fake_codex.mkdir()

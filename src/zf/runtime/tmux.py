@@ -389,6 +389,8 @@ class TmuxSession:
         if self.dry_run:
             return ""
         target = self.layout.resolve(self, window)
+        if not self.layout.target_owned_by(self, target, window):
+            return ""
         return self._pane_pid_for_target(target)
 
     def _pane_pid_for_target(self, target: object) -> str:
@@ -396,14 +398,18 @@ class TmuxSession:
             return ""
         address = target.address()  # type: ignore[attr-defined]
         result = self._run(
-            ["tmux", "list-panes", "-t", address, "-F", "#{pane_pid}"],
+            [
+                "tmux", "display-message",
+                "-p", "-t", address,
+                "#{pane_pid}",
+            ],
             check=False,
             capture=True,
         )
-        if result.returncode != 0:
+        if result.returncode != 0 or result.stderr.strip():
             return ""
-        lines = result.stdout.strip().splitlines()
-        return lines[0].strip() if lines else ""
+        pane_pid = result.stdout.strip()
+        return pane_pid if pane_pid.isdigit() else ""
 
     def pane_current_command(self, window: str) -> str:
         if self.dry_run:

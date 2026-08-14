@@ -32,7 +32,9 @@ def test_briefing_metrics_are_read_only_soft_observations(tmp_path: Path) -> Non
     assert saved == metrics
     assert saved["stage_profile"] == "judge"
     assert saved["required_read_count"] == 1
-    assert saved["actually_invoked_skills"] == "unknown"
+    assert saved["indexed_skills"] == ["judge-method"]
+    assert saved["auto_injected_skills"] == ["wrapper"]
+    assert saved["actually_invoked_skills"] == "unobserved"
     assert saved["section_bytes"]["Required Inputs"] > 0
 
 

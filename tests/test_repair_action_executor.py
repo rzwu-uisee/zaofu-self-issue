@@ -21,6 +21,11 @@ from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.integration_queue import build_integration_queue
 from zf.runtime.transport import AttachHandle, TransportAdapter
+from zf.runtime.workflow_operation import (
+    WorkflowOperationService,
+    reduce_workflow_operations,
+)
+from zf.runtime.task_contract_snapshot import effective_contract_revision
 
 
 class _RepairTransport(TransportAdapter):
@@ -875,6 +880,187 @@ def test_retry_integration_queue_repair_action_requests_retry(
     assert applied[-1].payload["kind"] == "retry_integration_queue_entry"
     assert applied[-1].payload["queue_entry_id"] == "iq-1"
     assert applied[-1].payload["queue_event_id"] == retry_events[-1].id
+
+
+def test_retry_integration_queue_redrives_matching_blocked_v4_operation(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    TaskStore(state_dir / "kanban.json").add(
+        Task(id="TASK-1", title="integration queue item", status="in_progress"),
+    )
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=writer,
+    )
+    operation = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="iq-1",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "integration",
+            "operation_generation": 1,
+            "task_map_generation": "map-g1",
+        },
+        parent_stage_id="integration",
+        task_id="TASK-1",
+        role_instance="candidate-integrator",
+    )
+    service.block(
+        operation_id="iq-1",
+        request_hash=operation.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-1",
+        reason="candidate_incremental_failed:CandidateIncrementalError",
+        details={"detail": "rolling smoke left candidate worktree dirty"},
+    )
+    _enqueue_integration_entry(state_dir, needs_review=True)
+    event = _append_request(
+        state_dir,
+        action_id="ra-iq-v4-retry",
+        kind="retry_integration_queue_entry",
+        idempotency_key="repair:iq-1:v4-retry",
+        task_id="TASK-1",
+        queue_entry_id="iq-1",
+        target_status="queued",
+    )
+
+    Orchestrator(state_dir, config, _RepairTransport()).run_once([event])
+
+    events = _events(state_dir)
+    redrives = [
+        item
+        for item in events
+        if item.type == "workflow.operation.redrive_admitted"
+        and item.payload.get("operation_id") == "iq-1"
+    ]
+    assert len(redrives) == 1
+    assert redrives[0].payload["recovery_decision_owner"] == "controlled_action"
+    assert redrives[0].payload["recovery_decision_event_id"] == event.id
+    assert reduce_workflow_operations(events)["iq-1"]["status"] == "requested"
+    applied = [
+        item
+        for item in events
+        if item.type == "repair.action.applied"
+        and item.payload.get("action_id") == "ra-iq-v4-retry"
+    ]
+    assert applied[-1].payload["operation_redrive_event_id"] == redrives[0].id
+
+
+def test_retry_integration_queue_rotates_after_contract_revision_divergence(
+    state_dir: Path,
+    config: ZfConfig,
+) -> None:
+    task = Task(id="TASK-1", title="integration contract refresh", status="in_progress")
+    task.contract.validation = {
+        "commands": [{
+            "id": "rolling-smoke",
+            "command": "true",
+            "tier": "runtime",
+            "rolling_smoke": True,
+        }],
+    }
+    TaskStore(state_dir / "kanban.json").add(task)
+    current_revision = effective_contract_revision(task)
+    previous_revision = "contract-before-rolling-smoke"
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    service = WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=writer,
+    )
+    from zf.runtime import workflow_operation_task_pipeline
+
+    legacy_request_keys = tuple(
+        key
+        for key in workflow_operation_task_pipeline.TASK_PIPELINE_REQUEST_KEYS
+        if key != "contract_revision"
+    )
+    with patch.object(
+        workflow_operation_task_pipeline,
+        "TASK_PIPELINE_REQUEST_KEYS",
+        legacy_request_keys,
+    ):
+        operation = service.ensure_operation(
+            workflow_run_id="run-1",
+            operation_id="iq-1",
+            operation_type="task-stage",
+            request={
+                "task_pipeline_stage": "integration",
+                "operation_generation": 1,
+                "task_map_generation": "map-g1",
+                "contract_revision": previous_revision,
+            },
+            parent_stage_id="integration",
+            task_id="TASK-1",
+            role_instance="candidate-integrator",
+        )
+    service.block(
+        operation_id="iq-1",
+        request_hash=operation.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-1",
+        reason="candidate_incremental_failed:CandidateIncrementalError",
+        details={"detail": "rolling_smoke_command_missing"},
+    )
+    _enqueue_integration_entry(state_dir, needs_review=True)
+
+    first_retry = _append_request(
+        state_dir,
+        action_id="ra-iq-same-operation-retry",
+        kind="retry_integration_queue_entry",
+        idempotency_key="repair:iq-1:same-operation",
+        task_id="TASK-1",
+        queue_entry_id="iq-1",
+    )
+    Orchestrator(state_dir, config, _RepairTransport()).run_once([first_retry])
+    divergent = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="iq-1",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "integration",
+            "operation_generation": 1,
+            "task_map_generation": "map-g1",
+            "contract_revision": current_revision,
+        },
+        parent_stage_id="integration",
+        task_id="TASK-1",
+        role_instance="candidate-integrator",
+    )
+    assert divergent.status == "divergent"
+    assert build_integration_queue(_events(state_dir))["entries"][0]["status"] == "queued"
+
+    rotate = _append_request(
+        state_dir,
+        action_id="ra-iq-contract-rotation",
+        kind="retry_integration_queue_entry",
+        idempotency_key="repair:iq-1:contract-rotation",
+        task_id="TASK-1",
+        queue_entry_id="iq-1",
+        rotate_operation_generation=True,
+        expected_previous_contract_revision=previous_revision,
+        expected_current_contract_revision=current_revision,
+    )
+    Orchestrator(state_dir, config, _RepairTransport()).run_once([rotate])
+
+    events = _events(state_dir)
+    operation_view = reduce_workflow_operations(events)["iq-1"]
+    assert operation_view["status"] == "superseded"
+    queue_entry = build_integration_queue(events)["entries"][0]
+    assert queue_entry["status"] == "discarded"
+    applied = [
+        item for item in events
+        if item.type == "repair.action.applied"
+        and item.payload.get("action_id") == "ra-iq-contract-rotation"
+    ]
+    assert applied[-1].payload["previous_contract_revision"] == previous_revision
+    assert applied[-1].payload["current_contract_revision"] == current_revision
+    assert applied[-1].payload["next_operation_generation"] == 2
 
 
 def test_discard_integration_queue_repair_action_requests_discard(

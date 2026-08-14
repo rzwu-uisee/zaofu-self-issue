@@ -6,7 +6,7 @@ import hashlib
 import json
 import shutil
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -139,6 +139,7 @@ class TaskWorkspaceManager:
         project_path = Path(plan.project_path)
         if workdir.exists():
             self._assert_owned(workdir)
+            plan = self._with_persisted_base(plan)
             self._assert_metadata_current(plan)
         else:
             write_workdir_owner_marker(
@@ -291,13 +292,9 @@ class TaskWorkspaceManager:
         )
 
     def _assert_metadata_current(self, plan: TaskWorkspacePlan) -> None:
-        path = Path(plan.workdir) / "meta.json"
-        if not path.exists():
+        data = self._read_metadata(plan)
+        if data is None:
             return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise TaskWorkspaceError(f"invalid task workspace metadata: {path}") from exc
         for field in (
             "workflow_run_id",
             "task_id",
@@ -310,6 +307,33 @@ class TaskWorkspaceManager:
                 raise TaskWorkspaceError(
                     f"task workspace currentness mismatch: {field}"
                 )
+
+    def _with_persisted_base(
+        self,
+        plan: TaskWorkspacePlan,
+    ) -> TaskWorkspacePlan:
+        data = self._read_metadata(plan)
+        if data is None:
+            return plan
+        base_commit = str(data.get("base_commit") or "").strip()
+        if not base_commit or self._resolve_commit(base_commit) != base_commit:
+            raise TaskWorkspaceError(
+                "task workspace currentness mismatch: base_commit"
+            )
+        return replace(plan, base_commit=base_commit)
+
+    @staticmethod
+    def _read_metadata(plan: TaskWorkspacePlan) -> dict[str, object] | None:
+        path = Path(plan.workdir) / "meta.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TaskWorkspaceError(f"invalid task workspace metadata: {path}") from exc
+        if not isinstance(data, dict):
+            raise TaskWorkspaceError(f"invalid task workspace metadata: {path}")
+        return data
 
     def _assert_owned(self, workdir: Path) -> None:
         assert_owned_workdir(

@@ -21,6 +21,7 @@ from zf.core.config.schema import (
     WorkflowConfig,
     WorkflowDagConfig,
     WorkflowStageConfig,
+    WorkflowStrictTriggersConfig,
     ZfConfig,
 )
 from zf.core.events.known_types import KNOWN_EVENT_TYPES
@@ -181,6 +182,56 @@ def test_run_manager_projection_includes_budget_diagnostics(tmp_path: Path) -> N
     assert item["first_event_id"] == "evt-budget-1"
     assert item["latest_event_id"] == "evt-budget-2"
     assert item["notification_policy"] == "owner_on_human_required"
+
+
+def test_run_manager_projection_fences_active_recovery_case(tmp_path: Path) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    _write_supervisor_attention(state_dir)
+    initial = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+    pending = initial["pending_actions"][0]
+    case_id = pending["recovery_case_id"]
+
+    log.append(ZfEvent(
+        type="run.manager.action.applied",
+        actor="run-manager",
+        task_id="T1",
+        payload={"recovery_case_id": case_id},
+    ))
+    log.append(ZfEvent(
+        type="run.manager.action.effect.pending",
+        actor="run-manager",
+        task_id="T1",
+        payload={"recovery_case_id": case_id},
+    ))
+    log.append(ZfEvent(
+        type="workflow.operation.superseded",
+        actor="zf-cli",
+        task_id="T1",
+        payload={
+            "recovery_case_id": case_id,
+            "operation_id": "operation-stale",
+            "request_hash": "request-stale",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    assert projection["pending_actions"] == []
+    case = next(
+        item for item in projection["recovery_cases"]["cases"]
+        if item["recovery_case_id"] == case_id
+    )
+    assert case["status"] == "verifying"
+    assert projection["recovery_cases"]["summary"]["pending_suppressed"] == 1
+    assert projection["summary"]["recovery_effects"]["superseded"] == 1
 
 
 def _write_failure_closeout_manifest(project_root: Path) -> Path:
@@ -683,6 +734,98 @@ def test_candidate_rework_cap_requires_orchestrator_triage_before_human(
 
     assert advised["status"] == "applied"
     assert any(event.type == "human.escalate" for event in log.read_all())
+
+
+def test_candidate_replan_marker_and_resynth_use_latest_owner_delta(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    config = _admission_replan_config()
+    writer.emit(
+        "zaofu.refactor.review.ready",
+        actor="zf-cli",
+        correlation_id="owner-delta-run",
+        payload={
+            "workflow_run_id": "owner-delta-run",
+            "trace_id": "owner-delta-run",
+            "pdd_id": "PRD-OWNER-DELTA",
+            "target_ref": "refs/heads/candidate/PRD-OWNER-DELTA",
+        },
+    )
+    delta = {
+        "directives": [{
+            "directive_id": "final-two-task-closure",
+            "required_actions": ["Keep exactly the two approved closure tasks."],
+        }],
+    }
+    writer.append(ZfEvent(
+        id="plan-rejected-owner-delta",
+        type="plan.rejected",
+        actor="operator",
+        correlation_id="owner-delta-run",
+        payload={
+            "reason": "Final owner topology correction.",
+            "orchestration_delta": delta,
+            "operator_override": True,
+        },
+    ))
+    requested = writer.emit(
+        "run.manager.control_action.requested",
+        actor="run-manager",
+        payload={"action": "candidate-rework-apply"},
+    )
+    service = ControlledActionService(
+        state_dir,
+        writer,
+        config=config,
+        actor="run-manager",
+        surface="run-manager",
+    )
+
+    result = service.execute(
+        action="candidate-rework-apply",
+        requested_action="candidate-rework-apply",
+        requested=requested,
+        payload={
+            "checkpoint_id": "candidate-owner-delta-checkpoint",
+            "candidate_rework_action": "replan",
+            "pdd_id": "PRD-OWNER-DELTA",
+            "trace_id": "owner-delta-run",
+            "target_ref": "refs/heads/candidate/PRD-OWNER-DELTA",
+            "source_event_id": "plan-rejected-owner-delta",
+            "source_event_type": "plan.rejected",
+            "rework_attempt": 1,
+            "rework_feedback": [
+                "plan-rejection: Final owner topology correction.",
+                "final-two-task-closure: Keep exactly the two approved closure tasks.",
+                "old eight-task feedback",
+            ],
+            "required_actions": ["Keep exactly the two approved closure tasks."],
+            "orchestration_delta": delta,
+            "operator_override": True,
+            "classification": "ambiguous",
+        },
+    )
+
+    assert result["status"] == "applied"
+    events = log.read_all()
+    marker = [
+        event for event in events
+        if event.type == "orchestrator.replan_requested"
+    ][-1]
+    resynth = [
+        event for event in events
+        if event.type == "zaofu.refactor.review.ready"
+        and event.payload.get("rework_of") == "plan-rejected-owner-delta"
+    ][-1]
+    for event in (marker, resynth):
+        assert event.payload["rework_feedback"][0] == (
+            "plan-rejection: Final owner topology correction."
+        )
+        assert event.payload["required_actions"] == [
+            "Keep exactly the two approved closure tasks."
+        ]
+        assert event.payload["orchestration_delta"] == delta
 
 
 def test_run_manager_executes_safe_workflow_resume_and_post_verifies(
@@ -1335,6 +1478,8 @@ def test_run_manager_executes_candidate_rework_controlled_action(
     assert pending["rework_summary"]["gap_tasks"][0]["task_id"] == "CJMIN-WEB-GAP-001"
     assert "task_map.ready" in pending["expected_downstream_events"]
     assert "task_map.amended" in pending["expected_downstream_events"]
+    assert "fanout.started" in pending["effect_expected_events"]
+    assert "fanout.cancelled" in pending["effect_failure_events"]
 
     result = run_manager_tick(
         state_dir=state_dir,
@@ -1353,6 +1498,10 @@ def test_run_manager_executes_candidate_rework_controlled_action(
         for event in events
     )
     assert any(event.type == RUN_MANAGER_ACTION_VERIFY_PASSED for event in events)
+    assert any(
+        event.type == "run.manager.action.effect.pending"
+        for event in events
+    )
     amended = [
         event for event in events
         if event.type == "task_map.amended"
@@ -1360,6 +1509,11 @@ def test_run_manager_executes_candidate_rework_controlled_action(
     ]
     assert amended
     assert amended[-1].payload["gap_task_ids"] == ["CJMIN-WEB-GAP-001"]
+    assert amended[-1].payload["task_map_digest"]
+    assert amended[-1].payload["task_map_generation"] != "generation-rm"
+    assert amended[-1].payload["supersedes_task_map_generation"] == (
+        "generation-rm"
+    )
     rework_ready = [
         event for event in events
         if event.type == "task_map.ready"
@@ -1373,7 +1527,19 @@ def test_run_manager_executes_candidate_rework_controlled_action(
     )
     assert rework_ready[-1].payload["workflow_run_id"] == "workflow-run-rm"
     assert rework_ready[-1].payload["flow_kind"] == "refactor"
-    assert rework_ready[-1].payload["plan_artifact_package_id"] == "planpkg-rm"
+    assert rework_ready[-1].payload["task_map_digest"] == amended[-1].payload[
+        "task_map_digest"
+    ]
+    assert rework_ready[-1].payload["task_map_generation"] == amended[-1].payload[
+        "task_map_generation"
+    ]
+    assert rework_ready[-1].payload["supersedes_task_map_generation"] == (
+        "generation-rm"
+    )
+    assert "plan_artifact_package_id" not in amended[-1].payload
+    assert "plan_artifact_package_id" not in rework_ready[-1].payload
+    assert "plan_artifact_package_ref" not in rework_ready[-1].payload
+    assert "plan_artifact_package_digest" not in rework_ready[-1].payload
     assert (
         rework_ready[-1].payload["workflow_proposal_ref"]["ref"]
         == "artifacts/proposals/rm.json"
@@ -1385,7 +1551,8 @@ def test_run_manager_executes_candidate_rework_controlled_action(
         for event in events
     )
     amended_ref = rework_ready[-1].payload["task_map_ref"]
-    amended_path = state_dir.joinpath(*Path(amended_ref).parts[1:])
+    assert amended_ref.startswith("artifacts/")
+    amended_path = state_dir / amended_ref
     amended_task_map = json.loads(amended_path.read_text(encoding="utf-8"))
     assert [task["task_id"] for task in amended_task_map["tasks"]] == [
         "CJMIN-WEB-001",
@@ -1401,6 +1568,205 @@ def test_run_manager_executes_candidate_rework_controlled_action(
         spawn_repairs=False,
     )
     assert second.actions_applied == 0
+
+
+def test_candidate_rework_root_id_routes_to_replan_not_writer_retrigger(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    task_map_ref = "artifacts/PRD-ROOT/task-map.json"
+    task_map_path = state_dir / task_map_ref
+    task_map_path.parent.mkdir(parents=True)
+    task_map_path.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-CHILD",
+            "title": "Current child",
+            "owner_role": "dev",
+            "allowed_paths": ["src/**"],
+            "allowed_paths_reason": "implementation owner",
+            "acceptance": ["child closes the requirement"],
+        }],
+    }), encoding="utf-8")
+    log.append(ZfEvent(
+        id="current-root-map",
+        type="task_map.ready",
+        correlation_id="workflow-root",
+        payload={
+            "pdd_id": "PRD-ROOT",
+            "feature_id": "PRD-ROOT",
+            "workflow_run_id": "workflow-root",
+            "trace_id": "workflow-root",
+            "task_map_ref": task_map_ref,
+            "task_map_generation": "generation-current",
+            "target_ref": "refs/heads/candidate/PRD-ROOT",
+        },
+    ))
+    log.append(ZfEvent(
+        id="current-root-failure",
+        type="test.failed",
+        correlation_id="workflow-root",
+        payload={
+            "pdd_id": "PRD-ROOT",
+            "feature_id": "PRD-ROOT",
+            "workflow_run_id": "workflow-root",
+            "trace_id": "workflow-root",
+            "task_map_generation": "generation-current",
+            "failed_task_ids": ["PRD-ROOT"],
+            "reason": "provider turn closed without a result",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+    pending = next(
+        item for item in projection["pending_actions"]
+        if item["action"] == "candidate-rework-apply"
+    )
+
+    assert pending["candidate_rework_action"] == "replan"
+    assert pending["safe_resume_action"] == "candidate_replan"
+    assert pending["failed_task_ids"] == []
+    assert pending["rework_summary"]["invalid_failed_task_ids"] == [
+        "PRD-ROOT"
+    ]
+    assert pending["expected_downstream_events"] == [
+        "orchestrator.replan_requested"
+    ]
+
+
+def test_candidate_rework_routes_verifier_paths_to_task_map_owners(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    task_map_path = state_dir / "artifacts" / "PRD-AC25" / "task_map.json"
+    task_map_path.parent.mkdir(parents=True)
+    task_map_path.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "TASK-PLATFORM",
+                "owner_role": "dev",
+                "allowed_paths": ["src/styles/mobility.css"],
+            },
+            {
+                "task_id": "TASK-E2E",
+                "owner_role": "dev",
+                "allowed_paths": ["tests/mobility-airport-platform/**"],
+            },
+            {
+                "task_id": "TASK-API",
+                "owner_role": "dev",
+                "allowed_paths": ["api/**"],
+            },
+        ],
+    }), encoding="utf-8")
+    log.append(ZfEvent(
+        type="task_map.ready",
+        actor="zf-cli",
+        correlation_id="workflow-ac25",
+        payload={
+            "pdd_id": "PRD-AC25",
+            "feature_id": "PRD-AC25",
+            "trace_id": "workflow-ac25",
+            "workflow_run_id": "workflow-ac25",
+            "flow_kind": "prd",
+            "target_ref": "refs/heads/candidate/PRD-AC25",
+            "task_map_ref": ".zf/artifacts/PRD-AC25/task_map.json",
+            "source_commit": "base123",
+            "candidate_base_commit": "base123",
+        },
+    ))
+    log.append(ZfEvent(
+        type="fanout.child.failed",
+        actor="zf-cli",
+        correlation_id="workflow-ac25",
+        payload={
+            "fanout_id": "fanout-ac25",
+            "child_id": "verify-candidate",
+            "task_id": "PRD-AC25",
+            "parent_task_id": "PRD-AC25",
+            "trace_id": "workflow-ac25",
+            "semantic_verdict": "rejected",
+            "reason": "semantic verdict: rejected",
+            "report": {
+                "schema_version": "verification-result.v1",
+                "execution_status": "completed",
+                "verdict": "rejected",
+                "verification_owner": "candidate_verify",
+                "task_id": "PRD-AC25",
+                "requirement_results": [{
+                    "acceptance_id": "AC25",
+                    "status": "failed",
+                    "findings": [
+                        {
+                            "path": "src/styles/mobility.css",
+                            "message": "inactive shell remains visible",
+                        },
+                        {
+                            "path": (
+                                "tests/mobility-airport-platform/"
+                                "airport-journey.spec.ts"
+                            ),
+                            "message": "E2E misses mode isolation",
+                        },
+                    ],
+                }],
+            },
+        },
+    ))
+    log.append(ZfEvent(
+        id="test-ac25-failed",
+        type="test.failed",
+        actor="zf-cli",
+        correlation_id="workflow-ac25",
+        payload={
+            "fanout_id": "fanout-ac25",
+            "pdd_id": "PRD-AC25",
+            "trace_id": "workflow-ac25",
+            "target_ref": "refs/heads/candidate/PRD-AC25",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+    pending = next(
+        item for item in projection["pending_actions"]
+        if item["action"] == "candidate-rework-apply"
+    )
+    assert pending["failed_task_ids"] == ["TASK-PLATFORM", "TASK-E2E"]
+    assert pending["rework_paths"] == [
+        "src/styles/mobility.css",
+        "tests/mobility-airport-platform/airport-journey.spec.ts",
+    ]
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        event_log=log,
+        action_filter={"candidate-rework-apply"},
+        spawn_repairs=False,
+    )
+
+    assert result.actions_applied == 1
+    ready = [
+        event for event in log.read_all()
+        if event.type == "task_map.ready"
+        and event.payload.get("source") == "run_manager_candidate_rework"
+    ][-1]
+    assert ready.payload["task_ids"] == ["TASK-PLATFORM", "TASK-E2E"]
+    assert ready.payload["resume_scope"] == "failed_children_only"
+    assert ready.payload["rework_paths"] == [
+        "src/styles/mobility.css",
+        "tests/mobility-airport-platform/airport-journey.spec.ts",
+    ]
 
 
 def test_run_manager_replans_contract_blocker_with_flow_identity(
@@ -1468,6 +1834,9 @@ def test_run_manager_replans_contract_blocker_with_flow_identity(
             "trace_id": "refactor-run-1",
             "failure_scope": "candidate",
             "failure_class": "candidate_integration_failure",
+            "candidate_ref": "candidate/REFACTOR-1",
+            "candidate_head_commit": "candidate-quality-failed-head",
+            "candidate_base_commit": "base123",
         },
         correlation_id="refactor-run-1",
     ))
@@ -1484,6 +1853,10 @@ def test_run_manager_replans_contract_blocker_with_flow_identity(
     assert pending["candidate_rework_action"] == "replan"
     assert pending["workflow_run_id"] == "refactor-run-1"
     assert pending["plan_artifact_package_id"] == "planpkg-refactor"
+    assert pending["candidate_ref"] == "candidate/REFACTOR-1"
+    assert pending["candidate_head_commit"] == "candidate-quality-failed-head"
+    assert pending["candidate_base_commit"] == "base123"
+    assert pending["target_ref"] == "candidate-quality-failed-head"
 
     result = run_manager_tick(
         state_dir=state_dir,
@@ -1503,6 +1876,9 @@ def test_run_manager_replans_contract_blocker_with_flow_identity(
     )
     assert replan.payload["workflow_run_id"] == "refactor-run-1"
     assert replan.payload["plan_artifact_package_id"] == "planpkg-refactor"
+    assert replan.payload["candidate_head_commit"] == "candidate-quality-failed-head"
+    assert replan.payload["candidate_base_commit"] == "base123"
+    assert replan.payload["target_ref"] == "candidate-quality-failed-head"
     resynth = [
         event for event in events
         if event.type == "zaofu.refactor.review.ready"
@@ -1510,6 +1886,9 @@ def test_run_manager_replans_contract_blocker_with_flow_identity(
     ][-1]
     assert resynth.payload["workflow_run_id"] == "refactor-run-1"
     assert resynth.payload["plan_artifact_package_id"] == "planpkg-refactor"
+    assert resynth.payload["candidate_head_commit"] == "candidate-quality-failed-head"
+    assert resynth.payload["candidate_base_commit"] == "base123"
+    assert resynth.payload["target_ref"] == "candidate-quality-failed-head"
 
 
 def test_run_manager_recovers_candidate_rework_anchor_from_artifact_and_git_head(
@@ -1855,6 +2234,77 @@ def test_run_manager_projection_adds_expired_attempt_recovery_action(
     ]
 
 
+def test_semantic_triage_suppresses_stale_attempt_recovery_action(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    projections_dir = state_dir / "projections"
+    projections_dir.mkdir(parents=True, exist_ok=True)
+    (projections_dir / "task_attempts.json").write_text(
+        json.dumps({
+            "schema_version": "shadow-spine.v1",
+            "tasks": {
+                "TASK-LEASE": {
+                    "latest_state": "running",
+                    "current_owner": "dev-lane-1",
+                    "open_attempts": 1,
+                    "counted_failures": 0,
+                    "attempts": [{
+                        "attempt_key": "attempt-lease",
+                        "state": "running",
+                        "role": "dev-lane-1",
+                        "started_ts": "2000-01-01T00:00:00+00:00",
+                        "source_event_id": "evt-attempt-start",
+                        "lease_token": "lease-1",
+                        "lease_state": "held",
+                        "terminal": None,
+                    }],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    log.append(ZfEvent(
+        id="evt-semantic-cap",
+        type="task.pipeline.semantic_rework.exhausted",
+        actor="zf-runtime",
+        task_id="TASK-LEASE",
+        correlation_id="RUN-1",
+        payload={
+            "semantic_triage_contract_version": 1,
+            "task_id": "TASK-LEASE",
+            "workflow_run_id": "RUN-1",
+            "stage_id": "verify",
+            "failure_class": "task_pipeline_semantic_rework_exhausted",
+            "failure_fingerprint": "semantic-cap:TASK-LEASE",
+            "failure_count": 3,
+            "retry_count": 2,
+            "failure_event_ids": ["evt-verify-blocked"],
+            "semantic_triage_required": True,
+        },
+    ))
+    config = _config()
+    config.roles.append(RoleConfig(name="orchestrator", backend="mock"))
+    config.workflow.strict_triggers = WorkflowStrictTriggersConfig(
+        rework_attempts_gte=3,
+    )
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=config,
+        project_root=tmp_path,
+    )
+
+    task_actions = [
+        action for action in projection["pending_actions"]
+        if action.get("task_id") == "TASK-LEASE"
+    ]
+    assert [action["action"] for action in task_actions] == [
+        "orchestrator-rework-triage",
+    ]
+
+
 def test_run_manager_projection_adds_failed_attempt_diagnosis_action(
     tmp_path: Path,
 ) -> None:
@@ -2095,6 +2545,25 @@ def test_candidate_rework_wins_over_candidate_ready_reemit() -> None:
     assert _candidate_rework_shadowed_by_workflow(candidate, [reemit]) is False
     assert _workflow_reemit_shadowed_by_candidate(reemit, [candidate]) is True
     assert _candidate_rework_shadowed_by_workflow(candidate, [repair]) is True
+
+
+def test_runtime_candidate_reemit_wins_over_candidate_rework() -> None:
+    candidate = {
+        "source_event_id": "evt-test-failed",
+        "source_event_ids": ["evt-test-failed"],
+        "fanout_id": "fanout-verify-runtime",
+        "pdd_id": "P1",
+    }
+    reemit = {
+        "safe_resume_action": "reemit_candidate_ready",
+        "source_event_type": "fanout.aggregate.completed",
+        "source_event_ids": ["evt-aggregate-failed"],
+        "fanout_id": "fanout-verify-runtime",
+        "pdd_id": "P1",
+    }
+
+    assert _candidate_rework_shadowed_by_workflow(candidate, [reemit]) is True
+    assert _workflow_reemit_shadowed_by_candidate(reemit, [candidate]) is False
 
 
 def test_operation_key_is_an_idempotency_marker_without_checkpoint() -> None:
@@ -2383,6 +2852,49 @@ def test_flow_goal_blocked_superseded_by_gap_plan_ready(
 
     assert not any(
         action.get("failure_class") == "flow_goal_blocked"
+        for action in projection["pending_actions"]
+    )
+
+
+def test_run_goal_blocked_superseded_by_active_goal_update(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    log.append(ZfEvent(
+        id="evt-run-budget-blocked",
+        type="run.goal.blocked",
+        actor="run-manager",
+        task_id="TASK-PARENT",
+        correlation_id="RUN-1",
+        payload={
+            "run_id": "RUN-1",
+            "workflow_run_id": "RUN-1",
+            "status": "blocked",
+            "failure_class": "workflow_budget_exceeded",
+            "reason": "workflow_budget_exceeded:usd",
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-run-reopened",
+        type="run.goal.updated",
+        actor="zf-goal-cli",
+        correlation_id="RUN-1",
+        payload={
+            "run_id": "RUN-1",
+            "workflow_run_id": "RUN-1",
+            "status": "active",
+            "reason": "owner approved a higher budget",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(),
+    )
+
+    assert not any(
+        "evt-run-budget-blocked" in action.get("source_event_ids", [])
         for action in projection["pending_actions"]
     )
 
@@ -3695,6 +4207,100 @@ def test_active_autoresearch_serializes_distinct_diagnosis_requests(
     ) is True
 
 
+def test_agent_autoresearch_recommendation_retries_after_inflight_terminal(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    first_action = {
+        "action": "diagnose-attention",
+        "safe_resume_action": "diagnose_attention",
+        "checkpoint_id": "diagnose-provider-stop-1",
+        "fingerprint": "provider-stop-1",
+        "failure_class": "provider_stop",
+        "source_event_ids": ["evt-provider-stop-1"],
+        "summary": "first provider stop",
+    }
+    assert _emit_autoresearch_request(
+        state_dir=state_dir,
+        writer=writer,
+        action=first_action,
+        projection={},
+        project_root=tmp_path,
+        causation_id="evt-tick-1",
+    ) is True
+    first_request = [
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+    ][-1]
+    first_request_id = str(first_request.payload["request_id"])
+    writer.emit(
+        "autoresearch.loop.started",
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": first_request_id},
+    )
+    log.append(ZfEvent(
+        type="run.manager.agent.recommendation",
+        id="evt-rec-after-active-autoresearch",
+        actor="run-manager",
+        payload={
+            "recommended_route": "autoresearch",
+            "checkpoint_id": "diagnose-provider-stop-2",
+            "fingerprint": "provider-stop-2",
+            "summary": "second provider stop",
+        },
+    ))
+
+    deferred = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        event_log=log,
+        spawn_repairs=False,
+    )
+    consumed = [
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AGENT_RECOMMENDATION_CONSUMED
+        and event.payload.get("source_event_id")
+        == "evt-rec-after-active-autoresearch"
+    ]
+    assert deferred.autoresearch_requested == 0
+    assert consumed[-1].payload["status"] == "deferred"
+    assert consumed[-1].payload["reason"] == "autoresearch_inflight"
+    assert len([
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+    ]) == 1
+
+    writer.emit(
+        "autoresearch.loop.failed",
+        actor="zf-autoresearch-resident",
+        payload={"loop_request_id": first_request_id},
+    )
+    retried = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(),
+        event_log=log,
+        spawn_repairs=False,
+    )
+
+    requests = [
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AUTORESEARCH_REQUESTED
+    ]
+    assert retried.autoresearch_requested == 1
+    assert len(requests) == 2
+    assert requests[-1].payload["checkpoint_id"] == "diagnose-provider-stop-2"
+    consumed = [
+        event for event in log.read_all()
+        if event.type == RUN_MANAGER_AGENT_RECOMMENDATION_CONSUMED
+        and event.payload.get("source_event_id")
+        == "evt-rec-after-active-autoresearch"
+    ]
+    assert consumed[-1].payload["status"] == "consumed"
+    assert consumed[-1].payload["downstream_event_ids"] == [requests[-1].id]
+
+
 def test_operation_v2_retryable_failure_keeps_mechanical_recovery_owner(
     tmp_path: Path,
 ) -> None:
@@ -4717,7 +5323,8 @@ def test_pending_human_decisions_deduplicate_repeated_same_lease(
                 "failure_class": "resident_agent_recommendation",
                 "checkpoint_id": "wfres-r5",
                 "fingerprint": "stall:r5",
-                "reason": "same stale human decision refreshed",
+                "reason": f"same human decision refresh {index}",
+                "suggested_options": [f"option-{index}"],
             },
         ))
 
@@ -4732,6 +5339,8 @@ def test_pending_human_decisions_deduplicate_repeated_same_lease(
     assert pending[0]["lease_key"]
     assert len(pending[0]["source_event_ids"]) == 10
     assert pending[0]["last_refreshed_at"]
+    assert pending[0]["reason"] == "same human decision refresh 9"
+    assert pending[0]["suggested_options"] == ["option-9"]
 
 
 def test_run_manager_executes_repair_closeout_validation_plan(tmp_path: Path) -> None:
@@ -5780,7 +6389,10 @@ def test_run_goal_completion_claim_is_blocked_while_feedback_is_open() -> None:
     judge = ZfEvent(type="judge.passed", id="judge-open", payload={})
     claim = run_goal_completion_claim_event(events, cause=judge)
     assert claim is not None and claim.type == RUN_GOAL_COMPLETION_CLAIMED
-    blocked = run_goal_completion_gate_event([*events, claim], claim=claim)
+    blocked = run_goal_completion_gate_event(
+        [*events, judge, claim],
+        claim=claim,
+    )
     assert blocked is not None and blocked.type == RUN_GOAL_COMPLETION_BLOCKED
     assert blocked.payload["blockers"] == ["open_feedback", "pending_handoff"]
 
@@ -5854,7 +6466,10 @@ def test_run_goal_completion_gate_closes_once_after_independent_verify() -> None
     judge = ZfEvent(type="judge.passed", id="judge-close", payload={})
     claim = run_goal_completion_claim_event(events, cause=judge)
     assert claim is not None
-    completion = run_goal_completion_gate_event([*events, claim], claim=claim)
+    completion = run_goal_completion_gate_event(
+        [*events, judge, claim],
+        claim=claim,
+    )
     assert completion is not None and completion.type == "run.goal.completed"
     replay_events = [*events, claim, completion]
     assert run_goal_completion_gate_event(replay_events, claim=claim) is None
@@ -6063,6 +6678,58 @@ def test_action_receipt_and_candidate_effect_are_settled_separately(
         event.type == "run.manager.action.effect.passed"
         for event in log.read_all()
     )
+
+
+def test_candidate_retrigger_effect_tracks_new_fanout_admission_failure(
+    tmp_path: Path,
+) -> None:
+    from zf.runtime.run_manager import (
+        _post_verify_action,
+        _settle_pending_action_effects,
+    )
+
+    _state_dir, log, writer = _state(tmp_path)
+    ready = writer.emit(
+        "task_map.ready",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "checkpoint_id": "checkpoint-retrigger",
+        },
+    )
+    action = {
+        "action": "candidate-rework-apply",
+        "candidate_rework_action": "retrigger",
+        "checkpoint_id": "checkpoint-retrigger",
+        "workflow_run_id": "run-1",
+        "fanout_id": "source-fanout",
+        "expected_downstream_events": ["task_map.ready"],
+        "effect_expected_events": ["fanout.started"],
+        "effect_failure_events": ["fanout.cancelled"],
+    }
+    _post_verify_action(
+        writer,
+        action,
+        {"emitted_event_ids": [ready.id]},
+        causation_id=ready.id,
+    )
+    writer.emit(
+        "fanout.cancelled",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "fanout_id": "new-writer-fanout",
+            "reason": "task map admission failed",
+        },
+    )
+
+    assert _settle_pending_action_effects(log.read_all(), writer) == 1
+    failed = [
+        event
+        for event in log.read_all()
+        if event.type == "run.manager.action.effect.failed"
+    ]
+    assert failed[-1].payload["observed_event_type"] == "fanout.cancelled"
 
 
 def test_ordered_action_effect_settles_goal_blocked_as_failure(
@@ -6357,7 +7024,10 @@ def test_canonical_goal_completion_rejects_missing_admitted_verify() -> None:
         },
     )
 
-    outcome = run_goal_completion_gate_event([*events, claim], claim=claim)
+    outcome = run_goal_completion_gate_event(
+        [*events, claim],
+        claim=claim,
+    )
 
     assert outcome is not None
     assert outcome.type == "run.goal.completion.rejected"
@@ -6449,7 +7119,10 @@ def test_canonical_goal_completion_ignores_stale_and_side_verify() -> None:
         },
     )
 
-    outcome = run_goal_completion_gate_event([*events, claim], claim=claim)
+    outcome = run_goal_completion_gate_event(
+        [*events, claim],
+        claim=claim,
+    )
 
     assert outcome is not None
     assert outcome.type == "run.goal.completion.rejected"
@@ -7009,7 +7682,10 @@ def test_run_goal_completion_gate_isolates_interleaved_runs() -> None:
 
     claim = run_goal_completion_claim_event(events, cause=judge_a)
     assert claim is not None and claim.payload["run_id"] == run_a
-    outcome = run_goal_completion_gate_event([*events, claim], claim=claim)
+    outcome = run_goal_completion_gate_event(
+        [*events, judge_a, claim],
+        claim=claim,
+    )
 
     assert outcome is not None and outcome.type == "run.goal.completed"
     assert outcome.payload["run_id"] == run_a
@@ -7028,6 +7704,91 @@ def test_run_goal_completion_claim_rejects_ambiguous_unscoped_judge() -> None:
         events,
         cause=ZfEvent(type="judge.passed", id="judge-unscoped", payload={}),
     ) is None
+
+
+def test_historical_closure_cannot_claim_a_different_active_run() -> None:
+    from zf.runtime.run_manager import run_goal_completion_claim_event
+
+    events = [
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-A",
+            payload={"run_id": "workflow-A"},
+        ),
+        ZfEvent(
+            type="run.goal.completed",
+            correlation_id="workflow-A",
+            payload={"run_id": "workflow-A", "claim_id": "claim-A"},
+        ),
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-B",
+            payload={"run_id": "workflow-B"},
+        ),
+    ]
+    stale = ZfEvent(
+        id="closure-A-replayed",
+        type="goal.closure.synthesized",
+        correlation_id="workflow-A",
+        payload={"workflow_run_id": "workflow-B"},
+    )
+
+    assert run_goal_completion_claim_event(events, cause=stale) is None
+
+
+def test_persisted_mixed_legacy_claim_is_rejected_by_goal_gate() -> None:
+    from zf.runtime.run_manager import (
+        RUN_GOAL_COMPLETION_REJECTED,
+        run_goal_completion_gate_event,
+    )
+
+    events = [
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-A",
+            payload={"run_id": "workflow-A"},
+        ),
+        ZfEvent(
+            id="judge-A",
+            type="judge.passed",
+            correlation_id="workflow-A",
+            payload={"workflow_run_id": "workflow-A"},
+        ),
+        ZfEvent(
+            type="run.goal.completed",
+            correlation_id="workflow-A",
+            payload={"run_id": "workflow-A", "claim_id": "claim-A"},
+        ),
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-B",
+            payload={"run_id": "workflow-B"},
+        ),
+    ]
+    mixed_claim = ZfEvent(
+        id="mixed-claim",
+        type="run.goal.completion.claimed",
+        correlation_id="workflow-B",
+        payload={
+            "run_id": "workflow-B",
+            "workflow_run_id": "workflow-B",
+            "claim_id": "claim-mixed",
+            "claim_type": "legacy_semantic_judge_verdict",
+            "source_event_id": "judge-A",
+            "source_event_type": "judge.passed",
+        },
+    )
+
+    outcome = run_goal_completion_gate_event(
+        [*events, mixed_claim],
+        claim=mixed_claim,
+    )
+
+    assert outcome is not None
+    assert outcome.type == RUN_GOAL_COMPLETION_REJECTED
+    assert outcome.payload["invalid_reasons"] == [
+        "legacy_completion_source_missing"
+    ]
 
 
 def test_run_manager_repair_intake_dispatches_through_executor(tmp_path: Path) -> None:

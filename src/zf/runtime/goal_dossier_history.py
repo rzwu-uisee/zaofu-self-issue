@@ -211,6 +211,11 @@ def _latest_terminal(events: list[ZfEvent]) -> dict[str, Any]:
                 or ""
             ),
             "completed_task_ids": _strings(payload.get("completed_task_ids")),
+            "goal_coverage": [
+                dict(item)
+                for item in payload.get("goal_coverage") or []
+                if isinstance(item, Mapping)
+            ],
             "workflow_run_id": str(
                 payload.get("workflow_run_id")
                 or payload.get("run_id")
@@ -579,6 +584,13 @@ def _authoritative_task_rows(
         if str(item.get("id") or "")
     }
     completed = set(completed_ids)
+    closed_goal_claim_ids = {
+        str(item.get("goal_claim_id") or "").strip()
+        for item in terminal.get("goal_coverage") or []
+        if isinstance(item, Mapping)
+        and str(item.get("status") or item.get("verdict") or "") == "closed"
+        and str(item.get("goal_claim_id") or "").strip()
+    }
     rows: list[dict[str, Any]] = []
     for task_id in authoritative_ids:
         row = dict(historical_by_id.get(task_id) or {
@@ -596,6 +608,17 @@ def _authoritative_task_rows(
         if task_id in completed:
             row["status"] = "done"
             row["status_source"] = "run_terminal"
+        else:
+            contract = row.get("contract")
+            contract = contract if isinstance(contract, Mapping) else {}
+            task_goal_claim_ids = set(_strings(contract.get("goal_claim_ids")))
+            if (
+                terminal.get("status") == "completed"
+                and task_goal_claim_ids
+                and task_goal_claim_ids <= closed_goal_claim_ids
+            ):
+                row["status"] = "done"
+                row["status_source"] = "run_goal_coverage"
         rows.append(row)
     return rows
 

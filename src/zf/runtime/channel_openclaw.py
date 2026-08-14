@@ -13,6 +13,11 @@ from zf.runtime.channel_contracts import (
     normalize_permission_profile,
     permission_profile_write_policy,
 )
+from zf.runtime.channel_reply_contract import (
+    channel_reply_response_contract,
+    emit_structured_reply_events,
+)
+from zf.runtime.channel_run_owner import provider_run_fields_for_request
 from zf.runtime.channel_sidecar import channel_message_event_payload
 from zf.runtime.openclaw_provider import (
     OpenClawGatewayClient,
@@ -303,7 +308,8 @@ def dispatch_openclaw_channel_reply(
         correlation_id=channel_id,
         payload=redact_obj(reply_payload),
     )
-    writer.emit(
+    run_fields = provider_run_fields_for_request(channel_id, request)
+    completed_event = writer.emit(
         "channel.agent.reply.completed",
         actor=actor,
         task_id=str(request.get("task_id") or "") or None,
@@ -320,8 +326,20 @@ def dispatch_openclaw_channel_reply(
             "provider_binding_id": binding.id,
             "remote_agent_id": remote_agent_id,
             "reason": "openclaw provider completed",
+            **run_fields,
             "source": source,
         }),
+    )
+    emit_structured_reply_events(
+        state_dir=Path(state_dir),
+        writer=writer,
+        channel=channel,
+        request=request,
+        message=message,
+        reply=reply,
+        reply_event_id=completed_event.id,
+        actor=actor,
+        source=source,
     )
     _emit_provider_health(
         writer,
@@ -442,6 +460,19 @@ def _build_channel_prompt(
 ) -> str:
     context_pack = _context_pack_by_id(channel, str(request.get("context_pack_id") or ""))
     channel_id = str(channel.get("channel_id") or request.get("channel_id") or "")
+    response_contract = channel_reply_response_contract(
+        channel,
+        request,
+        message,
+    )
+    repair_context = ""
+    if str(request.get("routing_reason") or "") == "remediation_redispatch":
+        repair_context = str(
+            redact_obj(
+                request.get("reason")
+                or "retry the rejected reply contract"
+            )
+        )
     recent = [
         {
             "member_id": item.get("member_id"),
@@ -462,6 +493,8 @@ def _build_channel_prompt(
         f"write_policy: {redact_obj(member.get('write_policy') if isinstance(member.get('write_policy'), dict) else permission_profile_write_policy(member.get('permission_profile')))}",
         f"context_pack: {redact_obj(context_pack)}",
         f"recent_messages: {redact_obj(recent)}",
+        f"response_contract: {response_contract}",
+        f"repair_context: {repair_context}" if repair_context else "",
         "",
         "Trigger message:",
         str(message.get("text") or message.get("message") or ""),

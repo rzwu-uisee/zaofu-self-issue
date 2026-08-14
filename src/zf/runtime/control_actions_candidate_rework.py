@@ -10,6 +10,7 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventLog, ZfEvent
 from zf.runtime.candidate_rework_identity import (
     _CANDIDATE_REWORK_IDENTITY_KEYS,
+    _candidate_rework_amended_identity_payload,
     _candidate_rework_identity_payload,
 )
 
@@ -164,6 +165,9 @@ class CandidateReworkActionsMixin:
         task_map_ref = str(payload.get("task_map_ref") or "")
         emitted: list[str] = []
         gap_task_ids: list[str] = []
+        amended_identity: dict[str, Any] = {}
+        task_map_digest = ""
+        superseded_generation = ""
         if rework_summary.get("gap_tasks"):
             try:
                 amend = _write_gap_task_map_amend(
@@ -179,6 +183,16 @@ class CandidateReworkActionsMixin:
                 }
             task_map_ref = amend["task_map_ref"]
             gap_task_ids = list(amend["gap_task_ids"])
+            task_map_digest = str(amend.get("task_map_digest") or "")
+            superseded_generation = str(
+                payload.get("task_map_generation") or ""
+            )
+            amended_identity = _candidate_rework_amended_identity_payload(
+                payload,
+                task_map_generation=str(
+                    amend.get("task_map_generation") or ""
+                ),
+            )
             amended = self.writer.emit(
                 "task_map.amended",
                 actor="zf-cli",
@@ -186,12 +200,14 @@ class CandidateReworkActionsMixin:
                 correlation_id=str(payload.get("trace_id") or "") or requested.correlation_id,
                 payload={
                     "schema_version": "task-map-amended.v1",
-                    **_candidate_rework_identity_payload(payload),
+                    **amended_identity,
                     "pdd_id": str(payload.get("pdd_id") or ""),
                     "feature_id": str(payload.get("feature_id") or ""),
                     "trace_id": str(payload.get("trace_id") or ""),
                     "task_map_ref": task_map_ref,
+                    "task_map_digest": task_map_digest,
                     "supersedes_task_map_ref": str(payload.get("task_map_ref") or ""),
+                    "supersedes_task_map_generation": superseded_generation,
                     "gap_task_ids": gap_task_ids,
                     "gap_task_count": len(gap_task_ids),
                     "source_event_id": str(payload.get("source_event_id") or ""),
@@ -200,7 +216,10 @@ class CandidateReworkActionsMixin:
             )
             emitted.append(amended.id)
         event_payload: dict[str, Any] = {
-            **_candidate_rework_identity_payload(payload),
+            **(
+                amended_identity
+                or _candidate_rework_identity_payload(payload)
+            ),
             "pdd_id": str(payload.get("pdd_id") or ""),
             "trace_id": str(payload.get("trace_id") or ""),
             "source_commit": str(payload.get("source_commit") or ""),
@@ -223,6 +242,20 @@ class CandidateReworkActionsMixin:
             "idempotency_key": str(payload.get("checkpoint_id") or ""),
         }
         failed_task_ids = _string_list(payload.get("failed_task_ids"))
+        rework_paths = _string_list(
+            payload.get("rework_paths") or rework_summary.get("rework_paths")
+        )
+        if rework_paths:
+            from zf.runtime.rework_task_scope import task_ids_for_rework_paths
+
+            path_owner_ids = task_ids_for_rework_paths(
+                rework_paths,
+                task_map_ref=task_map_ref,
+                state_dir=self.state_dir,
+                project_root=self.project_root or self.state_dir.parent,
+            )
+            if path_owner_ids:
+                failed_task_ids = path_owner_ids
         task_ids = gap_task_ids or failed_task_ids
         if failed_task_ids and not gap_task_ids:
             from zf.core.task.store import TaskStore
@@ -253,9 +286,15 @@ class CandidateReworkActionsMixin:
                     task_id for task_id in task_ids
                     if task_id not in set(failed_task_ids)
                 ]
+        if rework_paths:
+            event_payload["rework_paths"] = rework_paths
         if gap_task_ids:
             event_payload["amend_of"] = str(payload.get("task_map_ref") or "")
             event_payload["gap_task_ids"] = gap_task_ids
+            event_payload["task_map_digest"] = task_map_digest
+            event_payload["supersedes_task_map_generation"] = (
+                superseded_generation
+            )
         event = self.writer.emit(
             "task_map.ready",
             actor="zf-cli",
@@ -295,7 +334,9 @@ class CandidateReworkActionsMixin:
             "rework_attempt": int(payload.get("rework_attempt") or 0),
             "rework_source": str(payload.get("source_event_type") or ""),
             "classification": str(payload.get("classification") or ""),
-            "rework_feedback": _string_list(payload.get("rework_feedback")),
+            "rework_feedback": _string_list(
+                payload.get("rework_feedback")
+            ),
             "rework_categories": _string_list(payload.get("rework_categories")),
             "rework_summary": payload.get("rework_summary")
             if isinstance(payload.get("rework_summary"), dict) else {},
@@ -308,6 +349,18 @@ class CandidateReworkActionsMixin:
             "idempotency_key": str(payload.get("checkpoint_id") or ""),
             **scope_payload,
         }
+        for key in (
+            "required_actions",
+            "orchestration_delta",
+            "orchestration_delta_ref",
+            "orchestration_delta_digest",
+            "reason_codes",
+            "operator_override",
+            "owner_authorization",
+        ):
+            value = payload.get(key)
+            if value not in (None, "", [], {}):
+                event_payload[key] = value
         replan = self.writer.emit(
             "orchestrator.replan_requested",
             actor="zf-cli",
@@ -460,6 +513,7 @@ def _candidate_triage_context(payload: dict[str, Any]) -> dict[str, Any]:
         "rework_attempt",
         "rework_feedback",
         "failed_task_ids",
+        "rework_paths",
         "classification",
         "rework_categories",
         "rework_summary",
@@ -558,6 +612,7 @@ def _write_gap_task_map_amend(
 ) -> dict[str, Any]:
     from zf.runtime.module_gap_plan import (
         gap_tasks_from_rework_summary,
+        select_successor_base_commit,
         write_gap_task_map_amend_artifact,
     )
 
@@ -579,6 +634,14 @@ def _write_gap_task_map_amend(
         source_event_id=checkpoint_id or str(payload.get("source_event_id") or "event"),
         gap_tasks=gap_tasks,
         gap_plan_ref=str(rework_summary.get("gap_plan_ref") or ""),
+        supersedes_task_ids=(
+            _string_list(rework_summary.get("supersedes_task_ids"))
+            or _string_list(payload.get("supersedes_task_ids"))
+        ),
+        successor_base_commit=select_successor_base_commit({
+            **payload,
+            **rework_summary,
+        }),
     )
 
 

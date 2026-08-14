@@ -309,7 +309,7 @@ def test_phase1_completion_requests_question_dedup_once(
                 "source": "test",
             },
         )
-        writer.emit(
+        completed = writer.emit(
             "channel.agent.reply.completed",
             actor="runtime",
             correlation_id=CHANNEL_ID,
@@ -319,6 +319,36 @@ def test_phase1_completion_requests_question_dedup_once(
                 "request_id": request_id,
                 "message_id": "msg-requirement",
                 "target_member_id": member,
+                "source": "test",
+            },
+        )
+        writer.emit(
+            "channel.finding.recorded",
+            actor=member,
+            correlation_id=CHANNEL_ID,
+            payload={
+                "channel_id": CHANNEL_ID,
+                "thread_id": "main",
+                "member_id": member,
+                "contract_status": "structured",
+                "artifact_ref": f"channels/{CHANNEL_ID}/{member}.json",
+                "artifact_digest": f"digest-{member}",
+                "request_id": request_id,
+                "message_id": "msg-requirement",
+                "run_generation": 1,
+                "source_reply_event_id": completed.id,
+                "questions_frozen": True,
+                "source": "test",
+            },
+        )
+        writer.emit(
+            "channel.questions.frozen",
+            actor=member,
+            correlation_id=CHANNEL_ID,
+            payload={
+                "channel_id": CHANNEL_ID,
+                "thread_id": "main",
+                "member_id": member,
                 "source": "test",
             },
         )

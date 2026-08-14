@@ -201,6 +201,12 @@ function parsePlanOptions(value: unknown): AgentSessionPlanOption[] {
         memberCount: Number(submitDetails.member_count || members.length || 0),
         roles: members,
         maxRounds: Number(submitDetails.max_rounds || 0),
+        mode: textValue(submitDetails.mode).trim(),
+        engineMode: textValue(submitDetails.engine_mode).trim(),
+        routingStrategy: textValue(submitDetails.routing_strategy).trim(),
+        firstPassReplyCount: Number(
+          submitDetails.first_pass_reply_count || 0
+        ),
         routeId: textValue(submitDetails.route_id).trim(),
         family: textValue(submitDetails.family).trim(),
         kind: textValue(submitDetails.kind).trim(),

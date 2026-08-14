@@ -286,19 +286,177 @@ def test_hydrate_events_combines_exact_types_and_prefixes_with_or(tmp_path: Path
     assert [event.id for event in events] == ["evt-approval", "evt-attention"]
 
 
-def test_events_page_synchronously_catches_up_stale_projection(tmp_path: Path) -> None:
+def test_events_page_serves_last_known_while_tail_catches_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     state_dir = tmp_path / ".zf"
     _write_line(state_dir / "events.jsonl", ZfEvent(type="kanban.agent.turn.started", id="evt-started"))
     read_model.rebuild(state_dir)
 
     _write_line(state_dir / "events.jsonl", ZfEvent(type="kanban.agent.reply", id="evt-reply"))
 
+    scheduled = []
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: scheduled.append(state_dir),
+    )
+
     page = read_model.events_page(state_dir, limit=10)
 
     assert page is not None
     assert page["projection_state"] == "ready"
-    assert [item["id"] for item in page["items"]] == ["evt-started", "evt-reply"]
+    assert [item["id"] for item in page["items"]] == ["evt-started"]
+    assert page["current_seq"] == 1
+    assert scheduled == [state_dir]
+
+
+def test_events_page_explicit_fresh_read_catches_up_tail(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="a", id="evt-a"))
+    read_model.rebuild(state_dir)
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="b", id="evt-b"))
+
+    page = read_model.events_page(state_dir, limit=10, require_fresh=True)
+
+    assert page is not None
+    assert [item["id"] for item in page["items"]] == ["evt-a", "evt-b"]
     assert page["current_seq"] == 2
+
+
+def test_events_page_body_is_bound_to_selected_watermark(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="a", id="evt-a"))
+    read_model.rebuild(state_dir)
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="b", id="evt-b"))
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: read_model.rebuild(state_dir, config=config),
+    )
+
+    page = read_model.events_page(state_dir, limit=10)
+
+    assert page is not None
+    assert page["current_seq"] == 1
+    assert [item["id"] for item in page["items"]] == ["evt-a"]
+
+
+def test_agent_session_history_exposes_tail_and_supports_fresh_follow_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    base = {
+        "project_id": "proj-a",
+        "conversation_id": "kanban:proj-a",
+        "thread_key": "thread-a",
+        "backend": "codex-headless",
+    }
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="user.message",
+        id="evt-user",
+        payload={
+            **base,
+            "target": "kanban-agent",
+            "runtime_delivery": "headless",
+            "message": "question",
+        },
+    ))
+    read_model.rebuild(state_dir)
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="kanban.agent.reply",
+        id="evt-reply",
+        payload={**base, "answer": "answer"},
+    ))
+    scheduled = []
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: scheduled.append(state_dir),
+    )
+
+    stale = read_model.agent_session_history(
+        state_dir,
+        surface="kanban_agent",
+        thread_id="thread-a",
+        project_id="proj-a",
+        conversation_id="kanban:proj-a",
+        backend="codex-headless",
+        limit=10,
+    )
+
+    assert stale is not None
+    assert stale["tail_behind"] is True
+    assert [item["id"] for item in stale["items"]] == ["evt-user"]
+    assert scheduled == [state_dir]
+
+    fresh = read_model.agent_session_history(
+        state_dir,
+        surface="kanban_agent",
+        thread_id="thread-a",
+        project_id="proj-a",
+        conversation_id="kanban:proj-a",
+        backend="codex-headless",
+        limit=10,
+        require_fresh=True,
+    )
+
+    assert fresh is not None
+    assert fresh["tail_behind"] is False
+    assert [item["id"] for item in fresh["items"]] == ["evt-user", "evt-reply"]
+
+
+def test_agent_session_history_body_is_bound_to_selected_watermark(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    base = {
+        "project_id": "proj-a",
+        "conversation_id": "kanban:proj-a",
+        "thread_key": "thread-a",
+        "backend": "codex-headless",
+    }
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="user.message",
+        id="evt-user",
+        payload={
+            **base,
+            "target": "kanban-agent",
+            "runtime_delivery": "headless",
+            "message": "question",
+        },
+    ))
+    read_model.rebuild(state_dir)
+    _write_line(state_dir / "events.jsonl", ZfEvent(
+        type="kanban.agent.reply",
+        id="evt-reply",
+        payload={**base, "answer": "answer"},
+    ))
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: read_model.rebuild(state_dir, config=config),
+    )
+
+    page = read_model.agent_session_history(
+        state_dir,
+        surface="kanban_agent",
+        thread_id="thread-a",
+        project_id="proj-a",
+        conversation_id="kanban:proj-a",
+        backend="codex-headless",
+        limit=10,
+    )
+
+    assert page is not None
+    assert page["current_seq"] == 1
+    assert [item["id"] for item in page["items"]] == ["evt-user"]
 
 
 def test_events_page_keeps_kanban_agent_projection_fields(tmp_path: Path) -> None:

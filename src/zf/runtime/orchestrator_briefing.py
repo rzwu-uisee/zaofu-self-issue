@@ -144,6 +144,11 @@ def build_orchestrator_briefing(
     if handoff_events:
         sections.append(f"- If the trigger is {_format_event_list(handoff_events)}: kernel auto-routes;")
         sections.append("  no orchestrator action unless the chain stalls.")
+    sections.append("- For a Task managed by blocking Task Pipeline V4, inspect `projections/task-pipeline.json`")
+    sections.append("  before any recovery action. Never use legacy `task.assigned` to restart a terminal or")
+    sections.append("  blocked WorkflowOperation, and do not respawn a worker unless an active attempt is")
+    sections.append("  actually offline. Kernel/Run Manager owns pipeline recovery; emit `orchestrator.idle`")
+    sections.append("  when no semantic replan decision is available.")
     sections.append("- If the trigger is a failure (`*.rejected` / `*.failed` / `*.blocked`): decide rework, escalate, or change scope.")
     sections.append("- If the trigger is `human.escalate`: this is a meta-event about a stall, NOT a fresh failure.")
     sections.append("  Read the escalation payload (reason, origin/task id), find the original failure, and emit ONE")

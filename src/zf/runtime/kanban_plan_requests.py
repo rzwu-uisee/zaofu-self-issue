@@ -18,6 +18,11 @@ PLAN_REPAIR_EXHAUSTED_EVENT = "kanban.agent.plan.repair.exhausted"
 PLAN_REQUEST_SCHEMA_VERSION = "kanban-plan-request.v3"
 PLAN_RESPONSE_SCHEMA_VERSION = "kanban-plan-response.v2"
 PLAN_DIRECT_APPLY_ACTIONS = frozenset({"channel-create-and-start"})
+PLAN_CHANNEL_MODES = frozenset({
+    "conversation",
+    "clarification",
+    "multi_lens",
+})
 PLAN_PROPOSAL_ACTIONS = frozenset({
     "create-task",
     "workflow-start",
@@ -305,7 +310,12 @@ def plan_response_gate(
         selected_submit_mode = (
             "apply" if selected_submit_action else "continue"
         )
-
+    selected_submit_payload = (
+        selected.get("submit_payload")
+        if isinstance(selected, dict)
+        and isinstance(selected.get("submit_payload"), dict)
+        else {}
+    )
     for event in event_list:
         if event.type != PLAN_ANSWERED_EVENT:
             continue
@@ -337,6 +347,16 @@ def plan_response_gate(
                 "answers": canonical_answers,
             }
 
+    if selected_submit_action == "channel-create-and-start":
+        channel_mode = str(
+            selected_submit_payload.get("mode") or ""
+        ).strip()
+        if channel_mode not in PLAN_CHANNEL_MODES:
+            return {
+                "ok": False,
+                "status": "plan_channel_mode_required",
+            }
+
     return {
         "ok": True,
         "status": "ready",
@@ -350,12 +370,7 @@ def plan_response_gate(
         "answers": canonical_answers,
         "submit_action": selected_submit_action,
         "submit_mode": selected_submit_mode,
-        "submit_payload": (
-            selected.get("submit_payload")
-            if isinstance(selected, dict)
-            and isinstance(selected.get("submit_payload"), dict)
-            else {}
-        ),
+        "submit_payload": selected_submit_payload,
         "submit_details": (
             selected.get("submit_details")
             if isinstance(selected, dict)

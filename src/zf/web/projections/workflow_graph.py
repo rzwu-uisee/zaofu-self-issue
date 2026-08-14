@@ -435,11 +435,18 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
 
     projection_status: dict[str, Any] = {}
     source_seq = 0
+    projected_seq = 0
     cache_key = ""
     try:
         from zf.web.projections import read_model
+        from zf.web.projections.common import _event_global_seq
 
-        source_seq = read_model.current_projected_seq(state_dir, config=config)
+        projected_seq = read_model.current_projected_seq(
+            state_dir,
+            config=config,
+            require_fresh=force_recompute,
+        )
+        source_seq = _event_global_seq(state_dir)
         projection_status = read_model.projection_status(state_dir)
         cache_key = _workflow_graph_cache_key(
             config=config,
@@ -469,12 +476,14 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
     except Exception:
         projection_status = {"projection_state": "unavailable"}
         source_seq = 0
+        projected_seq = 0
         cache_key = ""
 
     events = _workflow_graph_events(
         state_dir,
         config=config,
         compiled_graph=compiled_graph,
+        max_seq=projected_seq,
     )
     fanout_events = [
         event for event in events
@@ -499,6 +508,8 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
                 "discriminator.failed",
             ],
             config=config,
+            require_fresh=False,
+            max_seq=projected_seq,
         )
     except Exception:
         _outcome_events = events
@@ -571,13 +582,13 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
         },
         "projection": {
             "source": "read_model.sqlite",
-            "source_seq": source_seq,
+            "source_seq": projected_seq,
             "projection_state": str(projection_status.get("projection_state", "unknown")),
-            "projection_lag": projection_status.get("projection_lag"),
+            "projection_lag": max(0, source_seq - projected_seq),
             "cache_key": cache_key,
         },
     }
-    if cache_key and source_seq:
+    if cache_key and projected_seq:
         try:
             from zf.web.projections import read_model
 
@@ -585,7 +596,7 @@ def _workflow_graph(state_dir: Path, *, config: ZfConfig | None = None, force_re
                 state_dir,
                 cache_key,
                 kind=_GRAPH_CACHE_KIND,
-                source_seq=source_seq,
+                source_seq=projected_seq,
                 payload=result,
             )
         except Exception:
@@ -710,6 +721,7 @@ def _workflow_graph_events(
     *,
     config: ZfConfig | None,
     compiled_graph: Any,
+    max_seq: int,
 ) -> list[ZfEvent]:
     try:
         from zf.web.projections import read_model
@@ -723,6 +735,8 @@ def _workflow_graph_events(
             types=sorted(event_types),
             type_prefixes=_OVERLAY_EVENT_PREFIXES,
             config=config,
+            require_fresh=False,
+            max_seq=max_seq,
             slim=True,
         )
     except Exception:

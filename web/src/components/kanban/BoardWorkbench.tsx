@@ -13,7 +13,14 @@ import {
 } from "../../components/kanban/taskToolbarSelection";
 import type { TaskFocus } from "../../components/kanban/taskToolbarSelection";
 import { contextBadgeTone, contextLabel, formatTokens } from "../../lib/format";
-import { taskPriority, taskRiskBadge } from "../../lib/task-display";
+import {
+  latestEventAge,
+  taskIsEffectivelyTerminal,
+  taskPriority,
+  taskRiskBadge,
+  taskTerminalOutcome,
+  taskTerminalTone,
+} from "../../lib/task-display";
 import type { TaskTelemetry } from "../../lib/task-display";
 import { Columns3, List } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -455,6 +462,7 @@ function TaskListView({
   const selectedTelemetry = selectedTask ? telemetryByTaskId.get(selectedTask.id) : undefined;
   const totalTokens = (selectedTelemetry?.inputTokens ?? 0) + (selectedTelemetry?.outputTokens ?? 0);
   const selectedRisk = selectedTask ? taskRiskBadge(selectedTask, selectedTelemetry) : null;
+  const selectedTerminal = selectedTask ? taskIsEffectivelyTerminal(selectedTask) : false;
 
   return (
     <div className="task-list-layout">
@@ -478,13 +486,19 @@ function TaskListView({
               >
                 <span className="mono">{task.id}</span>
                 <span>{task.title || "-"}</span>
-                <span className="muted">{task.status}</span>
-                <span className={`badge badge-${risk.tone}`}>{risk.label}</span>
-                <span className={`badge badge-${contextBadgeTone(telemetry?.contextRatio)}`}>
-                  {contextLabel(telemetry?.contextRatio)}
-                </span>
-                <span className="badge badge-muted">tok {formatTokens(total)}</span>
-                <span className="task-route-list-cell">{task.route_summary?.summary || "-"}</span>
+                <span className="muted">{task.display_status || task.status}</span>
+                {taskIsEffectivelyTerminal(task) ? (
+                  <span className={`badge badge-${taskTerminalTone(task)}`}>{taskTerminalOutcome(task)}</span>
+                ) : risk.label ? (
+                  <span className={`badge badge-${risk.tone}`}>{risk.label}</span>
+                ) : <span />}
+                {!taskIsEffectivelyTerminal(task) ? (
+                  <span className={`badge badge-${contextBadgeTone(telemetry?.contextRatio)}`}>
+                    {contextLabel(telemetry?.contextRatio)}
+                  </span>
+                ) : <span />}
+                {!taskIsEffectivelyTerminal(task) ? <span className="badge badge-muted">tok {formatTokens(total)}</span> : <span />}
+                <span className="task-route-list-cell">{taskIsEffectivelyTerminal(task) ? "-" : task.route_summary?.summary || "-"}</span>
               </button>
             );
           })}
@@ -505,50 +519,74 @@ function TaskListView({
               <span className="mono">{selectedTask.id}</span>
               <strong>{selectedTask.title || "(untitled)"}</strong>
             </div>
-            <div className="badge-row">
-              <span className={`badge badge-${selectedRisk?.tone ?? "muted"}`}>{selectedRisk?.label}</span>
-              <WorkflowBadges task={selectedTask} />
-              <span className={`badge badge-${contextBadgeTone(selectedTelemetry?.contextRatio)}`}>
-                {contextLabel(selectedTelemetry?.contextRatio)}
-              </span>
-              <span className="badge badge-muted">tokens {formatTokens(totalTokens)}</span>
-            </div>
-            <RouteSummaryStrip route={selectedTask.route_summary} />
-            <dl className="key-value-grid compact-kv">
-              <dt>Status</dt>
-              <dd>{selectedTask.status}</dd>
-              <dt>Priority</dt>
-              <dd>P{taskPriority(selectedTask)}</dd>
-              <dt>Assignee</dt>
-              <dd>{selectedTask.assigned_to || "-"}</dd>
-              <dt>Workers</dt>
-              <dd>{selectedTelemetry?.workerIds.join(", ") || "-"}</dd>
-              <dt>Input tokens</dt>
-              <dd>{formatTokens(selectedTelemetry?.inputTokens)}</dd>
-              <dt>Output tokens</dt>
-              <dd>{formatTokens(selectedTelemetry?.outputTokens)}</dd>
-              <dt>Cost</dt>
-              <dd>{formatUsd(selectedTelemetry?.usd)}</dd>
-              <dt>Latest event</dt>
-              <dd>{selectedTask.latest_event?.type || "-"}</dd>
-            </dl>
-            {selectedTask.blocked_reason ? (
-              <div className="notice compact-error">{selectedTask.blocked_reason}</div>
-            ) : null}
-            <div className="subsection compact-subsection">
-              <div className="inline-heading">
-                <h3>Evidence</h3>
-                <span className="muted">{selectedTask.evidence_badges?.length ?? 0}</span>
-              </div>
-              <div className="badge-row">
-                {selectedTask.evidence_badges?.length ? selectedTask.evidence_badges.map((badge) => (
-                  <span className={`badge badge-${badge.tone}`} key={`${selectedTask.id}-${badge.kind}-${badge.label}`}>
-                    {badge.label}
+            {selectedTerminal ? (
+              <>
+                <div className="badge-row">
+                  <span className={`badge badge-${taskTerminalTone(selectedTask)}`}>
+                    {taskTerminalOutcome(selectedTask)}
                   </span>
-                )) : <span className="muted">No evidence badges.</span>}
-                <BacklogRefsBadge task={selectedTask} />
-              </div>
-            </div>
+                </div>
+                <dl className="key-value-grid compact-kv">
+                  <dt>Status</dt>
+                  <dd>{selectedTask.task_card?.lifecycle.display_status || selectedTask.display_status || "done"}</dd>
+                  <dt>Outcome</dt>
+                  <dd>{taskTerminalOutcome(selectedTask)}</dd>
+                  <dt>Owner</dt>
+                  <dd>{selectedTask.task_card?.owner.actor_id || selectedTask.assigned_to || "-"}</dd>
+                  <dt>Latest activity</dt>
+                  <dd>{selectedTask.task_card?.activity.kind || selectedTask.latest_event?.type || "-"}</dd>
+                  <dt>Activity age</dt>
+                  <dd>{latestEventAge(selectedTask)}</dd>
+                </dl>
+              </>
+            ) : (
+              <>
+                <div className="badge-row">
+                  {selectedRisk?.label ? <span className={`badge badge-${selectedRisk.tone}`}>{selectedRisk.label}</span> : null}
+                  <WorkflowBadges task={selectedTask} />
+                  <span className={`badge badge-${contextBadgeTone(selectedTelemetry?.contextRatio)}`}>
+                    {contextLabel(selectedTelemetry?.contextRatio)}
+                  </span>
+                  <span className="badge badge-muted">tokens {formatTokens(totalTokens)}</span>
+                </div>
+                <RouteSummaryStrip route={selectedTask.route_summary} />
+                <dl className="key-value-grid compact-kv">
+                  <dt>Status</dt>
+                  <dd>{selectedTask.status}</dd>
+                  <dt>Priority</dt>
+                  <dd>P{taskPriority(selectedTask)}</dd>
+                  <dt>Assignee</dt>
+                  <dd>{selectedTask.assigned_to || "-"}</dd>
+                  <dt>Workers</dt>
+                  <dd>{selectedTelemetry?.workerIds.join(", ") || "-"}</dd>
+                  <dt>Input tokens</dt>
+                  <dd>{formatTokens(selectedTelemetry?.inputTokens)}</dd>
+                  <dt>Output tokens</dt>
+                  <dd>{formatTokens(selectedTelemetry?.outputTokens)}</dd>
+                  <dt>Cost</dt>
+                  <dd>{formatUsd(selectedTelemetry?.usd)}</dd>
+                  <dt>Latest event</dt>
+                  <dd>{selectedTask.latest_event?.type || "-"}</dd>
+                </dl>
+                {selectedTask.blocked_reason ? (
+                  <div className="notice compact-error">{selectedTask.blocked_reason}</div>
+                ) : null}
+                <div className="subsection compact-subsection">
+                  <div className="inline-heading">
+                    <h3>Evidence</h3>
+                    <span className="muted">{selectedTask.evidence_badges?.length ?? 0}</span>
+                  </div>
+                  <div className="badge-row">
+                    {selectedTask.evidence_badges?.length ? selectedTask.evidence_badges.map((badge) => (
+                      <span className={`badge badge-${badge.tone}`} key={`${selectedTask.id}-${badge.kind}-${badge.label}`}>
+                        {badge.label}
+                      </span>
+                    )) : <span className="muted">No evidence badges.</span>}
+                    <BacklogRefsBadge task={selectedTask} />
+                  </div>
+                </div>
+              </>
+            )}
           </>
         ) : (
           <p className="empty-text">No task selected.</p>
@@ -557,4 +595,3 @@ function TaskListView({
     </div>
   );
 }
-

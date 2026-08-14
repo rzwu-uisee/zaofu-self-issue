@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from zf.runtime.goal_gap_plan import (
     build_gap_task_map_amend,
     gap_tasks_from_gap_plan_payload,
@@ -246,3 +248,39 @@ def test_write_gap_task_map_amend_resolves_state_relative_artifact_ref(
 
     assert result["gap_task_ids"] == ["ISSUE-123-GAP-001"]
     assert Path(result["task_map_path"]).is_file()
+
+
+def test_write_gap_task_map_amend_rejects_missing_required_rolling_smoke(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    base_ref = "artifacts/ISSUE-123/task_map.json"
+    base_path = state_dir / base_ref
+    base_path.parent.mkdir(parents=True)
+    base_path.write_text(json.dumps(_base_task_map()), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="rolling_smoke_command_missing"):
+        write_gap_task_map_amend_artifact(
+            state_dir=state_dir,
+            project_root=tmp_path,
+            base_task_map_ref=base_ref,
+            pdd_id="ISSUE-123",
+            source_event_id="evt-policy-gap",
+            gap_tasks=[{
+                "task_id": "ISSUE-123-GAP-001",
+                "claim_paths": ["src/api/**", "tests/api/**"],
+                "acceptance": ["API returns the requested issue state"],
+                "verify_commands": ["uv run pytest tests/api/test_issue_123.py"],
+                "source_refs": ["issues/123.md"],
+            }],
+            admission_metadata={
+                "task_pipeline": {
+                    "candidate": {"rolling_smoke": "required"},
+                },
+            },
+        )
+
+    assert not (
+        state_dir
+        / "artifacts/ISSUE-123/gap-amends/evt-policy-gap/task_map.json"
+    ).exists()

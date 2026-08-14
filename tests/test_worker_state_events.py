@@ -242,6 +242,31 @@ class TestWorkerHealthFoldsEvents:
         assert orch.worker_health()["dev"] == "busy"
         assert orch._last_worker_task_id["dev"] == "T2"
 
+    def test_external_idle_transition_clears_process_recycle_gate(
+        self,
+        state_dir,
+        config,
+        transport,
+    ):
+        orch = Orchestrator(state_dir, config, transport)
+        orch._instance_state["dev"] = "pending_recycle"
+        orch._last_worker_state["dev"] = "pending_recycle"
+
+        orch._on_worker_state_changed_event(ZfEvent(
+            type="worker.state.changed",
+            actor="dev",
+            payload={
+                "instance_id": "dev",
+                "from": "respawning",
+                "to": "idle",
+                "reason": "fresh context restart complete",
+            },
+        ))
+
+        assert orch._instance_state["dev"] == "healthy"
+        assert orch._last_worker_state["dev"] == "idle"
+        assert orch._worker_dispatchable("dev") is True
+
 
 class TestDispatchHookSetsWorkerBusy:
     def test_dispatch_emits_worker_state_busy(

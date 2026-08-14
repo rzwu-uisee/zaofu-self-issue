@@ -435,6 +435,14 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # 下个 watchdog 进驻时抽 tick_watchdogs.py sibling。
     "src/zf/runtime/tick_services.py",
     "src/zf/runtime/candidates.py",
+    # Candidate CAS advancement and generation-continuation authority crossed
+    # the soft limit together. Split trigger: the next integration-base or
+    # advancement-receipt rule extracts candidate_integration_authority.py.
+    "src/zf/runtime/candidate_incremental.py",
+    # Plan-admission continuation evidence crossed the soft limit. Split
+    # trigger: the next rework classification or continuation-ledger rule
+    # moves continuation reduction into candidate_rework_evidence.py.
+    "src/zf/runtime/candidate_rework.py",
     "src/zf/runtime/channel_projection.py",
     # Task Pipeline V4 durable-call integration crossed the soft limit while
     # keeping prepare/admit/hydrate behavior together. Split trigger: next
@@ -445,10 +453,21 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # defer 触发条件:下次新增 ≥10 条 spec 时把 EVENT_PROBLEM_SPECS 数据
     # 段拆到 event_problem_specs_data.py,逻辑留本文件。
     "src/zf/runtime/event_problem_registry.py",
+    # Candidate-policy guidance is still one briefing-render concern. Split
+    # trigger: the next policy-specific guidance branch extracts a dedicated
+    # fanout briefing policy renderer.
+    "src/zf/runtime/fanout_briefing_runtime.py",
     "src/zf/runtime/housekeeping.py",
     "src/zf/runtime/injection.py",
     "src/zf/runtime/long_horizon.py",
     "src/zf/runtime/product_delivery.py",
+    # Package admission, inheritance, and reduction remain one artifact
+    # contract. Split trigger: the next package-currentness or port-inheritance
+    # rule extracts the reducer from plan_artifact_package.py.
+    "src/zf/runtime/plan_artifact_package.py",
+    # The current file is only just over the threshold. Split trigger: the next
+    # admission policy extracts Task Pipeline admission into a sibling module.
+    "src/zf/runtime/run_admission.py",
     "src/zf/runtime/run_archive.py",
     # Merge 2026-08-05: writer retry ownership and plan-artifact write-scope
     # preparation jointly crossed the soft limit. Split trigger: next durable
@@ -464,6 +483,10 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # or action-policy feature.
     "src/zf/runtime/run_manager.py",
     "src/zf/runtime/task_refs.py",
+    # Restart reconciliation accumulated generation/session settlement. Split
+    # trigger: the next terminalization or semantic-exhaustion rule extracts
+    # that reducer from task_pipeline_reconciler.py.
+    "src/zf/runtime/task_pipeline_reconciler.py",
     # Merge 2026-06-22: workflow checkpoint/resume recovery landed as a
     # cohesive runtime path. Split trigger: next workflow-resume bugfix or
     # checkpoint format change.
@@ -474,6 +497,10 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # reservation, reducer, or continuation lifecycle behavior change.
     "src/zf/runtime/workflow_operation.py",
     "src/zf/runtime/workdirs.py",
+    # Writer task-map normalization and mechanical admission crossed the soft
+    # limit together. Split trigger: the next writer admission rule extracts
+    # task normalization from writer_fanout_admission.py.
+    "src/zf/runtime/writer_fanout_admission.py",
     "src/zf/web/headless_agent.py",
     # Merge 2026-06-22: task timeline/read-model projection grew past the
     # soft limit. Split trigger: next task timeline/read-model endpoint change.

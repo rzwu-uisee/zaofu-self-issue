@@ -264,6 +264,7 @@ def build_resident_run_manager_briefing(
         "  `task-requeue`(wip_without_carrier:任务挂进行中但承接 child 已死)、",
         "  `child-rebuild`(为死 child 走 rework 重建承接)、",
         "  `stage-retrigger`(推进事件未消费/消费已败,自动新代际)、",
+        "  `stage-replan-new-generation`(stage replan cap 后凭 owner approval 开新代际,保留既有 checkpoint)、",
         "  `rescan-grant`(goal idle 驱动器弹尽后追加一轮)。",
         "  裁决输出:`run.manager.agent.recommendation` 带",
         "  `recommended_route=controlled_action`、`action=<动词>`、`action_payload={...}`、",

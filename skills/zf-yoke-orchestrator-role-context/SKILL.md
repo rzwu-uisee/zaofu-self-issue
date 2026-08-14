@@ -98,6 +98,15 @@ Do not restate their content here.
   (same semantic, two event shapes), dispatch `arch` for rework. Carry critic's
   `fix_items` and `risks` into the reissue briefing so arch v2 addresses them.
   Do not attempt to fix the plan yourself.
+- **Task Pipeline V4 recovery boundary**: for a Task present in
+  `projections/task-pipeline.json`, inspect `pipeline_stage`, current operation,
+  and active attempt before acting on `dispatch.silent_stall` or an assignment
+  complaint. A terminal/blocked `workflow.operation` cannot be restarted with
+  legacy `zf kanban assign`, and respawn is valid only when that Task has a
+  current active attempt whose worker is actually offline. Otherwise leave the
+  deterministic recovery decision to Run Manager; emit `orchestrator.idle` if
+  you do not have an admitted semantic replan action. Do not turn a pipeline
+  terminal failure into a false dispatch-binding incident.
 - **Autonomous `human.escalate` handling**: when recent `events.jsonl` contains
   `human.escalate`, do not wait for a real operator by default. You are the
   Layer 2 decision maker. Read the full escalation payload, `origin_event_id`

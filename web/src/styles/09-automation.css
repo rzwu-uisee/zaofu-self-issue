@@ -509,6 +509,121 @@
   margin-top: 2px;
 }
 
+.long-run-truth {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(170px, 0.42fr) minmax(420px, 1.55fr) minmax(310px, 1fr);
+  gap: 12px;
+  align-items: stretch;
+  border-block: 1px solid var(--line);
+  background: color-mix(in oklab, var(--surface) 72%, var(--bg));
+  padding: 10px 0;
+}
+
+.long-run-truth-heading,
+.long-run-truth-facts,
+.long-run-truth-milestones {
+  min-width: 0;
+}
+
+.long-run-truth-heading {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  border-right: 1px solid var(--line-soft);
+  padding: 0 12px;
+}
+
+.long-run-truth-heading > strong {
+  font-size: var(--text-13);
+}
+
+.long-run-truth-heading > span {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.long-run-truth-heading > em {
+  justify-self: start;
+  font-style: normal;
+}
+
+.long-run-truth-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  align-content: center;
+}
+
+.long-run-truth-facts > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}
+
+.long-run-truth-facts > span.is-alert {
+  border-left-color: var(--warn);
+}
+
+.long-run-truth-facts small,
+.long-run-truth-milestones small {
+  color: var(--muted-foreground);
+  font-size: var(--text-10);
+  text-transform: uppercase;
+}
+
+.long-run-truth-facts strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-12);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.long-run-truth-milestones {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
+  border-left: 1px solid var(--line-soft);
+  padding: 0 12px;
+}
+
+.long-run-truth-milestones > span {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 3px;
+  color: var(--muted-foreground);
+}
+
+.long-run-truth-milestones i {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.long-run-truth-milestones .is-proven i {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.long-run-truth-milestones strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--text-10);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .observability-workbench {
   display: grid;
   grid-template-columns: minmax(220px, 300px) minmax(0, 1fr) minmax(300px, 380px);
@@ -833,6 +948,26 @@
 }
 
 @media (max-width: 720px) {
+  .long-run-truth {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .long-run-truth-heading {
+    border-right: 0;
+    padding: 0 10px 8px;
+  }
+
+  .long-run-truth-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 0 10px;
+  }
+
+  .long-run-truth-milestones {
+    border-top: 1px solid var(--line-soft);
+    border-left: 0;
+    padding: 10px 10px 0;
+  }
+
   .integration-queue-grid,
   .task-pipeline-grid,
   .integration-queue-review-row,

@@ -97,6 +97,39 @@ def test_status_text_uses_canonical_projection_without_provider_run(tmp_path, mo
     ]
 
 
+def test_kanban_detail_status_queries_use_provider_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ctx = _project(tmp_path)
+    from zf.integrations.feishu import agent_conversation
+
+    original = agent_conversation.run_specialist_conversation
+    deterministic_replies = []
+
+    def _record_provider_route(**kwargs):
+        deterministic_replies.append(kwargs.get("deterministic_reply"))
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        agent_conversation,
+        "run_specialist_conversation",
+        _record_provider_route,
+    )
+
+    for index, text in enumerate((
+        "当前任务进度如何，合同、时间线、worker状态也都一起汇报一下",
+        "你汇报一下当前kanban上的任务啊",
+    ), start=1):
+        result = bridge_inbound_message(
+            _event(text, f"m-detail-{index}"),
+            context=ctx,
+        )
+        assert result["status"] == "replied"
+        assert result["kind"] == "kanban_agent_conversation"
+        assert result["reply_mode"] == "provider"
+
+    assert deterministic_replies == [None, None]
+
+
 def test_action_text_also_enters_agent_conversation(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     ctx = _project(tmp_path)

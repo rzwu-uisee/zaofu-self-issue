@@ -118,6 +118,7 @@ from zf.core.config.schema import (  # noqa: E402
     SecurityConfig,
     EventSigningConfig,
     SafetyConfig,
+    CostConfig,
     VerificationConfig,
     ContractDConfig,
     SemanticDConfig,
@@ -291,7 +292,13 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "autopilot", "autoresearch", "skill_sources", "global_budget_usd",
     "budget_enforcement", "budget_enforcement_enabled",
     # P0-8 存量遗漏(与 attempt_lease_grace_s 同族白名单坑)+ 133/G 批
-    "budget_fail_closed", "goal", "channel",
+    "budget_fail_closed", "goal", "channel", "cost",
+})
+_KNOWN_COST_KEYS = frozenset({
+    "pricing_catalog_url",
+    "pricing_refresh_ttl_seconds",
+    "pricing_refresh_timeout_seconds",
+    "backend_accounting_modes",
 })
 _KNOWN_CHANNEL_KEYS = frozenset({"agent_profiles"})
 _KNOWN_CHANNEL_AGENT_PROFILE_KEYS = frozenset({
@@ -2946,6 +2953,7 @@ def load_config(path: Path) -> ZfConfig:
         autopilot=_build_autopilot(raw.get("autopilot")),
         autoresearch=_build_autoresearch(raw.get("autoresearch")),
         skill_sources=_build_skill_sources(raw.get("skill_sources")),
+        cost=_build_cost(raw.get("cost")),
         global_budget_usd=(
             float(raw["global_budget_usd"])
             if raw.get("global_budget_usd") is not None else None
@@ -4393,6 +4401,43 @@ _KNOWN_GOAL_KEYS = frozenset({
     "enabled", "max_rescans", "idle_progress_ticks",
     "rework_fingerprint", "quiescent_after_escalate", "micro_loop",
 })
+
+
+def _build_cost(data: object) -> CostConfig:
+    if data is None:
+        return CostConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("cost must be a mapping")
+    _reject_unknown_keys(data, _KNOWN_COST_KEYS, "cost")
+    modes = data.get("backend_accounting_modes") or {}
+    if not isinstance(modes, dict):
+        raise ConfigError("cost.backend_accounting_modes must be a mapping")
+    normalized_modes: dict[str, str] = {}
+    valid_modes = {"api", "subscription", "enterprise", "unknown"}
+    for backend, mode in modes.items():
+        backend_name = str(backend or "").strip()
+        mode_name = str(mode or "").strip().lower()
+        if not backend_name or mode_name not in valid_modes:
+            raise ConfigError(
+                "cost.backend_accounting_modes values must be api, "
+                "subscription, enterprise, or unknown"
+            )
+        normalized_modes[backend_name] = mode_name
+    try:
+        ttl = int(data.get("pricing_refresh_ttl_seconds", 86_400))
+        timeout = float(data.get("pricing_refresh_timeout_seconds", 10.0))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("cost pricing refresh values must be numeric") from exc
+    if ttl < 60:
+        raise ConfigError("cost.pricing_refresh_ttl_seconds must be >= 60")
+    if timeout <= 0:
+        raise ConfigError("cost.pricing_refresh_timeout_seconds must be > 0")
+    return CostConfig(
+        pricing_catalog_url=str(data.get("pricing_catalog_url") or "").strip(),
+        pricing_refresh_ttl_seconds=ttl,
+        pricing_refresh_timeout_seconds=timeout,
+        backend_accounting_modes=normalized_modes,
+    )
 
 
 def _build_goal(data: dict | None) -> GoalConfig:

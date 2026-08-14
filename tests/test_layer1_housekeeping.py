@@ -242,8 +242,16 @@ def test_workflow_binding_audit_replay_preserves_full_contract(
         goal_claim_ids=["claim-workflow-task"],
     )
     task = Task(id="T1", title="workflow task", contract=contract)
-    ts.add(task)
     digest_before = task_workflow_binding_digest(task)
+    ts.add(Task(
+        id="T1",
+        title="workflow task",
+        contract=TaskContract(
+            behavior="stale pre-workflow contract",
+            verification="echo stale",
+            evidence_contract={"target_commit_required": True},
+        ),
+    ))
 
     apply_task_contract_event(ts, ZfEvent(
         type="task.contract.update",
@@ -263,6 +271,34 @@ def test_workflow_binding_audit_replay_preserves_full_contract(
     assert task_workflow_binding_digest(projected_task) == digest_before
     assert projected.verification == "(cd app && npm test) && npm test"
     assert projected.validation["full"]["command"] == projected.verification
+
+
+def test_task_creation_audit_replay_does_not_replace_workflow_owner(
+    state_dir: Path,
+) -> None:
+    ts = TaskStore(state_dir / "kanban.json")
+    workflow_contract = TaskContract(
+        behavior="deliver through the compiled Flow",
+        evidence_contract={"execution_owner": "workflow"},
+    )
+    ts.add(Task(id="T1", title="workflow task", contract=workflow_contract))
+
+    apply_task_contract_event(ts, ZfEvent(
+        type="task.contract.update",
+        actor="zf-cli",
+        task_id="T1",
+        payload={
+            "source": "task.create-from-contract",
+            "contract": {
+                "behavior": "stale creation contract",
+                "evidence_contract": {},
+            },
+        },
+    ))
+
+    projected = ts.get("T1")
+    assert projected is not None
+    assert asdict(projected.contract) == asdict(workflow_contract)
 
 
 def test_writer_owner_binding_audit_replay_preserves_full_contract(

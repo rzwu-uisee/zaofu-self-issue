@@ -173,6 +173,11 @@ class FanoutBriefingMixin:
                 str(ref) for ref in child_payload.get("input_result_refs") or []
                 if str(ref or "").strip()
             ]
+            from zf.runtime.product_acceptance import (
+                product_acceptance_handoff_payload,
+            )
+
+            product_identity = product_acceptance_handoff_payload(child_payload)
             for key in (
                 "workflow_run_id",
                 "task_map_generation",
@@ -191,7 +196,8 @@ class FanoutBriefingMixin:
                 value = child_payload.get(key)
                 if value not in (None, ""):
                     success_payload[key] = value
-            success_payload["goal_closure_result"] = {
+            success_payload.update(product_identity)
+            goal_closure_result = {
                 "schema_version": "goal-closure-result.v1",
                 "workflow_run_id": str(child_payload.get("workflow_run_id") or ""),
                 "goal_id": str(child_payload.get("goal_id") or ""),
@@ -221,6 +227,8 @@ class FanoutBriefingMixin:
                 "recommended_action": "complete",
                 "summary": "All mandatory Goal claims are closed by admitted results.",
             }
+            goal_closure_result.update(product_identity)
+            success_payload["goal_closure_result"] = goal_closure_result
         elif str(child_payload.get("contract_snapshot_ref") or "").strip():
             contract_snapshot = hydrate_task_contract_snapshot(
                 self.state_dir,
@@ -279,6 +287,39 @@ class FanoutBriefingMixin:
                 for item in reusable_receipts
                 if str(item.get("receipt_id") or "")
             ]
+            if str(child_payload.get("output_profile_id") or "") == "candidate-verify":
+                package_ref = str(
+                    child_payload.get("plan_artifact_package_ref") or ""
+                )
+                package_digest = str(
+                    child_payload.get("plan_artifact_package_digest") or ""
+                )
+                if package_ref and package_digest:
+                    from zf.runtime.product_acceptance import (
+                        product_acceptance_binding_from_package,
+                        product_acceptance_report_template,
+                    )
+
+                    product_binding = product_acceptance_binding_from_package(
+                        self.state_dir,
+                        {"ref": package_ref, "sha256": package_digest},
+                    )
+                    if product_binding.get("spec"):
+                        verification_template["product_acceptance_report"] = (
+                            product_acceptance_report_template(
+                                spec=dict(product_binding["spec"]),
+                                spec_ref=str(product_binding.get("spec_ref") or ""),
+                                spec_digest=str(
+                                    product_binding.get("spec_digest") or ""
+                                ),
+                                candidate_ref=str(
+                                    child_payload.get("candidate_ref") or ""
+                                ),
+                                target_commit=str(
+                                    child_payload.get("target_commit") or ""
+                                ),
+                            )
+                        )
             success_payload["verification_result"] = verification_template
         for key in (
             "workflow_run_id", "operation_id", "parent_operation_id",
@@ -651,8 +692,24 @@ class FanoutBriefingMixin:
                 "Every gap task MUST use the canonical task-map shape: non-empty `task_id`, `owner_role`, `claim_paths` or `allowed_paths`, `acceptance` or `acceptance_criteria`, `verify_commands` or `verification`, and `source_refs`.",
                 "Use `task_id`, not a bare `id`; `acceptance_refs` and `verification_commands` do not replace the canonical acceptance and verification fields.",
                 "Gap tasks MUST NOT claim overlapping paths. Combine related fixes into one task or give each task disjoint file ownership; ordering does not make duplicate path ownership valid.",
+                "When several gap tasks replace one old task, declare an explicit dependency chain. Exactly one terminal gap task supersedes the old task; predecessor tasks do not. The kernel inherits the old task's incoming dependencies onto the chain root and rewires downstream dependents to that terminal successor.",
+                "The terminal successor MUST declare `supersedes_task_ids`, the immutable `base_commit`, and a matching `git:<base_commit>` source ref. Every predecessor relation MUST be explicit in `blocked_by`; list order is not dependency evidence.",
                 "Keep suggestions out of `gap_tasks`; only implementation work required to close a blocking goal claim belongs there.",
             ])
+            candidate_policy = (
+                child_payload.get("candidate_policy")
+                or trigger_payload.get("candidate_policy")
+            )
+            candidate_policy = (
+                candidate_policy
+                if isinstance(candidate_policy, dict)
+                else {}
+            )
+            if str(candidate_policy.get("rolling_smoke") or "") == "required":
+                result_guidance.extend([
+                    "The active candidate policy requires rolling smoke. Every gap task MUST include `validation.commands` with at least one cheap behavior check marked with JSON boolean `rolling_smoke: true`, `deterministic: true`, `reusable: true`, and tier `static` or `runtime`.",
+                    "Do not rely on bare `verify_commands` for this policy and do not mark a source-delta-only assertion as the behavior smoke.",
+                ])
         if is_refactor_review:
             result_guidance.extend([
                 "For this refactor review workflow, finding severity describes planning risk.",
@@ -910,6 +967,13 @@ class FanoutBriefingMixin:
             subject_pdd_id=subject_pdd_id,
             verification_reader=verification_reader,
             artifact_delivery=is_artifact_delivery,
+            handoff_kind=str(
+                trigger_payload.get("handoff_kind")
+                or child_payload.get("handoff_kind")
+                or ""
+            ),
+            target_ref=str(context.target_ref or ""),
+            target_commit=str(child_payload.get("target_commit") or ""),
         )
         briefing_header = (
             [f"Active task: {task_id}", "", f"# Fanout Reader Child: {child_id}"]

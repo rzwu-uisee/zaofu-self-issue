@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from zf.core.events.model import ZfEvent
@@ -186,6 +187,23 @@ def settle_terminal_operation_attempt(
         and (not run_id or str(row.get("run_id") or "") == run_id)
         and (not task_id or str(row.get("task_id") or "") == task_id)
     ]
+    source_attempt_id = str(payload.get("source_attempt_id") or "").strip()
+    if source_attempt_id:
+        candidates = [
+            row
+            for row in candidates
+            if source_attempt_id
+            in {
+                str(row.get("attempt_id") or ""),
+                str(row.get("dispatch_id") or ""),
+            }
+        ]
+    else:
+        candidates = [
+            row
+            for row in candidates
+            if _attempt_existed_when_event_occurred(row, event)
+        ]
     active = [
         row for row in candidates
         if str(row.get("status") or "") in {"prepared", "delivering", "sent"}
@@ -244,6 +262,24 @@ def settle_terminal_operation_attempt(
     )
     support._emit_shadow_comparison(runtime, row)
     return True
+
+
+def _attempt_existed_when_event_occurred(
+    attempt: Mapping[str, Any],
+    event: ZfEvent,
+) -> bool:
+    """Prevent an old operation terminal event from settling a later redrive."""
+
+    created_at = str(attempt.get("created_at") or "").strip()
+    event_at = str(event.ts or "").strip()
+    if not created_at or not event_at:
+        return True
+    try:
+        return datetime.fromisoformat(created_at.replace("Z", "+00:00")) <= (
+            datetime.fromisoformat(event_at.replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError):
+        return True
 
 
 def _seal_active_read_ledger(runtime: Any, attempt_id: str) -> dict[str, Any]:

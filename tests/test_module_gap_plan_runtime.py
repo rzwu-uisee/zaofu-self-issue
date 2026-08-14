@@ -69,17 +69,19 @@ def _init_git_base(project_root: Path) -> str:
     ).strip()
 
 
-def _config(state_dir: Path) -> ZfConfig:
+def _config(state_dir: Path, *, writer_instances: int = 1) -> ZfConfig:
+    role_instances = [f"dev-lane-{index}" for index in range(writer_instances)]
     return ZfConfig(
         project=ProjectConfig(name="gap-plan-test", state_dir=str(state_dir)),
         roles=[
             RoleConfig(
                 name="dev",
-                instance_id="dev-lane-0",
+                instance_id=instance_id,
                 backend="mock",
                 role_kind="writer",
                 publishes=["dev.build.done", "dev.failed"],
-            ),
+            )
+            for instance_id in role_instances
         ],
         workflow=WorkflowConfig(
             stages=[
@@ -87,7 +89,7 @@ def _config(state_dir: Path) -> ZfConfig:
                     id="module-gap-impl",
                     trigger="task_map.ready",
                     topology="fanout_writer_scoped",
-                    roles=["dev-lane-0"],
+                    roles=role_instances,
                     task_map="${task_map_ref}",
                     synthesize_canonical_tasks=True,
                     aggregate=FanoutAggregateConfig(
@@ -101,14 +103,22 @@ def _config(state_dir: Path) -> ZfConfig:
     )
 
 
-def _state(tmp_path: Path) -> tuple[Path, EventLog, _RecordingTransport, Orchestrator]:
+def _state(
+    tmp_path: Path,
+    *,
+    writer_instances: int = 1,
+) -> tuple[Path, EventLog, _RecordingTransport, Orchestrator]:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
     (state_dir / "feature_list.json").write_text("[]\n", encoding="utf-8")
     log = EventLog(state_dir / "events.jsonl")
     transport = _RecordingTransport()
-    orch = Orchestrator(state_dir, _config(state_dir), transport)  # type: ignore[arg-type]
+    orch = Orchestrator(  # type: ignore[arg-type]
+        state_dir,
+        _config(state_dir, writer_instances=writer_instances),
+        transport,
+    )
     return state_dir, log, transport, orch
 
 
@@ -1877,11 +1887,31 @@ def test_module_parity_scan_completed_with_gaps_amends_task_map(
     base_commit = _init_git_base(tmp_path)
     state_dir, log, transport, orch = _state(tmp_path)
     task_map_ref = _write_base_task_map(state_dir)
-    TaskStore(state_dir / "kanban.json").add(Task(
+    task_map_path = state_dir / "artifacts" / "CANGJIE" / "task_map.json"
+    task_map = json.loads(task_map_path.read_text(encoding="utf-8"))
+    task_map["tasks"].append({
+        "task_id": "CANGJIE-ASSEMBLY-001",
+        "title": "Assemble Web baseline",
+        "owner_role": "dev",
+        "wave": 1,
+        "blocked_by": ["CANGJIE-WEB-001"],
+        "allowed_paths": ["app/**"],
+        "allowed_paths_reason": "assemble the retained downstream slice",
+        "acceptance": ["assembly consumes the verified Web baseline"],
+    })
+    task_map_path.write_text(json.dumps(task_map), encoding="utf-8")
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
         id="CANGJIE-WEB-001",
         title="Web baseline",
         status="review",
         assigned_to="dev-lane-0",
+    ))
+    store.add(Task(
+        id="CANGJIE-ASSEMBLY-001",
+        title="Assemble Web baseline",
+        status="backlog",
+        blocked_by=["CANGJIE-WEB-001"],
     ))
 
     decisions = orch.run_once(events=[ZfEvent(
@@ -1920,14 +1950,197 @@ def test_module_parity_scan_completed_with_gaps_amends_task_map(
     assert amended.payload["superseded_task_ids"] == ["CANGJIE-WEB-001"]
     assert ready.payload["resume_scope"] == "gap_tasks_only"
     assert ready.payload["task_ids"] == ["CANGJIE-WEB-GAP-001"]
-    task = TaskStore(state_dir / "kanban.json").get("CANGJIE-WEB-GAP-001")
-    superseded = TaskStore(state_dir / "kanban.json").get("CANGJIE-WEB-001")
+    task = store.get("CANGJIE-WEB-GAP-001")
+    superseded = store.get("CANGJIE-WEB-001")
+    retained = store.get("CANGJIE-ASSEMBLY-001")
     assert task is not None
     assert task.status == "in_progress"
     assert superseded is not None
     assert superseded.status == "cancelled"
+    assert retained is not None
+    assert retained.status == "backlog"
+    assert retained.blocked_by == ["CANGJIE-WEB-GAP-001"]
     assert any(event.type == "task.superseded" for event in events)
+    dependency_updates = [
+        event
+        for event in events
+        if event.type == "task.updated"
+        and event.payload.get("source") == "gap_task_map_dependency_adoption"
+    ]
+    assert [event.task_id for event in dependency_updates] == [
+        "CANGJIE-ASSEMBLY-001",
+    ]
     assert transport.sent and transport.sent[0][0] == "dev-lane-0"
+
+
+def test_multi_task_semantic_replan_replaces_one_node_without_assembly_gap(
+    tmp_path: Path,
+) -> None:
+    base_commit = _init_git_base(tmp_path)
+    api_path = tmp_path / "src" / "api" / "base.py"
+    api_path.parent.mkdir(parents=True)
+    api_path.write_text("BASE = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/api/base.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "source task commit",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True,
+    ).strip()
+    subprocess.run(["git", "reset", "--hard", base_commit], cwd=tmp_path, check=True)
+    api_path.parent.mkdir(parents=True)
+    api_path.write_text("BASE = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/api/base.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=ZaoFu Test",
+            "-c",
+            "user.email=zf@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "candidate scoped projection",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    target_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True,
+    ).strip()
+    state_dir, log, transport, orch = _state(tmp_path, writer_instances=2)
+    task_map_path = state_dir / "artifacts" / "PRODUCT" / "task_map.json"
+    task_map_path.parent.mkdir(parents=True)
+    task_map_path.write_text(json.dumps({
+        "schema_version": "task-map.v1",
+        "feature_id": "PRODUCT",
+        "tasks": [
+            {
+                "task_id": "API-BASE",
+                "title": "API base",
+                "owner_role": "dev-core",
+                "wave": 1,
+                "allowed_paths": ["src/api/base.py"],
+                "allowed_paths_reason": "base API owner",
+                "acceptance": ["base API exists"],
+            },
+            {
+                "task_id": "WEB-OLD",
+                "title": "Old Web",
+                "owner_role": "dev-web",
+                "wave": 2,
+                "blocked_by": ["API-BASE"],
+                "allowed_paths": ["web/src/**"],
+                "allowed_paths_reason": "old Web owner",
+                "acceptance": ["old Web exists"],
+            },
+            {
+                "task_id": "RELEASE",
+                "title": "Release",
+                "owner_role": "dev-release",
+                "wave": 3,
+                "blocked_by": ["WEB-OLD"],
+                "allowed_paths": ["evidence/**"],
+                "allowed_paths_reason": "release owner",
+                "acceptance": ["release evidence exists"],
+            },
+        ],
+    }), encoding="utf-8")
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(id="API-BASE", title="API base", status="in_progress"))
+    store.add(Task(id="WEB-OLD", title="Old Web", status="review"))
+    task_index_path = state_dir / "refs" / "task-index.json"
+    task_index_path.parent.mkdir(parents=True)
+    task_index_path.write_text(json.dumps({
+        "API-BASE": {
+            "task_id": "API-BASE",
+            "task_ref": "task/API-BASE",
+            "source_commit": source_commit,
+            "trace_id": "workflow-product",
+        },
+    }), encoding="utf-8")
+    log.append(ZfEvent(
+        id="api-base-projected",
+        type="candidate.task_ref.applied",
+        actor="zf-cli",
+        task_id="API-BASE",
+        payload={
+            "task_ref": "task/API-BASE",
+            "source_commit": source_commit,
+            "commit": target_commit,
+        },
+    ))
+
+    decisions = orch.run_once(events=[ZfEvent(
+        id="semantic-gap-plan",
+        type="flow.gap_plan.ready",
+        actor="zf-cli",
+        correlation_id="workflow-product",
+        payload={
+            "pdd_id": "PRODUCT",
+            "feature_id": "PRODUCT",
+            "workflow_run_id": "workflow-product",
+            "flow_kind": "issue",
+            "goal_kind": "issue",
+            "gap_category": "product_gap",
+            "trace_id": "workflow-product",
+            "task_map_ref": ".zf/artifacts/PRODUCT/task_map.json",
+            "target_ref": target_commit,
+            "supersedes_task_ids": ["WEB-OLD"],
+            "gap_tasks": [
+                {
+                    "task_id": "API-SAMPLE-DOC",
+                    "owner_role": "dev-api",
+                    "claim_paths": ["src/api/samples.py", "tests/api/**"],
+                    "acceptance": ["sample documents are returned"],
+                    "verify_commands": ["pytest tests/api -q"],
+                    "source_refs": ["reports/sample-gap.json"],
+                },
+                {
+                    "task_id": "WEB-NEW",
+                    "owner_role": "dev-web",
+                    "blocked_by": ["API-SAMPLE-DOC"],
+                    "claim_paths": ["web/src/**", "tests/web/**"],
+                    "acceptance": ["Web loads sample documents"],
+                    "verify_commands": ["npm --prefix web test"],
+                    "source_refs": ["reports/web-gap.json"],
+                },
+            ],
+        },
+    )])
+
+    events = log.read_all()
+    assert any(decision.action == "bridge" for decision in decisions)
+    assert not any(event.type == "task_map.amend.failed" for event in events)
+    amended = next(event for event in events if event.type == "task_map.amended")
+    task_map = json.loads(Path(amended.payload["task_map_ref"].replace(
+        ".zf/", f"{state_dir}/", 1,
+    )).read_text(encoding="utf-8"))
+    tasks = {task["task_id"]: task for task in task_map["tasks"]}
+    assert tasks["API-SAMPLE-DOC"]["blocked_by"] == ["API-BASE"]
+    assert tasks["WEB-NEW"]["blocked_by"] == ["API-SAMPLE-DOC"]
+    assert tasks["RELEASE"]["blocked_by"] == ["WEB-NEW"]
+    assert tasks["WEB-NEW"]["base_commit"] == target_commit
+    ready = next(event for event in events if event.type == "task_map.ready")
+    assert ready.payload["completed_task_ids"] == ["API-BASE"]
+    assert ready.payload["dispatch_base_commit"] == target_commit
+    assert transport.sent and transport.sent[0][0] == "dev-lane-0"
+    briefing = transport.sent[0][1].read_text(encoding="utf-8")
+    assert "API-SAMPLE-DOC" in briefing
+    assert target_commit in briefing
 
 
 def test_module_parity_scan_completed_without_gaps_closes_and_starts_judge(
@@ -2241,6 +2454,14 @@ def test_gap_plan_ready_amends_task_map_and_dispatches_gap_task(tmp_path: Path) 
             "feature_id": "CANGJIE",
             "trace_id": "trace-gap",
             "task_map_ref": task_map_ref,
+            "task_map_generation": "generation-before-gap",
+            "plan_revision": "generation-before-gap",
+            "plan_artifact_package_id": "planpkg-before-gap",
+            "plan_artifact_package_ref": "artifacts/plan-packages/before-gap.json",
+            "plan_artifact_package_digest": "package-before-gap-digest",
+            "goal_claim_set_ref": "artifacts/goal-claims/before-gap.json",
+            "goal_claim_set_digest": "claims-before-gap-digest",
+            "artifact_package_status": "admitted",
             "gap_plan_ref": gap_plan_ref,
             "source_commit": "base123",
             "candidate_base_commit": "base123",
@@ -2259,9 +2480,33 @@ def test_gap_plan_ready_amends_task_map_and_dispatches_gap_task(tmp_path: Path) 
     amended = next(event for event in events if event.type == "task_map.amended")
     ready = next(event for event in events if event.type == "task_map.ready")
     assert amended.payload["gap_task_ids"] == ["CANGJIE-WEB-GAP-001"]
+    assert amended.payload["task_map_digest"]
+    assert amended.payload["task_map_generation"] != "generation-before-gap"
+    assert amended.payload["supersedes_task_map_generation"] == (
+        "generation-before-gap"
+    )
     assert ready.payload["task_ids"] == ["CANGJIE-WEB-GAP-001"]
     assert ready.payload["resume_scope"] == "gap_tasks_only"
-    amended_path = state_dir.joinpath(*Path(ready.payload["task_map_ref"]).parts[1:])
+    assert ready.payload["task_map_digest"] == amended.payload["task_map_digest"]
+    assert ready.payload["task_map_generation"] == amended.payload[
+        "task_map_generation"
+    ]
+    assert ready.payload["task_map_ref"].startswith("artifacts/")
+    assert ready.payload["supersedes_task_map_generation"] == (
+        "generation-before-gap"
+    )
+    for generation_bound_key in (
+        "plan_revision",
+        "plan_artifact_package_id",
+        "plan_artifact_package_ref",
+        "plan_artifact_package_digest",
+        "goal_claim_set_ref",
+        "goal_claim_set_digest",
+        "artifact_package_status",
+    ):
+        assert generation_bound_key not in amended.payload
+        assert generation_bound_key not in ready.payload
+    amended_path = state_dir / ready.payload["task_map_ref"]
     amended_task_map = json.loads(amended_path.read_text(encoding="utf-8"))
     assert [task["task_id"] for task in amended_task_map["tasks"]] == [
         "CANGJIE-WEB-001",

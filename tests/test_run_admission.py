@@ -678,6 +678,48 @@ def test_terminal_run_dispatch_blocked_event_does_not_self_amplify(
     ) == before
 
 
+def test_completed_run_late_success_is_idempotently_suppressed(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    _invoke(runtime, run_id="RUN-A", task_id="TASK-A")
+    runtime.event_writer.append(ZfEvent(
+        type="run.goal.completed",
+        actor="orchestrator",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={"run_id": "RUN-A", "status": "completed"},
+    ))
+    late = ZfEvent(
+        type="judge.passed",
+        actor="judge",
+        task_id="TASK-A",
+        correlation_id="RUN-A",
+        payload={
+            "workflow_run_id": "RUN-A",
+            "dispatch_id": "dispatch-TASK-A",
+        },
+    )
+
+    first = runtime._reject_invalid_lifecycle_event(late)
+    second = runtime._reject_invalid_lifecycle_event(late)
+
+    assert first is not None and first.action == "block"
+    assert second is not None and second.action == "block"
+    suppressed = [
+        event for event in log.read_all()
+        if event.type == "run.result.duplicate_suppressed"
+    ]
+    assert len(suppressed) == 1
+    assert suppressed[0].payload["source_event_id"] == late.id
+    assert suppressed[0].payload["duplicate_terminal_success"] is True
+    assert not [
+        event for event in log.read_all()
+        if event.type == "run.result.rejected"
+        and event.payload.get("source_event_id") == late.id
+    ]
+
+
 def test_goal_active_update_reopens_explicitly_blocked_run(
     tmp_path: Path,
 ) -> None:

@@ -18,6 +18,7 @@ from zf.runtime.result_submit import bind_operation_submit_capability
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
     load_workflow_operation,
+    reduce_workflow_operations,
     stable_operation_id,
 )
 
@@ -69,6 +70,11 @@ def request_orchestrator_agent_checkpoint(
     operation_id = orchestrator_agent_checkpoint_operation_id(
         checkpoint=checkpoint,
         workflow_run_id=workflow_run_id,
+        source_event_id=checkpoint_source_event_id,
+        payload=payload,
+    )
+    candidate_key = orchestrator_agent_checkpoint_candidate_key(
+        checkpoint=checkpoint,
         source_event_id=checkpoint_source_event_id,
         payload=payload,
     )
@@ -169,6 +175,7 @@ def request_orchestrator_agent_checkpoint(
             identity.get("run_contract_digest") or ""
         ),
         "source_event_id": checkpoint_source_event_id,
+        "checkpoint_candidate_key": candidate_key,
     }
     if owner_delivery:
         result_identity.update({
@@ -245,6 +252,17 @@ def request_orchestrator_agent_checkpoint(
         causation_id=source_event.id,
         correlation_id=source_event.correlation_id or workflow_run_id,
     )
+    superseded_operation_ids: list[str] = []
+    if ensured.created and candidate_key:
+        superseded_operation_ids = _supersede_obsolete_checkpoint_operations(
+            runtime,
+            service=service,
+            workflow_run_id=workflow_run_id,
+            checkpoint=checkpoint,
+            candidate_key=candidate_key,
+            operation_id=operation_id,
+            source_event=source_event,
+        )
     if ensured.created:
         bind_attempt_artifact_read_capability(
             runtime.state_dir,
@@ -278,6 +296,8 @@ def request_orchestrator_agent_checkpoint(
                 "input_consumption_policy_ref": context.read_policy_ref,
                 "stage_execution_card_ref": context.stage_card_ref,
                 "source_event_id": checkpoint_source_event_id,
+                "checkpoint_candidate_key": candidate_key,
+                "supersedes_operation_ids": superseded_operation_ids,
             },
             causation_id=source_event.id,
             correlation_id=source_event.correlation_id or workflow_run_id,
@@ -366,17 +386,13 @@ def orchestrator_agent_checkpoint_revision(
         or "1"
     )
     if checkpoint == "plan_candidate":
-        generation = str(payload.get("task_map_generation") or "")
-        candidate_identity = str(
-            payload.get("plan_artifact_package_digest")
-            or payload.get("task_map_digest")
-            or payload.get("plan_artifact_package_id")
-            or payload.get("plan_artifact_package_ref")
-            or payload.get("task_map_ref")
-            or ""
+        candidate_key = orchestrator_agent_checkpoint_candidate_key(
+            checkpoint=checkpoint,
+            source_event_id=source_event_id,
+            payload=payload,
         )
-        if candidate_identity:
-            return ":".join((revision, generation, candidate_identity))
+        if candidate_key:
+            return candidate_key
         return ":".join((revision, source_event_id))
     if checkpoint == "pre_impl":
         return str(
@@ -397,6 +413,97 @@ def orchestrator_agent_checkpoint_revision(
             str(payload.get("dossier_source_fingerprint") or source_event_id),
         ))
     return revision
+
+
+def orchestrator_agent_checkpoint_candidate_key(
+    *,
+    checkpoint: str,
+    source_event_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Return current-candidate identity independent of display revision."""
+
+    if checkpoint != "plan_candidate":
+        return ""
+    generation = str(payload.get("task_map_generation") or "").strip()
+    candidate_digest = str(
+        payload.get("plan_artifact_package_digest")
+        or payload.get("task_map_digest")
+        or ""
+    ).strip()
+    if candidate_digest:
+        return f"generation:{generation or 'unknown'}:digest:{candidate_digest}"
+    candidate_ref = str(
+        payload.get("plan_artifact_package_id")
+        or payload.get("plan_artifact_package_ref")
+        or payload.get("task_map_ref")
+        or ""
+    ).strip()
+    if candidate_ref:
+        return f"generation:{generation or 'unknown'}:legacy-ref:{candidate_ref}"
+    return ""
+
+
+def _supersede_obsolete_checkpoint_operations(
+    runtime: Any,
+    *,
+    service: WorkflowOperationService,
+    workflow_run_id: str,
+    checkpoint: str,
+    candidate_key: str,
+    operation_id: str,
+    source_event: ZfEvent,
+) -> list[str]:
+    """Fence older in-flight OA candidates after a new candidate is durable."""
+
+    from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+    superseded: list[str] = []
+    operations = reduce_workflow_operations(
+        runtime.event_log.read_all(),
+        workflow_run_id=workflow_run_id,
+    )
+    for previous_id, operation in operations.items():
+        if previous_id == operation_id:
+            continue
+        if str(operation.get("parent_stage_id") or "") != f"oa-{checkpoint}":
+            continue
+        if str(operation.get("status") or "") not in {
+            "requested",
+            "reserved",
+            "running",
+            "suspended",
+        }:
+            continue
+        request_ref = operation.get("request_ref")
+        if not isinstance(request_ref, Mapping):
+            continue
+        try:
+            stored = hydrate_sidecar_ref(runtime.state_dir, dict(request_ref)).payload
+        except (OSError, ValueError, TypeError):
+            continue
+        request = stored.get("request") if isinstance(stored, Mapping) else None
+        if not isinstance(request, Mapping):
+            continue
+        previous_key = str(request.get("checkpoint_candidate_key") or "")
+        if not previous_key:
+            previous_key = orchestrator_agent_checkpoint_candidate_key(
+                checkpoint=checkpoint,
+                source_event_id=str(request.get("source_event_id") or ""),
+                payload=request,
+            )
+        if not previous_key or previous_key == candidate_key:
+            continue
+        service.supersede(
+            operation_id=previous_id,
+            request_hash=str(operation.get("request_hash") or ""),
+            workflow_run_id=workflow_run_id,
+            reason=f"checkpoint_candidate_superseded_by:{operation_id}",
+            causation_id=source_event.id,
+            correlation_id=source_event.correlation_id or workflow_run_id,
+        )
+        superseded.append(previous_id)
+    return superseded
 
 
 def orchestrator_agent_checkpoint_operation_id(
@@ -612,6 +719,7 @@ __all__ = [
     "canonical_checkpoint_source_event_id",
     "fail_orchestrator_agent_operation",
     "interrupt_orchestrator_agent_operation",
+    "orchestrator_agent_checkpoint_candidate_key",
     "orchestrator_agent_checkpoint_operation_id",
     "orchestrator_agent_checkpoint_revision",
     "prepared_operation_from_checkpoint_event",

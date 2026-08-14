@@ -27,7 +27,9 @@ class TaskPipelineReconciler:
         operations: Iterable[Mapping[str, Any]],
         attempts: Iterable[Mapping[str, Any]],
         terminal_task_ids: Iterable[str] = (),
+        external_gate_satisfied_task_ids: Iterable[str] = (),
         impl_rework_requests: Mapping[str, Mapping[str, Any]] | None = None,
+        preferred_role_instances: Mapping[str, Mapping[str, str]] | None = None,
     ) -> dict[str, Any]:
         normalized_tasks = sorted(
             (_task_row(task) for task in tasks),
@@ -56,6 +58,11 @@ class TaskPipelineReconciler:
             for row in normalized_tasks
             if row["status"] == "done"
         )
+        external_gate_satisfied_ids = {
+            str(task_id).strip()
+            for task_id in external_gate_satisfied_task_ids
+            if str(task_id).strip()
+        }
         normalized_rework_requests = {
             str(task_id): dict(request)
             for task_id, request in sorted(
@@ -63,6 +70,17 @@ class TaskPipelineReconciler:
                 key=lambda item: str(item[0]),
             )
             if str(task_id).strip() and isinstance(request, Mapping)
+        }
+        normalized_preferred_roles = {
+            str(task_id): {
+                str(stage): str(role)
+                for stage, role in dict(stage_roles).items()
+                if str(stage).strip() and str(role).strip()
+            }
+            for task_id, stage_roles in dict(
+                preferred_role_instances or {}
+            ).items()
+            if str(task_id).strip() and isinstance(stage_roles, Mapping)
         }
         operation_by_task: dict[str, list[dict[str, Any]]] = {}
         for operation in normalized_operations:
@@ -76,6 +94,9 @@ class TaskPipelineReconciler:
                 operations=operation_by_task.get(task["id"], []),
                 terminal_task_ids=terminal_ids,
                 policy=policy,
+                external_gate_satisfied=(
+                    task["id"] in external_gate_satisfied_ids
+                ),
                 impl_rework_request=normalized_rework_requests.get(task["id"]),
             )
             for task in normalized_tasks
@@ -96,6 +117,11 @@ class TaskPipelineReconciler:
             for operation in normalized_operations
             if str(operation.get("status") or "") in _ACTIVE_OPERATION_STATUSES
             and _operation_stage(operation) in pools
+            and _operation_matches_task_entry(
+                operation,
+                normalized_tasks,
+                external_gate_satisfied_ids=external_gate_satisfied_ids,
+            )
         ]
         occupancy = {
             name: sum(
@@ -124,6 +150,7 @@ class TaskPipelineReconciler:
                 "blocked",
                 "admission_blocked",
                 "replan_requested",
+                "external_gate_waiting",
             }
         })
         backpressure_policy = dict(policy.get("backpressure") or {})
@@ -192,6 +219,11 @@ class TaskPipelineReconciler:
                     pools[stage_name],
                     required_capabilities=view["required_capabilities"],
                     used_roles=used_roles,
+                    preferred_role=str(
+                        normalized_preferred_roles
+                        .get(view["task_id"], {})
+                        .get(stage_name, "")
+                    ),
                 )
                 if not role:
                     view["blockers"].append("no_compatible_idle_role")
@@ -228,7 +260,11 @@ class TaskPipelineReconciler:
             "operations": normalized_operations,
             "attempts": normalized_attempts,
             "terminal_task_ids": sorted(terminal_ids),
+            "external_gate_satisfied_task_ids": sorted(
+                external_gate_satisfied_ids
+            ),
             "impl_rework_requests": normalized_rework_requests,
+            "preferred_role_instances": normalized_preferred_roles,
         }
         projection: dict[str, Any] = {
             "schema_version": TASK_PIPELINE_SHADOW_SCHEMA,
@@ -251,6 +287,10 @@ class TaskPipelineReconciler:
                     if view["stage"] == "acceptance_review_ready"
                 ],
                 "integration_ready": integration_ready,
+                "external_gate_waiting": [
+                    view["task_id"] for view in task_views
+                    if view["stage"] == "external_gate_waiting"
+                ],
             },
             "occupancy": {
                 "active_task_pipelines": len(active_pipeline_ids),
@@ -312,12 +352,26 @@ def refresh_task_pipeline_projection(
             if dependency is not None and dependency.status == "done":
                 terminal_ids.add(dependency_id)
     events = orchestrator.event_log.read_all()
+    from zf.runtime.task_pipeline_contexts import task_pipeline_generation_contexts
+    from zf.runtime.task_pipeline_entry import (
+        task_pipeline_satisfied_external_gate_ids,
+    )
+
+    contexts = task_pipeline_generation_contexts(events)
     projection = TaskPipelineReconciler().reconcile(
         policy=selected_policy,
         tasks=tasks,
         operations=reduce_workflow_operations(events).values(),
         attempts=task_attempt_store(orchestrator).current_rows(),
         terminal_task_ids=terminal_ids,
+        external_gate_satisfied_task_ids=(
+            task_pipeline_satisfied_external_gate_ids(
+                events=events,
+                tasks=tasks,
+                generation_contexts=contexts,
+                project_root=Path(orchestrator.project_root),
+            )
+        ),
     )
     path = Path(orchestrator.state_dir) / "projections" / "task-pipeline-shadow.json"
     atomic_write_text(
@@ -481,6 +535,8 @@ def task_pipeline_policy_partitions(
 
 
 def _task_row(task: Any) -> dict[str, Any]:
+    from zf.runtime.task_pipeline_entry import task_pipeline_entry_mode
+
     if is_dataclass(task):
         raw = asdict(task)
     elif isinstance(task, Mapping):
@@ -501,6 +557,7 @@ def _task_row(task: Any) -> dict[str, Any]:
     return {
         "id": str(raw.get("id") or raw.get("task_id") or ""),
         "status": str(raw.get("status") or "backlog"),
+        "blocked_reason": str(raw.get("blocked_reason") or ""),
         "priority": int(raw.get("priority") or 3),
         "created_at": str(raw.get("created_at") or ""),
         "blocked_by": sorted({
@@ -513,6 +570,7 @@ def _task_row(task: Any) -> dict[str, Any]:
             contract.get("integration_admission_profile") or ""
         ),
         "risk_class": str(contract.get("risk_class") or ""),
+        "task_pipeline_entry_mode": task_pipeline_entry_mode(task),
     }
 
 
@@ -530,6 +588,7 @@ def _task_view(
     operations: list[dict[str, Any]],
     terminal_task_ids: set[str],
     policy: Mapping[str, Any],
+    external_gate_satisfied: bool = False,
     impl_rework_request: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers = [
@@ -540,25 +599,80 @@ def _task_view(
     stage = "impl_ready"
     next_generation = 1
     rework_count = 0
-    if task.get("status") == "blocked":
-        stage = "blocked"
-    elif blockers:
+    semantic_blocker: dict[str, Any] = {}
+    entry_mode = str(
+        task.get("task_pipeline_entry_mode") or "standard"
+    )
+    if blockers:
         stage = "dependency_blocked"
+    elif entry_mode == "external_gate" and not external_gate_satisfied:
+        stage = "external_gate_waiting"
+        blockers.append("required_manual_evidence_pending")
+    elif task.get("status") == "blocked" and entry_mode != "external_gate":
+        stage = "blocked"
     else:
         current_by_stage: dict[str, dict[str, Any]] = {}
+        allowed_stages = _entry_operation_stages(entry_mode)
         for operation in operations:
             operation_stage = _operation_stage(operation)
-            if operation_stage not in {"impl", "verify", "acceptance_review", "integration"}:
+            if operation_stage not in allowed_stages:
                 continue
             previous = current_by_stage.get(operation_stage)
             if previous is None or _operation_order(operation) > _operation_order(previous):
                 current_by_stage[operation_stage] = operation
-        stage, next_generation, rework_count = _derive_stage(
-            current_by_stage,
-            task=task,
-            policy=policy,
-            impl_rework_request=impl_rework_request,
-        )
+        if entry_mode == "external_gate":
+            stage, next_generation, rework_count = _derive_post_verification_stage(
+                current_by_stage,
+                task=task,
+                policy=policy,
+                verification_generation=1,
+                allow_impl_rework=False,
+            )
+        elif entry_mode == "verify_only":
+            stage, next_generation, rework_count = _derive_verify_only_stage(
+                current_by_stage,
+                task=task,
+                policy=policy,
+            )
+        else:
+            stage, next_generation, rework_count = _derive_stage(
+                current_by_stage,
+                task=task,
+                policy=policy,
+                impl_rework_request=impl_rework_request,
+            )
+        verify = current_by_stage.get("verify")
+        max_rework = int(policy.get("max_rework_attempts") or 0)
+        if (
+            stage == "blocked"
+            and verify is not None
+            and str(verify.get("status") or "") == "settled"
+            and not _semantic_passed(verify)
+            and int(verify.get("operation_generation") or 1) > max_rework
+        ):
+            blockers.append("semantic_rework_exhausted")
+            control_ref = verify.get("admitted_control_result_ref")
+            semantic_blocker = {
+                "stage": "verify",
+                "operation_id": str(verify.get("operation_id") or ""),
+                "operation_generation": int(
+                    verify.get("operation_generation") or 1
+                ),
+                "semantic_verdict": str(
+                    verify.get("semantic_verdict") or ""
+                ),
+                "max_rework_attempts": max_rework,
+                "source_event_id": str(
+                    verify.get("call_result_admitted_event_id")
+                    or verify.get("last_event_id")
+                    or ""
+                ),
+                "control_result_ref": (
+                    dict(control_ref)
+                    if isinstance(control_ref, Mapping)
+                    else {}
+                ),
+            }
         failed = [
             operation_stage
             for operation_stage, operation in current_by_stage.items()
@@ -566,6 +680,14 @@ def _task_view(
         ]
         if failed:
             blockers.extend(f"{item}_operation_failed" for item in sorted(failed))
+        if (
+            entry_mode == "verify_only"
+            and stage == "blocked"
+            and verify is not None
+            and str(verify.get("status") or "") == "settled"
+            and not _semantic_passed(verify)
+        ):
+            blockers.append("verify_only_verification_rejected")
         if stage == "admission_blocked":
             blockers.append("integration_admission_not_admitted")
         elif stage == "replan_requested":
@@ -574,11 +696,13 @@ def _task_view(
         "task_id": str(task.get("id") or ""),
         "stage": stage,
         "status": str(task.get("status") or ""),
+        "task_pipeline_entry_mode": entry_mode,
         "blocked_by": list(task.get("blocked_by") or []),
         "blockers": blockers,
         "required_capabilities": list(task.get("required_capabilities") or []),
         "next_operation_generation": next_generation,
         "rework_count": rework_count,
+        "semantic_blocker": semantic_blocker,
         "impl_rework_request": (
             dict(impl_rework_request)
             if stage == "impl_rework_ready" and impl_rework_request
@@ -604,6 +728,11 @@ def _derive_stage(
         return "impl_ready", impl_generation, max(0, impl_generation - 1)
     if impl_status in _ACTIVE_OPERATION_STATUSES:
         return "impl_active", impl_generation, max(0, impl_generation - 1)
+    if (
+        impl_status == "blocked"
+        and str(impl.get("reason") or "") == "request_hash_divergence"
+    ):
+        return "impl_ready", impl_generation, max(0, impl_generation - 1)
     if impl_status in {"failed", "blocked"}:
         return "blocked", impl_generation, max(0, impl_generation - 1)
     if impl_status != "settled" or not _semantic_passed(impl):
@@ -632,6 +761,11 @@ def _derive_stage(
         return "verify_ready", verify_generation, max(0, verify_generation - 1)
     if verify_status in _ACTIVE_OPERATION_STATUSES:
         return "verify_active", verify_generation, max(0, verify_generation - 1)
+    if (
+        verify_status == "blocked"
+        and str(verify.get("reason") or "") == "request_hash_divergence"
+    ):
+        return "verify_ready", verify_generation, max(0, verify_generation - 1)
     if verify_status in {"failed", "blocked"}:
         return "blocked", verify_generation, max(0, verify_generation - 1)
     if verify_status != "settled":
@@ -644,6 +778,62 @@ def _derive_stage(
                 verify_generation,
             )
         return "blocked", verify_generation, verify_generation
+
+    return _derive_post_verification_stage(
+        current,
+        task=task,
+        policy=policy,
+        verification_generation=verify_generation,
+        allow_impl_rework=True,
+    )
+
+
+def _derive_verify_only_stage(
+    current: Mapping[str, Mapping[str, Any]],
+    *,
+    task: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> tuple[str, int, int]:
+    verify = current.get("verify")
+    if verify is None:
+        return "verify_ready", 1, 0
+    generation = int(verify.get("operation_generation") or 1)
+    status = str(verify.get("status") or "")
+    if status == "requested":
+        return "verify_ready", generation, max(0, generation - 1)
+    if status in _ACTIVE_OPERATION_STATUSES:
+        return "verify_active", generation, max(0, generation - 1)
+    if (
+        status == "blocked"
+        and str(verify.get("reason") or "") == "request_hash_divergence"
+    ):
+        return "verify_ready", generation, max(0, generation - 1)
+    if status in {"failed", "blocked"}:
+        return "blocked", generation, max(0, generation - 1)
+    if status != "settled":
+        return "verify_ready", generation, max(0, generation - 1)
+    if not _semantic_passed(verify):
+        # A write-free audit cannot route a failed semantic verdict to Impl.
+        return "blocked", generation, max(0, generation - 1)
+    return _derive_post_verification_stage(
+        current,
+        task=task,
+        policy=policy,
+        verification_generation=generation,
+        allow_impl_rework=False,
+    )
+
+
+def _derive_post_verification_stage(
+    current: Mapping[str, Mapping[str, Any]],
+    *,
+    task: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    verification_generation: int,
+    allow_impl_rework: bool,
+) -> tuple[str, int, int]:
+    verify_generation = max(1, int(verification_generation or 1))
+    max_rework = int(policy.get("max_rework_attempts") or 0)
 
     admission = dict(policy.get("integration_admission") or {})
     requested_profile = str(task.get("integration_admission_profile") or "")
@@ -686,6 +876,16 @@ def _derive_stage(
                 verify_generation,
                 max(0, verify_generation - 1),
             )
+        if (
+            review_status == "blocked"
+            and str(review.get("reason") or "")
+            == "request_hash_divergence"
+        ):
+            return (
+                "acceptance_review_ready",
+                verify_generation,
+                max(0, verify_generation - 1),
+            )
         if review_status in {"failed", "blocked"}:
             return "blocked", verify_generation, max(0, verify_generation - 1)
         if review_status != "settled":
@@ -698,11 +898,17 @@ def _derive_stage(
             review.get("semantic_verdict") or ""
         ).strip().lower()
         if review_verdict == "revise":
-            if verify_generation <= max_rework:
+            if allow_impl_rework and verify_generation <= max_rework:
                 return (
                     "impl_rework_ready",
                     verify_generation + 1,
                     verify_generation,
+                )
+            if not allow_impl_rework:
+                return (
+                    "replan_requested",
+                    verify_generation,
+                    max(0, verify_generation - 1),
                 )
             return "blocked", verify_generation, verify_generation
         if review_verdict == "replan":
@@ -722,6 +928,12 @@ def _derive_stage(
         )
         if integration_generation >= verify_generation:
             status = str(integration.get("status") or "")
+            if status == "requested":
+                return (
+                    "integration_ready",
+                    integration_generation,
+                    max(0, verify_generation - 1),
+                )
             if status in _ACTIVE_OPERATION_STATUSES:
                 return (
                     "integration_active",
@@ -732,6 +944,12 @@ def _derive_stage(
                 return (
                     "integrated",
                     integration_generation,
+                    max(0, verify_generation - 1),
+                )
+            if status == "superseded":
+                return (
+                    "integration_ready",
+                    max(verify_generation, integration_generation + 1),
                     max(0, verify_generation - 1),
                 )
             if status in {"failed", "blocked", "settled"}:
@@ -781,6 +999,33 @@ def _operation_stage(operation: Mapping[str, Any]) -> str:
     return ""
 
 
+def _entry_operation_stages(entry_mode: str) -> set[str]:
+    if entry_mode == "external_gate":
+        return {"integration"}
+    if entry_mode == "verify_only":
+        return {"verify", "acceptance_review", "integration"}
+    return {"impl", "verify", "acceptance_review", "integration"}
+
+
+def _operation_matches_task_entry(
+    operation: Mapping[str, Any],
+    tasks: Iterable[Mapping[str, Any]],
+    *,
+    external_gate_satisfied_ids: set[str],
+) -> bool:
+    task_id = str(operation.get("task_id") or "")
+    task = next(
+        (row for row in tasks if str(row.get("id") or "") == task_id),
+        None,
+    )
+    if task is None:
+        return True
+    mode = str(task.get("task_pipeline_entry_mode") or "standard")
+    if mode == "external_gate" and task_id not in external_gate_satisfied_ids:
+        return False
+    return _operation_stage(operation) in _entry_operation_stages(mode)
+
+
 def _operation_order(operation: Mapping[str, Any]) -> tuple[int, str]:
     return (
         int(operation.get("operation_generation") or 1),
@@ -793,6 +1038,7 @@ def _select_role(
     *,
     required_capabilities: list[str],
     used_roles: set[str],
+    preferred_role: str = "",
 ) -> str:
     roles = sorted({str(item) for item in pool.get("role_instances", []) if str(item)})
     profiles = {
@@ -806,7 +1052,13 @@ def _select_role(
         str(item) for item in pool.get("capabilities", []) if str(item)
     )
     required = set(required_capabilities)
-    for role in roles:
+    ordered_roles = [
+        role
+        for role in [preferred_role, *roles]
+        if role and role in roles
+    ]
+    ordered_roles = list(dict.fromkeys(ordered_roles))
+    for role in ordered_roles:
         if role in used_roles:
             continue
         capabilities = profiles.get(role, pool_capabilities)

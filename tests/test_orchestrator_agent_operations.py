@@ -23,6 +23,7 @@ from zf.runtime.orchestrator_agent_operations import (
     CHECKPOINT_REQUESTED,
     DECISION_SUBMITTED,
     activate_orchestrator_agent_operation,
+    interrupt_orchestrator_agent_operation,
     request_orchestrator_agent_checkpoint,
     retry_orchestrator_agent_operation,
 )
@@ -643,6 +644,142 @@ def test_running_checkpoint_pane_death_is_recovered_once_after_send(
         if event.type == "orchestrator.dispatch.retry_requested"
         and event.payload.get("operation_id") == prepared.operation_id
     ]) == 1
+
+
+def test_graceful_stop_checkpoint_redrives_once_per_restart(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    provision_role_submit_credential(state_dir, "orchestrator")
+    provision_role_artifact_read_credential(
+        state_dir,
+        "orchestrator",
+        role_name="orchestrator",
+        provider="mock",
+    )
+    transport = RecordingTransport()
+    runtime = Orchestrator(
+        state_dir,
+        _config(),
+        transport,
+        project_root=tmp_path,
+    )
+    prepared = _request(runtime)
+    role = runtime._find_role_by_name("orchestrator")
+    assert role is not None
+    checkpoint = next(
+        event for event in log.read_all() if event.type == CHECKPOINT_REQUESTED
+    )
+    dispatch_orchestrator_agent_operation(runtime, role, checkpoint)
+
+    for restart_number in (1, 2):
+        interrupt_orchestrator_agent_operation(
+            runtime,
+            prepared,
+            reason="graceful_stop",
+            causation_id=f"stop-{restart_number}",
+        )
+
+        reconcile_orchestrator_agent_operation_liveness(runtime)
+        reconcile_orchestrator_agent_operation_liveness(runtime)
+
+        restart_checkpoints = [
+            event
+            for event in log.read_all()
+            if event.type == CHECKPOINT_REQUESTED
+            and event.payload.get("restart_interruption_event_id")
+        ]
+        assert len(restart_checkpoints) == restart_number
+        operation = load_workflow_operation(log, prepared.operation_id)
+        assert operation is not None
+        assert operation["status"] == "requested"
+        assert operation["redrive_count"] == restart_number
+
+        dispatch_orchestrator_agent_operation(
+            runtime,
+            role,
+            restart_checkpoints[-1],
+        )
+        operation = load_workflow_operation(log, prepared.operation_id)
+        assert operation is not None
+        assert operation["status"] == "running"
+
+    assert len(transport.sent) == 3
+    assert not [
+        event
+        for event in log.read_all()
+        if event.type == "worker.respawn.requested"
+    ]
+
+
+def test_restart_cancels_superseded_plan_candidate_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _writer = _state(tmp_path)
+    provision_role_submit_credential(state_dir, "orchestrator")
+    provision_role_artifact_read_credential(
+        state_dir,
+        "orchestrator",
+        role_name="orchestrator",
+        provider="mock",
+    )
+    transport = RecordingTransport()
+    runtime = Orchestrator(
+        state_dir,
+        _config(),
+        transport,
+        project_root=tmp_path,
+    )
+    older = _request(
+        runtime,
+        trigger_id="evt-plan-older",
+        checkpoint="plan_candidate",
+        payload_overrides={"task_map_generation": "generation-older"},
+    )
+    newer = _request(
+        runtime,
+        trigger_id="evt-plan-newer",
+        checkpoint="plan_candidate",
+        payload_overrides={"task_map_generation": "generation-newer"},
+    )
+    role = runtime._find_role_by_name("orchestrator")
+    assert role is not None
+    for prepared in (older, newer):
+        checkpoint = next(
+            event
+            for event in log.read_all()
+            if event.type == CHECKPOINT_REQUESTED
+            and event.payload.get("operation_id") == prepared.operation_id
+        )
+        dispatch_orchestrator_agent_operation(runtime, role, checkpoint)
+        interrupt_orchestrator_agent_operation(
+            runtime,
+            prepared,
+            reason="graceful_stop",
+            causation_id=f"stop-{prepared.operation_id}",
+        )
+
+    reconcile_orchestrator_agent_operation_liveness(runtime)
+    reconcile_orchestrator_agent_operation_liveness(runtime)
+
+    restart_checkpoints = [
+        event
+        for event in log.read_all()
+        if event.type == CHECKPOINT_REQUESTED
+        and event.payload.get("restart_interruption_event_id")
+    ]
+    assert [
+        event.payload["operation_id"] for event in restart_checkpoints
+    ] == [newer.operation_id]
+    older_operation = load_workflow_operation(log, older.operation_id)
+    newer_operation = load_workflow_operation(log, newer.operation_id)
+    assert older_operation is not None
+    assert older_operation["status"] == "cancelled"
+    assert older_operation["reason"] == (
+        "OA plan_candidate superseded by newer revision"
+    )
+    assert newer_operation is not None
+    assert newer_operation["status"] == "requested"
 
 
 def test_running_checkpoint_liveness_sweep_preserves_live_provider(

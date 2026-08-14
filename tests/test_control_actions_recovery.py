@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.task.schema import Task
+from zf.core.task.store import TaskStore
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.workflow_anchor import mark_workflow_managed_task
 
 
 def _service(tmp_path: Path) -> ControlledActionService:
@@ -125,6 +129,118 @@ def test_stage_retrigger_idempotent_and_generational(tmp_path: Path) -> None:
         and event.payload.get("redrive_of") == candidate.id
     ]
     assert len(redriven) == 1
+
+
+def test_stage_replan_new_generation_reopens_run_and_parent_once(
+    tmp_path: Path,
+) -> None:
+    svc = _service(tmp_path)
+    stage = SimpleNamespace(
+        id="issue-triage",
+        attempt_domain="plan",
+        topology="fanout_reader",
+        trigger="issue.requested",
+        failure_event="",
+        aggregate=SimpleNamespace(failure_event="issue.triage.failed"),
+    )
+    svc.config = SimpleNamespace(
+        workflow=SimpleNamespace(stages=[stage]),
+    )
+    store = TaskStore(svc.state_dir / "kanban.json")
+    store.update(
+        "T1",
+        status="blocked",
+        contract=mark_workflow_managed_task(
+            Task(id="T1", title="t")
+        ).contract,
+        blocked_reason="stage replan cap exhausted",
+    )
+    log = svc.writer.event_log
+    log.append(ZfEvent(
+        id="evt-run-start",
+        type="run.goal.started",
+        task_id="T1",
+        correlation_id="RUN-1",
+        payload={"run_id": "RUN-1", "objective": "deliver issue"},
+    ))
+    log.append(ZfEvent(
+        id="evt-origin",
+        type="issue.requested",
+        task_id="T1",
+        correlation_id="RUN-1",
+        payload={
+            "workflow_run_id": "RUN-1",
+            "issue_ref": "docs/issues/TODO.md",
+        },
+    ))
+    failure = ZfEvent(
+        id="evt-stage-failure",
+        type="issue.triage.failed",
+        task_id="T1",
+        correlation_id="RUN-1",
+        payload={
+            "workflow_run_id": "RUN-1",
+            "reason": "task map admission rejected",
+        },
+    )
+    log.append(failure)
+    escalation = ZfEvent(
+        id="evt-stage-escalation",
+        type="human.escalate",
+        task_id="T1",
+        correlation_id="RUN-1",
+        causation_id=failure.id,
+        payload={
+            "failure_class": "stage_replan_cap_exhausted",
+            "source_event_id": failure.id,
+            "allowed_actions": ["operator_review", "start_new_generation"],
+        },
+    )
+    log.append(escalation)
+
+    result = svc._execute_action(
+        requested=_req({}),
+        action="stage-replan-new-generation",
+        requested_action="stage-replan-new-generation",
+        payload={
+            "escalation_event_id": escalation.id,
+            "approval_ref": "operator:test",
+        },
+    )
+    replay = svc._execute_action(
+        requested=_req({}),
+        action="stage-replan-new-generation",
+        requested_action="stage-replan-new-generation",
+        payload={
+            "escalation_event_id": escalation.id,
+            "approval_ref": "operator:test",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["replayed"] is False
+    assert replay["ok"] is True
+    assert replay["replayed"] is True
+    generation = result["stage_replan_generation"]
+    events = log.read_all()
+    goal_update = next(
+        event for event in events
+        if event.type == "run.goal.updated"
+        and event.payload.get("stage_replan_generation") == generation
+    )
+    triggers = [
+        event for event in events
+        if event.type == "issue.requested"
+        and event.payload.get("stage_replan_generation") == generation
+    ]
+    assert len(triggers) == 1
+    assert triggers[0].payload["rework_attempt"] == 1
+    assert triggers[0].payload["operator_authorized"] is True
+    assert events.index(goal_update) < events.index(triggers[0])
+    task = store.get("T1")
+    assert task is not None
+    assert task.status == "in_progress"
+    assert task.blocked_reason == ""
 
 
 def test_fanout_aggregate_rebuild_requires_terminal_manifest_and_is_idempotent(

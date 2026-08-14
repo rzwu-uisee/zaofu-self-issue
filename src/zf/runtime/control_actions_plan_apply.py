@@ -389,7 +389,10 @@ class PlanApplyActionsMixin:
                 "max_rounds",
                 "member_count",
                 "message_id",
+                "mode",
+                "engine_mode",
                 "participants",
+                "reply_request_count",
                 "template_id",
                 "thread_id",
             )

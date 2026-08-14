@@ -11,8 +11,8 @@ from zf.core.events.model import ZfEvent
 def prepare_contract_snapshot(
     runtime: Any,
     *,
-    task: Any,
-    generation_context: Mapping[str, Any],
+    task: Any = None,
+    generation_context: Mapping[str, Any] | None = None,
     workspace: Any,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from zf.runtime.task_contract_snapshot import (
@@ -49,6 +49,9 @@ def prepare_verify_target(
     workspace: Any,
     contract_snapshot: Mapping[str, Any],
     contract_descriptor: Mapping[str, Any],
+    task: Any = None,
+    generation_context: Mapping[str, Any] | None = None,
+    entry_mode: str = "standard",
 ) -> dict[str, Any]:
     from zf.runtime.task_pipeline_runtime import (
         TaskPipelineRuntimeError,
@@ -56,14 +59,45 @@ def prepare_verify_target(
         _git,
     )
 
-    entry = runtime._task_ref_entry(task_id)
+    expected_workdir = Path(workspace.project_path).resolve()
+    if entry_mode == "verify_only":
+        if task is None or generation_context is None:
+            raise TaskPipelineRuntimeError(
+                "verify-only target requires Task and generation context"
+            )
+        from zf.runtime.task_pipeline_entry import (
+            admit_task_pipeline_read_only_ref,
+            task_pipeline_entry_target,
+        )
+
+        target_commit = task_pipeline_entry_target(
+            task,
+            generation_context,
+            project_root=Path(runtime.project_root),
+        )
+        workspace_head = _git(expected_workdir, "rev-parse", "HEAD")
+        if workspace_head != target_commit:
+            raise TaskPipelineRuntimeError(
+                "verify-only Task Workspace is not at the immutable target"
+            )
+        entry = admit_task_pipeline_read_only_ref(
+            runtime,
+            task=task,
+            context=generation_context,
+            target_commit=target_commit,
+            causation_id=str(
+                generation_context.get("generation_admitted_event_id") or ""
+            ),
+            workdir=str(expected_workdir),
+        )
+    else:
+        entry = runtime._task_ref_entry(task_id)
     source_commit = str(entry.get("source_commit") or "").strip()
     if not source_commit:
         raise TaskPipelineWaiting(
             "waiting_for_task_ref",
             "implementation settled but exact TaskRef is not admitted yet",
         )
-    expected_workdir = Path(workspace.project_path).resolve()
     actual_workdir_raw = str(entry.get("workdir") or "").strip()
     if not actual_workdir_raw:
         raise TaskPipelineWaiting(
@@ -106,6 +140,16 @@ def prepare_verify_target(
         target,
         source_event_id=str(entry.get("trigger_event_id") or ""),
     )
+    fields = {
+        "target_commit": source_commit,
+        "target_snapshot_ref": str(target_descriptor.get("ref") or ""),
+        "target_snapshot_digest": str(
+            target_descriptor.get("sha256") or ""
+        ),
+        **target_payload_fields(target_descriptor),
+    }
+    if entry_mode == "verify_only":
+        return fields
     self_check_descriptor = admit_impl_self_check(
         runtime,
         task_id=task_id,
@@ -118,15 +162,7 @@ def prepare_verify_target(
     )
     from zf.runtime.impl_self_check import self_check_payload_fields
 
-    return {
-        "target_commit": source_commit,
-        "target_snapshot_ref": str(target_descriptor.get("ref") or ""),
-        "target_snapshot_digest": str(
-            target_descriptor.get("sha256") or ""
-        ),
-        **target_payload_fields(target_descriptor),
-        **self_check_payload_fields(self_check_descriptor),
-    }
+    return {**fields, **self_check_payload_fields(self_check_descriptor)}
 
 
 def admit_impl_self_check(
@@ -156,6 +192,8 @@ def admit_impl_self_check(
         payload = event.payload if isinstance(event.payload, dict) else {}
         if (
             str(payload.get("workflow_run_id") or "") == workflow_run_id
+            and str(payload.get("task_map_generation") or "")
+            == task_map_generation
             and str(payload.get("target_commit") or "") == source_commit
             and int(payload.get("operation_generation") or 0)
             == operation_generation

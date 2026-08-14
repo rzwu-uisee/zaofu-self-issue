@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import zf.runtime.workflow_budget_guard as workflow_budget_guard
 from zf.core.config.loader import ConfigError, load_config
 from zf.core.config.schema import (
     ExecutionConfig,
@@ -411,6 +412,126 @@ def test_run_budget_uses_admission_limits_after_config_changes(
     assert load_workflow_operation(runtime.event_log, operation_id)["status"] == "cancelled"
     budget = next(event for event in emitted if event.type == "workflow.budget.exceeded")
     assert budget.payload["limits"]["timeout_seconds"] == 5.0
+
+
+def test_active_run_budget_amendment_rearms_guard_without_resetting_usage(
+    tmp_path: Path,
+) -> None:
+    runtime, transport = _runtime(
+        tmp_path,
+        operation_limits=ExecutionProfileLimitsConfig(),
+        run_limits=WorkflowRunLimitsConfig(cost_budget_usd=2),
+    )
+    run_id = "run-budget-amended"
+    runtime.event_writer.append(ZfEvent(
+        type="run.admission.admitted",
+        actor="orchestrator",
+        task_id="TASK-BUDGET",
+        correlation_id=run_id,
+        payload={
+            "run_id": run_id,
+            "workflow_run_id": run_id,
+            "request_id": run_id,
+            "task_id": "TASK-BUDGET",
+            "source_event_id": "invoke-budget-amended",
+            "budget_snapshot": usage_meter_snapshot(runtime),
+            "run_limits": {
+                "timeout_seconds": 5,
+                "token_budget": 10,
+                "cost_budget_usd": 2,
+            },
+        },
+    ))
+    runtime.cost_tracker.record_usage(
+        "dev", 100, 10, provider_cost_usd=2.1,
+    )
+    first = enforce_active_workflow_budgets(runtime)
+    assert any(event.type == "workflow.budget.exceeded" for event in first)
+    runtime.event_writer.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        correlation_id=run_id,
+        payload={
+            "run_id": run_id,
+            "workflow_run_id": run_id,
+            "status": "active",
+            "run_limits_patch": {
+                "timeout_seconds": 0,
+                "token_budget": 0,
+                "cost_budget_usd": 3,
+            },
+        },
+    ))
+
+    assert enforce_active_workflow_budgets(runtime) == []
+    runtime.cost_tracker.record_usage(
+        "dev", 100, 10, provider_cost_usd=1.0,
+    )
+    second = enforce_active_workflow_budgets(runtime)
+
+    amended = next(
+        event for event in second if event.type == "workflow.budget.exceeded"
+    )
+    assert amended.payload["limits"] == {
+        "timeout_seconds": 0.0,
+        "max_usage_samples": 0,
+        "token_budget": 0,
+        "cost_budget_usd": 3.0,
+    }
+    assert amended.payload["measurement"]["total_usd"] == 3.1
+    assert amended.payload["budget_revision_event_id"]
+
+
+def test_budget_guard_builds_run_aliases_once_per_sweep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _transport = _runtime(
+        tmp_path,
+        operation_limits=ExecutionProfileLimitsConfig(),
+        run_limits=WorkflowRunLimitsConfig(timeout_seconds=60),
+    )
+    admitted = None
+    for index in range(2):
+        run_id = f"run-budget-alias-{index}"
+        admitted = runtime.event_writer.append(ZfEvent(
+            type="run.admission.admitted",
+            actor="orchestrator",
+            correlation_id=run_id,
+            payload={
+                "run_id": run_id,
+                "workflow_run_id": run_id,
+                "request_id": run_id,
+                "task_id": f"TASK-BUDGET-{index}",
+                "source_event_id": f"invoke-budget-alias-{index}",
+                "budget_snapshot": usage_meter_snapshot(runtime),
+                "run_limits": {
+                    "timeout_seconds": 60,
+                    "token_budget": 0,
+                    "cost_budget_usd": 0,
+                },
+            },
+        ))
+    assert admitted is not None
+    calls = 0
+    original = workflow_budget_guard.run_aliases
+
+    def counting_run_aliases(events: object) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        return original(events)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        workflow_budget_guard,
+        "run_aliases",
+        counting_run_aliases,
+    )
+
+    assert enforce_active_workflow_budgets(
+        runtime,
+        now_epoch=_epoch(admitted.ts),
+    ) == []
+    assert calls == 1
 
 
 def test_budget_guard_is_idempotent_below_and_after_limit(tmp_path: Path) -> None:

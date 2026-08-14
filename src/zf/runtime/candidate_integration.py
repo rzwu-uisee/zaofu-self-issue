@@ -72,6 +72,13 @@ def candidate_failure_envelope(
         part for part in (command, diagnostics) if part.strip()
     )
     diagnostic_class = _diagnostic_class(failure_context)
+    failed_gate_names = quality.get("gates_failed")
+    if (
+        isinstance(failed_gate_names, list)
+        and "candidate_worktree_clean" in failed_gate_names
+        and str(evidence.get("reportable_status") or "").strip()
+    ):
+        diagnostic_class = "candidate_worktree_dirty"
 
     if status == "conflict" and _is_candidate_merge_conflict(candidate_payload):
         failure_class = "candidate_integration_conflict"
@@ -326,6 +333,7 @@ def _first_failed_check(quality: Mapping[str, Any]) -> dict[str, Any]:
                 check.get("exit_code") not in (0, "0")
                 or check.get("timed_out")
                 or check.get("error")
+                or str(check.get("reportable_status") or "").strip()
             ):
                 return dict(check)
     return {}
@@ -339,6 +347,7 @@ def _diagnostic_summary(
     values = [
         evidence.get("error"),
         evidence.get("stderr_tail"),
+        evidence.get("reportable_status"),
         evidence.get("stdout_tail"),
     ]
     for value in values:

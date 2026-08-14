@@ -929,6 +929,14 @@ def _build_channel_prompt(
         if isinstance(context_pack.get("agent_context"), dict)
         else {}
     )
+    repair_context = ""
+    if str(request.get("routing_reason") or "") == "remediation_redispatch":
+        repair_context = str(
+            redact_obj(
+                request.get("reason")
+                or "retry the rejected reply contract"
+            )
+        )
     return "\n".join([
         "ZaoFu Agent Channel reply request",
         f"channel_id: {channel_id}",
@@ -942,6 +950,7 @@ def _build_channel_prompt(
         f"context_pack: {redact_obj(context_pack)}",
         f"agent_context: {redact_obj(agent_context)}",
         f"response_contract: {response_contract}",
+        f"repair_context: {repair_context}" if repair_context else "",
         "",
         "Trigger message:",
         str(message.get("text") or message.get("message") or ""),

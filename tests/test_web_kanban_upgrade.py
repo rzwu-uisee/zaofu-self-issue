@@ -101,6 +101,11 @@ def test_snapshot_and_state_project_archived_done_tasks_separately(
     assert snapshot_archived["kanban_column"] == "done"
     assert state_archived["terminal"] is True
     assert state_archived["terminal_outcome"] == "success"
+    assert state_archived["display_status"] == "done"
+    assert state_archived["effective_terminal"] is True
+    assert state_archived["canonical_drift"] is False
+    assert state_archived["attention"]["required"] is False
+    assert state_archived["task_card"]["current_stage"] is None
 
 
 def test_snapshot_archived_cancelled_keeps_cancelled_terminal_outcome(
@@ -121,6 +126,9 @@ def test_snapshot_archived_cancelled_keeps_cancelled_terminal_outcome(
     assert archived["kanban_column"] == "done"
     assert archived["terminal"] is True
     assert archived["terminal_outcome"] == "cancelled"
+    assert archived["effective_terminal"] is True
+    assert archived["attention"]["required"] is False
+    assert archived["task_card"]["lifecycle"]["outcome"] == "cancelled"
 
 
 def test_worker_runtime_action_queues_request_event(

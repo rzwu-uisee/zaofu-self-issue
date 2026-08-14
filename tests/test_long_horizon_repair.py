@@ -510,6 +510,65 @@ def test_active_task_ignores_dispatch_superseded_by_assignment(
     assert orch._active_task_for_instance("test-2") is not None
 
 
+def test_active_task_reads_archived_fanout_terminal_before_new_dispatch(
+    tmp_path: Path,
+) -> None:
+    orch, store, log = _make_orchestrator(tmp_path)
+    task_id = "TASK-ROTATED-FANOUT"
+    store.add(Task(
+        id=task_id,
+        title="fanout crossed UTC midnight",
+        status="in_progress",
+        assigned_to="test-1",
+    ))
+    archive_dir = log.path.parent / "events"
+    archive_dir.mkdir()
+    fanout_payload = {
+        "fanout_id": "fanout-before-midnight",
+        "child_id": "test-1-rotated",
+        "run_id": "run-before-midnight",
+        "role_instance": "test-1",
+        "task_id": task_id,
+    }
+    archived = [
+        ZfEvent(
+            type="fanout.child.dispatched",
+            actor="zf-cli",
+            task_id=task_id,
+            payload=fanout_payload,
+        ),
+        ZfEvent(
+            type="fanout.child.completed",
+            actor="test-1",
+            task_id=task_id,
+            payload=fanout_payload,
+        ),
+    ]
+    (archive_dir / "2026-08-08.jsonl").write_text(
+        "\n".join(event.to_json() for event in archived) + "\n",
+        encoding="utf-8",
+    )
+    log.append(ZfEvent(type="run.goal.updated", actor="zf-cli"))
+
+    assert orch._active_task_for_instance("test-1") is None
+
+    log.append(ZfEvent(
+        type="fanout.child.dispatched",
+        actor="zf-cli",
+        task_id=task_id,
+        payload={
+            **fanout_payload,
+            "fanout_id": "fanout-after-midnight",
+            "child_id": "test-1-current",
+            "run_id": "run-after-midnight",
+        },
+    ))
+
+    active = orch._active_task_for_instance("test-1")
+    assert active is not None
+    assert active.id == task_id
+
+
 def test_autoresearch_stuck_injection_uses_recovery_path(tmp_path: Path) -> None:
     orch, store, log = _make_orchestrator(tmp_path)
     store.add(Task(

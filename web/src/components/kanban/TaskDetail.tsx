@@ -703,10 +703,12 @@ function buildTaskEffectiveSkillRows(
 
   const loadedRows = (skillsSummary?.loaded ?? []).map(asRecord);
   const lockRows = (skillsSummary?.lock ?? []).map(asRecord);
+  const invocationRows = (skillsSummary?.invocation?.skills ?? []).map(asRecord);
   const poolRows = skillsSummary?.pool ?? [];
   return [...required].sort((left, right) => left.localeCompare(right)).map((skill) => {
     const loaded = findTaskSkillRecord(loadedRows, task, skill);
     const lock = findTaskSkillRecord(lockRows, task, skill);
+    const invocation = findTaskSkillRecord(invocationRows, task, skill);
     const pool = poolRows.find((row) => row.name === skill) ?? null;
     const source = textValue(loaded?.source)
       || textValue(lock?.source)
@@ -730,6 +732,10 @@ function buildTaskEffectiveSkillRows(
       role: textValue(loaded?.role) || textValue(lock?.role) || enabledRows[0]?.role || "-",
       backend: textValue(loaded?.backend) || textValue(lock?.backend) || enabledRows[0]?.backend || "-",
       status: textValue(loaded?.status) || textValue(lock?.status) || (source !== "-" ? "enabled" : "requested"),
+      observed: textValue(invocation?.observation) || "unobserved",
+      invoked: boolish(invocation?.invoked),
+      evidence_events: Array.isArray(invocation?.evidence) ? invocation.evidence.length : 0,
+      dispatch_id: textValue(invocation?.dispatch_id) || "-",
       injected,
       load_on_demand: loadOnDemand,
       source,

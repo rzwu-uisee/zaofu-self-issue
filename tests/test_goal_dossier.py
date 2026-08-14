@@ -325,6 +325,80 @@ def test_goal_dossier_detects_summary_task_and_gap_inconsistency(
     }
 
 
+def test_goal_dossier_allows_evidence_backed_done_superset(
+    tmp_path: Path,
+) -> None:
+    state_dir, dossier, terminal, receipt = _readiness_fixture(tmp_path)
+    dossier["state"]["tasks"].append({"id": "TASK-2", "status": "done"})
+    dossier["state"]["task_counts"] = {
+        "total": 2,
+        "terminal": 2,
+        "open": 0,
+    }
+
+    readiness = evaluate_goal_dossier_delivery_readiness(
+        state_dir=state_dir,
+        dossier=dossier,
+        terminal=terminal,
+        receipt=receipt,
+    )
+
+    assert readiness["status"] == "ready"
+    assert readiness["issues"] == []
+
+
+def test_goal_dossier_rejects_missing_terminal_completed_task(
+    tmp_path: Path,
+) -> None:
+    state_dir, dossier, terminal, receipt = _readiness_fixture(tmp_path)
+    dossier["state"]["tasks"] = [{"id": "TASK-2", "status": "done"}]
+
+    readiness = evaluate_goal_dossier_delivery_readiness(
+        state_dir=state_dir,
+        dossier=dossier,
+        terminal=terminal,
+        receipt=receipt,
+    )
+
+    assert readiness["status"] == "incomplete"
+    assert {
+        issue["code"] for issue in readiness["issues"]
+    } == {"completed_task_set_mismatch"}
+
+
+def test_terminal_goal_coverage_closes_authoritative_task() -> None:
+    from zf.runtime.goal_dossier_history import (
+        _authoritative_task_rows,
+        _latest_terminal,
+    )
+
+    terminal = _latest_terminal([ZfEvent(
+        type="run.goal.completed",
+        payload={
+            "completed_task_ids": ["TASK-FINAL-BATCH"],
+            "goal_coverage": [
+                {"goal_claim_id": "CLAIM-1", "status": "closed"},
+                {"goal_claim_id": "CLAIM-2", "status": "closed"},
+            ],
+        },
+    )])
+
+    rows = _authoritative_task_rows(
+        historical_tasks=[{
+            "id": "TASK-CLAIMS",
+            "title": "claim-owned task",
+            "status": "blocked",
+            "status_source": "event_history",
+            "contract": {"goal_claim_ids": ["CLAIM-1", "CLAIM-2"]},
+        }],
+        task_map={"tasks": [{"task_id": "TASK-CLAIMS"}]},
+        terminal=terminal,
+    )
+
+    assert rows[0]["status"] == "done"
+    assert rows[0]["status_source"] == "run_goal_coverage"
+
+
 def test_goal_dossier_blocked_terminal_stays_blocked(
     tmp_path: Path,
 ) -> None:

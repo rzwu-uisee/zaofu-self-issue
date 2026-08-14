@@ -1,0 +1,141 @@
+{
+  "schema_version": "pricing-catalog.v1",
+  "catalog_version": "2026-08-11",
+  "currency": "USD",
+  "source_kind": "zaofu_curated",
+  "source_url": "docs/design/173-provider-usage-pricing-catalog-and-billing-reconciliation-design.md",
+  "fetched_at": "2026-08-11T00:00:00Z",
+  "effective_from": "2026-06-17T00:00:00Z",
+  "rates": [
+    {
+      "provider": "legacy",
+      "rate_key": "legacy:default",
+      "model_ids": ["default"],
+      "model_aliases": [],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard"},
+      "units": {
+        "fresh_input_per_mtok": "3.00",
+        "cache_read_per_mtok": "0.30",
+        "cache_write_5m_per_mtok": "3.75",
+        "output_per_mtok": "15.00"
+      }
+    },
+    {
+      "provider": "openai",
+      "rate_key": "openai:gpt-5.6-sol:standard:base",
+      "model_ids": ["gpt-5.6-sol"],
+      "model_aliases": ["gpt-5.6"],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard", "context_input_lte": 272000},
+      "units": {
+        "fresh_input_per_mtok": "5.00",
+        "cache_read_per_mtok": "0.50",
+        "cache_write_5m_per_mtok": "6.25",
+        "output_per_mtok": "30.00"
+      }
+    },
+    {
+      "provider": "openai",
+      "rate_key": "openai:gpt-5.6-sol:standard:long",
+      "model_ids": ["gpt-5.6-sol"],
+      "model_aliases": ["gpt-5.6"],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard", "context_input_gt": 272000},
+      "units": {
+        "fresh_input_per_mtok": "10.00",
+        "cache_read_per_mtok": "1.00",
+        "cache_write_5m_per_mtok": "12.50",
+        "output_per_mtok": "45.00"
+      }
+    },
+    {
+      "provider": "openai",
+      "rate_key": "openai:gpt-5.5:standard:base",
+      "model_ids": ["gpt-5.5", "gpt-5.5-codex"],
+      "model_aliases": [],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard", "context_input_lte": 272000},
+      "units": {
+        "fresh_input_per_mtok": "5.00",
+        "cache_read_per_mtok": "0.50",
+        "cache_write_5m_per_mtok": "6.25",
+        "output_per_mtok": "30.00"
+      }
+    },
+    {
+      "provider": "openai",
+      "rate_key": "openai:gpt-5.5:standard:long",
+      "model_ids": ["gpt-5.5", "gpt-5.5-codex"],
+      "model_aliases": [],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard", "context_input_gt": 272000},
+      "units": {
+        "fresh_input_per_mtok": "10.00",
+        "cache_read_per_mtok": "1.00",
+        "cache_write_5m_per_mtok": "12.50",
+        "output_per_mtok": "45.00"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "rate_key": "anthropic:claude-sonnet-4-6:standard",
+      "model_ids": ["claude-sonnet-4-6"],
+      "model_aliases": ["sonnet"],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard"},
+      "units": {
+        "fresh_input_per_mtok": "3.00",
+        "cache_read_per_mtok": "0.30",
+        "cache_write_5m_per_mtok": "3.75",
+        "cache_write_1h_per_mtok": "6.00",
+        "output_per_mtok": "15.00"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "rate_key": "anthropic:claude-opus-4-x:standard",
+      "model_ids": ["claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"],
+      "model_aliases": ["opus"],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard"},
+      "units": {
+        "fresh_input_per_mtok": "5.00",
+        "cache_read_per_mtok": "0.50",
+        "cache_write_5m_per_mtok": "6.25",
+        "cache_write_1h_per_mtok": "10.00",
+        "output_per_mtok": "25.00"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "rate_key": "anthropic:claude-fable-5:standard",
+      "model_ids": ["claude-fable-5"],
+      "model_aliases": [],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard"},
+      "units": {
+        "fresh_input_per_mtok": "10.00",
+        "cache_read_per_mtok": "1.00",
+        "cache_write_5m_per_mtok": "12.50",
+        "cache_write_1h_per_mtok": "20.00",
+        "output_per_mtok": "50.00"
+      }
+    },
+    {
+      "provider": "anthropic",
+      "rate_key": "anthropic:claude-haiku-4-5:standard",
+      "model_ids": ["claude-haiku-4-5"],
+      "model_aliases": ["haiku"],
+      "accounting_modes": ["api", "subscription", "enterprise", "unknown"],
+      "conditions": {"service_tier": "standard"},
+      "units": {
+        "fresh_input_per_mtok": "1.00",
+        "cache_read_per_mtok": "0.10",
+        "cache_write_5m_per_mtok": "1.25",
+        "cache_write_1h_per_mtok": "2.00",
+        "output_per_mtok": "5.00"
+      }
+    }
+  ]
+}

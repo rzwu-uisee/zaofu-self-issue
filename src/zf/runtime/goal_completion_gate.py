@@ -91,7 +91,7 @@ def reconcile_run_goal_completion(runtime: Any) -> None:
         return
     from zf.runtime.event_window import read_runtime_events
     from zf.runtime.run_manager import run_goal_completion_claim_event
-    from zf.runtime.run_scope import resolve_run_for_event
+    from zf.runtime.run_scope import resolve_run_for_completion_cause
 
     events = list(read_runtime_events(runtime.event_log, runtime.state_dir))
     _evaluate_active_claims(runtime, events)
@@ -108,7 +108,7 @@ def reconcile_run_goal_completion(runtime: Any) -> None:
             == "compat_projection"
         ):
             continue
-        run_id = resolve_run_for_event(events, cause)
+        run_id = resolve_run_for_completion_cause(events, cause)
         if not run_id or run_id in seen_run_ids:
             continue
         seen_run_ids.add(run_id)

@@ -31,6 +31,7 @@ def respawn_instance_with_lock(
     *,
     recovery_reason: str,
     inject_idle_prompt: bool,
+    force_fresh_session: bool = False,
 ) -> WorkflowRuntimeDecision:
     active_task = runtime._active_task_for_instance(role.instance_id)
     lock_dir = runtime.state_dir / "locks" / "respawns"
@@ -40,6 +41,7 @@ def respawn_instance_with_lock(
                 role,
                 recovery_reason=recovery_reason,
                 inject_idle_prompt=inject_idle_prompt,
+                force_fresh_session=force_fresh_session,
             )
     except SessionLockBusy:
         try:

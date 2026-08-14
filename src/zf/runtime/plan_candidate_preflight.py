@@ -8,7 +8,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from zf.runtime.plan_artifact_package import required_plan_ports
+from zf.runtime.plan_artifact_package import (
+    hydrate_plan_artifact_package,
+    required_plan_ports,
+)
 from zf.runtime.plan_artifact_ports import (
     canonical_plan_port_name,
     coerce_plan_port_descriptors,
@@ -96,6 +99,17 @@ def evaluate_plan_candidate_preflight(
             )
 
     if task_map:
+        prior_task_map = _canonical_prior_task_map(
+            trigger=trigger,
+            state_dir=state_dir,
+            project_root=project_root,
+            errors=errors,
+        )
+        if prior_task_map:
+            errors.extend(_mandatory_goal_claim_contract_errors(
+                previous=prior_task_map,
+                current=task_map,
+            ))
         validation = validate_task_map_payload(
             dict(task_map),
             require_task_verification=True,
@@ -114,8 +128,9 @@ def evaluate_plan_candidate_preflight(
         errors.extend(_claim_acceptance_command_errors(task_map))
         errors.extend(_rolling_smoke_command_errors(task_map, metadata=metadata))
         if validation.passed:
-            task_items = writer_task_items(dict(task_map))
+            task_items: list[dict[str, Any]] = []
             try:
+                task_items = writer_task_items(dict(task_map))
                 validate_writer_task_items(task_items)
             except (RuntimeError, ValueError) as exc:
                 _error(
@@ -124,20 +139,21 @@ def evaluate_plan_candidate_preflight(
                     "task_map.tasks",
                     str(exc),
                 )
-            policy = writer_policy or {}
-            for message in writer_task_map_policy_errors(
-                task_items,
-                candidate_quality_source=str(
-                    policy.get("candidate_quality_source") or "auto"
-                ),
-                work_units_config=policy.get("work_units"),
-            ):
-                _error(
-                    errors,
-                    "writer_fanout_task_map_policy_failed",
-                    "task_map.tasks",
-                    message,
-                )
+            if task_items:
+                policy = writer_policy or {}
+                for message in writer_task_map_policy_errors(
+                    task_items,
+                    candidate_quality_source=str(
+                        policy.get("candidate_quality_source") or "auto"
+                    ),
+                    work_units_config=policy.get("work_units"),
+                ):
+                    _error(
+                        errors,
+                        "writer_fanout_task_map_policy_failed",
+                        "task_map.tasks",
+                        message,
+                    )
 
     source_index = _source_index_candidate(
         candidates,
@@ -217,6 +233,194 @@ def plan_candidate_writer_policy(config: Any) -> dict[str, Any]:
                 ),
             },
         },
+    }
+
+
+def _canonical_prior_task_map(
+    *,
+    trigger: Mapping[str, Any],
+    state_dir: Path,
+    project_root: Path,
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Load the canonical predecessor bound to a replan, when one exists."""
+
+    package_ref = str(trigger.get("plan_artifact_package_ref") or "").strip()
+    package_digest = str(
+        trigger.get("plan_artifact_package_digest") or ""
+    ).strip()
+    if package_ref or package_digest:
+        if not package_ref or not package_digest:
+            _error(
+                errors,
+                "canonical_plan_package_binding_incomplete",
+                "trigger_payload.plan_artifact_package_ref",
+                "canonical Plan Package requires both ref and digest",
+            )
+            return {}
+        try:
+            package = hydrate_plan_artifact_package(
+                state_dir,
+                {"ref": package_ref, "sha256": package_digest},
+            )
+            descriptor = next(
+                (
+                    dict(port)
+                    for port in [
+                        *package.get("produced", []),
+                        *package.get("inherited", []),
+                    ]
+                    if isinstance(port, Mapping)
+                    and str(port.get("logical_name") or "") == "task_map"
+                ),
+                None,
+            )
+            if descriptor is None:
+                raise ValueError("canonical Plan Package has no task_map port")
+            return _load_bound_task_map(
+                descriptor,
+                state_dir=state_dir,
+                project_root=project_root,
+            )
+        except Exception as exc:
+            _error(
+                errors,
+                "canonical_plan_package_unreadable",
+                "trigger_payload.plan_artifact_package_ref",
+                str(exc),
+            )
+            return {}
+
+    descriptors = trigger.get("previous_plan_candidate_refs")
+    descriptors = descriptors if isinstance(descriptors, list) else []
+    for descriptor in reversed(descriptors):
+        if not isinstance(descriptor, Mapping):
+            continue
+        if str(descriptor.get("kind") or "") != "plan_candidate_task_map":
+            continue
+        try:
+            return _load_bound_task_map(
+                descriptor,
+                state_dir=state_dir,
+                project_root=project_root,
+            )
+        except Exception as exc:
+            _error(
+                errors,
+                "previous_plan_task_map_unreadable",
+                "trigger_payload.previous_plan_candidate_refs",
+                str(exc),
+            )
+            return {}
+    return {}
+
+
+def _load_bound_task_map(
+    descriptor: Mapping[str, Any],
+    *,
+    state_dir: Path,
+    project_root: Path,
+) -> dict[str, Any]:
+    ref = str(descriptor.get("ref") or "").strip()
+    expected = str(
+        descriptor.get("sha256") or descriptor.get("digest") or ""
+    ).strip()
+    if not ref or not expected:
+        raise ValueError("task-map descriptor requires ref and sha256")
+    path = resolve_artifact_file(
+        ref,
+        project_root=project_root,
+        state_dir=state_dir,
+    )
+    raw = path.read_bytes()
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != expected:
+        raise ValueError(
+            f"task-map digest mismatch for {ref!r}: "
+            f"expected {expected}, got {actual}"
+        )
+    return load_task_map(path)
+
+
+def _mandatory_goal_claim_contract_errors(
+    *,
+    previous: Mapping[str, Any],
+    current: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Reject silent weakening of an inherited mandatory Goal contract."""
+
+    previous_claims = _goal_claims_by_id(previous, mandatory_only=True)
+    current_claims = _goal_claims_by_id(current, mandatory_only=False)
+    errors: list[dict[str, str]] = []
+    for claim_id, before in previous_claims.items():
+        after = current_claims.get(claim_id)
+        if after is None:
+            _error(
+                errors,
+                "mandatory_goal_claim_contract_removed",
+                f"task_map.goal_claims[{claim_id}]",
+                "canonical mandatory Goal claim is missing from the replan",
+            )
+            continue
+        before_contract = _goal_claim_contract(before)
+        after_contract = _goal_claim_contract(after)
+        changed = [
+            field
+            for field, expected in before_contract.items()
+            if after_contract.get(field) != expected
+        ]
+        if changed:
+            _error(
+                errors,
+                "mandatory_goal_claim_contract_rewritten",
+                f"task_map.goal_claims[{claim_id}]",
+                "canonical mandatory Goal claim changed fields: "
+                + ", ".join(changed),
+            )
+    return errors
+
+
+def _goal_claims_by_id(
+    task_map: Mapping[str, Any],
+    *,
+    mandatory_only: bool,
+) -> dict[str, Mapping[str, Any]]:
+    claims: dict[str, Mapping[str, Any]] = {}
+    for item in task_map.get("goal_claims", []):
+        if not isinstance(item, Mapping):
+            continue
+        claim_id = str(item.get("goal_claim_id") or item.get("id") or "").strip()
+        if not claim_id or (mandatory_only and not bool(item.get("mandatory", True))):
+            continue
+        claims[claim_id] = item
+    return claims
+
+
+def _goal_claim_contract(claim: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "statement": str(
+            claim.get("statement")
+            or claim.get("text")
+            or claim.get("claim")
+            or ""
+        ).strip(),
+        "mandatory": bool(claim.get("mandatory", True)),
+        "acceptance_ids": sorted({
+            str(value).strip()
+            for value in claim.get("acceptance_ids", [])
+            if str(value).strip()
+        }),
+        "verification_command_ids": sorted({
+            str(value).strip()
+            for value in claim.get("verification_command_ids", [])
+            if str(value).strip()
+        }),
+        "verification_owner": str(
+            claim.get("verification_owner") or ""
+        ).strip(),
+        "verification_tier": str(
+            claim.get("verification_tier") or ""
+        ).strip(),
     }
 
 
@@ -515,7 +719,28 @@ def _claim_acceptance_command_errors(task_map: Mapping[str, Any]) -> list[dict[s
                 for value in criterion.get("verification_command_ids", [])
                 if str(value).strip()
             ]
-            if not refs:
+            immutable_baseline = (
+                str(criterion.get("evidence_mode") or "")
+                == "immutable_baseline_only"
+            )
+            if immutable_baseline:
+                if refs:
+                    _error(
+                        errors,
+                        "immutable_baseline_command_refs_present",
+                        f"{path}.verification_command_ids",
+                        "immutable E2E baseline must be command-free; keep downstream "
+                        "runtime audits outside this criterion's command ids",
+                    )
+                if not _is_pinned_immutable_baseline(criterion):
+                    _error(
+                        errors,
+                        "immutable_baseline_evidence_unpinned",
+                        f"{path}.evidence_refs",
+                        "immutable E2E baseline requires tier e2e, a pinned git commit, "
+                        "and retained artifact evidence",
+                    )
+            elif not refs:
                 _error(errors, "acceptance_command_missing", f"{path}.verification_command_ids", "mandatory acceptance criterion requires command ids")
             for command_id in refs:
                 if command_id not in command_ids:
@@ -530,6 +755,36 @@ def _claim_acceptance_command_errors(task_map: Mapping[str, Any]) -> list[dict[s
                 if not str(command.get(field) or "").strip():
                     _error(errors, f"command_{field}_missing", f"{task_id}.validation.commands[{command_id}].{field}", f"verification command requires {field}")
     return errors
+
+
+def _is_pinned_immutable_baseline(criterion: Mapping[str, Any]) -> bool:
+    """Allow command-free E2E claims only when immutable evidence is pinned."""
+
+    if (
+        str(criterion.get("evidence_mode") or "")
+        != "immutable_baseline_only"
+        or str(criterion.get("verification_tier") or "") != "e2e"
+    ):
+        return False
+    evidence_refs = {
+        str(value).strip()
+        for value in criterion.get("evidence_refs", [])
+        if str(value).strip()
+    }
+    pinned_commits = [
+        value.removeprefix("git:")
+        for value in evidence_refs
+        if value.startswith("git:")
+    ]
+    has_pinned_commit = any(
+        len(value) in {40, 64}
+        and all(character in "0123456789abcdef" for character in value.lower())
+        for value in pinned_commits
+    )
+    has_artifact_evidence = any(
+        value.startswith("artifacts/") for value in evidence_refs
+    )
+    return has_pinned_commit and has_artifact_evidence
 
 
 def _command_rows(task: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -617,8 +872,22 @@ def _rolling_smoke_command_errors(
     return errors
 
 
+def rolling_smoke_command_errors(
+    task_map: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Expose the candidate rolling-smoke policy for revised task maps."""
+
+    return _rolling_smoke_command_errors(task_map, metadata=metadata)
+
+
 def _error(errors: list[dict[str, str]], code: str, field: str, message: str) -> None:
     errors.append({"code": code, "field": field, "message": message})
 
 
-__all__ = ["SCHEMA_VERSION", "evaluate_plan_candidate_preflight"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "evaluate_plan_candidate_preflight",
+    "rolling_smoke_command_errors",
+]

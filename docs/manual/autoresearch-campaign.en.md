@@ -22,7 +22,7 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch campaign plan \
   --campaign full-validation \
   --output-dir /tmp/zaofu-ar-campaign-plan \
   --worktree-root /tmp/zaofu-ar-campaign \
-  --config examples/dev-codex-backends.yaml
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 ```
 
 Add `--no-tmux` when the generated commands should not use an outer supervisor.
@@ -47,13 +47,13 @@ Add `--no-tmux` when the generated commands should not use an outer supervisor.
 ### Phase 0: Provider-Free Preflight
 
 ```bash
-uv run zf validate --path examples/dev-codex-backends.yaml
+uv run zf validate --path examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 PYTHONPATH="$(pwd)/src" uv run pytest -q tests/test_autoresearch_campaign.py
 uv run zf autoresearch campaign plan \
   --campaign full-validation \
   --output-dir /tmp/zf-ar-full-validation-campaign-plan \
   --worktree-root /tmp/zf-ar-full-validation-wt \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --no-tmux
 ```
 

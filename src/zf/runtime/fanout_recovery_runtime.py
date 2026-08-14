@@ -7,6 +7,195 @@ import json
 from zf.core.events.model import ZfEvent
 
 
+def recover_unrecorded_reader_fanout_results(runtime) -> None:
+    """Reconcile reader results in restart-safe, cheapest-first order."""
+
+    from zf.runtime.reader_fanout_recovery_snapshot import (
+        build_reader_fanout_recovery_snapshot,
+        event_log_snapshot_token,
+    )
+
+    try:
+        from zf.runtime.event_window import read_runtime_events
+
+        events = read_runtime_events(runtime.event_log, runtime.state_dir)
+    except Exception:
+        return
+    event_token = event_log_snapshot_token(runtime.event_log)
+    runtime._recover_durable_fanout_aggregate_results(events)
+    if event_log_snapshot_token(runtime.event_log) != event_token:
+        try:
+            events = read_runtime_events(runtime.event_log, runtime.state_dir)
+        except Exception:
+            return
+    if runtime._resume_unstarted_reader_fanouts(events):
+        try:
+            events = read_runtime_events(runtime.event_log, runtime.state_dir)
+        except Exception:
+            return
+    if runtime._resume_unrecorded_reader_synth_results(events):
+        try:
+            events = read_runtime_events(runtime.event_log, runtime.state_dir)
+        except Exception:
+            return
+
+    recovery_snapshot = build_reader_fanout_recovery_snapshot(runtime, events)
+    if not recovery_snapshot.consistent:
+        return
+    if not has_nonterminal_reader_fanouts(
+        runtime,
+        recovery_snapshot=recovery_snapshot,
+    ):
+        return
+    for recover in (
+        runtime._recover_pending_reader_fanout_dispatches,
+        runtime._recover_lost_reader_fanout_dispatches,
+        runtime._recover_lost_fanout_synth_dispatches,
+        runtime._resume_unrecorded_reader_fanout_results,
+    ):
+        if recover(events, recovery_snapshot=recovery_snapshot):
+            # One immutable event/manifest snapshot owns one recovery sweep.
+            # A mutation is a new snapshot boundary and is picked up by the
+            # next level-triggered tick instead of rescanning every manifest.
+            return
+    runtime._recover_incomplete_reader_fanout_aggregates(
+        events,
+        recovery_snapshot=recovery_snapshot,
+    )
+
+
+def has_nonterminal_reader_fanouts(
+    runtime,
+    *,
+    recovery_snapshot=None,
+) -> bool:
+    terminal = {"completed", "failed", "timed_out", "cancelled"}
+    if recovery_snapshot is not None:
+        manifests = recovery_snapshot.manifests
+    else:
+        fanout_root = runtime.state_dir / "fanouts"
+        if not fanout_root.exists():
+            return False
+        manifests = (
+            (path.parent.name, runtime._fanout_manifest(path.parent.name))
+            for path in fanout_root.glob("*/manifest.json")
+        )
+    for _fanout_id, manifest in manifests:
+        if not manifest or manifest.get("topology") != "fanout_reader":
+            continue
+        aggregate = (
+            manifest.get("aggregate")
+            if isinstance(manifest.get("aggregate"), dict)
+            else {}
+        )
+        if (
+            str(manifest.get("status") or "") not in terminal
+            and str(aggregate.get("status") or "") not in terminal
+        ):
+            return True
+    return False
+
+
+def task_has_active_writer_fanout_dispatch(runtime, task_id: str) -> bool:
+    task = runtime.task_store.get(task_id)
+    if task is None or not str(task.active_dispatch_id or ""):
+        return False
+    active_dispatch_id = str(task.active_dispatch_id)
+    fanout_root = runtime.state_dir / "fanouts"
+    if not fanout_root.exists():
+        return False
+    for manifest_path in fanout_root.glob("*/manifest.json"):
+        manifest = runtime._fanout_manifest(manifest_path.parent.name)
+        if not manifest or manifest.get("topology") != "fanout_writer_scoped":
+            continue
+        aggregate = (
+            manifest.get("aggregate")
+            if isinstance(manifest.get("aggregate"), dict)
+            else {}
+        )
+        if aggregate.get("status") in {
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled",
+        }:
+            continue
+        for child in manifest.get("children", []) or []:
+            if not isinstance(child, dict):
+                continue
+            if (
+                str(child.get("status") or "") == "dispatched"
+                and str(child.get("task_id") or "") == task_id
+                and str(child.get("run_id") or "") == active_dispatch_id
+            ):
+                return True
+    return False
+
+
+def reader_result_replay_events(
+    runtime,
+    events: list[ZfEvent],
+    *,
+    terminal_children: set[tuple[str, str]],
+    recovery_snapshot=None,
+) -> list[ZfEvent]:
+    """Bound result replay to each unresolved child's durable dispatch."""
+
+    event_order = (
+        recovery_snapshot.event_order
+        if recovery_snapshot is not None
+        else {event.id: index for index, event in enumerate(events)}
+    )
+    terminal_statuses = {"completed", "failed", "timed_out", "cancelled"}
+    boundaries: list[int] = []
+    unresolved_children = 0
+    if recovery_snapshot is not None:
+        manifests = recovery_snapshot.manifests
+    else:
+        fanout_root = runtime.state_dir / "fanouts"
+        if not fanout_root.exists():
+            return []
+        manifests = (
+            (path.parent.name, runtime._fanout_manifest(path.parent.name))
+            for path in fanout_root.glob("*/manifest.json")
+        )
+
+    for fanout_id, manifest in manifests:
+        if not manifest or manifest.get("topology") != "fanout_reader":
+            continue
+        aggregate = (
+            manifest.get("aggregate")
+            if isinstance(manifest.get("aggregate"), dict)
+            else {}
+        )
+        if (
+            str(manifest.get("status") or "") in terminal_statuses
+            or str(aggregate.get("status") or "") in terminal_statuses
+        ):
+            continue
+        for child in manifest.get("children", []) or []:
+            if not isinstance(child, dict):
+                continue
+            child_id = str(child.get("child_id") or "")
+            if not child_id:
+                return events
+            if (
+                str(child.get("status") or "") in {"completed", "failed"}
+                and (fanout_id, child_id) in terminal_children
+            ):
+                continue
+            unresolved_children += 1
+            boundary_id = str(child.get("last_event_id") or "")
+            boundary_index = event_order.get(boundary_id)
+            if boundary_index is None:
+                return events
+            boundaries.append(boundary_index)
+
+    if unresolved_children == 0:
+        return []
+    return events[min(boundaries) + 1:]
+
+
 def reader_fanout_superseding_goal_claim(
     events: list[ZfEvent],
     *,
@@ -341,30 +530,107 @@ class FanoutRecoveryRuntimeMixin:
             events = self.event_log.read_all()
         except Exception:
             events = []
+        cancelled_event = None
         for event in reversed(events):
             if event.type != "fanout.cancelled":
                 continue
             payload = event.payload if isinstance(event.payload, dict) else {}
             if str(payload.get("fanout_id") or "") == fanout_id:
-                return
-        self.event_writer.append(ZfEvent(
-            type="fanout.cancelled",
-            actor="zf-cli",
-            payload={
-                "fanout_id": fanout_id,
-                "trace_id": str(manifest.get("trace_id") or ""),
-                "stage_id": str(manifest.get("stage_id") or ""),
-                "trigger_event_id": str(manifest.get("trigger_event_id") or ""),
-                "target_ref": str(manifest.get("target_ref") or ""),
-                "pdd_id": str(manifest.get("pdd_id") or ""),
-                "feature_id": str(manifest.get("feature_id") or ""),
-                "task_map_ref": str(manifest.get("task_map_ref") or ""),
-                "reason": reason,
-                "superseded_by": superseded_by,
-                "source": source,
-            },
-            correlation_id=str(manifest.get("trace_id") or "") or None,
-        ))
+                cancelled_event = event
+                break
+        if cancelled_event is None:
+            cancelled_event = self.event_writer.append(ZfEvent(
+                type="fanout.cancelled",
+                actor="zf-cli",
+                payload={
+                    "fanout_id": fanout_id,
+                    "trace_id": str(manifest.get("trace_id") or ""),
+                    "stage_id": str(manifest.get("stage_id") or ""),
+                    "trigger_event_id": str(
+                        manifest.get("trigger_event_id") or ""
+                    ),
+                    "target_ref": str(manifest.get("target_ref") or ""),
+                    "pdd_id": str(manifest.get("pdd_id") or ""),
+                    "feature_id": str(manifest.get("feature_id") or ""),
+                    "task_map_ref": str(manifest.get("task_map_ref") or ""),
+                    "reason": reason,
+                    "superseded_by": superseded_by,
+                    "source": source,
+                },
+                correlation_id=str(manifest.get("trace_id") or "") or None,
+            ))
+        self._cancel_superseded_reader_fanout_operations(
+            manifest=manifest,
+            reason=reason,
+            cancellation_event=cancelled_event,
+        )
+
+    def _cancel_superseded_reader_fanout_operations(
+        self,
+        *,
+        manifest: dict,
+        reason: str,
+        cancellation_event: ZfEvent,
+    ) -> None:
+        """Terminalize durable reader operations owned by a stale fanout."""
+
+        if str(manifest.get("topology") or "") != "fanout_reader":
+            return
+        operation_ids: set[str] = set()
+        for child in manifest.get("children", []) or []:
+            if not isinstance(child, dict):
+                continue
+            child_payload = (
+                child.get("payload")
+                if isinstance(child.get("payload"), dict)
+                else {}
+            )
+            operation_id = str(
+                child.get("operation_id")
+                or child_payload.get("operation_id")
+                or ""
+            ).strip()
+            if operation_id:
+                operation_ids.add(operation_id)
+        if not operation_ids:
+            return
+
+        from zf.runtime.workflow_operation import (
+            TERMINAL_OPERATION_STATUSES,
+            WorkflowOperationService,
+            reduce_workflow_operations,
+        )
+
+        operations = reduce_workflow_operations(self.event_log.read_all())
+        service = WorkflowOperationService(
+            state_dir=self.state_dir,
+            event_log=self.event_log,
+            event_writer=self.event_writer,
+        )
+        correlation_id = str(manifest.get("trace_id") or "")
+        for operation_id in sorted(operation_ids):
+            operation = operations.get(operation_id)
+            if (
+                operation is None
+                or str(operation.get("status") or "")
+                in TERMINAL_OPERATION_STATUSES
+            ):
+                continue
+            request_hash = str(operation.get("request_hash") or "").strip()
+            workflow_run_id = str(
+                operation.get("workflow_run_id") or correlation_id
+            ).strip()
+            if not request_hash or not workflow_run_id:
+                continue
+            service.cancel(
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=workflow_run_id,
+                reason=f"superseded_reader_fanout: {reason}",
+                task_id=str(operation.get("task_id") or ""),
+                causation_id=cancellation_event.id,
+                correlation_id=correlation_id or workflow_run_id,
+            )
 
     def _cancel_orphan_active_fanout_manifests(
         self,

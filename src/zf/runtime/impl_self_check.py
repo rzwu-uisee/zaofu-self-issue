@@ -67,6 +67,7 @@ def normalize_impl_self_check(
         if verification_command_required_for_stage(
             item,
             verification_owner="impl_self_check",
+            task_id=str(contract_snapshot.get("task_id") or ""),
         )
     }
     receipts = _normalize_receipts(
@@ -301,6 +302,7 @@ def completion_payload_template(
         and verification_command_required_for_stage(
             item,
             verification_owner="impl_self_check",
+            task_id=task_id,
         )
     ]
     command_ids = {

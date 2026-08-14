@@ -27,6 +27,17 @@ def rejection_fingerprint(payload: dict[str, Any]) -> str:
                 if str(item).strip()
             )),
         ]
+        if "candidate_worktree_clean" in {
+            str(item).strip().lower() for item in failed_gates
+        }:
+            # Dirty path lists and the diagnostic class changed across R4
+            # runtime versions; older envelopes also omitted the command.
+            # Count the immutable cleanliness gate, not its volatile
+            # porcelain body or evolving diagnostic metadata.
+            text = "\n".join(
+                part for part in (semantic_parts[0], semantic_parts[3]) if part
+            )
+            return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
         diagnostics = [
             str(payload.get("diagnostic_summary") or "").strip(),
             str(

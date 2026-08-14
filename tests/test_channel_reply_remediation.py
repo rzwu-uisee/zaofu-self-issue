@@ -25,6 +25,8 @@ from zf.runtime.channel_reply_remediation import (
     pending_channel_reply_exhausted_actions,
     remediate_channel_replies,
 )
+from zf.runtime.channel_reply_contract import emit_structured_reply_events
+from zf.runtime.channel_projection import project_channel
 from zf.runtime.event_problem_registry import EVENT_PROBLEM_SPECS
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
@@ -72,6 +74,34 @@ def test_failed_reply_is_immediate_redispatch_candidate():
     assert cands[0]["kind"] == "redispatch"
     assert cands[0]["status"] == "failed"
     assert cands[0]["run_generation"] == 1
+
+
+def test_contract_failure_is_immediate_redispatch_candidate():
+    events = [
+        _evt("channel.agent.reply.requested", age=1000),
+        _evt("channel.agent.reply.started", age=990),
+        _evt("channel.agent.reply.completed", age=985),
+        _evt(
+            "channel.agent.reply.failed",
+            age=980,
+            reason=(
+                "channel contribution contract rejected: "
+                "invalid_question_priority:high"
+            ),
+            failure_status="contract_invalid",
+            failure_class="channel_contribution_contract_invalid",
+            retryable=True,
+        ),
+    ]
+
+    candidates = channel_reply_remediation_candidates(events, now=NOW)
+
+    assert len(candidates) == 1
+    assert candidates[0]["kind"] == "redispatch"
+    assert candidates[0]["failure_status"] == "contract_invalid"
+    assert candidates[0]["failure_class"] == (
+        "channel_contribution_contract_invalid"
+    )
 
 
 def test_permanent_provider_failure_exhausts_without_blind_redispatch():
@@ -198,6 +228,34 @@ def test_remediate_redispatches_with_next_generation(tmp_path: Path):
     # Second pass: the re-emitted request is fresh pending — no re-arm storm.
     again = remediate_channel_replies(writer, events=log.read_all(), now=NOW)
     assert again == {"redispatched": [], "exhausted": []}
+
+
+def test_contract_diagnostic_is_carried_to_redispatch(tmp_path: Path):
+    reason = "channel contribution contract rejected: invalid_question_priority:high"
+    log = _seeded_log(tmp_path, [
+        _evt("channel.agent.reply.requested", age=1000),
+        _evt("channel.agent.reply.completed", age=990),
+        _evt(
+            "channel.agent.reply.failed",
+            age=980,
+            reason=reason,
+            failure_status="contract_invalid",
+            failure_class="channel_contribution_contract_invalid",
+            retryable=True,
+        ),
+    ])
+    writer = EventWriter(log)
+
+    remediate_channel_replies(writer, events=log.read_all(), now=NOW)
+
+    requested = [
+        event
+        for event in log.read_all()
+        if event.type == "channel.agent.reply.requested"
+        and event.payload.get("run_generation") == 2
+    ]
+    assert len(requested) == 1
+    assert reason in requested[0].payload["reason"]
 
 
 def test_generation_cap_emits_exhausted_exactly_once(tmp_path: Path):
@@ -419,6 +477,90 @@ def test_tick_housekeeping_self_heals_failed_reply(
                  if e.type == "channel.agent.reply.completed"
                  and e.payload.get("request_id") == REQ]
     assert completed, "persona fake dispatch should complete the redispatched reply"
+
+
+def test_invalid_contribution_self_heals_and_advances_discussion(
+    state_dir: Path,
+    orch: Orchestrator,
+) -> None:
+    """Transport success plus invalid semantics must retry without an operator."""
+
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_channel(log)
+    log.append(ZfEvent(
+        type="channel.discussion.started",
+        actor="channel-discussion",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "roster": [TARGET],
+            "synthesizer": TARGET,
+            "requirement_message_id": "msg-1",
+            "source": "test",
+        },
+    ))
+    log.append(_evt(
+        "channel.agent.reply.requested",
+        status="pending",
+        member_type="persona_agent",
+        backend="fake",
+    ))
+    completed = _evt("channel.agent.reply.completed")
+    log.append(completed)
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=orch.event_writer,
+        channel=project_channel(state_dir, CH) or {},
+        request={
+            "request_id": REQ,
+            "thread_id": "main",
+            "message_id": "msg-1",
+            "target_member_id": TARGET,
+            "run_generation": 1,
+        },
+        message={"message_id": "msg-1"},
+        reply=(
+            '{"channel_contribution":{"summary":"bad priority",'
+            '"questions":[{"id":"q1","question":"Ship?",'
+            '"kind":"owner_decision","priority":"high",'
+            '"target_member_id":"owner"}],"freeze":true}}'
+        ),
+        reply_event_id=completed.id,
+        actor="test",
+        source="test",
+    )
+    failed = next(
+        event
+        for event in log.read_all()
+        if event.type == "channel.agent.reply.failed"
+        and event.payload.get("failure_status") == "contract_invalid"
+    )
+
+    orch.run_once(events=[failed])
+
+    events = log.read_all()
+    generation_two = next(
+        event
+        for event in events
+        if event.type == "channel.agent.reply.completed"
+        and event.payload.get("run_generation") == 2
+    )
+    assert any(
+        event.type == "channel.finding.recorded"
+        and event.payload.get("contract_status") == "structured"
+        and event.payload.get("run_generation") == 2
+        for event in events
+    )
+
+    # EventWatcher delivers the already-emitted terminal event on its next
+    # batch; no operator-authored state event is needed.
+    orch.run_once(events=[generation_two])
+
+    detail = project_channel(state_dir, CH)
+    assert detail is not None
+    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+    assert detail["reply_requests"][0]["run_generation"] == 2
 
 
 def test_cold_tick_drains_durable_queued_replies_without_new_message(

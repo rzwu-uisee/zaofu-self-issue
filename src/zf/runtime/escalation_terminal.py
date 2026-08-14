@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.task.store import TaskStore
+from zf.runtime.run_admission import build_run_admission_projection
 from zf.runtime.run_scope import resolve_run_for_event
 
 
@@ -26,6 +27,7 @@ _RECOVERY_PROGRESS_EVENTS = frozenset({
     "human.resolved",
     "run.goal.completed",
     "run.goal.blocked",
+    "run.goal.updated",
     "workflow.resume.applied",
     "task_map.ready",
     "task_map.amended",
@@ -43,12 +45,7 @@ def converge_unrecoverable_escalations(
 
     rows = list(events)
     emitted = 0
-    terminalized_runs = {
-        str((event.payload or {}).get("run_id") or event.correlation_id or "")
-        for event in rows
-        if event.type in {"run.goal.completed", "run.goal.blocked"}
-        and isinstance(event.payload, dict)
-    }
+    terminalized_runs: set[str] = set()
     for index, escalation in enumerate(rows):
         if escalation.type != "human.escalate":
             continue
@@ -59,7 +56,10 @@ def converge_unrecoverable_escalations(
         run_id = resolve_run_for_event(rows, escalation)
         if not run_id:
             continue
-        if run_id in terminalized_runs or _run_terminal_exists(rows, run_id=run_id):
+        if run_id in terminalized_runs or _run_terminal_exists(
+            rows[index + 1:],
+            run_id=run_id,
+        ):
             continue
         if _recovered_after(rows, index=index, run_id=run_id):
             continue
@@ -318,14 +318,8 @@ def escalation_terminal_metadata(
 
 
 def _run_terminal_exists(events: Iterable[ZfEvent], *, run_id: str) -> bool:
-    for event in events:
-        if event.type not in {"run.goal.completed", "run.goal.blocked"}:
-            continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        event_run_id = str(payload.get("run_id") or event.correlation_id or "")
-        if event_run_id == run_id:
-            return True
-    return False
+    entry = build_run_admission_projection(events).runs.get(run_id)
+    return bool(entry is not None and entry.terminal)
 
 
 def _recovered_after(
@@ -337,6 +331,13 @@ def _recovered_after(
     for event in events[index + 1:]:
         if event.type not in _RECOVERY_PROGRESS_EVENTS:
             continue
+        if event.type == "run.goal.updated":
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if str(payload.get("status") or "").strip() not in {
+                "active",
+                "running",
+            }:
+                continue
         if resolve_run_for_event(events, event) == run_id:
             return True
     return False

@@ -18,6 +18,7 @@ from zf.runtime.channel_contract_artifacts import (
     validate_channel_contract,
 )
 from zf.runtime.channel_context import channel_contribution_index
+from zf.runtime.channel_contribution_repair import reject_contribution_contract
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_deliberation_contract import (
     apply_consensus_review_reply,
@@ -42,7 +43,6 @@ from zf.runtime.channel_reply_parsing import (
     structured_reply_payload_with_error as _structured_reply_payload_with_error,
 )
 from zf.runtime.channel_synthesis_repair import (
-    emit_invalid_contract_finding as _emit_invalid_contract_finding,
     ignore_stale_synthesis_repair as _ignore_stale_synthesis_repair,
     reject_synthesis_contract as _reject_synthesis_contract,
 )
@@ -597,7 +597,7 @@ def _emit_contribution(
         "channel_contribution",
     )
     if not contribution:
-        _emit_invalid_contract_finding(
+        reject_contribution_contract(
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -615,7 +615,7 @@ def _emit_contribution(
         kind="contribution",
     )
     if validation_error:
-        _emit_invalid_contract_finding(
+        reject_contribution_contract(
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -638,7 +638,7 @@ def _emit_contribution(
         source_kind="contribution",
     )
     if question_error:
-        _emit_invalid_contract_finding(
+        reject_contribution_contract(
             writer=writer,
             channel_id=channel_id,
             thread_id=thread_id,
@@ -709,6 +709,11 @@ def _emit_contribution(
             "source_manifest_ref": source_manifest["ref"],
             "source_manifest_digest": source_manifest["sha256"],
             "contract_status": "structured",
+            "request_id": str(request.get("request_id") or ""),
+            "message_id": str(request.get("message_id") or ""),
+            "run_generation": int(request.get("run_generation") or 1),
+            "source_reply_event_id": reply_event_id,
+            "questions_frozen": contribution.get("freeze", True) is not False,
             "source": source,
         },
     )

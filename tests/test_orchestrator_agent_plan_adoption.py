@@ -201,6 +201,7 @@ def _decision(prepared, *, action: str = "adopt") -> dict:
         },
         "decision": action,
         "reason_codes": ["plan_is_complete"],
+        "summary": "The current Plan package covers the admitted goal.",
         "affected_work_units": [],
         "required_followup": "continue" if action == "adopt" else "revise plan",
         "expected_outcome": "writer graph is current",
@@ -362,6 +363,41 @@ def test_equivalent_plan_candidate_event_reuses_pending_operation(
     )
 
 
+def test_same_generation_and_digest_ignore_display_revision_replay(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    trigger, loaded = _candidate(runtime, revision="r1", generation="g1")
+    first = plan_candidate_checkpoint_state(
+        runtime,
+        stage_id="impl-writers",
+        trigger_event=trigger,
+        loaded=loaded,
+        trace_id="run-plan-1",
+    )
+    replay_payload = {**trigger.payload, "plan_revision": "display-r2"}
+    replay = ZfEvent(
+        id="evt-task-map-display-r2",
+        type="task_map.ready",
+        correlation_id="run-plan-1",
+        payload=replay_payload,
+    )
+
+    second = plan_candidate_checkpoint_state(
+        runtime,
+        stage_id="impl-writers",
+        trigger_event=replay,
+        loaded=loaded,
+        trace_id="run-plan-1",
+    )
+
+    assert second.operation_id == first.operation_id
+    assert sum(
+        event.type == "workflow.operation.requested"
+        for event in runtime.event_log.read_all()
+    ) == 1
+
+
 def test_plan_candidate_digest_change_mints_new_operation_identity(
     tmp_path: Path,
 ) -> None:
@@ -384,6 +420,12 @@ def test_plan_candidate_digest_change_mints_new_operation_identity(
 
     assert second.operation_id != first.operation_id
     assert second.status == "requested"
+    from zf.runtime.workflow_operation import load_workflow_operation
+
+    previous = load_workflow_operation(runtime.event_log, first.operation_id)
+    assert previous is not None
+    assert previous["status"] == "superseded"
+    assert second.operation_id in previous["reason"]
     assert not any(
         event.type == "workflow.operation.blocked"
         and event.payload.get("reason") == "request_hash_divergence"

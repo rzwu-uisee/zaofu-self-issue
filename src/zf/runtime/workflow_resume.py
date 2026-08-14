@@ -8,7 +8,7 @@ import os
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -19,7 +19,15 @@ from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.core.workflow.graph import compile_workflow_graph
 from zf.runtime.candidate_rework import _feedback_lines_from_payload
+from zf.runtime.failure_kind import (
+    FAILURE_KIND_INFRA,
+    failure_kind_from_payload,
+    is_fanout_runtime_timeout_payload,
+)
 from zf.runtime.role_context import RoleContext, infer_role_context
+from zf.runtime.workflow_operation_task_pipeline import (
+    find_task_pipeline_budget_amendment,
+)
 from zf.runtime.workflow_reconciler import WorkflowGraphReconciler
 
 
@@ -80,6 +88,11 @@ class WorkflowBatchResumeCheckpoint:
     fanout_id: str = ""
     stage_id: str = ""
     trace_id: str = ""
+    workflow_run_id: str = ""
+    flow_kind: str = ""
+    request_kind: str = ""
+    candidate_snapshot_event_id: str = ""
+    freeze_id: str = ""
     task_map_ref: str = ""
     source_index_ref: str = ""
     source_commit: str = ""
@@ -114,6 +127,7 @@ class WorkflowOperationResumeCheckpoint:
     status: str
     last_event_id: str
     safe_resume_action: str
+    recovery_decision_event_id: str = ""
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,10 +173,23 @@ def build_workflow_resume_projection(
         for item in operation_checkpoints
         if item.safe_resume_action != "no_action"
     ]
+    resumable_operation_ids = {
+        item.operation_id
+        for item in operation_checkpoints
+        if item.safe_resume_action != "no_action"
+    }
+    classified_operation_ids = {
+        item.operation_id for item in operation_checkpoints
+    }
     resumable_operations = [
         row for row in workflow_operations.values()
-        if str(row.get("status") or "")
-        in {"requested", "reserved", "running", "suspended"}
+        if str(row.get("operation_id") or "") in classified_operation_ids
+        and (
+            str(row.get("status") or "")
+            in {"requested", "reserved", "running", "suspended"}
+            or str(row.get("operation_id") or "")
+            in resumable_operation_ids
+        )
     ]
     return {
         "schema_version": WORKFLOW_RESUME_SCHEMA_VERSION,
@@ -210,20 +237,83 @@ def build_workflow_operation_resume_checkpoints(
     checkpoints: list[WorkflowOperationResumeCheckpoint] = []
     for operation in operations.values():
         status = str(operation.get("status") or "")
-        if status not in {"requested", "reserved", "running", "suspended"}:
+        task_pipeline_stage = str(
+            operation.get("task_pipeline_stage") or ""
+        ).strip()
+        legacy_cancelled_restart = (
+            status == "cancelled"
+            and bool(task_pipeline_stage)
+            and str(operation.get("reason") or "")
+            == "workflow_resume_cancelled_interrupted_operation"
+        )
+        budget_amendment = find_task_pipeline_budget_amendment(
+            event_list,
+            operation,
+        )
+        if (
+            status not in {"requested", "reserved", "running", "suspended"}
+            and not legacy_cancelled_restart
+            and budget_amendment is None
+        ):
+            continue
+        if _later_successful_task_pipeline_operation(
+            operation,
+            operations.values(),
+        ):
             continue
         operation_id = str(operation.get("operation_id") or "")
-        live_attempt = any(
-            str(row.get("operation_id") or "") == operation_id
-            and str(row.get("status") or "")
-            in {"prepared", "delivering", "sent"}
-            and _resume_iso_epoch(str(row.get("lease_expires_at") or "")) > now
-            for row in attempts
+        live_attempt = _live_operation_attempt(
+            attempts,
+            operation_id=operation_id,
+            now_epoch=now,
         )
-        if status == "suspended":
+        newer_live_attempt = _live_operation_attempt(
+            attempts,
+            operation_id=operation_id,
+            now_epoch=now,
+            created_after_epoch=_resume_iso_epoch(
+                str(operation.get("last_event_at") or "")
+            ),
+        )
+        if budget_amendment is not None and live_attempt is not None:
+            action = "no_action"
+            reason = "budget-blocked operation already has a live TaskAttempt"
+        elif budget_amendment is not None:
+            action = "redrive_budget_amended_task_pipeline_operation"
+            reason = (
+                "owner amended every exceeded budget dimension after the "
+                "Task Pipeline operation was blocked"
+            )
+        elif status == "suspended" and newer_live_attempt is not None:
+            action = "no_action"
+            reason = (
+                "operation has a newer live TaskAttempt after interruption"
+            )
+        elif legacy_cancelled_restart:
+            action = "redrive_cancelled_interrupted_task_pipeline_operation"
+            reason = (
+                "legacy workflow resume cancelled an operation that had been "
+                "interrupted by an explicit runtime stop"
+            )
+        elif (
+            status == "suspended"
+            and task_pipeline_stage
+            and str(operation.get("reason") or "")
+            in {
+                "graceful_stop",
+                "fast_stop",
+                "task_pipeline_attempt_lease_expired",
+            }
+        ):
+            action = "redrive_interrupted_task_pipeline_operation"
+            reason = (
+                "Task Pipeline operation was interrupted by a replayable "
+                "runtime stop and retains request identity"
+            )
+        elif status == "suspended":
             action = "cancel_interrupted_operation"
             reason = "operation was interrupted by an explicit runtime stop"
-        elif live_attempt:
+        elif live_attempt is not None:
             action = "no_action"
             reason = "operation has a live scheduler-owned TaskAttempt lease"
         else:
@@ -236,6 +326,7 @@ def build_workflow_operation_resume_checkpoints(
                 request_hash,
                 str(operation.get("last_event_id") or ""),
                 action,
+                budget_amendment.id if budget_amendment is not None else "",
             )).encode("utf-8")
         ).hexdigest()[:24]
         checkpoints.append(WorkflowOperationResumeCheckpoint(
@@ -248,9 +339,49 @@ def build_workflow_operation_resume_checkpoints(
             status=status,
             last_event_id=str(operation.get("last_event_id") or ""),
             safe_resume_action=action,
+            recovery_decision_event_id=(
+                budget_amendment.id if budget_amendment is not None else ""
+            ),
             reason=reason,
         ))
     return checkpoints
+
+
+def _later_successful_task_pipeline_operation(
+    operation: Mapping[str, Any],
+    operations: Any,
+) -> str:
+    """Return a later same-stage success that makes this operation historical."""
+
+    operation_id = str(operation.get("operation_id") or "")
+    workflow_run_id = str(operation.get("workflow_run_id") or "")
+    task_id = str(operation.get("task_id") or "")
+    stage = str(operation.get("task_pipeline_stage") or "")
+    last_event_epoch = _resume_iso_epoch(
+        str(operation.get("last_event_at") or "")
+    )
+    if not all((operation_id, workflow_run_id, task_id, stage)):
+        return ""
+    for candidate in operations:
+        candidate_id = str(candidate.get("operation_id") or "")
+        if not candidate_id or candidate_id == operation_id:
+            continue
+        if str(candidate.get("workflow_run_id") or "") != workflow_run_id:
+            continue
+        if str(candidate.get("task_id") or "") != task_id:
+            continue
+        if str(candidate.get("task_pipeline_stage") or "") != stage:
+            continue
+        if str(candidate.get("status") or "") != "settled":
+            continue
+        if str(candidate.get("semantic_verdict") or "") != "passed":
+            continue
+        if _resume_iso_epoch(str(candidate.get("last_event_at") or "")) <= (
+            last_event_epoch
+        ):
+            continue
+        return candidate_id
+    return ""
 
 
 def _task_attempt_rows(state_dir: Path) -> list[dict[str, Any]]:
@@ -266,6 +397,37 @@ def _task_attempt_rows(state_dir: Path) -> list[dict[str, Any]]:
         for row in (attempts or {}).values()
         if isinstance(row, dict)
     ]
+
+
+def _live_operation_attempt(
+    attempts: list[dict[str, Any]],
+    *,
+    operation_id: str,
+    now_epoch: float,
+    created_after_epoch: float = 0.0,
+) -> dict[str, Any] | None:
+    candidates = [
+        row
+        for row in attempts
+        if str(row.get("operation_id") or "") == operation_id
+        and str(row.get("status") or "")
+        in {"prepared", "delivering", "sent"}
+        and _resume_iso_epoch(str(row.get("lease_expires_at") or ""))
+        > now_epoch
+        and (
+            created_after_epoch <= 0.0
+            or _resume_iso_epoch(str(row.get("created_at") or ""))
+            > created_after_epoch
+        )
+    ]
+    return max(
+        candidates,
+        key=lambda row: (
+            _resume_iso_epoch(str(row.get("created_at") or "")),
+            int(row.get("ordinal") or 0),
+        ),
+        default=None,
+    )
 
 
 def _resume_iso_epoch(value: str) -> float:
@@ -358,6 +520,7 @@ def build_workflow_resume_checkpoints(
                 if checkpoint.safe_resume_action != "no_action":
                     stall_suppression = _filing_suppression_reason(
                         task_events=task_events,
+                        all_events=event_list,
                         progress=progress,
                         event_sets=graph.event_sets,
                         inflight_fanouts=inflight_fanouts,
@@ -428,6 +591,7 @@ def build_workflow_resume_checkpoints(
         if not suppression and action not in {"no_action", ""}:
             suppression = _filing_suppression_reason(
                 task_events=task_events,
+                all_events=event_list,
                 progress=progress,
                 event_sets=graph.event_sets,
                 inflight_fanouts=inflight_fanouts,
@@ -517,6 +681,7 @@ def _filing_guard_indexes(events: list[ZfEvent]) -> tuple[dict[str, dict], set[s
 def _filing_suppression_reason(
     *,
     task_events: list[ZfEvent],
+    all_events: list[ZfEvent],
     progress: ZfEvent,
     event_sets: object,
     inflight_fanouts: dict[str, dict],
@@ -544,11 +709,51 @@ def _filing_suppression_reason(
             "task closeout evidence present with no later failure; "
             "stall signal is a false positive"
         )
+    if _task_pipeline_owns_next_stage(all_events, progress):
+        return (
+            "blocking Task Pipeline owns the next stage; legacy workflow "
+            "resume must not file a parallel gate checkpoint"
+        )
     payload = progress.payload if isinstance(progress.payload, dict) else {}
     fanout_id = str(payload.get("fanout_id") or "")
     if fanout_id and fanout_id in inflight_fanouts:
         return f"waiting_for_sibling: fanout {fanout_id} still aggregating"
     return ""
+
+
+def _task_pipeline_owns_next_stage(
+    events: list[ZfEvent],
+    progress: ZfEvent,
+) -> bool:
+    """Recognize a typed Impl result owned by an admitted v4 generation."""
+
+    if progress.type != "dev.build.done" or not progress.task_id:
+        return False
+    payload = _payload(progress)
+    generation = str(payload.get("task_map_generation") or "").strip()
+    workflow_run_id = str(payload.get("workflow_run_id") or "").strip()
+    if (
+        str(payload.get("task_pipeline_stage") or "").strip() != "impl"
+        or not generation
+        or not workflow_run_id
+    ):
+        return False
+    for event in reversed(events):
+        if event.type != "task.pipeline.generation.admitted":
+            continue
+        admitted = _payload(event)
+        if (
+            str(admitted.get("task_map_generation") or "").strip() == generation
+            and str(admitted.get("workflow_run_id") or "").strip()
+            == workflow_run_id
+            and progress.task_id in {
+                str(value).strip()
+                for value in admitted.get("task_ids") or []
+                if str(value).strip()
+            }
+        ):
+            return True
+    return False
 
 
 def build_workflow_batch_resume_checkpoints(
@@ -593,14 +798,42 @@ def build_workflow_batch_resume_checkpoints(
             status = str(payload.get("status") or "completed")
             if status == "completed":
                 continue
+            candidate_trigger = _candidate_trigger_for_failed_fanout(
+                event_list,
+                event,
+            )
+            candidate_runtime_retry = (
+                candidate_trigger is not None
+                and _candidate_runtime_failure_only(event_list, event)
+            )
             if _reader_stage_replan_owns_failed_batch(event_list, event):
-                continue
+                if not candidate_runtime_retry:
+                    continue
+            anchor = _anchor_for_event(event, anchors)
+            if candidate_trigger is not None:
+                candidate_trigger = _candidate_authority_event(
+                    event_list,
+                    candidate_trigger,
+                )
+                candidate_anchor = _payload(candidate_trigger)
+                anchor = {
+                    **anchor,
+                    **candidate_anchor,
+                    "candidate_snapshot_event_id": str(
+                        candidate_anchor.get("candidate_snapshot_event_id")
+                        or candidate_trigger.id
+                    ),
+                }
             checkpoint = _batch_checkpoint_from_event(
                 event,
                 source_event_type=event.type,
-                safe_resume_action=_batch_safe_action(payload),
+                safe_resume_action=(
+                    "reemit_candidate_ready"
+                    if candidate_runtime_retry
+                    else _batch_safe_action(payload)
+                ),
                 evidence_event_ids=[event.id],
-                anchor=_anchor_for_event(event, anchors),
+                anchor=anchor,
             )
             if checkpoint.fanout_id:
                 aggregates[checkpoint.fanout_id] = checkpoint
@@ -719,6 +952,114 @@ def _reader_stage_replan_owns_failed_batch(
     return bool(result_events)
 
 
+def _candidate_trigger_for_failed_fanout(
+    events: list[ZfEvent],
+    aggregate_event: ZfEvent,
+) -> ZfEvent | None:
+    fanout_id = str(_payload(aggregate_event).get("fanout_id") or "").strip()
+    if not fanout_id:
+        return None
+    started = next(
+        (
+            event
+            for event in reversed(events)
+            if event.type == "fanout.started"
+            and str(_payload(event).get("fanout_id") or "") == fanout_id
+        ),
+        None,
+    )
+    if started is None:
+        return None
+    trigger_event_id = str(
+        _payload(started).get("trigger_event_id") or ""
+    ).strip()
+    if not trigger_event_id:
+        return None
+    return next(
+        (
+            event
+            for event in reversed(events)
+            if event.id == trigger_event_id and event.type == "candidate.ready"
+        ),
+        None,
+    )
+
+
+def _runtime_failure_findings_only(payload: Mapping[str, Any]) -> bool:
+    findings = payload.get("findings")
+    categories = {
+        str(item.get("category") or "").strip()
+        for item in findings or []
+        if isinstance(item, Mapping)
+    } if isinstance(findings, list) else set()
+    return bool(categories) and categories == {"runtime_failure"}
+
+
+def _candidate_runtime_failure_only(
+    events: list[ZfEvent],
+    aggregate_event: ZfEvent,
+) -> bool:
+    """Classify candidate reader failure as runtime-only, including old logs."""
+
+    payload = _payload(aggregate_event)
+    fanout_id = str(payload.get("fanout_id") or "").strip()
+    child_failures = [
+        event
+        for event in events
+        if event.type.endswith(".child.failed")
+        and str(_payload(event).get("fanout_id") or "") == fanout_id
+    ] if fanout_id else []
+    from zf.runtime.verification_result import verification_result_from_payload
+
+    if any(
+        str(verification_result_from_payload(_payload(event)).get("verdict") or "")
+        in {"rejected", "blocked"}
+        for event in child_failures
+    ):
+        return False
+    if failure_kind_from_payload(payload) == FAILURE_KIND_INFRA:
+        return True
+    if _runtime_failure_findings_only(payload):
+        return True
+    if not fanout_id:
+        return False
+    return bool(child_failures) and all(
+        event.actor == "zf-cli"
+        and is_fanout_runtime_timeout_payload(_payload(event))
+        for event in child_failures
+    )
+
+
+def _candidate_authority_event(
+    events: list[ZfEvent],
+    candidate: ZfEvent,
+) -> ZfEvent:
+    """Follow recovery wrappers to their immutable candidate freeze."""
+
+    by_id = {
+        event.id: event
+        for event in events
+        if event.type == "candidate.ready"
+    }
+    current = candidate
+    visited: set[str] = set()
+    while current.id not in visited:
+        visited.add(current.id)
+        body = _payload(current)
+        if str(body.get("schema_version") or "") == "candidate-freeze-receipt.v1":
+            return current
+        parent_id = str(
+            body.get("candidate_snapshot_event_id")
+            or body.get("candidate_event_id")
+            or ""
+        ).strip()
+        parent = by_id.get(parent_id)
+        if parent is None:
+            break
+        current = parent
+    return candidate
+
+
 def _task_ref_repair_checkpoint(
     task: Task,
     events: list[ZfEvent],
@@ -800,13 +1141,22 @@ def _batch_checkpoint_from_event(
     safe_resume_action: str,
     evidence_event_ids: list[str],
     aggregate: WorkflowBatchResumeCheckpoint | None = None,
-    anchor: dict[str, str] | None = None,
+    anchor: dict[str, Any] | None = None,
 ) -> WorkflowBatchResumeCheckpoint:
     payload = _payload(event)
     anchor = anchor or {}
     fanout_id = _first_nonempty(payload.get("fanout_id"), aggregate.fanout_id if aggregate else "")
-    pdd_id = _first_nonempty(payload.get("pdd_id"), aggregate.pdd_id if aggregate else "")
-    feature_id = _first_nonempty(payload.get("feature_id"), aggregate.feature_id if aggregate else "")
+    pdd_id = _first_nonempty(
+        payload.get("pdd_id"),
+        anchor.get("pdd_id"),
+        aggregate.pdd_id if aggregate else "",
+    )
+    feature_id = _first_nonempty(
+        payload.get("feature_id"),
+        anchor.get("feature_id"),
+        aggregate.feature_id if aggregate else "",
+        pdd_id,
+    )
     stage_id = _first_nonempty(payload.get("stage_id"), aggregate.stage_id if aggregate else "")
     source_commit = _first_nonempty(
         payload.get("source_commit"),
@@ -833,11 +1183,16 @@ def _batch_checkpoint_from_event(
         anchor.get("candidate_ref"),
         aggregate.candidate_ref if aggregate else "",
     )
-    completed_task_ids = _unique_strings([
-        *_string_list(aggregate.completed_task_ids if aggregate else []),
-        *_string_list(payload.get("completed_task_ids")),
-        *_string_list(payload.get("task_ids")),
-    ])
+    if safe_resume_action == "reemit_candidate_ready" and _string_list(
+        anchor.get("completed_task_ids")
+    ):
+        completed_task_ids = _string_list(anchor.get("completed_task_ids"))
+    else:
+        completed_task_ids = _unique_strings([
+            *_string_list(aggregate.completed_task_ids if aggregate else []),
+            *_string_list(payload.get("completed_task_ids")),
+            *_string_list(payload.get("task_ids")),
+        ])
     failed_task_ids = (
         []
         if _candidate_environment_retry_only(payload)
@@ -883,6 +1238,34 @@ def _batch_checkpoint_from_event(
             event.correlation_id,
             anchor.get("trace_id"),
             aggregate.trace_id if aggregate else "",
+        ),
+        workflow_run_id=_first_nonempty(
+            payload.get("workflow_run_id"),
+            payload.get("run_id"),
+            anchor.get("workflow_run_id"),
+            anchor.get("run_id"),
+            event.correlation_id,
+            aggregate.workflow_run_id if aggregate else "",
+        ),
+        flow_kind=_first_nonempty(
+            payload.get("flow_kind"),
+            anchor.get("flow_kind"),
+            aggregate.flow_kind if aggregate else "",
+        ),
+        request_kind=_first_nonempty(
+            payload.get("request_kind"),
+            anchor.get("request_kind"),
+            aggregate.request_kind if aggregate else "",
+        ),
+        candidate_snapshot_event_id=_first_nonempty(
+            payload.get("candidate_snapshot_event_id"),
+            anchor.get("candidate_snapshot_event_id"),
+            aggregate.candidate_snapshot_event_id if aggregate else "",
+        ),
+        freeze_id=_first_nonempty(
+            payload.get("freeze_id"),
+            anchor.get("freeze_id"),
+            aggregate.freeze_id if aggregate else "",
         ),
         task_map_ref=_first_nonempty(
             payload.get("task_map_ref"),
@@ -956,6 +1339,15 @@ def _escalated_batch_checkpoint(
         ),
         stage_id=base.stage_id,
         trace_id=_first_nonempty(payload.get("trace_id"), event.correlation_id, base.trace_id),
+        workflow_run_id=_first_nonempty(
+            payload.get("workflow_run_id"),
+            payload.get("run_id"),
+            base.workflow_run_id,
+        ),
+        flow_kind=_first_nonempty(payload.get("flow_kind"), base.flow_kind),
+        request_kind=_first_nonempty(payload.get("request_kind"), base.request_kind),
+        candidate_snapshot_event_id=base.candidate_snapshot_event_id,
+        freeze_id=base.freeze_id,
         task_map_ref=base.task_map_ref,
         source_index_ref=base.source_index_ref,
         source_commit=base.source_commit,
@@ -1151,23 +1543,41 @@ def _candidate_reverify_checkpoint_recovered(
     """Require evidence from this recovery action, not legacy closeout."""
 
     source_seen = False
-    for event in events:
+    latest_candidate_id = ""
+    latest_candidate_idx = -1
+    terminal_recovery = False
+    for idx, event in enumerate(events):
         if event.id == checkpoint.source_event_id:
             source_seen = True
             continue
         if not source_seen:
             continue
         payload = _payload(event)
-        if not _payload_has_resume_marker(payload, checkpoint.checkpoint_id):
-            continue
-        if event.type in {
-            WORKFLOW_RESUME_APPLIED_EVENT,
-            "candidate.ready",
-            "test.passed",
-            "run.completed",
-        }:
-            return True
-    return False
+        if _payload_has_resume_marker(payload, checkpoint.checkpoint_id):
+            if event.type == "candidate.ready":
+                latest_candidate_id = event.id
+                latest_candidate_idx = idx
+            elif event.type in {"test.passed", "run.completed"}:
+                terminal_recovery = True
+    if terminal_recovery:
+        return True
+    if not latest_candidate_id:
+        return False
+    if any(
+        event.type == "fanout.started"
+        and str(_payload(event).get("trigger_event_id") or "")
+        == latest_candidate_id
+        for event in events[latest_candidate_idx + 1:]
+    ):
+        return True
+    return not any(
+        event.type == "orchestrator.decision.recorded"
+        and idx > latest_candidate_idx
+        and str(_payload(event).get("trigger_event_id") or "")
+        == latest_candidate_id
+        and str(_payload(event).get("outcome_reason") or "") == "out_of_scope"
+        for idx, event in enumerate(events)
+    )
 
 
 def _queued_children_checkpoint_recovered(
@@ -1538,6 +1948,10 @@ def _batch_resume_anchors(events: list[ZfEvent]) -> dict[str, dict[str, str]]:
         "feature_id",
         "fanout_id",
         "trace_id",
+        "workflow_run_id",
+        "flow_kind",
+        "request_kind",
+        "freeze_id",
         "task_map_ref",
         "source_index_ref",
         "source_commit",

@@ -44,12 +44,18 @@ amendment are separate role capabilities supplied by the workflow profile.
 4. Add independent acceptance, regression, integration, browser, provider, or
    packaging probes required by the task's risk and verification tier. Receipt
    reuse never waives semantic AC review or an independent high-risk probe.
-5. Map every mandatory acceptance criterion to evidence. Passing commands do
-   not close uncovered criteria. For `e2e` / `real_e2e`, inspect the receipt's
-   runner and method identity and confirm that the command exercised the
-   contract's real application, browser, provider, or simulation path. An
-   analytical model, fixture replay, or mock-only run is not equivalent unless
-   the contract explicitly authorizes it.
+5. Map every mandatory acceptance criterion into the result, but adjudicate
+   only criteria whose `verification_owner` matches this stage. Preserve rows
+   owned by `candidate_verify`, `human`, or another later layer as
+   `not_applicable`; do not claim them passed and do not reject/block the Task
+   because their downstream evidence does not exist yet. Run only commands
+   owned by this stage and, for `impl_self_check` / `task_verify`, produced by
+   this Task (`producer_task_id` is empty or equals the active Task). For
+   `e2e` / `real_e2e` owned here, inspect the receipt's runner and method
+   identity and confirm that the command exercised the contract's real
+   application, browser, provider, or simulation path. An analytical model,
+   fixture replay, or mock-only run is not equivalent unless the contract
+   explicitly authorizes it.
 6. Separate verifier/environment execution failure from a product rejection.
    Only a successfully executed, evidence-backed rejection enters semantic
    rework.
@@ -63,6 +69,25 @@ amendment are separate role capabilities supplied by the workflow profile.
    `owner`.
 9. Submit through the exact result profile and completion command in the
    briefing. Do not invent terminal events or mutate runtime truth.
+
+## Product Acceptance Passes
+
+When Candidate Verify receives a current `product_acceptance_spec`:
+
+- With no admitted Product Acceptance Report for the current generation,
+  execute the complete mandatory journey/assertion matrix against the pinned
+  candidate target.
+- After semantic rework on a newer target in the same generation, start from
+  the prior failed rows, inspect the implementation delta, test all impacted
+  journeys, and run the minimum regression closure for unaffected journeys.
+  Do not rerun unrelated expensive probes merely to inflate evidence.
+- The submitted `product_acceptance_report.v1` still covers every mandatory
+  journey and assertion. Every row must carry current-target evidence; reuse is
+  allowed only when the briefing/admission marks a receipt reusable for that
+  exact identity.
+- Deterministic product failure is semantic rework. Provider/environment
+  execution failure is `blocked`/external wait and must not be reported as a
+  failed product journey or consume semantic rework.
 
 ## Role Boundary
 

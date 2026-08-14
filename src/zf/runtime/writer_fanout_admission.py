@@ -26,6 +26,7 @@ from zf.runtime.task_contract_normalize import (
     canonical_verification_tiers,
     owner_fields_from_task_map_item,
 )
+from zf.runtime.writer_task_skills import validated_writer_task_skills
 
 TERMINAL_TASK_STATUSES = {"done", "cancelled", "superseded"}
 
@@ -317,10 +318,10 @@ def load_writer_task_map(
         requested_task_ids=requested_task_ids,
         completed_task_ids=completed_task_ids,
         is_replan=bool(
-            payload.get("rework_of")
-            or payload.get("rework_attempt")
+            payload.get("rework_of") or payload.get("rework_attempt")
             or payload.get("replan")
             or payload.get("replan_classification")
+            or payload.get("amend_of") or resume_scope == "gap_tasks_only"
         ),
         dispatch_base_commit=writer_fanout_dispatch_base_commit(
             items,
@@ -528,9 +529,7 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             continue
         if not isinstance(raw, dict):
             continue
-        materialized_raw = materialize_task_verification_commands(
-            raw, registry=command_registry
-        )
+        materialized_raw = materialize_task_verification_commands(raw, registry=command_registry)
         task_id = str(raw.get("task_id") or raw.get("id") or raw.get("task") or "")
         allowed_paths = _string_list(
             raw.get("allowed_paths")
@@ -574,6 +573,7 @@ def writer_task_items(data: object) -> list[dict[str, Any]]:
             "affinity_tag": str(raw.get("affinity_tag") or "").strip(),
             "context_group": str(raw.get("context_group") or "").strip(),
             "root_owner_class": str(raw.get("root_owner_class") or "").strip(),
+            "skills_required": validated_writer_task_skills(raw, task_id=task_id),
             "pipeline_declared_task_id": str(
                 raw.get("pipeline_declared_task_id") or ""
             ).strip(),
@@ -918,14 +918,61 @@ def _canonical_replan_task_ids(
     fail-closed in ``load_writer_task_map``.
     """
 
-    if not requested_task_ids or resume_scope != "gap_tasks_only":
+    if not requested_task_ids or resume_scope not in {
+        "gap_tasks_only",
+        "failed_children_only",
+        "failed_children_and_downstream",
+    }:
         return requested_task_ids
     available_ids = {
         str(item.get("task_id") or "").strip()
         for item in task_items
         if str(item.get("task_id") or "").strip()
     }
-    if set(requested_task_ids) <= available_ids:
+    successor_ids_by_predecessor: dict[str, list[str]] = {}
+    for item in task_items:
+        successor_id = str(item.get("task_id") or "").strip()
+        if not successor_id:
+            continue
+        for predecessor_id in task_map_supersedes_task_ids(item):
+            successor_ids_by_predecessor.setdefault(predecessor_id, []).append(
+                successor_id
+            )
+
+    resolved_ids: list[str] = []
+    unresolved_ids: list[str] = []
+    for requested_id in requested_task_ids:
+        successors = list(dict.fromkeys(
+            successor_ids_by_predecessor.get(requested_id, [])
+        ))
+        if len(successors) > 1:
+            raise RuntimeError(
+                "writer fanout task_map has ambiguous successor mapping for "
+                f"{requested_id}: {', '.join(successors)}"
+            )
+        if successors:
+            resolved_id = successors[0]
+        elif requested_id in available_ids:
+            resolved_id = requested_id
+        else:
+            unresolved_ids.append(requested_id)
+            continue
+        if resolved_id not in resolved_ids:
+            resolved_ids.append(resolved_id)
+
+    if not unresolved_ids:
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        declared_delta_ids = _string_list(
+            data.get("dispatch_delta_task_ids")
+        ) or _string_list(metadata.get("dispatch_delta_task_ids"))
+        if declared_delta_ids and set(declared_delta_ids) != set(resolved_ids):
+            raise RuntimeError(
+                "writer fanout task_map dispatch_delta_task_ids disagree with "
+                "the requested/superseding task selection"
+            )
+        return resolved_ids
+
+    if resume_scope != "gap_tasks_only":
         return requested_task_ids
 
     map_task_ids = _string_list(data.get("task_ids")) or _string_list(

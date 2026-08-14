@@ -495,6 +495,82 @@ class TestI41LivenessGate:
         ]
         assert len(observed) == 1  # evidence 仍有,且 per 死亡期去重
 
+    def test_dead_pending_recycle_with_active_fanout_respawns_immediately(
+        self,
+        state_dir,
+        config,
+        monkeypatch,
+    ):
+        """A dead pane cannot keep a live child lease until timeout merely
+        because its last provider heartbeat is still fresh."""
+        from zf.core.state.role_sessions import RoleSessionRegistry
+
+        store = TaskStore(state_dir / "kanban.json")
+        store.update("TASK-LIVENESS-DEV", status="done")
+        store.update("TASK-LIVENESS-REVIEW", status="done")
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(
+            type="fanout.child.dispatched",
+            actor="zf-cli",
+            task_id="TASK-FANOUT",
+            payload={
+                "fanout_id": "fanout-pending-recycle",
+                "child_id": "verify-1",
+                "run_id": "run-pending-recycle",
+                "role_instance": "dev",
+                "task_id": "TASK-FANOUT",
+                "stage_id": "verify",
+                "briefing_path": "briefings/verify-1.md",
+            },
+        ))
+        registry = RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        )
+        registry.get_or_create("dev")
+        registry.record_heartbeat("dev", {
+            "instance_id": "dev",
+            "state": "busy",
+            "current_task_id": "TASK-FANOUT",
+            "last_action_ts": "now",
+        })
+
+        transport = _AliveControllableTransport()
+        transport.spawn(RoleConfig(name="dev"), argv=[])
+        transport.spawn(RoleConfig(name="review"), argv=[])
+        orch = Orchestrator(state_dir, config, transport)
+        orch._dead_threshold = 1
+        orch._set_worker_state(
+            "dev",
+            "pending_recycle",
+            reason="context ratio exceeded while busy",
+        )
+        monkeypatch.setattr(
+            orch,
+            "_inject_fanout_recovery_briefing",
+            lambda *_args, **_kwargs: True,
+        )
+        transport.alive_flags["dev"] = False
+
+        orch.run_once()
+
+        assert transport.spawn_calls.count("dev") == 2
+        events = EventLog(state_dir / "events.jsonl").read_all()
+        failed = [
+            event
+            for event in events
+            if event.type == "worker.runner.failed" and event.actor == "dev"
+        ]
+        assert failed
+        assert (
+            failed[-1].payload["reason"]
+            == "pane dead and no recent liveness evidence "
+            "(pane_dead_during_pending_recycle_with_active_obligation)"
+        )
+        assert any(
+            event.type == "worker.respawned" and event.actor == "dev"
+            for event in events
+        )
+
     def test_kernel_state_mirror_does_not_mask_dead_pane(
         self, state_dir, config,
     ):

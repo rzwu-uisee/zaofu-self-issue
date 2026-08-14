@@ -134,3 +134,9 @@ def test_browser_planning_contract_keeps_future_evidence_out_of_blockers() -> No
     assert "瞬时状态只写入 `readiness`" in synthesizer
     assert "dependencies: [zf-browser-e2e-contract]" in adapter
     assert "dependencies: [zf-browser-e2e-contract]" in synthesizer
+    assert "owner-facing origin" in browser
+    assert "window.isSecureContext" in browser
+    assert "crypto.subtle" in browser
+    assert "`skills_required` is the Planner-owned" in _read(
+        "skills/zf-plan-task-map-contract/SKILL.md"
+    )

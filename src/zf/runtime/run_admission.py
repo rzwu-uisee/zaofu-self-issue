@@ -12,9 +12,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from zf.core.events.model import ZfEvent
+from zf.core.events.payload_schemas import SUCCESS_EVENT_TYPES
 from zf.core.state.locks import locked_path
 from zf.runtime.run_isolation import (
     concurrent_isolation_blocker as _concurrent_isolation_blocker,
+)
+from zf.runtime.run_scope import (
+    event_run_id as scoped_event_run_id,
+    run_aliases,
 )
 
 
@@ -39,6 +44,13 @@ RUN_ADMISSION_RECONCILE_EVENT_TYPES = frozenset({
     "workflow.invoke.requested",
     "run.admission.rejected",
 }) | RUN_TERMINAL_EVENT_TYPES
+_COMPLETED_RUN_DUPLICATE_EVENT_TYPES = SUCCESS_EVENT_TYPES | frozenset({
+    "fanout.child.completed",
+    "impl.child.completed",
+    "review.child.completed",
+    "task.done.evidence",
+    "verify.child.completed",
+})
 _LEGACY_RUNNING_EVENTS = frozenset({
     "run.started",
     "run.goal.started",
@@ -235,6 +247,40 @@ def build_run_admission_projection(
         active_run_ids=[entry.run_id for entry in active],
         queued_run_ids=[entry.run_id for entry in queued],
     )
+
+
+def fold_terminal_run_scope(
+    events: Iterable[ZfEvent],
+) -> tuple[dict[str, str], set[str]]:
+    """Return canonical aliases and the runs that are currently terminal.
+
+    ``run.goal.blocked`` is reversible through an explicit
+    ``run.goal.updated(status=active)``. Other terminal outcomes remain
+    irreversible. The singleton fallback preserves legacy unscoped events
+    without leaking them across concurrent runs.
+    """
+
+    rows = list(events)
+    aliases = run_aliases(rows)
+    known_runs = set(aliases.values())
+    singleton = next(iter(known_runs)) if len(known_runs) == 1 else ""
+    terminal_types: dict[str, str] = {}
+    for event in rows:
+        run_id = scoped_event_run_id(event, aliases=aliases) or singleton
+        if not run_id:
+            continue
+        if event.type in RUN_TERMINAL_EVENT_TYPES:
+            terminal_types[run_id] = event.type
+            continue
+        if event.type != "run.goal.updated":
+            continue
+        payload = _payload(event)
+        if (
+            str(payload.get("status") or "").strip() in {"active", "running"}
+            and terminal_types.get(run_id) == "run.goal.blocked"
+        ):
+            terminal_types.pop(run_id, None)
+    return aliases, set(terminal_types)
 
 
 def admit_workflow_invoke(
@@ -673,14 +719,20 @@ def reject_late_run_result(
         reason = f"run_not_admitted:{entry.status}"
     else:
         return ""
+    audit_event_type = (
+        "run.result.duplicate_suppressed"
+        if entry.status == "completed"
+        and event.type in _COMPLETED_RUN_DUPLICATE_EVENT_TYPES
+        else "run.result.rejected"
+    )
     if not any(
-        existing.type == "run.result.rejected"
+        existing.type == audit_event_type
         and str(_payload(existing).get("source_event_id") or "") == event.id
         and str(_payload(existing).get("run_id") or "") == run_id
         for existing in events
     ):
         runtime.event_writer.append(ZfEvent(
-            type="run.result.rejected",
+            type=audit_event_type,
             actor="orchestrator",
             task_id=event.task_id,
             payload={
@@ -693,6 +745,9 @@ def reject_late_run_result(
                 "reason": reason,
                 "terminal_event_id": entry.terminal_event_id,
                 "terminal_type": entry.terminal_type,
+                "duplicate_terminal_success": (
+                    audit_event_type == "run.result.duplicate_suppressed"
+                ),
             },
             causation_id=event.id,
             correlation_id=run_id,
@@ -957,6 +1012,7 @@ __all__ = [
     "admit_workflow_invoke",
     "build_run_admission_projection",
     "concurrent_isolation_blocker",
+    "fold_terminal_run_scope",
     "reconcile_run_admission",
     "record_run_dispatch_blocked",
     "reject_late_run_result",

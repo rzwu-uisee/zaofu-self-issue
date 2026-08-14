@@ -7,6 +7,7 @@ from typing import Any, Mapping
 from zf.core.events.model import ZfEvent
 from zf.runtime.call_result_runtime import workflow_operation_service
 from zf.runtime.channel_workflow_bridge import emit_fanout_channel_state_update
+from zf.runtime.failure_kind import FAILURE_KIND_INFRA
 from zf.runtime.workflow_operation import (
     TERMINAL_OPERATION_STATUSES,
     load_workflow_operation,
@@ -130,6 +131,19 @@ class FanoutTimeoutOperationsMixin:
             pending_children=pending_children,
             causation_event=causation_event,
         )
+        runtime_findings = [
+            {
+                "finding_id": f"{child_id}-runtime-timeout",
+                "severity": "high",
+                "category": "runtime_failure",
+                "child_id": child_id,
+                "message": (
+                    "fanout worker did not reach a terminal result within "
+                    f"the {timeout_seconds}s runtime liveness deadline"
+                ),
+            }
+            for child_id in pending_children
+        ]
         if not has_aggregate_started:
             self.event_writer.append(ZfEvent(
                 type="fanout.aggregate.started",
@@ -157,6 +171,8 @@ class FanoutTimeoutOperationsMixin:
                 "failed_children": pending_children,
                 "pending_children": pending_children,
                 "timeout_seconds": timeout_seconds,
+                "failure_kind": FAILURE_KIND_INFRA,
+                "findings": runtime_findings,
             },
             causation_id=causation_id,
             correlation_id=trace_id,
@@ -195,6 +211,8 @@ class FanoutTimeoutOperationsMixin:
                     "failed_children": pending_children,
                     "pending_children": pending_children,
                     "timeout_seconds": timeout_seconds,
+                    "failure_kind": FAILURE_KIND_INFRA,
+                    "findings": runtime_findings,
                 },
                 causation_id=aggregate_event.id,
                 correlation_id=trace_id,

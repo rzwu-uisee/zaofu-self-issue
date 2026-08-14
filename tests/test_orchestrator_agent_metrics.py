@@ -88,6 +88,9 @@ def test_metrics_reconstruct_semantic_control_health_from_events() -> None:
                 "operation_id": "op-plan",
                 "checkpoint": "plan_candidate",
                 "decision": "adopt",
+                "reason_codes": ["plan_complete"],
+                "summary": "Plan is complete.",
+                "explanation_status": "complete",
             },
         ),
         _event(
@@ -170,6 +173,8 @@ def test_metrics_reconstruct_semantic_control_health_from_events() -> None:
     assert summary["settled_operation_count"] == 1
     assert summary["avg_operation_latency_seconds"] == 5.0
     assert summary["p95_operation_latency_seconds"] == 5.0
+    assert summary["sla_breach_count"] == 0
+    assert summary["degraded_explanation_count"] == 0
     assert summary["stale_reject_count"] == 1
     assert summary["required_read_closure_rate"] == 1.0
     assert summary["target_match_rate"] == 1.0
@@ -184,6 +189,9 @@ def test_metrics_reconstruct_semantic_control_health_from_events() -> None:
     assert summary["cost_usd"] == 0.0045
     assert metrics["operations"][0]["required_read_closed"] is True
     assert metrics["operations"][0]["decision"] == "adopt"
+    assert metrics["operations"][0]["summary"] == "Plan is complete."
+    assert metrics["operations"][0]["sla_threshold_seconds"] == 300
+    assert metrics["operations"][0]["sla_breached"] is False
     assert metrics["operations"][0]["total_tokens"] == 1100
     assert metrics["checkpoints"]["plan_candidate"][
         "avg_operation_latency_seconds"
@@ -202,3 +210,50 @@ def test_metrics_empty_snapshot_is_stable() -> None:
     assert metrics["checkpoints"] == {}
     assert metrics["summary"]["operation_count"] == 0
     assert metrics["summary"]["required_read_closure_rate"] == 0.0
+
+
+def test_metrics_projects_pending_and_terminal_sla_breaches() -> None:
+    events = [
+        ZfEvent(
+            type="workflow.operation.requested",
+            id="evt-pending",
+            ts="2026-08-12T12:00:00+00:00",
+            payload={
+                "operation_id": "op-pending",
+                "operation_type": "orchestrator_agent_semantic",
+                "workflow_run_id": "run-1",
+                "parent_stage_id": "oa-plan_candidate",
+            },
+        ),
+        ZfEvent(
+            type="workflow.operation.requested",
+            id="evt-terminal-request",
+            ts="2026-08-12T12:00:00+00:00",
+            payload={
+                "operation_id": "op-terminal",
+                "operation_type": "orchestrator_agent_semantic",
+                "workflow_run_id": "run-1",
+                "parent_stage_id": "oa-semantic_failure",
+            },
+        ),
+        ZfEvent(
+            type="workflow.operation.settled",
+            id="evt-terminal-settled",
+            ts="2026-08-12T12:04:00+00:00",
+            payload={"operation_id": "op-terminal"},
+        ),
+    ]
+
+    metrics = build_orchestrator_agent_metrics(
+        events,
+        observed_at="2026-08-12T12:06:00+00:00",
+    )
+    rows = {row["operation_id"]: row for row in metrics["operations"]}
+
+    assert rows["op-pending"]["age_seconds"] == 360.0
+    assert rows["op-pending"]["sla_breached"] is True
+    assert rows["op-terminal"]["latency_seconds"] == 240.0
+    assert rows["op-terminal"]["sla_threshold_seconds"] == 180
+    assert rows["op-terminal"]["sla_breached"] is True
+    assert metrics["summary"]["sla_breach_count"] == 2
+    assert metrics["summary"]["pending_sla_breach_count"] == 1

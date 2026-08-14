@@ -238,6 +238,10 @@ def test_kanban_agent_recovery_contract_preserves_coding_and_kernel_boundaries()
 
     assert "workflow-batch-resume" in KANBAN_AGENT_ALLOWED_ACTIONS
     assert "candidate-rework-apply" in KANBAN_AGENT_ALLOWED_ACTIONS
+    assert "stage-replan-new-generation" in KANBAN_AGENT_ALLOWED_ACTIONS
+    assert "replan-approve" in KANBAN_AGENT_ALLOWED_ACTIONS
+    assert "replan-defer" in KANBAN_AGENT_ALLOWED_ACTIONS
+    assert "replan-reject" in KANBAN_AGENT_ALLOWED_ACTIONS
     assert boundary["direct_truth_write"] is False
     assert boundary["direct_role_dispatch"] is False
     assert boundary["direct_role_terminal_control"] is False

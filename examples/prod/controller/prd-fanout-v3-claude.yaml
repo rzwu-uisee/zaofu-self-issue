@@ -11,6 +11,7 @@ spec:
   evidencePolicy: strict_refs
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  productAcceptanceMode: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig

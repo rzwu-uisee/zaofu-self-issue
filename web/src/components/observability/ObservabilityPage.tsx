@@ -1,10 +1,12 @@
 // ObservabilityPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { search } from "../../api/client";
-import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
+import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, LongRunTruthMilestone, LongRunTruthProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
 import { LogsPanel } from "../../components/observability/LogsPanel";
 import { RunDossierPanel } from "../../components/observability/RunDossierPanel";
 import { formatTokens } from "../../lib/format";
 import { buildObservabilityEventWindow } from "../../app/observabilityModel";
+import { buildProjectCostPresentation } from "../../app/costPrecision";
+import { useProjectCost } from "../../app/useProjectCost";
 import { Archive, Bell, Boxes, ChevronRight, FolderGit2, Gauge, GitFork, Map as MapIcon, PauseCircle, PlayCircle, Radio, SkipBack, SkipForward, Wrench, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { LiveState, PageId, ParsedEventFilter, ProjectionKind, ProjectionMetricSpec, UiTone } from "../../app/sharedTypes";
@@ -192,11 +194,8 @@ export function ObservabilityPage({
   const runs = [...(snapshot?.active_runs ?? []), ...(snapshot?.runs ?? [])];
   const fanouts = snapshot?.fanouts ?? [];
   const candidates = snapshot?.candidates ?? [];
-  const totalTokens = Object.values(snapshot?.cost.per_role ?? {}).reduce(
-    (total, role) => total + role.input_tokens + role.output_tokens,
-    0,
-  );
-  const totalCost = snapshot?.cost.total_usd ?? 0;
+  const effectiveCost = useProjectCost(activeProjectId, snapshot?.cost);
+  const projectCost = buildProjectCostPresentation(effectiveCost);
   const maxContext = (snapshot?.agents ?? []).reduce<number | null>((max, agent) => {
     if (typeof agent.context_usage_ratio !== "number") return max;
     return Math.max(max ?? 0, agent.context_usage_ratio);
@@ -326,7 +325,7 @@ export function ObservabilityPage({
     { icon: PlayCircle, label: "Runs", value: scopedTraceMode ? "-" : snapshotReady ? runs.length : "-", meta: scopedTraceMode ? "load on open" : `${snapshot?.active_runs.length ?? 0} active`, tone: !scopedTraceMode && snapshot?.active_runs.length ? "warn" : !scopedTraceMode && runs.length ? "info" : "muted" },
     { icon: GitFork, label: "Fanouts", value: scopedTraceMode ? "-" : snapshotReady ? fanouts.length : "-", meta: scopedTraceMode ? "load on open" : "fan-out / fan-in", tone: !scopedTraceMode && fanouts.length ? "info" : "muted" },
     { icon: Gauge, label: "Context", value: scopedTraceMode ? "-" : maxContext == null ? "unknown" : `${Math.round(maxContext * 100)}%`, meta: scopedTraceMode ? "load on open" : `${snapshot?.agents?.length ?? 0} agents`, tone: !scopedTraceMode && maxContext != null ? maxContext >= 0.9 ? "err" : maxContext >= 0.75 ? "warn" : "ok" : "muted" },
-    { icon: Boxes, label: "Tokens", value: scopedTraceMode ? "-" : formatTokens(totalTokens), meta: scopedTraceMode ? "load on open" : formatUsd(totalCost), tone: !scopedTraceMode && totalTokens ? "info" : "muted" },
+    { icon: Boxes, label: "Tokens", value: scopedTraceMode ? "-" : formatTokens(projectCost.totalTokens), meta: scopedTraceMode ? "load on open" : `${formatUsd(projectCost.totalUsd)}${projectCost.precisionLabel ? ` · ${projectCost.precisionLabel}` : ""}`, tone: !scopedTraceMode && projectCost.hasUsage ? projectCost.precisionTone : "muted" },
   ];
   const tabs: Array<{ id: ObservabilityTab; label: string; count?: number }> = [
     { id: "traces", label: "Traces", count: traces.length },
@@ -416,6 +415,7 @@ export function ObservabilityPage({
         <span><strong>Truth</strong><em>EventLog / TaskStore</em></span>
         <span><strong>Raw</strong><em>redacted read-only</em></span>
       </div>
+      <LongRunTruthBand projection={snapshot?.long_run_truth} snapshotReady={snapshotReady} />
       <ProjectionMetricGrid metrics={metrics} />
       <div className="tab-row compact-tabs observability-tabs" aria-label="Observability tabs">
         {tabs.map((item) => (
@@ -641,6 +641,67 @@ export function ObservabilityPage({
         </div>
       ) : null}
     </div>
+  );
+}
+
+
+function LongRunTruthBand({
+  projection,
+  snapshotReady,
+}: {
+  projection?: LongRunTruthProjection;
+  snapshotReady: boolean;
+}) {
+  if (!projection || projection.status === "empty") {
+    return (
+      <section className="long-run-truth" data-testid="long-run-truth" data-state={snapshotReady ? "empty" : "loading"}>
+        <div className="long-run-truth-heading">
+          <strong>Current Run Truth</strong>
+          <span>{snapshotReady ? "No scoped workflow run" : "Loading event authority"}</span>
+        </div>
+      </section>
+    );
+  }
+  const noProgress = projection.no_progress.items[0] ?? {};
+  const fingerprint = textValue(noProgress.fingerprint);
+  const noProgressCount = Number(noProgress.count ?? 0);
+  const milestones: Array<[string, LongRunTruthMilestone]> = [
+    ["Verified", projection.milestones.verified],
+    ["Landed", projection.milestones.landed],
+    ["Reachable", projection.milestones.reachable],
+    ["Notified", projection.milestones.owner_notified],
+  ];
+  return (
+    <section className="long-run-truth" data-testid="long-run-truth" data-state={projection.status}>
+      <div className="long-run-truth-heading">
+        <strong>Current Run Truth</strong>
+        <span className="mono">{projection.current.run_id || "unobserved"}</span>
+        <em className={`badge badge-${projection.status === "ready" ? "ok" : "warn"}`}>{projection.status}</em>
+      </div>
+      <div className="long-run-truth-facts">
+        <span><small>Generation</small><strong className="mono">{projection.current.task_map_generation || "unobserved"}</strong></span>
+        <span><small>Candidate</small><strong className="mono">{projection.current.candidate_ref || projection.current.candidate_digest || "unobserved"}</strong></span>
+        <span><small>Events</small><strong>{projection.counts.raw_events.toLocaleString()}</strong></span>
+        <span><small>Operations</small><strong>{projection.counts.unique_operations.toLocaleString()}</strong></span>
+        <span className={projection.gate.status === "blocked" ? "is-alert" : ""}>
+          <small>Gate</small>
+          <strong>{projection.gate.status === "blocked" ? `${projection.gate.owner}: ${projection.gate.reason}` : "clear"}</strong>
+        </span>
+        <span className={projection.no_progress.status === "tripped" ? "is-alert" : ""}>
+          <small>No progress</small>
+          <strong>{fingerprint ? `${fingerprint} x${noProgressCount}` : "clear"}</strong>
+        </span>
+      </div>
+      <div className="long-run-truth-milestones" aria-label="Delivery milestones">
+        {milestones.map(([label, milestone]) => (
+          <span className={milestone.status === "proven" ? "is-proven" : ""} key={label} title={milestone.event_type || "No current-authority evidence"}>
+            <i aria-hidden="true" />
+            <small>{label}</small>
+            <strong>{milestone.status}</strong>
+          </span>
+        ))}
+      </div>
+    </section>
   );
 }
 

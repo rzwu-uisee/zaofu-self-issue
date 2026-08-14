@@ -74,6 +74,29 @@ def test_explicit_direct_create_task_mode_is_preserved() -> None:
     assert proposal["payload"]["execution_mode"] == "direct"
 
 
+def test_replan_owner_decision_can_be_proposed_for_web_approval() -> None:
+    answer = json.dumps({
+        "action_proposal": {
+            "action": "replan-approve",
+            "payload": {
+                "approval_ref": "plan-owner-1",
+                "checkpoint_id": "plan-owner-1",
+                "proposal_ref": "artifacts/plan-synth/checkpoint.json",
+                "eval_ref": "artifacts/plan-synth/eval.json",
+                "reason": "Owner selected option A with a 0.5% tolerance.",
+            },
+            "reason": "Resume the same run through bounded replan.",
+        },
+    })
+
+    proposal = extract_action_proposal(answer)
+
+    assert proposal is not None and proposal["valid"] is True
+    assert proposal["action"] == "replan-approve"
+    assert proposal["payload"]["checkpoint_id"] == "plan-owner-1"
+    assert proposal["payload"]["reason"].endswith("0.5% tolerance.")
+
+
 @pytest.mark.parametrize(
     ("intent", "error"),
     [

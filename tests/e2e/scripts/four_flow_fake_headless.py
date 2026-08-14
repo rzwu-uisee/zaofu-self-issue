@@ -206,6 +206,7 @@ def _channel_setup_plan() -> dict[str, Any]:
                     ),
                     "submit_payload": {
                         "template_id": "architecture-review",
+                        "mode": "multi_lens",
                         "channel_id": channel_id,
                         "name": "Four-flow architecture review",
                         "thread_id": "main",

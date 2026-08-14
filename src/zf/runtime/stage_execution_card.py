@@ -21,6 +21,7 @@ _CONTEXT_KEYS = (
     "attempt_id",
     "operation_id",
     "task_pipeline_stage",
+    "task_pipeline_entry_mode",
     "operation_generation",
     "workspace_generation",
     "placement_epoch",
@@ -43,6 +44,9 @@ _CONTEXT_KEYS = (
     "base_commit",
     "task_ref",
     "target_commit",
+    "verification_owner",
+    "verification_tier",
+    "external_evidence_bindings",
     "risk_class",
     "integration_admission_profile",
     "exact_task_target_commit",
@@ -118,6 +122,10 @@ _IMMUTABLE_RESULT_FIELDS = frozenset({
     "goal_id", "flow_kind", "objective_ref", "goal_claim_set_ref",
     "goal_claim_set_digest", "planning_result_ref", "candidate_ref",
     "closure_fact_ref", "closure_fact_digest", "output_profile_id",
+    "product_acceptance_required", "product_acceptance_spec_ref",
+    "product_acceptance_spec_digest", "product_acceptance_report_ref",
+    "product_acceptance_report_digest", "product_acceptance_verdict",
+    "provider_qualification_required", "provider_qualification_status",
     "output_profile_revision",
     "workflow_generation", "request_revision",
     "generic_workflow_contract_digest", "workflow_intent",
@@ -142,7 +150,25 @@ def render_review_subject_lines(
     subject_pdd_id: str,
     verification_reader: bool,
     artifact_delivery: bool,
+    handoff_kind: str = "",
+    target_ref: str = "",
+    target_commit: str = "",
 ) -> list[str]:
+    if handoff_kind == "task_base_recovery":
+        return [
+            f"- previous_candidate_ref: `{candidate_ref}`",
+            f"- previous_candidate_head_commit: `{candidate_head}`",
+            f"- recovery_target_ref: `{target_ref}`",
+            f"- recovery_target_commit: `{target_commit}`",
+            "",
+            "EVALUATE THE RECOVERY TARGET: judge/inspect `target_ref` at "
+            "`target_commit` as pinned in Child-Specific Context. This "
+            "handoff intentionally recovered to a task base newer than the "
+            "last admitted candidate; `candidate_ref` and "
+            "`candidate_head_commit` are previous candidate provenance only. "
+            "Do not switch the audit to that older candidate.",
+            "",
+        ]
     if candidate_ref and not artifact_delivery:
         return [
             f"- candidate_ref: `{candidate_ref}`",
@@ -458,6 +484,13 @@ def prepare_profiled_stage_result(
         "- Submit authorization is transport-owned; do not print or inspect it.",
         "",
     ]
+    if profile_id == "task-verify":
+        lines[7:7] = [
+            "- Verification command IDs are a closed set. Use `command_id` only "
+            "for an exact command already present in the prefilled template; "
+            "record extra independent probes without `command_id` and attach "
+            "their command/evidence through requirement reproduction evidence.",
+        ]
     if output_names:
         output_fields = ", ".join(f"`outputs.{name}`" for name in output_names)
         lines[7:7] = [
@@ -549,6 +582,8 @@ def prepare_writer_execution_card(
             "schema_version": "implementation-result.v1",
             "execution_status": "completed",
             "verdict": "passed",
+            "failure_class": "none",
+            "blocker_kind": "none",
             "target_commit": "<HEAD commit>",
             "changed_files": [],
             "evidence_refs": ["<implementation summary artifact or event ref>"],
@@ -566,8 +601,15 @@ def prepare_writer_execution_card(
         "`*** Update File`; never delete, add, move, or recreate the scratch path.",
         "- For a blocker, set `execution_status` to `failed`, describe "
         "the reproducible blocker, and run the same submit command.",
+        "- If the blocker proves this task contract is unsatisfiable inside "
+        "its allowed paths, set both `failure_class` and `blocker_kind` to "
+        "one of `task_contract_unsatisfiable`, `upstream_contract_gap`, or "
+        "`scope_contract_gap`; keep `none` for ordinary product failures.",
         "- Kernel supplies operation/run/task/attempt identity and selects "
         "the canonical success or failure event.",
+        "- Self-check command IDs are a closed set. Include a command receipt "
+        "only for an exact command already present in the prefilled template; "
+        "record extra checks as evidence instead of inventing a `command_id`.",
         "",
     ]
     return command, command, display, lines

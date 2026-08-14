@@ -43,6 +43,10 @@ def emit_invalid_contract_finding(
             "evidence_refs": [],
             "contract_status": status,
             "contract_error": reason,
+            "request_id": str(request.get("request_id") or ""),
+            "message_id": str(request.get("message_id") or ""),
+            "run_generation": int(request.get("run_generation") or 1),
+            "source_reply_event_id": reply_event_id,
             "source": source,
         },
     )

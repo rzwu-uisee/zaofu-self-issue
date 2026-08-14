@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -82,8 +83,58 @@ def cleanup_prepared_worktree(
         manifest=manifest,
         outcome=outcome,
     )
+    _rewind_owned_baseline_checkpoint(
+        root=root,
+        manifest=manifest,
+        outcome=outcome,
+    )
     outcome["status"] = "retained" if outcome["retained"] else "cleaned"
     return outcome
+
+
+def _rewind_owned_baseline_checkpoint(
+    *,
+    root: Path,
+    manifest: dict[str, Any],
+    outcome: dict[str, Any],
+) -> None:
+    """Uncommit a preparation-only baseline without touching candidate files."""
+
+    checkpoint = str(manifest.get("baseline_checkpoint_commit") or "").strip()
+    if not checkpoint or not (root / ".git").exists():
+        return
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if head.returncode != 0 or head.stdout.strip() != checkpoint:
+        return
+    parent = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", f"{checkpoint}^"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if parent.returncode != 0 or not parent.stdout.strip():
+        return
+    reset = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "reset",
+            "--mixed",
+            "--quiet",
+            parent.stdout.strip(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if reset.returncode == 0:
+        outcome["baseline_checkpoint_rewound"] = checkpoint
 
 
 def cleanup_interrupted_prepared_worktree(

@@ -61,6 +61,7 @@ def _decision(*, action: str = "adopt", checkpoint: str = "plan_candidate") -> d
         },
         "decision": action,
         "reason_codes": ["coverage_complete"],
+        "summary": "The Plan package covers the admitted claims.",
         "affected_work_units": [],
         "required_followup": "continue",
         "expected_outcome": "materialize",
@@ -249,7 +250,29 @@ def test_orchestration_config_rejects_ambiguous_authority(
 
 
 def test_plan_candidate_decision_is_normalized() -> None:
-    assert normalize_orchestration_decision(_decision())["decision"] == "adopt"
+    normalized = normalize_orchestration_decision(_decision())
+    assert normalized["decision"] == "adopt"
+    assert normalized["explanation_status"] == "complete"
+
+
+def test_legacy_decision_without_summary_is_degraded() -> None:
+    value = _decision()
+    value.pop("summary")
+
+    normalized = normalize_orchestration_decision(value)
+
+    assert normalized["summary"] == ""
+    assert normalized["explanation_status"] == "degraded"
+
+
+def test_explicit_empty_legacy_decision_summary_is_degraded() -> None:
+    value = _decision()
+    value["summary"] = ""
+
+    normalized = normalize_orchestration_decision(value)
+
+    assert normalized["summary"] == ""
+    assert normalized["explanation_status"] == "degraded"
 
 
 def test_checkpoint_rejects_disallowed_action() -> None:

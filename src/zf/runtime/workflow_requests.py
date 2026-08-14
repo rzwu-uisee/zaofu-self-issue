@@ -872,6 +872,7 @@ def _bind_effective_manifest(
         "objective": str(spec.get("objective") or ""),
         "source_root": str(spec.get("source_root") or ""),
         "target_root": str(spec.get("target_root") or ""),
+        "scope": _strings(spec.get("scope")),
         "acceptance": _strings(spec.get("acceptance")),
         "constraints": _strings(spec.get("constraints")),
         "open_questions": _strings(spec.get("open_questions")),
@@ -887,10 +888,20 @@ def _bind_effective_manifest(
         "source_workflow_input_manifest_ref": str(manifest_path),
         "source_workflow_input_manifest_digest": source_digest,
     })
-    refs = [str(item) for item in manifest.get("artifact_refs") or []]
-    if str(manifest_path) not in refs:
+    refs = [
+        dict(item) if isinstance(item, dict) else str(item)
+        for item in manifest.get("artifact_refs") or []
+        if item not in (None, "", {})
+    ]
+    ref_values = {
+        str(item.get("ref") or item.get("path") or item.get("uri") or "")
+        if isinstance(item, dict)
+        else str(item)
+        for item in refs
+    }
+    if str(manifest_path) not in ref_values:
         refs.append(str(manifest_path))
-    if projection["requirement_spec_ref"] not in refs:
+    if projection["requirement_spec_ref"] not in ref_values:
         refs.append(projection["requirement_spec_ref"])
     manifest["artifact_refs"] = refs
     text = json.dumps(

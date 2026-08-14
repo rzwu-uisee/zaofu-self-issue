@@ -278,6 +278,124 @@ def test_existing_workflow_request_creates_confirmed_requirement_revision(
     )
 
 
+def test_workflow_start_active_request_is_immutable_and_exact_replay_is_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, log = _service(tmp_path)
+    task_store = TaskStore(service.state_dir / "kanban.json")
+    task_store.add(Task(
+        id="TASK-ACTIVE-REQUEST",
+        title="Deliver the approved issue",
+        contract=TaskContract(
+            behavior="Deliver the approved issue behavior.",
+            verification="Run the focused issue regression.",
+            verification_tiers=["runtime"],
+            owner_instance="fix-lane-0",
+            spec_skip_reason="isolated workflow-start regression fixture",
+        ),
+    ))
+    objective = "Fix session expiry and add a regression test"
+    proposed = _execute(service, "workflow-request", {
+        "kind": "issue",
+        "objective": objective,
+        "backend": "mock",
+        "task_id": "TASK-ACTIVE-REQUEST",
+        "allow_missing_env": True,
+    })
+    submitted = _execute(service, "workflow-submit", {
+        "intake_ref": proposed["intake_ref"],
+        "request_id": proposed["request_id"],
+        "proposal_ref": proposed["proposal_ref"],
+        "proposal_digest": proposed["proposal_digest"],
+        "kind": "issue",
+        "task_id": "TASK-ACTIVE-REQUEST",
+        "allow_missing_env": True,
+    })
+    assert submitted["ok"] is True
+    before = load_workflow_request(service.state_dir, proposed["request_id"])
+    direct_event_count = len(log.read_all())
+    direct_revision = _execute(service, "workflow-request", {
+        "request_id": proposed["request_id"],
+        "kind": "issue",
+        "objective": "Expand the active request with a new dashboard",
+        "backend": "mock",
+        "task_id": "TASK-ACTIVE-REQUEST",
+        "allow_missing_env": True,
+    })
+    assert direct_revision["ok"] is False
+    assert direct_revision["status"] == "workflow_request_active"
+    assert not any(
+        event.type in {"workflow.request.updated", "workflow.request.proposed"}
+        for event in log.read_all()[direct_event_count:]
+    )
+    start = WorkflowStartService(
+        service.state_dir,
+        service.config,
+        project_root=tmp_path,
+    )
+    route = {
+        "route_id": "delivery:issue:standard",
+        "family": "delivery",
+        "kind": "issue",
+        "tier": "standard",
+        "start_adapter": "delivery_request_submit",
+        "available": True,
+    }
+    catalog = {
+        "schema_version": "workflow-route-catalog.v1",
+        "config_digest": "sha256:test-active-request",
+        "routes": [route],
+    }
+    monkeypatch.setattr(
+        "zf.runtime.workflow_start.workflow_route_catalog",
+        lambda _config: catalog,
+    )
+    monkeypatch.setattr(
+        "zf.runtime.workflow_start.resolve_workflow_route",
+        lambda _config, route_id, **_kwargs: (
+            route if route_id == route["route_id"] else None
+        ),
+    )
+    routes = start.routes(task_id="TASK-ACTIVE-REQUEST")
+    base_payload = {
+        "task_id": "TASK-ACTIVE-REQUEST",
+        "route_id": route["route_id"],
+        "objective": objective,
+        "task_contract_digest": routes["task_contract_digest"],
+        "config_digest": routes["config_digest"],
+    }
+    event_count = len(log.read_all())
+
+    changed = _execute(service, "workflow-start", {
+        **base_payload,
+        "objective": "Expand the active request with a new dashboard",
+    })
+
+    assert changed["ok"] is False
+    assert changed["status"] == "workflow_request_active"
+    assert load_workflow_request(
+        service.state_dir, proposed["request_id"]
+    )["revision"] == before["revision"]
+    assert not any(
+        event.type in {"workflow.request.updated", "workflow.request.proposed"}
+        for event in log.read_all()[event_count:]
+    )
+
+    replayed = _execute(service, "workflow-start", base_payload)
+
+    assert replayed["ok"] is True, replayed.get("reason")
+    assert replayed["idempotent_replay"] is True
+    assert replayed["workflow_invoke_status"] == "already_requested"
+    assert load_workflow_request(
+        service.state_dir, proposed["request_id"]
+    )["revision"] == before["revision"]
+    assert sum(
+        event.type == "workflow.invoke.requested"
+        for event in log.read_all()
+    ) == 1
+
+
 def test_intake_rejects_origin_change_before_overwriting_sidecars(
     tmp_path: Path,
 ) -> None:

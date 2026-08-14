@@ -25,6 +25,7 @@ export function WorkspaceRail({
   activePage,
   activeProjectId,
   channels,
+  channelsLoaded,
   inboxPendingCount = 0,
   liveState,
   onAddProject,
@@ -42,6 +43,7 @@ export function WorkspaceRail({
   activePage: PageId;
   activeProjectId: string;
   channels: ChannelSummary[];
+  channelsLoaded: boolean;
   inboxPendingCount?: number;
   liveState: LiveState;
   onAddProject: () => void;
@@ -207,8 +209,15 @@ export function WorkspaceRail({
                 </span>
                 <span className="muted">{channel.members?.length ?? 0}</span>
             </button>
-          )) : (
+          )) : channelsLoaded ? (
             <span className="empty-text">No channels</span>
+          ) : (
+            <button className="rail-nav-button" type="button" onClick={() => openPage("channels")}>
+              <span className="rail-nav-label">
+                <MessageSquare aria-hidden="true" className="rail-nav-icon" size={16} strokeWidth={1.8} />
+                <span>Open Channels</span>
+              </span>
+            </button>
           )}
           <button className="rail-nav-button muted-action" type="button" onClick={onNewChannel}>
             <span className="rail-nav-label">

@@ -37,10 +37,44 @@ export const BACKLOG_REF_KEYS = [
 
 export type BacklogRefKey = (typeof BACKLOG_REF_KEYS)[number];
 
+export interface TaskAttention {
+  required: boolean;
+  severity: "none" | "warning" | "error" | string;
+  code: string;
+  label: string;
+  since: string;
+  source_ref: string;
+}
+
+export interface TaskCardProjection {
+  schema_version: "task-card.v1" | string;
+  task_id: string;
+  title: string;
+  lifecycle: {
+    canonical_status: string;
+    display_status: string;
+    effective_terminal: boolean;
+    outcome: "success" | "cancelled" | "superseded" | "archived" | "" | string;
+    reconciled: boolean;
+    canonical_drift: boolean;
+  };
+  owner: { actor_id: string; role: string };
+  current_stage: string | null;
+  progress: Record<string, unknown> | null;
+  attention: TaskAttention;
+  activity: { kind: string; at: string };
+}
+
 export interface Task {
   id: string;
   title: string;
   status: string;
+  display_status?: string;
+  projection_reconciled?: boolean;
+  canonical_drift?: boolean;
+  effective_terminal?: boolean;
+  attention?: TaskAttention;
+  task_card?: TaskCardProjection;
   kanban_column?: string;
   workflow_phase?: string;
   impl_exit_gate_state?: string;
@@ -78,7 +112,7 @@ export interface Task {
     }>;
   };
   terminal?: boolean;
-  terminal_outcome?: "success" | "cancelled" | "";
+  terminal_outcome?: "success" | "cancelled" | "superseded" | "archived" | "";
   source?: string;
   priority?: number;
   assigned_to: string;
@@ -1162,12 +1196,39 @@ export interface CostRole {
   usd: number;
   input_tokens: number;
   output_tokens: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
+  estimated_usd?: number;
+  provider_reported_usd?: number;
+  billed_usd?: number;
+  unpriced_entries?: number;
+  partial_entries?: number;
   entries: number;
 }
 
 export interface CostSummary {
   total_usd: number;
   per_role: Record<string, CostRole>;
+  precision?: {
+    schema_version: string;
+    display_total_usd: number;
+    estimated_usd: number;
+    provider_reported_usd: number;
+    billed_usd: number;
+    unpriced_entries: number;
+    partial_entries: number;
+    statuses: Record<string, number>;
+    catalogs: Array<{ catalog_version: string; digest: string }>;
+  };
+  reconciliation?: {
+    provider: string;
+    accounting_mode: string;
+    status: string;
+    billed_usd?: string | null;
+    estimated_usd?: string | null;
+    variance_usd?: string | null;
+    attribution_precision?: string;
+  } | null;
 }
 
 export interface RuntimeSummary {
@@ -1784,6 +1845,20 @@ export interface SkillsSummary {
   loaded: Array<Record<string, unknown>>;
   lock: Array<Record<string, unknown>>;
   manifests: Array<Record<string, unknown>>;
+  invocation?: {
+    schema_version: string;
+    scope: Record<string, unknown>;
+    summary: {
+      considered_count: number;
+      loaded_count: number;
+      auto_injected_count: number;
+      missing_count: number;
+      invoked_count: number;
+      unobserved_count: number;
+    };
+    dispatches: Array<Record<string, unknown>>;
+    skills: Array<Record<string, unknown>>;
+  };
   warnings: Array<Record<string, unknown>>;
 }
 
@@ -2078,6 +2153,9 @@ export interface EventsPage {
   next_cursor: number | null;
   current_seq: number;
   limit: number;
+  projection_state?: string;
+  projection_lag?: number | null;
+  tail_behind?: boolean;
 }
 
 export interface AgentSessionHistoryPage {
@@ -2091,6 +2169,7 @@ export interface AgentSessionHistoryPage {
   current_seq: number;
   projection_state?: string;
   projection_lag?: number | null;
+  tail_behind?: boolean;
   source?: string;
 }
 
@@ -2115,6 +2194,10 @@ export interface ChannelsPage {
   generated_at?: string;
   source?: string;
   seq?: number;
+  projected_seq?: number;
+  projection_state?: string;
+  projection_lag?: number | null;
+  tail_behind?: boolean;
   channels: ChannelSummary[];
 }
 
@@ -2261,6 +2344,58 @@ export interface FleetStats {
   role_efficiency?: RoleEfficiencyRow[];
 }
 
+export interface LongRunTruthMilestone {
+  status: "proven" | "unproven" | string;
+  event_id?: string;
+  event_type?: string;
+  at?: string;
+  evidence?: string;
+}
+
+export interface LongRunTruthProjection {
+  schema_version: string;
+  status: "ready" | "degraded" | "empty" | string;
+  issues: string[];
+  current: {
+    run_id: string;
+    run_status: string;
+    task_map_generation: string;
+    candidate_ref: string;
+    candidate_digest: string;
+    candidate_status: string;
+  };
+  counts: {
+    raw_events: number;
+    authority_events: number;
+    unique_operations: number;
+    authority_operations: number;
+    current_operations: number;
+    pending_operations: number;
+    superseded_operations: number;
+  };
+  gate: {
+    status: string;
+    kind: string;
+    owner: string;
+    reason: string;
+    resume_condition: string;
+    event_id: string;
+    task_id: string;
+  };
+  no_progress: {
+    status: string;
+    threshold: number;
+    items: Array<Record<string, unknown>>;
+  };
+  milestones: {
+    verified: LongRunTruthMilestone;
+    landed: LongRunTruthMilestone;
+    reachable: LongRunTruthMilestone;
+    owner_notified: LongRunTruthMilestone;
+  };
+  debug?: Record<string, unknown>;
+}
+
 export interface Snapshot {
   seq: number;
   generated_at: string;
@@ -2276,6 +2411,7 @@ export interface Snapshot {
   features: Feature[];
   delivery_features?: Feature[];
   metrics_snapshot?: MetricsSnapshotProjection;
+  long_run_truth?: LongRunTruthProjection;
   fleet_stats?: FleetStats;
   traces: TraceSummary[];
   fanouts: FanoutSummary[];

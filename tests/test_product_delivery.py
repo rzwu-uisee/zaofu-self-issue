@@ -354,6 +354,7 @@ def test_product_delivery_materializes_global_commands_into_task_contract(
                     "acceptance_ids": ["AC-P", "AC-C"],
                     "owner": "candidate_verify",
                     "tier": "real_e2e",
+                    "producer_task_id": "TASK-PRODUCER",
                 }]},
                 "acceptance_criteria": [{
                     "id": "AC-P",
@@ -416,6 +417,9 @@ def test_product_delivery_materializes_global_commands_into_task_contract(
     assert snapshot["acceptance_criteria"][0][
         "verification_command_ids"
     ] == ["consumer-smoke", "shared-contract"]
+    assert snapshot["verification_commands"][1]["producer_task_id"] == (
+        "TASK-PRODUCER"
+    )
     assert [
         item["id"] for item in task_map["tasks"][1]["validation"]["commands"]
     ] == ["consumer-smoke"]

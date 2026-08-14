@@ -65,6 +65,10 @@ enough for multi-task refactors.
 拆 task_map 的形状方法委托 `yoke/vertical-slicing`(每个 task 纵切全部集成层、
 独立可验收);本节只管每条 task 的可派发字段。
 
+每个纵切 task 应关闭一条可观察 parity/user journey，而不是只迁移一个技术层。
+多条 slice 汇入同一真实入口时，保留唯一 final assembly owner；该 owner 负责入口
+wiring 和 assembled smoke，不重新拥有上游 slice 的测试或证据文件。
+
 Every task must be dispatchable:
 
 - `task_id` is stable and unique.
@@ -121,6 +125,13 @@ Do not emit plan success until:
    reason.
 2. Each lane has complete allowed paths and verification.
 3. `scan_quality_audit_ref` is present or a clear failure reason is emitted.
+
+当 briefing 把 `product_acceptance_spec` 声明为 required plan port 时，通过顶层
+`plan_ports[]` 返回一个 `product_acceptance_spec.v1` body。它必须声明与 task map
+一致的 assembly owner、真实 start/health entrypoints、mandatory parity/user journeys
+及其 observable assertions，以及 Provider qualification policy。workflow run、plan
+revision 和 task-map generation 由 Kernel 在组装当前 Package 时绑定，Planner 不得
+从旧 scan/replan artifact 复制这些 identity。
 
 内核门语义(铸 plan / 重触发时会静默拦截,写 plan 前先知道):
 

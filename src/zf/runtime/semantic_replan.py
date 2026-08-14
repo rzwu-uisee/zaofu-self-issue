@@ -27,9 +27,24 @@ _SEMANTIC_REPLAN_SKILLS = {
 _ANCHOR_EVENT_TYPES = {
     "task_map.ready",
     "task_map.amended",
+    "task_map.admitted",
     "product_delivery.task_map.adopted",
     "candidate.ready",
     "fanout.started",
+}
+_TASK_MAP_ANCHOR_EVENT_TYPES = {
+    "task_map.ready",
+    "task_map.amended",
+    "task_map.admitted",
+    "product_delivery.task_map.adopted",
+}
+_TASK_MAP_ANCHOR_KEYS = {
+    "task_map_ref",
+    "source_index_ref",
+    "task_map_generation",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
 }
 _ANCHOR_KEYS = (
     "workflow_run_id",
@@ -240,6 +255,14 @@ def _semantic_replan_anchor(
             anchor["pdd_id"] = pdd_id
             anchor["feature_id"] = str(payload.get("feature_id") or pdd_id)
         for key in _ANCHOR_KEYS:
+            if (
+                key in _TASK_MAP_ANCHOR_KEYS
+                and event.type not in _TASK_MAP_ANCHOR_EVENT_TYPES
+                and anchor.get(key) not in (None, "")
+            ):
+                # Candidate snapshots may finish after a newer task map was
+                # admitted. They own candidate identity, not task-map lineage.
+                continue
             value = payload.get(key)
             if value not in (None, ""):
                 anchor[key] = value
@@ -374,6 +397,15 @@ def _semantic_replan_anchor(
             anchor["handoff_kind"] = "task_base_recovery"
         else:
             anchor["target_ref"] = anchor["candidate_ref"]
+    elif not anchor.get("continuation_commit"):
+        # A task-scoped replan can happen before the writer fanout has emitted
+        # candidate.ready. The task snapshot still pins the integrated task
+        # base; inspect that immutable commit instead of falling back to the
+        # plan-stage HEAD and rediscovering already accepted slices.
+        failed_base = str(anchor.get("base_commit") or "").strip()
+        if failed_base:
+            anchor["target_ref"] = failed_base
+            anchor["handoff_kind"] = "task_base_recovery"
     anchor["supersedes_task_ids"] = [task_id] if task_id else []
     anchor["affected_task_ids"] = [task_id] if task_id else []
     return anchor

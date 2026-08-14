@@ -171,11 +171,13 @@ def terminal_goal_dossier_issues(
         for item in terminal_payload.get("completed_task_ids", []) or []
         if str(item).strip()
     }
-    if completed_ids and done_ids != completed_ids:
+    missing_completed_ids = completed_ids - done_ids
+    if missing_completed_ids:
         issues.append({
             "code": "completed_task_set_mismatch",
             "expected": sorted(completed_ids),
             "actual": sorted(done_ids),
+            "missing": sorted(missing_completed_ids),
         })
     if (
         int(counts.get("total") or 0) != len(tasks)

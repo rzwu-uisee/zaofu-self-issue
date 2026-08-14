@@ -217,6 +217,21 @@ def test_orchestrator_briefing_lists_available_tools(state_dir: Path, config_wit
     assert "zf emit" in briefing
 
 
+def test_orchestrator_briefing_preserves_task_pipeline_recovery_authority(
+    state_dir: Path,
+    config_with_orchestrator,
+):
+    briefing = build_orchestrator_briefing(
+        state_dir=state_dir,
+        config=config_with_orchestrator,
+        trigger_event=ZE(type="dispatch.silent_stall", actor="zf-cli"),
+    )
+
+    assert "projections/task-pipeline.json" in briefing
+    assert "Never use legacy `task.assigned`" in briefing
+    assert "Kernel/Run Manager owns pipeline recovery" in briefing
+
+
 def test_orchestrator_briefing_renders_fast_path_policy(
     state_dir: Path,
     config_with_orchestrator,

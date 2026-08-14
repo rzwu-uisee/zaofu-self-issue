@@ -12,10 +12,12 @@ from types import SimpleNamespace
 
 from zf.runtime.failure_kind import (
     FAILURE_KIND_BUDGET,
+    FAILURE_KIND_INFRA,
     aggregate_failure_kind,
     classify_dispatch_exception,
     failure_kind_from_payload,
     is_budget_reason,
+    is_fanout_runtime_timeout_payload,
 )
 from zf.runtime.candidate_rework import plan_candidate_rework
 from zf.runtime.orchestrator import BudgetExceededError
@@ -42,6 +44,18 @@ def test_failure_kind_from_payload_field_wins_over_text():
         {"reason": "dispatch to judge-prd blocked: budget exceeded"}
     ) == FAILURE_KIND_BUDGET
     assert failure_kind_from_payload({"reason": "tests failed"}) == ""
+
+
+def test_fanout_runtime_timeout_supports_structured_and_legacy_payloads():
+    assert is_fanout_runtime_timeout_payload({"failure_kind": FAILURE_KIND_INFRA})
+    assert is_fanout_runtime_timeout_payload({
+        "reason": "idle",
+        "timeout_seconds": 7200,
+    })
+    assert not is_fanout_runtime_timeout_payload({
+        "reason": "command timed out after 900s",
+        "timeout_seconds": 900,
+    })
 
 
 def test_aggregate_failure_kind_uniform_and_mixed():

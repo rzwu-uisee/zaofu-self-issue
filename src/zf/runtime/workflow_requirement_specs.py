@@ -27,12 +27,24 @@ def build_requirement_spec(
                 manifest.get("objective") or intake.get("objective") or ""
             ),
             "source_ref": str(manifest.get("source_ref") or ""),
+            "source_refs": dict(manifest.get("source_refs") or {}),
+            "artifact_refs": list(manifest.get("artifact_refs") or []),
+            "task_input_binding": dict(
+                manifest.get("task_input_binding") or {}
+            ),
+            "task_input_contract_ref": str(
+                manifest.get("task_input_contract_ref") or ""
+            ),
+            "task_input_contract_digest": str(
+                manifest.get("task_input_contract_digest") or ""
+            ),
             "source_root": str(
                 manifest.get("source_root") or intake.get("source_root") or ""
             ),
             "target_root": str(
                 manifest.get("target_root") or intake.get("target_root") or ""
             ),
+            "scope": strings(intake.get("scope") or manifest.get("scope")),
             "acceptance": strings(
                 intake.get("acceptance") or manifest.get("acceptance")
             ),
@@ -55,7 +67,7 @@ def build_requirement_spec(
 
 def normalize_requirement_spec(spec: dict[str, Any]) -> dict[str, Any]:
     out = dict(spec)
-    for key in ("acceptance", "constraints", "open_questions"):
+    for key in ("acceptance", "constraints", "open_questions", "scope"):
         out[key] = strings(out.get(key))
     out["clarification_answers"] = normalize_clarification_answers(
         out.get("clarification_answers")

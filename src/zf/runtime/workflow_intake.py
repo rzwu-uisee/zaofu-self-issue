@@ -29,6 +29,10 @@ from zf.runtime.workflow_origin import (
     normalize_workflow_origin_binding,
     workflow_origin_from_request,
 )
+from zf.runtime.workflow_task_input_artifacts import (
+    dedupe_artifact_refs,
+    materialize_task_workflow_input,
+)
 
 def build_flow_intake(
     *,
@@ -42,6 +46,7 @@ def build_flow_intake(
     project_id: str = "",
     project_name: str = "",
     strictness: str = "standard",
+    scope: tuple[str, ...] = (),
     parity_scope: tuple[str, ...] = (),
     acceptance: tuple[str, ...] = (),
     constraints: tuple[str, ...] = (),
@@ -55,6 +60,9 @@ def build_flow_intake(
     thread_key: str = "",
     origin_binding: dict[str, Any] | None = None,
     source_refs: dict[str, str] | None = None,
+    artifact_refs: tuple[Any, ...] = (),
+    task_input_binding: dict[str, Any] | None = None,
+    task_input_contract: dict[str, Any] | None = None,
     output: Path | None = None,
 ) -> dict[str, Any]:
     request_id = request_id or _unique_request_id(kind)
@@ -131,6 +139,19 @@ def build_flow_intake(
         for key, value in (source_refs or {}).items()
         if str(key).strip() and str(value).strip()
     }
+    task_input = materialize_task_workflow_input(
+        workflow_dir=workflow_dir,
+        project_root=project_root,
+        source_ref=source_ref,
+        source_refs=normalized_source_refs,
+        artifact_refs=artifact_refs,
+        acceptance=acceptance,
+        constraints=constraints,
+        scope=scope,
+        binding=task_input_binding or {},
+        input_contract=task_input_contract or {},
+    )
+    normalized_source_refs = task_input.source_refs
     intake_payload = {
         "schema_version": "workflow.intake.v1",
         "request_id": request_id,
@@ -149,12 +170,16 @@ def build_flow_intake(
         "requested_backend": backend,
         "requested_lanes": lanes,
         "strictness": strictness,
+        "scope": list(scope),
         "parity_scope": list(parity_scope),
         "created_by": created_by,
         "channel_id": channel_id,
         "thread_id": thread_id,
         "origin_binding": normalized_origin_binding,
         "source_refs": normalized_source_refs,
+        "task_input_binding": dict(task_input_binding or {}),
+        "task_input_contract_ref": task_input.contract_ref,
+        "task_input_contract_digest": task_input.contract_digest,
         "created_at": now,
     }
     intake_json_path.write_text(
@@ -188,8 +213,10 @@ def build_flow_intake(
         skill_plan=skill_plan,
         created_at=now,
     )
-    artifact_refs = [
+    manifest_artifact_refs = [
+        *artifact_refs,
         *([source_ref] if source_ref else []),
+        *([task_input.contract_ref] if task_input.contract_ref else []),
         str(intake_json_path),
         str(intake_markdown_path),
         str(skill_plan_path),
@@ -209,11 +236,15 @@ def build_flow_intake(
         "requested_backend": backend,
         "requested_lanes": lanes,
         "strictness": strictness,
+        "scope": list(scope),
         "parity_scope": list(parity_scope),
         "channel_id": channel_id,
         "thread_id": thread_id,
         "origin_binding": normalized_origin_binding,
         "source_refs": normalized_source_refs,
+        "task_input_binding": dict(task_input_binding or {}),
+        "task_input_contract_ref": task_input.contract_ref,
+        "task_input_contract_digest": task_input.contract_digest,
         "intake_ref": str(output_path),
         "intake_json_ref": str(intake_json_path),
         "intake_markdown_ref": str(intake_markdown_path),
@@ -225,7 +256,7 @@ def build_flow_intake(
         "acceptance": list(acceptance),
         "constraints": list(constraints),
         "open_questions": list(open_questions),
-        "artifact_refs": artifact_refs,
+        "artifact_refs": dedupe_artifact_refs(manifest_artifact_refs),
         "created_at": now,
     }
     manifest["workflow_input_manifest_ref"] = str(manifest_path)
@@ -268,6 +299,7 @@ def build_flow_intake(
         )),
         "request_projection_ref": request_projection_ref,
     }
+
 
 def _normalize_request_kind(kind: str) -> str:
     value = str(kind or "").strip().lower()

@@ -216,3 +216,119 @@ def test_completion_gate_keeps_current_generation_handoff_blocking() -> None:
     assert outcome is not None
     assert outcome.type == "run.goal.completion.blocked"
     assert outcome.payload["blockers"] == ["open_feedback", "pending_handoff"]
+
+
+def test_provider_qualification_wait_is_idempotent_and_not_semantic_rework() -> None:
+    run_id = "RUN-PROVIDER-WAIT"
+    target = "c" * 40
+    candidate_ref = "candidate/provider-wait"
+    generation = "generation-provider-wait"
+    closure_fields = {
+        "workflow_run_id": run_id,
+        "goal_id": "GOAL-PROVIDER-WAIT",
+        "task_map_generation": generation,
+        "candidate_head_commit": target,
+        "goal_claim_set_digest": "a" * 64,
+        "closure_fact_digest": "b" * 64,
+        "product_acceptance_spec_digest": "d" * 64,
+        "product_acceptance_report_digest": "e" * 64,
+        "product_acceptance_required": True,
+        "product_acceptance_verdict": "passed",
+        "provider_qualification_required": True,
+        "provider_qualification_status": "waiting_external",
+    }
+    admitted_ref = {
+        "ref": "artifacts/call-results/envelopes/" + "f" * 64 + ".json",
+        "sha256": "f" * 64,
+    }
+    events = [
+        ZfEvent(type="run.goal.started", payload={"run_id": run_id}),
+        ZfEvent(
+            type="candidate.ready",
+            correlation_id=run_id,
+            payload={
+                "workflow_run_id": run_id,
+                "candidate_ref": candidate_ref,
+                "candidate_head_commit": target,
+                "task_map_generation": generation,
+                "completed_task_ids": ["TASK-1"],
+            },
+        ),
+        ZfEvent(
+            type="fanout.child.completed",
+            correlation_id=run_id,
+            payload={
+                "workflow_run_id": run_id,
+                "candidate_ref": candidate_ref,
+                "target_commit": target,
+                "task_map_generation": generation,
+                "control_result_schema": "verification-result.v1",
+                "semantic_verdict": "passed",
+                "admitted_call_result_ref": admitted_ref,
+            },
+        ),
+        ZfEvent(type="flow.goal.closed", correlation_id=run_id, payload=closure_fields),
+    ]
+    claim = ZfEvent(
+        id="claim-provider-wait",
+        type="run.goal.completion.claimed",
+        correlation_id=run_id,
+        payload={
+            "run_id": run_id,
+            "goal_id": "GOAL-PROVIDER-WAIT",
+            "claim_id": "claim-provider-wait",
+            "claim_type": "admitted_goal_closure_result",
+            "target_commit": target,
+            "candidate_ref": candidate_ref,
+            "task_map_generation": generation,
+            "goal_claim_set_ref": "artifacts/goal-claims/current.json",
+            "goal_claim_set_digest": "a" * 64,
+            "closure_fact_ref": "artifacts/goal-closure/current.json",
+            "closure_fact_digest": "b" * 64,
+            "admitted_call_result_ref": admitted_ref,
+            "product_acceptance_required": True,
+            "product_acceptance_spec_ref": "artifacts/product/spec.json",
+            "product_acceptance_spec_digest": "d" * 64,
+            "product_acceptance_report_ref": "artifacts/product/report.json",
+            "product_acceptance_report_digest": "e" * 64,
+            "product_acceptance_verdict": "passed",
+            "provider_qualification_required": True,
+            "provider_qualification_status": "waiting_external",
+        },
+    )
+
+    first = run_goal_completion_gate_event([*events, claim], claim=claim)
+
+    assert first is not None
+    assert first.type == "run.goal.completion.blocked"
+    assert first.payload["blockers"] == ["waiting_external_provider"]
+    assert first.payload["external_wait"] == {
+        "kind": "provider_qualification",
+        "status": "waiting_external",
+        "semantic_attempt_incremented": False,
+    }
+    assert run_goal_completion_gate_event(
+        [*events, claim, first],
+        claim=claim,
+    ) is None
+
+    stale_claim = ZfEvent(
+        id="claim-provider-stale-report",
+        type="run.goal.completion.claimed",
+        correlation_id=run_id,
+        payload={
+            **claim.payload,
+            "claim_id": "claim-provider-stale-report",
+            "product_acceptance_report_digest": "9" * 64,
+        },
+    )
+    stale = run_goal_completion_gate_event(
+        [*events, stale_claim],
+        claim=stale_claim,
+    )
+
+    assert stale is not None
+    assert stale.type == "run.goal.completion.rejected"
+    assert "stale_product_acceptance_report_digest" in stale.payload[
+        "invalid_reasons"
+    ]

@@ -15,6 +15,10 @@ from zf.runtime.call_result_runtime import (
     mark_call_operation_started,
     prepare_call_operation,
 )
+from zf.runtime.artifact_read_ledger import (
+    build_input_consumption_policy,
+    write_input_consumption_policy,
+)
 from zf.runtime.result_submit import (
     ResultSubmitError,
     SemanticResultSubmitService,
@@ -97,6 +101,75 @@ def _semantic() -> dict:
         "known_gaps": [],
         "summary": "implemented",
     }
+
+
+def test_task_pipeline_submit_uses_current_attempt_delivery_policy(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    service = SemanticResultSubmitService(
+        state_dir=runtime.state_dir,
+        event_log=runtime.event_log,
+        event_writer=runtime.event_writer,
+    )
+    required_reads = [{
+        "source_id": "plan-port-planning_result",
+        "artifact_id": "planning_result",
+        "artifact_sha256": "a" * 64,
+        "json_path": "$",
+        "min_returned_bytes": 1,
+    }]
+    old_policy = build_input_consumption_policy(
+        workflow_run_id="run-1",
+        attempt_id="attempt-1",
+        required_reads=required_reads,
+    )
+    old_descriptor = write_input_consumption_policy(
+        runtime.state_dir,
+        old_policy,
+    )
+    current_policy = build_input_consumption_policy(
+        workflow_run_id="run-1",
+        attempt_id="attempt-2",
+        required_reads=required_reads,
+    )
+    current_descriptor = write_input_consumption_policy(
+        runtime.state_dir,
+        current_policy,
+    )
+    runtime.event_writer.append(ZfEvent(
+        type="task.pipeline.stage.dispatched",
+        actor="orchestrator",
+        origin="kernel",
+        task_id="TASK-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": "operation-1",
+            "attempt_id": "attempt-2",
+            "dispatch_id": "dispatch-2",
+            "placement_epoch": 2,
+            "task_stage_session_binding": "binding-1",
+            "input_consumption_policy_ref": current_descriptor,
+        },
+    ))
+    operation = {
+        "operation_id": "operation-1",
+        "active_attempt_id": "attempt-2",
+        "dispatch_id": "dispatch-2",
+    }
+    request = {
+        "task_pipeline_stage": "impl",
+        "input_consumption_policy_ref": old_descriptor,
+    }
+
+    delivery = service._current_task_pipeline_delivery(operation, request)
+    resolved = service._input_policy(
+        request,
+        task_pipeline_delivery=delivery,
+    )
+
+    assert delivery["placement_epoch"] == 2
+    assert resolved["attempt_id"] == "attempt-2"
 
 
 def _plan_candidate() -> dict:
@@ -418,6 +491,28 @@ def test_verification_projection_preserves_evidence_refs() -> None:
     )
 
     assert projection["report"]["evidence_refs"] == ["receipt:verify"]
+
+
+def test_implementation_projection_preserves_plan_level_blocker_metadata() -> None:
+    projection = _compatibility_projection(
+        "implementation_result",
+        {
+            "implementation_result": {
+                "verdict": "blocked",
+                "summary": "upstream controls are outside this task scope",
+                "failure_class": "upstream_contract_gap",
+                "blocker_kind": "upstream_contract_gap",
+                "evidence_refs": ["file:src/upstream.ts"],
+                "known_gaps": ["free camera belongs to the upstream slice"],
+            },
+        },
+    )
+
+    assert projection["failure_class"] == "upstream_contract_gap"
+    assert projection["blocker_kind"] == "upstream_contract_gap"
+    assert projection["reason"] == (
+        "upstream controls are outside this task scope"
+    )
 
 
 def test_stdin_semantic_submit_fills_identity_and_emits_canonical_event(tmp_path: Path) -> None:

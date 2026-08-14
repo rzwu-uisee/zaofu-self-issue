@@ -125,7 +125,72 @@ def is_plan_level_task_contract_blocker(event: ZfEvent) -> bool:
         str(item or "").strip() for item in evidence
     )
     reason = str(payload.get("reason") or payload.get("summary") or "").strip()
-    return semantic_kind and has_evidence and bool(reason)
+    # Canonical result adapters preserve the worker's reason as ``summary``
+    # but older implementation-result profiles do not carry failure_class.
+    # Accept only explicit scope-boundary language so an ordinary free-form
+    # ``dev.blocked`` cannot silently promote itself into semantic replan.
+    if not semantic_kind and reason:
+        normalized_reason = reason.lower()
+        semantic_kind = _contains_any(
+            normalized_reason,
+            _TASK_CONTRACT_SCOPE_BLOCKER_MARKERS,
+        )
+    if semantic_kind and has_evidence and bool(reason):
+        return True
+    return _legacy_typed_scope_blocker(payload)
+
+
+def _legacy_typed_scope_blocker(payload: dict[str, Any]) -> bool:
+    """Recognize admitted pre-metadata implementation blockers.
+
+    Older ``implementation-result.v1`` templates did not expose
+    ``failure_class`` or ``blocker_kind``. Keep replay compatible only when
+    the admitted self-check has a blocked acceptance row, durable evidence,
+    a known gap, and an explicit upstream/allowed-scope diagnosis.
+    """
+
+    self_check = payload.get("impl_self_check")
+    if not isinstance(self_check, dict):
+        return False
+    rows = self_check.get("acceptance_results")
+    if not isinstance(rows, list):
+        return False
+    blocked_rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and str(row.get("status") or "").strip().lower() == "blocked"
+    ]
+    if not blocked_rows:
+        return False
+    known_gaps = payload.get("known_gaps")
+    if not isinstance(known_gaps, list) or not any(
+        str(item or "").strip() for item in known_gaps
+    ):
+        return False
+    evidence_refs = list(payload.get("evidence_refs") or [])
+    for row in blocked_rows:
+        evidence_refs.extend(row.get("evidence_refs") or [])
+    if not any(str(item or "").strip() for item in evidence_refs):
+        return False
+    diagnosis = _payload_text({
+        "summary": payload.get("summary") or payload.get("reason") or "",
+        "known_gaps": known_gaps,
+        "blocked_results": blocked_rows,
+    })
+    english_scope = (
+        "outside this task" in diagnosis
+        or "outside the task" in diagnosis
+        or "outside task scope" in diagnosis
+        or (
+            "upstream" in diagnosis
+            and ("allowed path" in diagnosis or "task scope" in diagnosis)
+        )
+    )
+    chinese_scope = (
+        ("上游" in diagnosis or "任务契约" in diagnosis)
+        and ("范围外" in diagnosis or "超出" in diagnosis or "不在" in diagnosis)
+    )
+    return english_scope or chinese_scope
 
 
 @dataclass(frozen=True)
@@ -777,6 +842,19 @@ _INTEGRATION_PLAN_MARKERS = (
     "outside this child's allowed paths",
     "requires workspace/package files",
     "verification command exceeds task scope",
+)
+
+# Legacy implementation-result profiles may omit ``failure_class`` while
+# preserving an evidenced, explicit diagnosis that the required capability is
+# outside the immutable child scope. Keep this narrower than generic contract
+# language: it is used to choose semantic replan over blind task redispatch.
+_TASK_CONTRACT_SCOPE_BLOCKER_MARKERS = (
+    "outside allowed_paths",
+    "outside this slice's allowed_paths",
+    "outside this child's allowed paths",
+    "outside this child contract",
+    "cannot be implemented inside the allowed paths",
+    "cannot be satisfied inside the allowed paths",
 )
 
 _DESIGN_MARKERS = (

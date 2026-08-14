@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from zf.runtime.artifact_refs import runtime_artifact_sha256
 from zf.runtime.call_result_envelope import call_result_envelope_ref
 from zf.runtime.fanout_payload_data import (
     collect_payload_list,
@@ -17,6 +18,7 @@ from zf.runtime.fanout_payload_data import (
 )
 from zf.runtime.fanout_parent_identity import parent_flow_identity
 from zf.runtime.plan_port_projection import first_normalized_plan_ports
+from zf.runtime.plan_port_briefing import plan_port_contract_lines
 from zf.runtime.task_contract_snapshot import criterion_text
 
 from zf.core.config.schema import RoleConfig
@@ -46,6 +48,7 @@ class WriterFanoutDataMixin:
     _first_child_value = staticmethod(first_child_value)
     _payload_or_report_value = staticmethod(payload_or_report_value)
     _payload_ref_value = staticmethod(payload_ref_value)
+    _plan_port_contract_lines = staticmethod(plan_port_contract_lines)
 
     @staticmethod
     def _writer_current_task_ref(
@@ -180,38 +183,6 @@ class WriterFanoutDataMixin:
             "For refactor plan handoff, include `scan_quality_audit_ref` and list that audit artifact in `artifact_refs`.",
             "If the workflow asks for a full manifest, emit `artifact.manifest.published` with `kind=implementation_plan` and `kind=task_map` refs before the terminal success event.",
         ]
-
-    @staticmethod
-    def _plan_port_contract_lines(*, flow_kind: str = "") -> list[str]:
-        lines = [
-            "Plan-port contract: when Controlled Artifact Inputs include portable "
-            "matrix drafts, enrich them before success and return each ready body "
-            "through `plan_ports` using canonical logical names such as "
-            "`source_inventory`, `capability_matrix`, `acceptance_matrix`, "
-            "`test_matrix`, `task_map`, and `real_e2e_matrix`.",
-            "`plan_ports` MUST be a JSON array of descriptor objects shaped like "
-            "`{\"logical_name\": \"acceptance_matrix\", \"schema_version\": "
-            "\"acceptance-matrix.v1\", \"body\": {...}}`; do not use a "
-            "`{logical_name: body}` object map.",
-            "Return `plan_ports` once at the top level of the success payload; "
-            "do not duplicate the matrix bodies inside `report`.",
-            "Every required matrix body must set top-level `status: ready` and "
-            "`metadata.enrichment_contract.status: fulfilled`; do not overwrite "
-            "kernel state or claim an unadapted draft as ready.",
-            "Test Matrix has exactly one command registry: `test_matrix.commands[]`; never redefine commands under `tests[]`.",
-            "Passing fixture: every required matrix is `status:ready` with `metadata.enrichment_contract.status:fulfilled`; Task `TASK-1` command `test-command` uses tier `runtime`, exact command `pytest -q tests/test_command.py`, and `acceptance_ids:[\"AC-1\"]`.",
-            "Cross-links: capability `CAP-1` has `task_ids:[\"TASK-1\"]` and `acceptance_ids:[\"AC-1\"]`; acceptance `AC-1` has `capability_id:\"CAP-1\"`, `task_id:\"TASK-1\"`, and `verification_command_ids:[\"test-command\"]`; Test Matrix repeats the exact command and acceptance ids.",
-            "A pure aggregator may validate and carry child-supplied `plan_ports`, "
-            "but it must reject rather than invent missing project facts or matrix "
-            "bodies.",
-        ]
-        if str(flow_kind or "").strip().lower() == "issue":
-            lines.append(
-                "Issue compatibility: regression coverage belongs in the canonical "
-                "`test_matrix` port; `regression_test_matrix` is a delivery alias, "
-                "not a second logical port or mandatory duplicate file."
-            )
-        return lines
 
     def _generic_fanout_success_payload(
         self,
@@ -422,13 +393,26 @@ class WriterFanoutDataMixin:
                 "source_commit": source_commit,
                 "candidate_base_commit": base_commit,
             })
-            for key in (
-                "plan_admission_incident_id",
-                "task_map_digest",
-            ):
+            for key in ("plan_admission_incident_id",):
                 value = trigger_payload.get(key)
                 if value not in (None, ""):
                     payload[key] = value
+            state_dir = getattr(self, "state_dir", None)
+            project_root = getattr(self, "project_root", None)
+            task_map_digest = ""
+            if task_map_ref and state_dir is not None and project_root is not None:
+                task_map_digest = runtime_artifact_sha256(
+                    task_map_ref,
+                    state_dir=Path(state_dir),
+                    project_root=Path(project_root),
+                )
+            trigger_ref = str(trigger_payload.get("task_map_ref") or "").strip()
+            if not task_map_digest and trigger_ref == task_map_ref:
+                task_map_digest = str(
+                    trigger_payload.get("task_map_digest") or ""
+                ).strip()
+            if task_map_digest:
+                payload["task_map_digest"] = task_map_digest
         if success_event == "goal.closure.synthesized":
             from zf.runtime.goal_closure_fanout_payload import (
                 apply_goal_closure_aggregate_payload,
@@ -629,6 +613,9 @@ class WriterFanoutDataMixin:
             "request_revision",
             "workflow_generation",
             "task_map_generation",
+            "plan_artifact_package_id",
+            "plan_artifact_package_ref",
+            "plan_artifact_package_digest",
             "workflow_template",
             "completion_profile",
             "generic_workflow_contract_digest",
@@ -705,6 +692,10 @@ class WriterFanoutDataMixin:
             "rework_categories",
             "rework_summary",
             "replan_classification",
+            "stage_replan_generation",
+            "stage_replan_generation_source_event_id",
+            "operator_authorized",
+            "operator_authorization_ref",
             "replan",
             "orchestrator_decision",
             "supersedes_plan_fanout_id",

@@ -195,6 +195,40 @@ def test_projection_replay_is_stable_and_worker_comes_from_operation() -> None:
     ] == "impl-1"
 
 
+def test_projection_prefers_current_task_over_archived_duplicate() -> None:
+    current = Task(
+        id="TASK-A",
+        title="current external gate",
+        status="backlog",
+        contract=TaskContract(
+            evidence_contract={
+                "required_manual_evidence": "/tmp/ac8.json",
+            },
+            acceptance_criteria=[{
+                "id": "AC8",
+                "mandatory": True,
+                "verification_owner": "human",
+                "verification_tier": "manual_evidence",
+            }],
+        ),
+    )
+    archived = Task(
+        id="TASK-A",
+        title="stale archived copy",
+        status="done",
+    )
+
+    projection = build_task_pipeline_projection(
+        policy=_policy(),
+        tasks=[current, archived],
+        events=[_generation()],
+    )
+
+    assert projection["tasks"][0]["task_status"] == "backlog"
+    assert projection["tasks"][0]["pipeline_stage"] == "external_gate_waiting"
+    assert projection["queues"]["external_gate_waiting"] == ["TASK-A"]
+
+
 def test_projection_combines_concurrent_flow_policy_partitions() -> None:
     issue_policy = _policy()
     issue_policy.update({

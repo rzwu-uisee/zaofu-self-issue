@@ -7,6 +7,7 @@ from typing import Any
 from zf.core.events.model import ZfEvent
 from zf.runtime.fanout import FanoutChild, FanoutContext
 from zf.runtime.lane_stage_handoff import per_lane_flow_match
+from zf.runtime.module_gap_replacement import completed_task_ref_dependencies
 from zf.runtime.orchestrator_fanout import _writer_task_dependencies_satisfied
 
 
@@ -107,6 +108,25 @@ def reconcile_affinity_writer_slots(
         for task_id in trigger_payload.get("completed_task_ids", []) or []
         if str(task_id or "").strip()
     }
+    if str(trigger_payload.get("resume_scope") or "") == "gap_tasks_only":
+        fanout_task_ids = {
+            str(child.get("task_id") or "").strip()
+            for child in manifest.get("children", []) or []
+            if isinstance(child, dict) and str(child.get("task_id") or "").strip()
+        }
+        external_dependencies = {
+            dependency
+            for child in queued_children
+            for dependency in _queued_child_payload(child).get("blocked_by", []) or []
+            if str(dependency or "").strip() not in fanout_task_ids
+        }
+        completed_task_ids.update(completed_task_ref_dependencies(
+            state_dir=orchestrator.state_dir,
+            project_root=orchestrator.project_root,
+            task_ids=sorted(str(item) for item in external_dependencies),
+            target_commit=str(manifest.get("target_ref") or ""),
+            workflow_run_id=str(trigger_payload.get("workflow_run_id") or ""),
+        ))
     if per_lane_flow_match(orchestrator.config, stage.id, stage_slot) is None:
         completed_task_ids.update({
             str(child.get("task_id") or "")

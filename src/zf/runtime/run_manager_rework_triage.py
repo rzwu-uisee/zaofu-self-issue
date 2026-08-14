@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from zf.core.events.model import ZfEvent
+from zf.core.task.store import TaskStore
+from zf.runtime.manual_evidence_gate import pending_manual_evidence_gate_action
+from zf.runtime.rework_triage import is_plan_level_task_contract_blocker
 from zf.runtime.semantic_replan import (
     SEMANTIC_REPLAN_ACTION,
     SEMANTIC_REPLAN_SAFE_ACTION,
@@ -17,7 +20,11 @@ TRIAGE_REQUESTED = "orchestrator.rework.triage.requested"
 TRIAGE_RECORDED = "orchestrator.rework.triage.recorded"
 TRIAGE_REQUEST_ACTION = "orchestrator-rework-triage"
 TRIAGE_APPLY_ACTION = "orchestrator-triage-advice-apply"
-_TRIAGE_CAP_EVENTS = frozenset({"task.rework.capped", "candidate.rework.capped"})
+_TRIAGE_CAP_EVENTS = frozenset({
+    "task.rework.capped",
+    "candidate.rework.capped",
+    "task.pipeline.semantic_rework.exhausted",
+})
 ORCHESTRATOR_TRIAGE_ACTIONS = frozenset({
     TRIAGE_REQUEST_ACTION,
     TRIAGE_APPLY_ACTION,
@@ -129,6 +136,8 @@ def pending_rework_triage_actions(
 
 def pending_immediate_replan_actions(
     events: list[ZfEvent],
+    *,
+    task_store: TaskStore | None = None,
 ) -> list[dict[str, Any]]:
     """Promote a first-attempt unsatisfiable contract to semantic replan.
 
@@ -154,8 +163,22 @@ def pending_immediate_replan_actions(
         recommendation = str(
             payload.get("recommended_action") or ""
         ).strip().lower()
+        failed_event_id = str(payload.get("failed_event_id") or "").strip()
+        failed_event = events_by_id.get(failed_event_id)
+        is_manual_gate, manual_gate = pending_manual_evidence_gate_action(
+            task_store, events, failed_event, triage
+        )
+        if is_manual_gate:
+            if manual_gate is not None:
+                out.append(manual_gate)
+            continue
+        legacy_scope_blocker = (
+            recommendation == "request_evidence_reissue"
+            and failed_event is not None
+            and is_plan_level_task_contract_blocker(failed_event)
+        )
         retryable = payload.get("retryable")
-        if recommendation != "request_replan":
+        if recommendation != "request_replan" and not legacy_scope_blocker:
             continue
         if retryable is not False and str(retryable).strip().lower() != "false":
             continue
@@ -171,8 +194,6 @@ def pending_immediate_replan_actions(
             or _action_completed(events, checkpoint_id)
         ):
             continue
-        failed_event_id = str(payload.get("failed_event_id") or "").strip()
-        failed_event = events_by_id.get(failed_event_id)
         failed_payload = _payload(failed_event) if failed_event is not None else {}
         evidence_ids = list(dict.fromkeys(
             item for item in (failed_event_id, triage.id) if item
@@ -184,9 +205,18 @@ def pending_immediate_replan_actions(
             or failed_event_id
             or triage.id
         )
+        legacy_known_gaps = _string_list(failed_payload.get("known_gaps"))
         guidance = str(
-            payload.get("notes")
-            or failed_payload.get("reason")
+            (
+                failed_payload.get("reason")
+                or failed_payload.get("summary")
+                or (legacy_known_gaps[0] if legacy_known_gaps else "")
+            )
+            if legacy_scope_blocker
+            else (
+                payload.get("notes")
+                or failed_payload.get("reason")
+            )
             or "current task contract is not satisfiable inside its owned scope"
         )
         out.append({
@@ -207,7 +237,11 @@ def pending_immediate_replan_actions(
             "fingerprint": fingerprint,
             "failure_class": str(
                 failed_payload.get("failure_class")
-                or payload.get("classification")
+                or (
+                    "task_contract_unsatisfiable"
+                    if legacy_scope_blocker
+                    else payload.get("classification")
+                )
                 or "task_contract_unsatisfiable"
             ),
             "failure_count": 1,
@@ -248,7 +282,7 @@ def active_rework_triage_task_ids(
     if threshold <= 0:
         return active
     for index, event in enumerate(events):
-        if event.type != "task.rework.capped":
+        if event.type not in _TRIAGE_CAP_EVENTS:
             continue
         payload = _payload(event)
         if not is_semantic_triage_cap(event, threshold=threshold):
@@ -268,6 +302,7 @@ def active_immediate_replan_task_ids(events: list[ZfEvent]) -> set[str]:
     """Keep old-contract recovery suppressed until a replacement is admitted."""
 
     active: set[str] = set()
+    events_by_id = {event.id: event for event in events if event.id}
     latest_by_task: dict[str, tuple[int, ZfEvent]] = {}
     for index, event in enumerate(events):
         if event.type != "task.rework.triage.completed":
@@ -279,11 +314,23 @@ def active_immediate_replan_task_ids(events: list[ZfEvent]) -> set[str]:
 
     for task_id, (index, event) in latest_by_task.items():
         payload = _payload(event)
+        recommendation = str(
+            payload.get("recommended_action") or ""
+        ).strip().lower()
+        failed_event = events_by_id.get(
+            str(payload.get("failed_event_id") or "").strip()
+        )
+        legacy_scope_blocker = (
+            recommendation == "request_evidence_reissue"
+            and failed_event is not None
+            and is_plan_level_task_contract_blocker(failed_event)
+        )
         retryable = payload.get("retryable")
         if (
-            str(payload.get("recommended_action") or "").strip().lower()
-            != "request_replan"
-            or (
+            recommendation != "request_replan"
+            and not legacy_scope_blocker
+        ) or (
+            (
                 retryable is not False
                 and str(retryable).strip().lower() != "false"
             )
@@ -350,7 +397,7 @@ def _request_action(
         "failure_class": (
             "candidate_rework_exhausted"
             if str(payload.get("failure_scope") or "") == "candidate"
-            else "repeated_task_failure"
+            else str(payload.get("failure_class") or "repeated_task_failure")
         ),
         "failure_count": int(payload.get("failure_count") or payload.get("retry_count") or 0),
         "triage_threshold": threshold,

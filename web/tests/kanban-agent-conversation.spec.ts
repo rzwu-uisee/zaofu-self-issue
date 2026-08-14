@@ -510,6 +510,9 @@ test("KBA-CHANNEL Channel setup applies directly without a Workflow invoke", asy
   await expect(plan.locator(".agent-plan-recommended")).toHaveText("Recommended");
   await expect(plan).toContainText("3 members");
   await expect(plan).toContainText("4 rounds");
+  await expect(plan).toContainText("conversation");
+  await expect(plan).toContainText("Initial routing: 1 responder");
+  await expect(plan).toContainText("Blind first pass: 4-way fanout");
   await expect(plan).not.toContainText("Customize");
   await expect(plan.getByRole("button", { name: "Chat about" })).toBeEnabled();
   await plan.getByLabel("Quick change (Recommended)").check();

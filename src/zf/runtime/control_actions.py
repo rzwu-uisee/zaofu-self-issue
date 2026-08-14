@@ -503,6 +503,11 @@ class ControlledActionService(
                 requested=requested, action=action,
                 requested_action=requested_action, payload=payload,
             )
+        if action == "stage-replan-new-generation":
+            return self._stage_replan_new_generation_action(
+                requested=requested, action=action,
+                requested_action=requested_action, payload=payload,
+            )
         if action == "fanout-aggregate-rebuild":
             return self._fanout_aggregate_rebuild_action(
                 requested=requested, action=action,

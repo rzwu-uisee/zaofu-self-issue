@@ -44,6 +44,7 @@ def resolve_orphan_reader_fanout_child(
     payload: dict[str, Any],
     *,
     event_order: Mapping[str, int] | None = None,
+    recovery_snapshot: Any | None = None,
 ) -> tuple[str, str] | None:
     """Resolve one bare result without crossing dispatch authority domains."""
 
@@ -53,6 +54,30 @@ def resolve_orphan_reader_fanout_child(
     role_instance = str(payload.get("role_instance") or event.actor or "")
     if not role_instance:
         return None
+    if recovery_snapshot is not None:
+        candidates = recovery_snapshot.orphan_candidates.get(role_instance, ())
+        if not candidates:
+            return None
+        from zf.runtime.reader_fanout_recovery_snapshot import (
+            event_log_snapshot_token,
+        )
+
+        if (
+            event_log_snapshot_token(runtime.event_log)
+            != recovery_snapshot.event_log_token
+        ):
+            return None
+        event_order = event_order or recovery_snapshot.event_order
+        matches = _matching_snapshot_candidates(
+            runtime,
+            event,
+            payload,
+            candidates=candidates,
+            event_order=event_order,
+            recovery_snapshot=recovery_snapshot,
+        )
+        return matches[0] if len(matches) == 1 else None
+
     fanout_root = runtime.state_dir / "fanouts"
     if not fanout_root.exists():
         return None
@@ -116,6 +141,61 @@ def resolve_orphan_reader_fanout_child(
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _matching_snapshot_candidates(
+    runtime: Any,
+    event: ZfEvent,
+    payload: dict[str, Any],
+    *,
+    candidates: tuple[Any, ...],
+    event_order: Mapping[str, int],
+    recovery_snapshot: Any,
+) -> list[tuple[str, str]]:
+    matches: list[tuple[str, str]] = []
+    status = str(payload.get("status") or "")
+    for candidate in candidates:
+        fanout_id = str(candidate.fanout_id or "")
+        child_id = str(candidate.child_id or "")
+        if recovery_snapshot.currentness.get(fanout_id, ("", ""))[0]:
+            continue
+        manifest = recovery_snapshot.manifests_by_id.get(fanout_id)
+        if not isinstance(manifest, dict):
+            continue
+        aggregate = manifest.get("aggregate")
+        aggregate = aggregate if isinstance(aggregate, dict) else {}
+        if (
+            str(manifest.get("status") or "") in _TERMINAL_FANOUT_STATUSES
+            or str(aggregate.get("status") or "") in _TERMINAL_FANOUT_STATUSES
+        ):
+            continue
+        child = runtime._fanout_child(manifest, child_id)
+        if not isinstance(child, dict):
+            continue
+        if str(child.get("status") or "") in {"completed", "failed"}:
+            continue
+        aggregate_config = manifest.get("aggregate_config") or {}
+        success_event = str(aggregate_config.get("success_event") or "")
+        failure_event = str(aggregate_config.get("failure_event") or "")
+        child_success_event, child_failure_event = (
+            runtime._fanout_child_result_events(aggregate_config)
+        )
+        if (
+            event.type not in {
+                child_success_event,
+                child_failure_event,
+                success_event,
+                failure_event,
+            }
+            and status not in _RESULT_STATUSES
+        ):
+            continue
+        if not _result_follows_dispatch(event, child, event_order):
+            continue
+        if not _explicit_identity_matches(event, payload, manifest, child):
+            continue
+        matches.append((fanout_id, child_id))
+    return matches
 
 
 def _result_follows_dispatch(

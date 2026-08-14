@@ -53,15 +53,52 @@ def test_rotation_marks_stale(tmp_path: Path) -> None:
     assert read_model.projection_status(state_dir)["projection_state"] == "stale"
 
 
-def test_ensure_requested_catches_up_tail_for_read_your_writes(tmp_path: Path) -> None:
+def test_rotation_summary_can_explicitly_converge(tmp_path: Path, monkeypatch) -> None:
+    state_dir = tmp_path / ".zf"
+    _write_line(state_dir / "events.jsonl", ZfEvent(type="a", id="evt-a"))
+    read_model.rebuild(state_dir)
+    _write_line(
+        state_dir / "events" / "2026-06-27.jsonl",
+        ZfEvent(type="arch", id="evt-arch"),
+    )
+    scheduled = []
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: scheduled.append(state_dir),
+    )
+
+    stale = read_model.events_page(state_dir, limit=10)
+
+    assert stale is not None
+    assert stale["projection_state"] == "stale"
+    assert scheduled == [state_dir]
+
+    fresh = read_model.events_page(state_dir, limit=10, require_fresh=True)
+    assert fresh is not None
+    assert fresh["projection_state"] == "ready"
+    assert fresh["current_seq"] == 2
+
+
+def test_ensure_requested_serves_tail_behind_and_schedules_catch_up(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     state_dir = tmp_path / ".zf"
     _write_line(state_dir / "events.jsonl", ZfEvent(type="a", id="evt-a"))
     read_model.rebuild(state_dir)
     _write_line(state_dir / "events.jsonl", ZfEvent(type="b", id="evt-b"))
 
-    # ensure_requested must converge the tail synchronously so a following read
-    # sees the just-appended event (read-your-writes).
+    scheduled = []
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: scheduled.append(state_dir),
+    )
+
     status = read_model.ensure_requested(state_dir)
+
     assert status["projection_state"] == "ready"
-    assert status["tail_behind"] is False
-    assert int(status["projected_seq"]) == 2
+    assert status["tail_behind"] is True
+    assert int(status["projected_seq"]) == 1
+    assert scheduled == [state_dir]

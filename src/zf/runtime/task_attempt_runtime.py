@@ -188,13 +188,16 @@ def prepare_task_attempt(
         lease_id=str(attempt["lease_id"]),
     )
     if ensured.superseded_attempt_id:
+        superseded_attempt = (
+            store.get(ensured.superseded_attempt_id) or attempt
+        )
         _emit_once(
             runtime,
             "task.attempt.superseded",
             attempt_id=ensured.superseded_attempt_id,
             task_id=context.task_id,
             payload={
-                **_identity(attempt),
+                **_identity(superseded_attempt),
                 "attempt_id": ensured.superseded_attempt_id,
                 "superseded_by": attempt["attempt_id"],
             },

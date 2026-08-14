@@ -34,6 +34,11 @@ from zf.runtime.task_pipeline_reconciler import (
     task_pipeline_policy_for_contexts,
     task_pipeline_policy_partitions,
 )
+from zf.runtime.task_pipeline_affinity import task_pipeline_preferred_roles
+from zf.runtime.task_pipeline_dispatch_events import (
+    emit_task_pipeline_dispatch_deferred_once,
+    emit_task_pipeline_waiting_once,
+)
 from zf.runtime.task_pipeline_runtime_selection import (
     operation_matches_generation,
     terminal_dependency_ids,
@@ -426,17 +431,38 @@ def reconcile_task_pipeline_runtime(
     ]
     if not blocking_partitions:
         return []
+    blocking_task_ids = {
+        task_id
+        for partition in blocking_partitions
+        for task_id in partition["task_ids"]
+    }
+    blocking_contexts = {
+        task_id: contexts[task_id]
+        for task_id in sorted(blocking_task_ids)
+    }
+    from zf.runtime.task_pipeline_entry import reconcile_task_pipeline_entries
+
+    entry_decisions, external_gate_satisfied_ids = (
+        reconcile_task_pipeline_entries(
+            runtime,
+            generation_contexts=blocking_contexts,
+        )
+    )
+    decisions.extend(entry_decisions)
     from zf.runtime.task_pipeline_recovery import (
         reconcile_task_pipeline_redrives,
     )
 
     decisions.extend(reconcile_task_pipeline_redrives(
         runtime,
-        generation_contexts=contexts,
+        generation_contexts=blocking_contexts,
     ))
     from zf.runtime.task_attempt_runtime import task_attempt_store
     from zf.runtime.workflow_operation import reduce_workflow_operations
-    from zf.runtime.task_pipeline_rework import derive_impl_rework_requests
+    from zf.runtime.task_pipeline_rework import (
+        derive_impl_rework_requests,
+        reconcile_task_ref_repair_replays,
+    )
     from zf.runtime.task_pipeline_acceptance import (
         reconcile_task_pipeline_acceptance_routes,
     )
@@ -444,6 +470,12 @@ def reconcile_task_pipeline_runtime(
         reconcile_task_pipeline_integration,
     )
     from zf.runtime.task_pipeline_dispatch import dispatch_task_pipeline_stage
+
+    reconcile_task_ref_repair_replays(
+        runtime,
+        events=runtime.event_log.read_all(),
+        generation_contexts=contexts,
+    )
 
     for partition in blocking_partitions:
         policy = partition["policy"]
@@ -495,7 +527,25 @@ def reconcile_task_pipeline_runtime(
             operations=all_operations,
             attempts=attempts,
             terminal_task_ids=terminal_dependency_ids(runtime, tasks),
+            external_gate_satisfied_task_ids=(
+                set(group_contexts).intersection(
+                    external_gate_satisfied_ids
+                )
+            ),
             impl_rework_requests=impl_rework_requests,
+            preferred_role_instances=task_pipeline_preferred_roles(
+                runtime,
+                generation_contexts=group_contexts,
+            ),
+        )
+        from zf.runtime.task_pipeline_semantic_exhaustion import (
+            reconcile_task_pipeline_semantic_exhaustion,
+        )
+
+        reconcile_task_pipeline_semantic_exhaustion(
+            runtime,
+            projection=projection,
+            generation_contexts=group_contexts,
         )
         decisions.extend(reconcile_task_pipeline_integration(
             runtime,
@@ -513,6 +563,27 @@ def reconcile_task_pipeline_runtime(
                 task = runtime.task_store.get(task_id)
                 if task is None:
                     continue
+                cooldown_active = getattr(
+                    runtime,
+                    "_dispatch_recent_failure_cooldown_active",
+                    None,
+                )
+                if callable(cooldown_active) and cooldown_active(task):
+                    emit_task_pipeline_waiting_once(
+                        runtime,
+                        task_id=task_id,
+                        stage=stage,
+                        operation_generation=int(
+                            assignment.get("operation_generation") or 1
+                        ),
+                        context=group_contexts[task_id],
+                        reason="dispatch_failure_cooldown",
+                        detail=(
+                            "Task Pipeline dispatch is cooling down after "
+                            "repeated deterministic activation failures"
+                        ),
+                    )
+                    continue
                 try:
                     decision = dispatch_task_pipeline_stage(
                         runtime,
@@ -524,7 +595,7 @@ def reconcile_task_pipeline_runtime(
                         attempt_rows=attempts,
                     )
                 except TaskPipelineWaiting as exc:
-                    _emit_waiting_once(
+                    emit_task_pipeline_waiting_once(
                         runtime,
                         task_id=task_id,
                         stage=stage,
@@ -537,7 +608,14 @@ def reconcile_task_pipeline_runtime(
                     )
                     continue
                 except Exception as exc:
-                    _emit_dispatch_deferred_once(
+                    record_failure = getattr(
+                        runtime,
+                        "_record_dispatch_failure",
+                        None,
+                    )
+                    if callable(record_failure):
+                        record_failure(task_id)
+                    emit_task_pipeline_dispatch_deferred_once(
                         runtime,
                         task_id=task_id,
                         stage=stage,
@@ -548,6 +626,13 @@ def reconcile_task_pipeline_runtime(
                         reason=f"{type(exc).__name__}: {exc}"[:500],
                     )
                     continue
+                clear_failure = getattr(
+                    runtime,
+                    "_clear_dispatch_failure",
+                    None,
+                )
+                if callable(clear_failure):
+                    clear_failure(task_id)
                 if decision is not None:
                     decisions.append(decision)
     decisions.extend(
@@ -815,104 +900,6 @@ def _verify_rework_feedback(
         or []
     )
     return [dict(item) for item in rows if isinstance(item, Mapping)]
-
-
-def _emit_waiting_once(
-    runtime: Any,
-    *,
-    task_id: str,
-    stage: str,
-    operation_generation: int,
-    context: Mapping[str, Any],
-    reason: str,
-    detail: str,
-) -> None:
-    payload = {
-        "schema_version": "task-pipeline-stage-waiting.v1",
-        "workflow_run_id": str(context.get("workflow_run_id") or ""),
-        "task_id": task_id,
-        "task_map_generation": str(context.get("task_map_generation") or ""),
-        "task_pipeline_stage": stage,
-        "operation_generation": operation_generation,
-        "reason": reason,
-        "detail": detail[:500],
-    }
-    _emit_stage_occurrence_once(
-        runtime,
-        event_type="task.pipeline.stage.waiting",
-        task_id=task_id,
-        payload=payload,
-        causation_id=str(context.get("generation_admitted_event_id") or ""),
-    )
-
-
-def _emit_dispatch_deferred_once(
-    runtime: Any,
-    *,
-    task_id: str,
-    stage: str,
-    operation_generation: int,
-    context: Mapping[str, Any],
-    reason: str,
-) -> None:
-    payload = {
-        "schema_version": "task-pipeline-stage-dispatch-deferred.v1",
-        "workflow_run_id": str(context.get("workflow_run_id") or ""),
-        "task_id": task_id,
-        "task_map_generation": str(context.get("task_map_generation") or ""),
-        "task_pipeline_stage": stage,
-        "operation_generation": operation_generation,
-        "reason": reason,
-    }
-    _emit_stage_occurrence_once(
-        runtime,
-        event_type="task.pipeline.stage.dispatch_deferred",
-        task_id=task_id,
-        payload=payload,
-        causation_id=str(context.get("generation_admitted_event_id") or ""),
-    )
-
-
-def _emit_stage_occurrence_once(
-    runtime: Any,
-    *,
-    event_type: str,
-    task_id: str,
-    payload: Mapping[str, Any],
-    causation_id: str,
-) -> None:
-    identity = (
-        str(payload.get("workflow_run_id") or ""),
-        task_id,
-        str(payload.get("task_map_generation") or ""),
-        str(payload.get("task_pipeline_stage") or ""),
-        int(payload.get("operation_generation") or 0),
-        str(payload.get("reason") or ""),
-    )
-    for event in reversed(runtime.event_log.read_all()):
-        if event.type != event_type or event.task_id != task_id:
-            continue
-        existing = event.payload if isinstance(event.payload, dict) else {}
-        existing_identity = (
-            str(existing.get("workflow_run_id") or ""),
-            task_id,
-            str(existing.get("task_map_generation") or ""),
-            str(existing.get("task_pipeline_stage") or ""),
-            int(existing.get("operation_generation") or 0),
-            str(existing.get("reason") or ""),
-        )
-        if existing_identity == identity:
-            return
-        break
-    runtime.event_writer.append(ZfEvent(
-        type=event_type,
-        actor="orchestrator",
-        origin="kernel",
-        task_id=task_id,
-        payload=dict(payload),
-        causation_id=causation_id or None,
-        correlation_id=str(payload.get("workflow_run_id") or "") or None,
-    ))
 
 
 def _git(cwd: Path, *args: str) -> str:

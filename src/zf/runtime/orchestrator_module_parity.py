@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from zf.core.events.model import ZfEvent
 from zf.runtime.candidate_rework_identity import (
+    _candidate_rework_amended_identity_payload,
     _candidate_rework_identity_payload,
 )
 from zf.runtime.goal_closure_bridge import GoalClosureBridgeMixin
@@ -21,6 +22,23 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
     @staticmethod
     def _gap_workflow_identity(payload: dict) -> dict:
         identity = _candidate_rework_identity_payload(payload)
+        flow_kind = str(
+            payload.get("flow_kind") or payload.get("goal_kind") or ""
+        ).strip()
+        if flow_kind:
+            identity.setdefault("flow_kind", flow_kind)
+        return identity
+
+    @staticmethod
+    def _gap_amended_workflow_identity(
+        payload: dict,
+        *,
+        task_map_generation: str,
+    ) -> dict:
+        identity = _candidate_rework_amended_identity_payload(
+            payload,
+            task_map_generation=task_map_generation,
+        )
         flow_kind = str(
             payload.get("flow_kind") or payload.get("goal_kind") or ""
         ).strip()

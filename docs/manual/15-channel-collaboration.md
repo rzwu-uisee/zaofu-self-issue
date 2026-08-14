@@ -104,6 +104,11 @@ Kanban Agent 返回 action-bound Channel setup Plan。审核：
 - Leader 和 `propose_workflow` authority；
 - source receipt 目标。
 
+Action-bound Channel setup Plan 的每个选项都必须显式绑定
+`conversation|clarification|multi_lens`，不能静默继承模板默认值。确认界面同时展示
+初始路由是单 responder、facilitated relay，还是 N 路 blind fanout；缺少 mode 的旧
+pending Plan 在 apply 时 fail closed，已完成的历史 receipt 仍保持幂等可读。
+
 点击 `Create & start` 会原子执行：
 
 ```text

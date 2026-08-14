@@ -711,6 +711,24 @@ def test_task_map_validation_accepts_package_root_relative_node_commands() -> No
     assert result.summary["tasks_by_wave"] == {"1": 1, "2": 1}
 
 
+def test_task_map_validation_treats_node_modules_bin_as_dependency_tool() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-WEB-VERIFY",
+            "title": "verify web behavior",
+            "allowed_paths": ["tests/web/**"],
+            "allowed_paths_reason": "owns focused web tests",
+            "acceptance": ["web behavior passes"],
+            "verification": (
+                "./node_modules/.bin/tsx --test tests/web/behavior.test.mts"
+            ),
+        }],
+    })
+
+    assert result.passed is True, result.errors
+
+
 def test_task_map_validation_rejects_package_root_parent_escape() -> None:
     result = validate_task_map_payload({
         "schema_version": "task-map.v1",

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
+from zf.core.events.segments import build_event_manifest
 from zf.core.task.schema import Task
 from zf.runtime.injection import infer_completion_protocol
 from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
@@ -21,18 +22,60 @@ from zf.runtime.run_scope import event_run_id, run_aliases
 
 def _terminal_run_scope(
     events: list[ZfEvent],
-) -> tuple[dict[str, str], set[str]]:
+) -> tuple[dict[str, str], dict[str, tuple[int, str, int]]]:
+    """Return terminal epochs, including a bounded blocked-run reopen.
+
+    A workflow may legally resume after ``run.goal.blocked`` by publishing a
+    canonical active ``run.goal.updated``.  A terminal set loses that event
+    ordering and makes every later fanout child look dead during watchdog
+    recovery.  The tuple is ``(terminal_index, terminal_type, reopen_index)``;
+    ``reopen_index`` remains ``-1`` for hard terminal outcomes.
+    """
     aliases = run_aliases(events)
     known_runs = set(aliases.values())
     singleton = next(iter(known_runs)) if len(known_runs) == 1 else ""
-    terminal_runs: set[str] = set()
-    for event in events:
-        if event.type not in RUN_TERMINAL_EVENT_TYPES:
-            continue
+    terminal_epochs: dict[str, tuple[int, str, int]] = {}
+    for index, event in enumerate(events):
         run_id = event_run_id(event, aliases=aliases) or singleton
-        if run_id:
-            terminal_runs.add(run_id)
-    return aliases, terminal_runs
+        if not run_id:
+            continue
+        if event.type in RUN_TERMINAL_EVENT_TYPES:
+            terminal_epochs[run_id] = (index, event.type, -1)
+            continue
+        if event.type != "run.goal.updated":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        status = str(payload.get("status") or "").strip()
+        epoch = terminal_epochs.get(run_id)
+        if (
+            status in {"active", "running"}
+            and epoch is not None
+            and epoch[1] == "run.goal.blocked"
+            and index > epoch[0]
+        ):
+            terminal_epochs[run_id] = (epoch[0], epoch[1], index)
+    return aliases, terminal_epochs
+
+
+def _event_is_in_terminal_run_epoch(
+    event: ZfEvent,
+    *,
+    event_index: int,
+    aliases: dict[str, str],
+    terminal_epochs: dict[str, tuple[int, str, int]],
+) -> bool:
+    run_id = event_run_id(event, aliases=aliases)
+    epoch = terminal_epochs.get(run_id)
+    if epoch is None:
+        return False
+    terminal_index, terminal_type, reopen_index = epoch
+    if event_index < terminal_index:
+        return True
+    return not (
+        terminal_type == "run.goal.blocked"
+        and reopen_index > terminal_index
+        and event_index > reopen_index
+    )
 
 
 class LifecycleEvidenceQueriesMixin:
@@ -168,10 +211,11 @@ class LifecycleEvidenceQueriesMixin:
             return ""
         if events is None:
             events = self._fanout_lifecycle_events()
-        run_alias_map, terminal_runs = _terminal_run_scope(events)
+        run_alias_map, terminal_epochs = _terminal_run_scope(events)
         terminal_fanouts: set[str] = set()
         stale_child_runs: set[tuple[str, str, str]] = set()
-        for event in reversed(events):
+        for event_index in range(len(events) - 1, -1, -1):
+            event = events[event_index]
             payload = event.payload if isinstance(event.payload, dict) else {}
             if event.type in {"fanout.cancelled", "fanout.timed_out"}:
                 fanout_id = str(payload.get("fanout_id") or "")
@@ -205,7 +249,12 @@ class LifecycleEvidenceQueriesMixin:
             if event.type == "fanout.child.dispatched":
                 key = self._fanout_child_key(payload)
                 if (
-                    event_run_id(event, aliases=run_alias_map) in terminal_runs
+                    _event_is_in_terminal_run_epoch(
+                        event,
+                        event_index=event_index,
+                        aliases=run_alias_map,
+                        terminal_epochs=terminal_epochs,
+                    )
                     or key in stale_child_runs
                     or (key[0], key[1], "") in stale_child_runs
                 ):
@@ -225,10 +274,11 @@ class LifecycleEvidenceQueriesMixin:
         terminal event arrives.
         """
         events = self._fanout_lifecycle_events()
-        run_alias_map, terminal_runs = _terminal_run_scope(events)
+        run_alias_map, terminal_epochs = _terminal_run_scope(events)
         terminal_children: set[tuple[str, str, str]] = set()
         terminal_fanouts: set[str] = set()
-        for event in reversed(events):
+        for event_index in range(len(events) - 1, -1, -1):
+            event = events[event_index]
             payload = event.payload if isinstance(event.payload, dict) else {}
             if event.type == "fanout.child.stale_completion":
                 key = self._fanout_child_key(payload)
@@ -266,7 +316,12 @@ class LifecycleEvidenceQueriesMixin:
                 continue
             if str(payload.get("role_instance") or "") != instance_id:
                 continue
-            if event_run_id(event, aliases=run_alias_map) in terminal_runs:
+            if _event_is_in_terminal_run_epoch(
+                event,
+                event_index=event_index,
+                aliases=run_alias_map,
+                terminal_epochs=terminal_epochs,
+            ):
                 continue
             key = self._fanout_child_key(payload)
             if key[0] in terminal_fanouts:
@@ -296,6 +351,7 @@ class LifecycleEvidenceQueriesMixin:
         event_types = {
             "run.started",
             "run.goal.started",
+            "run.goal.updated",
             "workflow.invoke.requested",
             *RUN_TERMINAL_EVENT_TYPES,
             "fanout.child.dispatched",
@@ -310,39 +366,22 @@ class LifecycleEvidenceQueriesMixin:
             "fanout.cancelled",
             "fanout.timed_out",
         }
-        path = getattr(self.event_log, "path", None)
         cache_key = None
-        if path is not None:
-            try:
-                stat = path.stat()
-                cache_key = (stat.st_mtime_ns, stat.st_size)
-                cached = getattr(self, "_fanout_lifecycle_events_cache", None)
-                if isinstance(cached, tuple) and cached[0] == cache_key:
-                    return list(cached[1])
-            except OSError:
-                cache_key = None
-        events: list[ZfEvent] = []
         try:
-            if path is None:
-                raise OSError("event log path unavailable")
-            markers = tuple(f'"type":"{event_type}"' for event_type in event_types)
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if not any(marker in line for marker in markers):
-                        continue
-                    try:
-                        events.append(ZfEvent.from_json(line))
-                    except Exception:
-                        continue
+            cache_key = build_event_manifest(self.state_dir).digest
+            cached = getattr(self, "_fanout_lifecycle_events_cache", None)
+            if isinstance(cached, tuple) and cached[0] == cache_key:
+                return list(cached[1])
+        except (AttributeError, OSError):
+            cache_key = None
+        try:
+            events = [
+                event
+                for event in self.event_log.read_all()
+                if event.type in event_types
+            ]
         except Exception:
-            try:
-                events = [
-                    event
-                    for event in self.event_log.read_days(1)
-                    if event.type in event_types
-                ]
-            except Exception:
-                events = []
+            events = []
         if cache_key is not None:
             try:
                 self._fanout_lifecycle_events_cache = (cache_key, list(events))

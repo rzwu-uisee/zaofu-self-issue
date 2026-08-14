@@ -152,6 +152,115 @@ def test_terminal_operation_closes_attempt_and_active_read_ledger(
     )
 
 
+def test_old_terminal_event_does_not_settle_later_redrive_attempt(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    operation_id = "op-redrive"
+    runtime.event_writer.append(ZfEvent(
+        type="workflow.operation.interrupted",
+        ts="2026-07-31T00:00:01+00:00",
+        actor="zf-cli",
+        origin="kernel",
+        task_id="T1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "request_hash": "a" * 64,
+            "reason": "graceful_stop",
+        },
+    ))
+    store = TaskAttemptStore(runtime.state_dir / "task_attempts.json")
+    attempt = store.ensure_for_dispatch(
+        run_id="run-1",
+        task_id="T1",
+        dispatch_id="dispatch-2",
+        role="dev",
+        instance_id="dev-1",
+        operation_id=operation_id,
+        briefing_ref="briefings/T1-redrive.md",
+        created_at="2026-07-31T00:00:02+00:00",
+        lease_expires_at="2099-07-31T00:00:00+00:00",
+        max_attempts=3,
+    ).attempt
+    attempt_id = str(attempt["attempt_id"])
+    store.claim_delivery(
+        attempt_id,
+        updated_at="2026-07-31T00:00:03+00:00",
+    )
+    store.mark_sent(
+        attempt_id,
+        updated_at="2026-07-31T00:00:04+00:00",
+    )
+
+    reconcile_task_attempts(runtime)
+
+    current = store.get(attempt_id)
+    assert current is not None
+    assert current["status"] == "sent"
+    assert not any(
+        event.type == "task.attempt.superseded"
+        and str((event.payload or {}).get("attempt_id") or "") == attempt_id
+        for event in runtime.event_log.read_all()
+    )
+
+
+def test_interrupted_fanout_dispatch_supersedes_canonical_attempt(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    operation_id = "op-fanout-child"
+    dispatch_id = "run-fanout-verify-child-0"
+    store = TaskAttemptStore(runtime.state_dir / "task_attempts.json")
+    attempt = store.ensure_for_dispatch(
+        run_id="run-1",
+        task_id="T1",
+        dispatch_id=dispatch_id,
+        role="verify",
+        instance_id="verify-0",
+        operation_id=operation_id,
+        briefing_ref="briefings/verify-0.md",
+        created_at="2026-07-31T00:00:00+00:00",
+        lease_expires_at="2099-07-31T00:00:00+00:00",
+        max_attempts=3,
+    ).attempt
+    attempt_id = str(attempt["attempt_id"])
+    store.claim_delivery(
+        attempt_id,
+        updated_at="2026-07-31T00:00:01+00:00",
+    )
+    store.mark_sent(
+        attempt_id,
+        updated_at="2026-07-31T00:00:02+00:00",
+    )
+    interrupted = runtime.event_writer.append(ZfEvent(
+        type="workflow.operation.interrupted",
+        ts="2026-07-31T00:00:03+00:00",
+        actor="zf-cli",
+        origin="kernel",
+        task_id="T1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "request_hash": "a" * 64,
+            "reason": "graceful_stop",
+            "source_attempt_id": dispatch_id,
+        },
+    ))
+
+    assert reconcile_task_attempts(runtime) >= 1
+
+    current = store.get(attempt_id)
+    assert current is not None
+    assert current["status"] == "superseded"
+    assert current["terminal_event_id"] == interrupted.id
+    assert not any(
+        event.type == "task.attempt.retry_scheduled"
+        and str((event.payload or {}).get("attempt_id") or "") == attempt_id
+        for event in runtime.event_log.read_all()
+    )
+
+
 def test_live_attempt_projection_clears_operation_terminal_without_attempt_id() -> None:
     events = [
         ZfEvent(

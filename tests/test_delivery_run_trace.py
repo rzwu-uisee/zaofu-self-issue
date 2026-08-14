@@ -187,3 +187,14 @@ def test_terminal_duplicate_rejection_is_settled_not_failed() -> None:
     assert event_status(terminal_duplicate) == "settled"
     assert event_error(terminal_duplicate) == {}
     assert event_status(actual_rejection) == "failed"
+
+
+def test_completed_run_duplicate_suppression_is_settled() -> None:
+    event = ZfEvent(
+        id="evt-terminal-duplicate-suppressed",
+        type="run.result.duplicate_suppressed",
+        payload={"reason": "run_terminal:completed"},
+    )
+
+    assert event_status(event) == "settled"
+    assert event_error(event) == {}

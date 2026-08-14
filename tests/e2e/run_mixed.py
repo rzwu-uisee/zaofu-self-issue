@@ -45,6 +45,7 @@ per line for custom scenarios.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -75,11 +76,15 @@ FATAL_EVENT_TYPES = frozenset({
     "task.invalid_transition",
     "cost.budget.exceeded",
     "run.failed",
+    "run.goal.blocked",
     "ship.failed",
     "task.orphaned",
     "worker.respawn.failed",
     "worker.stuck.recovery_failed",
 })
+
+_RECOVERABLE_DISPATCH_DEAD_REASONS = frozenset({"pane_dead"})
+_DISPATCH_RECOVERY_GRACE_SECONDS = 30.0
 
 
 class _RunnerTerminated(Exception):
@@ -193,10 +198,11 @@ def _scan_first_fatal_event(
     size = events_path.stat().st_size
     if offset > size:
         offset = 0
-    fatal = None
+    rows: list[tuple[int, dict]] = []
     with events_path.open("r", encoding="utf-8") as f:
         f.seek(offset)
         while True:
+            line_offset = f.tell()
             line = f.readline()
             if not line:
                 break
@@ -206,15 +212,72 @@ def _scan_first_fatal_event(
                 event = json.loads(line)
             except ValueError:
                 continue
-            event_type = event.get("type")
-            if event_type in FATAL_EVENT_TYPES:
-                fatal = event
-                break
-            if event_type == "loop.stopped" and done < expected:
-                fatal = event
-                break
+            rows.append((line_offset, event))
         next_offset = f.tell()
-    return fatal, next_offset
+    for index, (line_offset, event) in enumerate(rows):
+        event_type = event.get("type")
+        if event_type == "orchestrator.dispatch_failed":
+            recovery = _dispatch_failure_recovery_state(
+                event,
+                [row for _, row in rows[index + 1 :]],
+            )
+            if recovery == "requested":
+                continue
+            if recovery == "grace":
+                return None, line_offset
+            return event, next_offset
+        if event_type in FATAL_EVENT_TYPES:
+            return event, next_offset
+        if event_type == "loop.stopped" and done < expected:
+            return event, next_offset
+    return None, next_offset
+
+
+def _dispatch_failure_recovery_state(
+    failure: dict,
+    later_events: list[dict],
+) -> str:
+    """Classify a transport pane loss as requested, grace, or fatal."""
+
+    payload = failure.get("payload") or {}
+    if not isinstance(payload, dict):
+        return "fatal"
+    if str(payload.get("dead_reason") or "") not in (
+        _RECOVERABLE_DISPATCH_DEAD_REASONS
+    ):
+        return "fatal"
+    trigger_id = str(payload.get("trigger_event_id") or "")
+    dispatch_id = str(payload.get("dispatch_id") or "")
+    for event in later_events:
+        if event.get("type") != "orchestrator.dispatch.retry_requested":
+            continue
+        retry = event.get("payload") or {}
+        if not isinstance(retry, dict):
+            continue
+        same_trigger = trigger_id and str(
+            retry.get("trigger_event_id") or ""
+        ) == trigger_id
+        same_dispatch = dispatch_id and str(
+            retry.get("dispatch_id") or ""
+        ) == dispatch_id
+        if (same_trigger or same_dispatch) and str(
+            retry.get("source") or ""
+        ) in {
+            "dispatch_failure_recovery",
+            "orchestrator_agent_checkpoint_dispatch_recovery",
+        }:
+            return "requested"
+    timestamp = str(failure.get("ts") or "")
+    try:
+        from datetime import datetime, timezone
+
+        occurred = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if occurred.tzinfo is None:
+            occurred = occurred.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - occurred).total_seconds()
+    except (TypeError, ValueError):
+        age = _DISPATCH_RECOVERY_GRACE_SECONDS
+    return "grace" if age < _DISPATCH_RECOVERY_GRACE_SECONDS else "fatal"
 
 
 def _print_fatal_event(event: dict | None, elapsed_s: float) -> None:
@@ -342,6 +405,7 @@ class WaitResult:
 def reset_state(worktree: Path) -> None:
     sd = worktree / ".zf"
     print(f"[reset] clearing state in {sd}")
+    sd.mkdir(parents=True, exist_ok=True)
     for p in [
         sd / "events.jsonl", sd / "kanban.json", sd / "feature_list.json",
         sd / "role_sessions.yaml", sd / "cost.jsonl",
@@ -433,13 +497,279 @@ def seed_tasks(worktree: Path, seeds: list[str]) -> None:
         print(f"  [{i}/{len(seeds)}] {s[:60]}…")
 
 
+def prepare_flow_source(
+    worktree: Path,
+    *,
+    flow_kind: str,
+    source_ref: str,
+    seeds: list[str],
+) -> str:
+    """Write and commit the source document used by a controller Flow."""
+
+    source_path = worktree / source_ref
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        f"# Autoresearch {flow_kind} source\n\n"
+        + "\n\n".join(seeds)
+        + "\n"
+    )
+    source_path.write_text(body, encoding="utf-8")
+    staged = _run(
+        ["git", "add", "--", source_ref],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if staged.returncode != 0:
+        raise RuntimeError(staged.stderr or staged.stdout or "git add failed")
+    changed = _run(
+        ["git", "diff", "--cached", "--quiet", "--", source_ref],
+        cwd=worktree,
+    )
+    if changed.returncode == 1:
+        committed = _run(
+            [
+                "git",
+                "commit",
+                "-m",
+                f"docs: add {flow_kind} autoresearch input",
+                "--",
+                source_ref,
+            ],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+        )
+        if committed.returncode != 0:
+            raise RuntimeError(
+                committed.stderr or committed.stdout or "git commit failed"
+            )
+    elif changed.returncode != 0:
+        raise RuntimeError("git diff failed while preparing Flow source")
+    return "autoresearch-" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def _commit_initialized_flow_baseline(worktree: Path) -> str:
+    """Commit only ZaoFu-managed instruction/config changes after ``zf init``."""
+
+    owned = {"AGENTS.md", "CLAUDE.md", "zf.yaml"}
+    dirty_result = _run(
+        ["git", "diff", "HEAD", "--name-only", "-z"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if dirty_result.returncode != 0:
+        raise RuntimeError("git baseline audit failed after zf init")
+    dirty = {value for value in dirty_result.stdout.split("\0") if value}
+    unexpected = dirty - owned
+    if unexpected:
+        raise RuntimeError(
+            "tracked files remain dirty outside the initialized Flow baseline: "
+            + ", ".join(sorted(unexpected))
+        )
+
+    paths = sorted(
+        path
+        for path in owned
+        if (worktree / path).exists()
+        or _run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
+    if paths:
+        staged = _run(
+            ["git", "add", "-A", "--", *paths],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+        )
+        if staged.returncode != 0:
+            raise RuntimeError(
+                staged.stderr or staged.stdout or "git add baseline failed"
+            )
+    staged_result = _run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if staged_result.returncode != 0:
+        raise RuntimeError("git staged-path audit failed after zf init")
+    staged_paths = {
+        value for value in staged_result.stdout.split("\0") if value
+    }
+    unexpected = staged_paths - owned
+    if unexpected:
+        raise RuntimeError(
+            "initialized Flow baseline staged unrelated paths: "
+            + ", ".join(sorted(unexpected))
+        )
+    if staged_paths:
+        committed = _run(
+            [
+                "git",
+                "-c",
+                "user.email=autoresearch@zaofu.dev",
+                "-c",
+                "user.name=ZaoFu Autoresearch",
+                "commit",
+                "-q",
+                "-m",
+                "chore: record ZaoFu Autoresearch instruction baseline",
+                "--",
+                *sorted(staged_paths),
+            ],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+        )
+        if committed.returncode != 0:
+            raise RuntimeError(
+                committed.stderr or committed.stdout or "git commit baseline failed"
+            )
+    remaining = _run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=no"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if remaining.returncode != 0 or remaining.stdout.strip():
+        raise RuntimeError(
+            "tracked files remain dirty after initialized Flow checkpoint: "
+            + remaining.stdout.strip()
+        )
+    head = _run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if head.returncode != 0:
+        raise RuntimeError("git rev-parse failed after initialized Flow checkpoint")
+    return head.stdout.strip()
+
+
+def initialize_flow_baseline(worktree: Path) -> str:
+    """Initialize managed project instructions and seal a clean Flow baseline."""
+
+    initialized = _run(
+        ["zf", "init", "--force"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if initialized.returncode != 0:
+        raise RuntimeError(
+            initialized.stderr or initialized.stdout or "zf init failed"
+        )
+    return _commit_initialized_flow_baseline(worktree)
+
+
+def submit_flow(
+    worktree: Path,
+    *,
+    flow_kind: str,
+    source_ref: str,
+    target_root: str,
+    seeds: list[str],
+    request_id: str,
+) -> bool:
+    """Use the same intake/clarify/submit path as production controllers."""
+
+    intake = worktree / ".zf" / "intake" / f"{request_id}.md"
+    intake.parent.mkdir(parents=True, exist_ok=True)
+    objective = "\n\n".join(seeds)
+    commands = [
+        [
+            "zf",
+            "flow",
+            "intake",
+            "--kind",
+            flow_kind,
+            "--from",
+            str(worktree / source_ref),
+            "--objective",
+            objective,
+            "--target",
+            target_root,
+            "--backend",
+            "codex",
+            "--project-id",
+            request_id,
+            "--request-id",
+            request_id,
+            "--acceptance",
+            objective,
+            "--output",
+            str(intake),
+            "--json",
+        ],
+        [
+            "zf",
+            "flow",
+            "clarify",
+            "--config",
+            "zf.yaml",
+            "--intake",
+            str(intake),
+            "--confirm",
+            "--actor",
+            "autoresearch-e2e",
+            "--json",
+        ],
+        [
+            "zf",
+            "flow",
+            "submit",
+            "--config",
+            "zf.yaml",
+            "--intake",
+            str(intake),
+            "--kind",
+            flow_kind,
+            "--requested-by",
+            "autoresearch-e2e",
+            "--reason",
+            "controller v3/v4 autoresearch E2E",
+            "--apply",
+            "--json",
+        ],
+    ]
+    for command in commands:
+        result = _run(command, cwd=worktree, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(
+                "[flow] failed: "
+                + " ".join(command[:3])
+                + "\n"
+                + (result.stderr or result.stdout or "unknown error"),
+                file=sys.stderr,
+            )
+            return False
+    print(f"[flow] submitted {flow_kind} request_id={request_id}")
+    return True
+
+
 def wait_for_done(
-    worktree: Path, expected: int, timeout_s: int,
+    worktree: Path,
+    expected: int,
+    timeout_s: int,
+    *,
+    require_run_goal: bool = False,
 ) -> WaitResult:
-    """Poll until N tasks are done, a fatal event appears, or timeout fires."""
+    """Poll until task or Run completion, a fatal event, or timeout."""
     events_path = worktree / ".zf" / "events.jsonl"
-    print(f"[wait] expecting {expected} task.status_changed→done "
-          f"(timeout {timeout_s}s)")
+    expectation = (
+        "run.goal.completed"
+        if require_run_goal
+        else f"{expected} task.status_changed→done"
+    )
+    print(f"[wait] expecting {expectation} (timeout {timeout_s}s)")
     start = time.time()
     last_done = -1
     fatal_offset = 0
@@ -449,7 +779,9 @@ def wait_for_done(
         if done != last_done:
             print(f"  [{int(elapsed):>4}s] done={done}/{expected}")
             last_done = done
-        if done >= expected:
+        if require_run_goal and _count_event(events_path, "run.goal.completed"):
+            return WaitResult("passed", done, expected, elapsed)
+        if not require_run_goal and done >= expected:
             return WaitResult("passed", done, expected, elapsed)
         fatal, fatal_offset = _scan_first_fatal_event(
             events_path, done, expected, fatal_offset,
@@ -628,6 +960,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Leave harness running after summary (for inspection)")
     p.add_argument("--confirm", action="store_true",
                    help="Required to actually run; otherwise dry-run")
+    p.add_argument(
+        "--flow-kind",
+        choices=("", "prd", "issue", "refactor"),
+        default="",
+        help=(
+            "Submit seeds through the production Flow intake/clarify/submit "
+            "entry instead of legacy user.message."
+        ),
+    )
+    p.add_argument(
+        "--flow-source",
+        default="docs/prd/autoresearch.md",
+        help="Project-relative source document for --flow-kind.",
+    )
+    p.add_argument(
+        "--flow-target-root",
+        default=".",
+        help="Target root passed to Flow intake.",
+    )
     return p.parse_args(argv)
 
 
@@ -674,6 +1025,19 @@ def main(argv: list[str] | None = None) -> int:
     _kill_lingering(worktree, session_name=session_name)
     if not args.no_reset:
         reset_state(worktree)
+    flow_request_id = ""
+    if args.flow_kind:
+        try:
+            initialize_flow_baseline(worktree)
+            flow_request_id = prepare_flow_source(
+                worktree,
+                flow_kind=args.flow_kind,
+                source_ref=args.flow_source,
+                seeds=seeds,
+            )
+        except RuntimeError as exc:
+            print(f"error: Flow source preparation failed: {exc}", file=sys.stderr)
+            return 3
     if start_harness(worktree) != 0:
         return 3
     launch_attempted = False
@@ -688,9 +1052,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         launch_attempted = True
         start_watcher(worktree)
-        seed_tasks(worktree, seeds)
+        if args.flow_kind:
+            if not submit_flow(
+                worktree,
+                flow_kind=args.flow_kind,
+                source_ref=args.flow_source,
+                target_root=args.flow_target_root,
+                seeds=seeds,
+                request_id=flow_request_id,
+            ):
+                return 4
+        else:
+            seed_tasks(worktree, seeds)
         started = time.time()
-        wait_result = wait_for_done(worktree, expected_done, args.timeout)
+        wait_result = wait_for_done(
+            worktree,
+            expected_done,
+            args.timeout,
+            require_run_goal=bool(args.flow_kind),
+        )
         elapsed = time.time() - started
         completed_normally = True
     except _RunnerTerminated as exc:

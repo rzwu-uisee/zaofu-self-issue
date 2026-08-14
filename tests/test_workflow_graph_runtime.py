@@ -1111,3 +1111,40 @@ def test_workflow_graph_web_projection_uses_read_model_cache(
     assert second["projection"]["source_seq"] == 1
     assert second["projection"]["projection_lag"] == 1
     assert second["projection"]["stale"] is True
+
+
+def test_workflow_graph_body_is_bound_to_selected_watermark(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = load_config(LEGACY_EXAMPLES / "zf-codex.yaml")
+    event_log = EventLog(tmp_path / "events.jsonl")
+    event_log.append(ZfEvent(
+        type="fanout.started",
+        actor="orchestrator",
+        payload={"fanout_id": "fo-old"},
+    ))
+    from zf.web.projections import read_model
+    from zf.web.projections.workflow_graph import _workflow_graph
+
+    read_model.rebuild(tmp_path, config=cfg)
+    event_log.append(ZfEvent(
+        type="fanout.started",
+        actor="orchestrator",
+        payload={"fanout_id": "fo-new"},
+    ))
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: read_model.rebuild(state_dir, config=config),
+    )
+
+    graph = _workflow_graph(tmp_path, config=cfg)
+
+    assert graph["projection"]["source_seq"] == 1
+    assert graph["projection"]["projection_lag"] == 1
+    fanout_ids = {
+        event["payload"]["fanout_id"]
+        for event in graph["overlays"]["fanouts"]
+    }
+    assert fanout_ids == {"fo-old"}

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+
 from zf.runtime.tmux import TmuxSession
+from zf.runtime.tmux_layout import PaneTarget
 
 
 class TestTmuxSessionDryRun:
@@ -85,6 +88,44 @@ class TestTmuxSessionDryRun:
         assert result.hard_killed is True
         assert not any("SIGTERM" in cmd for cmd in self.tmux.command_log)
         assert any("kill-window" in cmd for cmd in self.tmux.command_log)
+
+    def test_pane_pid_uses_exact_target_display_message(self, monkeypatch):
+        tmux = TmuxSession(session_name="test-zf", dry_run=False)
+        commands: list[list[str]] = []
+
+        def fake_run(args, *, check=True, capture=False):
+            commands.append(args)
+            return subprocess.CompletedProcess(
+                args, 0, stdout="4242\n", stderr=""
+            )
+
+        monkeypatch.setattr(tmux, "_run", fake_run)
+
+        pane_pid = tmux._pane_pid_for_target(
+            PaneTarget(session="test-zf", window="roles", pane="%42")
+        )
+
+        assert pane_pid == "4242"
+        assert commands == [[
+            "tmux", "display-message", "-p", "-t", "%42", "#{pane_pid}",
+        ]]
+
+    def test_pane_pid_rejects_unowned_layout_target(self, monkeypatch):
+        tmux = TmuxSession(session_name="test-zf", dry_run=False)
+        monkeypatch.setattr(
+            tmux.layout,
+            "target_owned_by",
+            lambda session, target, instance_id: False,
+        )
+        monkeypatch.setattr(
+            tmux,
+            "_pane_pid_for_target",
+            lambda target: (_ for _ in ()).throw(
+                AssertionError("unowned target must not be queried")
+            ),
+        )
+
+        assert tmux.pane_pid("missing-role") == ""
 
     def test_send_keys_records_command(self):
         self.tmux.send_keys("dev-1", "echo hello")

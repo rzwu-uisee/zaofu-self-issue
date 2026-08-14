@@ -463,6 +463,25 @@ class RepairActionExecutor:
             )
             return
         status = str(entry.get("status") or "")
+        request_payload = event.payload if isinstance(event.payload, dict) else {}
+        rotate_generation = request_payload.get("rotate_operation_generation") is True
+        from zf.runtime.workflow_operation import (
+            WorkflowOperationError,
+            WorkflowOperationService,
+            load_workflow_operation,
+        )
+
+        operation = load_workflow_operation(self.event_log, queue_entry_id)
+        if rotate_generation:
+            self._execute_rotate_integration_operation(
+                event,
+                record,
+                entry=entry,
+                operation=operation,
+                queue_status=status,
+                task_id=task_id or entry_task_id,
+            )
+            return
         if status != STATUS_NEEDS_REVIEW:
             self._reject(
                 event,
@@ -473,7 +492,6 @@ class RepairActionExecutor:
                 extra_payload={"queue_entry_id": queue_entry_id},
             )
             return
-        request_payload = event.payload if isinstance(event.payload, dict) else {}
         target_status = str(request_payload.get("target_status") or "queued").strip()
         if target_status not in {"queued", "integrating"}:
             self._reject(
@@ -485,6 +503,39 @@ class RepairActionExecutor:
                 extra_payload={"queue_entry_id": queue_entry_id},
             )
             return
+        operation_redrive_event_id = ""
+        if (
+            operation is not None
+            and str(operation.get("operation_type") or "") == "task-stage"
+            and str(operation.get("task_pipeline_stage") or "") == "integration"
+        ):
+            try:
+                redrive = WorkflowOperationService(
+                    state_dir=self.event_log.path.parent,
+                    event_log=self.event_log,
+                    event_writer=self.event_writer,
+                ).admit_redrive(
+                    operation_id=queue_entry_id,
+                    request_hash=str(operation.get("request_hash") or ""),
+                    workflow_run_id=str(operation.get("workflow_run_id") or ""),
+                    task_id=task_id or entry_task_id,
+                    source_attempt_id=event.id,
+                    recovery_decision_event_id=event.id,
+                    reason="Controlled integration queue retry admitted",
+                    recovery_decision_owner="controlled_action",
+                )
+            except WorkflowOperationError as exc:
+                self._reject(
+                    event,
+                    action_id=action_id,
+                    kind="retry_integration_queue_entry",
+                    task_id=task_id or entry_task_id,
+                    reason=f"integration_operation_redrive_rejected:{exc}",
+                    extra_payload={"queue_entry_id": queue_entry_id},
+                )
+                return
+            if redrive is not None:
+                operation_redrive_event_id = redrive.id
         queue_event = self.event_writer.append(ZfEvent(
             type="integration.queue.retry_requested",
             actor="zf-cli",
@@ -513,8 +564,212 @@ class RepairActionExecutor:
                 "queue_status": status,
                 "target_status": target_status,
                 "queue_event_id": queue_event.id,
+                "operation_redrive_event_id": operation_redrive_event_id,
             },
         )
+
+    def _execute_rotate_integration_operation(
+        self,
+        event: ZfEvent,
+        record: dict[str, object],
+        *,
+        entry: dict[str, object],
+        operation: dict[str, Any] | None,
+        queue_status: str,
+        task_id: str,
+    ) -> None:
+        action_id = str(record.get("id") or "")
+        queue_entry_id = str(record.get("queue_entry_id") or "")
+        kind = "retry_integration_queue_entry"
+        if queue_status not in {STATUS_NEEDS_REVIEW, "queued"}:
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason=(
+                    "integration_queue_entry_not_rotation_ready:"
+                    f"{queue_status or '(missing)'}"
+                ),
+                extra_payload={"queue_entry_id": queue_entry_id},
+            )
+            return
+        if (
+            operation is None
+            or str(operation.get("operation_type") or "") != "task-stage"
+            or str(operation.get("task_pipeline_stage") or "") != "integration"
+        ):
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason="integration_operation_not_rotatable",
+                extra_payload={"queue_entry_id": queue_entry_id},
+            )
+            return
+        operation_reason = str(operation.get("reason") or "")
+        if (
+            str(operation.get("status") or "") != "blocked"
+            or not (
+                operation_reason.startswith("candidate_incremental_failed:")
+                or operation_reason in {
+                    "request_hash_divergence",
+                    "request_hash_compatibility_failed",
+                }
+            )
+        ):
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason=(
+                    "integration_operation_not_rotation_ready:"
+                    f"{operation.get('status') or '(missing)'}:"
+                    f"{operation_reason or '(missing)'}"
+                ),
+                extra_payload={"queue_entry_id": queue_entry_id},
+            )
+            return
+        task = self.task_store.get(task_id)
+        if task is None:
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason=f"unknown_task:{task_id}",
+                extra_payload={"queue_entry_id": queue_entry_id},
+            )
+            return
+        request_payload = event.payload if isinstance(event.payload, dict) else {}
+        expected_previous = str(
+            request_payload.get("expected_previous_contract_revision") or ""
+        )
+        expected_current = str(
+            request_payload.get("expected_current_contract_revision") or ""
+        )
+        previous_revision = self._operation_contract_revision(operation)
+        from zf.runtime.task_contract_snapshot import effective_contract_revision
+
+        current_revision = effective_contract_revision(task)
+        if not expected_previous or not expected_current:
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason="integration_contract_rotation_requires_expected_revisions",
+                extra_payload={"queue_entry_id": queue_entry_id},
+            )
+            return
+        if (
+            expected_previous != previous_revision
+            or expected_current != current_revision
+            or previous_revision == current_revision
+        ):
+            self._reject(
+                event,
+                action_id=action_id,
+                kind=kind,
+                task_id=task_id,
+                reason="integration_contract_rotation_revision_mismatch",
+                extra_payload={
+                    "queue_entry_id": queue_entry_id,
+                    "previous_contract_revision": previous_revision,
+                    "current_contract_revision": current_revision,
+                },
+            )
+            return
+        from zf.runtime.workflow_operation import WorkflowOperationService
+
+        service = WorkflowOperationService(
+            state_dir=self.event_log.path.parent,
+            event_log=self.event_log,
+            event_writer=self.event_writer,
+        )
+        superseded = service.supersede(
+            operation_id=queue_entry_id,
+            request_hash=str(operation.get("request_hash") or ""),
+            workflow_run_id=str(operation.get("workflow_run_id") or ""),
+            task_id=task_id,
+            reason="integration_contract_revision_changed",
+            causation_id=event.id,
+            correlation_id=(
+                event.correlation_id
+                or str(operation.get("workflow_run_id") or "")
+            ),
+        )
+        next_generation = int(operation.get("operation_generation") or 1) + 1
+        queue_event = self.event_writer.append(ZfEvent(
+            type="integration.queue.discarded",
+            actor="zf-cli",
+            task_id=task_id or None,
+            payload={
+                "source": "repair_action_contract_rotation",
+                "action_id": action_id,
+                "queue_entry_id": queue_entry_id,
+                "reason": "superseded_by_contract_revision_change",
+                "previous_contract_revision": previous_revision,
+                "current_contract_revision": current_revision,
+                "next_operation_generation": next_generation,
+                "idempotency_key": str(record.get("idempotency_key") or ""),
+                "evidence_refs": list(record.get("evidence_refs") or []),
+            },
+            causation_id=superseded.id if superseded is not None else event.id,
+            correlation_id=(
+                event.correlation_id
+                or str(operation.get("workflow_run_id") or "")
+            ),
+        ))
+        self._terminal(
+            event,
+            applied=True,
+            action_id=action_id,
+            kind=kind,
+            task_id=task_id,
+            reason="integration operation generation rotated",
+            extra_payload={
+                "queue_entry_id": queue_entry_id,
+                "queue_status": str(entry.get("status") or queue_status),
+                "queue_event_id": queue_event.id,
+                "operation_superseded_event_id": (
+                    superseded.id if superseded is not None else ""
+                ),
+                "previous_contract_revision": previous_revision,
+                "current_contract_revision": current_revision,
+                "next_operation_generation": next_generation,
+            },
+        )
+
+    def _operation_contract_revision(
+        self,
+        operation: dict[str, Any],
+    ) -> str:
+        direct = str(operation.get("contract_revision") or "")
+        if direct:
+            return direct
+        descriptor = operation.get("request_ref")
+        if not isinstance(descriptor, dict) or not descriptor:
+            return ""
+        try:
+            from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+            body = hydrate_sidecar_ref(
+                self.event_log.path.parent,
+                descriptor,
+                purpose="integration_contract_revision_rotation",
+                actor="repair-action-executor",
+            ).payload
+        except Exception:
+            return ""
+        if not isinstance(body, dict):
+            return ""
+        request = body.get("request")
+        if not isinstance(request, dict):
+            return ""
+        return str(request.get("contract_revision") or "")
 
     def _execute_discard_integration_queue_entry(
         self,

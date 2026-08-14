@@ -62,6 +62,8 @@ class PlanSynthRuntimeMixin:
     def _recover_lost_fanout_synth_dispatches(
         self,
         events: list[ZfEvent],
+        *,
+        recovery_snapshot=None,
     ) -> bool:
         """Re-send a synth briefing lost when its provider session restarted."""
 
@@ -94,23 +96,36 @@ class PlanSynthRuntimeMixin:
             if role_instance:
                 lost_by_role.setdefault(role_instance, []).append((index, event))
 
-        fanout_root = self.state_dir / "fanouts"
-        if not fanout_root.exists():
-            return False
-        for manifest_path in fanout_root.glob("*/manifest.json"):
-            fanout_id = manifest_path.parent.name
+        if recovery_snapshot is not None:
+            manifests = recovery_snapshot.manifests
+        else:
+            fanout_root = self.state_dir / "fanouts"
+            if not fanout_root.exists():
+                return False
+            manifests = (
+                (path.parent.name, self._fanout_manifest(path.parent.name))
+                for path in fanout_root.glob("*/manifest.json")
+            )
+        for fanout_id, manifest in manifests:
             if fanout_id in terminal:
                 continue
-            manifest = self._fanout_manifest(fanout_id)
             if not manifest or manifest.get("topology") != "fanout_reader":
-                continue
-            stale_reason, _superseded_by = self._fanout_identity_stale_reason(
-                fanout_id,
-            )
-            if stale_reason:
                 continue
             synth = manifest.get("synth")
             if not isinstance(synth, dict) or synth.get("status") != "dispatched":
+                continue
+            if recovery_snapshot is None:
+                stale_reason, _superseded_by = (
+                    self._fanout_identity_stale_reason(fanout_id)
+                )
+            else:
+                stale_reason, _superseded_by = (
+                    self._fanout_identity_stale_reason(
+                        fanout_id,
+                        currentness=recovery_snapshot.currentness,
+                    )
+                )
+            if stale_reason:
                 continue
             role_instance = str(synth.get("role_instance") or "")
             synth_dispatches = dispatches.get(fanout_id, [])

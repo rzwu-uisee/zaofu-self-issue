@@ -292,6 +292,16 @@ class FanoutDispatchLivenessMixin:
     def _reader_dispatch_lost_role(event: ZfEvent) -> str:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if (
+            event.type == "role.lifecycle.dormant"
+            and str(payload.get("to") or "").strip() == "dormant"
+        ):
+            return str(
+                payload.get("instance_id")
+                or payload.get("role")
+                or event.actor
+                or ""
+            ).strip()
+        if (
             event.type == "provider.turn.closed"
             and str(payload.get("backend") or "").strip() == "codex"
             and str(payload.get("turn_id") or "").strip()
@@ -397,7 +407,8 @@ class FanoutDispatchLivenessMixin:
         except Exception:
             return False
         now = self._now()
-        for event in reversed(events):
+        for index in range(len(events) - 1, -1, -1):
+            event = events[index]
             if event.type != "fanout.child.dispatch_deferred":
                 continue
             payload = event.payload if isinstance(event.payload, dict) else {}
@@ -409,9 +420,44 @@ class FanoutDispatchLivenessMixin:
                 continue
             if reason and str(payload.get("reason") or "") != reason:
                 continue
+            if reason == "provider_turn_active":
+                return not self._provider_turn_defer_resolved(
+                    events[index + 1 :],
+                    role_instance=role_instance,
+                )
             try:
                 return now - self._event_epoch(event) < window_s
             except Exception:
+                return True
+        return False
+
+    @staticmethod
+    def _provider_turn_defer_resolved(
+        events: list[ZfEvent],
+        *,
+        role_instance: str,
+    ) -> bool:
+        """Return whether a durable event released the deferred provider turn."""
+
+        for event in events:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if event.type == "loop.stopped":
+                return True
+            matches_role = role_instance in {
+                str(event.actor or "").strip(),
+                str(payload.get("instance_id") or "").strip(),
+                str(payload.get("role_instance") or "").strip(),
+            }
+            if not matches_role:
+                continue
+            if event.type in {
+                "codex.hook.stop",
+                "provider.turn.closed",
+                "role.lifecycle.dormant",
+                "worker.launch_artifact.written",
+                "worker.recycled",
+                "worker.respawned",
+            }:
                 return True
         return False
 

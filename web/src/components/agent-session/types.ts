@@ -83,6 +83,10 @@ export interface AgentSessionPlanOption {
     memberCount?: number;
     roles?: string[];
     maxRounds?: number;
+    mode?: string;
+    engineMode?: string;
+    routingStrategy?: string;
+    firstPassReplyCount?: number;
     routeId?: string;
     family?: string;
     kind?: string;

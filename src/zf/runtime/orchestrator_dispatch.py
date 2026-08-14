@@ -1844,20 +1844,27 @@ class DispatchMixin(
         now: float,
     ) -> None:
         """Emit cost.budget.exceeded with per-(scope, role) cooldown."""
-        key = (scope, role_name if scope == "role" else "")
+        role_scope = scope == "role" or scope.startswith("role_")
+        key = (scope, role_name if role_scope else "")
         last = self._cost_block_last_emit.get(key, 0.0)
         if now - last < self._cost_block_cooldown_seconds:
             return
         self._cost_block_last_emit[key] = now
         try:
+            try:
+                meter_snapshot = self.cost_tracker.usage_totals()
+            except Exception:
+                meter_snapshot = {"meter_available": False}
             self.event_writer.append(ZfEvent(
                 type="cost.budget.exceeded",
                 actor="zf-cli",
                 payload={
                     "scope": scope,
-                    "role": role_name if scope == "role" else None,
+                    "role": role_name if role_scope else None,
                     "budget_usd": budget,
                     "current_usd": round(current, 4),
+                    "meter_snapshot": meter_snapshot,
+                    "pricing_formula_version": "deterministic-token-cost.v1",
                 },
             ))
         except Exception:

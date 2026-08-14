@@ -36,6 +36,7 @@ _CANONICAL_TASK_CONTRACT_SOURCES = frozenset({
 })
 
 _TASK_CONTRACT_AUDIT_REPLAY_SOURCES = frozenset({
+    "task.create-from-contract",
     "workflow_start",
     "workflow_submit",
     "workflow_request_terminal_rotation",
@@ -69,31 +70,37 @@ def apply_agent_usage_event(
     if not event.actor:
         return
     usage = event.payload.get("usage") or {}
-    input_tokens = int(usage.get("input_tokens", 0))
-    output_tokens = int(usage.get("output_tokens", 0))
+    from zf.runtime.provider_usage import canonical_usage_tokens
+
+    backend_hint = str(event.payload.get("backend", ""))
+    receipt = canonical_usage_tokens(
+        usage,
+        backend=backend_hint,
+        input_semantics=str(event.payload.get("input_semantics") or ""),
+    )
+    input_tokens = int(receipt["fresh_input_tokens"])
+    output_tokens = int(receipt["output_tokens"])
     instance_id = event.actor
     m = re.match(r"^(.*?)-(\d+)$", instance_id)
     role_type = m.group(1) if m else instance_id
     backend = (role_backends or {}).get(role_type, "") or str(
         event.payload.get("backend", "")
     )
-    # B-COST-01: model rides the payload (disk-reader / transport tag it);
-    # absent → "default" still resolves to a sane rate.
-    model = str(event.payload.get("model") or "default")
+    accounting_mode = str(
+        event.payload.get("accounting_mode") or "unknown"
+    )
+    # Missing/unknown model must remain visible to pricing. CostTracker keeps
+    # an explicit legacy "default" rate for direct old callers, but runtime
+    # receipts no longer silently invent that model identity.
+    model = str(event.payload.get("model") or "")
     # Provider self-reported cost (Claude stream-json `total_cost_usd`) is
     # authoritative when present — record_usage prefers it over token×rate.
     provider_cost = event.payload.get("total_cost_usd")
     provider_cost_usd = (
         float(provider_cost) if isinstance(provider_cost, (int, float)) else None
     )
-    # Cache tokens are priced separately ONLY for backends whose input is
-    # fresh-only. Codex bundles cache into input_tokens already, so passing
-    # its cache fields again would double-count → pass 0 for codex.
-    if backend == "codex":
-        cache_creation = cache_read = 0
-    else:
-        cache_creation = int(usage.get("cache_creation_input_tokens", 0))
-        cache_read = int(usage.get("cache_read_input_tokens", 0))
+    cache_creation = int(receipt["cache_creation_input_tokens"])
+    cache_read = int(receipt["cache_read_input_tokens"])
     if not any((input_tokens, output_tokens, cache_creation, cache_read)):
         return
     record = tracker.record_usage
@@ -125,6 +132,11 @@ def apply_agent_usage_event(
         cache_creation_tokens=cache_creation,
         cache_read_tokens=cache_read,
         provider_cost_usd=provider_cost_usd,
+        provider=str(event.payload.get("provider") or ""),
+        accounting_mode=accounting_mode,
+        occurred_at=str(
+            event.payload.get("usage_timestamp") or event.ts or ""
+        ),
         source_event_id=str(event.id or ""),
         usage_sample_id=_usage_sample_id_for_event(event),
         **extra,
@@ -332,19 +344,26 @@ def apply_task_dispatched_heartbeat_seed(
 
 
 # Universal worker-activity liveness (2026-07-09). Backend-agnostic:
-# ``agent.usage`` is emitted by both codex and claude-code; ``codex.hook.*`` /
-# ``claude.hook.*`` (prefix, not enumerated — future hook types auto-covered)
-# are per-tool-call activity. Any of these proves the worker is alive.
+# provider transcripts, ``agent.usage``, and provider hooks are objective
+# evidence that the worker is alive. Transcript events cover invocations where
+# usage or hook telemetry is sparse or unavailable.
 _ACTIVITY_LIVENESS_MIN_GAP_S = 60.0
+_ACTIVITY_LIVENESS_EVENTS = frozenset({
+    "agent.thinking",
+    "agent.text",
+    "agent.tool.use",
+    "agent.tool.result",
+    "agent.usage",
+})
 _ACTIVITY_LIVENESS_INFRA_ACTORS = frozenset({
     "zf-cli", "run-manager", "zf-supervisor", "zf-runtime",
     "zf-autoresearch", "zf-stall-redispatch", "operator", "",
 })
 
 
-def _is_worker_activity_event(event_type: str) -> bool:
+def is_worker_activity_event(event_type: str) -> bool:
     return (
-        event_type == "agent.usage"
+        event_type in _ACTIVITY_LIVENESS_EVENTS
         or event_type.startswith("codex.hook.")
         or event_type.startswith("claude.hook.")
     )
@@ -373,7 +392,7 @@ def apply_worker_activity_heartbeat(
     registry write per ``_ACTIVITY_LIVENESS_MIN_GAP_S`` per instance to bound
     ``role_sessions.yaml`` churn under high-frequency hook traffic.
     """
-    if not _is_worker_activity_event(event.type):
+    if not is_worker_activity_event(event.type):
         return
     instance_id = (event.actor or "").strip()
     if not instance_id or instance_id in _ACTIVITY_LIVENESS_INFRA_ACTORS:
@@ -639,10 +658,17 @@ def apply_task_contract_event(store: TaskStore, event: ZfEvent) -> None:
             )
         return
     if event.payload.get("source") in _TASK_CONTRACT_AUDIT_REPLAY_SOURCES:
-        # These controlled actions persist the canonical TaskContract before
-        # emitting an audit event. Replaying that complete contract through
-        # the legacy partial-update adapter can truncate shell commands and
-        # discard structured validation matrices.
+        # Controlled actions persist the canonical TaskContract before
+        # emitting this audit event.  A cold-start watcher can nevertheless
+        # replay an older task.contract.update after that direct write.  The
+        # audit event is therefore also the lossless replay source: restore
+        # its complete contract directly instead of routing it through the
+        # legacy partial-update adapter.
+        try:
+            materialized = TaskContract(**dict(contract_data))
+        except (TypeError, ValueError):
+            return
+        store.update(event.task_id, contract=materialized)
         return
     if event.actor == "zf-cli" and event.payload.get(
         "source"

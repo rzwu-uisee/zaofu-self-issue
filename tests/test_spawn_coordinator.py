@@ -512,22 +512,21 @@ class TestCodexFirstSpawn:
 
 class TestCodexRespawnWithCachedUuid:
     def test_codex_respawn_uses_cached_session_id(
-        self, coordinator, transport, registry, tmp_path, monkeypatch
+        self, coordinator, transport, registry
     ):
         # Prime the registry with a fake observed codex session
-        fake_codex = tmp_path / "codex_home"
-        fake_codex.mkdir()
-        monkeypatch.setattr(
-            "zf.core.state.role_sessions.CODEX_SESSIONS_ROOT",
-            fake_codex / "sessions",
-        )
+        role = RoleConfig(name="dev", backend="codex")
+        sessions_root = coordinator._codex_sessions_root(role)
         u = "55555555-5555-5555-5555-555555555555"
-        folder = fake_codex / "sessions" / "2026" / "04" / "15"
+        folder = sessions_root / "2026" / "04" / "15"
         folder.mkdir(parents=True)
         (folder / f"rollout-2026-04-15T00-00-00-{u}.jsonl").write_text("{}")
-        registry.observe_codex_session("dev", since_ts=0)
+        registry.observe_codex_session(
+            "dev",
+            since_ts=0,
+            sessions_root=sessions_root,
+        )
 
-        role = RoleConfig(name="dev", backend="codex")
         # Simulate first spawn already happened: mark as spawned
         registry.mark_spawned("dev")
 
@@ -539,6 +538,52 @@ class TestCodexRespawnWithCachedUuid:
         assert "resume" in argv
         resume_idx = argv.index("resume")
         assert argv[resume_idx + 1] == u
+        assert argv[resume_idx - 2:resume_idx] == ["-C", "/tmp/zf"]
+
+    def test_codex_respawn_rejects_session_owned_by_another_role_home(
+        self, state_dir, registry, transport, tmp_path
+    ):
+        event_log = EventLog(state_dir / "events.jsonl")
+        coordinator = SpawnCoordinator(
+            state_dir=state_dir,
+            registry=registry,
+            transport=transport,
+            project_root="/tmp/zf",
+            event_log=event_log,
+        )
+        session_id = "56565656-5656-5656-5656-565656565656"
+        foreign_root = (
+            state_dir
+            / "workdirs"
+            / "dev-2"
+            / "codex-home"
+            / "sessions"
+            / "2026"
+            / "08"
+            / "09"
+        )
+        foreign_root.mkdir(parents=True)
+        rollout = foreign_root / f"rollout-2026-08-09T00-00-00-{session_id}.jsonl"
+        rollout.write_text("{}\n", encoding="utf-8")
+        registry.bind_codex_session(
+            "dev",
+            session_id,
+            session_path=rollout,
+            observed_from="test",
+        )
+        registry.mark_spawned("dev")
+
+        coordinator.spawn(RoleConfig(name="dev", backend="codex"))
+
+        _, argv, _ = transport.spawn_calls[-1]
+        assert "resume" not in argv
+        assert registry.get("dev") is None
+        warning = [
+            event
+            for event in event_log.read_all()
+            if event.type == "worker.spawn_warning"
+        ][-1]
+        assert warning.payload["code"] == "codex_cached_session_missing"
 
     def test_codex_respawn_with_missing_cached_session_starts_fresh(
         self, state_dir, registry, transport, tmp_path

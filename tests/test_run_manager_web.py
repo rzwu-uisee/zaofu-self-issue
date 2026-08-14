@@ -95,6 +95,19 @@ def test_state_api_reconciles_residual_tasks_after_run_completed(
     assert task["kanban_column"] == "done"
     assert task["projection_reconciled"] is True
     assert task["projection_reconcile_reason"] == "run_completed"
+    assert task["effective_terminal"] is True
+    assert task["canonical_drift"] is True
+    assert task["attention"]["required"] is False
+    assert task["task_card"]["schema_version"] == "task-card.v1"
+    assert task["task_card"]["lifecycle"] == {
+        "canonical_status": "in_progress",
+        "display_status": "done",
+        "effective_terminal": True,
+        "outcome": "success",
+        "reconciled": True,
+        "canonical_drift": True,
+    }
+    assert task["task_card"]["current_stage"] is None
     assert TaskStore(state_dir / "kanban.json").get("TASK-R4-GAP").status == "in_progress"
 
 

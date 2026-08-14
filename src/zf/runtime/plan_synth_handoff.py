@@ -68,6 +68,16 @@ _PLAN_REWORK_CONTEXT_KEYS = (
     "owner_confirmation_ref",
     "owner_decision_items",
     "owner_decision_resolution",
+    "human_resolution",
+    "source_commit",
+    "candidate_base_commit",
+    "required_actions",
+    "orchestration_delta",
+    "orchestration_delta_ref",
+    "orchestration_delta_digest",
+    "reason_codes",
+    "operator_override",
+    "owner_authorization",
 )
 _TASK_DELIVERY_FACT_TYPES = frozenset({
     "candidate.ready",

@@ -249,3 +249,74 @@ def test_same_recovery_case_bridges_only_one_autoresearch_invocation() -> None:
         second_request,
         events=[first_request, first_invocation, second_request],
     ) is None
+
+
+def test_terminal_diagnosis_is_superseded_by_later_same_run_reopen() -> None:
+    blocked = ZfEvent(
+        id="evt-blocked",
+        type="run.goal.blocked",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "blocked"},
+    )
+    request = ZfEvent(
+        id="evt-request",
+        type=RUN_MANAGER_AUTORESEARCH_REQUESTED,
+        correlation_id="run-1",
+        payload={
+            "request_id": "terminal-request",
+            "recovery_case_id": "terminal-case",
+            "operation_key": "terminal-diagnosis:evt-blocked",
+            "workflow_run_id": "run-1",
+        },
+    )
+    reopened = ZfEvent(
+        id="evt-reopened",
+        type="run.goal.updated",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "active"},
+    )
+
+    assert build_invocation_request_from_run_manager_event(
+        request,
+        events=[blocked, request, reopened],
+    ) is None
+
+
+def test_terminal_diagnosis_survives_unrelated_or_earlier_reopen() -> None:
+    earlier_reopen = ZfEvent(
+        id="evt-earlier-reopen",
+        type="run.goal.updated",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "active"},
+    )
+    blocked = ZfEvent(
+        id="evt-blocked",
+        type="run.goal.blocked",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "blocked"},
+    )
+    request = ZfEvent(
+        id="evt-request",
+        type=RUN_MANAGER_AUTORESEARCH_REQUESTED,
+        correlation_id="run-1",
+        payload={
+            "request_id": "terminal-request",
+            "recovery_case_id": "terminal-case",
+            "operation_key": "terminal-diagnosis:evt-blocked",
+            "workflow_run_id": "run-1",
+        },
+    )
+    other_run_reopen = ZfEvent(
+        id="evt-other-reopen",
+        type="run.goal.updated",
+        correlation_id="run-2",
+        payload={"run_id": "run-2", "status": "active"},
+    )
+
+    invocation = build_invocation_request_from_run_manager_event(
+        request,
+        events=[earlier_reopen, blocked, request, other_run_reopen],
+    )
+
+    assert invocation is not None
+    assert invocation.type == "autoresearch.invocation.requested"

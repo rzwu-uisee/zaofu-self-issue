@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import asdict
+from pathlib import Path
 
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.core.task.schema import Task
 from zf.core.task.store import TERMINAL_STATES, TaskStore
+from zf.runtime.task_workflow_plans import task_workflow_binding_digest
 from zf.runtime.workflow_anchor import (
     is_workflow_managed_task,
+    mark_workflow_managed_task,
     workflow_task_request_binding,
 )
 from zf.runtime.workflow_task_request_rotation import (
@@ -20,6 +24,54 @@ from zf.runtime.workflow_task_request_rotation import (
 WORKFLOW_TASK_ACTIVATION_SOURCE = "workflow_invoke_admission"
 RESEARCH_TASK_COMPLETION_SOURCE = "research_artifact_delivery"
 WORKFLOW_TASK_TERMINAL_SOURCE = "workflow_run_terminal"
+WORKFLOW_TASK_REOPEN_SOURCE = "workflow_run_reopened"
+
+
+def claim_submitted_workflow_task(
+    *,
+    state_dir: Path,
+    task_id: str,
+    writer: EventWriter,
+    source_event: ZfEvent,
+    actor: str,
+) -> None:
+    """Reserve an existing parent Task for workflow-owned dispatch."""
+
+    if not task_id:
+        return
+    store = TaskStore(state_dir / "kanban.json")
+    task = store.get(task_id)
+    if task is None:
+        return
+    was_managed = is_workflow_managed_task(task)
+    previous_assigned_to = str(task.assigned_to or "")
+    previous_dispatch_id = str(task.active_dispatch_id or "")
+    if was_managed and not previous_assigned_to and not previous_dispatch_id:
+        return
+    if not was_managed:
+        mark_workflow_managed_task(task)
+    store.update(
+        task_id,
+        contract=task.contract,
+        assigned_to=None,
+        active_dispatch_id="",
+    )
+    writer.append(ZfEvent(
+        type="task.contract.update",
+        actor=actor,
+        task_id=task_id,
+        causation_id=source_event.id,
+        correlation_id=source_event.correlation_id,
+        payload={
+            "source": "workflow_submit",
+            "contract": asdict(task.contract),
+            "contract_digest": task_workflow_binding_digest(task),
+            "execution_owner": "workflow",
+            "previous_assigned_to": previous_assigned_to,
+            "assignment_released": bool(previous_assigned_to),
+            "previous_dispatch_id": previous_dispatch_id,
+        },
+    ))
 
 
 def activate_workflow_managed_task(
@@ -85,11 +137,15 @@ def activate_workflow_managed_task(
                 "workflow_request_rotation_event_id": str(
                     rotation_event.id if rotation_event is not None else ""
                 ),
+                "previous_assigned_to": str(task.assigned_to or ""),
+                "assignment_released": bool(task.assigned_to),
             },
         ))
     return task_store.update(
         task_id,
         status="in_progress",
+        assigned_to=None,
+        active_dispatch_id="",
         blocked_reason="",
         started_at=task.started_at or accepted_event.ts,
     )
@@ -324,6 +380,80 @@ def settle_workflow_managed_task_from_run_terminal(
     )
 
 
+def reopen_workflow_managed_task_from_run_recovery(
+    *,
+    task_store: TaskStore,
+    event_writer: EventWriter,
+    recovery_event: ZfEvent,
+) -> Task | None:
+    """Project an authorized blocked-Run recovery onto its parent Task."""
+
+    if recovery_event.type != "run.goal.updated":
+        raise ValueError("recovery_event must be run.goal.updated")
+    payload = (
+        recovery_event.payload
+        if isinstance(recovery_event.payload, dict)
+        else {}
+    )
+    if str(payload.get("status") or "").strip() not in {"active", "running"}:
+        return None
+    workflow_run_id = str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or recovery_event.correlation_id
+        or ""
+    ).strip()
+    task_id = str(
+        recovery_event.task_id or payload.get("parent_task_id") or ""
+    ).strip()
+    if not task_id and workflow_run_id:
+        from zf.runtime.workflow_lineage import resolve_workflow_run_lineage
+
+        task_id = resolve_workflow_run_lineage(
+            event_writer.event_log.read_all(),
+            workflow_run_id,
+        ).parent_task_id
+    task = task_store.get(task_id) if task_id else None
+    if task is None or not is_workflow_managed_task(task):
+        return None
+    if task.status == "in_progress":
+        return task
+    if task.status not in {"backlog", "blocked"}:
+        return None
+    if _lifecycle_event(
+        event_writer,
+        event_type="task.status_changed",
+        task_id=task_id,
+        source=WORKFLOW_TASK_REOPEN_SOURCE,
+        trigger_event_id=recovery_event.id,
+    ) is None:
+        event_writer.append(ZfEvent(
+            type="task.status_changed",
+            actor="zf-cli",
+            task_id=task_id,
+            payload={
+                "from": task.status,
+                "to": "in_progress",
+                "source": WORKFLOW_TASK_REOPEN_SOURCE,
+                "trigger_event": recovery_event.type,
+                "trigger_event_id": recovery_event.id,
+                "workflow_run_id": workflow_run_id,
+                "stage_replan_generation": str(
+                    payload.get("stage_replan_generation") or ""
+                ),
+            },
+            causation_id=recovery_event.id,
+            correlation_id=workflow_run_id or recovery_event.correlation_id,
+        ))
+    return task_store.update(
+        task_id,
+        status="in_progress",
+        blocked_reason="",
+        assigned_to="",
+        active_dispatch_id="",
+    )
+
+
 def _verified_research_lineage(
     event_writer: EventWriter,
     *,
@@ -417,8 +547,10 @@ def _lifecycle_event(
 __all__ = [
     "RESEARCH_TASK_COMPLETION_SOURCE",
     "WORKFLOW_TASK_ACTIVATION_SOURCE",
+    "WORKFLOW_TASK_REOPEN_SOURCE",
     "WORKFLOW_TASK_TERMINAL_SOURCE",
     "activate_workflow_managed_task",
     "complete_standalone_research_task",
+    "reopen_workflow_managed_task_from_run_recovery",
     "settle_workflow_managed_task_from_run_terminal",
 ]

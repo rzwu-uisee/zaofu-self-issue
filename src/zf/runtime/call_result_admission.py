@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -23,10 +22,12 @@ from zf.runtime.call_result_adapters import (
     AdaptedControlResult,
     ControlResultAdapterError,
     ControlResultAdapterRegistry,
+    adapt_control_result_for_operation,
 )
 from zf.runtime.call_result_correction import (
     build_correction_briefing,
     repair_instruction,
+    wait_for_source_turn_stop,
 )
 from zf.runtime.call_result_envelope import (
     envelope_identity_key,
@@ -116,7 +117,9 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             mode = "shadow"
         payload = dict(event.payload) if isinstance(event.payload, dict) else {}
         try:
-            adapted = self.adapters.adapt(self.state_dir, event)
+            adapted = adapt_control_result_for_operation(
+                self.adapters, self.state_dir, event, operation
+            )
         except ControlResultAdapterError as exc:
             return CallResultAdmissionOutcome(
                 status="unsupported",
@@ -155,6 +158,16 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             adapted,
             ledger_descriptor,
             state_dir=self.state_dir,
+            source_event_id=event.id,
+        )
+        from zf.runtime.product_acceptance import (
+            bind_product_acceptance_report,
+        )
+
+        adapted = bind_product_acceptance_report(
+            adapted,
+            state_dir=self.state_dir,
+            operation=operation,
             source_event_id=event.id,
         )
         control_ref = {
@@ -200,7 +213,9 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             envelope,
             operation or {},
         )
-        currentness_issues.extend(self._plan_package_currentness_issues(envelope))
+        currentness_issues.extend(
+            self._plan_package_currentness_issues(envelope, operation or {})
+        )
         currentness_issues.extend(
             self._task_result_currentness_issues(envelope, adapted, operation or {})
         )
@@ -486,6 +501,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
                 "control_result_ref": adapted.descriptor,
                 "control_result_schema": adapted.schema_version,
                 "semantic_verdict": _semantic_verdict(adapted.payload),
+                **_product_acceptance_projection(adapted.payload),
                 "provider_operation_summary_ref": provider_summary_ref or {},
                 "read_ledger_ref": ledger_descriptor,
                 "source_event_id": event.id,
@@ -638,6 +654,12 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             "plan_artifact_package_digest",
             "run_contract_ref",
             "run_contract_digest",
+            "product_acceptance_spec_ref",
+            "product_acceptance_spec_digest",
+            "product_acceptance_report_ref",
+            "product_acceptance_report_digest",
+            "product_acceptance_verdict",
+            "provider_qualification_status",
             "base_commit",
             "task_ref",
             "contract_snapshot_ref",
@@ -894,7 +916,7 @@ def dispatch_call_result_correction(
     ), None)
     if role is None:
         return False
-    _wait_for_source_turn_stop(
+    wait_for_source_turn_stop(
         runtime,
         source_event=source_event,
         actor=actor,
@@ -929,56 +951,29 @@ def dispatch_call_result_correction(
     return True
 
 
-def _wait_for_source_turn_stop(
-    runtime: Any,
-    *,
-    source_event: ZfEvent,
-    actor: str,
-    backend: str,
-    timeout_seconds: float = 30.0,
-    poll_interval: float = 0.1,
-) -> bool:
-    """Avoid submitting a correction while the source provider turn is active.
-
-    Terminal results are emitted from a provider tool call, before the TUI's
-    stop hook and input loop settle. Sending the correction immediately can
-    paste its text while dropping Enter. Other backends and synthetic tests do
-    not expose a per-turn stop hook, so they keep the existing fast path.
-    """
-    stop_type = {
-        "codex": "codex.hook.stop",
-        "claude-code": "claude.hook.stop",
-    }.get(backend)
-    event_log = getattr(runtime, "event_log", None)
-    if not stop_type or event_log is None:
-        return True
-
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
-    source_seen = False
-    while True:
-        try:
-            events = event_log.read_all()
-        except Exception:
-            return False
-        for event in events:
-            if event.id == source_event.id:
-                source_seen = True
-                continue
-            if (
-                source_seen
-                and event.type == stop_type
-                and str(event.actor or "") == actor
-            ):
-                return True
-        if not source_seen:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(max(0.01, poll_interval))
-
-
 def _semantic_verdict(control_result: Mapping[str, Any]) -> str:
     return str(control_result.get("verdict") or "pending")
+
+
+def _product_acceptance_projection(
+    control_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    fields = (
+        "product_acceptance_required",
+        "product_acceptance_spec_ref",
+        "product_acceptance_spec_digest",
+        "product_acceptance_report_ref",
+        "product_acceptance_report_digest",
+        "product_acceptance_verdict",
+        "provider_qualification_required",
+        "provider_qualification_status",
+        "provider_qualification_receipt_refs",
+    )
+    return {
+        field: control_result[field]
+        for field in fields
+        if control_result.get(field) not in (None, "", [], {})
+    }
 
 
 __all__ = [

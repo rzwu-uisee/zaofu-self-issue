@@ -37,6 +37,9 @@ Division of labor (avoid dual-source drift):
 - Use Docker with `mcp/playwright:latest` for browser E2E unless the operator
   explicitly asks for host browsers and no exact run-scoped command is pinned.
 - Start local API/UI services on `0.0.0.0` when a container must reach them.
+- Declare the exact owner-facing service URL and origin in the Task/real-E2E
+  matrix. A pass on `http://localhost` does not prove behavior on
+  `http://<LAN-IP>` or another delivery origin.
 - Use host networking for local service smoke tests only when the canonical
   contract does not pin a different network boundary.
 - Run the container with the host UID/GID so mounted workdirs remain writable.
@@ -83,6 +86,17 @@ exact command is supplied, preserve it instead of adapting this fallback.
   command plus writable runner/config/test/evidence paths. Do not leave viewport,
   pointer, network, storage, refresh, or screenshot acceptance attached only to
   `npm test`, a build command, or a future Verify interpretation.
+- Record `bind_host`, `service_url`, and `browser_origin` in the browser row or
+  its evidence contract. Verify the owner-facing origin in addition to any
+  runner-internal localhost origin; preserve both receipts when both are part
+  of the delivery path.
+- When the product depends on WebCrypto or another secure-context API, run a
+  capability probe at the exact owner-facing origin (for example
+  `window.isSecureContext` and the required `crypto.subtle` operation). An
+  unsupported insecure origin is a product failure unless the product contract
+  declares and the test proves a supported fallback. Do not replace this with
+  a localhost-only assertion, because browsers treat localhost and LAN/IP HTTP
+  origins differently.
 - Include static/package checks separately from browser E2E checks.
 - Mark browser checks with the canonical verification tier **`e2e`**. The kernel
   tier set is `static` / `runtime` / `e2e` / `manual_evidence`
@@ -153,11 +167,29 @@ through ZaoFu recovery — not wait for a self-re-review at the same commit.
 ## Evidence To Emit
 
 When reporting a browser gate result, include the exact command, service
-URLs/ports, whether it ran in Docker or failed before Docker, package setup
+URLs/ports, bind host, tested origins, secure-context/capability probe results,
+whether it ran in Docker or failed before Docker, package setup
 commands run, pass/fail counts, and either product-failure evidence or the
 environment/setup blocker. Emit a role-consistent event: `dev.failed`,
 `review.child.failed` / `review.child.completed`, or `verify.child.failed` /
 `verify.child.completed`.
+
+For every mandatory browser journey in a current Product Acceptance Spec,
+produce all applicable evidence layers:
+
+1. DOM/business assertions proving the expected content, state, navigation,
+   and key interaction rather than only HTTP 200 or a mounted root element.
+2. Screenshot or canvas-pixel evidence proving the main viewport is nonblank,
+   correctly framed, and free of incoherent overlap at the declared desktop
+   and mobile viewports. For canvas/media products, record deterministic pixel
+   statistics or frame checks in addition to the screenshot.
+3. A mandatory demo-difference assertion when the journey claims dynamic
+   behavior: compare before/after state, frames, route, data, or control output
+   so a static placeholder cannot pass as the feature.
+
+Persist large screenshots, traces, and pixel reports as sidecars and return
+their exact ref/digest in the Product Acceptance Report. Do not embed image
+bodies in events or let narrative "looks correct" replace observable checks.
 
 **A verify/review child report is a structured contract, not free text.** Since
 FIX-14, the `report` payload on verify/review child events is validated against

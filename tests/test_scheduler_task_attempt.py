@@ -476,6 +476,15 @@ def test_transport_failure_schedules_one_retry_and_success_resets_series(
     assert len(rows) == 2
     assert {row["ordinal"] for row in rows} == {1, 2}
     assert next(row for row in rows if row["ordinal"] == 1)["status"] == "superseded"
+    superseded = next(
+        row
+        for row in runtime.event_log.read_all()
+        if row.type == "task.attempt.superseded"
+        and row.payload.get("attempt_id") == first["attempt_id"]
+    )
+    assert superseded.payload["dispatch_id"] == first["dispatch_id"]
+    assert superseded.payload["lease_id"] == first["lease_id"]
+    assert superseded.payload["superseded_by"] == second_context.attempt_id
     retry_events = [
         row
         for row in runtime.event_log.read_all()

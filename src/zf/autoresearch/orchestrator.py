@@ -37,6 +37,8 @@ from zf.autoresearch.worktree_preparation import (
     cleanup_prepared_worktree,
     write_preparation_journal,
 )
+from zf.core.config.loader import load_config
+from zf.core.config.render import renderable_config_to_primitive
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
@@ -58,12 +60,17 @@ FATAL_EVENT_TYPES = frozenset({
     "worker.stuck.recovery_failed",
 })
 
+DEFAULT_CONTROLLER_TEMPLATE = Path(
+    "examples/prod/controller/prd-task-pipeline-v4-canary.yaml"
+)
+DEFAULT_FLOW_SOURCE_REF = "docs/prd/autoresearch.md"
+
 
 @dataclass(frozen=True)
 class AutoresearchRunConfig:
     scenario_name: str = "self-eval-backlog"
     worktree: Path = Path("/tmp/zaofu-autoresearch")
-    config_template: Path = Path("examples/tmp/dev-codex-backends.yaml")
+    config_template: Path = DEFAULT_CONTROLLER_TEMPLATE
     branch: str = ""
     seed_file: Path | None = None
     expected_done: int | None = None
@@ -78,8 +85,13 @@ class AutoresearchRunConfig:
     backlog_on_failure: bool = False
     backlog_state_dir: Path | None = None
     inject_worker_stuck: bool = False
-    inject_worker_stuck_instance: str = "dev-1"
+    inject_worker_stuck_instance: str = "dev-lane-0"
     inject_worker_stuck_timeout_seconds: int = 600
+    flow_kind: str = "prd"
+    flow_source_ref: str = DEFAULT_FLOW_SOURCE_REF
+    flow_target_root: str = "."
+    task_pipeline_mode: str = "blocking"
+    orchestrator_checkpoint_policy: str = "blocking"
     # Overlay the developer's current uncommitted ACDMRT changes into the
     # autoresearch worktree. Disable for strict HEAD-only evaluation (CI).
     sync_dirty: bool = True
@@ -189,11 +201,81 @@ def _run(
     return proc
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+def _load_config_template(path: Path) -> dict[str, Any]:
+    """Expand legacy or controller YAML into one canonical config mapping."""
+
+    data = renderable_config_to_primitive(load_config(path))
     if not isinstance(data, dict):
         raise ValueError(f"yaml root must be a mapping: {path}")
     return data
+
+
+def _apply_autoresearch_controller_overrides(
+    data: dict[str, Any],
+    *,
+    cfg: AutoresearchRunConfig,
+    run_id: str,
+) -> None:
+    project = data.setdefault("project", {})
+    project["name"] = "zaofu-autoresearch"
+    project["state_dir"] = ".zf"
+    data.setdefault("session", {})["tmux_session"] = (
+        f"zf-autoresearch-{run_id}"
+    )
+    data["global_budget_usd"] = cfg.budget_usd
+
+    workflow = data.setdefault("workflow", {})
+    flow_metadata = workflow.get("_flow_metadata")
+    if isinstance(flow_metadata, dict):
+        flow_metadata["prd_ref"] = cfg.flow_source_ref
+        flow_metadata["target_root"] = cfg.flow_target_root
+        task_pipeline = flow_metadata.get("task_pipeline")
+        if isinstance(task_pipeline, dict):
+            task_pipeline["mode"] = cfg.task_pipeline_mode
+
+    orchestration = workflow.get("orchestration")
+    if isinstance(orchestration, dict) and cfg.orchestrator_checkpoint_policy:
+        for key in (
+            "checkpoints",
+            "checkpoint_policies",
+            "pilot_id",
+            "shadow_sample_percent",
+        ):
+            orchestration.pop(key, None)
+        orchestration["mode"] = "exception_advisor"
+        flow_policy = {
+            "mode": "semantic_control",
+            "checkpoints": ["plan_candidate"],
+            "checkpoint_policies": {
+                "plan_candidate": cfg.orchestrator_checkpoint_policy,
+            },
+            "shadow_sample_percent": 100,
+        }
+        if cfg.orchestrator_checkpoint_policy == "blocking":
+            flow_policy["pilot_id"] = "autoresearch-prd-v4"
+        orchestration.setdefault("flow_policies", {})[
+            cfg.flow_kind
+        ] = flow_policy
+
+    run_limits = workflow.get("run_limits")
+    if isinstance(run_limits, dict):
+        run_limits["cost_budget_usd"] = cfg.budget_usd
+
+    for source in data.get("skill_sources") or []:
+        if (
+            isinstance(source, dict)
+            and str(source.get("name") or "") == "zaofu-skills"
+        ):
+            source["path"] = str(repo_root() / "skills")
+
+    feishu_path = cfg.worktree.resolve() / "feishu.yaml"
+    if feishu_path.is_file():
+        external = yaml.safe_load(feishu_path.read_text(encoding="utf-8")) or {}
+        integrations = data.get("integrations")
+        if isinstance(external, dict) and isinstance(integrations, dict):
+            for key in ("feishu_identity", "feishu_routing"):
+                if key in external:
+                    integrations.pop(key, None)
 
 
 def ensure_web_dependencies(worktree: Path, *, log_path: Path) -> str:
@@ -349,6 +431,96 @@ def sync_tracked_checkout_changes(
     return summary
 
 
+def _checkpoint_prepared_flow_baseline(
+    worktree: Path,
+    *,
+    synced_summary: dict[str, Any],
+    run_id: str,
+) -> str:
+    """Commit the explicit candidate/config paths in an isolated Flow worktree."""
+
+    if not (worktree / ".git").exists():
+        return ""
+
+    paths = {"zf.yaml"}
+    for key in ("added", "modified", "deleted"):
+        values = synced_summary.get(key) or []
+        if isinstance(values, list):
+            paths.update(str(value) for value in values if str(value))
+    renamed = synced_summary.get("renamed") or []
+    if isinstance(renamed, list):
+        for pair in renamed:
+            if not isinstance(pair, list):
+                continue
+            paths.update(str(value) for value in pair if str(value))
+    ordered_paths = sorted(paths)
+
+    staged_before = _run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        cwd=worktree,
+    )
+    if staged_before.returncode != 0:
+        raise RuntimeError("git staged-path audit failed before Flow checkpoint")
+    unexpected = {
+        value for value in staged_before.stdout.split("\0") if value
+    } - paths
+    if unexpected:
+        raise RuntimeError(
+            "refusing to checkpoint unrelated staged paths: "
+            + ", ".join(sorted(unexpected))
+        )
+
+    staged = _run(
+        ["git", "add", "-A", "--", *ordered_paths],
+        cwd=worktree,
+    )
+    if staged.returncode != 0:
+        detail = (staged.stderr or staged.stdout or "").strip()
+        raise RuntimeError(f"git add failed for Flow baseline: {detail}")
+    staged_paths_result = _run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        cwd=worktree,
+    )
+    if staged_paths_result.returncode != 0:
+        raise RuntimeError("git staged-path audit failed after Flow checkpoint")
+    staged_paths = {
+        value
+        for value in staged_paths_result.stdout.split("\0")
+        if value
+    }
+    unexpected = staged_paths - paths
+    if unexpected:
+        raise RuntimeError(
+            "Flow checkpoint staged paths outside its ownership: "
+            + ", ".join(sorted(unexpected))
+        )
+    if staged_paths:
+        committed = _run(
+            [
+                "git",
+                "-c",
+                "user.email=autoresearch@zaofu.dev",
+                "-c",
+                "user.name=ZaoFu Autoresearch",
+                "commit",
+                "-q",
+                "-m",
+                f"chore: checkpoint autoresearch Flow baseline {run_id}",
+                "--",
+                *sorted(staged_paths),
+            ],
+            cwd=worktree,
+        )
+        if committed.returncode != 0:
+            detail = (committed.stderr or committed.stdout or "").strip()
+            raise RuntimeError(f"git commit failed for Flow baseline: {detail}")
+
+    head = _run(["git", "rev-parse", "HEAD"], cwd=worktree)
+    if head.returncode != 0:
+        raise RuntimeError("git rev-parse failed after Flow baseline checkpoint")
+    return head.stdout.strip()
+
+
 def prepare_worktree(
     cfg: AutoresearchRunConfig,
     *,
@@ -409,6 +581,7 @@ def prepare_worktree(
         "seed_existed": seed_existed,
         "original_seed": str(original_seed) if seed_existed else "",
         "generated_seed_sha256": "",
+        "baseline_checkpoint_commit": "",
         "web_dependencies": {
             "mode": "pending",
             "path": "web/node_modules",
@@ -428,13 +601,12 @@ def prepare_worktree(
         preparation["phase"] = "candidate_synced"
         write_preparation_journal(journal_path, preparation)
 
-        data = _load_yaml(config_src)
-        data.setdefault("project", {})["name"] = "zaofu-autoresearch"
-        data["project"]["state_dir"] = ".zf"
-        data.setdefault("session", {})["tmux_session"] = (
-            f"zf-autoresearch-{run_id}"
+        data = _load_config_template(config_src)
+        _apply_autoresearch_controller_overrides(
+            data,
+            cfg=cfg,
+            run_id=run_id,
         )
-        data["global_budget_usd"] = cfg.budget_usd
         rendered_zf = yaml.safe_dump(
             data,
             allow_unicode=True,
@@ -471,6 +643,19 @@ def prepare_worktree(
         web["symlink_target"] = web_dependency_link_target
         preparation["phase"] = "web_prepared"
         write_preparation_journal(journal_path, preparation)
+
+        if cfg.flow_kind:
+            preparation["phase"] = "baseline_checkpoint_pending"
+            write_preparation_journal(journal_path, preparation)
+            preparation["baseline_checkpoint_commit"] = (
+                _checkpoint_prepared_flow_baseline(
+                    worktree,
+                    synced_summary=synced_summary,
+                    run_id=run_id,
+                )
+            )
+            preparation["phase"] = "baseline_checkpointed"
+            write_preparation_journal(journal_path, preparation)
 
         seed_text = scenario.seed_text.strip() + "\n"
         preparation["generated_seed_sha256"] = hashlib.sha256(
@@ -589,6 +774,15 @@ def build_inner_runner_command(
         str(scenario.timeout_seconds),
         "--confirm",
     ]
+    if cfg.flow_kind:
+        cmd.extend([
+            "--flow-kind",
+            cfg.flow_kind,
+            "--flow-source",
+            cfg.flow_source_ref,
+            "--flow-target-root",
+            cfg.flow_target_root,
+        ])
     if cfg.keep_running:
         cmd.append("--no-stop")
     return cmd

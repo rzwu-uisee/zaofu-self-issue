@@ -276,6 +276,91 @@ def test_candidate_verify_operation_pins_aggregate_contract_and_target(
     }
 
 
+def test_candidate_verify_authority_pins_triggering_freeze(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    seeded = _seed_frozen_candidate(runtime)
+    original = next(
+        event
+        for event in runtime.event_log.read_all()
+        if event.id == "evt-candidate-ready"
+    )
+    original_body = dict(original.payload)
+    newer_receipt = {
+        key: value
+        for key, value in original_body.items()
+        if key not in {
+            "target_commit",
+            "freeze_receipt_ref",
+            "freeze_receipt_digest",
+        }
+    }
+    newer_receipt.update({
+        "freeze_id": "freeze-2",
+        "candidate_generation": "candidate-generation-2",
+    })
+    newer_descriptor = write_immutable_json_sidecar(
+        runtime.state_dir,
+        newer_receipt,
+        root="candidate-freeze-receipts",
+        kind="candidate_freeze_receipt",
+        schema_version="candidate-freeze-receipt.v1",
+        created_by="test",
+    )
+    runtime.event_log.append(ZfEvent(
+        id="evt-candidate-ready-newer",
+        type="candidate.ready",
+        correlation_id=seeded["run_id"],
+        payload={
+            **newer_receipt,
+            "target_commit": seeded["candidate_head"],
+            "freeze_receipt_ref": newer_descriptor,
+            "freeze_receipt_digest": newer_descriptor["sha256"],
+        },
+    ))
+    runtime.event_log.append(ZfEvent(
+        id="evt-candidate-ready-recovery",
+        type="candidate.ready",
+        correlation_id=seeded["run_id"],
+        payload={
+            "workflow_run_id": seeded["run_id"],
+            "candidate_head_commit": seeded["candidate_head"],
+            "candidate_base_commit": "a" * 40,
+            "completed_task_ids": [seeded["child_task_id"]],
+            "candidate_snapshot_event_id": "evt-candidate-ready",
+            "freeze_id": "freeze-1",
+            "source": "workflow_resume_batch",
+        },
+    ))
+    payload = {
+        "workflow_run_id": seeded["run_id"],
+        "task_id": "FLOW-ANCHOR",
+        "target_commit": seeded["candidate_head"],
+        "trigger_payload": {
+            "freeze_id": "freeze-1",
+            "candidate_snapshot_event_id": "evt-candidate-ready-recovery",
+        },
+    }
+
+    prepare_candidate_verification_authority(
+        runtime,
+        payload=payload,
+        workflow_run_id=seeded["run_id"],
+        task_id="FLOW-ANCHOR",
+    )
+
+    assert payload["candidate_snapshot_event_id"] == "evt-candidate-ready"
+    target = hydrate_sidecar_ref(
+        runtime.state_dir,
+        {
+            "ref": payload["target_snapshot_ref"],
+            "sha256": payload["target_snapshot_digest"],
+        },
+    ).payload
+    assert target["candidate_event_id"] == "evt-candidate-ready"
+
+
 def test_candidate_verify_fails_before_dispatch_without_current_task_verify(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +392,24 @@ def test_candidate_verify_semantic_submit_uses_pinned_candidate_authority(
 ) -> None:
     runtime = _runtime(tmp_path)
     seeded = _seed_frozen_candidate(runtime)
+    runtime.event_log.append(ZfEvent(
+        id="evt-candidate-recovery-wrapper",
+        type="candidate.ready",
+        correlation_id=seeded["run_id"],
+        payload={
+            "workflow_run_id": seeded["run_id"],
+            "trace_id": seeded["run_id"],
+            "pdd_id": "FLOW-ANCHOR",
+            "feature_id": "FLOW-ANCHOR",
+            "candidate_ref": "refs/heads/candidate/demo",
+            "candidate_base_commit": "a" * 40,
+            "candidate_head_commit": seeded["candidate_head"],
+            "completed_task_ids": [seeded["child_task_id"]],
+            "candidate_snapshot_event_id": "evt-candidate-ready",
+            "source": "workflow_resume_batch",
+            "resume_checkpoint_ref": "wfres-candidate-retry",
+        },
+    ))
     token = provision_role_submit_credential(
         runtime.state_dir,
         "verify-lane-0",

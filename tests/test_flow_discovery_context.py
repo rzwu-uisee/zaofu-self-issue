@@ -26,7 +26,11 @@ def test_flow_discovery_uses_frozen_candidate_identity() -> None:
         event=trigger,
         payload=dict(trigger.payload),
         fallback={},
-        metadata={},
+        metadata={
+            "task_pipeline": {
+                "candidate": {"rolling_smoke": "required"},
+            },
+        },
         pdd_id="PDD-1",
         feature_id="FEATURE-1",
         trace_id="run-1",
@@ -38,3 +42,6 @@ def test_flow_discovery_uses_frozen_candidate_identity() -> None:
     assert context.candidate_head_commit == "abc123"
     assert context.request_payload["candidate_ref"] == context.candidate_ref
     assert context.request_payload["candidate_head_commit"] == "abc123"
+    assert context.request_payload["candidate_policy"] == {
+        "rolling_smoke": "required",
+    }

@@ -2258,6 +2258,13 @@ def _copy_materialized_candidate_path(*, source: Path, target: Path) -> bool:
 def _quality_gate_env(worktree: Path) -> dict[str, str]:
     """Run candidate quality checks against the candidate worktree checkout."""
     env = os.environ.copy()
+    venv_bin = worktree / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+    if venv_bin.is_dir():
+        inherited_path = env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            [str(venv_bin), *(part for part in inherited_path if part != str(venv_bin))]
+        )
+
     project_src = worktree / "src"
     if not project_src.exists():
         env.pop("PYTHONPATH", None)

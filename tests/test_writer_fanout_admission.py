@@ -226,6 +226,33 @@ def test_writer_task_items_dedupes_same_task_redundant_subtree_files():
     validate_writer_task_items(items)
 
 
+def test_writer_task_items_preserves_strict_skills_required():
+    items = writer_task_items({
+        "tasks": [{
+            "task_id": "domain",
+            "allowed_paths": ["src/domain/**"],
+            "skills_required": ["can-domain", "react-ui"],
+        }],
+    })
+
+    assert items[0]["skills_required"] == ["can-domain", "react-ui"]
+
+
+@pytest.mark.parametrize(
+    "skills_required",
+    ["can-domain", [""], ["can-domain", "can-domain"], [1]],
+)
+def test_writer_task_items_rejects_invalid_skills_required(skills_required):
+    with pytest.raises(RuntimeError, match="skills_required|required skill"):
+        writer_task_items({
+            "tasks": [{
+                "task_id": "domain",
+                "allowed_paths": ["src/domain/**"],
+                "skills_required": skills_required,
+            }],
+        })
+
+
 def test_midpath_recursion_glob_overlap_rejected():
     # 2026-06-10 review P1-5: `src/foo/**/*.py` previously kept the literal
     # `**` component (only TRAILING globs were stripped), so it compared as

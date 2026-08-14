@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **68** 个顶层命令 family、**257** 条可寻址命令路径。
+当前共 **68** 个顶层命令 family、**258** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -610,6 +610,7 @@ Inspect or clean runtime state
 | `zf state` | Inspect or clean runtime state |
 | `zf state clean` | Clean rebuildable runtime projections |
 | `zf state reconcile` | Detect Kanban and tmux pane desync (in_progress without a live worker) |
+| `zf state retention-plan` | Inventory retention classes and safe reclaim candidates (read-only) |
 
 ## `zf status`
 

@@ -11,6 +11,7 @@ markers so pre-field event logs keep classifying.
 from __future__ import annotations
 
 FAILURE_KIND_BUDGET = "budget"
+FAILURE_KIND_INFRA = "infra"
 FAILURE_KIND_QUALITY = "quality"
 FAILURE_KIND_MIXED = "mixed"
 
@@ -43,6 +44,27 @@ def failure_kind_from_payload(payload: object) -> str:
     if is_budget_reason(str(payload.get("reason") or "")):
         return FAILURE_KIND_BUDGET
     return ""
+
+
+def is_fanout_runtime_timeout_payload(payload: object) -> bool:
+    """Return whether a child failure is a harness-owned fanout timeout.
+
+    New events carry ``failure_kind=infra``.  The exact reason/timeout pair is
+    retained for older logs written before that field existed; callers should
+    apply this fallback only to kernel-emitted fanout child failures.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    if failure_kind_from_payload(payload) == FAILURE_KIND_INFRA:
+        return True
+    reason = str(payload.get("reason") or "").strip().lower()
+    if reason not in {"idle", "timeout"}:
+        return False
+    try:
+        return float(payload.get("timeout_seconds") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def aggregate_failure_kind(failed_children: list) -> str:

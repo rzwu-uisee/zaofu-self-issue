@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import zf.runtime.tick_services as tick_services
 from zf.core.config.schema import (
     AutoresearchConfig,
     AutoresearchTriggerPolicyConfig,
+    GoalConfig,
     ProjectConfig,
     RuntimeConfig,
     RuntimeRunManagerConfig,
@@ -175,6 +177,62 @@ def test_cost_blackout_has_startup_grace_for_missing_initial_usage(
     assert not [event for event in log.read_all() if event.type == "cost.usage.blackout"]
 
 
+def test_cost_blackout_builds_run_aliases_once_for_usage_scan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = _state(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    writer = EventWriter(log)
+    now = datetime.now(timezone.utc).isoformat()
+    run_id = "run-blackout-alias"
+    log.append(ZfEvent(
+        type="run.goal.started",
+        ts=now,
+        correlation_id=run_id,
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+    ))
+    log.append(ZfEvent(
+        type="task.dispatched",
+        ts=now,
+        correlation_id=run_id,
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+    ))
+    for index in range(25):
+        log.append(ZfEvent(
+            type="agent.usage",
+            ts=now,
+            correlation_id=run_id,
+            payload={
+                "run_id": run_id,
+                "workflow_run_id": run_id,
+                "usage": {"input_tokens": index + 1},
+            },
+        ))
+    calls = 0
+    original = tick_services.run_aliases
+
+    def counting_run_aliases(events):
+        nonlocal calls
+        calls += 1
+        return original(events)
+
+    monkeypatch.setattr(tick_services, "run_aliases", counting_run_aliases)
+
+    assert _emit_cost_blackout_if_needed(
+        event_log=log,
+        event_writer=writer,
+        state_dir=state_dir,
+        state=TickServiceState(),
+        intervals=TickServiceIntervals(
+            cost_blackout_stale_s=900,
+            cost_blackout_startup_grace_s=0,
+            cost_blackout_cooldown_s=0,
+        ),
+    ) is False
+    assert calls == 1
+
+
 def test_standard_tick_services_runs_supervisor_and_autoresearch(tmp_path: Path) -> None:
     state_dir = _state(tmp_path)
     config = ZfConfig(autoresearch=AutoresearchConfig(
@@ -309,6 +367,71 @@ def test_standard_tick_materializes_blocked_goal_before_quiescent_return(
         and event.payload.get("message_kind") == "run_terminal_delivery"
     ]
     assert len(requests) == 1
+
+
+def test_standard_tick_terminalizes_unrecoverable_escalation_before_quiescence(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    config = ZfConfig(
+        project=ProjectConfig(name="demo"),
+        goal=GoalConfig(enabled=True),
+    )
+    orch = _FakeOrchestrator(state_dir, config)
+    orch.event_log.append(ZfEvent(
+        id="evt-start",
+        type="run.goal.started",
+        correlation_id="run-stage-cap",
+        payload={
+            "run_id": "run-stage-cap",
+            "workflow_run_id": "run-stage-cap",
+            "goal_id": "GOAL-STAGE-CAP",
+        },
+    ))
+    orch.event_log.append(ZfEvent(
+        id="evt-stage-cap",
+        type="human.escalate",
+        actor="zf-cli",
+        task_id="TASK-STAGE-CAP",
+        ts="2026-08-01T00:00:00+00:00",
+        correlation_id="run-stage-cap",
+        payload={
+            "reason": "stage replan cap exhausted",
+            "failure_class": "stage_replan_cap_exhausted",
+            "failure_scope": "plan_admission",
+            "operator_required": True,
+            "recoverable": False,
+            "terminalization_condition": "auto_recovery_exhausted",
+        },
+    ))
+
+    run_standard_tick_services(
+        orch,
+        state=TickServiceState(),
+        now=1.0,
+        intervals=TickServiceIntervals(
+            heartbeat_sweep_s=999,
+            bug_scan_s=999,
+            supervisor_inspection_s=999,
+            spine_projection_s=999,
+            cost_blackout_check_s=999,
+            stillness_audit_s=999,
+        ),
+    )
+
+    events = orch.event_log.read_all()
+    terminal = next(
+        event for event in events
+        if event.type == "run.goal.blocked"
+        and event.causation_id == "evt-stage-cap"
+    )
+    request = next(
+        event for event in events
+        if event.type == "run.manager.autoresearch.requested"
+        and event.causation_id == terminal.id
+    )
+    assert terminal.correlation_id == "run-stage-cap"
+    assert request.payload["failure_class"] == "stage_replan_cap_exhausted"
 
 
 def test_standard_tick_services_coalesces_healthy_run_manager_ticks(

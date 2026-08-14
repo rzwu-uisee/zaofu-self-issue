@@ -454,6 +454,8 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
         "qa_analyst",
     ]
     assert result["max_rounds"] == 4
+    assert result["mode"] == "multi_lens"
+    assert result["engine_mode"] == "fanout_then_synthesis"
     channel = project_channel(state_dir, "ch-auto") or {}
     assert channel["discussion"]["default_responder_id"] == "tech_leader"
     assert channel["discussion"]["mode"] == "multi_lens"
@@ -489,6 +491,11 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
         and event.payload.get("action") == "channel-create-and-start"
     ]
     assert len(completions) == 1
+    assert completions[0].payload["mode"] == "multi_lens"
+    assert completions[0].payload["engine_mode"] == (
+        "fanout_then_synthesis"
+    )
+    assert completions[0].payload["reply_request_count"] == 3
 
     followup = _execute(
         service,
@@ -627,9 +634,10 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
                 "label": "Quick change (Recommended)",
                 "recommended": true,
                 "description": "Three implementation roles and four rounds.",
-                "submit_payload": {
-                  "template_id": "quick-change",
-                  "name": "Session registry migration",
+                  "submit_payload": {
+                    "template_id": "quick-change",
+                    "mode": "conversation",
+                    "name": "Session registry migration",
                   "overrides": {
                     "backend": "fake",
                     "budget": {"max_rounds": 4}
@@ -640,9 +648,10 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
                 "id": "architecture",
                 "label": "Architecture review",
                 "description": "Four review roles and six rounds.",
-                "submit_payload": {
-                  "template_id": "architecture-review",
-                  "overrides": {
+                  "submit_payload": {
+                    "template_id": "architecture-review",
+                    "mode": "multi_lens",
+                    "overrides": {
                     "backend": "fake",
                     "budget": {"max_rounds": 6}
                   }
@@ -708,6 +717,9 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
     assert result["applied_action"] == "channel-create-and-start"
     assert result["member_count"] == 3
     assert result["max_rounds"] == 4
+    assert result["mode"] == "conversation"
+    assert result["engine_mode"] == "manual_mention"
+    assert result["reply_request_count"] == 1
     channel = project_channel(state_dir, result["channel_id"]) or {}
     assert channel["name"] == "Session registry migration"
     assert {member["channel_role"] for member in channel["members"]} == {

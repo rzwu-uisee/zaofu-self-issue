@@ -71,7 +71,7 @@ def complete_deterministic_reply(
         correlation_id=channel_id,
         payload=redact_obj(reply_payload),
     )
-    writer.emit(
+    completed_event = writer.emit(
         "channel.agent.reply.completed",
         actor=actor,
         task_id=str(request.get("task_id") or "") or None,
@@ -88,5 +88,18 @@ def complete_deterministic_reply(
             **run_fields,
             "source": source,
         },
+    )
+    from zf.runtime.channel_reply_contract import emit_structured_reply_events
+
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message=message,
+        reply=reply,
+        reply_event_id=completed_event.id,
+        actor=actor,
+        source=source,
     )
     return ChannelDispatchResult(dispatched=[request_id], completed=[request_id])

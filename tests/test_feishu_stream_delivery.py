@@ -21,9 +21,10 @@ def _w(sd: Path) -> EventWriter:
     return EventWriter(EventLog(sd / "events.jsonl"))
 
 
-def _delta(rid: str, chunk: str) -> ZfEvent:
+def _delta(rid: str, chunk: str, *, member_id: str = "") -> ZfEvent:
     return ZfEvent(type="agent.session.part.delta", actor="dev",
-                   payload={"request_id": rid, "kind": "text", "delta": chunk})
+                   payload={"request_id": rid, "kind": "text", "delta": chunk,
+                            "member_id": member_id})
 
 
 def _sync(sd, ledger, sent, updated):
@@ -105,6 +106,52 @@ def test_push_stream_card_serializes_concurrent_projection_ticks(tmp_path):
     assert transport.send_calls == 1
     assert len(transport.sent_messages) == 1
     assert sum(len(result["sent"]) for result in results) == 1
+
+
+def test_scoped_and_empty_projection_share_canonical_member_ledger(tmp_path):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    _w(state_dir).append(
+        _delta("R-member", "working", member_id="zf-product-manager")
+    )
+    transport = MockFeishuTransport()
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+
+    def run_push(member: str) -> None:
+        barrier.wait(timeout=3)
+        results.append(push_stream_card_once(
+            state_dir,
+            transport,
+            receive_id="oc_owner",
+            member=member,
+        ))
+
+    scoped = threading.Thread(target=run_push, args=("zf-product-manager",))
+    inferred = threading.Thread(target=run_push, args=("",))
+    scoped.start()
+    inferred.start()
+    scoped.join(timeout=3)
+    inferred.join(timeout=3)
+
+    assert not scoped.is_alive() and not inferred.is_alive()
+    assert len(transport.sent_messages) == 1
+    assert sum(len(result["sent"]) for result in results) == 1
+    assert {result["member"] for result in results} == {"zf-product-manager"}
+    ledger_dir = state_dir / "integrations" / "feishu"
+    scoped_ledger = json.loads(
+        (ledger_dir / "stream_ledger-zf-product-manager.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert scoped_ledger["stream-R-member"]["message_id"]
+    shared_path = ledger_dir / "stream_ledger.json"
+    shared_ledger = (
+        json.loads(shared_path.read_text(encoding="utf-8"))
+        if shared_path.exists()
+        else {}
+    )
+    assert "stream-R-member" not in shared_ledger
 
 
 def test_high_frequency_deltas_collapse_to_one_render(tmp_path):

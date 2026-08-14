@@ -342,6 +342,90 @@ def test_task_verify_does_not_require_candidate_owned_command_receipt(
     ) == []
 
 
+def test_candidate_verify_requires_its_local_candidate_command(
+    tmp_path: Path,
+) -> None:
+    contract = _contract()
+    contract["verification_owner"] = "candidate_verify"
+    contract["verification_tier"] = "task_non_smoke"
+    contract["acceptance_criteria"][0].update({
+        "verification_owner": "candidate_verify",
+        "verification_tier": "task_non_smoke",
+    })
+    contract["verification_commands"][0].update({
+        "owner": "candidate_verify",
+        "producer_task_id": "TASK-1",
+    })
+    descriptor = write_task_contract_snapshot(tmp_path, contract)
+    target = build_target_snapshot(
+        descriptor,
+        target_commit="target-1",
+        contract_snapshot=contract,
+    )
+    target_descriptor = write_target_snapshot(tmp_path, target)
+    result = _verification_result(contract, descriptor, target_descriptor)
+    result["verification_owner"] = "candidate_verify"
+    result["verification_tier"] = "task_non_smoke"
+    result["requirement_results"][0].update({
+        "verification_owner": "candidate_verify",
+        "verification_tier": "task_non_smoke",
+    })
+
+    assert typed_result_admission_issues(
+        tmp_path,
+        schema_version="verification-result.v1",
+        result=result,
+        semantic_submit=True,
+    ) == []
+
+    result["probe_receipts"] = [{
+        "probe_id": "independent-release-audit",
+        "status": "passed",
+        "evidence_refs": ["event:independent-release-audit"],
+    }]
+    issues = typed_result_admission_issues(
+        tmp_path,
+        schema_version="verification-result.v1",
+        result=result,
+        semantic_submit=True,
+    )
+    assert [issue["code"] for issue in issues] == [
+        "verification_canonical_command_coverage_missing"
+    ]
+
+
+def test_task_verify_does_not_require_another_tasks_producer_command(
+    tmp_path: Path,
+) -> None:
+    contract, descriptor, target_descriptor = _descriptors(tmp_path)
+    contract["verification_commands"][0]["producer_task_id"] = "TASK-EVIDENCE"
+    descriptor = write_task_contract_snapshot(tmp_path, contract)
+    target = build_target_snapshot(
+        descriptor,
+        target_commit="target-1",
+        contract_snapshot=contract,
+    )
+    target_descriptor = write_target_snapshot(tmp_path, target)
+    result = _verification_result(contract, descriptor, target_descriptor)
+    result["contract_snapshot_ref"] = descriptor["ref"]
+    result["contract_snapshot_digest"] = descriptor["sha256"]
+    result["target_snapshot_ref"] = target_descriptor["ref"]
+    result["target_snapshot_digest"] = target_descriptor["sha256"]
+    result["probe_receipts"] = [{
+        "probe_id": "independent-task-verify",
+        "status": "passed",
+        "evidence_refs": ["event:focused-check"],
+    }]
+    result["requirement_results"][0]["reproduction_commands"] = []
+
+    assert typed_result_admission_issues(
+        tmp_path,
+        schema_version="verification-result.v1",
+        result=result,
+        semantic_submit=True,
+    ) == []
+
+
 def test_verify_rejects_substituted_or_unbound_canonical_command(
     tmp_path: Path,
 ) -> None:

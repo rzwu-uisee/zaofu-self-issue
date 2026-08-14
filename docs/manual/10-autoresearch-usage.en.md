@@ -85,20 +85,21 @@ WT="/tmp/zf-autoresearch-${STAMP}"
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180
 ```
 
-For the strict full-Codex DAG, use the Autoresearch-safe template. It keeps
-runtime paths under one `.zf` tree:
+For v3 compatibility coverage, select the production v3 controller explicitly.
+`examples/tmp/` and the old `examples/zf-full-*.yaml` files are no longer
+Autoresearch validation baselines:
 
 ```bash
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
-  --worktree /tmp/zf-ar-full-codex-template-dry \
-  --config examples/zf-full-codex-autoresearch.yaml \
+  --worktree /tmp/zf-ar-prd-v3-template-dry \
+  --config examples/prod/controller/prd-fanout-v3.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 260
@@ -111,7 +112,7 @@ budget:
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
@@ -175,12 +176,12 @@ and a satisfied stuck injection when applicable.
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
   --inject-worker-stuck \
-  --inject-worker-stuck-instance dev-1 \
+  --inject-worker-stuck-instance dev-lane-0 \
   --backlog-on-failure \
   --tmux \
   --confirm
@@ -201,7 +202,7 @@ uv run zf autoresearch loop \
   --worktree /tmp/zf-ar-loop \
   --max-iterations 4 \
   --budget-usd 500 \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --fix-wait-strategy head_change
 ```
 
@@ -234,7 +235,7 @@ uv run zf autoresearch campaign plan \
   --campaign harness-hardening \
   --output-dir /tmp/zf-ar-campaign-plan \
   --worktree-root /tmp/zf-ar-campaign \
-  --config examples/dev-codex-backends.yaml
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 ```
 
 This writes `campaign.json`, `campaign.md`, and `run-campaign.sh`. Run scenarios
@@ -272,7 +273,7 @@ uv run zf autoresearch self-repair prepare \
 uv run zf autoresearch self-repair checkpoint \
   --task TASK-ABCDEF \
   --role dev \
-  --worker dev-1 \
+  --worker dev-lane-0 \
   --progress "patched failure classifier" \
   --stage implementation
 

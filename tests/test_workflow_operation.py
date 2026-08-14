@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import zf.runtime.workflow_operation as workflow_operation_module
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
 from zf.runtime.workflow_operation import (
@@ -79,6 +80,12 @@ def test_task_pipeline_operation_replays_across_placement_relocation(
         "task_map_generation": 3,
         "workspace_generation": 1,
         "prompt": "implement the admitted task contract",
+        "execution_profile": {
+            "schema_version": "execution-profile.v1",
+            "role": "writer_lane_1",
+            "profile_id": "bounded-direct-v1",
+            "profile_digest": "profile-sha",
+        },
         "result_identity": {
             "task_id": "T1",
             "role_instance": "writer_lane_1",
@@ -117,6 +124,12 @@ def test_task_pipeline_operation_replays_across_placement_relocation(
                 "lease_id": "lease-2",
                 "placement_epoch": 2,
             },
+            "execution_profile": {
+                "schema_version": "execution-profile.v1",
+                "role": "writer_lane_2",
+                "profile_id": "bounded-direct-v1",
+                "profile_digest": "profile-sha",
+            },
             "role_instance": "writer_lane_2",
             "active_attempt_id": "attempt-2",
             "lease_id": "lease-2",
@@ -142,6 +155,133 @@ def test_task_pipeline_operation_replays_across_placement_relocation(
     assert persisted["active_attempt_id"] == "attempt-1"
     assert persisted["lease_id"] == "lease-1"
     assert persisted["request"]["placement_epoch"] == 1
+
+
+def test_task_pipeline_legacy_hash_reopens_only_for_attempt_local_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = _service(tmp_path)
+    current_hash_body = workflow_operation_module.task_pipeline_request_hash_body
+
+    def legacy_hash_body(request_body, request):  # noqa: ANN001
+        body = dict(current_hash_body(request_body, request))
+        semantic_request = dict(body["request"])
+        semantic_request["source_manifest_digest"] = str(
+            request.get("source_manifest_digest") or ""
+        )
+        semantic_request["read_policy_digest"] = str(
+            request.get("read_policy_digest") or ""
+        )
+        body["request"] = semantic_request
+        return body
+
+    monkeypatch.setattr(
+        workflow_operation_module,
+        "task_pipeline_request_hash_body",
+        legacy_hash_body,
+    )
+    first = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage-legacy-hash",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "impl",
+            "operation_generation": 3,
+            "prompt": "repair the admitted contract",
+            "source_manifest_digest": "a" * 64,
+            "read_policy_digest": "b" * 64,
+        },
+        task_id="TASK-A",
+    )
+    monkeypatch.setattr(
+        workflow_operation_module,
+        "task_pipeline_request_hash_body",
+        current_hash_body,
+    )
+    service.block(
+        operation_id="op-task-stage-legacy-hash",
+        request_hash="f" * 64,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        reason="request_hash_divergence",
+    )
+
+    replay = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage-legacy-hash",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "impl",
+            "operation_generation": 3,
+            "prompt": "repair the admitted contract",
+            "source_manifest_digest": "c" * 64,
+            "read_policy_digest": "d" * 64,
+        },
+        task_id="TASK-A",
+    )
+
+    assert replay.status == "requested"
+    assert replay.replay_hit is True
+    assert replay.request_hash == first.request_hash
+    view = reduce_workflow_operations(service.event_log.read_all())[
+        "op-task-stage-legacy-hash"
+    ]
+    assert view["status"] == "requested"
+    assert view["divergent"] is False
+    assert view["compatibility_proof_digest"]
+    compatibility_events = [
+        event
+        for event in service.event_log.read_all()
+        if event.type == "workflow.operation.redrive_admitted"
+        and event.payload.get("compatibility_proof_digest")
+    ]
+    assert len(compatibility_events) == 1
+    compatibility_ref = compatibility_events[0].payload[
+        "compatibility_request_ref"
+    ]
+    assert (tmp_path / compatibility_ref["ref"]).is_file()
+
+    service.block(
+        operation_id="op-task-stage-legacy-hash",
+        request_hash=first.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        reason="request_hash_compatibility_failed",
+    )
+    recovered_again = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage-legacy-hash",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "impl",
+            "operation_generation": 3,
+            "prompt": "repair the admitted contract",
+            "source_manifest_digest": "c" * 64,
+            "read_policy_digest": "d" * 64,
+        },
+        task_id="TASK-A",
+    )
+    assert recovered_again.status == "requested"
+    assert sum(
+        event.type == "workflow.operation.redrive_admitted"
+        for event in service.event_log.read_all()
+    ) == 2
+
+    divergent = service.ensure_operation(
+        workflow_run_id="run-1",
+        operation_id="op-task-stage-legacy-hash",
+        operation_type="task-stage",
+        request={
+            "task_pipeline_stage": "impl",
+            "operation_generation": 3,
+            "prompt": "a different semantic request",
+            "source_manifest_digest": "e" * 64,
+            "read_policy_digest": "f" * 64,
+        },
+        task_id="TASK-A",
+    )
+    assert divergent.status == "divergent"
 
 
 def test_operation_settles_even_when_product_verdict_is_rejected(tmp_path: Path) -> None:
@@ -333,6 +473,26 @@ def test_task_pipeline_redrive_preserves_operation_and_is_idempotent(
     assert view["redrive_source_attempt_ids"] == ["attempt-1"]
     assert view["role_instance"] == ""
     assert view["active_attempt_id"] == ""
+
+    service.mark_started(
+        operation_id="op-task-a-impl-g1",
+        request_hash=ensured.request_hash,
+        workflow_run_id="run-1",
+        task_id="TASK-A",
+        dispatch_id="dispatch-2",
+        role_instance="impl-2",
+        active_attempt_id="attempt-2",
+        lease_id="lease-2",
+    )
+    events = service.event_log.read_all()
+    restarted = reduce_workflow_operations(events)["op-task-a-impl-g1"]
+    assert restarted["status"] == "running"
+    assert restarted["active_attempt_id"] == "attempt-2"
+    assert restarted["dispatch_id"] == "dispatch-2"
+    assert sum(
+        event.type == "workflow.operation.started"
+        for event in events
+    ) == 2
 
 
 def test_transient_transport_retry_reopens_same_operation_once(

@@ -10,6 +10,7 @@ from zf.core.events.model import ZfEvent
 from zf.runtime.fanout_recovery_runtime import (
     reader_fanout_superseding_goal_claim,
 )
+from zf.runtime.reader_fanout_recovery_snapshot import event_log_snapshot_token
 from zf.runtime.task_contract_snapshot import snapshot_payload_fields
 from zf.runtime.writer_fanout_data import _FANOUT_AFFINITY_METADATA_KEYS
 from zf.runtime.writer_fanout_retry import (
@@ -363,6 +364,141 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
             "prepared_call": prepared_call,
         }
 
+    def _prepare_reader_fanout_retry_operation(
+        self,
+        *,
+        manifest: dict[str, Any],
+        child: dict[str, Any],
+        recovery_decision_event: ZfEvent,
+    ):
+        """Redrive a suspended durable reader call without changing identity."""
+
+        if str(manifest.get("topology") or "") != "fanout_reader":
+            return None
+        payload = (
+            dict(child.get("payload"))
+            if isinstance(child.get("payload"), dict)
+            else {}
+        )
+        operation_id = str(
+            payload.get("operation_id") or child.get("operation_id") or ""
+        )
+        request_hash = str(
+            payload.get("request_hash") or child.get("request_hash") or ""
+        )
+        if not operation_id or not request_hash:
+            return None
+
+        from zf.runtime.call_result_admission import result_protocol_mode
+        from zf.runtime.call_result_runtime import (
+            PreparedCallOperation,
+            workflow_operation_service,
+        )
+        from zf.runtime.workflow_operation import (
+            WorkflowOperationError,
+            load_workflow_operation,
+        )
+
+        operation = load_workflow_operation(self.event_log, operation_id)
+        if operation is None:
+            return None
+        if str(operation.get("request_hash") or "") != request_hash:
+            raise WorkflowOperationError(
+                f"reader retry operation {operation_id} request diverged"
+            )
+
+        status = str(operation.get("status") or "")
+        if status == "running":
+            return None
+        if status == "suspended":
+            source_attempt_id = str(
+                operation.get("active_attempt_id")
+                or payload.get("attempt_id")
+                or child.get("attempt_id")
+                or ""
+            )
+            workflow_operation_service(self).admit_redrive(
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=str(
+                    operation.get("workflow_run_id")
+                    or payload.get("workflow_run_id")
+                    or manifest.get("trace_id")
+                    or ""
+                ),
+                task_id=str(
+                    operation.get("task_id")
+                    or payload.get("task_id")
+                    or child.get("task_id")
+                    or ""
+                ),
+                source_attempt_id=source_attempt_id,
+                recovery_decision_event_id=recovery_decision_event.id,
+                reason=(
+                    "Kernel reader fanout replay admitted after provider "
+                    "context loss"
+                ),
+                recovery_decision_owner="kernel_replay",
+            )
+            operation = load_workflow_operation(self.event_log, operation_id)
+            if operation is None:
+                raise WorkflowOperationError(
+                    f"reader retry operation {operation_id} disappeared"
+                )
+            status = str(operation.get("status") or "")
+
+        attempt_id = str(
+            operation.get("active_attempt_id")
+            or payload.get("attempt_id")
+            or child.get("attempt_id")
+            or ""
+        )
+        lease_id = str(
+            operation.get("lease_id")
+            or payload.get("lease_id")
+            or attempt_id
+        )
+        return PreparedCallOperation(
+            mode=str(payload.get("result_protocol_mode") or "")
+            or result_protocol_mode(self.config, payload),
+            workflow_run_id=str(
+                operation.get("workflow_run_id")
+                or payload.get("workflow_run_id")
+                or manifest.get("trace_id")
+                or ""
+            ),
+            operation_id=operation_id,
+            request_hash=request_hash,
+            attempt_id=attempt_id,
+            lease_id=lease_id,
+            role_instance=str(
+                operation.get("role_instance")
+                or payload.get("role_instance")
+                or child.get("role_instance")
+                or ""
+            ),
+            task_id=str(
+                operation.get("task_id")
+                or payload.get("task_id")
+                or child.get("task_id")
+                or ""
+            ),
+            parent_task_id=str(
+                operation.get("parent_task_id")
+                or payload.get("parent_task_id")
+                or manifest.get("pdd_id")
+                or ""
+            ),
+            output_profile_id=str(payload.get("output_profile_id") or ""),
+            output_profile_revision=str(
+                payload.get("output_profile_revision") or ""
+            ),
+            result_scratch_ref=str(payload.get("result_scratch_ref") or ""),
+            should_dispatch=status == "requested",
+            ensure_status=status,
+            provider_session_id="",
+        )
+
     def _preregister_reader_fanout_operations(
         self,
         *,
@@ -484,6 +620,8 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
     def _recover_pending_reader_fanout_dispatches(
         self,
         events: list[ZfEvent],
+        *,
+        recovery_snapshot=None,
     ) -> bool:
         from zf.runtime.fanout import FanoutChild, FanoutContext
 
@@ -503,13 +641,20 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                 active_children.add((fanout_id, child_id))
 
         recovered = False
-        fanout_root = self.state_dir / "fanouts"
-        if not fanout_root.exists():
-            return False
-        manifests = [
-            (manifest_path.parent.name, self._fanout_manifest(manifest_path.parent.name))
-            for manifest_path in fanout_root.glob("*/manifest.json")
-        ]
+        closed_stale: set[str] = set()
+        if recovery_snapshot is not None:
+            manifests = list(recovery_snapshot.manifests)
+        else:
+            fanout_root = self.state_dir / "fanouts"
+            if not fanout_root.exists():
+                return False
+            manifests = [
+                (
+                    manifest_path.parent.name,
+                    self._fanout_manifest(manifest_path.parent.name),
+                )
+                for manifest_path in fanout_root.glob("*/manifest.json")
+            ]
         started_order = {
             str((event.payload or {}).get("fanout_id") or ""): index
             for index, event in enumerate(events)
@@ -544,10 +689,11 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                 manifests=manifests,
                 started_order=started_order,
                 events=events,
+                recovery_snapshot=recovery_snapshot,
             )
             if not stale_reason:
                 continue
-            before = len(self.event_log.read_all())
+            before = event_log_snapshot_token(self.event_log)
             self._cancel_superseded_fanout_manifest(
                 fanout_id=fanout_id,
                 manifest=manifest,
@@ -555,9 +701,15 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                 superseded_by=superseded_by,
                 source="superseded_reader_fanout_manifest_closeout",
             )
-            recovered = recovered or len(self.event_log.read_all()) > before
+            closed_stale.add(fanout_id)
+            recovered = (
+                recovered
+                or event_log_snapshot_token(self.event_log) != before
+            )
 
         for fanout_id, manifest in manifests:
+            if fanout_id in closed_stale:
+                continue
             if not manifest or manifest.get("topology") != "fanout_reader":
                 continue
             aggregate = (
@@ -576,9 +728,10 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                 manifests=manifests,
                 started_order=started_order,
                 events=events,
+                recovery_snapshot=recovery_snapshot,
             )
             if stale_reason:
-                before = len(self.event_log.read_all())
+                before = event_log_snapshot_token(self.event_log)
                 self._cancel_superseded_fanout_manifest(
                     fanout_id=fanout_id,
                     manifest=manifest,
@@ -586,7 +739,10 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                     superseded_by=superseded_by,
                     source="superseded_reader_fanout_manifest_closeout",
                 )
-                recovered = recovered or len(self.event_log.read_all()) > before
+                recovered = (
+                    recovered
+                    or event_log_snapshot_token(self.event_log) != before
+                )
                 continue
             stage_id = str(manifest.get("stage_id") or "")
             stage = self._fanout_stage_by_id(stage_id)
@@ -646,7 +802,7 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                 aggregate=stage.aggregate,
             )
             for child, role in pending:
-                before = len(self.event_log.read_all())
+                before = event_log_snapshot_token(self.event_log)
                 self._dispatch_reader_fanout_child(
                     context=context,
                     child=child,
@@ -655,7 +811,10 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
                     causation_id=fanout_causation_id,
                     prepared_dispatch=prepared_dispatches.get(child.child_id),
                 )
-                recovered = recovered or len(self.event_log.read_all()) > before
+                recovered = (
+                    recovered
+                    or event_log_snapshot_token(self.event_log) != before
+                )
         return recovered
 
     def _reader_fanout_stale_status(
@@ -666,16 +825,27 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
         manifests: list[tuple[str, dict | None]],
         started_order: dict[str, int],
         events: list[ZfEvent],
+        recovery_snapshot=None,
     ) -> tuple[str, str]:
-        goal_claim_id = reader_fanout_superseding_goal_claim(
-            events,
-            manifest=manifest,
+        goal_claim_id = (
+            recovery_snapshot.superseding_goal_claims.get(fanout_id, "")
+            if recovery_snapshot is not None
+            else reader_fanout_superseding_goal_claim(
+                events,
+                manifest=manifest,
+            )
         )
         if goal_claim_id:
             return "superseded_by_admitted_goal_completion_claim", goal_claim_id
-        stale_reason, superseded_by = self._fanout_identity_stale_reason(
-            fanout_id,
-        )
+        if recovery_snapshot is None:
+            stale_reason, superseded_by = self._fanout_identity_stale_reason(
+                fanout_id,
+            )
+        else:
+            stale_reason, superseded_by = self._fanout_identity_stale_reason(
+                fanout_id,
+                currentness=recovery_snapshot.currentness,
+            )
         if stale_reason:
             return stale_reason, superseded_by
         superseded_by = self._newer_reader_replan_fanout(

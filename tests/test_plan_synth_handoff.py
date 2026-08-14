@@ -188,6 +188,17 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
                 "artifact_gate": "failed",
                 "rework_categories": ["goal_claim_identity_drift"],
                 "replan_classification": "design_issue",
+                "source_commit": "a" * 40,
+                "candidate_base_commit": "b" * 40,
+                "required_actions": [
+                    "Bind candidate verification to the frozen source commit.",
+                ],
+                "orchestration_delta": {
+                    "immutable_completed_baseline": "git:" + "a" * 40,
+                },
+                "reason_codes": ["candidate_identity_rebound"],
+                "operator_override": True,
+                "owner_authorization": "continue_until_complete",
             },
         },
         reports=[{
@@ -234,7 +245,51 @@ def test_plan_synth_handoff_pins_requirement_and_rework_context(
         "artifact_gate": "failed",
         "rework_categories": ["goal_claim_identity_drift"],
         "replan_classification": "design_issue",
+        "source_commit": "a" * 40,
+        "candidate_base_commit": "b" * 40,
+        "required_actions": [
+            "Bind candidate verification to the frozen source commit.",
+        ],
+        "orchestration_delta": {
+            "immutable_completed_baseline": "git:" + "a" * 40,
+        },
+        "reason_codes": ["candidate_identity_rebound"],
+        "operator_override": True,
+        "owner_authorization": "continue_until_complete",
     }
+
+
+def test_plan_handoff_pins_causal_human_resolution(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    human_resolution = {
+        "schema_version": "human-resolution.v1",
+        "source_event_id": "human-resolution-1",
+        "source_ref": "events.jsonl#human-resolution-1",
+        "actor": "operator",
+        "resolved_event_id": "escalation-1",
+        "source_failure_event_id": "plan-rejected-1",
+        "action": "start_new_generation",
+        "response": "Keep AC24 command-free and the release audit runtime-only.",
+        "contract_evidence_refs": ["git:" + "a" * 40],
+    }
+
+    refs = build_plan_handoff_input_refs(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        payload={
+            "rework_of": "plan-rejected-1",
+            "human_resolution": human_resolution,
+        },
+        source_event_id="replan-1",
+    )
+
+    context_ref = next(
+        item for item in refs
+        if item["source_id"] == "plan-rework-context"
+    )
+    context = hydrate_sidecar_ref(state_dir, context_ref).payload
+    assert context["human_resolution"] == human_resolution
 
 
 def test_plan_synth_handoff_pins_file_target_as_exact_requirement(
@@ -407,6 +462,41 @@ def test_plan_rework_rejects_previous_candidate_digest_drift(
                 }],
             },
         )
+
+
+def test_plan_synth_large_child_body_is_immutable_ref_not_inline(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    sentinel = "PLAN-BODY-SENTINEL-" + ("x" * 150_000)
+
+    payload = build_plan_synth_call_payload(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        manifest={
+            "fanout_id": "fanout-large",
+            "trace_id": "run-large",
+            "stage_id": "plan",
+            "trigger_event_id": "evt-large",
+        },
+        reports=[{
+            "child_id": "planner",
+            "report": {"status": "passed", "task_map": sentinel},
+        }],
+        run_id="run-large-synth",
+        role_instance="plan-critic",
+    )
+
+    serialized = json.dumps(payload, ensure_ascii=False)
+    child = next(
+        item for item in payload["input_refs"]
+        if item["source_id"] == "child-result-planner"
+    )
+    hydrated = hydrate_sidecar_ref(state_dir, child).payload
+    assert "PLAN-BODY-SENTINEL" not in serialized
+    assert hydrated["task_map"] == sentinel
+    assert child["sha256"]
 
 
 @pytest.mark.parametrize(

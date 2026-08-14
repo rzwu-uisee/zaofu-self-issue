@@ -2199,6 +2199,14 @@ def _apply_contribution(
         "contract_status": "structured",
         "artifact_ref": artifact_ref,
         "artifact_digest": artifact_digest,
+        "request_id": _payload_str(payload, "request_id"),
+        "message_id": _payload_str(payload, "message_id"),
+        "run_generation": _payload_int(payload.get("run_generation"), 1),
+        "source_reply_event_id": _payload_str(
+            payload,
+            "source_reply_event_id",
+        ),
+        "questions_frozen": payload.get("questions_frozen") is True,
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),
     }

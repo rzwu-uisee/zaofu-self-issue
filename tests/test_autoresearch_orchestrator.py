@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from zf.autoresearch import orchestrator as ar_orchestrator
 from zf.autoresearch.campaign import (
@@ -37,6 +39,142 @@ def test_default_config_templates_exist() -> None:
 
     assert (root / AutoresearchRunConfig().config_template).is_file()
     assert (root / LoopConfig().config_template).is_file()
+    assert "examples/prod/controller" in str(
+        AutoresearchRunConfig().config_template
+    )
+
+
+def test_prepare_worktree_renders_v4_controller_in_blocking_mode(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "feishu.yaml").write_text(
+        "feishu_identity: {enabled: false}\nfeishu_routing: {}\n",
+        encoding="utf-8",
+    )
+    cfg = AutoresearchRunConfig(
+        worktree=worktree,
+        config_template=(
+            root
+            / "examples/prod/controller/prd-task-pipeline-v4-canary.yaml"
+        ),
+        reuse_worktree=True,
+        sync_dirty=False,
+    )
+
+    prepare_worktree(
+        cfg,
+        scenario=resolve_scenario("controlled-stuck-recovery"),
+        run_id="v4-controller",
+        run_dir=tmp_path / "run",
+    )
+
+    rendered = yaml.safe_load(
+        (worktree / "zf.yaml").read_text(encoding="utf-8")
+    )
+    metadata = rendered["workflow"]["_flow_metadata"]
+    orchestration = rendered["workflow"]["orchestration"]
+    assert metadata["prd_ref"] == "docs/prd/autoresearch.md"
+    assert metadata["target_root"] == "."
+    assert metadata["task_pipeline"]["mode"] == "blocking"
+    assert orchestration["mode"] == "exception_advisor"
+    assert (
+        orchestration["flow_policies"]["prd"]["checkpoint_policies"][
+            "plan_candidate"
+        ]
+        == "blocking"
+    )
+    assert rendered["project"]["state_dir"] == ".zf"
+    assert "feishu_identity" not in rendered["integrations"]
+    assert "feishu_routing" not in rendered["integrations"]
+
+
+def test_prepare_worktree_checkpoints_explicit_flow_baseline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=worktree,
+        check=True,
+    )
+    (worktree / "zf.yaml").write_text(
+        "version: '1.0'\nproject: {name: original}\n",
+        encoding="utf-8",
+    )
+    (worktree / "candidate.txt").write_text("before\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "--", "zf.yaml", "candidate.txt"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "base"],
+        cwd=worktree,
+        check=True,
+    )
+    template = tmp_path / "template.yaml"
+    template.write_text(
+        "version: '1.0'\nproject: {name: template}\nsession: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ar_orchestrator,
+        "sync_tracked_checkout_changes",
+        lambda *_args, **_kwargs: {
+            "added": [],
+            "modified": ["candidate.txt"],
+            "deleted": [],
+            "renamed": [],
+            "skipped": False,
+        },
+    )
+    monkeypatch.setattr(
+        ar_orchestrator,
+        "ensure_web_dependencies",
+        lambda *_args, **_kwargs: "present",
+    )
+    (worktree / "candidate.txt").write_text("after\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+
+    prepare_worktree(
+        AutoresearchRunConfig(
+            worktree=worktree,
+            config_template=template,
+            reuse_worktree=True,
+            sync_dirty=True,
+        ),
+        scenario=resolve_scenario("self-eval-backlog"),
+        run_id="flow-baseline",
+        run_dir=run_dir,
+    )
+
+    tracked = subprocess.run(
+        ["git", "show", "--pretty=", "--name-only", "HEAD"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    manifest = json.loads(
+        (
+            run_dir
+            / "worktree-preparation"
+            / "worktree-preparation.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert tracked == ["candidate.txt", "zf.yaml"]
+    assert len(manifest["baseline_checkpoint_commit"]) == 40
 
 
 def test_resolve_builtin_scenario_allows_overrides(tmp_path: Path) -> None:
@@ -304,7 +442,9 @@ def test_write_campaign_plan_outputs_json_markdown_and_script(
         campaign=campaign,
         output_dir=tmp_path / "plan",
         worktree_root=tmp_path / "worktrees",
-        config_template=Path("examples/tmp/dev-codex-backends.yaml"),
+        config_template=Path(
+            "examples/prod/controller/prd-task-pipeline-v4-canary.yaml"
+        ),
         use_tmux=False,
     )
 
@@ -327,7 +467,9 @@ def test_write_campaign_plan_threads_review_gate_mode(tmp_path: Path) -> None:
         campaign=campaign,
         output_dir=tmp_path / "plan",
         worktree_root=tmp_path / "worktrees",
-        config_template=Path("examples/tmp/dev-codex-backends.yaml"),
+        config_template=Path(
+            "examples/prod/controller/prd-task-pipeline-v4-canary.yaml"
+        ),
         use_tmux=False,
         review_gate="auto",
     )
@@ -366,6 +508,9 @@ def test_build_inner_runner_command_uses_run_mixed_contract(tmp_path: Path) -> N
     assert "4" in cmd
     assert "--timeout" in cmd
     assert "99" in cmd
+    assert cmd[cmd.index("--flow-kind") + 1] == "prd"
+    assert cmd[cmd.index("--flow-source") + 1] == "docs/prd/autoresearch.md"
+    assert cmd[cmd.index("--flow-target-root") + 1] == "."
     assert "--no-stop" in cmd
 
 

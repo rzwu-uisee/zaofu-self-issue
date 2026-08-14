@@ -513,7 +513,15 @@ class SemanticResultSubmitService:
         )
         profile = self.registry.profile(profile_id, revision)
         event_type = self._canonical_event_type(request, semantic)
+        task_pipeline_delivery = self._current_task_pipeline_delivery(
+            operation,
+            request,
+        )
         identity = dict(request.get("result_identity") or {})
+        for key in ("placement_epoch", "task_stage_session_binding"):
+            value = task_pipeline_delivery.get(key)
+            if value not in (None, ""):
+                identity[key] = value
         identity.update({
             "workflow_run_id": str(operation.get("workflow_run_id") or ""),
             "operation_id": operation_id,
@@ -545,11 +553,19 @@ class SemanticResultSubmitService:
             profile.semantic_field,
             {profile.semantic_field: adapted.payload},
         ))
-        policy = self._input_policy(request)
+        policy = self._input_policy(
+            request,
+            task_pipeline_delivery=task_pipeline_delivery,
+        )
         outcome = self.admission.report_legacy_result(
             event,
             mode="blocking",
-            operation=dict(operation),
+            operation={
+                **dict(operation),
+                "result_identity": dict(identity),
+                "output_profile_id": profile_id,
+                "output_profile_revision": revision,
+            },
             input_policy=policy,
             require_semantic_submit=True,
             semantic_submit=True,
@@ -781,8 +797,47 @@ class SemanticResultSubmitService:
             raise ResultSubmitError("canonical_event_missing", f"operation has no {key}")
         return event_type
 
-    def _input_policy(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        descriptor = request.get("input_consumption_policy_ref")
+    def _current_task_pipeline_delivery(
+        self,
+        operation: Mapping[str, Any],
+        request: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not str(request.get("task_pipeline_stage") or "").strip():
+            return {}
+        operation_id = str(operation.get("operation_id") or "").strip()
+        attempt_id = str(operation.get("active_attempt_id") or "").strip()
+        dispatch_id = str(operation.get("dispatch_id") or "").strip()
+        if not operation_id or not attempt_id:
+            return {}
+        for event in reversed(self.event_log.read_all()):
+            if (
+                event.type != "task.pipeline.stage.dispatched"
+                or str(event.origin or "") != "kernel"
+            ):
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if (
+                str(payload.get("operation_id") or "") == operation_id
+                and str(payload.get("attempt_id") or "") == attempt_id
+                and (
+                    not dispatch_id
+                    or str(payload.get("dispatch_id") or "") == dispatch_id
+                )
+            ):
+                return dict(payload)
+        return {}
+
+    def _input_policy(
+        self,
+        request: Mapping[str, Any],
+        *,
+        task_pipeline_delivery: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        delivery = task_pipeline_delivery or {}
+        if str(request.get("task_pipeline_stage") or "").strip():
+            descriptor = delivery.get("input_consumption_policy_ref")
+        else:
+            descriptor = request.get("input_consumption_policy_ref")
         if not isinstance(descriptor, Mapping) or not str(descriptor.get("ref") or ""):
             return {}
         hydrated = hydrate_sidecar_ref(self.state_dir, dict(descriptor)).payload
@@ -878,6 +933,9 @@ def _compatibility_projection(field: str, payload: Mapping[str, Any]) -> dict[st
                 "evidence_refs": list(result.get("evidence_refs") or []),
                 "impl_self_check": dict(result.get("self_check") or {}),
                 "known_gaps": list(result.get("known_gaps") or []),
+                "failure_class": str(result.get("failure_class") or ""),
+                "blocker_kind": str(result.get("blocker_kind") or ""),
+                "reason": str(result.get("summary") or ""),
             }
             if field == "implementation_result" else {}
         ),

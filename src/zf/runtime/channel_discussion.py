@@ -32,6 +32,7 @@ from zf.runtime.channel_contracts import (
     normalize_product_discussion_mode,
 )
 from zf.runtime.channel_consensus_identity import consensus_reached_payload
+from zf.runtime.channel_discussion_contribution import valid_phase1_members
 from zf.runtime.channel_question_dedup import (
     question_ledger,
     question_ledger_digest,
@@ -616,23 +617,16 @@ def advance_discussion(
 # ---------------------------------------------------------------------------
 
 def _phase1_complete(channel: dict[str, Any], session: dict[str, Any], thread_id: str) -> bool:
-    roster = [str(m) for m in session.get("roster") or []]
-    trigger = str(session.get("requirement_message_id") or "")
-    if not roster or not trigger:
-        return False
-    terminal = {"completed", "failed", "cancelled", "superseded"}
-    by_member: dict[str, str] = {}
-    for request in channel.get("reply_requests") or []:
-        if not isinstance(request, dict):
-            continue
-        if str(request.get("message_id") or "") != trigger:
-            continue
-        member = str(request.get("target_member_id") or "")
-        if member in roster:
-            by_member[member] = str(request.get("status") or "")
-    if set(by_member) != set(roster):
-        return False
-    return all(status in terminal for status in by_member.values())
+    roster = {
+        str(member)
+        for member in session.get("roster") or []
+        if str(member)
+    }
+    return bool(roster) and roster <= valid_phase1_members(
+        channel,
+        session,
+        thread_id,
+    )
 
 
 def _ledger_converged(channel: dict[str, Any], session: dict[str, Any], thread_id: str) -> bool:
@@ -887,15 +881,7 @@ def _handle_phase1_deadline(
     """Quorum (>=2/3 replied) degrades into phase2; below quorum stalls."""
     emitted: list[str] = []
     roster = [str(m) for m in session.get("roster") or []]
-    trigger = str(session.get("requirement_message_id") or "")
-    terminal = {"completed", "failed", "cancelled", "superseded"}
-    replied = {
-        str(r.get("target_member_id") or "")
-        for r in channel.get("reply_requests") or []
-        if isinstance(r, dict)
-        and str(r.get("message_id") or "") == trigger
-        and str(r.get("status") or "") in terminal
-    }
+    replied = valid_phase1_members(channel, session, thread_id)
     quorum = math.ceil(len(roster) * 2 / 3) if roster else 0
     responders = [m for m in roster if m in replied]
     if roster and len(responders) >= quorum:

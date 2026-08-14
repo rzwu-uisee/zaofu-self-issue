@@ -95,6 +95,35 @@ class ControlResultAdapterRegistry:
             raise ControlResultAdapterError(
                 f"no call-result adapter for {event.type!r}"
             )
+        return self._adapt_with_adapter(state_dir, event, adapter)
+
+    def adapt_for_profile(
+        self,
+        state_dir: Path,
+        event: ZfEvent,
+        *,
+        profile_id: str,
+        revision: str,
+    ) -> AdaptedControlResult:
+        """Adapt through the exact profile pinned by the operation request."""
+
+        profile = self.profile(profile_id, revision)
+        if profile.allowed_event_types and event.type not in profile.allowed_event_types:
+            raise ControlResultAdapterError(
+                f"event {event.type!r} is not allowed by profile {profile_id!r}"
+            )
+        adapter = next(
+            item for item in self._adapters
+            if item.adapter_id == profile.adapter_id
+        )
+        return self._adapt_with_adapter(state_dir, event, adapter)
+
+    def _adapt_with_adapter(
+        self,
+        state_dir: Path,
+        event: ZfEvent,
+        adapter: ControlResultAdapter,
+    ) -> AdaptedControlResult:
         payload, issues = adapter.normalize(event)
         if adapter.schema_version == WORKFLOW_READ_RESULT_SCHEMA:
             from zf.runtime.generic_workflow_outputs import (
@@ -172,13 +201,35 @@ class ControlResultAdapterRegistry:
             payload={**protected, profile.semantic_field: result},
             correlation_id=correlation_id or None,
         )
-        adapted = self.adapt(state_dir, event)
-        if adapted.adapter_id != profile.adapter_id:
-            raise ControlResultAdapterError(
-                f"profile {profile_id!r} selected adapter {adapted.adapter_id!r}; "
-                f"expected {profile.adapter_id!r}"
-            )
+        adapted = self.adapt_for_profile(
+            state_dir,
+            event,
+            profile_id=profile_id,
+            revision=revision,
+        )
         return event, adapted
+
+
+def adapt_control_result_for_operation(
+    registry: ControlResultAdapterRegistry,
+    state_dir: Path,
+    event: ZfEvent,
+    operation: Mapping[str, Any] | None,
+) -> AdaptedControlResult:
+    """Apply immutable operation profile authority, with legacy fallback."""
+
+    profile_id = str((operation or {}).get("output_profile_id") or "").strip()
+    if not profile_id:
+        return registry.adapt(state_dir, event)
+    revision = str(
+        (operation or {}).get("output_profile_revision") or "1"
+    ).strip()
+    return registry.adapt_for_profile(
+        state_dir,
+        event,
+        profile_id=profile_id,
+        revision=revision,
+    )
 
 
 def default_control_result_adapters() -> list[ControlResultAdapter]:

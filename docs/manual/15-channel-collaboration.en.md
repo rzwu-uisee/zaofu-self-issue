@@ -114,6 +114,13 @@ Review the action-bound setup Plan for:
 - Leader and `propose_workflow` authority;
 - source receipt target.
 
+Every option in an action-bound Channel setup Plan must explicitly bind one of
+`conversation|clarification|multi_lens`; it cannot silently inherit the template
+default. The confirmation surface also shows whether initial routing is a
+single responder, facilitated relay, or N-way blind fanout. An old pending Plan
+without a mode fails closed at apply time, while completed historical receipts
+remain idempotently readable.
+
 `Create & start` atomically performs:
 
 ```text

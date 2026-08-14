@@ -7,6 +7,7 @@ handoff cannot resolve the same reference to different files.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 
@@ -51,6 +52,25 @@ def resolve_runtime_artifact_ref(
     return canonical
 
 
+def runtime_artifact_sha256(
+    raw_ref: str | Path,
+    *,
+    project_root: Path,
+    state_dir: Path,
+) -> str:
+    """Return the digest of one resolved artifact, or empty when unreadable."""
+
+    path = resolve_runtime_artifact_ref(
+        raw_ref,
+        project_root=project_root,
+        state_dir=state_dir,
+    )
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+    except OSError:
+        return ""
+
+
 def _unique_worktree_match(state_dir: Path, ref: Path) -> Path | None:
     workdirs = state_dir / "workdirs"
     if not workdirs.is_dir():
@@ -75,4 +95,4 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
     return out
 
 
-__all__ = ["resolve_runtime_artifact_ref"]
+__all__ = ["resolve_runtime_artifact_ref", "runtime_artifact_sha256"]

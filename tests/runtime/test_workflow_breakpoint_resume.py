@@ -488,6 +488,237 @@ def test_resume_projection_exposes_integration_failed_batch_checkpoint(
     assert checkpoint["evidence_event_ids"] == [aggregate.id, failed.id]
 
 
+def test_resume_projection_reemits_candidate_after_runtime_only_reader_failure(
+    tmp_path: Path,
+) -> None:
+    state_dir, _store, log = _state(tmp_path)
+    candidate = ZfEvent(
+        id="candidate-ready-runtime-retry",
+        type="candidate.ready",
+        correlation_id="run-candidate-retry",
+        payload={
+            "schema_version": "candidate-freeze-receipt.v1",
+            "freeze_id": "freeze-runtime-retry",
+            "workflow_run_id": "run-candidate-retry",
+            "flow_kind": "prd",
+            "request_kind": "prd",
+            "fanout_id": "task-pipeline-generation-1",
+            "pdd_id": "PDD-RUNTIME-RETRY",
+            "feature_id": "PDD-RUNTIME-RETRY",
+            "candidate_ref": "refs/heads/candidate/PDD-RUNTIME-RETRY",
+            "candidate_base_commit": "a" * 40,
+            "candidate_head_commit": "b" * 40,
+            "diff_ref": f"{'a' * 40}..{'b' * 40}",
+            "task_map_ref": "artifacts/plan/task-map.json",
+            "source_index_ref": "artifacts/plan/source-index.json",
+            "completed_task_ids": ["TASK-A"],
+            "task_ids": ["TASK-A", "TASK-SUPERSEDED"],
+        },
+    )
+    started = ZfEvent(
+        type="fanout.started",
+        correlation_id="run-candidate-retry",
+        payload={
+            "fanout_id": "fanout-candidate-runtime-retry",
+            "trace_id": "run-candidate-retry",
+            "stage_id": "prd-lanes-verify",
+            "topology": "fanout_reader",
+            "trigger_event_id": candidate.id,
+        },
+    )
+    aggregate = ZfEvent(
+        type="fanout.aggregate.completed",
+        correlation_id="run-candidate-retry",
+        payload={
+            "fanout_id": "fanout-candidate-runtime-retry",
+            "trace_id": "run-candidate-retry",
+            "stage_id": "prd-lanes-verify",
+            "pdd_id": "PDD-RUNTIME-RETRY",
+            "status": "failed",
+            "failure_event": "test.failed",
+            "task_ids": ["TASK-A", "TASK-SUPERSEDED"],
+            "failed_children": ["verify-lane-0"],
+            "findings": [{
+                "finding_id": "verify-lane-0-reason",
+                "category": "runtime_failure",
+                "child_id": "verify-lane-0",
+                "message": "durable operation preregistration failed",
+            }],
+        },
+    )
+    failed = ZfEvent(
+        type="test.failed",
+        correlation_id="run-candidate-retry",
+        payload={
+            **aggregate.payload,
+            "status": "failed",
+        },
+    )
+    for event in (candidate, started, aggregate, failed):
+        log.append(event)
+
+    projection = build_workflow_resume_projection(state_dir, _lane_config())
+
+    assert projection["summary"]["batch_pending"] == 1
+    checkpoint = projection["batch_checkpoints"][0]
+    assert checkpoint["safe_resume_action"] == "reemit_candidate_ready"
+    assert checkpoint["workflow_run_id"] == "run-candidate-retry"
+    assert checkpoint["flow_kind"] == "prd"
+    assert checkpoint["request_kind"] == "prd"
+    assert checkpoint["candidate_snapshot_event_id"] == candidate.id
+    assert checkpoint["freeze_id"] == "freeze-runtime-retry"
+    assert checkpoint["candidate_ref"] == candidate.payload["candidate_ref"]
+    assert checkpoint["candidate_head_commit"] == (
+        candidate.payload["candidate_head_commit"]
+    )
+    assert checkpoint["completed_task_ids"] == ["TASK-A"]
+
+    dispatched: list[ZfEvent] = []
+    applied = apply_workflow_resume(
+        state_dir,
+        _lane_config(),
+        gate_dispatcher=dispatched.append,
+    )
+    assert applied["applied"] == 1
+    assert len(dispatched) == 1
+    reemitted = dispatched[0]
+    assert reemitted.type == "candidate.ready"
+    assert reemitted.payload["workflow_run_id"] == "run-candidate-retry"
+    assert reemitted.payload["flow_kind"] == "prd"
+    assert reemitted.payload["request_kind"] == "prd"
+    assert reemitted.payload["candidate_snapshot_event_id"] == candidate.id
+    assert reemitted.payload["freeze_id"] == "freeze-runtime-retry"
+
+    log.append(ZfEvent(
+        type="orchestrator.decision.recorded",
+        correlation_id="run-candidate-retry",
+        payload={
+            "trigger_event_id": reemitted.id,
+            "trigger_event_type": "candidate.ready",
+            "decision": "no_action",
+            "outcome_reason": "out_of_scope",
+        },
+    ))
+
+    retry_projection = build_workflow_resume_projection(state_dir, _lane_config())
+    assert retry_projection["summary"]["batch_pending"] == 1
+    retried: list[ZfEvent] = []
+    retry = apply_workflow_resume(
+        state_dir,
+        _lane_config(),
+        gate_dispatcher=retried.append,
+    )
+    assert retry["applied"] == 1
+    assert len(retried) == 1
+    assert retried[0].payload["flow_kind"] == "prd"
+    log.append(ZfEvent(
+        type="fanout.started",
+        correlation_id="run-candidate-retry",
+        payload={
+            "fanout_id": "fanout-candidate-runtime-retry-redriven",
+            "stage_id": "prd-lanes-verify",
+            "trigger_event_id": retried[0].id,
+        },
+    ))
+    recovered = build_workflow_resume_projection(state_dir, _lane_config())
+    assert recovered["summary"]["batch_pending"] == 0
+
+    log.append(ZfEvent(
+        type="fanout.aggregate.completed",
+        correlation_id="run-candidate-retry",
+        payload={
+            "fanout_id": "fanout-candidate-runtime-retry-redriven",
+            "trace_id": "run-candidate-retry",
+            "stage_id": "prd-lanes-verify",
+            "pdd_id": "PDD-RUNTIME-RETRY",
+            "status": "failed",
+            "failure_event": "test.failed",
+            "failed_children": ["verify-lane-0"],
+            "findings": [{
+                "finding_id": "verify-lane-0-reason-redriven",
+                "category": "runtime_failure",
+                "child_id": "verify-lane-0",
+                "message": "provider process exited during retry",
+            }],
+        },
+    ))
+    nested_retry = build_workflow_resume_projection(state_dir, _lane_config())
+    nested_checkpoint = nested_retry["batch_checkpoints"][0]
+    assert nested_checkpoint["candidate_snapshot_event_id"] == candidate.id
+
+
+def test_resume_projection_reemits_candidate_for_legacy_idle_timeout(
+    tmp_path: Path,
+) -> None:
+    state_dir, _store, log = _state(tmp_path)
+    candidate = ZfEvent(
+        id="candidate-ready-legacy-idle",
+        type="candidate.ready",
+        correlation_id="run-legacy-idle",
+        payload={
+            "schema_version": "candidate-freeze-receipt.v1",
+            "freeze_id": "freeze-legacy-idle",
+            "workflow_run_id": "run-legacy-idle",
+            "flow_kind": "prd",
+            "request_kind": "prd",
+            "pdd_id": "PDD-LEGACY-IDLE",
+            "candidate_ref": "refs/heads/candidate/PDD-LEGACY-IDLE",
+            "candidate_base_commit": "a" * 40,
+            "candidate_head_commit": "b" * 40,
+            "completed_task_ids": ["TASK-A"],
+        },
+    )
+    started = ZfEvent(
+        type="fanout.started",
+        correlation_id="run-legacy-idle",
+        payload={
+            "fanout_id": "fanout-legacy-idle",
+            "trace_id": "run-legacy-idle",
+            "stage_id": "prd-lanes-verify",
+            "topology": "fanout_reader",
+            "trigger_event_id": candidate.id,
+        },
+    )
+    child_failed = ZfEvent(
+        type="fanout.child.failed",
+        actor="zf-cli",
+        correlation_id="run-legacy-idle",
+        payload={
+            "fanout_id": "fanout-legacy-idle",
+            "child_id": "verify-lane-1",
+            "reason": "idle",
+            "timeout_seconds": 7200,
+        },
+    )
+    aggregate = ZfEvent(
+        type="fanout.aggregate.completed",
+        correlation_id="run-legacy-idle",
+        payload={
+            "fanout_id": "fanout-legacy-idle",
+            "trace_id": "run-legacy-idle",
+            "stage_id": "prd-lanes-verify",
+            "status": "failed",
+            "failure_event": "test.failed",
+            "failed_children": ["verify-lane-1"],
+            "pending_children": ["verify-lane-1"],
+            "reason": "timeout",
+            "timeout_seconds": 7200,
+        },
+    )
+    for event in (candidate, started, child_failed, aggregate):
+        log.append(event)
+
+    projection = build_workflow_resume_projection(state_dir, _lane_config())
+
+    assert projection["summary"]["batch_pending"] == 1
+    checkpoint = projection["batch_checkpoints"][0]
+    assert checkpoint["safe_resume_action"] == "reemit_candidate_ready"
+    assert checkpoint["pdd_id"] == "PDD-LEGACY-IDLE"
+    assert checkpoint["feature_id"] == "PDD-LEGACY-IDLE"
+    assert checkpoint["candidate_snapshot_event_id"] == candidate.id
+    assert checkpoint["candidate_head_commit"] == "b" * 40
+
+
 def test_resume_apply_requeues_only_failed_batch_children(tmp_path: Path) -> None:
     state_dir, _store, log = _state(tmp_path)
     task_map = ZfEvent(

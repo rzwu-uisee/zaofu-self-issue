@@ -51,8 +51,12 @@ def write_briefing_with_metrics(
         "required_read_count": len(payload.get("required_reads") or []),
         "required_read_returned_bytes": "unknown",
         "indexed_skill_count": len(indexed_skills),
+        "indexed_skills": _skill_names(indexed_skills),
         "auto_injected_skill_count": len(auto_injected_skills),
-        "actually_invoked_skills": "unknown",
+        "auto_injected_skills": _skill_names(auto_injected_skills),
+        # Dynamic invocation evidence belongs to EventLog projection. A
+        # briefing can only state that no provider evidence has been observed.
+        "actually_invoked_skills": "unobserved",
         "soft_budget_bytes": budget,
         "soft_budget_exceeded": len(encoded) > budget,
     }
@@ -131,6 +135,18 @@ def _stage_profile(stage: str, role: str, payload: Mapping[str, Any]) -> str:
     if "impl" in identity or "dev" in identity or "writer" in identity:
         return "impl"
     return "other"
+
+
+def _skill_names(values: Sequence[Any]) -> list[str]:
+    names: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            name = str(value.get("name") or value.get("skill") or "")
+        else:
+            name = str(getattr(value, "name", value) or "")
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 __all__ = [

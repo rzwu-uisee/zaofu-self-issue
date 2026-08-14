@@ -9,6 +9,7 @@ import type {
   ChannelDetail,
   ChannelHistorySearchResult,
   ChannelsPage,
+  CostSummary,
   CandidateDetail,
   DeliveryTrace,
   DeliveryThickTrace,
@@ -51,8 +52,11 @@ import type {
 } from "./types";
 import { cachedGetJson, clearGetCache } from "./queryClient";
 
-async function requestJson<T>(path: string): Promise<T> {
-  return cachedGetJson<T>(path);
+async function requestJson<T>(
+  path: string,
+  options: { bypassCache?: boolean } = {},
+): Promise<T> {
+  return cachedGetJson<T>(path, options);
 }
 
 function projectPrefix(projectId?: string): string {
@@ -424,6 +428,10 @@ export function getSnapshot(projectId?: string): Promise<Snapshot> {
   return requestJson<Snapshot>(`${projectPrefix(projectId)}/snapshot`);
 }
 
+export function getProjectCost(projectId?: string): Promise<CostSummary> {
+  return requestJson<CostSummary>(`${projectPrefix(projectId)}/cost`);
+}
+
 export interface ProjectHealthSummary {
   schema_version: string;
   runtime_state: string;
@@ -594,10 +602,17 @@ export function getRecentEvents(limit = 60, projectId?: string): Promise<RecentE
   return getRecentEventsPage(limit, projectId).then((page) => page.items);
 }
 
-export function getRecentEventsPage(limit = 60, projectId?: string): Promise<EventsPage> {
+export function getRecentEventsPage(
+  limit = 60,
+  projectId?: string,
+  requireFresh = false,
+): Promise<EventsPage> {
   if (projectId) {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (requireFresh) params.set("require_fresh", "true");
     return requestJson<EventsPage>(
-      `${projectPrefix(projectId)}/events?limit=${encodeURIComponent(String(limit))}`,
+      `${projectPrefix(projectId)}/events?${params.toString()}`,
+      { bypassCache: requireFresh },
     );
   }
   return requestJson<RecentEvent[]>(`/api/views/recent?limit=${limit}`).then((items) => ({
@@ -623,8 +638,17 @@ export function getTaskDiff(taskId: string, projectId?: string): Promise<TaskDif
   return requestJson<TaskDiff>(`${projectPrefix(projectId)}/tasks/${encodeURIComponent(taskId)}/diff`);
 }
 
-export function getEventsPage(params: URLSearchParams, projectId?: string): Promise<EventsPage> {
-  return requestJson<EventsPage>(`${projectPrefix(projectId)}/events?${params.toString()}`);
+export function getEventsPage(
+  params: URLSearchParams,
+  projectId?: string,
+  requireFresh = false,
+): Promise<EventsPage> {
+  const query = new URLSearchParams(params);
+  if (requireFresh) query.set("require_fresh", "true");
+  return requestJson<EventsPage>(
+    `${projectPrefix(projectId)}/events?${query.toString()}`,
+    { bypassCache: requireFresh },
+  );
 }
 
 export interface PendingKanbanProposal {
@@ -666,6 +690,7 @@ export function getAgentSessionHistory(
     taskId?: string;
     beforeSeq?: number | null;
     limit?: number;
+    requireFresh?: boolean;
   },
 ): Promise<AgentSessionHistoryPage> {
   const search = new URLSearchParams({
@@ -677,8 +702,10 @@ export function getAgentSessionHistory(
   if (params.backend) search.set("backend", params.backend);
   if (params.taskId) search.set("task_id", params.taskId);
   if (params.beforeSeq) search.set("before_seq", String(params.beforeSeq));
+  if (params.requireFresh) search.set("require_fresh", "true");
   return requestJson<AgentSessionHistoryPage>(
     `${projectPrefix(projectId)}/agent-session/history?${search.toString()}`,
+    { bypassCache: Boolean(params.requireFresh) },
   );
 }
 
@@ -757,8 +784,12 @@ export function getRuntime(projectId?: string): Promise<RuntimeSummary> {
   return requestJson<RuntimeSummary>(`${projectPrefix(projectId)}/runtime`);
 }
 
-export function getChannels(projectId?: string): Promise<ChannelsPage> {
-  return requestJson<ChannelsPage>(`${projectPrefix(projectId)}/channels`).then((data) => ({
+export function getChannels(projectId?: string, requireFresh = false): Promise<ChannelsPage> {
+  const suffix = requireFresh ? "?require_fresh=true" : "";
+  return requestJson<ChannelsPage>(
+    `${projectPrefix(projectId)}/channels${suffix}`,
+    { bypassCache: requireFresh },
+  ).then((data) => ({
     ...data,
     channels: data.channels ?? [],
   }));

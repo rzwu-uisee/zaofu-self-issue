@@ -308,6 +308,96 @@ def test_candidate_quality_failure_routes_to_rework_not_candidate_reemit(
     assert projection["batch_checkpoints"][0]["safe_resume_action"] == "trigger_rework"
 
 
+def test_candidate_semantic_rejection_is_not_runtime_reemitted(
+    tmp_path: Path,
+) -> None:
+    fanout_id = "fanout-candidate-verify"
+    projection = _projection(tmp_path, [
+        ZfEvent(
+            type="candidate.ready",
+            id="evt-candidate",
+            actor="zf-cli",
+            correlation_id="workflow-1",
+            payload={
+                "pdd_id": "PRD-1",
+                "candidate_ref": "refs/heads/candidate/PRD-1",
+                "candidate_head_commit": "abc123",
+            },
+        ),
+        ZfEvent(
+            type="fanout.started",
+            id="evt-started",
+            actor="zf-cli",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "stage_id": "prd-lanes-verify",
+                "topology": "fanout_reader",
+                "trigger_event_id": "evt-candidate",
+                "pdd_id": "PRD-1",
+            },
+        ),
+        ZfEvent(
+            type="fanout.child.failed",
+            id="evt-child-failed",
+            actor="zf-cli",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "child_id": "verify-lane-2",
+                "semantic_verdict": "rejected",
+                "report": {
+                    "schema_version": "verification-result.v1",
+                    "execution_status": "completed",
+                    "verdict": "rejected",
+                    "verification_owner": "candidate_verify",
+                    "requirement_results": [{
+                        "acceptance_id": "AC25",
+                        "status": "failed",
+                        "findings": [{
+                            "path": "src/styles/mobility.css",
+                            "message": "inactive mode remains visible",
+                        }],
+                    }],
+                },
+            },
+        ),
+        ZfEvent(
+            type="fanout.aggregate.completed",
+            id="evt-aggregate",
+            actor="zf-cli",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "stage_id": "prd-lanes-verify",
+                "pdd_id": "PRD-1",
+                "status": "failed",
+                "failure_event": "test.failed",
+                "failed_children": ["verify-lane-2"],
+                "findings": [{
+                    "category": "runtime_failure",
+                    "message": "semantic verdict: rejected",
+                }],
+            },
+        ),
+        ZfEvent(
+            type="test.failed",
+            id="evt-test-failed",
+            actor="zf-cli",
+            causation_id="evt-aggregate",
+            correlation_id="workflow-1",
+            payload={
+                "fanout_id": fanout_id,
+                "pdd_id": "PRD-1",
+                "status": "failed",
+            },
+        ),
+    ])
+
+    assert projection["summary"]["batch_pending"] == 0
+    assert projection["batch_checkpoints"] == []
+
+
 def test_candidate_dependency_failure_does_not_reopen_quality_gate_owners(
     tmp_path: Path,
 ) -> None:

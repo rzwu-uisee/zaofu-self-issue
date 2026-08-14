@@ -61,6 +61,30 @@ def process_goal_closure_result(runtime: Any, event: ZfEvent) -> None:
         "goal_claim_set_digest": str(result.get("goal_claim_set_digest") or ""),
         "closure_fact_ref": str(result.get("closure_fact_ref") or ""),
         "closure_fact_digest": str(result.get("closure_fact_digest") or ""),
+        "product_acceptance_required": bool(
+            result.get("product_acceptance_required")
+        ),
+        "product_acceptance_spec_ref": str(
+            result.get("product_acceptance_spec_ref") or ""
+        ),
+        "product_acceptance_spec_digest": str(
+            result.get("product_acceptance_spec_digest") or ""
+        ),
+        "product_acceptance_report_ref": str(
+            result.get("product_acceptance_report_ref") or ""
+        ),
+        "product_acceptance_report_digest": str(
+            result.get("product_acceptance_report_digest") or ""
+        ),
+        "product_acceptance_verdict": str(
+            result.get("product_acceptance_verdict") or ""
+        ),
+        "provider_qualification_required": bool(
+            result.get("provider_qualification_required")
+        ),
+        "provider_qualification_status": str(
+            result.get("provider_qualification_status") or "not_required"
+        ),
         "admitted_call_result_ref": dict(envelope_ref),
         "control_result_ref": dict(payload.get("control_result_ref") or {})
         if isinstance(payload.get("control_result_ref"), dict) else {},

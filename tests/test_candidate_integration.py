@@ -84,6 +84,33 @@ def test_task_contract_gate_failure_preserves_task_owner() -> None:
     assert envelope["failed_task_ids"] == ["TASK-SCAFFOLD"]
 
 
+def test_candidate_cleanliness_failure_preserves_tracked_path_diagnostics() -> None:
+    candidate = {
+        "status": "quality_failed",
+        "quality": {
+            "status": "failed",
+            "gates_failed": ["candidate_worktree_clean"],
+            "gate_checks": {
+                "candidate_worktree_clean": [{
+                    "command": "git status --porcelain --untracked-files=all",
+                    "exit_code": 0,
+                    "stdout_tail": " M web/dist/index.html\n?? web/cache.json\n",
+                    "reportable_status": " M web/dist/index.html\n",
+                }],
+            },
+        },
+    }
+
+    envelope = candidate_failure_envelope(candidate, failed_children=[])
+
+    assert envelope["failure_class"] == "candidate_product_quality_failed"
+    assert envelope["diagnostic_class"] == "candidate_worktree_dirty"
+    assert envelope["failing_command"] == (
+        "git status --porcelain --untracked-files=all"
+    )
+    assert envelope["diagnostic_summary"] == "M web/dist/index.html"
+
+
 def test_candidate_integration_attempt_identity_changes_with_environment() -> None:
     candidate = _missing_vite_candidate()
     first = candidate_integration_identity(

@@ -287,3 +287,120 @@ def test_human_resolution_after_escalation_prevents_late_terminal(tmp_path: Path
         log.read_all(),
         writer=writer,
     ) == 0
+
+
+def test_reopened_blocked_run_can_terminalize_a_later_recovery_epoch(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(mark_workflow_managed_task(Task(
+        id="TASK-PLAN",
+        title="Plan workflow",
+        status="in_progress",
+    )))
+    log.append(_start())
+    first_escalation = ZfEvent(
+        id="evt-escalate-first",
+        type="human.escalate",
+        task_id="TASK-PLAN",
+        correlation_id="RUN-1",
+        payload={
+            "reason": "issue.triage.failed: stage replan cap exhausted",
+            "failure_class": "stage_replan_cap_exhausted",
+            "operator_required": True,
+            "recoverable": False,
+        },
+    )
+    log.append(first_escalation)
+    assert converge_unrecoverable_escalations(
+        log.read_all(), writer=writer, task_store=store,
+    ) == 1
+    first_terminal = next(
+        event for event in log.read_all()
+        if event.type == "run.goal.blocked"
+    )
+    log.append(ZfEvent(
+        id="evt-run-reopened",
+        type="run.goal.updated",
+        task_id="TASK-PLAN",
+        correlation_id="RUN-1",
+        payload={"run_id": "RUN-1", "status": "active"},
+    ))
+    store.update("TASK-PLAN", status="in_progress", blocked_reason="")
+    second_escalation = ZfEvent(
+        id="evt-escalate-second",
+        type="human.escalate",
+        task_id="TASK-PLAN",
+        correlation_id="RUN-1",
+        payload={
+            "reason": "issue.triage.failed: stage replan cap exhausted again",
+            "failure_class": "stage_replan_cap_exhausted",
+            "operator_required": True,
+            "recoverable": False,
+        },
+    )
+    log.append(second_escalation)
+
+    assert converge_unrecoverable_escalations(
+        log.read_all(), writer=writer, task_store=store,
+    ) == 1
+    assert converge_unrecoverable_escalations(
+        log.read_all(), writer=writer, task_store=store,
+    ) == 0
+    terminals = [
+        event for event in log.read_all()
+        if event.type == "run.goal.blocked"
+    ]
+    assert len(terminals) == 2
+    assert terminals[0].id == first_terminal.id
+    assert terminals[1].causation_id == second_escalation.id
+    assert store.get("TASK-PLAN").status == "blocked"
+
+def test_reopened_run_can_terminalize_a_new_escalation(tmp_path: Path) -> None:
+    _state_dir, log, writer = _state(tmp_path)
+    log.append(_start())
+    log.append(ZfEvent(
+        id="evt-old-blocked",
+        type="run.goal.blocked",
+        correlation_id="RUN-1",
+        payload={"run_id": "RUN-1", "status": "blocked"},
+    ))
+    log.append(ZfEvent(
+        id="evt-old-resolved",
+        type="human.resolved",
+        correlation_id="RUN-1",
+        payload={"response": "resume with a larger budget"},
+    ))
+    log.append(ZfEvent(
+        id="evt-new-escalation",
+        type="human.escalate",
+        correlation_id="RUN-1",
+        payload={
+            "reason": "prd.plan.failed: stage replan cap exhausted",
+            "failure_class": "stage_replan_cap_exhausted",
+            "operator_required": True,
+            "recoverable": False,
+        },
+    ))
+
+    assert converge_unrecoverable_escalations(
+        log.read_all(),
+        writer=writer,
+        request_autoresearch=True,
+    ) == 1
+    assert converge_unrecoverable_escalations(
+        log.read_all(),
+        writer=writer,
+        request_autoresearch=True,
+    ) == 0
+
+    blocked = [event for event in log.read_all() if event.type == "run.goal.blocked"]
+    assert len(blocked) == 2
+    assert blocked[-1].causation_id == "evt-new-escalation"
+    requested = [
+        event for event in log.read_all()
+        if event.type == "run.manager.autoresearch.requested"
+    ]
+    assert len(requested) == 1
+    assert requested[0].causation_id == blocked[-1].id

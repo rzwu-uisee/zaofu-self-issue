@@ -6,9 +6,11 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from zf.core.config.schema import ZfConfig
+from zf.core.cost.billing import BillingReconciliationStore
 from zf.core.cost.tracker import CostTracker
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.segments import list_event_segments
 from zf.core.events.writer import EventWriter
 from zf.core.workspace import WorkspaceProject
 from zf.core.workspace import stable_project_id
@@ -161,24 +163,61 @@ def _deep_kanban_enabled() -> bool:
 def _cost(state_dir: Path) -> dict:
     cost_path = state_dir / "cost.jsonl"
     if not cost_path.exists():
-        return {"total_usd": 0.0, "per_role": {}}
+        return {
+            "total_usd": 0.0,
+            "per_role": {},
+            "precision": _empty_cost_precision(),
+            "reconciliation": None,
+        }
     try:
         tracker = CostTracker(cost_path)
         per_role = tracker.per_role_totals()
         return {
             "total_usd": round(tracker.total_usd(), 4),
+            "precision": tracker.precision_summary(),
+            "reconciliation": (
+                BillingReconciliationStore(state_dir).latest() or None
+            ),
             "per_role": {
                 role: {
                     "usd": round(s.total_usd, 4),
                     "input_tokens": s.input_tokens,
                     "output_tokens": s.output_tokens,
+                    "cache_creation_tokens": s.cache_creation_tokens,
+                    "cache_read_tokens": s.cache_read_tokens,
+                    "estimated_usd": round(s.estimated_usd, 4),
+                    "provider_reported_usd": round(
+                        s.provider_reported_usd, 4
+                    ),
+                    "billed_usd": round(s.billed_usd, 4),
+                    "unpriced_entries": s.unpriced_entries,
+                    "partial_entries": s.partial_entries,
                     "entries": s.entries,
                 }
                 for role, s in per_role.items()
             },
         }
     except Exception:
-        return {"total_usd": 0.0, "per_role": {}}
+        return {
+            "total_usd": 0.0,
+            "per_role": {},
+            "precision": _empty_cost_precision(),
+            "reconciliation": None,
+        }
+
+
+def _empty_cost_precision() -> dict[str, Any]:
+    return {
+        "schema_version": "cost-precision-summary.v1",
+        "display_total_usd": 0.0,
+        "estimated_usd": 0.0,
+        "provider_reported_usd": 0.0,
+        "billed_usd": 0.0,
+        "unpriced_entries": 0,
+        "partial_entries": 0,
+        "statuses": {},
+        "catalogs": [],
+    }
 
 
 def _empty_queue_role_summary(role: str) -> dict:
@@ -1064,3 +1103,9 @@ def _line_count(path: Path) -> int:
                 count += 1
     _LINE_COUNT_CACHE[key] = (stat.st_mtime_ns, stat.st_size, count)
     return count
+
+
+def _event_global_seq(state_dir: Path) -> int:
+    """Return the committed sequence across archived and active segments."""
+
+    return sum(_line_count(segment.path) for segment in list_event_segments(state_dir))

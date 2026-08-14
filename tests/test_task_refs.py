@@ -5,6 +5,8 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.schema import (
     ProjectConfig,
     RoleConfig,
@@ -105,6 +107,62 @@ def test_task_ref_manager_creates_ref_and_index_for_valid_build(tmp_path: Path):
     assert index["TASK-1"]["task_ref"] == "task/TASK-1"
 
 
+def test_read_only_task_ref_admission_is_exact_and_idempotent(tmp_path: Path):
+    head = _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    manager = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=_config(state_dir),
+    )
+
+    first = manager.admit_read_only_target(
+        task_id="TASK-AUDIT",
+        source_commit=head,
+        trigger_event_id="evt-human",
+        trace_id="run-1",
+        pdd_id="FEATURE-1",
+        feature_id="FEATURE-1",
+    )
+    second = manager.admit_read_only_target(
+        task_id="TASK-AUDIT",
+        source_commit=head,
+        trigger_event_id="evt-human",
+        trace_id="run-1",
+        pdd_id="FEATURE-1",
+        feature_id="FEATURE-1",
+    )
+
+    assert first.status == "updated"
+    assert second.status == "existing"
+    assert first.payload["diagnostics"]["write_free"] is True
+    assert _git(tmp_path, "rev-parse", "refs/heads/task/TASK-AUDIT") == head
+
+
+def test_read_only_task_ref_rejects_tracked_dirty_workspace(tmp_path: Path):
+    head = _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    workspace = state_dir / "workdirs" / "tasks" / "run-1" / "TASK-AUDIT" / "g1" / "project"
+    workspace.parent.mkdir(parents=True)
+    _git(tmp_path, "worktree", "add", "--detach", str(workspace), head)
+    (workspace / "README.md").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="tracked modifications"):
+        TaskRefManager(
+            state_dir=state_dir,
+            project_root=tmp_path,
+            config=_config(state_dir),
+        ).admit_read_only_target(
+            task_id="TASK-AUDIT",
+            source_commit=head,
+            trigger_event_id="evt-generation",
+            trace_id="run-1",
+            workdir=str(workspace),
+        )
+
+
 def test_task_ref_manager_preserves_workflow_run_without_correlation(tmp_path: Path):
     head = _init_repo(tmp_path)
     state_dir = tmp_path / ".zf"
@@ -189,6 +247,161 @@ def test_task_pipeline_result_binds_workspace_from_exact_dispatch(
     assert result.payload["workdir"] == str(workspace)
     assert result.payload["run_id"] == "run-1"
     assert result.payload["source_commit"] == source_commit
+
+
+def test_task_pipeline_scope_uses_dispatch_base_when_project_head_advanced(
+    tmp_path: Path,
+) -> None:
+    base = _init_repo(tmp_path)
+    state_dir = tmp_path / ".zf"
+    workspace = (
+        state_dir / "workdirs" / "tasks" / "run-1" / "TASK-1" / "g1" / "project"
+    )
+    workspace.parent.mkdir(parents=True)
+    branch = "worker/task-pipeline/TASK-1/g1"
+    _git(tmp_path, "worktree", "add", "-b", branch, str(workspace), base)
+
+    (tmp_path / "zf.yaml").write_text("version: 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "zf.yaml")
+    _git(tmp_path, "commit", "-q", "-m", "advance control config")
+
+    (workspace / "src").mkdir()
+    (workspace / "src" / "task.py").write_text("print('ok')\n", encoding="utf-8")
+    _git(workspace, "add", "src/task.py")
+    _git(workspace, "commit", "-q", "-m", "task increment")
+    source_commit = _git(workspace, "rev-parse", "HEAD")
+
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-1",
+        title="scoped task",
+        status="in_progress",
+        contract=TaskContract(scope=["src/task.py"]),
+    ))
+    operation_id = "wop-task-impl"
+    attempt_id = "ta-task-impl"
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        type="task.pipeline.stage.dispatched",
+        actor="orchestrator",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "base_commit": base,
+            "workdir": str(workspace),
+            "source_branch": branch,
+        },
+    ))
+    event = ZfEvent(
+        type="dev.build.done",
+        actor="dev-lane-0",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "source_commit": source_commit,
+            "source_branch": branch,
+            "files_touched": ["src/task.py"],
+        },
+    )
+
+    result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=_config(state_dir),
+    ).process_dev_build_done(event)
+
+    assert result is not None
+    assert result.status == "updated"
+    assert result.payload["changed_files"] == ["src/task.py"]
+    assert _git(tmp_path, "rev-parse", "refs/heads/task/TASK-1") == source_commit
+
+
+def test_task_pipeline_scope_uses_adopted_feature_candidate_after_dispatch(
+    tmp_path: Path,
+) -> None:
+    base = _init_repo(tmp_path)
+    base_branch = _git(tmp_path, "branch", "--show-current")
+    state_dir = tmp_path / ".zf"
+    workspace = (
+        state_dir / "workdirs" / "tasks" / "run-1" / "TASK-1" / "g1" / "project"
+    )
+    workspace.parent.mkdir(parents=True)
+
+    _git(tmp_path, "checkout", "-q", "-b", "candidate/TASK-PARENT", base)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "product.py").write_text("print('integrated')\n", encoding="utf-8")
+    _git(tmp_path, "add", "src/product.py")
+    _git(tmp_path, "commit", "-q", "-m", "integrate prior product task")
+    candidate = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "checkout", "-q", base_branch)
+
+    branch = "worker/task-pipeline/TASK-1/g1"
+    _git(tmp_path, "worktree", "add", "-b", branch, str(workspace), candidate)
+    (workspace / "tests").mkdir()
+    (workspace / "tests" / "release.py").write_text("print('verified')\n", encoding="utf-8")
+    _git(workspace, "add", "tests/release.py")
+    _git(workspace, "commit", "-q", "-m", "add release evidence")
+    source_commit = _git(workspace, "rev-parse", "HEAD")
+
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-1",
+        title="release evidence",
+        status="in_progress",
+        contract=TaskContract(
+            feature_id="TASK-PARENT",
+            scope=["tests/release.py"],
+        ),
+    ))
+    operation_id = "wop-task-impl"
+    attempt_id = "ta-task-impl"
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        type="task.pipeline.stage.dispatched",
+        actor="orchestrator",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "base_commit": base,
+            "parent_task_id": "TASK-PARENT",
+            "workdir": str(workspace),
+            "source_branch": branch,
+        },
+    ))
+    event = ZfEvent(
+        type="dev.build.done",
+        actor="dev-lane-0",
+        task_id="TASK-1",
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "operation_id": operation_id,
+            "attempt_id": attempt_id,
+            "task_pipeline_stage": "impl",
+            "source_commit": source_commit,
+            "source_branch": branch,
+            "files_touched": ["tests/release.py"],
+        },
+    )
+
+    result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=_config(state_dir),
+    ).process_dev_build_done(event)
+
+    assert result is not None
+    assert result.status == "updated"
+    assert result.payload["changed_files"] == ["tests/release.py"]
+    assert _git(tmp_path, "rev-parse", "refs/heads/task/TASK-1") == source_commit
 
 
 def test_task_ref_manager_rejects_source_commit_outside_contract_scope(

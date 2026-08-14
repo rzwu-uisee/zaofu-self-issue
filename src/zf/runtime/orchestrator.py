@@ -38,6 +38,7 @@ from zf.core.verification.discriminator import (
 )
 from zf.core.verification.scope_ratchet import ScopeRatchet, ScopeSnapshot
 from zf.runtime.drift import DriftDetector
+from zf.runtime.durable_hook_catchup import consume_durable_nonwake_hooks
 from zf.runtime.escalation import EscalationManager
 from zf.runtime.reader_child_task_resolution import resolve_reader_child_task_id
 from zf.runtime.refresh import RefreshPolicy
@@ -70,6 +71,7 @@ from zf.runtime.housekeeping import (
     apply_worker_activity_heartbeat,
     apply_worker_heartbeat_event,
     apply_worker_state_changed_event,
+    is_worker_activity_event,
     promote_to_memory_note_event,
 )
 # arch_proposal_contract_update_event + spec_ingest_suggested_event
@@ -868,6 +870,8 @@ class WorkflowRuntimeCoordinator(
         # Flush a wake suppressed by coalescing in a prior cycle once its
         # interval has elapsed (driven by either a new event or the idle tick).
         self._flush_pending_layer2_wake()
+        if events is None and consume_durable_nonwake_hooks(self):
+            return decisions
         decisions.extend(self._capture_logs())
         decisions.extend(
             self._react_to_events(events, consumed_offset=consumed_offset)
@@ -1814,11 +1818,11 @@ class WorkflowRuntimeCoordinator(
             trigger_event_id = str(event.payload.get("trigger_event_id") or "")
             if trigger_event_id:
                 outcomes_by_trigger.setdefault(trigger_event_id, []).append(event)
-        for event in events:
-            if event.type != "task_map.ready" or not isinstance(event.payload, dict):
-                continue
-            if not event.payload.get("rework_of"):
-                continue
+        from zf.runtime.candidate_rework_generation import (
+            current_rework_task_map_replay_candidates,
+        )
+
+        for event in current_rework_task_map_replay_candidates(events):
             event_outcomes = outcomes_by_trigger.get(event.id, [])
             if event_outcomes and not self._rework_task_map_stale_retryable(
                 event,
@@ -1911,11 +1915,22 @@ class WorkflowRuntimeCoordinator(
             # Read recent events (tail window). EventLog can grow large;
             # we only need the tail to detect recent silent stalls.
             events = list(self.event_log.read_all())
+            from zf.runtime.task_pipeline_contexts import (
+                task_pipeline_generation_contexts,
+            )
+
+            task_pipeline_task_ids = set(
+                task_pipeline_generation_contexts(events)
+            )
             # Window: only last ~500 events are relevant for a 30s threshold
             # (assuming a typical cangjie round has < 100 events per minute).
             if len(events) > 500:
                 events = events[-500:]
-            result = sweep_silent_dispatches(events=events)
+            result = sweep_silent_dispatches(
+                events=events,
+                ignored_task_ids=task_pipeline_task_ids,
+                tasks=self.task_store.list_all(),
+            )
         except Exception:
             return
 
@@ -3185,10 +3200,10 @@ class WorkflowRuntimeCoordinator(
                     apply_worker_state_changed_event(registry, event)
                 except Exception:
                     pass
-            elif event.type.startswith("codex.hook.") or event.type.startswith("claude.hook."):
-                # Universal activity liveness (2026-07-09): per-tool-call hooks
-                # prove a worker is alive during long turns where agent.usage
-                # is sparse (agent.usage keeps its own richer handler above).
+            elif is_worker_activity_event(event.type):
+                # Provider hooks and transcripts prove a worker is alive during
+                # long turns where agent.usage is sparse (agent.usage keeps its
+                # own richer handler above).
                 # Throttled inside the helper; backend- and workflow-agnostic.
                 from zf.core.state.role_sessions import RoleSessionRegistry
                 try:
@@ -3605,10 +3620,22 @@ class WorkflowRuntimeCoordinator(
         from zf.runtime.verification_commands import (
             task_map_contract_verification_fields,
         )
-        from zf.runtime.writer_task_map_supersede import apply_explicit_task_supersedes
-        apply_explicit_task_supersedes(
-            task_store=self.task_store, event_writer=self.event_writer, loaded=loaded
-        )
+        from zf.runtime.workflow_anchor import is_workflow_managed_task
+
+        workflow_parent_ids = sorted({
+            task_id
+            for item in loaded.task_items
+            if (task_id := str(item.get("task_id") or "").strip())
+            and (existing := self.task_store.get(task_id)) is not None
+            and is_workflow_managed_task(existing)
+        })
+        if workflow_parent_ids:
+            raise RuntimeError(
+                "writer task_map reuses workflow-managed parent task id(s): "
+                + ", ".join(workflow_parent_ids)
+                + "; keep each workflow parent outside writer tasks and use a "
+                "distinct implementation or candidate-audit task id"
+            )
 
         feature_id = str(loaded.feature_id or loaded.pdd_id or "")
         from zf.runtime.flow_roles import resolve_writer_owner
@@ -3626,17 +3653,22 @@ class WorkflowRuntimeCoordinator(
             payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
             raw = item.get("raw_task") if isinstance(item.get("raw_task"), dict) else {}
             scope = str(item.get("scope") or task_id)
-            verification_tiers = self._writer_task_contract_list(
+            explicit_verification_tiers = self._writer_task_contract_list(
                 raw.get("verification_tiers")
                 or item.get("verification_tiers")
                 or payload.get("verification_tiers")
-            ) or ["runtime"]
+            )
             source_refs = {
                 "task_map_ref": loaded.task_map_ref,
             }
             if loaded.source_index_ref:
                 source_refs["source_index_ref"] = loaded.source_index_ref
-            from zf.runtime.writer_task_materialization import bind_plan_package_source_refs
+            from zf.runtime.writer_task_materialization import (
+                bind_plan_package_source_refs,
+                writer_task_allowed_paths,
+                writer_task_contract_source_ref,
+                writer_task_pipeline_entry_mode,
+            )
             bind_plan_package_source_refs(source_refs, loaded)
             module_id = self._first_nonempty(
                 raw.get("module_id"),
@@ -3687,6 +3719,12 @@ class WorkflowRuntimeCoordinator(
             verification, validation = task_map_contract_verification_fields(
                 raw, item,
             )
+            verification_tiers = explicit_verification_tiers or list(dict.fromkeys(
+                str(command.get("tier") or "").strip()
+                for command in validation.get("commands", [])
+                if isinstance(command, dict)
+                and str(command.get("tier") or "").strip()
+            )) or ["runtime"]
             acceptance_criteria = (
                 self._writer_acceptance_criteria(raw.get("acceptance_criteria"))
                 or self._writer_acceptance_criteria(raw.get("acceptance"))
@@ -3716,6 +3754,7 @@ class WorkflowRuntimeCoordinator(
                 owner_binding.owner_instance or default_owner.owner_instance
             )
             evidence_contract = dict(raw_evidence_contract)
+            task_pipeline_entry_mode = writer_task_pipeline_entry_mode(item, raw)
             evidence_contract.update({
                 "source": "refactor_task_map",
                 "source_refs": source_refs,
@@ -3728,6 +3767,16 @@ class WorkflowRuntimeCoordinator(
                     getattr(loaded, "workflow_run_id", "") or ""
                 ),
             })
+            if task_pipeline_entry_mode != "standard":
+                evidence_contract["task_pipeline_entry_mode"] = (
+                    task_pipeline_entry_mode
+                )
+                evidence_contract["write_free"] = True
+            execution_mode = str(
+                raw.get("execution_mode") or item.get("execution_mode") or ""
+            ).strip()
+            if execution_mode:
+                evidence_contract["execution_mode"] = execution_mode
             if goal_id:
                 evidence_contract["goal_id"] = goal_id
             if goal_kind:
@@ -3757,15 +3806,19 @@ class WorkflowRuntimeCoordinator(
                 verification_tiers=verification_tiers,
                 # allowed_paths first: in the refactor task_map dialect `scope`
                 # is prose while `allowed_paths` carries path globs for task_refs.
-                scope=(
-                    self._writer_task_contract_list(item.get("allowed_paths"))
-                    or self._writer_task_contract_list(raw.get("scope"))
-                    or [scope]
+                scope=writer_task_allowed_paths(
+                    item,
+                    raw,
+                    fallback=scope,
                 ),
                 product_contract_ref=product_contract_ref,
                 spec_ref=str(raw.get("spec_ref") or "").strip(),
                 plan_ref=str(raw.get("plan_ref") or "").strip(),
-                source_ref=self._first_nonempty(raw.get("source_ref"), loaded.task_map_ref),
+                source_ref=writer_task_contract_source_ref(
+                    item,
+                    raw,
+                    fallback=loaded.task_map_ref,
+                ),
                 source_key=self._first_nonempty(
                     raw.get("source_key"),
                     f"{loaded.task_map_ref}#{task_id}",
@@ -3787,9 +3840,8 @@ class WorkflowRuntimeCoordinator(
                 evidence_contract=evidence_contract,
             )
             refreshed_task = Task(
-                id=task_id,
-                title=scope,
-                status="backlog",
+                id=task_id, title=scope, status="backlog",
+                skills_required=list(item.get("skills_required") or []),
                 blocked_by=blocked_by,
                 contract=contract,
             )
@@ -3813,8 +3865,8 @@ class WorkflowRuntimeCoordinator(
                     reopened = old_status == "done"
                 else:
                     self.task_store.update(
-                        task_id,
-                        title=scope,
+                        task_id, title=scope,
+                        skills_required=list(refreshed_task.skills_required),
                         blocked_by=blocked_by,
                         contract=contract,
                     )
@@ -3840,6 +3892,26 @@ class WorkflowRuntimeCoordinator(
                 ))
         from zf.runtime.writer_task_materialization import materialize_writer_tasks
         materialize_writer_tasks(self, pending_new_tasks, loaded)
+        from zf.runtime.writer_task_map_supersede import (
+            apply_explicit_task_supersedes,
+            reconcile_retained_task_dependencies,
+        )
+
+        # Keep a replacement crash-safe: first make the successor addressable,
+        # then migrate retained dependency edges, and only then archive the old
+        # task. A gap-only resume still dispatches only its requested tasks.
+        reconcile_retained_task_dependencies(
+            task_store=self.task_store,
+            event_writer=self.event_writer,
+            loaded=loaded,
+            state_dir=self.state_dir,
+            project_root=self.project_root,
+        )
+        apply_explicit_task_supersedes(
+            task_store=self.task_store,
+            event_writer=self.event_writer,
+            loaded=loaded,
+        )
 
     @staticmethod
     def _task_contract_task_map_ref(contract) -> str:
@@ -4244,6 +4316,8 @@ class WorkflowRuntimeCoordinator(
             },
         ))
         try:
+            from zf.core.workflow.flow_metadata import flow_metadata_for
+
             amend = write_gap_task_map_amend_artifact(
                 state_dir=self.state_dir,
                 project_root=self.project_root,
@@ -4252,6 +4326,11 @@ class WorkflowRuntimeCoordinator(
                 source_event_id=event.id,
                 gap_tasks=gap_tasks,
                 gap_plan_ref=gap_plan_ref,
+                replacement_context=payload,
+                admission_metadata=flow_metadata_for(
+                    self.config,
+                    payload=payload,
+                ),
             )
         except Exception as exc:
             self.event_writer.append(ZfEvent(
@@ -4276,6 +4355,17 @@ class WorkflowRuntimeCoordinator(
                 reason=f"task_map amend failed: {exc}",
             )
         gap_task_ids = list(amend.get("gap_task_ids") or [])
+        superseded_generation = str(
+            workflow_identity.get("task_map_generation") or ""
+        ).strip()
+        task_map_digest = str(amend.get("task_map_digest") or "").strip()
+        task_map_generation = str(
+            amend.get("task_map_generation") or ""
+        ).strip()
+        amended_workflow_identity = self._gap_amended_workflow_identity(
+            payload,
+            task_map_generation=task_map_generation,
+        )
         flow_kind = str(
             payload.get("flow_kind") or payload.get("goal_kind") or ""
         ).strip()
@@ -4294,7 +4384,7 @@ class WorkflowRuntimeCoordinator(
             causation_id=requested.id,
             correlation_id=trace_id,
             payload={
-                **workflow_identity,
+                **amended_workflow_identity,
                 "schema_version": "task-map-amended.v1",
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
@@ -4304,7 +4394,9 @@ class WorkflowRuntimeCoordinator(
                 "goal_kind": goal_kind,
                 "flow_kind": flow_kind,
                 "task_map_ref": str(amend.get("task_map_ref") or ""),
+                "task_map_digest": task_map_digest,
                 "supersedes_task_map_ref": base_task_map_ref,
+                "supersedes_task_map_generation": superseded_generation,
                 "gap_plan_ref": gap_plan_ref,
                 "gap_task_ids": gap_task_ids,
                 "gap_task_count": len(gap_task_ids),
@@ -4321,7 +4413,7 @@ class WorkflowRuntimeCoordinator(
             causation_id=amended.id,
             correlation_id=trace_id,
             payload={
-                **workflow_identity,
+                **amended_workflow_identity,
                 "pdd_id": pdd_id,
                 "feature_id": feature_id,
                 "trace_id": trace_id,
@@ -4330,25 +4422,26 @@ class WorkflowRuntimeCoordinator(
                 "goal_kind": goal_kind,
                 "flow_kind": flow_kind,
                 "task_map_ref": str(amend.get("task_map_ref") or ""),
+                "task_map_digest": task_map_digest,
                 "source_index_ref": str(payload.get("source_index_ref") or ""),
                 "source_commit": str(payload.get("source_commit") or ""),
                 "candidate_base_commit": str(
-                    payload.get("candidate_base_commit")
-                    or payload.get("source_commit")
-                    or ""
+                    payload.get("candidate_base_commit") or payload.get("source_commit") or ""
                 ),
                 "dispatch_base_commit": str(
                     payload.get("dispatch_base_commit")
-                    or payload.get("candidate_head_commit")
+                    or payload.get("target_ref") or payload.get("candidate_head_commit")
                     or payload.get("candidate_base_commit")
                     or payload.get("source_commit")
                     or ""
                 ),
                 "target_ref": str(payload.get("target_ref") or ""),
                 "amend_of": base_task_map_ref,
+                "supersedes_task_map_generation": superseded_generation,
                 "gap_plan_ref": gap_plan_ref,
                 "gap_task_ids": gap_task_ids,
                 "task_ids": gap_task_ids,
+                "completed_task_ids": list(amend.get("completed_task_ids") or []),
                 "superseded_task_ids": list(amend.get("superseded_task_ids") or []),
                 "resume_scope": "gap_tasks_only",
                 "gap_event_type": gap_event_type,
@@ -4381,10 +4474,10 @@ class WorkflowRuntimeCoordinator(
             "rework_categories",
             "rework_summary",
             "replan_classification",
-            "replan",
-            "orchestrator_decision",
-            "supersedes_plan_fanout_id",
-            "supersedes_plan_artifact_refs",
+            "stage_replan_generation", "stage_replan_generation_source_event_id",
+            "operator_authorized", "operator_authorization_ref",
+            "replan", "orchestrator_decision",
+            "supersedes_plan_fanout_id", "supersedes_plan_artifact_refs",
         ):
             value = payload.get(key)
             if value not in (None, "", []):
@@ -4480,126 +4573,18 @@ class WorkflowRuntimeCoordinator(
         return projection
 
     def _compile_refactor_plan_projection(self, projection):
-        """Compile a refactor plan task_map against deterministic workflow shape.
-
-        This is a structural gate, not a subjective quality review. It reuses
-        the writer-fanout task normalization and lane_pipeline admission
-        contract so plan artifacts that cannot be dispatched fail before
-        publishing ``*.plan.ready``.
-        """
-        if projection is None or not getattr(projection, "ok", False):
-            return projection
-        payload = dict(getattr(projection, "payload", {}) or {})
-        if payload.get("artifact_kind") != "refactor_plan":
-            return projection
-        task_map_ref = str(payload.get("task_map_ref") or "").strip()
-        pipeline_spec = self._lane_pipeline_for_trigger("task_map.ready")
-        if not task_map_ref or pipeline_spec is None:
-            if task_map_ref:
-                payload["plan_compile_gate"] = "skipped"
-                projection.payload.update(payload)
-            return projection
-
-        diagnostics: list[str] = []
-        try:
-            import json
-            from zf.core.security.hash import sha256_file
-            from zf.core.workflow.lane_pipeline import (
-                validate_lane_pipeline_admission,
-            )
-            from zf.runtime.refactor_artifacts import RefactorArtifactProjection
-            from zf.runtime.task_map import validate_task_map_payload
-            from zf.runtime.writer_fanout_admission import (
-                _resolve_artifact_ref,
-                validate_writer_task_items,
-                writer_task_items,
-            )
-
-            task_map_path = _resolve_artifact_ref(
-                task_map_ref,
-                state_dir=self.state_dir,
-                project_root=self.project_root,
-            )
-            data = json.loads(task_map_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                task_map_validation = validate_task_map_payload(
-                    data,
-                    require_task_verification=False,
-                )
-                if not task_map_validation.passed:
-                    diagnostics.extend(
-                        f"task_map: {error}"
-                        for error in task_map_validation.errors
-                    )
-            task_items = writer_task_items(data)
-            validate_writer_task_items(task_items)
-            problems = validate_lane_pipeline_admission(
-                pipeline_spec,
-                task_items,
-                task_map_payload=data if isinstance(data, dict) else None,
-            )
-            diagnostics.extend(f"lane_pipeline: {problem}" for problem in problems)
-        except Exception as exc:  # fail closed: malformed task_map is not ready.
-            diagnostics.append(f"plan compile failed: {exc}")
-
-        if not diagnostics:
-            payload["plan_compile_gate"] = "passed"
-            projection.payload.update(payload)
-            return projection
-
-        artifact_dir = Path(
-            str(payload.get("artifact_dir") or getattr(projection, "artifact_dir", ""))
+        from zf.core.workflow.lane_pipeline import (
+            validate_lane_pipeline_admission,
         )
-        if not artifact_dir:
-            artifact_dir = self.state_dir / "artifacts" / "refactor-plan"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics_path = artifact_dir / "artifact-gate-diagnostics.json"
-        diagnostics_path.write_text(
-            json.dumps(diagnostics, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        from zf.runtime.refactor_plan_compiler import (
+            compile_refactor_plan_projection,
         )
-        artifact_refs = list(dict.fromkeys(
-            [str(ref) for ref in payload.get("artifact_refs", []) or [] if str(ref)]
-            + [str(diagnostics_path)]
-        ))
-        compile_reason = (
-            "plan compile gate failed: " + "; ".join(diagnostics)
-        )[:1000]
-        findings = [
-            dict(item)
-            for item in payload.get("findings", []) or []
-            if isinstance(item, dict)
-        ]
-        compile_finding = {
-            "severity": "high",
-            "category": "plan_compile_gate",
-            "path": task_map_ref,
-            "message": compile_reason,
-        }
-        if not any(
-            str(item.get("message") or "") == compile_reason
-            for item in findings
-        ):
-            findings.append(compile_finding)
-        payload.update({
-            "artifact_gate": "failed",
-            "plan_compile_gate": "failed",
-            "reason": compile_reason,
-            "findings": findings,
-            "diagnostics_ref": str(diagnostics_path),
-            "artifact_refs": artifact_refs,
-            "artifact_digests": {
-                ref: sha256_file(Path(ref))
-                for ref in artifact_refs
-                if Path(ref).exists() and Path(ref).is_file()
-            },
-        })
-        return RefactorArtifactProjection(
-            status="failed",
-            artifact_dir=str(artifact_dir),
-            artifact_refs=artifact_refs,
-            payload=payload,
-            diagnostics=diagnostics,
+
+        return compile_refactor_plan_projection(
+            self,
+            projection,
+            pipeline_spec=self._lane_pipeline_for_trigger("task_map.ready"),
+            validate_pipeline=validate_lane_pipeline_admission,
         )
 
 

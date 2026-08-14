@@ -69,6 +69,54 @@ def test_event_task_map_ref_still_wins_when_present(tmp_path):
     assert [t["task_id"] for t in loaded.task_items] == ["T1"]
 
 
+def test_gap_task_map_amend_is_loaded_as_replan(tmp_path):
+    state_dir = tmp_path / ".zf"
+    pdd = "ISSUE-GAP"
+    _write_task_map(state_dir, pdd)
+    ref = f".zf/artifacts/{pdd}/task_map.json"
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map="${task_map_ref}"),
+        event=ZfEvent(
+            type="task_map.ready",
+            payload={
+                "pdd_id": pdd,
+                "task_map_ref": ref,
+                "amend_of": ".zf/artifacts/ISSUE-GAP/task-map-v1.json",
+                "resume_scope": "gap_tasks_only",
+                "task_ids": ["T1"],
+            },
+        ),
+        pdd_id=pdd,
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    assert loaded.is_replan is True
+
+
+def test_initial_task_map_is_not_loaded_as_replan(tmp_path):
+    state_dir = tmp_path / ".zf"
+    pdd = "ISSUE-INITIAL"
+    _write_task_map(state_dir, pdd)
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map="${task_map_ref}"),
+        event=ZfEvent(
+            type="task_map.ready",
+            payload={
+                "pdd_id": pdd,
+                "task_map_ref": f".zf/artifacts/{pdd}/task_map.json",
+            },
+        ),
+        pdd_id=pdd,
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    assert loaded.is_replan is False
+
+
 def test_loader_preserves_planner_target_commit_as_writer_dispatch_base(tmp_path):
     state_dir = tmp_path / ".zf"
     pdd = "PRD-BASELINE"
@@ -188,6 +236,7 @@ def test_gap_only_resume_loads_requested_task_from_full_task_map(tmp_path):
     )
 
     assert [item["task_id"] for item in loaded.task_items] == ["CANGJIE-GAP-001"]
+    assert loaded.is_replan is True
 
 
 def test_gap_only_successor_map_rebinds_stale_rework_task_id(tmp_path):
@@ -253,6 +302,91 @@ def test_gap_only_successor_map_rebinds_stale_rework_task_id(tmp_path):
 
     assert loaded.requested_task_ids == ["RELEASE-R7"]
     assert [item["task_id"] for item in loaded.task_items] == ["RELEASE-R7"]
+
+
+def test_failed_and_downstream_scope_maps_unique_successor_and_keeps_audit(
+    tmp_path,
+):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=tmp_path,
+        check=True,
+    )
+    (tmp_path / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    state_dir = tmp_path / ".zf"
+    path = state_dir / "artifacts" / "PRD" / "task_map.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({
+            "schema_version": "task-map.v1",
+            "feature_id": "PRD",
+            "resume_scope": "failed_children_and_downstream",
+            "metadata": {
+                "dispatch_delta_task_ids": ["AC8-R2", "RELEASE-AUDIT"],
+            },
+            "tasks": [
+                {
+                    "task_id": "ALREADY-DONE",
+                    "title": "retained historical slice",
+                    "allowed_paths": ["src/history/**"],
+                },
+                {
+                    "task_id": "AC8-R2",
+                    "title": "replace failed AC8 receipt",
+                    "allowed_paths": ["scripts/ac8/**"],
+                    "supersedes_task_ids": ["AC8-R1"],
+                    "base_commit": head,
+                    "source_refs": [f"git:{head}"],
+                },
+                {
+                    "task_id": "RELEASE-AUDIT",
+                    "title": "read-only release audit",
+                    "allowed_paths": [],
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    event = ZfEvent(
+        type="task_map.ready",
+        payload={
+            "pdd_id": "PRD",
+            "task_map_ref": ".zf/artifacts/PRD/task_map.json",
+            "resume_scope": "failed_children_and_downstream",
+            "task_ids": ["AC8-R1", "RELEASE-AUDIT"],
+            "rework_of": "plan-rejected-1",
+        },
+    )
+
+    loaded = load_writer_task_map(
+        stage=SimpleNamespace(task_map="${task_map_ref}"),
+        event=event,
+        pdd_id="PRD",
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    assert loaded.requested_task_ids == ["AC8-R2", "RELEASE-AUDIT"]
+    assert [item["task_id"] for item in loaded.task_items] == [
+        "AC8-R2",
+        "RELEASE-AUDIT",
+    ]
 
 
 def test_gap_only_resume_skips_global_lane_pipeline_root_owner_gate(tmp_path):

@@ -66,3 +66,28 @@ def test_pre_run_operation_keeps_legacy_identity_without_approved_anchor() -> No
 
     assert aliases[synthesis_id] == synthesis_id
     assert aliases[request_id] == synthesis_id
+
+
+def test_conflicting_event_does_not_union_two_canonical_runs() -> None:
+    events = [
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-A",
+            payload={"run_id": "workflow-A"},
+        ),
+        ZfEvent(
+            type="run.goal.started",
+            correlation_id="workflow-B",
+            payload={"run_id": "workflow-B"},
+        ),
+        ZfEvent(
+            type="goal.closure.synthesized",
+            correlation_id="workflow-A",
+            payload={"workflow_run_id": "workflow-B"},
+        ),
+    ]
+
+    aliases = run_aliases(events)
+
+    assert aliases["workflow-A"] == "workflow-A"
+    assert aliases["workflow-B"] == "workflow-B"

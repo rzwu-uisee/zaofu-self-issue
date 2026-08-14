@@ -27,10 +27,19 @@ def reconcile_task_pipeline_integration(
     task = runtime.task_store.get(task_id)
     if not task_id or context is None or task is None:
         return []
-    verify = _current_verify_operation(operation_rows, task_id)
-    if verify is None:
+    source = _current_integration_source(
+        runtime,
+        operation_rows=operation_rows,
+        task=task,
+        context=context,
+    )
+    if source is None:
         return []
-    generation = int(verify.get("operation_generation") or 1)
+    generation = _integration_generation(
+        projection,
+        task_id=task_id,
+        fallback=int(source.get("operation_generation") or 1),
+    )
     from zf.runtime.candidates import CandidateRebuilder
 
     rebuilder = CandidateRebuilder(
@@ -44,12 +53,13 @@ def reconcile_task_pipeline_integration(
         workflow_run_id=str(context.get("workflow_run_id") or ""),
         task_map_generation=str(context.get("task_map_generation") or ""),
         operation_generation=generation,
-        pipeline_key=str(verify.get("pipeline_key") or ""),
+        pipeline_key=str(source.get("pipeline_key") or ""),
         dispatch_base_commit=str(context.get("dispatch_base_commit") or ""),
         contract_revision=_contract_revision(task),
         event_writer=runtime.event_writer,
         causation_id=str(
-            verify.get("call_result_admitted_event_id")
+            source.get("call_result_admitted_event_id")
+            or source.get("source_event_id")
             or context.get("generation_admitted_event_id")
             or ""
         ),
@@ -93,10 +103,62 @@ def _current_verify_operation(
     )
 
 
+def _current_integration_source(
+    runtime: Any,
+    *,
+    operation_rows: list[dict[str, Any]],
+    task: Any,
+    context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    verify = _current_verify_operation(operation_rows, str(task.id))
+    if verify is not None:
+        return verify
+    from zf.runtime.task_pipeline_entry import task_pipeline_entry_mode
+
+    if task_pipeline_entry_mode(task) != "external_gate":
+        return None
+    workflow_run_id = str(context.get("workflow_run_id") or "")
+    task_map_generation = str(context.get("task_map_generation") or "")
+    for event in reversed(runtime.event_log.read_all()):
+        if event.type != "task.pipeline.external_gate.satisfied":
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        if (
+            str(event.task_id or "") == str(task.id)
+            and str(payload.get("workflow_run_id") or "") == workflow_run_id
+            and str(payload.get("task_map_generation") or "")
+            == task_map_generation
+        ):
+            return {
+                **dict(payload),
+                "source_event_id": event.id,
+            }
+    return None
+
+
 def _contract_revision(task: Any) -> str:
     from zf.runtime.task_contract_snapshot import effective_contract_revision
 
     return effective_contract_revision(task)
+
+
+def _integration_generation(
+    projection: Mapping[str, Any],
+    *,
+    task_id: str,
+    fallback: int,
+) -> int:
+    for raw in projection.get("tasks") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        if str(raw.get("task_id") or "") != task_id:
+            continue
+        try:
+            generation = int(raw.get("next_operation_generation") or fallback)
+        except (TypeError, ValueError):
+            return fallback
+        return generation if generation > 0 else fallback
+    return fallback
 
 
 __all__ = ["reconcile_task_pipeline_integration"]

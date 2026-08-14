@@ -135,6 +135,23 @@ would discard verified work and force a needless rebuild. If the blocker
 implicates product behavior or the receipts are incomplete, do not promote the
 failed delivery checkpoint; retain the last independently accepted commit.
 
+When one failed task is replaced by multiple gap tasks, model a graph-node
+replacement rather than copying `supersedes_task_ids` onto every new task:
+
+- declare `blocked_by` between every predecessor and successor; list order is
+  not a dependency contract;
+- exactly one terminal task in that replacement subgraph carries
+  `supersedes_task_ids`, `base_commit`, and `git:<base_commit>`;
+- additive/predecessor tasks do not supersede the old task;
+- the kernel mechanically inherits the old task's incoming dependencies onto
+  the replacement root and rewires old downstream dependents to the terminal
+  successor;
+- if the subgraph has multiple terminals, revise the task graph before emit.
+
+For example, `API gap -> Web rebuild` replacing an old Web task means the Web
+rebuild blocks on the API gap and is the sole task that supersedes the old Web
+task. Do not emit two unrelated replacements and rely on array order.
+
 A continuation or retry that deliberately reuses the same `task_id` must use
 the same top-level `base_commit` + `git:<base_commit>` binding whenever it
 starts from an accepted checkpoint. Do not invent aliases such as

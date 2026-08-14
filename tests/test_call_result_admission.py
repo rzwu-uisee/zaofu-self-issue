@@ -1024,7 +1024,50 @@ def test_plan_domain_result_is_not_bound_to_previous_plan_package(
     } == {"stale_plan_artifact_package"}
 
 
-def test_global_rescan_uses_pinned_target_without_weakening_candidate_verify(
+def test_task_result_uses_package_bound_to_its_task_map_generation(
+    tmp_path: Path,
+) -> None:
+    admission, operations = _runtime(tmp_path)
+    for generation, package in (
+        ("generation-1", "old"),
+        ("generation-2", "current"),
+    ):
+        operations.event_log.append(ZfEvent(
+            type="plan.artifact_package.admitted",
+            correlation_id="run-task",
+            payload={
+                "workflow_run_id": "run-task",
+                "task_map_generation": generation,
+                "package_id": f"planpkg-{package}",
+                "package_ref": f"artifacts/plan-packages/{package}.json",
+                "package_digest": f"{package}-digest",
+                "mode": "blocking",
+                "status": "admitted",
+            },
+        ))
+    task_identity = {
+        "workflow_run_id": "run-task",
+        "attempt_domain": "task",
+        "task_map_generation": "generation-1",
+        "plan_artifact_package_id": "planpkg-old",
+        "plan_artifact_package_ref": "artifacts/plan-packages/old.json",
+        "plan_artifact_package_digest": "old-digest",
+    }
+
+    assert admission._plan_package_currentness_issues(
+        {"identity": task_identity},
+    ) == []
+    assert admission._plan_package_currentness_issues(
+        {
+            "identity": {
+                **task_identity,
+                "attempt_domain": "candidate",
+            },
+        },
+    ) != []
+
+
+def test_task_and_global_verify_use_pinned_target_without_weakening_candidate_verify(
     tmp_path: Path,
 ) -> None:
     admission, operations = _runtime(tmp_path)
@@ -1097,6 +1140,22 @@ def test_global_rescan_uses_pinned_target_without_weakening_candidate_verify(
         {
             "output_profile_id": "global-rescan",
             "output_profile_revision": "1",
+        },
+    ) == []
+    assert admission._task_result_currentness_issues(
+        envelope,
+        adapted,
+        {
+            "output_profile_id": "task-verify",
+            "output_profile_revision": "1",
+        },
+    ) == []
+    assert admission._task_result_currentness_issues(
+        envelope,
+        adapted,
+        {
+            "operation_type": "task-stage",
+            "task_pipeline_stage": "verify",
         },
     ) == []
     strict_codes = {

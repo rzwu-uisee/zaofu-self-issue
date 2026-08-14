@@ -408,6 +408,76 @@ def _fold_stream_states(events: list, member: str = "") -> dict[str, dict[str, A
     return states
 
 
+def _read_stream_events(state_dir: Path) -> list[Any]:
+    from zf.core.events.log import EventLog
+
+    try:
+        events = EventLog(Path(state_dir) / "events.jsonl").read_all()
+    except Exception:
+        events = []
+    try:
+        from zf.runtime.live_delta_bus import LiveDeltaBus
+
+        live_rows, _ = LiveDeltaBus(Path(state_dir)).read_since()
+        if live_rows:
+            events = sorted(
+                [*events, *live_rows],
+                key=lambda event: str(getattr(event, "ts", "") or ""),
+            )
+    except Exception:
+        pass
+    return events
+
+
+def _resolve_stream_member(
+    state_dir: Path,
+    requested_member: str,
+) -> tuple[str, str, set[str], set[str]]:
+    """Resolve one canonical member or fail closed for mixed projections."""
+
+    states = _fold_stream_states(_read_stream_events(state_dir))
+    all_request_ids = set(states)
+    request_members = {
+        request_id: str(state.get("member_id") or "").strip()
+        for request_id, state in states.items()
+    }
+    member = str(requested_member or "").strip()
+    if member:
+        return (
+            member,
+            "explicit",
+            {
+                request_id
+                for request_id, owner in request_members.items()
+                if owner == member
+            },
+            all_request_ids,
+        )
+    members = {owner for owner in request_members.values() if owner}
+    if len(members) == 1:
+        member = next(iter(members))
+        return (
+            member,
+            "inferred",
+            {
+                request_id
+                for request_id, owner in request_members.items()
+                if owner == member
+            },
+            all_request_ids,
+        )
+    if len(members) > 1:
+        return "", "ambiguous_member", set(), all_request_ids
+    scoped_ledgers = list(
+        (Path(state_dir) / "integrations" / "feishu").glob(
+            "stream_ledger-*.json"
+        )
+    )
+    if all_request_ids and scoped_ledgers:
+        return "", "missing_member", set(), all_request_ids
+    return "", "legacy_shared", all_request_ids, all_request_ids
+
+
 def sync_stream_card(state_dir, *, send_card, update_card, ledger: dict | None = None,
                      member: str = "") -> dict:
     """Send one streaming card per reply, update it in place as content grows.
@@ -418,32 +488,9 @@ def sync_stream_card(state_dir, *, send_card, update_card, ledger: dict | None =
     (deltas drive the card only — §5.1)."""
     from pathlib import Path
 
-    from zf.core.events.log import EventLog
-
     ledger = ledger if ledger is not None else {}
-    try:
-        events = EventLog(Path(state_dir) / "events.jsonl").read_all()
-    except Exception:
-        events = []
-    # doc 106 B axis: token deltas ride the ephemeral LiveDeltaBus, not the
-    # ledger. The card fold merges both — the bus file scratch is readable
-    # across processes, so the bridge keeps streaming while replies run in
-    # the web/orchestrator process. Committed terminal events still come
-    # from events.jsonl.
-    try:
-        from zf.runtime.live_delta_bus import LiveDeltaBus
-
-        live_rows, _ = LiveDeltaBus(Path(state_dir)).read_since()
-        if live_rows:
-            # Re-sort by ts: a committed terminal event must fold AFTER the
-            # bus deltas that created its stream state, or the card never
-            # finalizes.
-            events = sorted(
-                [*events, *live_rows],
-                key=lambda e: str(getattr(e, "ts", "") or ""),
-            )
-    except Exception:
-        pass
+    # doc 106 B axis: merge committed terminal facts with ephemeral deltas.
+    events = _read_stream_events(Path(state_dir))
     repair_request_ids = _internal_plan_repair_request_ids(events)
     states = _fold_stream_states(events, member=member)
     from zf.integrations.feishu.channel_reply_presentation import (
@@ -551,13 +598,31 @@ def push_stream_card_once(state_dir, transport, *, receive_id: str,
 
     from zf.integrations.feishu.transport import FeishuMessage
 
-    # Per-bot isolation: when several bridges (one per Feishu app) share a
-    # state_dir, scope each bridge to its own member's replies AND give it a
-    # member-suffixed ledger file, so they never cross-update each other's cards.
-    member = member or os.environ.get("ZF_FEISHU_STREAM_MEMBER", "").strip()
+    # Per-bot isolation: route both the fast ticker and Bridge projection loop
+    # through the member encoded in canonical stream events.  An empty caller
+    # may use the legacy shared ledger only when no scoped identity exists.
+    requested_member = (
+        member or os.environ.get("ZF_FEISHU_STREAM_MEMBER", "").strip()
+    )
+    member, identity_status, member_request_ids, all_request_ids = (
+        _resolve_stream_member(Path(state_dir), requested_member)
+    )
+    if identity_status in {"ambiguous_member", "missing_member"}:
+        return {
+            "sent": [],
+            "updated": [],
+            "suppressed": sorted(all_request_ids),
+            "visible_request_ids": [],
+            "ledger": {},
+            "member": "",
+            "identity_status": identity_status,
+            "reason": "stream projection member is not uniquely resolvable",
+        }
     suffix = f"-{member}" if member else ""
     ledger_path = (Path(state_dir) / "integrations" / "feishu"
                    / f"stream_ledger{suffix}.json")
+    legacy_ledger_path = ledger_path.with_name("stream_ledger.json")
+    registry_path = ledger_path.with_name("stream_ledger_registry.json")
 
     def read_ledger(path: Path) -> dict[str, Any]:
         try:
@@ -582,23 +647,51 @@ def push_stream_card_once(state_dir, transport, *, receive_id: str,
     # projection loop also flushes this card.  They can otherwise both read an
     # empty ledger and send duplicate "正在思考" cards for one request.  The
     # external send/update and its idempotency record form one critical section.
-    with locked_path(ledger_path):
-        scoped_ledger_missing = bool(member) and not ledger_path.exists()
-        ledger = read_ledger(ledger_path)
-        if scoped_ledger_missing:
-            # A pre-isolation bridge used the shared ledger. Seed a new
-            # per-member ledger from it once so a bridge restart does not
-            # replay every historical thinking card into the group.
-            ledger = read_ledger(ledger_path.with_name("stream_ledger.json"))
-        result = sync_stream_card(
-            state_dir,
-            send_card=send_card,
-            update_card=update_card,
-            ledger=ledger,
-            member=member,
-        )
-        atomic_write_text(
-            ledger_path,
-            json.dumps(result["ledger"], ensure_ascii=False, indent=2) + "\n",
-        )
-    return result
+    with locked_path(registry_path):
+        with locked_path(ledger_path):
+            ledger = read_ledger(ledger_path)
+            migrated_request_ids: list[str] = []
+            ledger_conflicts: list[str] = []
+            legacy_ledger = read_ledger(legacy_ledger_path) if member else {}
+            if member and legacy_ledger:
+                for request_id in sorted(member_request_ids):
+                    key = f"stream-{request_id}"
+                    legacy_entry = legacy_ledger.get(key)
+                    if not isinstance(legacy_entry, dict):
+                        continue
+                    scoped_entry = ledger.get(key)
+                    if not isinstance(scoped_entry, dict):
+                        ledger[key] = legacy_entry
+                    elif (
+                        str(scoped_entry.get("message_id") or "")
+                        != str(legacy_entry.get("message_id") or "")
+                    ):
+                        ledger_conflicts.append(request_id)
+                    legacy_ledger.pop(key, None)
+                    migrated_request_ids.append(request_id)
+                if migrated_request_ids:
+                    atomic_write_text(
+                        legacy_ledger_path,
+                        json.dumps(legacy_ledger, ensure_ascii=False, indent=2)
+                        + "\n",
+                    )
+            result = sync_stream_card(
+                state_dir,
+                send_card=send_card,
+                update_card=update_card,
+                ledger=ledger,
+                member=member,
+            )
+            atomic_write_text(
+                ledger_path,
+                json.dumps(result["ledger"], ensure_ascii=False, indent=2)
+                + "\n",
+            )
+    return {
+        **result,
+        "member": member,
+        "identity_status": identity_status,
+        "ledger_path": str(ledger_path),
+        "migrated_request_ids": migrated_request_ids,
+        "ledger_conflicts": ledger_conflicts,
+    }

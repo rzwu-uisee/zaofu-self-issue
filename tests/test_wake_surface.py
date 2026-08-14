@@ -40,7 +40,7 @@ def test_kept_events_still_wake():
 def test_wake_list_changes_are_explicit():
     # 快照锁:数量带 ±0 容差——增删唤醒源必须改本测试(显式决策)。
     assert len(WAKE_PATTERNS) == len(set(WAKE_PATTERNS))  # 无重复
-    assert len(WAKE_PATTERNS) == 171, (
+    assert len(WAKE_PATTERNS) == 172, (
         f"WAKE_PATTERNS={len(WAKE_PATTERNS)}; 唤醒面变更需同步本快照"
         f"(K2 基线 103-7=96;B14 plan 审核门显式 +3:plan.approval.requested /"
         f" plan.approved / plan.rejected —— 均 workflow 控制事件需唤醒"
@@ -86,7 +86,8 @@ def test_wake_list_changes_are_explicit():
             f"channel.question.dedup.remediation.exhausted → 169; durable "
             f"provider operation failure redrive +1:"
             f"workflow.operation.failed → 170; bounded Channel synthesis "
-            f"repair dispatch +1:channel.synthesis.repair.requested → 171"
+            f"repair dispatch +1:channel.synthesis.repair.requested → 171; "
+            f"external Task Pipeline gate resolution +1:human.resolved → 172"
         )
 
 

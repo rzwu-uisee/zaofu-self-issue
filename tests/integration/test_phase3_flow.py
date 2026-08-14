@@ -137,7 +137,9 @@ class TestGracefulShutdown:
         # stop_autoresearch_sidecar added 2026-07-10: cross-process pidfile
         # teardown of the resident's process group (R3/R4/R5 orphan leak).
         # Feishu projection uses the same cross-process closeout guarantee.
-        assert len(steps) == 17
+        # Provider usage tail reconciliation runs after provider exit and
+        # before the shutdown snapshot/EventLog close.
+        assert len(steps) == 18
         assert "shutdown_marker" in steps
         assert "interrupt_workflow_operations" in steps
         assert steps.index("interrupt_workflow_operations") < steps.index(
@@ -150,6 +152,11 @@ class TestGracefulShutdown:
         assert "stop_feishu_projection_sidecar" in steps
         assert steps.index("stop_feishu_projection_sidecar") == (
             steps.index("stop_autoresearch_sidecar") + 1
+        )
+        assert steps.index("kill_session") < steps.index(
+            "reconcile_provider_usage_tail"
+        ) < steps.index("save_shutdown_snapshot") < steps.index(
+            "emit_completion"
         )
         assert "release_lock" in steps
         assert "flush_event_index" in steps

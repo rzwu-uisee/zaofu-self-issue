@@ -9,6 +9,9 @@ from zf.runtime.candidate_rework import (
     candidate_quality_failure_message,
     plan_candidate_rework,
 )
+from zf.runtime.candidate_rework_generation import (
+    current_rework_task_map_replay_candidates,
+)
 from zf.runtime.candidate_integration import candidate_failure_envelope
 from zf.runtime.replan_resynth import (
     build_replan_resynth_event,
@@ -20,6 +23,92 @@ def _ev(etype, payload=None, task_id=None, eid="", corr=""):
     return SimpleNamespace(
         type=etype, payload=payload or {}, task_id=task_id, id=eid, correlation_id=corr
     )
+
+
+def test_rework_task_map_replay_keeps_only_latest_current_scope() -> None:
+    events = [
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-1",
+                "task_map_generation": "gen-1",
+                "rework_of": "reject-1",
+            },
+            eid="ready-old",
+        ),
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-1",
+                "task_map_generation": "gen-1",
+                "rework_of": "reject-1",
+            },
+            eid="ready-duplicate",
+        ),
+        _ev(
+            "task_map.amended",
+            {"supersedes_task_map_generation": "gen-1"},
+            eid="amended",
+        ),
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-1",
+                "task_map_generation": "gen-2",
+                "rework_of": "reject-2",
+            },
+            eid="ready-current",
+        ),
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-2",
+                "task_map_generation": "other-gen",
+                "rework_of": "reject-3",
+            },
+            eid="ready-other-pdd",
+        ),
+    ]
+
+    selected = current_rework_task_map_replay_candidates(events)
+
+    assert [event.id for event in selected] == [
+        "ready-current",
+        "ready-other-pdd",
+    ]
+
+
+def test_rework_task_map_replay_deduplicates_same_current_generation() -> None:
+    events = [
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-1",
+                "task_map_generation": "gen-current",
+                "rework_of": "reject-1",
+            },
+            eid="ready-first",
+        ),
+        _ev(
+            "task_map.ready",
+            {
+                "workflow_run_id": "run-1",
+                "pdd_id": "PDD-1",
+                "task_map_generation": "gen-current",
+                "rework_of": "reject-1",
+            },
+            eid="ready-last",
+        ),
+    ]
+
+    selected = current_rework_task_map_replay_candidates(events)
+
+    assert [event.id for event in selected] == ["ready-last"]
 
 
 def test_candidate_rejection_plans_retrigger_with_feedback():
@@ -94,6 +183,116 @@ def test_candidate_gate_owner_routes_task_and_downstream_rework():
     assert len(plans) == 1
     assert plans[0].action == "retrigger"
     assert plans[0].failed_task_ids == ("TASK-SCAFFOLD",)
+
+
+def test_unattributed_candidate_cleanliness_failure_replans_without_input_replay():
+    """Candidate input task_ids are not failed-task attribution.
+
+    A tracked build-output drift cannot be repaired by rebuilding the same
+    candidate or replaying every input slice; planning must assign the missing
+    owned path first.
+    """
+    events = [
+        _ev("integration.failed", {
+            "pdd_id": "PRD-WEB",
+            "trace_id": "trace-web",
+            "failure_scope": "candidate",
+            "failure_class": "candidate_product_quality_failed",
+            "failure_fingerprint": "candidate-cleanliness-1",
+            "quality_gates_failed": ["candidate_worktree_clean"],
+            "diagnostic_class": "candidate_worktree_dirty",
+            "diagnostic_summary": "M web/dist/index.html",
+            "task_ids": ["TASK-API", "TASK-WEB"],
+            "failed_task_ids": [],
+        }, eid="integration-cleanliness", corr="trace-web"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "replan"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].failed_task_ids == ()
+    assert "candidate_worktree_drift" in plans[0].failure_categories
+
+
+def test_candidate_attempt_ledger_prefers_referenced_event_type():
+    events = [
+        _ev("integration.failed", {
+            "pdd_id": "PRD-SOURCE",
+            "trace_id": "trace-source",
+            "failure_scope": "candidate",
+            "failure_class": "product_test_failed",
+            "failed_task_ids": ["TASK-WEB"],
+        }, eid="integration-old", corr="trace-source"),
+        _ev("orchestrator.replan_requested", {
+            "pdd_id": "PRD-SOURCE",
+            "rework_of": "integration-old",
+            "rework_source": "integration.failed",
+        }, eid="replan-old", corr="trace-source"),
+        _ev("issue.triage.failed", {
+            "pdd_id": "PRD-SOURCE",
+            "trace_id": "trace-source",
+        }, eid="triage-failed", corr="trace-source"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-SOURCE",
+            "rework_of": "triage-failed",
+            "rework_source": "integration.failed",
+        }, eid="triage-replay", corr="trace-source"),
+        _ev("integration.failed", {
+            "pdd_id": "PRD-SOURCE",
+            "trace_id": "trace-source",
+            "failure_scope": "candidate",
+            "failure_class": "product_test_failed",
+            "failed_task_ids": ["TASK-WEB"],
+        }, eid="integration-current", corr="trace-source"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].action == "retrigger"
+    assert plans[0].attempt == 2
+
+
+def test_candidate_cleanliness_fingerprint_ignores_dirty_path_format():
+    config = SimpleNamespace(
+        goal=SimpleNamespace(rework_fingerprint=True),
+        workflow=SimpleNamespace(rework_routing={}),
+    )
+    common = {
+        "pdd_id": "PRD-CLEAN",
+        "trace_id": "trace-clean",
+        "failure_scope": "candidate",
+        "failure_class": "candidate_product_quality_failed",
+        "quality_gates_failed": ["candidate_worktree_clean"],
+        "failed_task_ids": [],
+    }
+    events = [
+        _ev("integration.failed", {
+            **common,
+            "diagnostic_class": "command_failed",
+            "diagnostic_summary": "git status --porcelain --untracked-files=all",
+        }, eid="clean-old", corr="trace-clean"),
+        _ev("orchestrator.replan_requested", {
+            "pdd_id": "PRD-CLEAN",
+            "rework_of": "clean-old",
+            "rework_source": "integration.failed",
+        }, eid="clean-replan", corr="trace-clean"),
+        _ev("integration.failed", {
+            **common,
+            "diagnostic_class": "candidate_worktree_dirty",
+            "diagnostic_summary": "D web/dist/old.js\n?? web/dist/new.js",
+            "failing_command": "git status --porcelain --untracked-files=all",
+            "exit_code": 0,
+        }, eid="clean-current", corr="trace-clean"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2, config=config)
+
+    assert len(plans) == 1
+    assert plans[0].action == "replan"
+    assert plans[0].attempt == 2
 
 
 def test_admitted_plan_port_dependency_plans_replan_not_dev_retrigger():
@@ -645,6 +844,291 @@ def test_infra_only_verify_failure_does_not_consume_rework_budget():
     assert plans[0].action == "replan"
 
 
+def test_legacy_idle_timeout_does_not_plan_candidate_rework():
+    events = [
+        _ev("fanout.started", {
+            "fanout_id": "fanout-candidate-runtime-timeout",
+            "pdd_id": "PDD-RUNTIME",
+        }, eid="fs-runtime"),
+        _ev("fanout.child.failed", {
+            "fanout_id": "fanout-candidate-runtime-timeout",
+            "child_id": "verify-lane-1",
+            "reason": "idle",
+            "timeout_seconds": 7200,
+            "trace_id": "run-runtime",
+        }, eid="fc-runtime", corr="run-runtime"),
+        _ev("test.failed", {
+            "fanout_id": "fanout-candidate-runtime-timeout",
+            "target_ref": "refs/heads/candidate/PDD-RUNTIME",
+            "reason": "timeout",
+            "timeout_seconds": 7200,
+            "trace_id": "run-runtime",
+        }, eid="tf-runtime", corr="run-runtime"),
+    ]
+
+    assert plan_candidate_rework(events, max_attempts=2) == []
+
+
+def test_candidate_verify_rejection_uses_current_fanout_and_survives_reemit():
+    result = {
+        "schema_version": "verification-result.v1",
+        "execution_status": "completed",
+        "verdict": "rejected",
+        "verification_owner": "candidate_verify",
+        "task_id": "PRD-AC25",
+        "requirement_results": [{
+            "acceptance_id": "AC25",
+            "status": "failed",
+            "findings": [{
+                "path": "src/styles/mobility.css",
+                "severity": "high",
+                "message": "inactive mode still occupies the viewport",
+            }],
+        }],
+        "rework_items": [{
+            "rework_item_id": "RW-AC25",
+            "required_delta": "hide inactive mode surfaces",
+            "done_when": "computed display is none",
+        }],
+    }
+    events = [
+        _ev("fanout.started", {
+            "fanout_id": "fanout-old",
+            "pdd_id": "PRD-AC25",
+        }, eid="old-start"),
+        _ev("fanout.child.failed", {
+            "fanout_id": "fanout-old",
+            "child_id": "verify-old",
+            "trace_id": "workflow-1",
+            "reason": "docker registry unavailable",
+        }, eid="old-failed", corr="workflow-1"),
+        _ev("fanout.started", {
+            "fanout_id": "fanout-current",
+            "pdd_id": "PRD-AC25",
+        }, eid="current-start"),
+        _ev("fanout.child.failed", {
+            "fanout_id": "fanout-current",
+            "child_id": "verify-current",
+            "task_id": "PRD-AC25",
+            "parent_task_id": "PRD-AC25",
+            "trace_id": "workflow-1",
+            "semantic_verdict": "rejected",
+            "report": result,
+            "reason": "semantic verdict: rejected",
+        }, eid="current-failed", corr="workflow-1"),
+        _ev("test.failed", {
+            "fanout_id": "fanout-current",
+            "pdd_id": "PRD-AC25",
+            "target_ref": "refs/heads/candidate/PRD-AC25",
+            "trace_id": "workflow-1",
+        }, eid="test-failed", corr="workflow-1"),
+        _ev("candidate.ready", {
+            "fanout_id": "fanout-current",
+            "pdd_id": "PRD-AC25",
+            "candidate_ref": "refs/heads/candidate/PRD-AC25",
+            "source": "workflow_resume_batch",
+            "rework_of": "aggregate-failed",
+            "trace_id": "workflow-1",
+        }, eid="bad-reemit", corr="workflow-1"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    plan = plans[0]
+    assert plan.source_event_id == "test-failed"
+    assert plan.failed_task_ids == ()
+    assert plan.rework_paths == ("src/styles/mobility.css",)
+    assert any("inactive mode still occupies" in line for line in plan.feedback)
+    assert all("docker registry unavailable" not in line for line in plan.feedback)
+
+
+def test_failed_rework_admission_reopens_same_rejection_with_new_checkpoint_seed():
+    events = [
+        _ev("fanout.started", {
+            "fanout_id": "fanout-verify",
+            "pdd_id": "PRD-1",
+        }, eid="verify-started"),
+        _ev("test.failed", {
+            "fanout_id": "fanout-verify",
+            "pdd_id": "PRD-1",
+            "target_ref": "refs/heads/candidate/PRD-1",
+            "trace_id": "workflow-1",
+            "workflow_run_id": "workflow-1",
+            "task_map_generation": "generation-1",
+        }, eid="test-failed", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "workflow_run_id": "workflow-1",
+            "task_map_generation": "generation-2",
+            "supersedes_task_map_generation": "generation-1",
+            "rework_of": "test-failed",
+            "rework_source": "test.failed",
+            "rework_attempt": 1,
+        }, eid="bad-ready", corr="workflow-1"),
+        _ev("fanout.cancelled", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "trigger_event_id": "bad-ready",
+            "failure_scope": "plan_admission",
+            "reason": "superseded_task_map",
+        }, eid="bad-admission", corr="workflow-1"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].source_event_id == "test-failed"
+    assert plans[0].attempt == 1
+    assert plans[0].continuation_failure_ids == ("bad-admission",)
+
+
+def test_candidate_rework_checkpoint_bounds_repeated_continuation_failures():
+    from types import SimpleNamespace
+
+    from zf.runtime.run_manager import _candidate_rework_checkpoint_id
+
+    base = {
+        "pdd_id": "PRD-1",
+        "source_event_id": "test-failed",
+        "action": "retrigger",
+        "attempt": 1,
+    }
+    first = _candidate_rework_checkpoint_id(SimpleNamespace(
+        **base,
+        continuation_failure_ids=("admission-1",),
+    ))
+    second = _candidate_rework_checkpoint_id(SimpleNamespace(
+        **base,
+        continuation_failure_ids=("admission-1", "admission-2"),
+    ))
+    third = _candidate_rework_checkpoint_id(SimpleNamespace(
+        **base,
+        continuation_failure_ids=("admission-1", "admission-2", "admission-3"),
+    ))
+
+    assert first != second
+    assert second == third
+
+
+def test_structural_failure_of_latest_continuation_replans_original_rejection():
+    events = [
+        _ev("test.failed", {
+            "fanout_id": "fanout-verify",
+            "pdd_id": "PRD-1",
+            "target_ref": "refs/heads/candidate/PRD-1",
+            "trace_id": "workflow-1",
+            "workflow_run_id": "workflow-1",
+            "task_map_generation": "generation-1",
+        }, eid="test-failed", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "workflow_run_id": "workflow-1",
+            "task_map_generation": "generation-2",
+            "rework_of": "test-failed",
+            "rework_source": "test.failed",
+            "rework_attempt": 1,
+        }, eid="first-ready", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "workflow_run_id": "workflow-1",
+            "task_map_generation": "generation-2",
+            "rework_of": "test-failed",
+            "rework_source": "test.failed",
+            "rework_attempt": 1,
+        }, eid="bad-ready", corr="workflow-1"),
+        _ev("fanout.cancelled", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "trigger_event_id": "bad-ready",
+            "failure_scope": "plan_admission",
+            "reason": (
+                "writer fanout task_map has overlapping allowed paths "
+                "'src/app/**' and 'src/app/main.ts'"
+            ),
+        }, eid="bad-admission", corr="workflow-1"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].source_event_id == "test-failed"
+    assert plans[0].action == "replan"
+    assert plans[0].classification == "design_issue"
+    assert plans[0].continuation_failure_ids == ("bad-admission",)
+    assert any("overlapping allowed paths" in line for line in plans[0].feedback)
+
+
+def test_successful_marker_after_failed_continuation_handles_rejection():
+    events = [
+        _ev("test.failed", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+        }, eid="test-failed", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "rework_of": "test-failed",
+        }, eid="bad-ready", corr="workflow-1"),
+        _ev("fanout.cancelled", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "trigger_event_id": "bad-ready",
+            "failure_scope": "plan_admission",
+            "reason": "plan artifact package admission failed",
+        }, eid="bad-admission", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "rework_of": "test-failed",
+        }, eid="good-ready", corr="workflow-1"),
+    ]
+
+    assert plan_candidate_rework(events, max_attempts=2) == []
+
+
+def test_latest_failed_continuation_outranks_newer_handled_rejection():
+    events = [
+        _ev("test.failed", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+        }, eid="older-failure", corr="workflow-1"),
+        _ev("test.failed", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+        }, eid="newer-failure", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "rework_of": "newer-failure",
+        }, eid="newer-handled", corr="workflow-1"),
+        _ev("task_map.ready", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "rework_of": "older-failure",
+        }, eid="older-bad-ready", corr="workflow-1"),
+        _ev("fanout.cancelled", {
+            "pdd_id": "PRD-1",
+            "trace_id": "workflow-1",
+            "trigger_event_id": "older-bad-ready",
+            "failure_scope": "plan_admission",
+            "reason": (
+                "writer fanout task_map has overlapping allowed paths "
+                "'src/app/**' and 'src/app/main.ts'"
+            ),
+        }, eid="older-admission-failed", corr="workflow-1"),
+    ]
+
+    plans = plan_candidate_rework(events, max_attempts=2)
+
+    assert len(plans) == 1
+    assert plans[0].source_event_id == "older-failure"
+    assert plans[0].action == "replan"
+
+
 def test_already_handled_rejection_is_skipped():
     events = [
         _ev("review.rejected", {"target_ref": "cand/CJMIN-1"}, eid="r1"),
@@ -1046,6 +1530,33 @@ def test_old_candidate_generation_is_audit_only():
     assert plan_candidate_rework(events) == []
 
 
+def test_late_failure_from_old_candidate_generation_is_audit_only():
+    events = [
+        _ev(
+            "task_map.ready",
+            {
+                "pdd_id": "CJMIN-1",
+                "workflow_run_id": "run-1",
+                "task_map_generation": "generation-2",
+                "task_map_ref": "artifacts/task-map-v2.json",
+            },
+            eid="new-generation",
+        ),
+        _ev(
+            "test.failed",
+            {
+                "pdd_id": "CJMIN-1",
+                "workflow_run_id": "run-1",
+                "task_map_generation": "generation-1",
+                "status": "failed",
+            },
+            eid="late-old-failure",
+        ),
+    ]
+
+    assert plan_candidate_rework(events) == []
+
+
 def test_multiple_rejections_same_pdd_plan_once():
     # two review.rejected for the same candidate must yield ONE rework,
     # not double-trigger the writer fanout.
@@ -1256,6 +1767,245 @@ def test_multi_flow_replan_uses_the_prd_plan_trigger() -> None:
     assert event.payload["flow_kind"] == "prd"
 
 
+def test_replan_resynth_rebinds_stale_package_to_current_generation() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="prd.scan.completed",
+            ),
+            stages=[],
+        ),
+    )
+    events = [
+        _ev(
+            "prd.scan.completed",
+            {
+                "workflow_run_id": "prd-run",
+                "trace_id": "prd-run",
+                "pdd_id": "PRD-1",
+                "task_map_generation": "generation-old",
+                "plan_artifact_package_id": "planpkg-old",
+                "plan_artifact_package_ref": "artifacts/plan-packages/old.json",
+                "plan_artifact_package_digest": "digest-old",
+                "goal_claim_set_ref": "artifacts/claims-old.json",
+                "goal_claim_set_digest": "claims-old-digest",
+            },
+            eid="scan-old",
+            corr="prd-run",
+        ),
+        _ev(
+            "goal.claim_set.pinned",
+            {
+                "workflow_run_id": "prd-run",
+                "task_map_generation": "generation-current",
+                "goal_claim_set_ref": "artifacts/claims-current.json",
+                "goal_claim_set_digest": "claims-current-digest",
+            },
+            eid="claims-current",
+            corr="prd-run",
+        ),
+        _ev(
+            "plan.artifact_package.admitted",
+            {
+                "workflow_run_id": "prd-run",
+                "package_slot": "execution_plan",
+                "task_map_generation": "generation-current",
+                "package_id": "planpkg-current",
+                "package_ref": "artifacts/plan-packages/current.json",
+                "package_digest": "digest-current",
+            },
+            eid="package-current",
+            corr="prd-run",
+        ),
+    ]
+    plan = SimpleNamespace(
+        pdd_id="PRD-1",
+        trace_id="prd-run",
+        workflow_run_id="prd-run",
+        task_map_generation="generation-current",
+        plan_artifact_package_id="planpkg-old",
+        plan_artifact_package_ref="artifacts/plan-packages/old.json",
+        plan_artifact_package_digest="digest-old",
+        target_ref="refs/heads/candidate/PRD-1",
+        source_event_id="plan-rejected",
+        attempt=1,
+        source_event_type="plan.rejected",
+        feedback=("regenerate plan matrices",),
+        failure_categories=(),
+        rework_summary={},
+        classification="ambiguous",
+        flow_kind="prd",
+    )
+
+    event = build_replan_resynth_event(plan=plan, events=events, config=config)
+
+    assert event is not None
+    assert event.payload["task_map_generation"] == "generation-current"
+    assert event.payload["plan_artifact_package_id"] == "planpkg-current"
+    assert event.payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert event.payload["plan_artifact_package_digest"] == "digest-current"
+    assert event.payload["goal_claim_set_ref"] == "artifacts/claims-current.json"
+    assert event.payload["goal_claim_set_digest"] == "claims-current-digest"
+
+
+def test_replan_resynth_rebinds_rejected_generation_to_current_package() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="prd.scan.completed",
+            ),
+            stages=[],
+        ),
+    )
+    events = [
+        _ev(
+            "prd.scan.completed",
+            {
+                "workflow_run_id": "prd-run",
+                "trace_id": "prd-run",
+                "pdd_id": "PRD-1",
+            },
+            eid="scan-old",
+            corr="prd-run",
+        ),
+        _ev(
+            "plan.artifact_package.admitted",
+            {
+                "workflow_run_id": "prd-run",
+                "package_slot": "execution_plan",
+                "task_map_generation": "generation-rejected",
+                "package_id": "planpkg-rejected",
+                "package_ref": "artifacts/plan-packages/rejected.json",
+                "package_digest": "digest-rejected",
+            },
+            eid="package-rejected",
+            corr="prd-run",
+        ),
+        _ev(
+            "plan.artifact_package.admitted",
+            {
+                "workflow_run_id": "prd-run",
+                "package_slot": "execution_plan",
+                "task_map_generation": "generation-current",
+                "package_id": "planpkg-current",
+                "package_ref": "artifacts/plan-packages/current.json",
+                "package_digest": "digest-current",
+            },
+            eid="package-current",
+            corr="prd-run",
+        ),
+    ]
+    plan = SimpleNamespace(
+        pdd_id="PRD-1",
+        trace_id="prd-run",
+        workflow_run_id="prd-run",
+        task_map_generation="generation-rejected",
+        plan_artifact_package_id="planpkg-rejected",
+        plan_artifact_package_ref="artifacts/plan-packages/rejected.json",
+        plan_artifact_package_digest="digest-rejected",
+        target_ref="refs/heads/candidate/PRD-1",
+        source_event_id="plan-rejected",
+        attempt=1,
+        source_event_type="plan.rejected",
+        feedback=("restore mandatory claims",),
+        failure_categories=(),
+        rework_summary={},
+        classification="ambiguous",
+        flow_kind="prd",
+    )
+
+    event = build_replan_resynth_event(plan=plan, events=events, config=config)
+
+    assert event is not None
+    assert event.payload["task_map_generation"] == "generation-current"
+    assert event.payload["plan_artifact_package_id"] == "planpkg-current"
+    assert event.payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert event.payload["plan_artifact_package_digest"] == "digest-current"
+
+
+def test_replan_resynth_prioritizes_latest_plan_rejection_owner_delta() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="prd.scan.completed",
+            ),
+            stages=[],
+        ),
+    )
+    delta = {
+        "directives": [{
+            "directive_id": "final-two-task-closure",
+            "required_actions": [
+                "Keep exactly the AC8 receipt and candidate audit tasks.",
+                "Preserve the three mandatory inherited Goal claims.",
+            ],
+        }],
+    }
+    events = [
+        _ev(
+            "prd.scan.completed",
+            {
+                "workflow_run_id": "prd-run",
+                "trace_id": "prd-run",
+                "pdd_id": "PRD-1",
+                "rework_feedback": ["old eight-task feedback"],
+            },
+            eid="scan-old",
+            corr="prd-run",
+        ),
+        _ev(
+            "plan.rejected",
+            {
+                "plan_id": "plan-old",
+                "reason": "Owner-authorized final continuation.",
+                "reason_codes": ["mandatory_goal_claim_continuity"],
+                "orchestration_delta": delta,
+                "operator_override": True,
+                "owner_authorization": "continue_until_complete",
+            },
+            eid="plan-rejected-final",
+            corr="prd-run",
+        ),
+    ]
+    plan = SimpleNamespace(
+        pdd_id="PRD-1",
+        trace_id="prd-run",
+        workflow_run_id="prd-run",
+        target_ref="refs/heads/candidate/PRD-1",
+        source_event_id="plan-rejected-final",
+        attempt=1,
+        source_event_type="plan.rejected",
+        feedback=("old eight-task feedback",),
+        failure_categories=(),
+        rework_summary={},
+        classification="ambiguous",
+        flow_kind="prd",
+    )
+
+    event = build_replan_resynth_event(plan=plan, events=events, config=config)
+
+    assert event is not None
+    assert event.payload["rework_feedback"][0] == (
+        "plan-rejection: Owner-authorized final continuation."
+    )
+    assert event.payload["rework_feedback"][-1] == "old eight-task feedback"
+    assert event.payload["required_actions"] == [
+        "Keep exactly the AC8 receipt and candidate audit tasks.",
+        "Preserve the three mandatory inherited Goal claims.",
+    ]
+    assert event.payload["orchestration_delta"] == delta
+    assert event.payload["operator_override"] is True
+    assert event.payload["owner_authorization"] == "continue_until_complete"
+    assert "plan_artifact_package_id" not in event.payload
+
+
 def test_single_flow_replan_keeps_configured_resynth_trigger() -> None:
     config = _replan_config()
     plan = SimpleNamespace(
@@ -1330,6 +2080,84 @@ def test_replan_followthrough_repairs_a_cross_flow_trigger() -> None:
 
     assert [event.type for event in repairs] == ["prd.scan.completed"]
     assert repairs[0].payload["rework_of"] == "blocked-1"
+
+
+def test_replan_followthrough_carries_causal_human_resolution() -> None:
+    config = SimpleNamespace(
+        workflow=SimpleNamespace(
+            admission_replan=SimpleNamespace(
+                enabled=True,
+                resynth_trigger="prd.scan.completed",
+            ),
+            stages=[],
+        ),
+    )
+    resolution = SimpleNamespace(
+        type="human.resolved",
+        id="human-resolution-1",
+        actor="operator",
+        task_id="PRD-1",
+        correlation_id="prd-run",
+        causation_id="escalation-1",
+        payload={
+            "schema_version": "human-resolution.v1",
+            "resolved_event_id": "escalation-1",
+            "source_failure_event_id": "plan-rejected-1",
+            "action": "start_new_generation",
+            "response": "Keep AC24 command-free and the release audit runtime-only.",
+            "contract_evidence_refs": ["git:" + "a" * 40],
+        },
+    )
+    marker = SimpleNamespace(
+        type="orchestrator.replan_requested",
+        id="replan-1",
+        actor="operator",
+        task_id="PRD-1",
+        correlation_id="prd-run",
+        causation_id="human-resolution-1",
+        payload={
+            "workflow_run_id": "prd-run",
+            "flow_kind": "prd",
+            "pdd_id": "PRD-1",
+            "source_commit": "a" * 40,
+            "candidate_base_commit": "a" * 40,
+            "rework_of": "plan-rejected-1",
+            "rework_source": "plan.rejected",
+            "rework_attempt": 2,
+            "previous_plan_candidate_refs": [{
+                "ref": "artifacts/plan/task-map.json",
+                "sha256": "b" * 64,
+            }],
+            "required_actions": ["Preserve the exact owner resolution."],
+        },
+    )
+
+    repairs = plan_missing_replan_resynth_events(
+        [resolution, marker],
+        config=config,
+    )
+
+    assert len(repairs) == 1
+    assert repairs[0].payload["human_resolution"] == {
+        "schema_version": "human-resolution.v1",
+        "source_event_id": "human-resolution-1",
+        "source_ref": "events.jsonl#human-resolution-1",
+        "actor": "operator",
+        "resolved_event_id": "escalation-1",
+        "source_failure_event_id": "plan-rejected-1",
+        "action": "start_new_generation",
+        "response": "Keep AC24 command-free and the release audit runtime-only.",
+        "contract_evidence_refs": ["git:" + "a" * 40],
+    }
+    assert repairs[0].payload["previous_plan_candidate_refs"] == [{
+        "ref": "artifacts/plan/task-map.json",
+        "sha256": "b" * 64,
+    }]
+    assert repairs[0].payload["required_actions"] == [
+        "Preserve the exact owner resolution.",
+    ]
+    assert repairs[0].payload["source_commit"] == "a" * 40
+    assert repairs[0].payload["candidate_base_commit"] == "a" * 40
 
 
 def test_replan_followthrough_does_not_repeat_after_task_map_progress() -> None:

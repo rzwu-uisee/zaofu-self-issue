@@ -77,6 +77,9 @@ def normalize_verification_commands(
         producer_paths = _string_list(record.get("producer_paths"))
         if producer_paths:
             normalized["producer_paths"] = producer_paths
+        producer_task_id = str(record.get("producer_task_id") or "").strip()
+        if producer_task_id:
+            normalized["producer_task_id"] = producer_task_id
         if "rolling_smoke" in record:
             marker = record["rolling_smoke"]
             if not isinstance(marker, bool):
@@ -177,11 +180,19 @@ def verification_command_required_for_stage(
     command: Mapping[str, Any],
     *,
     verification_owner: str,
+    task_id: str = "",
 ) -> bool:
     """Select the canonical command subset required by a verification stage."""
 
     command_owner = str(command.get("owner") or "impl_self_check").strip()
     stage_owner = str(verification_owner or "").strip()
+    producer_task_id = str(command.get("producer_task_id") or "").strip()
+    if (
+        producer_task_id
+        and stage_owner in {"impl_self_check", "task_verify", "candidate_verify"}
+        and producer_task_id != str(task_id or "").strip()
+    ):
+        return False
     if stage_owner == "impl_self_check":
         return command_owner == "impl_self_check"
     if stage_owner == "task_verify":

@@ -85,6 +85,21 @@ def test_synthesis_prompt_states_mechanical_json_types() -> None:
     assert "All plural fields must be JSON arrays" in prompt
 
 
+def test_contribution_prompt_states_exact_question_enums() -> None:
+    prompt = channel_reply_response_contract(
+        _channel(),
+        {
+            "thread_id": "main",
+            "message_id": "msg-requirement",
+        },
+        {"message_id": "msg-requirement"},
+    )
+
+    assert "fact|owner_decision|tradeoff|clarification" in prompt
+    assert "p0|p1|p2|p3" in prompt
+    assert "critical, high, medium, or low" in prompt
+
+
 def test_consensus_review_prompt_pins_canonical_artifact_digest() -> None:
     prompt = channel_reply_response_contract(
         {},
@@ -429,6 +444,16 @@ def test_malformed_contract_and_unknown_classification_fail_closed(
         "invalid_channel_contribution"
     )
     assert finding.payload["contract_error"] == "questions must be a list"
+    assert finding.payload["request_id"] == "reply-researcher"
+    failed = next(
+        event
+        for event in events
+        if event.type == "channel.agent.reply.failed"
+    )
+    assert failed.payload["failure_class"] == (
+        "channel_contribution_contract_invalid"
+    )
+    assert failed.payload["retryable"] is True
     assert not any(
         event.type == "channel.questions.frozen" for event in events
     )
@@ -467,6 +492,46 @@ def test_malformed_contract_and_unknown_classification_fail_closed(
         for event in events
     )
 
+
+def test_question_graph_contract_failure_is_retryable(tmp_path: Path) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _emit_contribution(
+        state_dir,
+        writer,
+        _channel(),
+        {
+            "summary": "Priority alias drifted.",
+            "questions": [{
+                "id": "q-priority",
+                "question": "Which rollout is approved?",
+                "kind": "owner_decision",
+                "priority": "high",
+                "target_member_id": "owner",
+            }],
+            "freeze": True,
+        },
+    )
+
+    events = writer.event_log.read_all()
+    finding = next(
+        event
+        for event in events
+        if event.type == "channel.finding.recorded"
+    )
+    assert finding.payload["contract_status"] == (
+        "invalid_channel_contribution_question_graph"
+    )
+    assert finding.payload["contract_error"] == "invalid_question_priority:high"
+    failed = next(
+        event
+        for event in events
+        if event.type == "channel.agent.reply.failed"
+    )
+    assert failed.payload["run_generation"] == 1
+    assert failed.payload["failure_status"] == "contract_invalid"
+    assert not any(
+        event.type == "channel.questions.frozen" for event in events
+    )
 
 def test_synthesis_malformed_json_requests_bounded_repair_and_recovers(
     tmp_path: Path,

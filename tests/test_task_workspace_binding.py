@@ -101,6 +101,29 @@ def test_task_workspaces_isolate_worker_reuse_and_restore_rework(
     assert task_c.project_path != task_a.project_path
 
 
+def test_existing_task_workspace_keeps_frozen_base_when_candidate_advances(
+    tmp_path: Path,
+) -> None:
+    manager, role, base = _manager(tmp_path)
+    task = _prepare(manager, role, base, "TASK-A")
+    task_path = Path(task.project_path)
+    (task_path / "task.txt").write_text("task work\n", encoding="utf-8")
+    _git(task_path, "add", "task.txt")
+    _git(task_path, "commit", "-q", "-m", "task work")
+    task_head = _git(task_path, "rev-parse", "HEAD")
+
+    (tmp_path / "candidate.txt").write_text("candidate work\n", encoding="utf-8")
+    _git(tmp_path, "add", "candidate.txt")
+    _git(tmp_path, "commit", "-q", "-m", "advance candidate")
+    advanced_candidate = _git(tmp_path, "rev-parse", "HEAD")
+
+    resumed = _prepare(manager, role, advanced_candidate, "TASK-A")
+
+    assert resumed.project_path == task.project_path
+    assert resumed.base_commit == base
+    assert _git(task_path, "rev-parse", "HEAD") == task_head
+
+
 def test_task_workspace_generation_and_base_are_currentness_fences(
     tmp_path: Path,
 ) -> None:

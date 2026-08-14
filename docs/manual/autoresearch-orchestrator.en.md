@@ -20,7 +20,10 @@ The Autoresearch Orchestrator:
 
 Implementation is under `src/zf/autoresearch/`; CLI wiring is in
 `src/zf/cli/autoresearch.py`; the default runner is `tests.e2e.run_mixed`; and
-the default template is `examples/dev-codex-backends.yaml`.
+the default template is
+`examples/prod/controller/prd-task-pipeline-v4-canary.yaml`. Controller runs
+enter through `flow intake -> flow clarify -> flow submit`, not the deprecated
+legacy `user.message` startup path.
 
 ## 2. Prerequisites
 
@@ -50,7 +53,7 @@ WT="/tmp/zaofu-autoresearch-${STAMP}"
 PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
   --scenario self-eval-backlog \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 4 \
   --timeout 10800 \
   --budget-usd 500 \
@@ -73,8 +76,9 @@ tail -f "$WT/.zf/events.jsonl"
 (cd "$WT" && PYTHONPATH=/path/to/zaofu/src python3 -m zf.cli.main kanban --board)
 ```
 
-Track done counts, fatal events, actual multi-worker distribution, repeated
-stalls, and budget. Fatal types include dispatch failure, invalid transition,
+Track `run.goal.completed`, done counts, fatal events, actual multi-worker
+distribution, repeated stalls, and budget. A done count is progress evidence,
+not a substitute for the controller Run terminal. Fatal types include dispatch failure, invalid transition,
 budget exhaustion, failed run or ship, orphaned task, failed respawn/recycle,
 and failed stuck recovery.
 
@@ -103,7 +107,7 @@ events use actor `zf-autoresearch` and source `autoresearch`.
 |---|---|
 | `--scenario` | Built-in scenario name |
 | `--worktree` | Isolated worktree; required |
-| `--config` | YAML template |
+| `--config` | v4 controller template by default; select the matching v3 controller explicitly for compatibility coverage |
 | `--expected-done` | Required completed task count |
 | `--timeout` | Inner runner timeout |
 | `--budget-usd` | Global budget written into test config |
@@ -145,7 +149,7 @@ Stop and remove only resources belonging to this run.
 
 ## 11. Acceptance
 
-Require inner exit code zero, enough done transitions, no fatal event, all core
+Require inner exit code zero, `run.goal.completed`, enough done transitions, no fatal event, all core
 artifacts present, real multi-worker distribution where expected, and an
 actionable backlog with report and reproduction command when the run fails.
 The `self-eval-backlog` scenario is designed to expose implementation defects in

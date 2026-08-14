@@ -356,6 +356,60 @@ def test_restore_ignores_nonterminal_operation_from_terminal_run(
     assert coordinator.spawned == []
 
 
+def test_restore_recovers_operation_after_blocked_run_is_reactivated(
+    tmp_path: Path,
+) -> None:
+    orchestrator, transport, _coordinator = _orchestrator(tmp_path)
+    payload = _payload()
+    payload["flow_kind"] = "issue"
+    payload["workflow_run_id"] = "run-resumed"
+    payload["workflow_operation_id"] = "wop-resumed"
+    activate_flow_roles(orchestrator, payload=payload)
+    operation = {
+        "workflow_run_id": "run-resumed",
+        "operation_id": "wop-resumed-issue-fix",
+        "operation_type": "agent",
+        "request_hash": "e" * 64,
+        "role_instance": "issue-fix",
+        "task_id": "TASK-RESUMED",
+    }
+    for event_type in (
+        "workflow.operation.requested",
+        "workflow.operation.started",
+    ):
+        orchestrator.event_writer.append(ZfEvent(
+            type=event_type,
+            actor="kernel",
+            task_id="TASK-RESUMED",
+            payload=operation,
+            correlation_id="run-resumed",
+        ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="kernel",
+        task_id="TASK-RESUMED",
+        payload={"run_id": "run-resumed"},
+        correlation_id="run-resumed",
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        task_id="TASK-RESUMED",
+        payload={"run_id": "run-resumed", "status": "active"},
+        correlation_id="run-resumed",
+    ))
+
+    restored, _transport, coordinator = _orchestrator(
+        tmp_path,
+        transport=transport,
+    )
+    results = restore_flow_role_activations(restored)
+
+    assert results[0].status == "recovered"
+    assert results[0].recovered_instance_ids == ("issue-fix",)
+    assert [item[0] for item in coordinator.spawned] == ["issue-fix"]
+
+
 def test_activation_prepares_workdir_before_materializing_role_skills(
     tmp_path: Path,
     monkeypatch,

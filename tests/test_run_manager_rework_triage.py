@@ -25,7 +25,11 @@ from zf.core.task.store import TaskStore
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_briefing import build_orchestrator_briefing
 from zf.runtime.rework_triage import classify_rework_trigger
-from zf.runtime.run_manager import build_run_manager_projection, run_manager_tick
+from zf.runtime.run_manager import (
+    _prioritize_pending_actions,
+    build_run_manager_projection,
+    run_manager_tick,
+)
 from zf.runtime.run_manager_rework_triage import (
     TRIAGE_RECORDED,
     TRIAGE_REQUESTED,
@@ -81,6 +85,118 @@ def _failure(round_number: int) -> ZfEvent:
             "reason": "missing expiry test",
         },
     )
+
+
+def test_evidenced_scope_blocker_without_failure_class_requests_replan() -> None:
+    blocked = ZfEvent(
+        id="evt-live-scope-blocker",
+        type="dev.blocked",
+        actor="issue-fix-lane-0",
+        task_id="P0-WEB-GOLDEN",
+        payload={
+            "summary": (
+                "The API cannot supply the selected committed scenario "
+                "document, and adding that API is outside this child contract."
+            ),
+            "evidence_refs": [
+                "git:3e46b45",
+                "file:src/scenarioforge/api/app.py",
+            ],
+        },
+    )
+
+    result = classify_rework_trigger(blocked)
+
+    assert result.classification == "design_issue"
+    assert result.gate_rule == "task_contract"
+    assert result.suspected_owner == "planner"
+    assert result.recommended_action == "request_replan"
+    assert result.should_increment_retry is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "summary": "Adding that API is outside this child contract.",
+            "evidence_refs": [],
+        },
+        {
+            "summary": "The current contract needs more investigation.",
+            "evidence_refs": ["file:src/api.py"],
+        },
+    ],
+)
+def test_unproven_or_ambiguous_blocker_does_not_request_replan(
+    payload: dict[str, object],
+) -> None:
+    blocked = ZfEvent(
+        id="evt-ambiguous-blocker",
+        type="dev.blocked",
+        actor="dev",
+        task_id="TASK-1",
+        payload=payload,
+    )
+
+    result = classify_rework_trigger(blocked)
+
+    assert result.recommended_action != "request_replan"
+
+
+def test_semantic_replan_preempts_stale_mechanical_batch_resume() -> None:
+    ready = {
+        "preflight": {"status": "passed"},
+        "policy_decision": {"decision": "auto_decide"},
+    }
+    actions = _prioritize_pending_actions([
+        {
+            **ready,
+            "action": "workflow-batch-resume",
+            "safe_resume_action": "reemit_candidate_ready",
+            "checkpoint_id": "stale-batch",
+        },
+        {
+            **ready,
+            "action": SEMANTIC_REPLAN_ACTION,
+            "safe_resume_action": "request_semantic_replan",
+            "checkpoint_id": "current-contract-replan",
+        },
+    ])
+
+    assert actions[0]["action"] == SEMANTIC_REPLAN_ACTION
+    assert actions[1]["action"] == "workflow-batch-resume"
+
+
+def test_manual_external_gate_preempts_auto_resume_and_diagnosis() -> None:
+    ready = {
+        "preflight": {"status": "passed"},
+        "policy_decision": {"decision": "auto_decide"},
+    }
+    actions = _prioritize_pending_actions([
+        {
+            **ready,
+            "action": "workflow-batch-resume",
+            "safe_resume_action": "repair_failed_children",
+            "checkpoint_id": "stale-batch",
+        },
+        {
+            "action": "diagnose-attention",
+            "safe_resume_action": "diagnose_attention",
+            "checkpoint_id": "stale-diagnosis",
+            "preflight": {"status": "passed"},
+            "policy_decision": {"decision": "needs_diagnosis"},
+        },
+        {
+            "action": "orchestrator-triage-advice-apply",
+            "safe_resume_action": "blocked_external_gate",
+            "checkpoint_id": "manual-gate",
+            "failure_class": "manual_evidence_required",
+            "preflight": {"status": "passed"},
+            "policy_decision": {"decision": "human_escalate"},
+        },
+    ])
+
+    assert actions[0]["checkpoint_id"] == "manual-gate"
 
 
 def test_first_unsatisfiable_contract_routes_to_semantic_replan(
@@ -252,6 +368,164 @@ def test_first_unsatisfiable_contract_routes_to_semantic_replan(
         event for event in log.read_all()
         if event.type == "flow.discovery.requested"
     ]) == 1
+
+
+def test_required_manual_evidence_waits_at_recoverable_human_gate(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    required_ref = "artifacts/evidence/manual/acceptance.json"
+    store.add(Task(
+        id="TASK-MANUAL-AUDIT",
+        title="run write-free release audit",
+        status="in_progress",
+        assigned_to="dev-lane-1",
+        contract=TaskContract(
+            feature_id="PRD-MANUAL",
+            behavior="audit release evidence without fabricating human input",
+            evidence_contract={"required_manual_evidence": required_ref},
+        ),
+    ))
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev-lane-1",
+        task_id="TASK-MANUAL-AUDIT",
+        correlation_id="manual-run",
+        payload={
+            "workflow_run_id": "manual-run",
+            "failure_class": "upstream_contract_gap",
+            "blocker_kind": "upstream_contract_gap",
+            "reason": "independent human acceptance receipt is absent",
+            "evidence_refs": ["command:release-audit#exit=1"],
+        },
+    )
+    triage = writer.emit(
+        "task.rework.triage.completed",
+        actor="zf-cli",
+        task_id="TASK-MANUAL-AUDIT",
+        correlation_id="manual-run",
+        payload={
+            "task_id": "TASK-MANUAL-AUDIT",
+            "failed_event_id": blocked.id,
+            "classification": "design_issue",
+            "recommended_action": "request_replan",
+            "retryable": False,
+        },
+    )
+    legacy_replan = pending_immediate_replan_actions(log.read_all())[0]
+    assert legacy_replan["action"] == SEMANTIC_REPLAN_ACTION
+    writer.emit(
+        "run.manager.action.applied",
+        actor="run-manager",
+        task_id="TASK-MANUAL-AUDIT",
+        payload={
+            "checkpoint_id": legacy_replan["checkpoint_id"],
+            "action": SEMANTIC_REPLAN_ACTION,
+            "status": "applied",
+        },
+    )
+
+    actions = pending_immediate_replan_actions(
+        log.read_all(),
+        task_store=store,
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["safe_resume_action"] == "blocked_external_gate"
+    assert actions[0]["owner_route"] == "human"
+    assert actions[0]["required_evidence_refs"] == [required_ref]
+    assert actions[0]["recorded_event_id"] == triage.id
+
+    result = run_manager_tick(
+        state_dir=state_dir,
+        writer=writer,
+        config=_config(with_orchestrator=True),
+        event_log=log,
+        spawn_repairs=False,
+    )
+
+    assert result.actions_blocked == 1
+    events = log.read_all()
+    blocked_action = next(
+        event
+        for event in events
+        if event.type == "run.manager.action.blocked"
+    )
+    escalation = next(event for event in events if event.type == "human.escalate")
+    assert blocked_action.task_id == "TASK-MANUAL-AUDIT"
+    assert blocked_action.correlation_id == "manual-run"
+    assert blocked_action.payload["suggested_options"] == [
+        "provide_required_evidence",
+        "safe_halt",
+    ]
+    assert blocked_action.payload["question"] == (
+        "请按任务合约提供独立人工验收证据，完成后由 operator 恢复重验。"
+    )
+    assert escalation.correlation_id == "manual-run"
+    assert escalation.payload["run_id"] == "manual-run"
+    assert escalation.payload["workflow_run_id"] == "manual-run"
+    assert escalation.payload["failure_class"] == "manual_evidence_required"
+    assert escalation.payload["blocker_kind"] == "external_gate"
+    assert escalation.payload["required_evidence_refs"] == [required_ref]
+    assert escalation.payload["resume_condition"] == (
+        "required_manual_evidence_present_and_reverified"
+    )
+    assert not {
+        "flow.discovery.requested",
+        "verify.parity_scan.requested",
+        "run.manager.autoresearch.requested",
+        "run.goal.blocked",
+    }.intersection(event.type for event in events)
+    assert pending_immediate_replan_actions(
+        events,
+        task_store=store,
+    ) == []
+
+
+def test_manual_evidence_contract_does_not_capture_code_replan(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-CODE-GAP",
+        title="repair code contract",
+        status="in_progress",
+        contract=TaskContract(
+            evidence_contract={
+                "required_manual_evidence": "artifacts/evidence/manual.json",
+            },
+        ),
+    ))
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev",
+        task_id="TASK-CODE-GAP",
+        payload={
+            "failure_class": "task_contract_unsatisfiable",
+            "reason": "owned code paths cannot satisfy the current contract",
+        },
+    )
+    writer.emit(
+        "task.rework.triage.completed",
+        actor="zf-cli",
+        task_id="TASK-CODE-GAP",
+        payload={
+            "task_id": "TASK-CODE-GAP",
+            "failed_event_id": blocked.id,
+            "recommended_action": "request_replan",
+            "retryable": False,
+        },
+    )
+
+    actions = pending_immediate_replan_actions(
+        log.read_all(),
+        task_store=store,
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["action"] == SEMANTIC_REPLAN_ACTION
 
 
 def test_semantic_replan_preserves_current_handoff_and_candidate_identity(
@@ -437,6 +711,86 @@ def test_semantic_replan_preserves_current_handoff_and_candidate_identity(
     }
 
 
+def test_semantic_replan_keeps_admitted_task_map_over_stale_candidate(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    old_task_map = state_dir / "artifacts" / "PRD-MAP" / "task-map-v1.json"
+    current_task_map = state_dir / "artifacts" / "PRD-MAP" / "task-map-v2.json"
+    old_task_map.parent.mkdir(parents=True)
+    old_task_map.write_text(
+        '{"schema_version":"task-map.v1","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    current_task_map.write_text(
+        '{"schema_version":"task-map.v1","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    TaskStore(state_dir / "kanban.json").add(Task(
+        id="TASK-MAP-CURRENT",
+        title="repair current task map",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            feature_id="PRD-MAP",
+            behavior="repair current task map",
+            evidence_contract={
+                "source_refs": {"task_map_ref": str(old_task_map)},
+            },
+        ),
+    ))
+    writer.emit(
+        "task_map.admitted",
+        actor="zf-cli",
+        correlation_id="prd-map-run",
+        payload={
+            "pdd_id": "PRD-MAP",
+            "feature_id": "PRD-MAP",
+            "task_map_ref": str(current_task_map),
+        },
+    )
+    writer.emit(
+        "candidate.ready",
+        actor="zf-cli",
+        correlation_id="prd-map-run",
+        payload={
+            "pdd_id": "PRD-MAP",
+            "feature_id": "PRD-MAP",
+            "task_map_ref": str(old_task_map),
+            "candidate_ref": "candidate/PRD-MAP",
+            "candidate_head_commit": "candidate-current",
+        },
+    )
+    config = _config()
+    config.roles.append(RoleConfig(
+        name="flow-discovery",
+        backend="mock",
+        skills=["zf-gap-task-synth"],
+    ))
+    config.workflow.stages.append(WorkflowStageConfig(
+        id="prd-post-verify-discovery",
+        trigger="flow.discovery.requested",
+        topology="fanout_reader",
+        roles=["flow-discovery"],
+        flow_kind="prd",
+    ))
+
+    action = enrich_semantic_replan_action(
+        {
+            "action": SEMANTIC_REPLAN_ACTION,
+            "task_id": "TASK-MAP-CURRENT",
+            "source_event_id": "blocked-current-map",
+        },
+        state_dir=state_dir,
+        events=log.read_all(),
+        config=config,
+        project_root=tmp_path,
+    )
+
+    assert action["task_map_ref"] == str(current_task_map)
+    assert action["candidate_head_commit"] == "candidate-current"
+
+
 def test_semantic_replan_does_not_target_candidate_behind_task_base(
     tmp_path: Path,
 ) -> None:
@@ -561,6 +915,94 @@ def test_semantic_replan_does_not_target_candidate_behind_task_base(
     assert action["previous_candidate_ref"] == candidate_head
     assert action["previous_candidate_head_commit"] == candidate_head
     assert action["candidate_head_commit"] == candidate_head
+
+
+def test_semantic_replan_without_candidate_targets_immutable_task_base(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    task_map = state_dir / "artifacts" / "PRD-NO-CANDIDATE" / "task_map.json"
+    task_map.parent.mkdir(parents=True)
+    task_map.write_text(
+        '{"schema_version":"task-map.v1","pdd_id":"PRD-NO-CANDIDATE","tasks":[]}\n',
+        encoding="utf-8",
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-WEB",
+        title="repair a missing API predecessor",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            feature_id="PRD-NO-CANDIDATE",
+            behavior="repair a missing API predecessor",
+            acceptance_criteria=["the Web path loads an authoritative sample"],
+            evidence_contract={
+                "workflow_run_id": "prd-no-candidate-run",
+                "source_refs": {"task_map_ref": str(task_map)},
+            },
+        ),
+    ))
+    identity = current_task_contract_identity(
+        store.get("TASK-WEB"),
+        task_map_ref=str(task_map),
+    )
+    writer.emit(
+        "task_map.ready",
+        actor="zf-cli",
+        correlation_id="prd-no-candidate-run",
+        payload={
+            "workflow_run_id": "prd-no-candidate-run",
+            "pdd_id": "PRD-NO-CANDIDATE",
+            "task_map_ref": str(task_map),
+            "target_ref": "HEAD",
+        },
+    )
+    blocked = writer.emit(
+        "dev.blocked",
+        actor="dev",
+        task_id="TASK-WEB",
+        correlation_id="prd-no-candidate-run",
+        payload={
+            "workflow_run_id": "prd-no-candidate-run",
+            "task_id": "TASK-WEB",
+            "contract_revision": identity["contract_revision"],
+            "task_map_generation": identity["task_map_generation"],
+            "task_ref": "task/TASK-WEB",
+            "base_commit": "task-base-commit",
+        },
+    )
+    config = _config()
+    config.roles.append(RoleConfig(
+        name="prd-flow-discovery",
+        backend="mock",
+        skills=["zf-gap-task-synth"],
+    ))
+    config.workflow.stages.append(WorkflowStageConfig(
+        id="prd-post-verify-discovery",
+        trigger="flow.discovery.requested",
+        topology="fanout_reader",
+        roles=["prd-flow-discovery"],
+        flow_kind="prd",
+    ))
+
+    action = enrich_semantic_replan_action(
+        {
+            "action": SEMANTIC_REPLAN_ACTION,
+            "task_id": "TASK-WEB",
+            "source_event_id": blocked.id,
+            "failure_event_ids": [blocked.id],
+        },
+        state_dir=state_dir,
+        events=log.read_all(),
+        config=config,
+        project_root=tmp_path,
+    )
+
+    assert "candidate_ref" not in action
+    assert action["base_commit"] == "task-base-commit"
+    assert action["target_ref"] == "task-base-commit"
+    assert action["handoff_kind"] == "task_base_recovery"
 
 
 def test_semantic_replan_prefers_failed_task_committed_continuation(
@@ -780,6 +1222,53 @@ def test_immediate_replan_suppression_uses_latest_task_triage() -> None:
         request_replan,
         retry_current_contract,
     ]) == []
+
+
+def test_legacy_typed_scope_blocker_promotes_stale_evidence_triage() -> None:
+    blocked = ZfEvent(
+        id="blocked-legacy",
+        type="dev.blocked",
+        task_id="TASK-1",
+        payload={
+            "summary": (
+                "The upstream simulation controls are outside this task scope."
+            ),
+            "evidence_refs": ["file:src/upstream-controls.ts"],
+            "known_gaps": [
+                "The upstream producer is outside this task's allowed paths."
+            ],
+            "impl_self_check": {
+                "acceptance_results": [{
+                    "acceptance_id": "AC15",
+                    "status": "blocked",
+                    "evidence_refs": ["file:src/upstream-controls.ts"],
+                    "residual_risks": [
+                        "Correcting the producer is outside this task scope."
+                    ],
+                }],
+            },
+        },
+    )
+    stale_triage = ZfEvent(
+        id="triage-legacy",
+        type="task.rework.triage.completed",
+        task_id="TASK-1",
+        payload={
+            "failed_event_id": blocked.id,
+            "classification": "evidence_payload_gap",
+            "recommended_action": "request_evidence_reissue",
+            "retryable": False,
+        },
+    )
+
+    actions = pending_immediate_replan_actions([blocked, stale_triage])
+
+    assert len(actions) == 1
+    assert actions[0]["action"] == SEMANTIC_REPLAN_ACTION
+    assert actions[0]["source_event_id"] == blocked.id
+    assert active_immediate_replan_task_ids([blocked, stale_triage]) == {
+        "TASK-1"
+    }
 
 
 def test_immediate_replan_suppression_ends_when_task_map_supersedes_task() -> None:
@@ -1147,6 +1636,51 @@ def test_missing_orchestrator_advisor_falls_back_without_waiting(
     assert action["failure_class"] == "orchestrator_triage_unavailable"
     assert action["policy_decision"]["decision"] == "needs_diagnosis"
     assert not any(event.type == TRIAGE_REQUESTED for event in log.read_all())
+
+
+def test_task_pipeline_semantic_exhaustion_uses_orchestrator_triage(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, _ = _state(tmp_path)
+    log.append(ZfEvent(
+        id="pipeline-semantic-cap",
+        type="task.pipeline.semantic_rework.exhausted",
+        actor="zf-runtime",
+        task_id="TASK-1",
+        correlation_id="RUN-1",
+        payload={
+            "semantic_triage_contract_version": 1,
+            "task_id": "TASK-1",
+            "workflow_run_id": "RUN-1",
+            "stage_id": "verify",
+            "failure_class": "task_pipeline_semantic_rework_exhausted",
+            "failure_fingerprint": "task-pipeline-semantic:TASK-1:verify:blocked",
+            "failure_count": 3,
+            "retry_count": 2,
+            "failure_event_ids": ["verify-1"],
+            "semantic_triage_required": True,
+            "last_reason": "verify exhausted two semantic reworks",
+        },
+    ))
+
+    projection = build_run_manager_projection(
+        state_dir,
+        events=log.read_all(),
+        config=_config(with_orchestrator=True),
+    )
+
+    actions = [
+        item for item in projection["pending_actions"]
+        if item.get("task_id") == "TASK-1"
+    ]
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["action"] == "orchestrator-rework-triage"
+    assert action["failure_class"] == (
+        "task_pipeline_semantic_rework_exhausted"
+    )
+    assert action["policy_decision"]["decision"] == "auto_decide"
+    assert action["expected_downstream_events"] == [TRIAGE_REQUESTED]
 
 
 def test_aggregate_retry_cap_uses_generic_diagnosis_not_semantic_triage(

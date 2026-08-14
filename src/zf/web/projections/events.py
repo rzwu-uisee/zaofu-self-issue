@@ -227,6 +227,7 @@ def _events_page(
     failed: bool = False,
     blocked: bool = False,
     config: ZfConfig | None = None,
+    require_fresh: bool = False,
 ) -> dict:
     limit = max(1, min(limit, 500))
     try:
@@ -243,6 +244,7 @@ def _events_page(
             failed=failed,
             blocked=blocked,
             config=config,
+            require_fresh=require_fresh,
         )
         if projected is not None:
             return projected

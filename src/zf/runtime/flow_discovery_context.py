@@ -101,6 +101,15 @@ def build_flow_discovery_context(
             else "post_verify_flow_discovery_bridge"
         ),
     }
+    task_pipeline = metadata.get("task_pipeline")
+    task_pipeline = task_pipeline if isinstance(task_pipeline, Mapping) else {}
+    candidate = task_pipeline.get("candidate")
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    rolling_smoke = str(candidate.get("rolling_smoke") or "").strip()
+    if rolling_smoke:
+        request_payload["candidate_policy"] = {
+            "rolling_smoke": rolling_smoke,
+        }
     for key in (
         "task_map_generation",
         "task_map_digest",

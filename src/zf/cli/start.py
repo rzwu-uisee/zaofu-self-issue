@@ -754,6 +754,35 @@ def _requeue_inflight_for_start(
     return True
 
 
+def _refresh_pricing_catalog(config, state_dir: Path) -> None:
+    """Refresh configured pricing without making runtime startup depend on it."""
+
+    cost = getattr(config, "cost", None)
+    url = str(getattr(cost, "pricing_catalog_url", "") or "").strip()
+    if not url:
+        return
+    from zf.core.cost.catalog import (
+        PricingCatalogError,
+        PricingCatalogStore,
+        PricingCatalogSyncService,
+    )
+
+    try:
+        PricingCatalogSyncService(
+            PricingCatalogStore(state_dir),
+            url=url,
+            ttl_seconds=int(
+                getattr(cost, "pricing_refresh_ttl_seconds", 86_400)
+            ),
+            timeout_seconds=float(
+                getattr(cost, "pricing_refresh_timeout_seconds", 10.0)
+            ),
+        ).refresh()
+    except PricingCatalogError as exc:
+        # The bundled/state-dir last-known-good catalog remains available.
+        print(f"Warning: {exc}; using last-known-good pricing", file=sys.stderr)
+
+
 def run(args: argparse.Namespace) -> int:
     project_root = Path.cwd()
     # doc 78 O-7 fix: load the project .env so the watcher (and the O-7
@@ -843,6 +872,8 @@ def run(args: argparse.Namespace) -> int:
     if not state_dir.exists():
         print(f"Error: {state_dir} not found. To fix: run 'zf init'", file=sys.stderr)
         return 1
+    if not dry_run:
+        _refresh_pricing_catalog(config, state_dir)
     session_path = state_dir / "session.yaml"
     if not session_path.exists():
         print(

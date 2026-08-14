@@ -39,7 +39,22 @@ sets. Do this after all prose edits and before the success event:
    acceptance-id sets, owners, tiers, and literal command bodies may not drift.
 5. Every Task must map to its declared capabilities and every capability
    `task_id` must map back to an existing Task; compare both directions.
-6. If the briefing provides a local validator or admission command, run it on
+6. On replan, preserve every prior mandatory `goal_claims[]` contract unless
+   the controlled inputs include an active claim waiver. Copy the canonical
+   `id`, statement, `mandatory`, `acceptance_ids`,
+   `verification_command_ids`, `verification_owner`, and
+   `verification_tier` values from the prior Task Map exactly in meaning; do
+   not keep only the id/text while weakening its closure mapping. Completed
+   implementation may move to an immutable baseline, but that does not
+   authorize deleting, downgrading, renaming, or rewriting its Goal claim.
+   Read the prior Task Map and pinned Goal Claim Set supplied by the briefing,
+   preserve old mandatory claim records, then add only the new gap claims.
+7. If `plan-rework-context` contains `human_resolution`, treat its exact
+   `response`, action, source event, and contract evidence refs as current
+   owner authority. Bind `events.jsonl#<source_event_id>` in the revised plan
+   sources and satisfy the response literally; an older owner confirmation or
+   prior approval does not override this causal resolution.
+8. If the briefing provides a local validator or admission command, run it on
    the final files and repair every finding before submission. Do not invent a
    validator command or substitute an equivalent command for the one supplied.
 
@@ -221,6 +236,7 @@ contract.
       "title": "Implement one vertical slice",
       "summary": "Concrete behavior and scope.",
       "owner_role": "dev-core",
+      "skills_required": ["project-domain-skill"],
       "affinity_tag": "core",
       "wave": 1,
       "dependencies": [],
@@ -253,6 +269,15 @@ those paths explicitly. For greenfield products under a subdirectory, treat that
 subdirectory's package scaffold (for example `app/pyproject.toml`) as the
 project scaffold owner and list it in both `allowed_paths` and
 `shared_conventions.packaging_file`.
+
+`skills_required` is the Planner-owned, machine-readable method contract for a
+Task. When the effective role/skill inventory names a project or domain skill
+that the Task must use, copy that exact registered skill name into this list.
+Use a JSON list of unique, non-empty strings. Do not encode skills only in
+`owner_role`, prose, markdown, or `affinity_tag`, and do not invent an
+unregistered skill from the Task title. Omit the field when no task-specific
+skill is required. The Kernel validates and preserves this declaration through
+canonical Task materialization and replan; it does not infer semantic skills.
 
 Every path in `exclusive_files` has exactly one owner across the entire Task
 Map. A dependency edge, later wave, or serialized execution does not permit a
@@ -369,6 +394,43 @@ For every mandatory acceptance criterion, at least one linked canonical
 acceptance matrix, test matrix, and real-E2E matrix. A command owned only by
 `candidate_verify` cannot satisfy a criterion owned by `task_verify`, even when
 the command text would exercise the same behavior.
+
+Choose the Task Pipeline entry explicitly when a task has no implementation
+delta. These are scheduler semantics, not permission to weaken evidence:
+
+- A normal writer task omits `execution_mode` (or uses `standard`) and declares
+  non-empty `allowed_paths`; it follows Impl then task Verify.
+- A genuinely human-owned gate uses `execution_mode: "external_gate"`, exact
+  `required_manual_evidence`, `allowed_paths: []`, and mandatory criteria owned
+  by `human` at `manual_evidence` tier. Do not create an implementation task to
+  run an interactive command or fabricate the receipt. Bind the task to an
+  immutable `continuation_checkpoint` such as `git:<full commit>`.
+- A write-free candidate audit uses `execution_mode: "runtime_only"` (the
+  scheduler normalizes it to `verify_only`), `runtime_only: true`,
+  `write_free: true`, `allowed_paths: []`, and exact `candidate_target` plus
+  `immutable_baseline`. Its mandatory criteria use `candidate_verify`. A failed
+  audit must not silently become an Impl rework of the same read-only task.
+
+When a candidate audit depends on an external gate, put the gate task in
+`blocked_by` and declare `required_external_digest_env` in the audit's
+`evidence_contract`. The audit command may read that environment variable; the
+Kernel binds its value from the admitted upstream receipt. Keep upstream
+commands in the global registry with their original `producer_task_id`, but do
+not rerun them from the audit task. The audit executes only commands produced
+by itself and owned by its verification layer; retained upstream receipts are
+read-only evidence.
+
+An admitted, completed E2E run may be reused without redispatch only as an
+immutable baseline. In that case the criterion must use
+`evidence_mode: "immutable_baseline_only"`, tier `e2e`, an empty
+`verification_command_ids` list, and evidence refs containing both the exact
+`git:<target_commit>` and retained artifact paths. The matching real-E2E matrix
+row must use `execution_mode: "immutable_baseline_only"`,
+`command_required: false`, the same `target_commit`, the exact
+`origin_command`, and the retained receipts. A runtime aggregation/audit may
+consume those receipts downstream, but its command id and row must remain in
+the runtime test registry; never place that runtime command in the real-E2E
+matrix or use it as the same-tier verifier for the baseline criterion.
 
 Give every acceptance entry a stable id by prefixing the string (e.g.
 `PDD-CORE-001-AC1: ...`; the kernel accepts `acceptance_criteria` as an

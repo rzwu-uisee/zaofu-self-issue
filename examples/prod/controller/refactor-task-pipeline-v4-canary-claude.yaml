@@ -20,6 +20,7 @@ spec:
   completionThreshold: close_p0_p1
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  productAcceptanceMode: blocking
   semanticSubmitProfiles:
     workflow-read: blocking
     plan-synth: blocking

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from dataclasses import asdict, replace
@@ -1501,6 +1502,9 @@ def test_fanout_success_payload_preserves_workflow_request_identity() -> None:
                 "requirement_spec_ref": "requests/req-001-rev-2.json",
                 "requirement_spec_digest": "sha256:abc123",
                 "request_revision": 2,
+                "plan_artifact_package_id": "planpkg-current",
+                "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
+                "plan_artifact_package_digest": "package-sha",
                 "workflow_proposal_ref": {
                     "ref": "artifacts/workflow/proposals/req-001.json",
                     "sha256": "proposal-sha",
@@ -1513,12 +1517,19 @@ def test_fanout_success_payload_preserves_workflow_request_identity() -> None:
                 "effective_config_digest": "config-sha",
                 "run_contract_ref": "run-contracts/run-001.json",
                 "run_contract_digest": "contract-sha",
+                "stage_replan_generation": "stage-replan-approved",
+                "stage_replan_generation_source_event_id": "evt-escalation",
+                "operator_authorized": True,
+                "operator_authorization_ref": "operator:test",
             },
             "children": [{
                 "child_id": "issue-plan",
                 "payload": {
                     "evidence_refs": ["docs/plans/issue.md"],
                     "effective_config_digest": "forged-child-config-sha",
+                    "plan_artifact_package_id": "planpkg-forged",
+                    "plan_artifact_package_ref": "artifacts/plan-packages/forged.json",
+                    "plan_artifact_package_digest": "forged-package-sha",
                 },
             }],
         }
@@ -1527,11 +1538,22 @@ def test_fanout_success_payload_preserves_workflow_request_identity() -> None:
     assert payload["request_id"] == "req-001"
     assert payload["run_id"] == "run-001"
     assert payload["workflow_run_id"] == "run-001"
+    assert payload["stage_replan_generation"] == "stage-replan-approved"
+    assert payload["stage_replan_generation_source_event_id"] == (
+        "evt-escalation"
+    )
+    assert payload["operator_authorized"] is True
+    assert payload["operator_authorization_ref"] == "operator:test"
     assert payload["flow_kind"] == "issue"
     assert payload["workflow_request_ref"] == "requests/req-001.json"
     assert payload["requirement_spec_ref"] == "requests/req-001-rev-2.json"
     assert payload["requirement_spec_digest"] == "sha256:abc123"
     assert payload["request_revision"] == 2
+    assert payload["plan_artifact_package_id"] == "planpkg-current"
+    assert payload["plan_artifact_package_ref"] == (
+        "artifacts/plan-packages/current.json"
+    )
+    assert payload["plan_artifact_package_digest"] == "package-sha"
     assert payload["workflow_proposal_digest"] == "proposal-sha"
     assert payload["effective_config_digest"] == "config-sha"
     assert payload["run_contract_ref"] == "run-contracts/run-001.json"
@@ -1564,6 +1586,43 @@ def test_task_map_ready_preserves_parent_goal_identity() -> None:
     assert payload["workflow_run_id"] == "run-issue"
     assert payload["goal_id"] == "goal-issue"
     assert payload["task_map_ref"] == "artifacts/issue/task-map.json"
+
+
+def test_task_map_ready_rehashes_replanned_child_artifact(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    project_root = tmp_path / "project"
+    task_map_path = state_dir / "artifacts" / "current-task-map.json"
+    task_map_path.parent.mkdir(parents=True)
+    task_map_path.write_text(
+        '{"tasks": [{"task_id": "TASK-2"}]}',
+        encoding="utf-8",
+    )
+    expected_digest = hashlib.sha256(task_map_path.read_bytes()).hexdigest()
+    probe = _FanoutPayloadProbe()
+    probe.state_dir = state_dir
+    probe.project_root = project_root
+
+    payload = probe._generic_fanout_success_payload(
+        manifest={
+            "fanout_id": "fanout-prd-replan",
+            "trigger_payload": {
+                "task_map_ref": "artifacts/previous-task-map.json",
+                "task_map_digest": "a" * 64,
+            },
+            "children": [{
+                "child_id": "prd-plan",
+                "payload": {
+                    "task_map_ref": "artifacts/current-task-map.json",
+                    "source_commit": "b" * 40,
+                    "candidate_base_commit": "b" * 40,
+                },
+            }],
+        },
+        success_event="task_map.ready",
+    )
+
+    assert payload["task_map_digest"] == expected_digest
+    assert payload["task_map_digest"] != "a" * 64
 
 
 def test_task_map_ready_normalizes_parent_pdd_as_goal_identity() -> None:
@@ -1838,6 +1897,38 @@ def test_writer_fanout_synthesize_canonical_tasks_admits_unseeded(tmp_path: Path
     assert store.get("TASK-2").contract.goal_claim_ids == ["CLAIM-B"]
 
 
+def test_writer_materialization_binds_successor_contract_to_task_base(
+    tmp_path: Path,
+) -> None:
+    state_dir, _log, _transport, orch = _state(
+        tmp_path,
+        synthesize_canonical=True,
+    )
+    base_commit = _git(tmp_path, "rev-parse", "HEAD")
+    task_map_path = state_dir / "artifacts" / "F-11111111" / "task_map.json"
+    task_map = json.loads(task_map_path.read_text(encoding="utf-8"))
+    successor = task_map["tasks"][0]
+    successor.update({
+        "base_commit": base_commit,
+        "source_ref": "docs/gaps/hidden-surface.md",
+        "source_refs": [
+            "docs/gaps/hidden-surface.md",
+            f"git:{base_commit}",
+        ],
+        "evidence_contract": {
+            "supersedes_task_ids": ["TASK-OLD"],
+        },
+    })
+    task_map["tasks"] = [successor]
+    task_map_path.write_text(json.dumps(task_map), encoding="utf-8")
+
+    _start(orch)
+
+    task = TaskStore(state_dir / "kanban.json").get("TASK-1")
+    assert task is not None
+    assert task.contract.source_ref == f"git:{base_commit}"
+
+
 def test_blocking_task_pipeline_bad_base_rejects_before_task_materialization(
     tmp_path: Path,
 ) -> None:
@@ -1922,6 +2013,46 @@ def test_writer_fanout_synthesize_canonical_refreshes_workflow_bootstrap_placeho
     )
     assert task.contract.behavior == "Create a.txt with TASK-1 smoke content."
     assert validate_task_contract(task, config=orch.config, project_root=tmp_path) == []
+
+
+def test_writer_fanout_rejects_workflow_parent_id_before_partial_materialization(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _state(
+        tmp_path,
+        synthesize_canonical=True,
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-1",
+        title="workflow parent",
+        status="backlog",
+        contract=TaskContract(
+            behavior="Preserve the owner-confirmed workflow contract.",
+            evidence_contract={
+                "execution_owner": "workflow",
+                "workflow_request_id": "trace-1",
+                "workflow_request_revision": 1,
+            },
+        ),
+    ))
+
+    _start(orch)
+
+    cancelled = [
+        event for event in log.read_all()
+        if event.type == "fanout.cancelled"
+    ]
+    assert len(cancelled) == 1
+    assert (
+        "writer task_map reuses workflow-managed parent task id(s): TASK-1"
+        in cancelled[0].payload["reason"]
+    )
+    assert not [sent for sent in transport.sent if sent[0].startswith("dev-")]
+    assert store.get("TASK-2") is None
+    parent = store.get("TASK-1")
+    assert parent is not None
+    assert parent.contract.behavior == "Preserve the owner-confirmed workflow contract."
 
 
 def test_plan_contract_requires_assembly_task_for_multi_bundle():
@@ -2063,7 +2194,11 @@ def test_writer_fanout_canonicalizes_semantic_task_map_owner_role(tmp_path: Path
     data = json.loads(task_map.read_text(encoding="utf-8"))
     data["tasks"][0]["owner_role"] = "dev-core"
     data["tasks"][0]["acceptance"] = ["core module parity is implemented"]
+    data["tasks"][0]["skills_required"] = ["can-domain"]
     task_map.write_text(json.dumps(data), encoding="utf-8")
+    for role in orch.config.roles:
+        if role.name == "dev":
+            role.skills = [*role.skills, "can-domain"]
 
     _start(orch)
     task_map_manifests = [
@@ -2079,6 +2214,7 @@ def test_writer_fanout_canonicalizes_semantic_task_map_owner_role(tmp_path: Path
     assert task.contract.owner_role == "dev"
     assert task.contract.evidence_contract["semantic_owner_role"] == "dev-core"
     assert task.contract.acceptance_criteria == ["core module parity is implemented"]
+    assert task.skills_required == ["can-domain"]
     assert validate_task_contract(task, config=orch.config, project_root=tmp_path) == []
     assert [sent[0] for sent in transport.sent if sent[0].startswith("dev-")]
 
@@ -2459,12 +2595,16 @@ def test_replan_contract_refresh_resets_blocked_task_generation(tmp_path: Path):
         retry_count=2,
     )
     next_ref = ".zf/artifacts/F-11111111/task-map-blocked-replan.json"
-    (state_dir / "artifacts" / "F-11111111" / "task-map-blocked-replan.json").write_text(
+    next_path = (
+        state_dir / "artifacts" / "F-11111111" / "task-map-blocked-replan.json"
+    )
+    next_data = json.loads(
         (state_dir / "artifacts" / "F-11111111" / "task_map.json").read_text(
             encoding="utf-8",
-        ),
-        encoding="utf-8",
+        )
     )
+    next_data["tasks"][0]["skills_required"] = ["replanned-domain"]
+    next_path.write_text(json.dumps(next_data), encoding="utf-8")
     trigger = ZfEvent(
         type="task_map.ready",
         actor="zf-cli",
@@ -2496,6 +2636,7 @@ def test_replan_contract_refresh_resets_blocked_task_generation(tmp_path: Path):
     assert refreshed.active_dispatch_id == ""
     assert refreshed.retry_count == 0
     assert refreshed.blocked_reason == ""
+    assert refreshed.skills_required == ["replanned-domain"]
     assert refreshed.contract.evidence_contract["source_refs"]["task_map_ref"] == next_ref
 
 
@@ -2691,6 +2832,10 @@ def test_refactor_plan_bridge_preserves_replan_metadata(tmp_path: Path):
             "rework_attempt": 2,
             "rework_source": "verify.failed",
             "replan_classification": "contract_freeze_gap",
+            "stage_replan_generation": "stage-replan-approved",
+            "stage_replan_generation_source_event_id": "evt-escalation",
+            "operator_authorized": True,
+            "operator_authorization_ref": "operator:test",
         },
         trace_id="trace-1",
     )
@@ -2703,6 +2848,12 @@ def test_refactor_plan_bridge_preserves_replan_metadata(tmp_path: Path):
     assert payload["rework_attempt"] == 2
     assert payload["rework_source"] == "verify.failed"
     assert payload["replan_classification"] == "contract_freeze_gap"
+    assert payload["stage_replan_generation"] == "stage-replan-approved"
+    assert payload["stage_replan_generation_source_event_id"] == (
+        "evt-escalation"
+    )
+    assert payload["operator_authorized"] is True
+    assert payload["operator_authorization_ref"] == "operator:test"
 
 
 def test_strict_plan_approval_does_not_leak_canonical_tasks_before_approval(
@@ -4102,7 +4253,7 @@ def test_candidate_rework_sweep_dedupes_equivalent_rework_task_maps(
         if event.type == "fanout.started"
     ]
     assert len(started) == 1
-    assert started[0].payload["trigger_event_id"] == "rework-ready-a"
+    assert started[0].payload["trigger_event_id"] == "rework-ready-b"
     assert [sent[0] for sent in transport.sent] == ["dev-1", "dev-2"]
 
 
@@ -5201,6 +5352,66 @@ def test_fanout_dispatch_defers_while_provider_turn_is_active(tmp_path: Path):
     assert deferred[0].payload["reason"] == "provider_turn_active"
 
 
+def test_provider_turn_active_deferral_coalesces_until_turn_closes(
+    tmp_path: Path,
+):
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    role = next(
+        role for role in orch.config.roles if role.instance_id == "dev-1"
+    )
+    active = True
+    orch._active_provider_turn = (  # type: ignore[method-assign]
+        lambda instance_id: (
+            {"turn_id": "turn-active"}
+            if active and instance_id == "dev-1"
+            else None
+        )
+    )
+    deferred_payload = {
+        "fanout_id": "fanout-next",
+        "child_id": "child-next",
+        "role_instance": "dev-1",
+        "reason": "provider_turn_active",
+    }
+    log.append(ZfEvent(
+        type="fanout.child.dispatch_deferred",
+        ts="2020-01-01T00:00:00+00:00",
+        actor="zf-cli",
+        payload=deferred_payload,
+    ))
+
+    assert not orch._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-next",
+        stage_id="dev-fanout",
+        child_id="child-next",
+        run_id="run-fanout-next-child-next",
+        trace_id="trace-next",
+    )
+    assert len([
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatch_deferred"
+    ]) == 1
+
+    log.append(ZfEvent(
+        type="provider.turn.closed",
+        actor="dev-1",
+        payload={"backend": "codex", "turn_id": "turn-active"},
+    ))
+    assert not orch._ensure_fanout_role_dispatchable(
+        role=role,
+        fanout_id="fanout-next",
+        stage_id="dev-fanout",
+        child_id="child-next",
+        run_id="run-fanout-next-child-next",
+        trace_id="trace-next",
+    )
+    assert len([
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatch_deferred"
+    ]) == 2
+
+
 def test_provider_native_turn_close_releases_fanout_dispatch(tmp_path: Path):
     _state_dir, log, _transport, orch = _state(tmp_path)
     role = next(
@@ -5574,6 +5785,74 @@ def test_affinity_pipeline_dependency_waits_for_final_task_terminal(
         and event.payload.get("task_id") == "TASK-NEXT"
         for event in log.read_all()
     )
+
+
+def test_gap_reconcile_reuses_external_task_ref_in_immutable_target(
+    tmp_path: Path,
+) -> None:
+    state_dir, log, transport, orch = _state(
+        tmp_path,
+        affinity_stage_slots=True,
+        affinity_lane_count=2,
+    )
+    base_commit = _git(tmp_path, "rev-parse", "HEAD")
+    source_commit = _commit(tmp_path, "upstream.txt", "done\n", "source task")
+    _git(tmp_path, "reset", "--hard", base_commit)
+    target_commit = _commit(
+        tmp_path,
+        "upstream.txt",
+        "done\n",
+        "candidate scoped projection",
+    )
+    task_map = state_dir / "artifacts" / "F-11111111" / "task_map.json"
+    task_map.write_text(json.dumps({
+        "tasks": [
+            {"task_id": "TASK-UPSTREAM", "allowed_paths": ["upstream.txt"]},
+            {
+                "task_id": "TASK-GAP",
+                "blocked_by": ["TASK-UPSTREAM"],
+                "allowed_paths": ["gap.txt"],
+            },
+        ],
+    }), encoding="utf-8")
+    _seed_tasks(state_dir, task_ids=("TASK-UPSTREAM", "TASK-GAP"))
+    orch.task_store.update("TASK-UPSTREAM", status="in_progress")
+    refs_dir = state_dir / "refs"
+    refs_dir.mkdir()
+    refs_dir.joinpath("task-index.json").write_text(json.dumps({
+        "TASK-UPSTREAM": {
+            "task_ref": "task/TASK-UPSTREAM",
+            "source_commit": source_commit,
+            "trace_id": "trace-1",
+        },
+    }), encoding="utf-8")
+    _start(orch, payload={
+        "workflow_run_id": "trace-1",
+        "task_ids": ["TASK-GAP"],
+        "resume_scope": "gap_tasks_only",
+        "target_ref": target_commit,
+        "dispatch_base_commit": target_commit,
+    })
+    fanout_id = _fanout_id(log)
+    assert _child(_manifest(state_dir, fanout_id), "TASK-GAP")["status"] == "queued"
+    assert transport.sent == []
+
+    log.append(ZfEvent(
+        type="candidate.task_ref.applied",
+        actor="zf-cli",
+        task_id="TASK-UPSTREAM",
+        payload={
+            "task_ref": "task/TASK-UPSTREAM",
+            "source_commit": source_commit,
+            "commit": target_commit,
+        },
+    ))
+
+    assert orch._reconcile_active_affinity_writer_fanouts() == 1
+    child = _child(_manifest(state_dir, fanout_id), "TASK-GAP")
+    assert child["status"] == "dispatched"
+    assert child["target_ref"] == target_commit
+    assert [sent[0] for sent in transport.sent] == ["dev-1"]
 
 
 def test_affinity_reconcile_recovers_ready_queue_after_missed_release(

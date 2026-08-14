@@ -28,8 +28,17 @@ function planOptionDetails(option?: AgentSessionPlanOption): string {
       ? `Output: ${details.outputProfile.replaceAll("_", " ")}`
       : "",
   ] : [];
+  const routingDetail = details.mode === "multi_lens"
+    ? `Blind first pass: ${details.firstPassReplyCount || details.memberCount || 0}-way fanout`
+    : details.mode === "clarification"
+      ? "Initial routing: 1 facilitator"
+      : details.mode === "conversation"
+        ? "Initial routing: 1 responder"
+        : "";
   const channelDetails = details.templateId ? [
     details.templateName || details.templateId,
+    details.mode ? details.mode.replaceAll("_", " ") : "",
+    routingDetail,
     `${details.memberCount || 0} members`,
     (details.roles || []).map((role) => role.replaceAll("_", " ")).join(", "),
     `${details.maxRounds || 0} rounds`,

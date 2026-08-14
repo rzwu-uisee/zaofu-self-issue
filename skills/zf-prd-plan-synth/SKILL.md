@@ -89,14 +89,21 @@ text.
 
 ## Task Design
 
-Split by behavior, not by component-only layers. A good PRD task map usually
-has API/runtime/web slices, each with:
+Split by end-to-end user journey, not by component-only layers. Each normal
+slice should own the smallest runnable behavior across the API/runtime/web
+layers it needs, plus its focused tests and evidence. A good task has:
 
 - owner role such as `dev-api`, `dev-runtime`, or `dev-web`;
 - `allowed_paths` and `exclusive_files`;
 - dependencies and wave;
 - acceptance criteria tied to the PRD;
 - verification commands for product, API, and web verify agents.
+
+Every mandatory user journey must map to one or more bounded tasks and exact
+acceptance ids. Do not create independent "backend", "frontend", and "tests"
+tasks that cannot demonstrate a user-visible outcome on their own. When more
+than one slice feeds the same product, preserve one final assembly owner that
+owns shared wiring and the real product entrypoint.
 
 Each `exclusive_files` path has one owner across the full map. A later wave or
 dependency does not permit duplicate ownership; assign shared entrypoint and
@@ -143,6 +150,24 @@ Declare `required_plan_ports` from the PRD's actual dependencies, normally
 `requirement_spec`, `goal_claim_set`, `task_map`, `planning_result`, and the
 matrices consumed by implementation or Verify. Emit their source refs; never
 construct or select the current Plan Artifact Package yourself.
+
+When the briefing declares `product_acceptance_spec` as a required plan port,
+return one top-level `plan_ports[]` descriptor with logical name
+`product_acceptance_spec`, schema `product_acceptance_spec.v1`, and an inline
+body containing:
+
+- one stable `assembly_owner` that matches the task-map assembly owner;
+- runnable `entrypoints[]`, each with `entrypoint_id`, exact `start_command`,
+  observable `health_check`, and owner;
+- `user_journeys[]` with stable ids, mandatory flags, verification tiers, and
+  observable assertions (`api|cli|dom|interaction|state|visual`);
+- a `provider_qualification` policy that explicitly says whether real Provider
+  qualification is required, which providers are in scope, and its TTL.
+
+Do not invent run, plan-revision, or task-map-generation values in that body.
+The Kernel binds those identities while constructing the current Plan Artifact
+Package. Product semantics, journeys, commands, and assembly ownership remain
+Planner-owned.
 
 For `e2e` / `real_e2e` criteria, bind the command to the intended executable
 path and method. A deterministic analytical estimate, fixture replay, or

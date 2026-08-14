@@ -1010,6 +1010,10 @@ def channel_event_schema_rules() -> dict[str, dict[str, Any]]:
                 "run_id",
                 "provider_run_id",
                 "run_generation",
+                "failure_status",
+                "failure_class",
+                "retryable",
+                "terminal_disposition",
             ],
         },
         "channel.typing.started": {

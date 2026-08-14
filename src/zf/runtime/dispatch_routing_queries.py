@@ -256,6 +256,15 @@ class DispatchRoutingQueriesMixin:
         global_cap = getattr(self.config, "global_budget_usd", None)
         if global_cap is not None:
             try:
+                if fail_closed and self.cost_tracker.has_unpriced_usage():
+                    self._emit_cost_block(
+                        scope="global_pricing_unavailable",
+                        role_name=role.name,
+                        budget=global_cap,
+                        current=-1.0,
+                        now=now,
+                    )
+                    return True
                 total = self.cost_tracker.total_usd()
             except Exception:
                 # P0-8(审计 D9):历史 fail-open = 读失败按 $0 放行,
@@ -279,6 +288,19 @@ class DispatchRoutingQueriesMixin:
         if role_cap is not None:
             try:
                 role_summary = self.cost_tracker.per_role_totals().get(role.name)
+                if (
+                    fail_closed
+                    and role_summary is not None
+                    and role_summary.unpriced_entries > 0
+                ):
+                    self._emit_cost_block(
+                        scope="role_pricing_unavailable",
+                        role_name=role.name,
+                        budget=role_cap,
+                        current=-1.0,
+                        now=now,
+                    )
+                    return True
                 role_total = role_summary.total_usd if role_summary else 0.0
             except Exception:
                 if fail_closed:
@@ -385,6 +407,7 @@ class DispatchRoutingQueriesMixin:
                 reason=(
                     f"cleared stale {state} from newer idle/active liveness"
                 ),
+                force=True,
             )
         except Exception:
             return False

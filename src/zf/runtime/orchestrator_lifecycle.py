@@ -426,7 +426,29 @@ class LifecycleManagerMixin(
                             ))
                         except Exception:
                             pass
+                    active_fanout = self._active_fanout_child_for_instance(
+                        role.instance_id,
+                    )
                     stale, stale_basis = self._worker_liveness_stale(role)
+                    instance_state = getattr(self, "_instance_state", {})
+                    pending_recycle = (
+                        instance_state.get(role.instance_id)
+                        == "pending_recycle"
+                        or self._last_worker_state.get(role.instance_id)
+                        == "pending_recycle"
+                    )
+                    # A pending recycle is kernel-owned proof that this pane
+                    # must be replaced once its active obligation drains. If
+                    # the pane is already gone, waiting for the normal worker
+                    # heartbeat threshold only preserves a dead lease.
+                    if pending_recycle and (
+                        active_task is not None or active_fanout is not None
+                    ):
+                        stale = True
+                        stale_basis = (
+                            "pane_dead_during_pending_recycle_with_active_"
+                            "obligation"
+                        )
                     if stale:
                         # Pending manifest recovery precedes normal respawn,
                         # even if the reactor already advanced the task after
@@ -442,10 +464,7 @@ class LifecycleManagerMixin(
                         if manifest_recovery is not None:
                             decisions.append(manifest_recovery)
                             continue
-                        if active_task is not None or (
-                            self._active_fanout_child_for_instance(role.instance_id)
-                            is not None
-                        ):
+                        if active_task is not None or active_fanout is not None:
                             self._emit_worker_runner_failed(
                                 role=role,
                                 task=active_task,
@@ -898,7 +917,22 @@ class LifecycleManagerMixin(
         """
         from zf.runtime.respawn_lease import reset_respawn_success_circuit
         reset_respawn_success_circuit(self, role)
-        return self._respawn_instance(role, recovery_reason="manual_restart")
+        state = str(
+            self._last_worker_state.get(role.instance_id)
+            or self._instance_state.get(role.instance_id)
+            or "idle"
+        )
+        force_fresh_session = state in {"pending_recycle", "recycling"}
+        return self._respawn_instance(
+            role,
+            recovery_reason=(
+                "manual_context_recycle"
+                if force_fresh_session
+                else "manual_restart"
+            ),
+            inject_idle_prompt=not force_fresh_session,
+            force_fresh_session=force_fresh_session,
+        )
 
     def _respawn_instance(
         self,
@@ -906,6 +940,7 @@ class LifecycleManagerMixin(
         *,
         recovery_reason: str = "watchdog",
         inject_idle_prompt: bool = True,
+        force_fresh_session: bool = False,
     ) -> "WorkflowRuntimeDecision":
         """Serialize replacement of one provider session across processes.
 
@@ -921,6 +956,7 @@ class LifecycleManagerMixin(
             role,
             recovery_reason=recovery_reason,
             inject_idle_prompt=inject_idle_prompt,
+            force_fresh_session=force_fresh_session,
         )
 
     def _respawn_instance_with_lease(
@@ -929,6 +965,7 @@ class LifecycleManagerMixin(
         *,
         recovery_reason: str = "watchdog",
         inject_idle_prompt: bool = True,
+        force_fresh_session: bool = False,
     ) -> "WorkflowRuntimeDecision":
         """G-RESUME-4/5: watchdog-triggered respawn.
 
@@ -969,8 +1006,14 @@ class LifecycleManagerMixin(
             ),
         )
         coordinator = self._get_spawn_coordinator()
+        session_replacement: dict[str, str] = {}
         try:
-            if role.backend == "codex" and self._codex_context_exhausted(role):
+            if force_fresh_session:
+                session_replacement = self._replace_provider_session_for_recycle(
+                    role,
+                    reason=recovery_reason,
+                )
+            elif role.backend == "codex" and self._codex_context_exhausted(role):
                 reg = RoleSessionRegistry(
                     self.state_dir / "role_sessions.yaml",
                     project_root=str(self.project_root),
@@ -1064,6 +1107,7 @@ class LifecycleManagerMixin(
                     "role": role.name,
                     "instance_id": role.instance_id,
                     "reason": recovery_reason,
+                    **session_replacement,
                 },
             ))
             active_task = self._active_task_for_instance(role.instance_id)
@@ -1086,6 +1130,10 @@ class LifecycleManagerMixin(
                 )
             # A recovered active task remains busy; an idle respawn clears any
             # stale generation left by the terminated provider process.
+            if force_fresh_session:
+                self._instance_state[role.instance_id] = "healthy"
+                self._hard_cap_exceeded.pop(role.instance_id, None)
+                self._context_compact_attempts().discard(role.instance_id)
             self._set_worker_state(
                 role.instance_id,
                 "busy" if active_task is not None or active_fanout is not None else "idle",
@@ -1610,33 +1658,10 @@ class LifecycleManagerMixin(
         instance_id = role.instance_id
         try:
             active_fanout = self._active_fanout_child_for_instance(instance_id)
-            from zf.core.state.role_sessions import RoleSessionRegistry
-            reg = RoleSessionRegistry(
-                self.state_dir / "role_sessions.yaml",
-                project_root=str(self.project_root),
+            session_replacement = self._replace_provider_session_for_recycle(
+                role,
+                reason="context_threshold_recycle",
             )
-            old_session = reg.get(instance_id)
-            if role.backend == "codex":
-                # Codex cannot pre-seed a new session UUID; after recycle we
-                # must launch fresh and observe the next real rollout file.
-                reg.clear(instance_id)
-                new_session = None
-                session_strategy = "fresh_context_recycle_clear_codex"
-            else:
-                new_session = reg.rotate(instance_id)
-                session_strategy = "fresh_context_recycle_rotated_session"
-            self.event_writer.append(ZfEvent(
-                type="worker.recycling",
-                actor=instance_id,
-                payload={
-                    "role": role.name,
-                    "instance_id": instance_id,
-                    "backend": role.backend,
-                    "old_session": str(old_session) if old_session else "",
-                    "new_session": str(new_session) if new_session else "",
-                    "session_strategy": session_strategy,
-                },
-            ))
             try:
                 self.transport.terminate(instance_id)
             except Exception:
@@ -1672,8 +1697,7 @@ class LifecycleManagerMixin(
                     "role": role.name,
                     "instance_id": instance_id,
                     "backend": role.backend,
-                    "new_session": str(new_session) if new_session else "",
-                    "session_strategy": session_strategy,
+                    **session_replacement,
                 },
             ))
             # Explicit healthy state (not None) so state machine is
@@ -1700,10 +1724,14 @@ class LifecycleManagerMixin(
                     f"{active_fanout.get('fanout_id')}:{active_fanout.get('child_id')}"
                 )
             else:
-                reason = f"recycle complete (new session {new_session})"
+                reason = (
+                    "recycle complete (new session "
+                    f"{session_replacement.get('new_session') or 'provider-assigned'})"
+                )
             self._set_worker_state(
                 instance_id, next_state,
                 reason=reason,
+                force=next_state == "idle",
             )
         except Exception as e:
             try:
@@ -1715,6 +1743,43 @@ class LifecycleManagerMixin(
             except Exception:
                 pass
             # Stay in "recycling" state so _check_pending doesn't retry.
+
+    def _replace_provider_session_for_recycle(
+        self,
+        role: "RoleConfig",
+        *,
+        reason: str,
+    ) -> dict[str, str]:
+        """Replace a provider resume binding while retaining old transcripts."""
+
+        instance_id = role.instance_id
+        registry = RoleSessionRegistry(
+            self.state_dir / "role_sessions.yaml",
+            project_root=str(self.project_root),
+        )
+        old_session = registry.get(instance_id)
+        if role.backend == "codex":
+            registry.clear(instance_id)
+            new_session = None
+            strategy = "fresh_context_recycle_clear_codex"
+        else:
+            new_session = registry.rotate(instance_id)
+            strategy = "fresh_context_recycle_rotated_session"
+        payload = {
+            "role": role.name,
+            "instance_id": instance_id,
+            "backend": role.backend,
+            "old_session": str(old_session) if old_session else "",
+            "new_session": str(new_session) if new_session else "",
+            "session_strategy": strategy,
+            "reason": reason,
+        }
+        self.event_writer.append(ZfEvent(
+            type="worker.recycling",
+            actor=instance_id,
+            payload=payload,
+        ))
+        return payload
 
 
     def _inject_fanout_recovery_briefing(

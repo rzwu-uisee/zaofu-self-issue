@@ -100,29 +100,16 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
         Probe the cached path first, then the role-local CODEX_HOME sessions
         root, before allowing resume.
         """
-        def _matches(path: Path) -> bool:
-            try:
-                return (
-                    path.is_file()
-                    and session_id in path.stem
-                    and self.registry._rollout_matches_project(path)
-                )
-            except OSError:
-                return False
+        from zf.runtime.codex_session_ownership import (
+            codex_session_exists_for_role,
+        )
 
-        cached = self.registry.get_path(role.instance_id)
-        if cached is not None and _matches(cached):
-            return True
-
-        roots = [self._codex_sessions_root(role), Path.home() / ".codex" / "sessions"]
-        for root in roots:
-            try:
-                matches = root.glob(f"*/*/*/rollout-*-{session_id}.jsonl")
-            except OSError:
-                continue
-            if any(_matches(path) for path in matches):
-                return True
-        return False
+        return codex_session_exists_for_role(
+            self.registry,
+            role_sessions_root=self._codex_sessions_root(role),
+            instance_id=role.instance_id,
+            session_id=session_id,
+        )
 
     # -- primary entry: spawn a role (first boot or respawn) --
 
@@ -246,6 +233,9 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
             session_id=session_id,
             is_resume=is_respawn,
         )
+        if role.backend == "codex" and is_respawn and session_id:
+            resume_index = argv.index("resume")
+            argv[resume_index:resume_index] = ["-C", str(spawn_cwd)]
         env_prefix = [
             "env",
             f"ZF_PROJECT_ROOT={Path(self.project_root).resolve()}",

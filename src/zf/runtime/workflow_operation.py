@@ -465,6 +465,90 @@ class WorkflowOperationService:
             if existing is not None:
                 existing_hash = str(existing.get("request_hash") or "")
                 if existing_hash and existing_hash != request_hash:
+                    compatibility = self._task_pipeline_replay_compatibility(
+                        existing=existing,
+                        current_request_body=request_body,
+                        current_request_hash=request_hash,
+                    )
+                    if compatibility is not None:
+                        compatibility_digest, compatibility_request_ref = compatibility
+                        status = str(existing.get("status") or "requested")
+                        if (
+                            status == "blocked"
+                            and str(existing.get("reason") or "")
+                            in {
+                                "request_hash_divergence",
+                                "request_hash_compatibility_failed",
+                            }
+                        ):
+                            source_attempt_ids = list(
+                                existing.get("redrive_source_attempt_ids") or []
+                            )
+                            admit_task_pipeline_redrive(
+                                self,
+                                operation_id=operation_id,
+                                request_hash=existing_hash,
+                                workflow_run_id=workflow_run_id,
+                                task_id=task_id,
+                                source_attempt_id=(
+                                    str(source_attempt_ids[-1])
+                                    if source_attempt_ids
+                                    else ""
+                                ),
+                                recovery_decision_event_id=str(
+                                    existing.get("last_event_id") or causation_id
+                                ),
+                                reason=(
+                                    "Task Pipeline replay request differs only "
+                                    "by attempt-local input evidence"
+                                ),
+                                recovery_decision_owner="kernel_replay",
+                                compatibility_proof_digest=compatibility_digest,
+                                compatibility_request_ref=compatibility_request_ref,
+                            )
+                            status = "requested"
+                        result_ref = existing.get("admitted_call_result_ref")
+                        result_ref = (
+                            result_ref if isinstance(result_ref, dict) else {}
+                        )
+                        return EnsureOperationResult(
+                            status=status,
+                            operation_id=operation_id,
+                            request_hash=existing_hash,
+                            replay_hit=True,
+                            admitted_call_result_ref=str(
+                                result_ref.get("ref") or ""
+                            ),
+                            admitted_call_result_digest=str(
+                                result_ref.get("sha256") or ""
+                            ),
+                            reason="task_pipeline_attempt_local_replay",
+                        )
+                    if (
+                        str(existing.get("status") or "") == "blocked"
+                        and str(existing.get("reason") or "")
+                        == "request_hash_divergence"
+                    ):
+                        self._emit_once(
+                            "workflow.operation.blocked",
+                            operation_id=operation_id,
+                            request_hash=existing_hash,
+                            workflow_run_id=workflow_run_id,
+                            task_id=task_id,
+                            payload={
+                                "reason": "request_hash_compatibility_failed",
+                                "expected_request_hash": existing_hash,
+                                "actual_request_hash": request_hash,
+                            },
+                            causation_id=causation_id,
+                            correlation_id=correlation_id,
+                        )
+                        return EnsureOperationResult(
+                            status="divergent",
+                            operation_id=operation_id,
+                            request_hash=request_hash,
+                            reason="request_hash_compatibility_failed",
+                        )
                     self._emit_once(
                         "workflow.operation.blocked",
                         operation_id=operation_id,
@@ -540,6 +624,83 @@ class WorkflowOperationService:
                 request_hash=request_hash,
                 created=True,
             )
+
+    def _task_pipeline_replay_compatibility(
+        self,
+        *,
+        existing: Mapping[str, Any],
+        current_request_body: Mapping[str, Any],
+        current_request_hash: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Prove an old Task Pipeline request differs only by attempt evidence."""
+
+        descriptor = existing.get("request_ref")
+        if not isinstance(descriptor, dict) or not descriptor:
+            return None
+        try:
+            from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+            hydrated = hydrate_sidecar_ref(
+                self.state_dir,
+                descriptor,
+                purpose="task_pipeline_request_replay_compatibility",
+                actor="workflow-operation-service",
+            )
+        except Exception:
+            return None
+        persisted = hydrated.payload
+        if not isinstance(persisted, Mapping):
+            return None
+        persisted_request = persisted.get("request")
+        current_request = current_request_body.get("request")
+        if not isinstance(persisted_request, Mapping) or not isinstance(
+            current_request, Mapping
+        ):
+            return None
+        if not str(current_request.get("task_pipeline_stage") or "").strip():
+            return None
+        persisted_compatibility_hash = operation_request_hash(
+            task_pipeline_request_hash_body(persisted, persisted_request)
+        )
+        current_compatibility_hash = operation_request_hash(
+            task_pipeline_request_hash_body(
+                current_request_body,
+                current_request,
+            )
+        )
+        if (
+            persisted_compatibility_hash != current_compatibility_hash
+            or current_compatibility_hash != current_request_hash
+        ):
+            return None
+        compatibility_body = {
+            "schema_version": "task-pipeline-request-replay-compatibility.v1",
+            "operation_id": str(existing.get("operation_id") or ""),
+            "authoritative_request_hash": str(existing.get("request_hash") or ""),
+            "compatibility_request_hash": current_compatibility_hash,
+            "persisted_request_ref": dict(descriptor),
+            "ignored_attempt_local_fields": [
+                "source_manifest_digest",
+                "read_policy_digest",
+                "execution_profile.role",
+            ],
+            "current_request": dict(current_request_body),
+        }
+        compatibility_descriptor = write_immutable_json_sidecar(
+            self.state_dir,
+            compatibility_body,
+            root="operations/replay-compatibility",
+            kind="task_pipeline_request_replay_compatibility",
+            schema_version=(
+                "task-pipeline-request-replay-compatibility.v1"
+            ),
+            created_by="workflow-operation-service",
+            source_event_id=str(existing.get("last_event_id") or ""),
+        )
+        return (
+            str(compatibility_descriptor.get("sha256") or ""),
+            compatibility_descriptor,
+        )
 
     def reserve_continuation(
         self,
@@ -881,6 +1042,9 @@ class WorkflowOperationService:
         source_attempt_id: str,
         recovery_decision_event_id: str,
         reason: str,
+        recovery_decision_owner: str = "run_manager",
+        compatibility_proof_digest: str = "",
+        compatibility_request_ref: Mapping[str, Any] | None = None,
     ) -> ZfEvent | None:
         """Admit one Run Manager decision for same-operation redrive."""
         return admit_task_pipeline_redrive(
@@ -892,6 +1056,9 @@ class WorkflowOperationService:
             source_attempt_id=source_attempt_id,
             recovery_decision_event_id=recovery_decision_event_id,
             reason=reason,
+            recovery_decision_owner=recovery_decision_owner,
+            compatibility_proof_digest=compatibility_proof_digest,
+            compatibility_request_ref=compatibility_request_ref,
         )
 
     def fail(
@@ -946,6 +1113,23 @@ class WorkflowOperationService:
                 str(existing_body.get("operation_id") or "") == operation_id
                 and str(existing_body.get("request_hash") or "") == request_hash
             ):
+                if event_type == "workflow.operation.started":
+                    occurrence = (
+                        str(payload.get("active_attempt_id") or ""),
+                        str(payload.get("dispatch_id") or ""),
+                    )
+                    existing_occurrence = (
+                        str(existing_body.get("active_attempt_id") or ""),
+                        str(existing_body.get("dispatch_id") or ""),
+                    )
+                    if occurrence != existing_occurrence:
+                        continue
+                if (
+                    event_type == "workflow.operation.interrupted"
+                    and causation_id
+                    and str(event.causation_id or "") != causation_id
+                ):
+                    continue
                 source_attempt_id = str(payload.get("source_attempt_id") or "")
                 if not source_attempt_id or str(
                     existing_body.get("source_attempt_id") or ""
@@ -998,6 +1182,7 @@ def interrupt_active_workflow_operations(
             workflow_run_id=str(operation.get("workflow_run_id") or ""),
             task_id=str(operation.get("task_id") or ""),
             reason=reason,
+            source_attempt_id=str(operation.get("active_attempt_id") or ""),
             causation_id=causation_id,
             correlation_id=str(operation.get("workflow_run_id") or ""),
         )

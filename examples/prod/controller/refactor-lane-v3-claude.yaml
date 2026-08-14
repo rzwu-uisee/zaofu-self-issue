@@ -18,6 +18,7 @@ spec:
   completionThreshold: close_p0_p1
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  productAcceptanceMode: blocking
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig

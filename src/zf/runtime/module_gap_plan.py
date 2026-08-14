@@ -7,11 +7,24 @@ artifact and emit the normal kernel events.
 
 from __future__ import annotations
 
+from copy import deepcopy
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+
+from zf.core.state.atomic_io import atomic_write_text
+
+from zf.runtime.module_gap_replacement import (
+    bind_replacement_group as _bind_replacement_group,
+    completed_task_ref_dependencies as _completed_task_ref_dependencies,
+    inherit_superseded_incoming_dependencies as _inherit_superseded_incoming_dependencies,
+    raise_dependency_waves as _raise_dependency_waves,
+    rewire_superseded_dependents as _rewire_superseded_dependents,
+    select_successor_base_commit,
+)
 
 _SUPPORTED_SCHEMA_VERSIONS = {"module-gap-plan.v1", "goal-gap-plan.v1"}
 
@@ -52,6 +65,10 @@ def write_gap_task_map_amend_artifact(
     source_event_id: str,
     gap_tasks: list[dict[str, Any]],
     gap_plan_ref: str = "",
+    supersedes_task_ids: list[str] | None = None,
+    successor_base_commit: str = "",
+    replacement_context: dict[str, Any] | None = None,
+    admission_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from zf.runtime.task_map import validate_task_map_payload
 
@@ -65,6 +82,13 @@ def write_gap_task_map_amend_artifact(
     base_task_map = json.loads(task_map_path.read_text(encoding="utf-8"))
     if not isinstance(base_task_map, dict):
         raise ValueError("base task_map must be a JSON object")
+    replacement_context = replacement_context or {}
+    supersedes_task_ids = supersedes_task_ids or _string_list(
+        replacement_context.get("supersedes_task_ids")
+    )
+    successor_base_commit = successor_base_commit or select_successor_base_commit(
+        replacement_context
+    )
     artifact_rel = (
         Path("artifacts")
         / _safe_artifact_part(pdd_id or "unknown")
@@ -73,26 +97,68 @@ def write_gap_task_map_amend_artifact(
         / "task_map.json"
     )
     artifact_path = Path(state_dir) / artifact_rel
-    artifact_ref = ".zf/" + artifact_rel.as_posix()
+    artifact_ref = artifact_rel.as_posix()
     amended = build_gap_task_map_amend(
         base_task_map,
         gap_tasks=gap_tasks,
         supersedes_task_map_ref=base_task_map_ref,
         gap_plan_ref=gap_plan_ref,
+        supersedes_task_ids=supersedes_task_ids,
+        successor_base_commit=successor_base_commit,
+    )
+    amended_gap_ids = set(
+        _string_list((amended.get("amend") or {}).get("gap_task_ids"))
+        if isinstance(amended.get("amend"), dict)
+        else []
+    )
+    amended_gap_tasks = [
+        task
+        for task in _dict_list(amended.get("tasks"))
+        if _task_id(task) in amended_gap_ids
+    ]
+    completed_dependency_task_ids = _completed_task_ref_dependencies(
+        state_dir=state_dir,
+        project_root=project_root,
+        task_ids=_unique_strings(
+            dependency
+            for task in amended_gap_tasks
+            for key in ("blocked_by", "dependencies")
+            for dependency in _string_list(task.get(key))
+            if dependency not in amended_gap_ids
+        ),
+        target_commit=successor_base_commit,
+        workflow_run_id=str(replacement_context.get("workflow_run_id") or ""),
     )
     validation = validate_task_map_payload(amended, require_task_verification=True)
     if not validation.passed:
         raise ValueError("amended task_map validation failed: " + "; ".join(validation.errors))
+    from zf.runtime.plan_candidate_preflight import rolling_smoke_command_errors
+
+    policy_errors = rolling_smoke_command_errors(
+        amended,
+        metadata=admission_metadata,
+    )
+    if policy_errors:
+        details = "; ".join(
+            f"{row['code']} at {row['field']}: {row['message']}"
+            for row in policy_errors
+        )
+        raise ValueError(f"amended task_map candidate policy failed: {details}")
+    serialized = json.dumps(amended, ensure_ascii=False, indent=2) + "\n"
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(
-        json.dumps(amended, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    atomic_write_text(artifact_path, serialized)
+    task_map_digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    from zf.runtime.goal_claim_set import canonical_task_map_generation
+
+    task_map_generation = canonical_task_map_generation(
+        task_map_digest=task_map_digest,
+        task_map_ref=artifact_ref,
     )
     history = _append_replan_history_if_requested(
         state_dir=state_dir,
         project_root=project_root,
         history_ref=_first_nonempty(gap_tasks, "replan_history_ref"),
-        gap_tasks=gap_tasks,
+        gap_tasks=amended_gap_tasks or gap_tasks,
         source_event_id=source_event_id,
         supersedes_task_map_ref=base_task_map_ref,
         new_task_map_ref=artifact_ref,
@@ -101,12 +167,17 @@ def write_gap_task_map_amend_artifact(
     result = {
         "task_map_ref": artifact_ref,
         "task_map_path": str(artifact_path),
+        "task_map_digest": task_map_digest,
+        "task_map_generation": task_map_generation,
         "gap_task_ids": [
             _task_id(task)
             for task in gap_tasks
             if _task_id(task)
         ],
-        "superseded_task_ids": _superseded_task_ids(gap_tasks),
+        "superseded_task_ids": list(
+            (amended.get("amend") or {}).get("superseded_task_ids") or []
+        ),
+        "completed_task_ids": completed_dependency_task_ids,
     }
     result.update(history)
     return result
@@ -169,6 +240,8 @@ def build_gap_task_map_amend(
     gap_tasks: list[dict[str, Any]],
     supersedes_task_map_ref: str,
     gap_plan_ref: str = "",
+    supersedes_task_ids: list[str] | None = None,
+    successor_base_commit: str = "",
 ) -> dict[str, Any]:
     """Return a full task-map with gap tasks appended.
 
@@ -188,13 +261,24 @@ def build_gap_task_map_amend(
         for task in tasks
         if (task_id := _task_id(task))
     }
+    gap_tasks = _bind_replacement_group(
+        gap_tasks,
+        envelope_supersedes=_string_list(supersedes_task_ids),
+        successor_base_commit=successor_base_commit,
+    )
     gap_tasks = [
         _inherit_replacement_mechanical_identity(task, base_tasks_by_id)
         for task in gap_tasks
     ]
     existing_ids = {_task_id(task) for task in tasks if _task_id(task)}
     superseded_task_ids = _superseded_task_ids(gap_tasks)
-    unknown_superseded = sorted(set(superseded_task_ids) - existing_ids)
+    historical_superseded = _replayed_supersede_lineage(
+        gap_tasks,
+        base_tasks_by_id=base_tasks_by_id,
+    )
+    unknown_superseded = sorted(
+        set(superseded_task_ids) - existing_ids - historical_superseded
+    )
     if unknown_superseded:
         raise ValueError(
             "gap plan supersedes unknown task ids: " + ", ".join(unknown_superseded)
@@ -207,7 +291,15 @@ def build_gap_task_map_amend(
         )
     if superseded_task_ids:
         superseded_set = set(superseded_task_ids)
+        gap_tasks = _inherit_superseded_incoming_dependencies(
+            gap_tasks,
+            base_tasks_by_id=base_tasks_by_id,
+        )
         tasks = [task for task in tasks if _task_id(task) not in superseded_set]
+        tasks = _rewire_superseded_dependents(
+            tasks,
+            gap_tasks=gap_tasks,
+        )
         existing_ids -= superseded_set
     next_wave = _next_wave(tasks)
     appended: list[str] = []
@@ -218,6 +310,7 @@ def build_gap_task_map_amend(
         tasks.append(_gap_task_to_task_map_item(raw, wave=next_wave))
         existing_ids.add(task_id)
         appended.append(task_id)
+    _raise_dependency_waves(tasks)
 
     source_refs = dict(base_task_map.get("source_refs") or {})
     if supersedes_task_map_ref:
@@ -331,6 +424,9 @@ def _gap_task_to_task_map_item(raw: dict[str, Any], *, wave: int) -> dict[str, A
     base_commit = str(raw.get("base_commit") or "").strip()
     if base_commit:
         item["base_commit"] = base_commit
+    validation = raw.get("validation")
+    if isinstance(validation, dict):
+        item["validation"] = deepcopy(validation)
     return item
 
 
@@ -341,24 +437,129 @@ def _inherit_replacement_mechanical_identity(
     """Preserve explicit parent ownership metadata across a replacement.
 
     This does not infer whether a task is an assembly task. It only carries
-    forward mechanical identity from the task that the gap explicitly names
-    as its parent (or sole superseded task).
+    forward mechanical identity from the sole superseded task, falling back
+    to the explicitly named parent when no replacement identity is present.
     """
 
     item = dict(raw)
-    parent_id = str(item.get("parent_task_id") or "").strip()
-    if not parent_id:
+    superseded = _string_list(item.get("supersedes_task_ids"))
+    inherited_task_id = (
+        superseded[0]
+        if len(superseded) == 1
+        else str(item.get("parent_task_id") or "").strip()
+    )
+    parent = base_tasks_by_id.get(inherited_task_id)
+    if parent is None:
         superseded = _string_list(item.get("supersedes_task_ids"))
         if len(superseded) == 1:
-            parent_id = superseded[0]
-    parent = base_tasks_by_id.get(parent_id)
+            parent = base_tasks_by_id.get(superseded[0])
     if parent is None:
         return item
     for key in ("root_owner_class", "affinity_tag", "context_group"):
         value = str(parent.get(key) or "").strip()
         if value:
             item.setdefault(key, value)
+    if "wave" not in item and parent.get("wave") not in (None, ""):
+        item["wave"] = parent["wave"]
+    if "blocked_by" not in item and "dependencies" not in item:
+        blocked_by = _string_list(parent.get("blocked_by"))
+        if blocked_by:
+            item["blocked_by"] = blocked_by
+    if not isinstance(item.get("validation"), dict):
+        validation = _matching_replacement_validation(
+            item,
+            parent=parent,
+            superseded_task_id=inherited_task_id,
+        )
+        if validation:
+            item["validation"] = validation
+            item["verification_read_paths"] = list(dict.fromkeys([
+                *_string_list(item.get("verification_read_paths")),
+                *_string_list(parent.get("verification_read_paths")),
+                *_string_list(parent.get("allowed_paths")),
+                *_string_list(parent.get("exclusive_files")),
+                *_string_list(parent.get("shared_files")),
+            ]))
     return item
+
+
+def _matching_replacement_validation(
+    replacement: dict[str, Any],
+    *,
+    parent: dict[str, Any],
+    superseded_task_id: str,
+) -> dict[str, Any]:
+    """Carry mechanical command metadata only for an unchanged gate."""
+
+    validation = parent.get("validation")
+    if not isinstance(validation, dict):
+        return {}
+    raw_commands = validation.get("commands")
+    if not isinstance(raw_commands, list):
+        return {}
+    commands = [row for row in raw_commands if isinstance(row, dict)]
+    requested = _verification(replacement)
+    inherited = [
+        str(command.get("command") or "").strip()
+        for command in commands
+        if str(command.get("command") or "").strip()
+    ]
+    # A successor may add a scoped proof command (for example a target-bound
+    # git diff) while retaining part of the predecessor's verification gate.
+    # Keep the predecessor's command catalog in that additive case so retained
+    # acceptance criteria do not lose their globally referenced command ids.
+    if not requested or not any(command in inherited for command in requested):
+        return {}
+
+    rebound = deepcopy(validation)
+    replacement_id = _task_id(replacement)
+    for command in rebound.get("commands", []):
+        if not isinstance(command, dict):
+            continue
+        producer = str(command.get("producer_task_id") or "").strip()
+        if not producer or producer == superseded_task_id:
+            command["producer_task_id"] = replacement_id
+    return rebound
+
+
+def _replacement_ids_by_superseded(
+    gap_tasks: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    replacements: dict[str, list[str]] = {}
+    for task in gap_tasks:
+        replacement_id = _task_id(task)
+        if not replacement_id:
+            continue
+        for superseded_id in _string_list(task.get("supersedes_task_ids")):
+            task_ids = replacements.setdefault(superseded_id, [])
+            if replacement_id not in task_ids:
+                task_ids.append(replacement_id)
+    return replacements
+
+
+def _rewrite_superseded_task_dependencies(
+    tasks: list[dict[str, Any]],
+    *,
+    replacements_by_superseded: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    """Keep the retained DAG connected after replacing canonical task ids."""
+
+    rewritten_tasks: list[dict[str, Any]] = []
+    for raw in tasks:
+        task = dict(raw)
+        dependencies = _string_list(task.get("blocked_by"))
+        if not dependencies:
+            rewritten_tasks.append(task)
+            continue
+        rewritten: list[str] = []
+        for dependency in dependencies:
+            replacements = replacements_by_superseded.get(dependency)
+            for task_id in replacements or [dependency]:
+                if task_id not in rewritten:
+                    rewritten.append(task_id)
+        task["blocked_by"] = rewritten
+        rewritten_tasks.append(task)
+    return rewritten_tasks
 
 
 def _validation_payload(gap_tasks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -394,10 +595,11 @@ def _enriched_gap_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
     }
     inherited_lists = {
         key: _string_list(payload.get(key))
-        for key in ("affected_tasks", "gate_changes", "supersedes_task_ids")
+        for key in ("affected_tasks", "gate_changes")
         if _string_list(payload.get(key))
     }
-    if not inherited and not inherited_lists:
+    aggregate_supersedes = _string_list(payload.get("supersedes_task_ids"))
+    if not inherited and not inherited_lists and not aggregate_supersedes:
         return tasks
     enriched: list[dict[str, Any]] = []
     for task in tasks:
@@ -409,7 +611,24 @@ def _enriched_gap_tasks(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 item.setdefault(key, value)
         for key, value in inherited_lists.items():
             item.setdefault(key, value)
+        if aggregate_supersedes and not _string_list(
+            item.get("supersedes_task_ids")
+        ):
+            parent_task_id = str(item.get("parent_task_id") or "").strip()
+            matched = [
+                task_id
+                for task_id in aggregate_supersedes
+                if task_id == parent_task_id
+            ]
+            if matched:
+                item["supersedes_task_ids"] = matched
+            elif len(tasks) == 1:
+                # Legacy single-gap payloads used only the aggregate field.
+                item["supersedes_task_ids"] = list(aggregate_supersedes)
         enriched.append(item)
+    envelope_supersedes = _string_list(payload.get("supersedes_task_ids"))
+    if len(enriched) == 1 and envelope_supersedes:
+        enriched[0].setdefault("supersedes_task_ids", envelope_supersedes)
     return enriched
 
 
@@ -502,18 +721,18 @@ def _append_replan_history_if_requested(
             "affected_tasks": _unique_strings(
                 value
                 for task in gap_tasks
-                for value in _string_list(task.get("affected_tasks"))
+                for value in _task_contract_list(task, "affected_tasks")
             ),
             "superseded_task_ids": _superseded_task_ids(gap_tasks),
             "gate_changes": _unique_strings(
                 value
                 for task in gap_tasks
-                for value in _string_list(task.get("gate_changes"))
+                for value in _task_contract_list(task, "gate_changes")
             ),
             "source_refs": _unique_strings(
                 value
                 for task in gap_tasks
-                for value in _string_list(task.get("source_refs"))
+                for value in _task_contract_list(task, "source_refs")
             ),
         },
     )
@@ -527,8 +746,46 @@ def _superseded_task_ids(gap_tasks: list[dict[str, Any]]) -> list[str]:
     return _unique_strings(
         value
         for task in gap_tasks
-        for value in _string_list(task.get("supersedes_task_ids"))
+        for container in (task, task.get("payload"))
+        if isinstance(container, dict)
+        for value in _string_list(container.get("supersedes_task_ids"))
     )
+
+
+def _replayed_supersede_lineage(
+    gap_tasks: list[dict[str, Any]],
+    *,
+    base_tasks_by_id: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Return predecessor ids proven by an existing identical successor id.
+
+    An amended task map removes the predecessor node but retains its explicit
+    supersede lineage on the successor. A later verifier may rediscover the
+    same bounded gap. Treat that as an idempotent replay only when the proposed
+    successor already exists and records the same predecessor mechanically.
+    """
+
+    replayed: set[str] = set()
+    for task in gap_tasks:
+        existing = base_tasks_by_id.get(_task_id(task))
+        if existing is None:
+            continue
+        proposed_ids = set(_task_contract_list(task, "supersedes_task_ids"))
+        existing_ids = set(_task_contract_list(existing, "supersedes_task_ids"))
+        replayed.update(proposed_ids & existing_ids)
+    return replayed
+
+
+def _task_contract_list(raw: dict[str, Any], key: str) -> list[str]:
+    values: list[str] = []
+    for container in (
+        raw,
+        raw.get("payload"),
+        raw.get("evidence_contract"),
+    ):
+        if isinstance(container, dict):
+            values.extend(_string_list(container.get(key)))
+    return _unique_strings(values)
 
 
 def _unique_strings(values: Any) -> list[str]:
@@ -562,7 +819,19 @@ def _acceptance(raw: dict[str, Any]) -> list[str]:
 
 
 def _verification(raw: dict[str, Any]) -> list[str]:
-    return _string_list(raw.get("verify_commands") or raw.get("verification"))
+    commands = _string_list(raw.get("verify_commands") or raw.get("verification"))
+    if commands:
+        return commands
+    validation = raw.get("validation")
+    rows = validation.get("commands") if isinstance(validation, dict) else []
+    if not isinstance(rows, list):
+        return []
+    return [
+        command
+        for row in rows
+        if isinstance(row, dict)
+        and (command := str(row.get("command") or "").strip())
+    ]
 
 
 def _dict_list(value: Any) -> list[dict[str, Any]]:

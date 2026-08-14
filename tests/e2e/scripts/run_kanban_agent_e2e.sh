@@ -153,6 +153,7 @@ if marker.startswith("KBA_CHANNEL_"):
                     "recommended": True,
                     "submit_payload": {
                         "template_id": "quick-change",
+                        "mode": "conversation",
                         "name": "API authentication review",
                         "overrides": {
                             "backend": "fake",
@@ -166,6 +167,7 @@ if marker.startswith("KBA_CHANNEL_"):
                     "description": "Broader architecture and security review.",
                     "submit_payload": {
                         "template_id": "architecture-review",
+                        "mode": "multi_lens",
                         "name": "API authentication architecture review",
                         "overrides": {
                             "backend": "fake",

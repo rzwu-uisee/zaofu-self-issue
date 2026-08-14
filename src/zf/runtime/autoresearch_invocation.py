@@ -13,6 +13,7 @@ from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_obj
+from zf.runtime.recovery_case import recovery_case_id_from_payload
 
 
 AUTORESEARCH_INVOCATION_SCHEMA_VERSION = "autoresearch.invocation.v0"
@@ -23,46 +24,6 @@ AUTORESEARCH_INVOCATION_EVENTS = {
 }
 _SAFE_LEVELS = {"", "diagnose", "l1", "L1"}
 _DIRECT_APPLY_POLICIES = {"direct_apply", "mainline_apply", "auto_apply", "apply_to_main"}
-
-
-def recovery_case_id_from_payload(
-    payload: dict[str, Any],
-    *,
-    fallback: str = "",
-) -> str:
-    """Build the producer-independent identity of one recovery case.
-
-    Invocation request ids are transport details.  Dedupe must instead bind to
-    the run/failure identity so Supervisor, a capped stall, and Run Manager
-    cannot create parallel diagnoses for the same root cause.
-    """
-
-    existing = str(payload.get("recovery_case_id") or "").strip()
-    if existing:
-        return existing
-    source_ids = _string_list(payload.get("source_event_ids"))
-    identity = "|".join([
-        str(
-            payload.get("workflow_run_id")
-            or payload.get("run_id")
-            or payload.get("trace_id")
-            or payload.get("correlation_id")
-            or ""
-        ).strip(),
-        str(payload.get("failure_scope") or payload.get("failure_class") or "").strip(),
-        str(payload.get("plan_admission_incident_id") or "").strip(),
-        str(payload.get("fingerprint") or payload.get("attention_id") or "").strip(),
-        str(payload.get("task_id") or "").strip(),
-        str(payload.get("stage_id") or "").strip(),
-        str(payload.get("fanout_id") or "").strip(),
-        str(
-            payload.get("original_trigger_event_id")
-            or payload.get("source_event_id")
-            or (source_ids[0] if source_ids else "")
-            or fallback
-        ).strip(),
-    ])
-    return "rcase-" + _sha1(identity)[:16]
 
 
 def autoresearch_invocation_projection(events: list[ZfEvent]) -> dict[str, Any]:
@@ -195,6 +156,8 @@ def build_invocation_request_from_run_manager_event(
     payload = event.payload if isinstance(event.payload, dict) else {}
     if _is_observability_only_run_manager_request(payload):
         return None
+    if run_manager_autoresearch_request_superseded(event, events=events):
+        return None
     request_id = str(
         payload.get("request_id")
         or payload.get("loop_request_id")
@@ -275,6 +238,75 @@ def build_invocation_request_from_run_manager_event(
             },
         }),
     )
+
+
+def run_manager_autoresearch_request_superseded(
+    event: ZfEvent,
+    *,
+    events: list[ZfEvent],
+) -> bool:
+    """Return whether an operator reopen replaced a terminal diagnosis.
+
+    A terminal diagnosis is tied to one ``run.goal.blocked`` occurrence.  If
+    the operator later reopens that same run, replaying the old request on the
+    next harness start would diagnose an abandoned recovery route.  Ordinary
+    active-run diagnosis requests remain unaffected.
+    """
+
+    if event.type != "run.manager.autoresearch.requested":
+        return False
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    operation_key = str(payload.get("operation_key") or "").strip()
+    if not operation_key.startswith("terminal-diagnosis:"):
+        return False
+    terminal_event_id = operation_key.removeprefix("terminal-diagnosis:").strip()
+    if not terminal_event_id:
+        return False
+
+    request_index = next(
+        (index for index, candidate in enumerate(events) if candidate.id == event.id),
+        -1,
+    )
+    terminal_event = next(
+        (
+            candidate
+            for candidate in events[:request_index] if request_index >= 0
+            and candidate.id == terminal_event_id
+            and candidate.type == "run.goal.blocked"
+        ),
+        None,
+    )
+    if request_index < 0 or terminal_event is None:
+        return False
+    terminal_payload = (
+        terminal_event.payload if isinstance(terminal_event.payload, dict) else {}
+    )
+    run_id = str(
+        payload.get("workflow_run_id")
+        or payload.get("run_id")
+        or terminal_payload.get("workflow_run_id")
+        or terminal_payload.get("run_id")
+        or terminal_event.correlation_id
+        or ""
+    ).strip()
+    if not run_id:
+        return False
+    for candidate in events[request_index + 1:]:
+        if candidate.type != "run.goal.updated":
+            continue
+        candidate_payload = (
+            candidate.payload if isinstance(candidate.payload, dict) else {}
+        )
+        candidate_run_id = str(
+            candidate_payload.get("workflow_run_id")
+            or candidate_payload.get("run_id")
+            or candidate.correlation_id
+            or ""
+        ).strip()
+        status = str(candidate_payload.get("status") or "").strip().lower()
+        if candidate_run_id == run_id and status in {"active", "running"}:
+            return True
+    return False
 
 
 def _is_observability_only_run_manager_request(payload: dict[str, Any]) -> bool:
@@ -459,6 +491,7 @@ __all__ = [
     "invocation_id_from_payload",
     "rejection_payload",
     "recovery_case_id_from_payload",
+    "run_manager_autoresearch_request_superseded",
     "trigger_payload_from_invocation",
     "validate_invocation_request",
 ]

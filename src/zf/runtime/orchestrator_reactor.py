@@ -38,7 +38,10 @@ from zf.runtime.channel_synthesis_reactor import (
 from zf.runtime.cli_command import zf_cli_cmd
 from zf.runtime.durable_call_workflow import DurableCallWorkflowMixin
 from zf.runtime.feature_completion import close_feature_if_all_tasks_done
-from zf.runtime.goal_terminal_settlement import select_candidate_terminal_tasks
+from zf.runtime.goal_terminal_settlement import (
+    select_candidate_terminal_tasks,
+    successful_task_ids_before_terminal,
+)
 from zf.runtime.artifact_manifest import (
     is_taskless_workflow_manifest_payload,
     load_manifest_from_payload,
@@ -61,6 +64,7 @@ from zf.runtime.autoresearch_invocation import (
     invocation_id_from_payload,
     recovery_case_id_from_payload,
     rejection_payload,
+    run_manager_autoresearch_request_superseded,
     trigger_payload_from_invocation,
     validate_invocation_request,
 )
@@ -1083,11 +1087,7 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
     def _on_worker_state_changed_event(
         self, event: ZfEvent,
     ) -> WorkflowRuntimeDecision | None:
-        """A2(PRD goal-mode e2e finding-3):blocked_human 曾无事件出口——
-        内存态只在启动 catch-up 重建,运行中外部 worker.state.changed 只进
-        registry 永不进内存,唯一解锁是重启(r6.1 悬案根因)。此处把
-        外部状态事件按 payload.instance_id 应用到内存;kernel 自身发射的
-        事件重放为幂等同值,无害。"""
+        """Apply external worker state events to the in-memory lifecycle view."""
         payload = event.payload if isinstance(event.payload, dict) else {}
         instance = str(
             payload.get("instance_id") or payload.get("role") or ""
@@ -1096,6 +1096,15 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         if instance and to_state:
             try:
                 self._last_worker_state[instance] = to_state
+            except Exception:
+                pass
+            try:
+                recycling = {"pending_recycle", "recycling"}
+                resumed = {"idle", "busy", "awaiting_review", "completion_pending"}
+                if to_state in recycling:
+                    self._instance_state[instance] = to_state
+                elif self._instance_state.get(instance) in recycling and to_state in resumed:
+                    self._instance_state[instance] = "healthy"
             except Exception:
                 pass
         if instance and payload.get("respawn_success_circuit_reset") is True:
@@ -4473,6 +4482,10 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
             pdd_id=pdd_id,
             feature_id=feature_id,
             is_bootstrap_task=self._is_workflow_bootstrap_task,
+            successful_task_ids=successful_task_ids_before_terminal(
+                self.event_log.read_all(),
+                event,
+            ),
         )
         for task in tasks:
             if self._move_task(task.id, "done", trigger_event=event.type):
@@ -6585,6 +6598,11 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
             events = self.event_log.read_all()
         except Exception:
             events = [event]
+        if run_manager_autoresearch_request_superseded(event, events=events):
+            return WorkflowRuntimeDecision(
+                action="skip", task_id=event.task_id,
+                reason="terminal diagnosis superseded by later goal reopen",
+            )
         invocation = build_invocation_request_from_run_manager_event(
             event,
             events=events,
@@ -6789,7 +6807,7 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         run_goal_terminal_success = (
             task.status in {
                 "backlog", "in_progress", "review", "verify", "testing",
-                "test", "judge",
+                "test", "judge", "blocked",
             }
             and to_status == "done"
             and trigger_event == "run.goal.completed"
@@ -6807,7 +6825,10 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
                 or run_goal_terminal_success
             ):
                 self.sm.transition(task.status, to_status)
-            updated_task = self.task_store.update(task_id, status=to_status)
+            updates = {"status": to_status}
+            if to_status == "done" and task.blocked_reason:
+                updates["blocked_reason"] = ""
+            updated_task = self.task_store.update(task_id, **updates)
             self._refresh_task_doc_projection(
                 updated_task,
                 source_event=trigger_event or "reactor_move",

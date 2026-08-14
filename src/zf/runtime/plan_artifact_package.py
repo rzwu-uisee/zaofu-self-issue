@@ -276,11 +276,23 @@ def reduce_plan_artifact_packages(
     workflow_run_id: str,
     package_slot: str = PLAN_ARTIFACT_PACKAGE_SLOT,
 ) -> dict[str, Any]:
+    event_list = list(events)
+    aborted_admission_sources = {
+        str(payload.get("trigger_event_id") or "").strip()
+        for event in event_list
+        if (
+            (event_type := _event_parts(event)[0]) == "fanout.cancelled"
+            and isinstance((payload := _event_parts(event)[2]), Mapping)
+            and str(payload.get("failure_scope") or "") == "plan_admission"
+            and str(payload.get("trigger_event_id") or "").strip()
+        )
+    }
     current: dict[str, Any] | None = None
     history: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
-    revisions: dict[str, str] = {}
-    for event in events:
+    revisions: dict[str, tuple[str, str, str]] = {}
+    generations: dict[str, tuple[str, str]] = {}
+    for event in event_list:
         event_type, event_id, payload = _event_parts(event)
         if event_type not in {
             "plan.artifact_package.admitted",
@@ -302,15 +314,51 @@ def reduce_plan_artifact_packages(
             continue
         if event_type == "plan.artifact_package.superseded":
             continue
+        source_event_id = str(payload.get("source_event_id") or "").strip()
+        if source_event_id and source_event_id in aborted_admission_sources:
+            rejected.append({
+                **row,
+                "status": "rejected",
+                "reason": "aborted_plan_admission",
+            })
+            continue
         revision = str(payload.get("plan_revision") or "")
         digest = str(payload.get("package_digest") or payload.get("package_sha256") or "")
+        generation = str(payload.get("task_map_generation") or "")
         existing = revisions.get(revision)
-        if revision and existing and existing != digest:
+        if revision and existing:
+            existing_digest, existing_generation, existing_event_id = existing
+            if existing_digest == digest:
+                continue
+            if generation and generation == existing_generation:
+                rejected.append({
+                    **row,
+                    "status": "rejected",
+                    "reason": "immutable_generation_replay_conflict",
+                    "canonical_package_digest": existing_digest,
+                    "canonical_event_id": existing_event_id,
+                })
+                continue
             raise PlanArtifactPackageError(
                 f"conflicting admitted package for plan revision {revision}"
             )
+        existing_generation = generations.get(generation)
+        if generation and existing_generation:
+            existing_digest, existing_event_id = existing_generation
+            if existing_digest == digest:
+                continue
+            rejected.append({
+                **row,
+                "status": "rejected",
+                "reason": "immutable_generation_replay_conflict",
+                "canonical_package_digest": existing_digest,
+                "canonical_event_id": existing_event_id,
+            })
+            continue
         if revision:
-            revisions[revision] = digest
+            revisions[revision] = (digest, generation, event_id)
+        if generation:
+            generations[generation] = (digest, event_id)
         if current and str(current.get("package_digest") or "") != digest:
             history.append({**current, "status": "superseded"})
         current = {**row, "status": "current"}
@@ -326,6 +374,81 @@ def reduce_plan_artifact_packages(
             "admitted_count": len(history) + (1 if current else 0),
         },
     }
+
+
+def admitted_plan_artifact_package_for_generation(
+    projection: Mapping[str, Any],
+    *,
+    task_map_generation: str,
+) -> dict[str, Any]:
+    """Select the immutable admitted package bound to one Task generation."""
+
+    generation = str(task_map_generation or "").strip()
+    if not generation:
+        return {}
+    current = projection.get("current")
+    history = projection.get("history")
+    candidates = [
+        row
+        for row in [
+            current if isinstance(current, Mapping) else None,
+            *(
+                reversed(history)
+                if isinstance(history, list)
+                else []
+            ),
+        ]
+        if isinstance(row, Mapping)
+        and str(row.get("task_map_generation") or "") == generation
+    ]
+    if not candidates:
+        return {}
+    digests = {
+        str(row.get("package_digest") or row.get("package_sha256") or "")
+        for row in candidates
+    }
+    if len(digests) != 1:
+        raise PlanArtifactPackageError(
+            "conflicting admitted packages for task-map generation " + generation
+        )
+    return dict(candidates[0])
+
+
+def plan_artifact_package_binding(
+    events: Iterable[ZfEvent | Mapping[str, Any]],
+    package: Mapping[str, Any],
+) -> dict[str, str]:
+    """Return one admitted package and its generation-pinned Claim Set."""
+
+    binding = {
+        "task_map_generation": str(package.get("task_map_generation") or ""),
+        "plan_artifact_package_id": str(package.get("package_id") or ""),
+        "plan_artifact_package_ref": str(package.get("package_ref") or ""),
+        "plan_artifact_package_digest": str(package.get("package_digest") or ""),
+    }
+    claim_ref = str(package.get("goal_claim_set_ref") or "")
+    claim_digest = str(package.get("goal_claim_set_digest") or "")
+    if not claim_ref or not claim_digest:
+        run_id = str(package.get("workflow_run_id") or "")
+        generation = str(package.get("task_map_generation") or "")
+        for event in reversed(list(events)):
+            event_type, _event_id, payload = _event_parts(event)
+            if event_type != "goal.claim_set.pinned":
+                continue
+            if str(payload.get("workflow_run_id") or "") != run_id:
+                continue
+            if str(payload.get("task_map_generation") or "") != generation:
+                continue
+            claim_ref = str(payload.get("goal_claim_set_ref") or "")
+            claim_digest = str(payload.get("goal_claim_set_digest") or "")
+            if claim_ref and claim_digest:
+                break
+    if claim_ref and claim_digest:
+        binding.update({
+            "goal_claim_set_ref": claim_ref,
+            "goal_claim_set_digest": claim_digest,
+        })
+    return binding
 
 
 def prepare_plan_artifact_package(
@@ -478,22 +601,82 @@ def prepare_plan_artifact_package(
         active_contract,
         source_event_id=source_event_id,
     )
+    plan_revision = str(
+        payload.get("plan_revision")
+        or payload.get("revision")
+        or generation
+    )
     validate_required_matrix_readiness(
         state_dir=state_dir,
         ports=[*explicit_ports.values(), *inherited],
         required_ports=required_ports,
     )
+    product_acceptance_port = next(
+        (
+            port
+            for port in [*explicit_ports.values(), *inherited]
+            if str(port.get("logical_name") or "")
+            == "product_acceptance_spec"
+        ),
+        None,
+    )
+    if isinstance(product_acceptance_port, Mapping):
+        from zf.runtime.product_acceptance import (
+            PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+            validate_product_acceptance_spec,
+        )
+
+        hydrated = hydrate_sidecar_ref(
+            state_dir,
+            {
+                "ref": str(product_acceptance_port.get("ref") or ""),
+                "sha256": str(product_acceptance_port.get("sha256") or ""),
+            },
+        )
+        if not isinstance(hydrated.payload, Mapping):
+            raise PlanArtifactPackageError(
+                "product_acceptance_spec must contain a JSON object"
+            )
+        product_acceptance_spec = dict(hydrated.payload)
+        if "product_acceptance_spec" in explicit_ports:
+            product_acceptance_spec.update({
+                "schema_version": PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+                "workflow_run_id": workflow_run_id,
+                "flow_kind": flow_kind,
+                "plan_revision": plan_revision,
+                "task_map_generation": generation,
+            })
+            descriptor = write_immutable_json_sidecar(
+                state_dir,
+                product_acceptance_spec,
+                root="product-acceptance/specs",
+                kind="product_acceptance_spec",
+                schema_version=PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+                created_by="plan-artifact-package",
+                source_event_id=source_event_id,
+            )
+            explicit_ports["product_acceptance_spec"] = {
+                **explicit_ports["product_acceptance_spec"],
+                "schema_version": PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+                "ref": str(descriptor.get("ref") or ""),
+                "sha256": str(descriptor.get("sha256") or ""),
+            }
+        validate_product_acceptance_spec(
+            product_acceptance_spec,
+            expected={
+                "workflow_run_id": workflow_run_id,
+                "flow_kind": flow_kind,
+                "plan_revision": plan_revision,
+                "task_map_generation": generation,
+            },
+        )
     package = build_plan_artifact_package(
         workflow_run_id=workflow_run_id,
         request_id=str(payload.get("request_id") or ""),
         flow_kind=flow_kind,
         producer_stage_id=producer_stage_id,
         run_contract=run_contract,
-        plan_revision=str(
-            payload.get("plan_revision")
-            or payload.get("revision")
-            or generation
-        ),
+        plan_revision=plan_revision,
         task_map_generation=generation,
         produced=explicit_ports.values(),
         inherited=inherited,
@@ -585,17 +768,30 @@ def admit_plan_artifact_package_for_payload(
         task_map_digest=payload.get("task_map_digest"),
         task_map_ref=payload.get("task_map_ref"),
     )
-    if (
-        current_before
-        and incoming_generation
-        and str(current_before.get("task_map_generation") or "")
-        == incoming_generation
-    ):
+    admitted_rows = [
+        row
+        for row in [
+            *(reduced_before.get("history") or []),
+            current_before,
+        ]
+        if isinstance(row, Mapping)
+    ]
+    reusable = next(
+        (
+            row
+            for row in admitted_rows
+            if incoming_generation
+            and str(row.get("task_map_generation") or "")
+            == incoming_generation
+        ),
+        None,
+    )
+    if reusable:
         current_body = hydrate_plan_artifact_package(
             state_dir,
             {
-                "ref": current_before["package_ref"],
-                "sha256": current_before["package_digest"],
+                "ref": reusable["package_ref"],
+                "sha256": reusable["package_digest"],
             },
         )
         current_mode = str(
@@ -609,10 +805,10 @@ def admit_plan_artifact_package_for_payload(
         return {
             "artifact_package_mode": current_mode,
             "artifact_package_status": "admitted",
-            "plan_artifact_package_id": str(current_before.get("package_id") or ""),
-            "plan_artifact_package_ref": str(current_before.get("package_ref") or ""),
+            "plan_artifact_package_id": str(reusable.get("package_id") or ""),
+            "plan_artifact_package_ref": str(reusable.get("package_ref") or ""),
             "plan_artifact_package_digest": str(
-                current_before.get("package_digest") or ""
+                reusable.get("package_digest") or ""
             ),
             "run_contract_ref": str(current_body.get("run_contract_ref") or ""),
             "run_contract_digest": str(
@@ -720,6 +916,12 @@ def admit_plan_artifact_package_for_payload(
             descriptor,
             status="admitted",
         )
+        admitted_payload.update({
+            "goal_claim_set_ref": str(claim.get("goal_claim_set_ref") or ""),
+            "goal_claim_set_digest": str(
+                claim.get("goal_claim_set_digest") or ""
+            ),
+        })
         event_writer.append(ZfEvent(
             type="plan.artifact_package.admitted",
             actor="zf-cli",
@@ -871,11 +1073,13 @@ __all__ = [
     "PLAN_ARTIFACT_PACKAGE_SCHEMA",
     "PLAN_ARTIFACT_PACKAGE_SLOT",
     "PlanArtifactPackageError",
+    "admitted_plan_artifact_package_for_generation",
     "admit_plan_artifact_package_for_payload",
     "artifact_package_mode",
     "build_plan_artifact_package",
     "hydrate_plan_artifact_package",
     "package_event_payload",
+    "plan_artifact_package_binding",
     "prepare_plan_artifact_package",
     "reduce_plan_artifact_packages",
     "required_plan_ports",

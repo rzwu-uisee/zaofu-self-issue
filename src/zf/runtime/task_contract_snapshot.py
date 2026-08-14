@@ -233,6 +233,7 @@ def build_task_contract_snapshot(
         contract_revision=identity["contract_revision"],
         verification_tiers=list(getattr(contract, "verification_tiers", []) or []),
     )
+    verification_owner, verification_tier = _snapshot_verification_route(criteria)
     all_command_ids = [str(item["id"]) for item in commands]
     for criterion in criteria:
         if criterion["verification_command_ids"]:
@@ -261,6 +262,8 @@ def build_task_contract_snapshot(
         "allowed_paths": list(getattr(contract, "scope", []) or []),
         "protected_paths": [".zf/**"],
         "acceptance_criteria": criteria,
+        "verification_owner": verification_owner,
+        "verification_tier": verification_tier,
         "verification_command": verification_command,
         "verification_commands": [
             {
@@ -276,6 +279,11 @@ def build_task_contract_snapshot(
                 **(
                     {"producer_paths": list(item["producer_paths"])}
                     if item.get("producer_paths")
+                    else {}
+                ),
+                **(
+                    {"producer_task_id": str(item["producer_task_id"])}
+                    if item.get("producer_task_id")
                     else {}
                 ),
             }
@@ -550,6 +558,12 @@ def _validate_snapshot(snapshot: Mapping[str, Any]) -> None:
     acceptance_ids = [str(item.get("acceptance_id") or "") for item in criteria]
     if len(acceptance_ids) != len(set(acceptance_ids)):
         raise TaskContractSnapshotError("snapshot acceptance ids must be unique")
+    snapshot_owner = str(snapshot.get("verification_owner") or "")
+    if snapshot_owner and snapshot_owner not in VERIFICATION_OWNERS:
+        raise TaskContractSnapshotError("snapshot verification owner is invalid")
+    snapshot_tier = str(snapshot.get("verification_tier") or "")
+    if snapshot_tier and snapshot_tier not in VERIFICATION_TIERS:
+        raise TaskContractSnapshotError("snapshot verification tier is invalid")
     commands = snapshot.get("verification_commands", [])
     if not isinstance(commands, list):
         raise TaskContractSnapshotError("snapshot verification_commands must be a list")
@@ -593,6 +607,27 @@ def _validate_target_snapshot(snapshot: Mapping[str, Any]) -> None:
         raise TaskContractSnapshotError(
             "verification target missing: " + ", ".join(missing)
         )
+
+
+def _snapshot_verification_route(
+    criteria: list[dict[str, Any]],
+) -> tuple[str, str]:
+    mandatory = [
+        item for item in criteria
+        if item.get("mandatory", True) is not False
+    ]
+    owners = {
+        str(item.get("verification_owner") or "task_verify")
+        for item in mandatory
+    }
+    owner = "candidate_verify" if owners == {"candidate_verify"} else "task_verify"
+    tiers = {
+        str(item.get("verification_tier") or "task_non_smoke")
+        for item in mandatory
+        if str(item.get("verification_owner") or "task_verify") == owner
+    }
+    tier = next(iter(tiers)) if len(tiers) == 1 else "task_non_smoke"
+    return owner, tier
 
 
 def _digest(value: Any) -> str:

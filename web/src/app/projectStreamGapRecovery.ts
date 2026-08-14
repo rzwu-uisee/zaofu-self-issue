@@ -58,10 +58,11 @@ export function useProjectStreamGapRecovery(
     const recoveryPage = initial.page;
     assertCurrentRecovery(mountedRef.current, initial.activeProjectId, projectId, recoveryPage, initial.page);
 
-    // Anchor the recovery window first. Projection reads that follow include
-    // at least this cursor; later events are replayed by the replacement SSE.
+    // Catch up the projection before choosing the replacement SSE cursor.
+    // Events appended after this read remain above current_seq and are replayed
+    // by the replacement stream instead of being skipped by a newer health seq.
     invalidateProjectReadCache(projectId);
-    const nextEventsPage = await getRecentEventsPage(60, projectId);
+    const nextEventsPage = await getRecentEventsPage(60, projectId, true);
     const authoritativeCursor = Number(nextEventsPage.current_seq);
     if (!Number.isInteger(authoritativeCursor) || authoritativeCursor < 0) {
       throw new Error("stream recovery returned an invalid event cursor");

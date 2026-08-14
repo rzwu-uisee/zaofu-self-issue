@@ -13,10 +13,11 @@ from zf.core.events.model import ZfEvent
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.git_capture import git_env
+from zf.runtime.task_pipeline_contexts import (
+    CANDIDATE_FREEZE_RECEIPT_SCHEMA,
+    task_pipeline_generation_is_current,
+)
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
-
-
-CANDIDATE_FREEZE_RECEIPT_SCHEMA = "candidate-freeze-receipt.v1"
 
 
 def reconcile_task_pipeline_terminals(
@@ -28,7 +29,60 @@ def reconcile_task_pipeline_terminals(
 
     decisions: list[WorkflowRuntimeDecision] = []
     events = runtime.event_log.read_all()
+    archived_session_keys = {
+        (
+            str(event.payload.get("workflow_run_id") or ""),
+            str(event.payload.get("task_map_generation") or ""),
+            str(event.task_id or ""),
+        )
+        for event in events
+        if event.type == "task.pipeline.sessions.archived"
+        and isinstance(event.payload, dict)
+    }
+    session_registry: RoleSessionRegistry | None = None
     for task_id, context in sorted(generation_contexts.items()):
+        task = runtime.task_store.get(task_id)
+        archive_key = (
+            str(context.get("workflow_run_id") or ""),
+            str(context.get("task_map_generation") or ""),
+            task_id,
+        )
+        if (
+            task is not None
+            and str(task.status) in {"done", "cancelled"}
+            and archive_key in archived_session_keys
+        ):
+            continue
+        if task is not None and str(task.status) == "cancelled":
+            superseded = _authorized_supersession_event(
+                events,
+                task_id=task_id,
+                context=context,
+            )
+            if superseded is not None:
+                if session_registry is None:
+                    session_registry = RoleSessionRegistry(
+                        Path(runtime.state_dir) / "role_sessions.yaml",
+                        project_root=str(runtime.project_root),
+                    )
+                archived = _archive_settled_task_sessions(
+                    runtime,
+                    task_id=task_id,
+                    context=context,
+                    integration_event=superseded,
+                    registry=session_registry,
+                    events=events,
+                )
+            else:
+                archived = False
+            if archived:
+                archived_session_keys.add(archive_key)
+                decisions.append(WorkflowRuntimeDecision(
+                    action="task_pipeline_sessions_archived",
+                    task_id=task_id,
+                    reason="admitted Task Map supersession -> sessions archived",
+                ))
+            continue
         integrated = _latest_integration_event(
             events,
             task_id=task_id,
@@ -84,12 +138,20 @@ def reconcile_task_pipeline_terminals(
             receipt_ref=dict(descriptor),
             integration_event=integrated,
         )
+        if session_registry is None:
+            session_registry = RoleSessionRegistry(
+                Path(runtime.state_dir) / "role_sessions.yaml",
+                project_root=str(runtime.project_root),
+            )
         if _archive_settled_task_sessions(
             runtime,
             task_id=task_id,
             context=context,
             integration_event=integrated,
+            registry=session_registry,
+            events=events,
         ):
+            archived_session_keys.add(archive_key)
             decisions.append(WorkflowRuntimeDecision(
                 action="task_pipeline_sessions_archived",
                 task_id=task_id,
@@ -139,11 +201,11 @@ def task_pipeline_workspace_base(
     task: Any,
     generation_context: Mapping[str, Any],
 ) -> str:
-    """Start newly admitted work from the latest current Candidate head."""
+    """Start newly admitted work from the newest linear Candidate head."""
 
     fallback = str(generation_context.get("dispatch_base_commit") or "")
     workflow_run_id = str(generation_context.get("workflow_run_id") or "")
-    task_map_generation = str(generation_context.get("task_map_generation") or "")
+    candidate_head = ""
     for event in reversed(runtime.event_log.read_all()):
         if event.type != "candidate.updated":
             continue
@@ -151,13 +213,74 @@ def task_pipeline_workspace_base(
         if (
             payload.get("incremental") is True
             and str(payload.get("workflow_run_id") or "") == workflow_run_id
-            and str(payload.get("task_map_generation") or "")
-            == task_map_generation
         ):
             candidate_head = str(payload.get("candidate_head") or "").strip()
             if candidate_head:
-                return candidate_head
-    return fallback
+                break
+    if not candidate_head or candidate_head == fallback:
+        return candidate_head or fallback
+
+    project_root = Path(runtime.project_root)
+    fallback_before_candidate = _commit_is_ancestor(
+        project_root,
+        ancestor=fallback,
+        descendant=candidate_head,
+    )
+    if fallback_before_candidate is True:
+        return candidate_head
+    candidate_before_fallback = _commit_is_ancestor(
+        project_root,
+        ancestor=candidate_head,
+        descendant=fallback,
+    )
+    if candidate_before_fallback is True:
+        return fallback
+
+    from zf.runtime.task_pipeline_runtime import TaskPipelineRuntimeError
+
+    if fallback_before_candidate is None or candidate_before_fallback is None:
+        raise TaskPipelineRuntimeError(
+            "Task Pipeline workspace base lineage is not resolvable: "
+            f"dispatch_base={fallback!r}, candidate_head={candidate_head!r}"
+        )
+    raise TaskPipelineRuntimeError(
+        "Task Pipeline workspace base diverged from the current Candidate: "
+        f"dispatch_base={fallback}, candidate_head={candidate_head}"
+    )
+
+
+def _commit_is_ancestor(
+    project_root: Path,
+    *,
+    ancestor: str,
+    descendant: str,
+) -> bool | None:
+    if not ancestor or not descendant:
+        return None
+    if ancestor == descendant:
+        return True
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project_root),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
 
 
 def _freeze_generation(
@@ -170,7 +293,15 @@ def _freeze_generation(
     events = runtime.event_log.read_all()
     workflow_run_id = str(context.get("workflow_run_id") or "")
     task_map_generation = str(context.get("task_map_generation") or "")
+    if not task_pipeline_generation_is_current(
+        events,
+        workflow_run_id=workflow_run_id,
+        generation_id=generation_id,
+    ):
+        return False
     integrated: list[tuple[ZfEvent, dict[str, Any], dict[str, Any]]] = []
+    completed_task_ids: list[str] = []
+    superseded: list[ZfEvent] = []
     from zf.runtime.candidate_incremental import hydrate_task_integration_receipt
     from zf.runtime.candidates import CandidateRebuilder
 
@@ -182,7 +313,19 @@ def _freeze_generation(
     )
     for task_id in task_ids:
         task = runtime.task_store.get(task_id)
-        if task is None or str(task.status) != "done":
+        if task is None:
+            return False
+        if str(task.status) == "cancelled":
+            supersession = _authorized_supersession_event(
+                events,
+                task_id=task_id,
+                context=context,
+            )
+            if supersession is None:
+                return False
+            superseded.append(supersession)
+            continue
+        if str(task.status) != "done":
             return False
         event = _latest_integration_event(
             events,
@@ -206,6 +349,7 @@ def _freeze_generation(
         except Exception:
             return False
         integrated.append((event, receipt, dict(descriptor)))
+        completed_task_ids.append(task_id)
     if (
         not integrated
         or _generation_has_active_work(runtime, context, task_ids)
@@ -269,12 +413,25 @@ def _freeze_generation(
         }
         for event, receipt, descriptor in integrated
     ])
+    supersession_ledger_digest = _digest([
+        {
+            "task_id": event.task_id,
+            "event_id": event.id,
+            "superseded_by_task_map_ref": (
+                event.payload.get("superseded_by_task_map_ref")
+                if isinstance(event.payload, dict)
+                else ""
+            ),
+        }
+        for event in superseded
+    ])
     freeze_id = _digest({
         "workflow_run_id": workflow_run_id,
         "task_map_generation": task_map_generation,
         "candidate_generation": candidate_generation,
         "candidate_head": candidate_head,
         "integration_ledger_digest": ledger_digest,
+        "supersession_ledger_digest": supersession_ledger_digest,
     })
     if _candidate_ready_exists(events, freeze_id):
         return False
@@ -314,7 +471,12 @@ def _freeze_generation(
         ),
         "integration_ledger_digest": ledger_digest,
         "task_ids": task_ids,
-        "completed_task_ids": task_ids,
+        "completed_task_ids": completed_task_ids,
+        "superseded_task_ids": sorted(
+            str(event.task_id or "") for event in superseded
+        ),
+        "task_supersession_event_ids": [event.id for event in superseded],
+        "supersession_ledger_digest": supersession_ledger_digest,
         "task_integration_receipt_refs": receipt_refs,
         "status": "frozen",
     }
@@ -398,6 +560,62 @@ def _latest_integration_event(
     return None
 
 
+def _authorized_supersession_event(
+    events: list[ZfEvent],
+    *,
+    task_id: str,
+    context: Mapping[str, Any],
+) -> ZfEvent | None:
+    """Return a cancellation backed by a later admitted Task Map amendment."""
+
+    workflow_run_id = str(context.get("workflow_run_id") or "")
+    generation_event_id = str(context.get("generation_admitted_event_id") or "")
+    event_order = {event.id: index for index, event in enumerate(events)}
+    generation_index = event_order.get(generation_event_id, -1)
+    for index in range(len(events) - 1, generation_index, -1):
+        event = events[index]
+        if event.type != "task.superseded" or event.task_id != task_id:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        replacement_ref = str(
+            payload.get("superseded_by_task_map_ref") or ""
+        ).strip()
+        if (
+            event.origin != "kernel"
+            or str(payload.get("source") or "") != "writer_task_map_adoption"
+            or str(payload.get("status") or "") != "cancelled"
+            or not replacement_ref
+            or (
+                workflow_run_id
+                and str(event.correlation_id or "") != workflow_run_id
+            )
+        ):
+            continue
+        replacement_identity = _artifact_ref_identity(replacement_ref)
+        for admitted in events[index + 1:]:
+            if admitted.type != "task.pipeline.generation.admitted":
+                continue
+            admitted_payload = (
+                admitted.payload if isinstance(admitted.payload, dict) else {}
+            )
+            if (
+                str(admitted_payload.get("workflow_run_id") or "")
+                == workflow_run_id
+                and _artifact_ref_identity(
+                    str(admitted_payload.get("task_map_ref") or "")
+                ) == replacement_identity
+            ):
+                return event
+    return None
+
+
+def _artifact_ref_identity(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    marker = "artifacts/"
+    index = normalized.find(marker)
+    return normalized[index:] if index >= 0 else normalized
+
+
 def _emit_task_done_once(
     runtime: Any,
     *,
@@ -439,6 +657,8 @@ def _archive_settled_task_sessions(
     task_id: str,
     context: Mapping[str, Any],
     integration_event: ZfEvent,
+    registry: RoleSessionRegistry,
+    events: list[ZfEvent],
 ) -> bool:
     """Archive Task-stage transcripts only after all exact work settles."""
 
@@ -446,10 +666,6 @@ def _archive_settled_task_sessions(
         return False
     workflow_run_id = str(context.get("workflow_run_id") or "")
     task_map_generation = str(context.get("task_map_generation") or "")
-    registry = RoleSessionRegistry(
-        Path(runtime.state_dir) / "role_sessions.yaml",
-        project_root=str(runtime.project_root),
-    )
     bindings = [
         dict(binding)
         for binding in registry.task_stage_bindings().values()
@@ -507,7 +723,7 @@ def _archive_settled_task_sessions(
         "task_id": task_id,
         "binding_keys": [row["binding_key"] for row in archived],
     })
-    for event in runtime.event_log.read_all():
+    for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if (
             event.type == "task.pipeline.sessions.archived"
@@ -611,6 +827,83 @@ def _release_archived_task_stage_slot(
     return True
 
 
+def archive_task_pipeline_stage_binding(
+    runtime: Any,
+    *,
+    binding_key: str,
+    task_id: str,
+    causation_id: str,
+    reason: str,
+) -> bool:
+    """Archive and release a stage binding that can never be dispatched again."""
+
+    key = str(binding_key or "").strip()
+    if not key:
+        return False
+    registry = RoleSessionRegistry(
+        Path(runtime.state_dir) / "role_sessions.yaml",
+        project_root=str(runtime.project_root),
+    )
+    binding = registry.task_stage_bindings().get(key)
+    if (
+        not isinstance(binding, Mapping)
+        or str(binding.get("task_id") or "") != str(task_id or "")
+    ):
+        return False
+    identity = {
+        "workflow_run_id": str(binding.get("workflow_run_id") or ""),
+        "task_id": str(binding.get("task_id") or ""),
+        "stage": str(binding.get("stage") or ""),
+        "rework_affinity_id": str(binding.get("rework_affinity_id") or ""),
+    }
+    current = dict(binding)
+    if str(current.get("status") or "") != "archived":
+        if str(current.get("status") or "") != "sealed":
+            current = registry.seal_task_stage_session(**identity) or current
+        current = registry.archive_task_stage_session(**identity) or current
+    role_instance = str(current.get("current_role_instance") or "")
+    if role_instance:
+        meta = registry.instance_meta().get(role_instance, {})
+        if str(meta.get("active_task_stage_binding_key") or "") == key:
+            if not _release_archived_task_stage_slot(
+                runtime,
+                registry=registry,
+                role_instance=role_instance,
+                binding_key=key,
+                task_id=str(task_id or ""),
+            ):
+                return False
+
+    existing = next((
+        event
+        for event in runtime.event_log.read_all()
+        if event.type == "task.pipeline.stage.session.archived"
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("binding_key") or "") == key
+    ), None)
+    if existing is not None:
+        return False
+    runtime.event_writer.append(ZfEvent(
+        type="task.pipeline.stage.session.archived",
+        actor="orchestrator",
+        origin="kernel",
+        task_id=str(task_id or "") or None,
+        correlation_id=identity["workflow_run_id"] or None,
+        causation_id=str(causation_id or "") or None,
+        payload={
+            "binding_key": key,
+            "workflow_run_id": identity["workflow_run_id"],
+            "task_id": identity["task_id"],
+            "task_pipeline_stage": identity["stage"],
+            "rework_affinity_id": identity["rework_affinity_id"],
+            "role_instance": role_instance,
+            "status": "archived",
+            "reason": str(reason or "")[:500],
+        },
+    ))
+    return True
+
+
 def _generation_sessions_archived(
     events: list[ZfEvent],
     *,
@@ -672,6 +965,7 @@ def _now_iso() -> str:
 
 __all__ = [
     "CANDIDATE_FREEZE_RECEIPT_SCHEMA",
+    "archive_task_pipeline_stage_binding",
     "reconcile_task_pipeline_freeze",
     "reconcile_task_pipeline_terminals",
     "task_pipeline_workspace_base",

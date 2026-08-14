@@ -14,6 +14,11 @@ _AUTHORITATIVE_GENERATION_EVENTS = frozenset({
     "candidate.ready",
     "fanout.started",
 })
+_CURRENT_GENERATION_EVENTS = frozenset({
+    "task_map.ready",
+    "product.delivery.wave.ready",
+    "candidate.ready",
+})
 
 _CANDIDATE_REWORK_IDENTITY_KEYS = (
     "workflow_run_id",
@@ -37,8 +42,23 @@ _CANDIDATE_REWORK_IDENTITY_KEYS = (
     "artifact_package_status",
     "plan_revision",
     "task_map_generation",
+    "source_commit",
+    "candidate_base_commit",
+    "candidate_ref",
+    "candidate_head_commit",
     "project_adapter_ref",
     "skill_adapter_plan_ref",
+)
+
+_TASK_MAP_GENERATION_BOUND_IDENTITY_KEYS = (
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+    "artifact_package_status",
+    "plan_revision",
+    "task_map_generation",
 )
 
 
@@ -61,6 +81,19 @@ def _candidate_rework_identity_payload(payload: object) -> dict[str, Any]:
         for key in _CANDIDATE_REWORK_IDENTITY_KEYS
         if payload.get(key) not in (None, "", [], {})
     }
+
+
+def _candidate_rework_amended_identity_payload(
+    payload: object,
+    *,
+    task_map_generation: str,
+) -> dict[str, Any]:
+    identity = _candidate_rework_identity_payload(payload)
+    for key in _TASK_MAP_GENERATION_BOUND_IDENTITY_KEYS:
+        identity.pop(key, None)
+    if task_map_generation:
+        identity["task_map_generation"] = task_map_generation
+    return identity
 
 
 def _pdd_from_event(
@@ -89,6 +122,7 @@ def _candidate_generation_stale(
     event: object,
     payload: dict[str, Any],
     pdd_by_fanout_id: dict[str, str],
+    ignored_event_ids: set[str] | None = None,
 ) -> bool:
     """A later authoritative run/generation makes this failure audit-only."""
 
@@ -101,7 +135,34 @@ def _candidate_generation_stale(
         _candidate_scope_ref(payload),
         pdd_by_fanout_id=pdd_by_fanout_id,
     )
+    for current in reversed(events[:event_idx]):
+        if str(getattr(current, "type", "") or "") not in (
+            _CURRENT_GENERATION_EVENTS
+        ):
+            continue
+        current_payload = getattr(current, "payload", {}) or {}
+        if not isinstance(current_payload, dict):
+            continue
+        current_pdd = _pdd_from_event(
+            current_payload,
+            _candidate_scope_ref(current_payload),
+            pdd_by_fanout_id=pdd_by_fanout_id,
+        )
+        if pdd_id and current_pdd and pdd_id != current_pdd:
+            continue
+        current_run = str(
+            current_payload.get("workflow_run_id") or ""
+        ).strip()
+        current_generation = str(
+            current_payload.get("task_map_generation") or ""
+        ).strip()
+        if workflow_run_id and current_run and workflow_run_id != current_run:
+            return True
+        if generation and current_generation:
+            return generation != current_generation
     for later in events[event_idx + 1:]:
+        if str(getattr(later, "id", "") or "") in (ignored_event_ids or set()):
+            continue
         if str(getattr(later, "type", "") or "") not in _AUTHORITATIVE_GENERATION_EVENTS:
             continue
         later_payload = getattr(later, "payload", {}) or {}
@@ -199,6 +260,11 @@ def _is_candidate_success_closure(
     event_type: str,
     payload: dict[str, Any],
 ) -> bool:
+    if (
+        event_type == "candidate.ready"
+        and str(payload.get("source") or "") == "workflow_resume_batch"
+    ):
+        return False
     if is_module_parity_scan_completed_event(event_type):
         return (
             "open_p0_p1_gap_count" in payload

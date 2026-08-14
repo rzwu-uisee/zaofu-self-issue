@@ -7,7 +7,6 @@ import re
 from typing import Any
 
 from zf.core.security.redaction import redact_obj
-from zf.runtime.channel_templates import materialize_channel_template
 from zf.runtime.kanban_plan_requests import (
     PLAN_APPLY_ALLOWED_ACTIONS,
     PLAN_DIRECT_APPLY_ACTIONS,
@@ -23,6 +22,7 @@ from zf.web.channel_task_plan import (
     normalize_channel_task_submit_payload,
     selected_channel_task_authority,
 )
+from zf.web.channel_setup_plan import normalize_channel_setup_submit_payload
 from zf.web.plan_workflow_submit import (
     normalize_task_workflow_submit_payload,
 )
@@ -724,93 +724,9 @@ def _normalize_plan_submit_payload(
         )
     if action == "create-task":
         return normalize_channel_task_submit_payload(raw_payload)
-    if action != "channel-create-and-start":
-        return {}, {}, f"unsupported Plan submit action: {action}"
-
-    allowed_keys = {
-        "channel_id",
-        "mode",
-        "name",
-        "overrides",
-        "task_id",
-        "template_id",
-        "thread_id",
-    }
-    unknown = sorted(set(raw_payload) - allowed_keys)
-    if unknown:
-        return (
-            {},
-            {},
-            "unsupported submit_payload field(s): " + ", ".join(unknown),
-        )
-    template_id = str(raw_payload.get("template_id") or "").strip()
-    if not template_id:
-        return {}, {}, "submit_payload.template_id is required"
-    overrides = raw_payload.get("overrides")
-    if overrides is not None and not isinstance(overrides, dict):
-        return {}, {}, "submit_payload.overrides must be a mapping"
-    materialized, error = materialize_channel_template(
-        template_id,
-        overrides=overrides,
-    )
-    if error or materialized is None:
-        return {}, {}, error or "channel template preflight failed"
-
-    payload: dict[str, Any] = {"template_id": template_id}
-    mode = str(raw_payload.get("mode") or "").strip()
-    if mode and mode not in {"conversation", "clarification", "multi_lens"}:
-        return (
-            {},
-            {},
-            "submit_payload.mode must be conversation, clarification, or multi_lens",
-        )
-    if mode:
-        payload["mode"] = mode
-    name = str(raw_payload.get("name") or "").strip()
-    if name:
-        payload["name"] = name
-    for key in ("channel_id", "task_id", "thread_id"):
-        value = str(raw_payload.get(key) or "").strip()
-        if value:
-            payload[key] = value
-    if isinstance(overrides, dict) and overrides:
-        payload["overrides"] = overrides
-    members = [
-        {
-            "member_id": str(member.get("member_id") or ""),
-            "role": str(member.get("channel_role") or ""),
-            "permission_profile": str(
-                member.get("permission_profile") or "read_only"
-            ),
-        }
-        for member in materialized["members"]
-        if isinstance(member, dict)
-    ]
-    discussion = (
-        materialized.get("discussion")
-        if isinstance(materialized.get("discussion"), dict)
-        else {}
-    )
-    effective_mode = mode or str(discussion.get("mode") or "conversation")
-    details = {
-        "template_id": template_id,
-        "template_name": str(materialized.get("name") or template_id),
-        "template_version": str(
-            materialized.get("template_version") or ""
-        ),
-        "template_digest": str(
-            materialized.get("template_digest") or ""
-        ),
-        "materialization_digest": str(
-            materialized.get("materialization_digest") or ""
-        ),
-        "member_count": len(members),
-        "members": members,
-        "product_mode": effective_mode,
-        "mode": effective_mode,
-        "max_rounds": int(discussion.get("max_rounds") or 0),
-    }
-    return payload, details, ""
+    if action == "channel-create-and-start":
+        return normalize_channel_setup_submit_payload(raw_payload)
+    return {}, {}, f"unsupported Plan submit action: {action}"
 
 
 def _plan_subject_type(

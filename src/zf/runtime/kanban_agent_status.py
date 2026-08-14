@@ -26,18 +26,44 @@ _WORKFLOW_LIFECYCLE_EVENTS = frozenset({
     "workflow.submit.accepted",
     "workflow.invoke.requested",
 })
+_OVERVIEW_TERMS = (
+    "project overview",
+    "project status",
+    "项目概览",
+    "项目状态",
+    "项目当前状态",
+    "状态",
+    "status",
+)
+_DETAIL_TERMS = (
+    "kanban",
+    "task",
+    "worker",
+    "dispatch",
+    "contract",
+    "timeline",
+    "看板",
+    "任务",
+    "合同",
+    "时间线",
+    "心跳",
+    "调度",
+)
 
 
 def is_project_status_query(message: str, *, project_id: str = "") -> bool:
-    """Return true only for a low-risk, no-action status intent."""
+    """Return true only for an explicit, bounded project overview."""
 
+    normalized = " ".join(str(message or "").strip().lower().split())
     intent = infer_operator_intent(
         message,
         project_id=project_id,
         source="kanban-agent",
     )
     return (
-        str(intent.get("intent_type") or "") == "project_status_query"
+        any(term in normalized for term in _OVERVIEW_TERMS)
+        and not any(term in normalized for term in _DETAIL_TERMS)
+        and str(intent.get("intent_type") or "") == "project_status_query"
         and not list(intent.get("proposed_actions") or [])
         and not bool(intent.get("requires_confirmation"))
     )

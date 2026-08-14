@@ -312,6 +312,168 @@ class TestGoalTerminalSettlement:
         assert store.get("T-COMPLETED").status == "done"
         assert store.get("T-SIBLING").status == "in_progress"
 
+    def test_run_goal_closes_tasks_from_same_amended_generation(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        store.add(Task(
+            id="T-EARLIER",
+            title="earlier task-map slice",
+            status="in_progress",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract={
+                    "source_refs": {
+                        "task_map_ref": "artifacts/task-map-initial.json",
+                        "task_map_generation": "GEN-1",
+                    },
+                },
+            ),
+        ))
+        store.add(Task(
+            id="T-FINAL",
+            title="final amendment slice",
+            status="in_progress",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract={
+                    "source_refs": {
+                        "task_map_ref": "artifacts/task-map-amended.json",
+                        "task_map_generation": "GEN-1",
+                    },
+                },
+            ),
+        ))
+        store.add(Task(
+            id="T-NEW-GENERATION",
+            title="replanned task",
+            status="in_progress",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract={
+                    "source_refs": {
+                        "task_map_ref": "artifacts/task-map-g2.json",
+                        "task_map_generation": "GEN-2",
+                    },
+                },
+            ),
+        ))
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-AMEND",
+                "workflow_run_id": "RUN-AMEND",
+                "pdd_id": "RUN-AMEND",
+                "feature_id": "RUN-AMEND",
+                "completed_task_ids": ["T-FINAL"],
+                "task_map_ref": "artifacts/task-map-amended.json",
+                "task_map_generation": "GEN-1",
+            },
+        )
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[terminal])
+
+        assert store.get("T-EARLIER").status == "done"
+        assert store.get("T-FINAL").status == "done"
+        assert store.get("T-NEW-GENERATION").status == "in_progress"
+
+    def test_run_goal_closes_blocked_tasks_only_with_terminal_evidence(
+        self, state_dir: Path, legacy_config, transport
+    ):
+        store = TaskStore(state_dir / "kanban.json")
+        evidence_contract = {
+            "source_refs": {
+                "task_map_ref": "artifacts/task-map-initial.json",
+                "task_map_generation": "GEN-1",
+            },
+        }
+        store.add(Task(
+            id="T-CLOSED-CLAIMS",
+            title="closed goal claims",
+            status="blocked",
+            blocked_reason="stale pre-terminal projection",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                goal_claim_ids=["CLAIM-1", "CLAIM-2"],
+                evidence_contract=evidence_contract,
+            ),
+        ))
+        store.add(Task(
+            id="T-SUCCEEDED",
+            title="successful task attempt",
+            status="blocked",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract=evidence_contract,
+            ),
+        ))
+        store.add(Task(
+            id="T-NO-EVIDENCE",
+            title="blocked without terminal evidence",
+            status="blocked",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract=evidence_contract,
+            ),
+        ))
+        store.add(Task(
+            id="T-STALE-SUCCESS",
+            title="success belongs to another run",
+            status="blocked",
+            contract=TaskContract(
+                feature_id="RUN-AMEND",
+                evidence_contract=evidence_contract,
+            ),
+        ))
+        succeeded = ZfEvent(
+            type="task.attempt.succeeded",
+            actor="zf-cli",
+            task_id="T-SUCCEEDED",
+            payload={"workflow_run_id": "RUN-AMEND"},
+        )
+        terminal = ZfEvent(
+            type="run.goal.completed",
+            actor="zf-cli",
+            payload={
+                "run_id": "RUN-AMEND",
+                "workflow_run_id": "RUN-AMEND",
+                "pdd_id": "RUN-AMEND",
+                "feature_id": "RUN-AMEND",
+                "completed_task_ids": ["T-FINAL"],
+                "task_map_ref": "artifacts/task-map-amended.json",
+                "task_map_generation": "GEN-1",
+                "goal_coverage": [
+                    {"goal_claim_id": "CLAIM-1", "status": "closed"},
+                    {"goal_claim_id": "CLAIM-2", "status": "closed"},
+                ],
+            },
+        )
+        _emit(state_dir, succeeded)
+        _emit(state_dir, ZfEvent(
+            type="task.attempt.succeeded",
+            actor="zf-cli",
+            task_id="T-STALE-SUCCESS",
+            payload={"workflow_run_id": "RUN-OLD"},
+        ))
+        _emit(state_dir, terminal)
+
+        Orchestrator(
+            state_dir,
+            legacy_config,
+            transport,
+        ).run_once(events=[terminal])
+
+        assert store.get("T-CLOSED-CLAIMS").status == "done"
+        assert store.get("T-CLOSED-CLAIMS").blocked_reason == ""
+        assert store.get("T-SUCCEEDED").status == "done"
+        assert store.get("T-NO-EVIDENCE").status == "blocked"
+        assert store.get("T-STALE-SUCCESS").status == "blocked"
+
     def test_run_goal_closes_bound_workflow_managed_root(
         self, state_dir: Path, legacy_config, transport
     ):

@@ -12,6 +12,7 @@ from typing import Any
 from zf.core.config.loader import ConfigError
 from zf.core.config.project_context import resolve_project_context
 from zf.core.skills import build_skill_lock_entries
+from zf.runtime.skill_invocation_projection import project_skill_invocations
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -103,6 +104,11 @@ def _build_report() -> dict[str, Any]:
             entries.append(item)
             _collect_entry_issues(item, issues)
 
+    invocation = project_skill_invocations(
+        context.state_dir,
+        config=config,
+        project_root=context.project_root,
+    )
     return {
         "project_root": str(context.project_root),
         "state_dir": str(context.state_dir),
@@ -111,6 +117,7 @@ def _build_report() -> dict[str, Any]:
             for source in config.skill_sources
         ],
         "enabled": entries,
+        "invocation": invocation,
         "issues": issues,
     }
 
@@ -185,3 +192,11 @@ def _print_report(report: dict[str, Any], *, include_ok: bool) -> None:
             f"  - {item['instance_id']}::{item['name']} "
             f"status={status} source={source} materialized_to={materialized}"
         )
+    invocation = report.get("invocation", {})
+    summary = invocation.get("summary", {}) if isinstance(invocation, dict) else {}
+    print(
+        "Invocation evidence: "
+        f"{summary.get('invoked_count', 0)} invoked / "
+        f"{summary.get('loaded_count', 0)} loaded / "
+        f"{summary.get('considered_count', 0)} considered"
+    )

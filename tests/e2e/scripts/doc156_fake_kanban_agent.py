@@ -148,6 +148,7 @@ def _channel_plan_request() -> dict[str, Any]:
                     "recommended": True,
                     "submit_payload": {
                         "template_id": "quick-change",
+                        "mode": "conversation",
                         "channel_id": channel_id,
                         "name": "Doc 156 live review",
                         "task_id": task_id,
@@ -164,6 +165,7 @@ def _channel_plan_request() -> dict[str, Any]:
                     "description": "Broader architecture and security scrutiny.",
                     "submit_payload": {
                         "template_id": "architecture-review",
+                        "mode": "multi_lens",
                         "channel_id": channel_id,
                         "name": "Doc 156 architecture review",
                         "task_id": task_id,

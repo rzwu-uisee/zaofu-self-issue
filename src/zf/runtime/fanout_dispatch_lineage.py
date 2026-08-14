@@ -86,19 +86,30 @@ def bind_reader_fanout_lineage(
     if not workflow_run_id:
         return "", ""
     events = runtime.event_log.read_all()
+    trigger_task_id = str(trigger_payload.get("task_id") or "").strip()
     try:
-        _, parent_task_id = bind_workflow_task_lineage(
+        trigger_task_id, parent_task_id = bind_workflow_task_lineage(
             events,
             workflow_run_id=workflow_run_id,
             payload=trigger_payload,
             task_id=str(event.task_id or ""),
         )
         for child in context.expected_children:
+            # Task-scoped discovery/replan requests execute under the leaf
+            # contract while the Workflow Run remains anchored to its root
+            # Task. Reader children are initially role-only, so preserve the
+            # trigger's leaf identity before lineage binding fills the parent.
+            if trigger_task_id:
+                child.payload.setdefault("task_id", trigger_task_id)
             bind_workflow_task_lineage(
                 events,
                 workflow_run_id=workflow_run_id,
                 payload=child.payload,
-                task_id=str(child.payload.get("task_id") or ""),
+                task_id=str(
+                    child.payload.get("task_id")
+                    or trigger_task_id
+                    or ""
+                ),
             )
     except WorkflowLineageError as exc:
         runtime.event_writer.append(ZfEvent(

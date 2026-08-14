@@ -367,6 +367,7 @@ def test_selected_call_result_replays_settled_operation_without_redispatch(
         "child_id": "C1",
         "stage_id": "impl",
         "task_id": "T1",
+        "task_map_generation": "g1",
         "plan_artifact_package_id": "planpkg-current",
         "plan_artifact_package_ref": "artifacts/plan-packages/current.json",
         "plan_artifact_package_digest": "package-sha",
@@ -703,6 +704,63 @@ def test_runtime_admission_uses_output_profile_from_pinned_operation(
     assert outcome.admitted
     assert captured["output_profile_id"] == "global-rescan"
     assert captured["output_profile_revision"] == "1"
+
+
+def test_runtime_admission_uses_pinned_adapter_when_result_omits_profile(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    payload = {
+        "workflow_run_id": "run-rescan-admission",
+        "fanout_id": "fanout-rescan-admission",
+        "child_id": "flow-discovery",
+        "stage_id": "post-verify-discovery",
+        "role_instance": "flow-discovery",
+        "output_profile_id": "global-rescan",
+        "output_profile_revision": "1",
+    }
+    prepared = prepare_call_operation(
+        runtime,
+        payload=payload,
+        operation_type="fanout_reader_child",
+        operation_key="flow-discovery",
+        stage_id="post-verify-discovery",
+        task_id="",
+        dispatch_id="run-rescan-admission-discovery",
+    )
+    mark_call_operation_started(
+        runtime,
+        prepared,
+        task_id="",
+        dispatch_id="run-rescan-admission-discovery",
+    )
+    result = ZfEvent(
+        type="flow.discovery.child.failed",
+        actor="flow-discovery",
+        payload={
+            "operation_id": prepared.operation_id,
+            "request_hash": prepared.request_hash,
+            "workflow_run_id": prepared.workflow_run_id,
+            "report": {
+                "status": "failed",
+                "recommendation": "reject",
+                "summary": "manual evidence is unavailable",
+            },
+        },
+        correlation_id=prepared.workflow_run_id,
+    )
+
+    outcome = admit_runtime_call_result(runtime, result, mode="blocking")
+
+    assert outcome.status != "unsupported"
+    reported = next(
+        event for event in runtime.event_log.read_all()
+        if event.type == "workflow.call.result.reported"
+    )
+    assert reported.payload["adapter_id"] == "verification-result-v1-explicit"
+    assert not {
+        issue["code"] for issue in reported.payload["issues"]
+    }.intersection({"adapter_missing", "call_result_unsupported"})
 
 
 def _prepared_plan_synth(tmp_path: Path):
@@ -1054,7 +1112,7 @@ def test_call_result_correction_waits_for_source_turn_stop(
         ))
 
     monkeypatch.setattr(
-        "zf.runtime.call_result_admission.time.sleep",
+        "zf.runtime.call_result_correction.time.sleep",
         append_stop,
     )
     sent: list[tuple[str, Path]] = []

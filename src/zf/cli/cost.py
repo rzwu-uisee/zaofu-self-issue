@@ -4,9 +4,24 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 
-from zf.core.config.project_context import resolve_project_context
+from zf.core.config.project_context import (
+    load_project_env,
+    resolve_project_context,
+)
+from zf.core.cost.billing import (
+    BillingError,
+    BillingReconciliationService,
+    BillingReconciliationStore,
+    admin_key_from_environment,
+)
+from zf.core.cost.catalog import (
+    PricingCatalogError,
+    PricingCatalogStore,
+    PricingCatalogSyncService,
+)
 from zf.core.cost.tracker import CostTracker
 
 
@@ -21,6 +36,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         help="Group spend by backend (claude-code / codex / ...)")
     parser.add_argument("--doctor", action="store_true",
                         help="Diagnose duplicate or legacy cost projection entries")
+    parser.add_argument("--refresh-pricing", action="store_true",
+                        help="Refresh the configured pricing catalog")
+    parser.add_argument("--reconcile", choices=("openai", "anthropic"),
+                        help="Reconcile an organization billing window")
+    parser.add_argument("--start", help="Billing window start (RFC3339)")
+    parser.add_argument("--end", help="Billing window end (RFC3339)")
+    parser.add_argument(
+        "--accounting-mode",
+        choices=("api", "subscription", "enterprise"),
+        default="api",
+        help="Billing route represented by the provider session",
+    )
     parser.add_argument("--json", action="store_true", help="Wrap output in zf.cli.result.v1")
     parser.set_defaults(func=run)
 
@@ -30,6 +57,10 @@ def run(args: argparse.Namespace) -> int:
     state_dir = context.state_dir
     tracker = CostTracker(state_dir / "cost.jsonl")
 
+    if getattr(args, "refresh_pricing", False):
+        return _run_refresh(context, args)
+    if getattr(args, "reconcile", None):
+        return _run_reconcile(context, tracker, args)
     if getattr(args, "doctor", False):
         return _run_doctor(tracker)
 
@@ -41,6 +72,8 @@ def run(args: argparse.Namespace) -> int:
     else:
         totals = tracker.per_role_totals(last_days=last_days)
     grand_total = tracker.total_usd(last_days=last_days)
+    precision = tracker.precision_summary(last_days=last_days)
+    reconciliation = BillingReconciliationStore(state_dir).latest()
 
     if not totals:
         if getattr(args, "json", False):
@@ -48,7 +81,12 @@ def run(args: argparse.Namespace) -> int:
 
             print_result(
                 command="cost",
-                data={"totals": {}, "grand_total_usd": grand_total},
+                data={
+                    "totals": {},
+                    "grand_total_usd": grand_total,
+                    "precision": precision,
+                    "reconciliation": reconciliation or None,
+                },
                 context=context,
             )
             return 0
@@ -74,6 +112,8 @@ def run(args: argparse.Namespace) -> int:
                     role: asdict(summary) for role, summary in sorted(totals.items())
                 },
                 "grand_total_usd": grand_total,
+                "precision": precision,
+                "reconciliation": reconciliation or None,
                 "budget": budget,
             },
             context=context,
@@ -87,12 +127,115 @@ def run(args: argparse.Namespace) -> int:
               f"[{summary.entries} entries]")
 
     print(f"\n  {'Total':15s}  ${grand_total:.4f}")
+    print(
+        "  Precision        "
+        f"estimate ${precision['estimated_usd']:.4f} | "
+        f"reported ${precision['provider_reported_usd']:.4f} | "
+        f"billed ${precision['billed_usd']:.4f}"
+    )
+    if precision["unpriced_entries"] or precision["partial_entries"]:
+        print(
+            "  Pricing status  "
+            f"{precision['unpriced_entries']} unpriced | "
+            f"{precision['partial_entries']} partial"
+        )
+    if reconciliation:
+        print(
+            "  Reconciliation  "
+            f"{reconciliation.get('provider', 'unknown')} | "
+            f"{reconciliation.get('status', 'unknown')} | "
+            f"{reconciliation.get('billed_usd') or 'unavailable'}"
+        )
 
     if args.budget is not None:
         pct = (grand_total / args.budget * 100) if args.budget > 0 else 0
         status = "WITHIN" if grand_total <= args.budget else "EXCEEDED"
         print(f"\n  Budget: ${args.budget:.2f}  Used: {pct:.1f}%  [{status}]")
 
+    return 0
+
+
+def _run_refresh(context, args: argparse.Namespace) -> int:
+    config = getattr(context.config, "cost", None)
+    url = str(getattr(config, "pricing_catalog_url", "") or "")
+    service = PricingCatalogSyncService(
+        PricingCatalogStore(context.state_dir),
+        url=url,
+        ttl_seconds=int(
+            getattr(config, "pricing_refresh_ttl_seconds", 86_400)
+        ),
+        timeout_seconds=float(
+            getattr(config, "pricing_refresh_timeout_seconds", 10.0)
+        ),
+    )
+    try:
+        result = service.refresh(force=True)
+    except PricingCatalogError as exc:
+        print(f"Pricing catalog refresh failed: {exc}")
+        return 2
+    if getattr(args, "json", False):
+        from zf.cli.output import print_result
+
+        print_result(command="cost", data={"pricing_refresh": result}, context=context)
+    else:
+        print(f"Pricing catalog: {result.get('status', 'unknown')}")
+        if result.get("catalog_version"):
+            print(
+                f"  {result['catalog_version']} | {result.get('digest', '')}"
+            )
+    return 0
+
+
+def _run_reconcile(
+    context,
+    tracker: CostTracker,
+    args: argparse.Namespace,
+) -> int:
+    if not args.start or not args.end:
+        print("Billing reconciliation requires --start and --end.")
+        return 2
+    load_project_env(context.project_root)
+    provider = str(args.reconcile)
+    key = admin_key_from_environment(provider)
+    estimate: Decimal | None = None
+    try:
+        estimate = tracker.estimated_usd_between(
+            start=args.start,
+            end=args.end,
+        )
+        result = BillingReconciliationService(
+            BillingReconciliationStore(context.state_dir)
+        ).reconcile(
+            provider=provider,
+            accounting_mode=args.accounting_mode,
+            start=args.start,
+            end=args.end,
+            project_id=str(
+                getattr(getattr(context.config, "project", None), "name", "")
+            ),
+            estimated_usd=estimate,
+            api_key=key,
+        )
+    except (BillingError, ValueError) as exc:
+        print(f"Billing reconciliation failed: {exc}")
+        return 2
+    if getattr(args, "json", False):
+        from zf.cli.output import print_result
+
+        print_result(
+            command="cost",
+            data={"reconciliation": result},
+            context=context,
+        )
+    else:
+        print(
+            f"Billing reconciliation: {result['provider']} | "
+            f"{result['status']}"
+        )
+        print(f"  estimate: ${result.get('estimated_usd') or 'unavailable'}")
+        print(f"  billed:   ${result.get('billed_usd') or 'unavailable'}")
+        print(f"  variance: ${result.get('variance_usd') or 'unavailable'}")
+        print(f"  ref: {result['ref']}")
     return 0
 
 

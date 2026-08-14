@@ -14,7 +14,9 @@ lives on TmuxTransport, not TmuxSession.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -511,11 +513,13 @@ def test_pane_grid_terminate_keeps_exact_target_when_mapping_changes(
     def fake_run(args, *, check=True, capture=False):
         commands.append(args)
         if args[:2] == ["tmux", "display-message"]:
+            if args[-1] == "#{pane_pid}":
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="4242\n", stderr=""
+                )
             return subprocess.CompletedProcess(
                 args, 0, stdout="%42\tdev\n", stderr=""
             )
-        if args[:2] == ["tmux", "list-panes"]:
-            return subprocess.CompletedProcess(args, 0, stdout="4242\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     def fake_signal(pane_pid, signal_name):
@@ -559,6 +563,10 @@ def test_pane_grid_terminate_handles_tmux_zero_exit_for_gone_pane(monkeypatch):
         nonlocal owner_probes
         commands.append(args)
         if args[:2] == ["tmux", "display-message"]:
+            if args[-1] == "#{pane_pid}":
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="4242\n", stderr=""
+                )
             owner_probes += 1
             if owner_probes <= 2:
                 return subprocess.CompletedProcess(
@@ -567,8 +575,6 @@ def test_pane_grid_terminate_handles_tmux_zero_exit_for_gone_pane(monkeypatch):
             return subprocess.CompletedProcess(
                 args, 0, stdout="\t\n", stderr=""
             )
-        if args[:2] == ["tmux", "list-panes"]:
-            return subprocess.CompletedProcess(args, 0, stdout="4242\n", stderr="")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(tmux, "_run", fake_run)
@@ -588,3 +594,57 @@ def test_pane_grid_terminate_handles_tmux_zero_exit_for_gone_pane(monkeypatch):
     assert result.target == "%42"
     assert not any(cmd[:2] == ["tmux", "kill-pane"] for cmd in commands)
     assert "dev" not in layout._panes  # type: ignore[attr-defined]
+
+
+@pytest.mark.host
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is unavailable")
+def test_pane_grid_terminate_preserves_sibling_processes(tmp_path: Path):
+    """A pane-grid recycle must signal only the selected stable pane id."""
+
+    session_name = f"zf-pane-isolation-{uuid.uuid4().hex[:10]}"
+    layout = PaneGridLayout(
+        window_name="roles",
+        binding_path=tmp_path / "pane_bindings.json",
+    )
+    tmux = TmuxSession(
+        session_name=session_name,
+        dry_run=False,
+        layout=layout,
+    )
+    roles = [_R("orchestrator"), _R("plan-critic"), _R("planner")]
+
+    try:
+        tmux.create_session()
+        targets = {
+            role.instance_id: layout.create_slot(tmux, role)
+            for role in roles
+        }
+        for role in roles:
+            tmux.send_keys(
+                role.instance_id,
+                "exec sleep 60",
+                submit_delay_s=0,
+            )
+
+        sibling_pids = {
+            name: tmux._pane_pid_for_target(targets[name])
+            for name in ("orchestrator", "plan-critic")
+        }
+        planner_pid = tmux._pane_pid_for_target(targets["planner"])
+
+        result = tmux.terminate_window(
+            "planner",
+            grace_seconds=0.2,
+            poll_interval=0.02,
+        )
+
+        assert result.target == targets["planner"].address()
+        assert result.pane_pid == planner_pid
+        assert planner_pid not in sibling_pids.values()
+        assert not tmux.pane_alive("planner")
+        for name, expected_pid in sibling_pids.items():
+            assert layout.target_owned_by(tmux, targets[name], name)
+            assert tmux._pane_pid_for_target(targets[name]) == expected_pid
+            assert tmux.pane_alive(name)
+    finally:
+        tmux.kill_session()

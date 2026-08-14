@@ -20,8 +20,9 @@ from zf.runtime.flow_roles import (
     role_configs_for_flow,
 )
 from zf.runtime.event_window import read_runtime_events
-from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
-from zf.runtime.run_scope import event_run_id, run_aliases
+from zf.runtime.run_admission import (
+    fold_terminal_run_scope as _terminal_run_scope,
+)
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.transport import (
     transport_error_diagnostics,
@@ -612,19 +613,6 @@ def _latest_activation_state_events(
         if activation_id:
             latest[activation_id] = event
     return latest
-
-
-def _terminal_run_scope(
-    events: list[ZfEvent],
-) -> tuple[dict[str, str], set[str]]:
-    aliases = run_aliases(events)
-    terminal_runs = {
-        run_id
-        for event in events
-        if event.type in RUN_TERMINAL_EVENT_TYPES
-        if (run_id := event_run_id(event, aliases=aliases))
-    }
-    return aliases, terminal_runs
 
 
 def _activation_run_is_terminal(

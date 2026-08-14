@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from zf.core.events.model import ZfEvent
+from zf.core.task.schema import Task, TaskContract
 
 
 def _evt(
@@ -88,6 +89,59 @@ def test_silent_stall_when_assigned_but_no_dispatched_after_threshold():
     assert task_id == "TASK-X"
     assert assignee == "dev-1"
     assert age >= 45.0
+
+
+def test_workflow_managed_parent_is_excluded_from_silent_stall_sweep():
+    """A Flow parent is lifecycle state, not an undispatched worker unit."""
+    from zf.runtime.dispatch_sweep import sweep_silent_dispatches
+
+    now = datetime.now(timezone.utc)
+    events = [
+        _evt(
+            "task.assigned",
+            now - timedelta(seconds=45),
+            "TASK-FLOW-PARENT",
+            {"assignee": "judge-issue"},
+        ),
+    ]
+
+    result = sweep_silent_dispatches(
+        events=events,
+        now=now,
+        silent_stall_threshold_s=30.0,
+        tasks=[Task(
+            id="TASK-FLOW-PARENT",
+            title="Flow parent",
+            contract=TaskContract(
+                evidence_contract={"execution_owner": "workflow"},
+            ),
+        )],
+    )
+
+    assert result.silent_stalls == []
+
+
+def test_task_pipeline_managed_task_is_ignored_by_legacy_sweep():
+    from zf.runtime.dispatch_sweep import sweep_silent_dispatches
+
+    now = datetime.now(timezone.utc)
+    events = [
+        _evt(
+            "task.assigned",
+            now - timedelta(seconds=45),
+            "TASK-PIPELINE",
+            {"assignee": "dev-lane-1"},
+        ),
+    ]
+
+    result = sweep_silent_dispatches(
+        events=events,
+        now=now,
+        silent_stall_threshold_s=30.0,
+        ignored_task_ids={"TASK-PIPELINE"},
+    )
+
+    assert result.silent_stalls == []
 
 
 def test_no_stall_when_assigned_within_threshold():

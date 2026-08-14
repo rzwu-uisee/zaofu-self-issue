@@ -64,6 +64,7 @@ _KNOWN_PARAM_KEYS_V3 = _KNOWN_PARAM_KEYS | frozenset({
     "roleSkillBundles", "role_skill_bundles",
     "semanticSubmitProfiles", "semantic_submit_profiles",
     "artifactPackageMode", "artifact_package_mode",
+    "productAcceptanceMode", "product_acceptance_mode",
 })
 _COMMON_PRODUCT_FLOW_KEYS = frozenset({
     "flowProfile", "flow_profile",
@@ -83,6 +84,7 @@ _COMMON_PRODUCT_FLOW_KEYS = frozenset({
     "planCriticRole", "plan_critic_role",
     "semanticSubmitProfiles", "semantic_submit_profiles",
     "artifactPackageMode", "artifact_package_mode",
+    "productAcceptanceMode", "product_acceptance_mode",
     "taskPipeline", "task_pipeline",
 })
 _KNOWN_ISSUE_FLOW_KEYS = _COMMON_PRODUCT_FLOW_KEYS | frozenset({
@@ -138,6 +140,9 @@ _TASK_MAP_CONTRACT_INSTRUCTIONS = [
     "Plan handoff hard contract: produce a non-empty human-readable Markdown plan and expose it as plan_artifact_ref/plan_ref or plan_md.",
     "Plan handoff hard contract: produce source-index.v1 and expose source_index_ref or a source_index plan port; every task needs source_key, source_ref, and source_excerpt.",
     "Goal handoff hard contract: explicit mandatory goal_claims must be mapped through task goal_claim_ids to structured acceptance criteria and verification command ids; every command and acceptance criterion needs an owner and tier.",
+    "Product planning contract: slice normal tasks by runnable user journey across the layers it needs, not by backend/frontend/test-only horizontal ownership; each slice owns its focused implementation and evidence.",
+    "Product planning contract: when multiple slices feed one product, declare one final assembly owner for shared wiring and the real entrypoint; the assembly task consumes prior evidence rather than recreating it.",
+    "Product Acceptance contract: when `product_acceptance_spec` is a required plan port, return one `plan_ports[]` descriptor with schema `product_acceptance_spec.v1`; declare assembly_owner, runnable entrypoints/start/health, mandatory user journeys with observable assertions, and deterministic-vs-provider qualification policy. Runtime binds workflow_run_id, plan_revision, and task_map_generation.",
 ]
 
 _PRD_PLAN_INSTRUCTIONS = [
@@ -169,6 +174,7 @@ _FINAL_JUDGE_INSTRUCTIONS = [
     "Return one machine-readable top-level `goal_closure_result` with schema_version `goal-closure-result.v1`; bind workflow_run_id, goal_id, flow_kind, task_map_generation, target_commit, objective_ref, goal_claim_set ref/digest, planning/candidate refs, closure fact ref/digest, and every canonical goal claim.",
     "Use verdict passed only when every mandatory claim is closed or explicitly waived with admitted supporting refs. Use rejected for semantic gaps and blocked for external/human or unavailable-input blockers.",
     "A semantic rejected/blocked verdict is still a successfully executed Judge call: emit the configured child success event so the Kernel semantic router, not fanout retry, owns recovery.",
+    "When Product Acceptance is required, read and copy the exact current spec/report refs and digests from the briefing. Reject a deterministic failed journey, block a missing/stale report, and leave missing/expired/failed Provider qualification to the Kernel external-wait gate without consuming semantic rework.",
 ]
 
 _REFACTOR_SCAN_INSTRUCTIONS = [
@@ -315,6 +321,20 @@ def _artifact_package_mode_param(params: dict[str, Any]) -> str:
     if mode not in {"off", "shadow", "blocking"}:
         raise WorkflowProfileError(
             "flow.artifactPackageMode: mode must be off, shadow, or blocking"
+        )
+    return mode
+
+
+def _product_acceptance_mode_param(params: dict[str, Any]) -> str:
+    mode = str(_pick(
+        params,
+        "productAcceptanceMode",
+        "product_acceptance_mode",
+        default="shadow",
+    )).strip().lower()
+    if mode not in {"off", "shadow", "blocking"}:
+        raise WorkflowProfileError(
+            "flow.productAcceptanceMode: mode must be off, shadow, or blocking"
         )
     return mode
 
@@ -798,6 +818,27 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
           for r in (*scan_roles, scan_synth, plan_critic_role, verify_bridge_role,
                     module_parity_role, judge_role)),
     ]
+    product_acceptance_mode = _product_acceptance_mode_param(params)
+    refactor_required_ports = [
+        "requirement_spec",
+        "goal_claim_set",
+        "task_map",
+        "planning_result",
+    ]
+    if product_acceptance_mode == "blocking":
+        refactor_required_ports.append("product_acceptance_spec")
+    refactor_conditional_ports = [
+        "source_inventory",
+        "capability_matrix",
+        "acceptance_matrix",
+        "test_matrix",
+        "real_e2e_matrix",
+        "source_index",
+        "plan_critique",
+        "project_adapter",
+    ]
+    if product_acceptance_mode == "shadow":
+        refactor_conditional_ports.append("product_acceptance_spec")
     metadata = {
         "flow_kind": "refactor",
         "objective_ref": str(_pick(
@@ -863,12 +904,11 @@ def expand_refactor_flow_v3(params: dict) -> dict[str, Any]:
         "artifact_package": {
             "mode": _artifact_package_mode_param(params),
             "package_slot": "execution_plan",
-            "required_ports": [
-                "requirement_spec",
-                "goal_claim_set",
-                "task_map",
-                "planning_result",
-            ],
+            "required_ports": refactor_required_ports,
+            "conditional_ports": refactor_conditional_ports,
+        },
+        "product_acceptance": {
+            "mode": product_acceptance_mode,
         },
     }
     return {
@@ -985,6 +1025,26 @@ def _controller_metadata(
     default_delivery: str,
     default_discovery: str = "",
 ) -> dict[str, Any]:
+    product_acceptance_mode = _product_acceptance_mode_param(params)
+    required_ports = [
+        (
+            "issue_spec"
+            if kind == "issue"
+            else "requirement_spec"
+        ),
+        "goal_claim_set",
+        "task_map",
+        "planning_result",
+    ]
+    conditional_ports = [
+        "accepted_plan",
+        "plan_critique",
+        "project_adapter",
+    ]
+    if product_acceptance_mode == "blocking":
+        required_ports.append("product_acceptance_spec")
+    elif product_acceptance_mode == "shadow":
+        conditional_ports.append("product_acceptance_spec")
     return {
         "flow_kind": kind,
         "quality_floor": str(_pick(
@@ -1018,21 +1078,11 @@ def _controller_metadata(
         "artifact_package": {
             "mode": _artifact_package_mode_param(params),
             "package_slot": "execution_plan",
-            "required_ports": [
-                (
-                    "issue_spec"
-                    if kind == "issue"
-                    else "requirement_spec"
-                ),
-                "goal_claim_set",
-                "task_map",
-                "planning_result",
-            ],
-            "conditional_ports": [
-                "accepted_plan",
-                "plan_critique",
-                "project_adapter",
-            ],
+            "required_ports": required_ports,
+            "conditional_ports": conditional_ports,
+        },
+        "product_acceptance": {
+            "mode": product_acceptance_mode,
         },
     }
 

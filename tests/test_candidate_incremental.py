@@ -22,9 +22,11 @@ from zf.core.task.store import TaskStore
 from zf.runtime.candidates import CandidateRebuilder
 from zf.runtime.candidate_incremental import (
     CandidateIncrementalError,
+    _select_integration_base,
+    _successor_contract_binds_base,
     _update_candidate_ref,
 )
-from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref, write_sidecar_json
 from zf.runtime.task_refs import TaskRefManager
 from zf.runtime.task_pipeline_terminal import (
     _release_archived_task_stage_slot,
@@ -32,6 +34,10 @@ from zf.runtime.task_pipeline_terminal import (
     reconcile_task_pipeline_terminals,
 )
 from zf.runtime.tmux import TmuxError
+from zf.runtime.workflow_operation import (
+    WorkflowOperationService,
+    load_workflow_operation,
+)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -45,15 +51,27 @@ def _git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _setup(tmp_path: Path, *, rolling_smoke: bool = True):
+def _setup(
+    tmp_path: Path,
+    *,
+    rolling_smoke: bool = True,
+    provision_node_modules: bool = False,
+):
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.name", "Integration Test")
     _git(tmp_path, "config", "user.email", "integration@example.com")
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    _git(tmp_path, "add", "README.md")
+    (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    _git(tmp_path, "add", "README.md", ".gitignore")
     _git(tmp_path, "commit", "-q", "-m", "base")
     _git(tmp_path, "branch", "-M", "main")
     base = _git(tmp_path, "rev-parse", "HEAD")
+    if provision_node_modules:
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "tool.txt").write_text(
+            "runtime dependency\n",
+            encoding="utf-8",
+        )
 
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -61,7 +79,11 @@ def _setup(tmp_path: Path, *, rolling_smoke: bool = True):
     config = ZfConfig(
         project=ProjectConfig(name="incremental", state_dir=str(state_dir)),
         runtime=RuntimeConfig(
-            workdirs=WorkdirConfig(enabled=True, mode="worktree"),
+            workdirs=WorkdirConfig(
+                enabled=True,
+                mode="worktree",
+                provision_paths=["node_modules"] if provision_node_modules else [],
+            ),
             git=GitIsolationConfig(
                 candidate_base_ref="main",
                 auto_ship_on_candidate_complete=True,
@@ -186,6 +208,502 @@ def test_incremental_integration_replay_is_idempotent(tmp_path: Path) -> None:
     ]) == 1
 
 
+def test_incremental_redrive_reconciles_admitted_candidate_advancement(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(tmp_path)
+    marker = tmp_path / "allow-task-b"
+    task = Task(id="TASK-B", title="Task B", key="F-11111111:TASK-B")
+    task.contract.contract_revision = "contract-r1"
+    task.contract.scope = ["second.txt"]
+    task.contract.validation = {
+        "commands": [{
+            "id": "rolling-task-b",
+            "command": f"test -f second.txt && test -f {marker}",
+            "tier": "runtime",
+            "rolling_smoke": True,
+        }]
+    }
+    TaskStore(state_dir / "kanban.json").add(task)
+    writer.append(ZfEvent(
+        type="task.created",
+        task_id=task.id,
+        payload={"feature_id": "F-11111111"},
+    ))
+    _git(tmp_path, "checkout", "-q", "-b", "worker/task-b", base)
+    (tmp_path / "second.txt").write_text("task b\n", encoding="utf-8")
+    _git(tmp_path, "add", "second.txt")
+    _git(tmp_path, "commit", "-q", "-m", "feat: task b")
+    task_b_commit = _git(tmp_path, "rev-parse", "HEAD")
+    ref_result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+    ).process_dev_build_done(ZfEvent(
+        type="dev.build.done",
+        actor="impl-2",
+        task_id=task.id,
+        payload={
+            "source_commit": task_b_commit,
+            "source_branch": "worker/task-b",
+            "base_git_head": base,
+            "feature_id": "F-11111111",
+            "files_touched": ["second.txt"],
+        },
+    ))
+    assert ref_result is not None and ref_result.status == "updated"
+    rebuilder = CandidateRebuilder(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+        event_log=log,
+    )
+    first_b = rebuilder.integrate_task_pipeline_task(
+        task_id=task.id,
+        workflow_run_id="run-1",
+        task_map_generation="map-g1",
+        operation_generation=1,
+        pipeline_key="pipeline-B",
+        dispatch_base_commit=base,
+        contract_revision="contract-r1",
+        event_writer=writer,
+        causation_id="generation-event",
+    )
+    assert first_b.status == "needs_review"
+    operation_id = str(first_b.payload["operation_id"])
+
+    task_a = _integrate(tmp_path, state_dir, config, log, writer, base)
+    marker.touch()
+    repair = writer.append(ZfEvent(
+        type="repair.action.requested",
+        actor="operator",
+        task_id=task.id,
+        payload={
+            "action_id": "repair-task-b",
+            "kind": "retry_integration_queue_entry",
+            "queue_entry_id": operation_id,
+            "idempotency_key": "repair-task-b",
+        },
+    ))
+    operation = load_workflow_operation(log, operation_id)
+    assert operation is not None
+    WorkflowOperationService(
+        state_dir=state_dir,
+        event_log=log,
+        event_writer=writer,
+    ).admit_redrive(
+        operation_id=operation_id,
+        request_hash=str(operation["request_hash"]),
+        workflow_run_id="run-1",
+        task_id=task.id,
+        source_attempt_id=repair.id,
+        recovery_decision_event_id=repair.id,
+        reason="controlled candidate retry",
+        recovery_decision_owner="controlled_action",
+    )
+
+    retried = rebuilder.integrate_task_pipeline_task(
+        task_id=task.id,
+        workflow_run_id="run-1",
+        task_map_generation="map-g1",
+        operation_generation=1,
+        pipeline_key="pipeline-B",
+        dispatch_base_commit=base,
+        contract_revision="contract-r1",
+        event_writer=writer,
+        causation_id=repair.id,
+    )
+
+    assert retried.status == "integrated"
+    receipt = hydrate_sidecar_ref(
+        state_dir,
+        retried.payload["receipt_ref"],
+    ).payload
+    assert receipt["expected_candidate_head"] == base
+    assert receipt["previous_candidate_head"] == task_a.payload["candidate_head"]
+    assert receipt["candidate_head_reconciled"] is True
+    assert len(receipt["candidate_advancement_receipt_refs"]) == 1
+    candidate = state_dir / "candidates" / "F-11111111" / "worktree"
+    assert (candidate / "feature.txt").read_text(encoding="utf-8") == "implemented\n"
+    assert (candidate / "second.txt").read_text(encoding="utf-8") == "task b\n"
+    assert not [
+        event for event in log.read_all()
+        if event.type == "workflow.operation.blocked"
+        and event.task_id == task.id
+        and event.payload.get("reason") == "request_hash_divergence"
+    ]
+
+
+def test_incremental_integration_adopts_authorized_successor_base(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(tmp_path)
+    first = _integrate(tmp_path, state_dir, config, log, writer, base)
+    previous_candidate = str(first.payload["candidate_head"])
+
+    _git(
+        tmp_path,
+        "checkout",
+        "-q",
+        "-b",
+        "worker/replacement-base",
+        previous_candidate,
+    )
+    (tmp_path / "prerequisite.txt").write_text("verified base\n", encoding="utf-8")
+    _git(tmp_path, "add", "prerequisite.txt")
+    _git(tmp_path, "commit", "-q", "-m", "feat: verified replacement base")
+    replacement_base = _git(tmp_path, "rev-parse", "HEAD")
+
+    _git(tmp_path, "checkout", "-q", "-b", "worker/task-b")
+    (tmp_path / "gap.txt").write_text("gap closure\n", encoding="utf-8")
+    _git(tmp_path, "add", "gap.txt")
+    _git(tmp_path, "commit", "-q", "-m", "feat: close successor gap")
+    gap_commit = _git(tmp_path, "rev-parse", "HEAD")
+
+    successor = Task(id="TASK-B", title="Task B", key="F-11111111:TASK-B")
+    successor.contract.contract_revision = "contract-r2"
+    successor.contract.scope = ["gap.txt"]
+    successor.contract.source_ref = f"git:{replacement_base}"
+    successor.contract.evidence_contract = {
+        "supersedes_task_ids": ["TASK-A"],
+    }
+    successor.contract.validation = {
+        "commands": [{
+            "id": "rolling-successor-base",
+            "command": "test -f prerequisite.txt && test -f gap.txt",
+            "tier": "runtime",
+            "rolling_smoke": True,
+        }]
+    }
+    TaskStore(state_dir / "kanban.json").add(successor)
+    writer.append(ZfEvent(
+        type="task.created",
+        task_id=successor.id,
+        payload={"feature_id": "F-11111111"},
+    ))
+    ref_result = TaskRefManager(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+    ).process_dev_build_done(ZfEvent(
+        type="dev.build.done",
+        actor="impl-2",
+        task_id=successor.id,
+        payload={
+            "source_commit": gap_commit,
+            "source_branch": "worker/task-b",
+            "base_git_head": replacement_base,
+            "feature_id": "F-11111111",
+            "files_touched": ["gap.txt"],
+        },
+    ))
+    assert ref_result is not None and ref_result.status == "updated"
+
+    result = CandidateRebuilder(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+        event_log=log,
+    ).integrate_task_pipeline_task(
+        task_id=successor.id,
+        workflow_run_id="run-2",
+        task_map_generation="map-g2",
+        operation_generation=1,
+        pipeline_key="pipeline-B",
+        dispatch_base_commit=replacement_base,
+        contract_revision="contract-r2",
+        event_writer=writer,
+        causation_id="generation-event-2",
+    )
+
+    assert result.status == "integrated"
+    receipt = hydrate_sidecar_ref(state_dir, result.payload["receipt_ref"]).payload
+    assert receipt["previous_candidate_head"] == previous_candidate
+    assert receipt["integration_base_head"] == replacement_base
+    assert receipt["successor_base_adopted"] is True
+    assert receipt["supersedes_task_ids"] == ["TASK-A"]
+    assert receipt["adopted_base_commits"] == [replacement_base]
+    candidate = state_dir / "candidates" / "F-11111111" / "worktree"
+    assert (candidate / "prerequisite.txt").read_text(encoding="utf-8") == "verified base\n"
+    assert (candidate / "gap.txt").read_text(encoding="utf-8") == "gap closure\n"
+
+
+def test_incremental_integration_rejects_unbound_newer_dispatch_base(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(tmp_path)
+    first = _integrate(tmp_path, state_dir, config, log, writer, base)
+    previous_candidate = str(first.payload["candidate_head"])
+
+    _git(tmp_path, "checkout", "-q", "--detach", previous_candidate)
+    (tmp_path / "unbound.txt").write_text("not authorized\n", encoding="utf-8")
+    _git(tmp_path, "add", "unbound.txt")
+    _git(tmp_path, "commit", "-q", "-m", "feat: unbound continuation")
+    unbound_base = _git(tmp_path, "rev-parse", "HEAD")
+    rebuilder = CandidateRebuilder(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+        event_log=log,
+    )
+
+    with pytest.raises(
+        CandidateIncrementalError,
+        match="requires a successor contract bound",
+    ):
+        _select_integration_base(
+            rebuilder,
+            task_id="TASK-A",
+            task_source_commit=unbound_base,
+            expected_candidate_head=previous_candidate,
+            dispatch_base_commit=unbound_base,
+        )
+
+    assert _git(
+        tmp_path,
+        "rev-parse",
+        "refs/heads/candidate/F-11111111",
+    ) == previous_candidate
+
+
+def test_incremental_integration_accepts_admitted_generation_continuation(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(tmp_path)
+    first = _integrate(tmp_path, state_dir, config, log, writer, base)
+    previous_candidate = str(first.payload["candidate_head"])
+
+    _git(tmp_path, "checkout", "-q", "--detach", previous_candidate)
+    (tmp_path / "evidence.txt").write_text("accepted evidence\n", encoding="utf-8")
+    _git(tmp_path, "add", "evidence.txt")
+    _git(tmp_path, "commit", "-q", "-m", "test: refresh accepted evidence")
+    continuation_base = _git(tmp_path, "rev-parse", "HEAD")
+
+    task_map_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/test/continuation-task-map.json",
+        {
+            "schema_version": "task-map.v1",
+            "metadata": {
+                "writer_dispatch_base_commit": continuation_base,
+            },
+            "tasks": [{
+                "task_id": "TASK-A",
+                "source_ref": "docs/feature.md",
+            }],
+        },
+        kind="task_map",
+        schema_version="task-map.v1",
+        created_by="test",
+    )
+    package_common = {
+        "schema_version": "plan-artifact-package.v1",
+        "workflow_run_id": "run-2",
+        "flow_kind": "prd",
+        "package_slot": "execution_plan",
+        "producer_stage_id": "prd-plan",
+        "run_contract_ref": "artifacts/test/run-contract.json",
+        "run_contract_sha256": "a" * 64,
+        "run_contract_digest": "b" * 64,
+        "required_ports": ["task_map"],
+        "produced": [{
+            "logical_name": "task_map",
+            "artifact_kind": "task_map",
+            "schema_version": "task-map.v1",
+            "producer_stage_id": "prd-plan",
+            "ref": task_map_descriptor["ref"],
+            "sha256": task_map_descriptor["sha256"],
+        }],
+        "inherited": [],
+    }
+    prior_package = write_sidecar_json(
+        state_dir,
+        "artifacts/test/prior-plan-package.json",
+        {
+            **package_common,
+            "plan_revision": "map-g1",
+            "task_map_generation": "map-g1",
+        },
+        kind="plan_artifact_package",
+        schema_version="plan-artifact-package.v1",
+        created_by="test",
+    )
+    package_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/test/continuation-plan-package.json",
+        {
+            **package_common,
+            "plan_revision": "map-g2",
+            "task_map_generation": "map-g2",
+            "supersedes_package_ref": prior_package["ref"],
+            "supersedes_package_digest": prior_package["sha256"],
+        },
+        kind="plan_artifact_package",
+        schema_version="plan-artifact-package.v1",
+        created_by="test",
+    )
+    store = TaskStore(state_dir / "kanban.json")
+    task = store.get("TASK-A")
+    assert task is not None
+    task.contract.evidence_contract = {
+        "workflow_run_id": "run-2",
+        "source_refs": {
+            "task_map_ref": task_map_descriptor["ref"],
+            "task_map_generation": "map-g2",
+            "plan_artifact_package_ref": package_descriptor["ref"],
+            "plan_artifact_package_digest": package_descriptor["sha256"],
+        },
+    }
+    store.update(task.id, contract=task.contract)
+    trigger = writer.append(ZfEvent(
+        type="task_map.ready",
+        actor="zf-cli",
+        origin="kernel",
+        correlation_id="run-2",
+        payload={
+            "workflow_run_id": "run-2",
+            "target_ref": previous_candidate,
+            "task_map_ref": task_map_descriptor["ref"],
+            "task_map_generation": "map-g2",
+            "plan_artifact_package_ref": package_descriptor["ref"],
+            "plan_artifact_package_digest": package_descriptor["sha256"],
+        },
+    ))
+    writer.append(ZfEvent(
+        type="task.pipeline.generation.admitted",
+        actor="zf-cli",
+        origin="kernel",
+        correlation_id="run-2",
+        payload={
+            "schema_version": "task-pipeline-generation.v1",
+            "generation_id": "generation-2",
+            "workflow_run_id": "run-2",
+            "trigger_event_id": trigger.id,
+            "task_map_ref": task_map_descriptor["ref"],
+            "task_map_generation": "map-g2",
+            "plan_artifact_package_ref": package_descriptor["ref"],
+            "plan_artifact_package_digest": package_descriptor["sha256"],
+            "dispatch_base_commit": continuation_base,
+            "task_ids": ["TASK-A"],
+        },
+    ))
+
+    selected = _select_integration_base(
+        CandidateRebuilder(
+            state_dir=state_dir,
+            project_root=tmp_path,
+            config=config,
+            event_log=log,
+        ),
+        task_id="TASK-A",
+        task_source_commit=continuation_base,
+        expected_candidate_head=previous_candidate,
+        dispatch_base_commit=continuation_base,
+    )
+
+    assert selected == (
+        continuation_base,
+        True,
+        [],
+        [continuation_base],
+    )
+
+
+def test_successor_base_accepts_immutable_plan_package_binding(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, _writer, base_commit, _ = _setup(tmp_path)
+    task_map_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/test/successor-task-map.json",
+        {
+            "schema_version": "task-map.v1",
+            "tasks": [{
+                "task_id": "TASK-B",
+                "base_commit": base_commit,
+                "source_refs": ["docs/gap.md", f"git:{base_commit}"],
+                "evidence_contract": {
+                    "supersedes_task_ids": ["TASK-A"],
+                },
+            }],
+        },
+        kind="task_map",
+        schema_version="task-map.v1",
+        created_by="test",
+    )
+    package_descriptor = write_sidecar_json(
+        state_dir,
+        "artifacts/test/successor-plan-package.json",
+        {
+            "schema_version": "plan-artifact-package.v1",
+            "workflow_run_id": "run-2",
+            "flow_kind": "refactor",
+            "package_slot": "execution_plan",
+            "producer_stage_id": "gap-impl",
+            "run_contract_ref": "artifacts/test/run-contract.json",
+            "run_contract_sha256": "a" * 64,
+            "run_contract_digest": "b" * 64,
+            "plan_revision": "map-g2",
+            "task_map_generation": "map-g2",
+            "required_ports": ["task_map"],
+            "produced": [{
+                "logical_name": "task_map",
+                "artifact_kind": "task_map",
+                "schema_version": "task-map.v1",
+                "producer_stage_id": "gap-impl",
+                "ref": task_map_descriptor["ref"],
+                "sha256": task_map_descriptor["sha256"],
+            }],
+            "inherited": [],
+        },
+        kind="plan_artifact_package",
+        schema_version="plan-artifact-package.v1",
+        created_by="test",
+    )
+    successor = Task(id="TASK-B", title="Task B")
+    successor.contract.source_ref = "docs/gap.md"
+    successor.contract.evidence_contract = {
+        "workflow_run_id": "run-2",
+        "supersedes_task_ids": ["TASK-A"],
+        "source_refs": {
+            "task_map_ref": task_map_descriptor["ref"],
+            "task_map_generation": "map-g2",
+            "plan_artifact_package_ref": package_descriptor["ref"],
+            "plan_artifact_package_digest": package_descriptor["sha256"],
+        },
+    }
+    TaskStore(state_dir / "kanban.json").add(successor)
+    rebuilder = CandidateRebuilder(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+        event_log=log,
+    )
+
+    assert _successor_contract_binds_base(
+        rebuilder,
+        task_id="TASK-B",
+        expected_source_ref=f"git:{base_commit}",
+        supersedes_task_ids=["TASK-A"],
+    )
+
+
+def test_incremental_integration_ignores_untracked_provisioned_environment(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(
+        tmp_path,
+        provision_node_modules=True,
+    )
+
+    result = _integrate(tmp_path, state_dir, config, log, writer, base)
+    candidate_worktree = state_dir / "candidates" / "F-11111111" / "worktree"
+
+    assert (candidate_worktree / "node_modules").is_symlink()
+    assert _git(candidate_worktree, "status", "--porcelain") == "?? node_modules"
+    assert result.status == "integrated"
+
+
 def test_candidate_head_cas_conflict_never_overwrites_current_head(
     tmp_path: Path,
 ) -> None:
@@ -243,6 +761,7 @@ def test_incremental_integration_fails_closed_without_marked_rolling_smoke(
 
 def test_integration_receipt_drives_task_terminal_and_exact_candidate_freeze(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_dir, config, log, writer, base, _ = _setup(tmp_path)
     generation = writer.append(ZfEvent(
@@ -310,6 +829,18 @@ def test_integration_receipt_drives_task_terminal_and_exact_candidate_freeze(
         _set_worker_state=lambda *_args, **_kwargs: None,
         _emit_role_lifecycle_event=lambda *_args, **_kwargs: None,
     )
+    registry_loads = 0
+
+    class CountingRoleSessionRegistry(RoleSessionRegistry):
+        def __init__(self, *args, **kwargs):
+            nonlocal registry_loads
+            registry_loads += 1
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "zf.runtime.task_pipeline_terminal.RoleSessionRegistry",
+        CountingRoleSessionRegistry,
+    )
 
     terminal = reconcile_task_pipeline_terminals(
         runtime,
@@ -338,6 +869,7 @@ def test_integration_receipt_drives_task_terminal_and_exact_candidate_freeze(
     ]
     assert replay_terminal == []
     assert replay_freeze == []
+    assert registry_loads == 1
     assert runtime.task_store.get("TASK-A").status == "done"
     assert len([event for event in events if event.type == "task.done"]) == 1
     archived = RoleSessionRegistry(
@@ -394,6 +926,147 @@ def test_integration_receipt_drives_task_terminal_and_exact_candidate_freeze(
     assert freeze["plan_artifact_package_id"] == "planpkg-1"
     assert freeze["task_map_ref"] == "artifacts/plan/task-map.json"
     assert freeze["source_index_ref"] == "artifacts/plan/source-index.json"
+
+
+def test_candidate_freeze_requires_admitted_supersession_for_cancelled_task(
+    tmp_path: Path,
+) -> None:
+    state_dir, config, log, writer, base, _ = _setup(tmp_path)
+    task_store = TaskStore(state_dir / "kanban.json")
+    task_store.add(Task(id="TASK-B", title="Task B"))
+    writer.append(ZfEvent(type="task.created", task_id="TASK-B"))
+    generation = writer.append(ZfEvent(
+        type="task.pipeline.generation.admitted",
+        origin="kernel",
+        payload={
+            "schema_version": "task-pipeline-generation.v1",
+            "generation_id": "generation-1",
+            "workflow_run_id": "run-1",
+            "flow_kind": "prd",
+            "request_kind": "prd",
+            "pdd_id": "F-11111111",
+            "feature_id": "F-11111111",
+            "fanout_id": "fanout-plan-1",
+            "task_map_generation": "map-g1",
+            "task_map_ref": "artifacts/plan/task-map.json",
+            "dispatch_base_commit": base,
+            "task_ids": ["TASK-A", "TASK-B"],
+        },
+        correlation_id="run-1",
+    ))
+    task_store.update(
+        "TASK-B",
+        status="cancelled",
+        blocked_reason="superseded by amended Task Map",
+    )
+    superseded = writer.append(ZfEvent(
+        type="task.superseded",
+        actor="zf-cli",
+        origin="kernel",
+        task_id="TASK-B",
+        payload={
+            "source": "writer_task_map_adoption",
+            "superseded_by_task_map_ref": (
+                ".zf/artifacts/plan/amended-task-map.json"
+            ),
+            "superseded_task_ids": ["TASK-B"],
+            "status": "cancelled",
+        },
+        correlation_id="run-1",
+    ))
+    _integrate(tmp_path, state_dir, config, log, writer, base)
+    sessions = RoleSessionRegistry(
+        state_dir / "role_sessions.yaml", project_root=str(tmp_path)
+    )
+    binding = sessions.bind_task_stage_session(
+        workflow_run_id="run-1",
+        task_id="TASK-B",
+        stage="impl",
+        rework_affinity_id="map-g1:impl",
+        role_instance="impl-b",
+        role_config_digest="config-sha",
+        workspace_generation=1,
+        placement_epoch=1,
+        backend="mock",
+    )
+    sessions.activate_task_stage_session(
+        binding_key=binding["binding_key"], role_instance="impl-b"
+    )
+    context = {
+        **generation.payload,
+        "generation_admitted_event_id": generation.id,
+    }
+    terminated: list[str] = []
+    role = SimpleNamespace(instance_id="impl-b")
+    runtime = SimpleNamespace(
+        state_dir=state_dir,
+        project_root=tmp_path,
+        config=config,
+        event_log=log,
+        event_writer=writer,
+        task_store=task_store,
+        transport=SimpleNamespace(
+            is_alive=lambda _instance: True,
+            terminate=lambda instance: terminated.append(instance),
+        ),
+        _find_role_by_instance=lambda instance: (
+            role if instance == role.instance_id else None
+        ),
+        _set_worker_state=lambda *_args, **_kwargs: None,
+        _emit_role_lifecycle_event=lambda *_args, **_kwargs: None,
+    )
+
+    reconcile_task_pipeline_terminals(
+        runtime,
+        generation_contexts={"TASK-A": context, "TASK-B": context},
+    )
+    assert reconcile_task_pipeline_freeze(
+        runtime,
+        generation_contexts={"TASK-A": context, "TASK-B": context},
+    ) == []
+    assert sessions.task_stage_binding(
+        workflow_run_id="run-1",
+        task_id="TASK-B",
+        stage="impl",
+        rework_affinity_id="map-g1:impl",
+    )["status"] == "active"
+
+    writer.append(ZfEvent(
+        type="task.pipeline.generation.admitted",
+        origin="kernel",
+        payload={
+            "schema_version": "task-pipeline-generation.v1",
+            "generation_id": "generation-2",
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g2",
+            "task_map_ref": "artifacts/plan/amended-task-map.json",
+            "dispatch_base_commit": base,
+            "task_ids": ["TASK-C"],
+        },
+        correlation_id="run-1",
+    ))
+    archived = reconcile_task_pipeline_terminals(
+        runtime,
+        generation_contexts={"TASK-A": context, "TASK-B": context},
+    )
+    frozen = reconcile_task_pipeline_freeze(
+        runtime,
+        generation_contexts={"TASK-A": context, "TASK-B": context},
+    )
+
+    assert [decision.action for decision in archived] == [
+        "task_pipeline_sessions_archived"
+    ]
+    assert frozen == []
+    assert terminated == ["impl-b"]
+    ready = [event for event in log.read_all() if event.type == "candidate.ready"]
+    assert ready == []
+    archived_event = next(
+        event for event in log.read_all()
+        if event.type == "task.pipeline.sessions.archived"
+        and event.task_id == "TASK-B"
+    )
+    assert archived_event.causation_id == superseded.id
 
 
 @pytest.mark.parametrize(

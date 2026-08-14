@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from zf.core.config.schema import RoleConfig, RoleLifecycleConfig
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
@@ -24,6 +25,7 @@ from zf.runtime.task_pipeline_runtime import (
     admit_task_pipeline_generation,
     preflight_task_pipeline_generation,
 )
+from zf.runtime.task_pipeline_terminal import task_pipeline_workspace_base
 
 
 _PACKAGE_ID = "planpkg-" + "b" * 64
@@ -52,6 +54,133 @@ def _init_master_repo(root: Path) -> str:
     _git(root, "commit", "-q", "-m", "init")
     _git(root, "branch", "-M", "master")
     return _git(root, "rev-parse", "HEAD")
+
+
+def _commit_file(root: Path, relative: str, content: str, message: str) -> str:
+    (root / relative).write_text(content, encoding="utf-8")
+    _git(root, "add", relative)
+    _git(root, "commit", "-q", "-m", message)
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _workspace_base_runtime(
+    project_root: Path,
+    *,
+    candidate_head: str,
+    candidate_generation: str = "map-new",
+) -> SimpleNamespace:
+    event = ZfEvent(
+        type="candidate.updated",
+        payload={
+            "incremental": True,
+            "workflow_run_id": "run-1",
+            "task_map_generation": candidate_generation,
+            "candidate_head": candidate_head,
+        },
+    )
+    return SimpleNamespace(
+        project_root=project_root,
+        event_log=SimpleNamespace(read_all=lambda: [event]),
+    )
+
+
+def test_workspace_base_uses_newer_candidate_across_task_map_generations(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    dispatch_base = _init_master_repo(project_root)
+    candidate_head = _commit_file(
+        project_root,
+        "candidate.txt",
+        "candidate\n",
+        "candidate",
+    )
+    runtime = _workspace_base_runtime(
+        project_root,
+        candidate_head=candidate_head,
+    )
+
+    selected = task_pipeline_workspace_base(
+        runtime,
+        task=SimpleNamespace(id="TASK-LATE"),
+        generation_context={
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-old",
+            "dispatch_base_commit": dispatch_base,
+        },
+    )
+
+    assert selected == candidate_head
+
+
+def test_workspace_base_preserves_newer_successor_dispatch_base(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    _init_master_repo(project_root)
+    candidate_head = _commit_file(
+        project_root,
+        "candidate.txt",
+        "candidate\n",
+        "candidate",
+    )
+    successor_base = _commit_file(
+        project_root,
+        "successor.txt",
+        "successor\n",
+        "successor",
+    )
+    runtime = _workspace_base_runtime(
+        project_root,
+        candidate_head=candidate_head,
+    )
+
+    selected = task_pipeline_workspace_base(
+        runtime,
+        task=SimpleNamespace(id="TASK-SUCCESSOR"),
+        generation_context={
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-new",
+            "dispatch_base_commit": successor_base,
+        },
+    )
+
+    assert selected == successor_base
+
+
+def test_workspace_base_rejects_divergent_candidate_history(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    root_head = _init_master_repo(project_root)
+    candidate_head = _commit_file(
+        project_root,
+        "candidate.txt",
+        "candidate\n",
+        "candidate",
+    )
+    _git(project_root, "checkout", "-q", "-b", "successor", root_head)
+    divergent_base = _commit_file(
+        project_root,
+        "successor.txt",
+        "successor\n",
+        "successor",
+    )
+    runtime = _workspace_base_runtime(
+        project_root,
+        candidate_head=candidate_head,
+    )
+
+    with pytest.raises(TaskPipelineRuntimeError, match="base diverged"):
+        task_pipeline_workspace_base(
+            runtime,
+            task=SimpleNamespace(id="TASK-DIVERGED"),
+            generation_context={
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-new",
+                "dispatch_base_commit": divergent_base,
+            },
+        )
 
 
 def _runtime(project_root: Path, *, base_ref: str) -> SimpleNamespace:
@@ -395,10 +524,6 @@ def test_stage_dispatch_carries_admitted_plan_package_identity(
         lambda *_args, **_kwargs: "d" * 40,
     )
     monkeypatch.setattr(
-        "zf.runtime.task_pipeline_runtime._effective_pipeline_role",
-        lambda role, **_kwargs: role,
-    )
-    monkeypatch.setattr(
         "zf.runtime.task_pipeline_runtime._activate_task_stage_binding",
         lambda *_args, **_kwargs: {"binding_key": "binding-1"},
     )
@@ -427,12 +552,12 @@ def test_stage_dispatch_carries_admitted_plan_package_identity(
         "zf.runtime.call_result_runtime.prepare_call_operation",
         _prepare_call_operation,
     )
-    role = SimpleNamespace(
+    role = RoleConfig(
         instance_id="fix-lane-0",
         name="fix",
-        lifecycle=SimpleNamespace(mode="on_demand"),
+        lifecycle=RoleLifecycleConfig(mode="on_demand"),
         role_kind="writer",
-        skills=(),
+        skills=["base-worker"],
         backend="claude-code",
     )
     runtime = SimpleNamespace(
@@ -445,7 +570,12 @@ def test_stage_dispatch_carries_admitted_plan_package_identity(
     result = dispatch_task_pipeline_stage(
         runtime,
         policy={},
-        task=SimpleNamespace(id="TASK-1", title="fix", contract=SimpleNamespace()),
+        task=SimpleNamespace(
+            id="TASK-1",
+            title="fix",
+            skills_required=["can-domain"],
+            contract=SimpleNamespace(),
+        ),
         assignment={
             "stage": "impl",
             "role_instance": "fix-lane-0",
@@ -468,6 +598,7 @@ def test_stage_dispatch_carries_admitted_plan_package_identity(
     assert result is None
     assert captured["plan_artifact_package_id"] == _PACKAGE_ID
     assert captured["plan_artifact_package_ref"] == _PACKAGE_REF
+    assert captured["skills"] == ["base-worker", "can-domain"]
     assert captured["plan_artifact_package_digest"] == _PACKAGE_DIGEST
     assert captured["task_contract_snapshot_ref"] == (
         "artifacts/task-contracts/task-1.json"

@@ -11,7 +11,9 @@ from pathlib import Path
 from zf.core.events.log import EventLog
 from zf.core.events.writer import EventWriter
 from zf.runtime.run_manager import (
+    _next_wait,
     _status_explain_decision,
+    _transition_name,
     emit_human_escalation_package,
 )
 
@@ -83,6 +85,88 @@ def test_release_and_unknown_scopes_fail_closed() -> None:
         assert result["next_auto_action"] == "wait_for_human_decision"
         assert len(result["blocking_refs"]) == 1
         assert result["side_blocking_refs"] == []
+
+
+def test_run_scope_human_gate_takes_priority_over_stale_diagnosis() -> None:
+    result = _status_explain_decision(
+        pending_action={
+            "action": "diagnose-attention",
+            "owner_route": "run_manager",
+            "policy_decision": {
+                "decision": "needs_diagnosis",
+                "intervention_class": "diagnose",
+            },
+        },
+        completion_profile={
+            "pending_human_decisions": [{
+                "decision_token": "hdec-manual-evidence",
+                "blocking_scope": "run",
+                "checkpoint_id": "manual-evidence-gate-1",
+            }],
+        },
+        monitor={"state": "needs_human"},
+        no_progress={"status": "tripped"},
+        repair_merge_queue={},
+    )
+
+    assert result["blocking"] is True
+    assert result["owner_route"] == "human"
+    assert result["wait_reason"] == "human_decision_pending"
+    assert result["next_auto_action"] == "wait_for_human_decision"
+    assert result["blocking_refs"][0]["checkpoint_id"] == "manual-evidence-gate-1"
+
+
+def test_active_run_waits_after_human_gate_escalation() -> None:
+    transition = _transition_name(
+        projection={
+            "goal": {"status": "active"},
+            "completion_profile": {
+                "status": "blocked",
+                "blocking_human_decisions": [{
+                    "decision_token": "hdec-manual-evidence",
+                    "blocking_scope": "run",
+                    "checkpoint_id": "manual-evidence-gate-1",
+                }],
+            },
+        },
+        actions_applied=0,
+        actions_blocked=0,
+        actions_failed=0,
+        repairs_dispatched=0,
+        repair_closeouts=0,
+        autoresearch_requested=0,
+        reflect_requested=0,
+        reflect_completed=0,
+        autoresearch_consumed=0,
+        applied_safe_actions=[],
+    )
+
+    assert transition == "continue_waiting"
+
+
+def test_monitor_wait_prioritizes_human_gate_over_pending_actions() -> None:
+    assert _next_wait(
+        "needs_human",
+        [{"action": "diagnose-attention"}],
+        [],
+        completion_profile={
+            "blocking_human_decisions": [{
+                "blocking_scope": "run",
+                "checkpoint_id": "manual-evidence-gate-1",
+            }],
+        },
+    ) == "human_decision"
+
+
+def test_legacy_human_notice_does_not_hide_its_migration_action() -> None:
+    assert _next_wait(
+        "needs_human",
+        [{"action": "diagnose-attention"}],
+        [],
+        completion_profile={
+            "blocking_human_decisions": [{"blocking_scope": "run"}],
+        },
+    ) == "run_manager_action"
 
 
 def test_direct_owner_action_auto_acknowledges_escalation(tmp_path: Path) -> None:

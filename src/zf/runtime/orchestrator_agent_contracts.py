@@ -163,6 +163,15 @@ def normalize_orchestration_decision(value: Mapping[str, Any]) -> dict[str, Any]
     reason_codes = _string_list(body, "reason_codes", required=True)
     if len(reason_codes) != len(set(reason_codes)):
         raise OrchestratorAgentContractError("reason_codes must be unique")
+    summary = str(body.get("summary") or "").strip()
+    # orchestration-decision.v1 historically omitted summary, and legacy
+    # result adapters may materialize that omission as an empty string.
+    # Preserve admission compatibility while making it fail-visible.
+    body = {
+        **body,
+        "summary": summary,
+        "explanation_status": "complete" if summary else "degraded",
+    }
     affected_work_units = _string_list(body, "affected_work_units")
     if len(affected_work_units) > 8:
         raise OrchestratorAgentContractError(

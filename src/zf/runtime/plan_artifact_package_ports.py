@@ -35,6 +35,7 @@ _PORT_REF_KEYS = {
     "plan_critique": ("plan_critique_ref", "critic_ref"),
     "project_adapter": ("project_adapter_ref",),
     "accepted_plan": ("accepted_plan_ref",),
+    "product_acceptance_spec": ("product_acceptance_spec_ref",),
 }
 _ENRICHED_MATRIX_PORTS = frozenset({
     "source_inventory",

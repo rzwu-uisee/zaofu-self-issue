@@ -120,6 +120,15 @@ class UsageReport:
     usage_series_id: str = ""
     """Stable provider-session identity for cumulative accounting."""
 
+    provider: str = ""
+    """Observed model provider when the native session reports it."""
+
+    accounting_mode: str = "unknown"
+    """Observed billing mode: api/subscription/enterprise/unknown."""
+
+    input_semantics: str = ""
+    """Whether raw input is fresh-only or combined with cache counters."""
+
 
 # Claude 4.x large-context models report a 1M context window. The 200k
 # default fallback otherwise mis-flags a healthy worker (e.g. 247k tokens on
@@ -273,6 +282,8 @@ class ClaudeSessionReader(BackendSessionReader):
             timestamp=latest_ts,
             raw=dict(latest),
             model=latest_model,
+            provider="anthropic",
+            input_semantics="fresh_plus_cache",
         )
 
     def scan_narrative_since(
@@ -518,6 +529,9 @@ class CodexSessionReader(BackendSessionReader):
         latest_info: dict | None = None
         latest_ts: str = ""
         session_id: str = ""
+        latest_model: str = ""
+        model_provider: str = "openai"
+        latest_rate_limits: dict = {}
         try:
             text = session_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -534,6 +548,14 @@ class CodexSessionReader(BackendSessionReader):
                 payload = obj.get("payload") or {}
                 if isinstance(payload, dict):
                     session_id = str(payload.get("id") or session_id)
+                    model_provider = str(
+                        payload.get("model_provider") or model_provider
+                    )
+                continue
+            if obj.get("type") == "turn_context":
+                payload = obj.get("payload") or {}
+                if isinstance(payload, dict):
+                    latest_model = str(payload.get("model") or latest_model)
                 continue
             if obj.get("type") != "event_msg":
                 continue
@@ -544,6 +566,10 @@ class CodexSessionReader(BackendSessionReader):
             if not isinstance(info, dict):
                 continue
             latest_info = info
+            rate_limits = payload.get("rate_limits")
+            latest_rate_limits = (
+                dict(rate_limits) if isinstance(rate_limits, dict) else {}
+            )
             latest_ts = obj.get("timestamp", "")
         if latest_info is None:
             return None
@@ -565,7 +591,7 @@ class CodexSessionReader(BackendSessionReader):
             ratio=ratio,
             timestamp=latest_ts,
             raw=dict(accounting_usage),
-            model=str(latest_info.get("model", "")),
+            model=str(latest_info.get("model") or latest_model),
             usage_semantics="cumulative" if cumulative else "incremental",
             usage_series_id=(
                 f"codex:{session_id}"
@@ -575,6 +601,13 @@ class CodexSessionReader(BackendSessionReader):
                     str(session_path.resolve()).encode("utf-8")
                 ).hexdigest()[:24]
             ),
+            provider=model_provider,
+            accounting_mode=(
+                "subscription"
+                if str(latest_rate_limits.get("plan_type") or "").strip()
+                else "unknown"
+            ),
+            input_semantics="combined_includes_cache",
         )
 
 

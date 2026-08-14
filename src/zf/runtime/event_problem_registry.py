@@ -497,6 +497,13 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             source="task_pipeline",
         ),
         _flow_stage_expected(
+            "task.pipeline.semantic_rework.exhausted",
+            failure_class="task_pipeline_semantic_rework_exhausted",
+            title="Task Pipeline semantic rework exhausted",
+            source="task_pipeline",
+            suggested_action_kind="diagnose_flow_stage_failure",
+        ),
+        _flow_stage_expected(
             "task.pipeline.acceptance.failed",
             failure_class="task_pipeline_acceptance_failed",
             title="Task Pipeline acceptance execution failed",
@@ -1094,6 +1101,11 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
         _kernel_projection(
             "run.result.rejected",
             title="Late Project Run result rejected",
+            source="kernel_admission",
+        ),
+        _kernel_projection(
+            "run.result.duplicate_suppressed",
+            title="Duplicate completed Project Run result suppressed",
             source="kernel_admission",
         ),
         EventProblemSpec(

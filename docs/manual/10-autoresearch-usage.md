@@ -103,25 +103,21 @@ WT="/tmp/zf-autoresearch-${STAMP}"
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180
 ```
 
-需要验证 strict/full Codex DAG 时,使用
-`examples/zf-full-codex-autoresearch.yaml`。它是
-`examples/zf-full-codex.yaml` 的 Autoresearch-safe 变体:保留 full DAG、
-all-Codex roles、strict skills 和 gate 配置,但 `project.state_dir` 与
-`runtime.workdirs.root`、`runtime.skills.pool`、`runtime.skills.lock_file` 都
-落在 `.zf/**`,避免 `autoresearch run` 复制模板后同时生成 `.zf` 与
-`.zf-full-codex` 两套 runtime state tree。
+需要做 v3 兼容性对照时,显式改用
+`examples/prod/controller/prd-fanout-v3.yaml`。`examples/tmp/` 与旧
+`examples/zf-full-*.yaml` 不再作为 Autoresearch 验证基线。
 
 ```bash
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
-  --worktree /tmp/zf-ar-full-codex-template-dry \
-  --config examples/zf-full-codex-autoresearch.yaml \
+  --worktree /tmp/zf-ar-prd-v3-template-dry \
+  --config examples/prod/controller/prd-fanout-v3.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 260
@@ -136,7 +132,7 @@ provider 长跑。
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
@@ -268,12 +264,12 @@ $WT/.zf/autoresearch/runs/<run-id>/
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
   --inject-worker-stuck \
-  --inject-worker-stuck-instance dev-1 \
+  --inject-worker-stuck-instance dev-lane-0 \
   --backlog-on-failure \
   --tmux \
   --confirm
@@ -308,7 +304,7 @@ uv run zf autoresearch loop \
   --worktree /tmp/zf-ar-loop \
   --max-iterations 4 \
   --budget-usd 500 \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --fix-wait-strategy head_change
 ```
 
@@ -374,7 +370,7 @@ uv run zf autoresearch campaign plan \
   --campaign harness-hardening \
   --output-dir /tmp/zf-ar-campaign-plan \
   --worktree-root /tmp/zf-ar-campaign \
-  --config examples/dev-codex-backends.yaml
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 ```
 
 输出:
@@ -448,7 +444,7 @@ uv run zf autoresearch self-repair prepare \
 uv run zf autoresearch self-repair checkpoint \
   --task TASK-ABCDEF \
   --role dev \
-  --worker dev-1 \
+  --worker dev-lane-0 \
   --progress "patched failure signal classifier" \
   --stage implementation
 
@@ -471,7 +467,7 @@ WT="/tmp/zf-ar-smoke-${STAMP}"
 uv run zf autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
@@ -510,7 +506,7 @@ uv run zf backlog why-not-done TASK-ABCDEF --state-dir "$WT/.zf"
 uv run zf autoresearch run \
   --scenario <failed-scenario> \
   --worktree /tmp/zf-ar-regression \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --backlog-on-failure \
   --tmux \
   --confirm

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from zf.runtime.rework_task_scope import expand_rework_task_ids
+from zf.runtime.rework_task_scope import (
+    expand_rework_task_ids,
+    task_ids_for_rework_paths,
+)
 
 
 def test_rework_scope_retains_transitive_downstream_dag(tmp_path: Path) -> None:
@@ -62,3 +65,34 @@ def test_rework_scope_excludes_completed_downstream(tmp_path: Path) -> None:
     )
 
     assert scope == ["A"]
+
+
+def test_verification_paths_map_to_existing_task_owners(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    task_map = state_dir / "task-map.json"
+    state_dir.mkdir()
+    task_map.write_text(json.dumps({
+        "tasks": [
+            {
+                "task_id": "PLATFORM",
+                "allowed_paths": ["src/mobility/**", "src/styles/mobility.css"],
+            },
+            {
+                "task_id": "E2E",
+                "allowed_paths": ["tests/mobility-airport-platform/**"],
+            },
+            {"task_id": "UNRELATED", "allowed_paths": ["api/**"]},
+        ],
+    }), encoding="utf-8")
+
+    task_ids = task_ids_for_rework_paths(
+        [
+            "src/styles/mobility.css",
+            "tests/mobility-airport-platform/airport-journey.spec.ts",
+        ],
+        task_map_ref=str(task_map),
+        state_dir=state_dir,
+        project_root=tmp_path,
+    )
+
+    assert task_ids == ["PLATFORM", "E2E"]

@@ -196,6 +196,21 @@ class GoalClosureBridgeMixin:
             claim_set=claim_set,
             payload=payload,
         )
+        if (
+            read_contract.get("product_acceptance_required")
+            and not str(
+                read_contract.get("product_acceptance_report_ref") or ""
+            )
+        ):
+            self._emit_goal_closure_identity_invalid(
+                source_event,
+                identity=identity,
+                reason=(
+                    "current Candidate has no admitted Product Acceptance "
+                    "Report for the required Plan port"
+                ),
+            )
+            return None
         if not list(read_contract.get("input_result_refs") or []):
             self._emit_goal_closure_identity_invalid(
                 source_event,
@@ -318,6 +333,7 @@ class GoalClosureBridgeMixin:
         )
         package_ref = str(identity.get("plan_artifact_package_ref") or "")
         package_digest = str(identity.get("plan_artifact_package_digest") or "")
+        product_acceptance: dict = {"required": False}
         add_descriptor(
             ref=package_ref,
             digest=package_digest,
@@ -326,6 +342,9 @@ class GoalClosureBridgeMixin:
         )
         if package_ref and package_digest:
             from zf.runtime.plan_artifact_package import hydrate_plan_artifact_package
+            from zf.runtime.product_acceptance import (
+                product_acceptance_binding_from_package,
+            )
 
             package = hydrate_plan_artifact_package(
                 self.state_dir,
@@ -339,6 +358,10 @@ class GoalClosureBridgeMixin:
                     source_id=f"plan-port-{logical_name}",
                     kind=str(port.get("artifact_kind") or logical_name),
                 )
+            product_acceptance = product_acceptance_binding_from_package(
+                self.state_dir,
+                {"ref": package_ref, "sha256": package_digest},
+            )
 
         candidate_task_commits = candidate_task_source_commits(
             events,
@@ -347,6 +370,8 @@ class GoalClosureBridgeMixin:
         )
         admitted_refs: list[str] = []
         admitted_index = 0
+        product_report: dict = {}
+        product_report_descriptor: dict = {}
         for event in reversed(events):
             if event.type != "workflow.call.result.admitted" or not isinstance(event.payload, dict):
                 continue
@@ -400,6 +425,74 @@ class GoalClosureBridgeMixin:
                 source_id=f"admitted-result-{admitted_index}",
                 kind="admitted_call_result",
             )
+            if (
+                not product_report_descriptor
+                and str(body.get("control_result_schema") or "")
+                == "verification-result.v1"
+                and result_generation
+                and same_task_map_generation(
+                    result_generation,
+                    str(identity.get("task_map_generation") or ""),
+                )
+                and result_target == str(identity.get("candidate_head_commit") or "")
+                and str(body.get("product_acceptance_report_ref") or "")
+                and str(body.get("product_acceptance_report_digest") or "")
+            ):
+                candidate_descriptor = {
+                    "ref": str(body.get("product_acceptance_report_ref") or ""),
+                    "sha256": str(
+                        body.get("product_acceptance_report_digest") or ""
+                    ),
+                }
+                try:
+                    from zf.runtime.product_acceptance import (
+                        validate_product_acceptance_report,
+                    )
+                    from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+                    hydrated_report = hydrate_sidecar_ref(
+                        self.state_dir,
+                        candidate_descriptor,
+                    ).payload
+                    if not isinstance(hydrated_report, dict):
+                        continue
+                    validate_product_acceptance_report(
+                        hydrated_report,
+                        spec=dict(product_acceptance.get("spec") or {}),
+                        expected={
+                            "workflow_run_id": workflow_run_id,
+                            "task_map_generation": str(
+                                identity.get("task_map_generation") or ""
+                            ),
+                            "candidate_ref": _resolve_candidate_ref(
+                                events,
+                                workflow_run_id=workflow_run_id,
+                                target_commit=str(
+                                    identity.get("candidate_head_commit") or ""
+                                ),
+                                payload=payload,
+                            ),
+                            "target_commit": str(
+                                identity.get("candidate_head_commit") or ""
+                            ),
+                            "product_acceptance_spec_ref": str(
+                                product_acceptance.get("spec_ref") or ""
+                            ),
+                            "product_acceptance_spec_digest": str(
+                                product_acceptance.get("spec_digest") or ""
+                            ),
+                        },
+                    )
+                except (OSError, ValueError):
+                    continue
+                product_report = dict(hydrated_report)
+                product_report_descriptor = candidate_descriptor
+                add_descriptor(
+                    ref=candidate_descriptor["ref"],
+                    digest=candidate_descriptor["sha256"],
+                    source_id="product-acceptance-report",
+                    kind="product_acceptance_report",
+                )
 
         planning_result_ref = str(payload.get("task_map_ref") or "").strip()
         candidate_ref = _resolve_candidate_ref(
@@ -437,8 +530,29 @@ class GoalClosureBridgeMixin:
                 kind=kind,
             )
             if source:
-                descriptors.append(source)
+                add_descriptor(
+                    ref=source.get("ref"),
+                    digest=source.get("sha256"),
+                    source_id=source_id,
+                    kind=kind,
+                )
         from zf.runtime.call_result_envelope import write_immutable_json_sidecar
+
+        provider_qualification = {
+            "required": False,
+            "status": "not_required",
+            "providers": [],
+        }
+        if product_report:
+            from zf.runtime.product_acceptance import (
+                provider_qualification_status,
+            )
+
+            provider_qualification = provider_qualification_status(
+                self.state_dir,
+                spec=dict(product_acceptance.get("spec") or {}),
+                report=product_report,
+            )
 
         contract_snapshot = {
             "schema_version": "goal-closure-contract-snapshot.v1",
@@ -460,6 +574,30 @@ class GoalClosureBridgeMixin:
                 identity.get("plan_artifact_package_digest") or ""
             ),
             "delivery_policy": str(metadata.get("delivery_policy") or "report_only"),
+            "product_acceptance_required": bool(
+                product_acceptance.get("required")
+            ),
+            "product_acceptance_spec_ref": str(
+                product_acceptance.get("spec_ref") or ""
+            ),
+            "product_acceptance_spec_digest": str(
+                product_acceptance.get("spec_digest") or ""
+            ),
+            "product_acceptance_report_ref": str(
+                product_report_descriptor.get("ref") or ""
+            ),
+            "product_acceptance_report_digest": str(
+                product_report_descriptor.get("sha256") or ""
+            ),
+            "product_acceptance_verdict": str(
+                product_report.get("verdict") or ""
+            ),
+            "provider_qualification_required": bool(
+                provider_qualification.get("required")
+            ),
+            "provider_qualification_status": str(
+                provider_qualification.get("status") or "not_required"
+            ),
         }
         contract_descriptor = write_immutable_json_sidecar(
             self.state_dir,
@@ -482,6 +620,18 @@ class GoalClosureBridgeMixin:
             ),
             "plan_artifact_package_digest": str(
                 identity.get("plan_artifact_package_digest") or ""
+            ),
+            "product_acceptance_spec_ref": str(
+                product_acceptance.get("spec_ref") or ""
+            ),
+            "product_acceptance_spec_digest": str(
+                product_acceptance.get("spec_digest") or ""
+            ),
+            "product_acceptance_report_ref": str(
+                product_report_descriptor.get("ref") or ""
+            ),
+            "product_acceptance_report_digest": str(
+                product_report_descriptor.get("sha256") or ""
             ),
             "candidate_ref": candidate_ref,
             "target_commit": str(identity.get("candidate_head_commit") or ""),
@@ -530,6 +680,30 @@ class GoalClosureBridgeMixin:
             ),
             "plan_artifact_package_digest": str(
                 identity.get("plan_artifact_package_digest") or ""
+            ),
+            "product_acceptance_required": bool(
+                product_acceptance.get("required")
+            ),
+            "product_acceptance_spec_ref": str(
+                product_acceptance.get("spec_ref") or ""
+            ),
+            "product_acceptance_spec_digest": str(
+                product_acceptance.get("spec_digest") or ""
+            ),
+            "product_acceptance_report_ref": str(
+                product_report_descriptor.get("ref") or ""
+            ),
+            "product_acceptance_report_digest": str(
+                product_report_descriptor.get("sha256") or ""
+            ),
+            "product_acceptance_verdict": str(
+                product_report.get("verdict") or ""
+            ),
+            "provider_qualification_required": bool(
+                provider_qualification.get("required")
+            ),
+            "provider_qualification_status": str(
+                provider_qualification.get("status") or "not_required"
             ),
             "goal_closure_contract_snapshot_ref": str(
                 contract_descriptor.get("ref") or ""

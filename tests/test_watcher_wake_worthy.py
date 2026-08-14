@@ -60,3 +60,124 @@ def test_run_once_no_lag_warning_when_fresh(tmp_path: Path) -> None:
     state_dir, log, transport, orch = _state(tmp_path)
     orch.run_once(events=[ZfEvent(type="dev.build.done", actor="dev-1", payload={})])
     assert not [e for e in log.read_all() if e.type == "runtime.watcher.lag_warning"]
+
+
+def test_durable_nonwake_hook_batch_uses_layer1_fast_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.test_writer_fanout_runtime import _state
+    from zf.core.events.writer import EventWriter
+    from zf.runtime import orchestrator_periodic_sweep
+
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    orch.session_store.create(project_root=str(tmp_path))  # type: ignore[attr-defined]
+    hooks = [
+        EventWriter(log).append(ZfEvent(
+            type="codex.hook.pre_tool_use",
+            actor="dev-1",
+            payload={"permissionDecision": "allow"},
+        )),
+        EventWriter(log).append(ZfEvent(
+            type="codex.hook.post_tool_use",
+            actor="dev-1",
+            payload={"tool_name": "Read"},
+        )),
+    ]
+    durable_boundary = log.current_offset()
+    housekept: list[str] = []
+    callback_appends: list[ZfEvent] = []
+    original_housekeeping = orch._apply_housekeeping  # type: ignore[attr-defined]
+
+    def counted_housekeeping(event):  # noqa: ANN001
+        housekept.append(event.id)
+        original_housekeeping(event)
+        if not callback_appends:
+            callback_appends.append(EventWriter(log).append(ZfEvent(
+                type="test.housekeeping.follow_up",
+                actor="runtime",
+                payload={"source_event_id": event.id},
+            )))
+
+    monkeypatch.setattr(orch, "_apply_housekeeping", counted_housekeeping)
+    monkeypatch.setattr(
+        orchestrator_periodic_sweep,
+        "run_replay_sweep",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pure Hook catch-up must not run replay sweep")
+        ),
+    )
+    monkeypatch.setattr(
+        orch,
+        "_capture_logs",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("pure Hook catch-up must not capture transports")
+        ),
+    )
+
+    assert orch.run_once() == []
+    assert housekept == [event.id for event in hooks]
+    assert orch._load_offset() == durable_boundary  # type: ignore[attr-defined]
+    remaining, _new_offset = log.read_from_offset(durable_boundary)
+    assert [event.id for event in remaining] == [callback_appends[0].id]
+
+
+def test_durable_hook_batch_with_control_event_uses_normal_cycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.test_writer_fanout_runtime import _state
+    from zf.core.events.writer import EventWriter
+    from zf.runtime import orchestrator_periodic_sweep
+
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    orch.session_store.create(project_root=str(tmp_path))  # type: ignore[attr-defined]
+    EventWriter(log).append(ZfEvent(
+        type="codex.hook.post_tool_use",
+        actor="dev-1",
+        payload={"tool_name": "Read"},
+    ))
+    EventWriter(log).append(ZfEvent(
+        type="user.message",
+        actor="owner",
+        payload={"text": "continue"},
+    ))
+    durable_boundary = log.current_offset()
+    replay_calls: list[object] = []
+    monkeypatch.setattr(
+        orchestrator_periodic_sweep,
+        "run_replay_sweep",
+        lambda runtime, *, events: replay_calls.append((runtime, events)),
+    )
+
+    orch.run_once()
+
+    assert replay_calls == [(orch, None)]
+    assert orch._load_offset() == durable_boundary  # type: ignore[attr-defined]
+
+
+def test_durable_nonhook_observation_uses_normal_cycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.test_writer_fanout_runtime import _state
+    from zf.core.events.writer import EventWriter
+    from zf.runtime import orchestrator_periodic_sweep
+
+    _state_dir, log, _transport, orch = _state(tmp_path)
+    orch.session_store.create(project_root=str(tmp_path))  # type: ignore[attr-defined]
+    EventWriter(log).append(ZfEvent(
+        type="runtime.snapshot.recorded",
+        actor="zf-cli",
+        payload={"snapshot_ref": "runtime-snapshot.json"},
+    ))
+    replay_calls: list[object] = []
+    monkeypatch.setattr(
+        orchestrator_periodic_sweep,
+        "run_replay_sweep",
+        lambda runtime, *, events: replay_calls.append((runtime, events)),
+    )
+
+    orch.run_once()
+
+    assert replay_calls == [(orch, None)]

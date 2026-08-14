@@ -133,6 +133,42 @@ def test_apply_agent_usage_event_without_config_still_works(
     assert entry.get("backend", "") == ""
 
 
+def test_lifecycle_applies_configured_accounting_mode_when_unobserved(
+    tmp_path: Path,
+):
+    from zf.core.config.schema import CostConfig, ZfConfig
+    from zf.core.events.model import ZfEvent
+    from zf.runtime.housekeeping import apply_agent_usage_event
+    from zf.runtime.provider_usage_reconciliation import (
+        _accounting_mode_for_usage,
+    )
+
+    tracker = CostTracker(tmp_path / "cost.jsonl")
+    accounting_mode = _accounting_mode_for_usage(
+        ZfConfig(cost=CostConfig(
+            backend_accounting_modes={"codex": "subscription"}
+        )),
+        "codex",
+        "unknown",
+    )
+    event = ZfEvent(
+        type="agent.usage",
+        actor="dev-1",
+        payload={
+            "backend": "codex",
+            "model": "gpt-5.6-sol",
+            "accounting_mode": accounting_mode,
+            "usage": {"input_tokens": 500, "output_tokens": 300},
+        },
+    )
+
+    apply_agent_usage_event(tracker, event)
+
+    entry = json.loads((tmp_path / "cost.jsonl").read_text().strip())
+    assert entry["accounting_mode"] == "subscription"
+    assert entry["estimate_kind"] == "api_equivalent"
+
+
 # -- T4: `zf cost --by-backend` CLI --
 
 def test_cli_by_backend_groups_output(tmp_path: Path, monkeypatch, capsys):

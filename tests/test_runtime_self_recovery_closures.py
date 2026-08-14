@@ -122,6 +122,51 @@ def test_run_manager_autoresearch_keeps_timed_out_fanout_request() -> None:
     assert invocation.type == "autoresearch.invocation.requested"
 
 
+def test_orchestrator_skips_terminal_diagnosis_after_goal_reopen(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state_dir(tmp_path)
+    log = EventLog(state_dir / "events.jsonl")
+    blocked = ZfEvent(
+        id="evt-blocked",
+        type="run.goal.blocked",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "blocked"},
+    )
+    request = ZfEvent(
+        id="evt-request",
+        type="run.manager.autoresearch.requested",
+        correlation_id="run-1",
+        payload={
+            "request_id": "terminal-request",
+            "operation_key": "terminal-diagnosis:evt-blocked",
+            "workflow_run_id": "run-1",
+        },
+    )
+    reopened = ZfEvent(
+        id="evt-reopened",
+        type="run.goal.updated",
+        correlation_id="run-1",
+        payload={"run_id": "run-1", "status": "active"},
+    )
+    for event in (blocked, request, reopened):
+        log.append(event)
+
+    decision = _orchestrator_layer2(
+        state_dir,
+    )._on_run_manager_autoresearch_requested(request)
+
+    assert decision is not None
+    assert decision.action == "skip"
+    assert decision.reason == (
+        "terminal diagnosis superseded by later goal reopen"
+    )
+    assert not any(
+        event.type == "autoresearch.invocation.requested"
+        for event in log.read_all()
+    )
+
+
 def test_completion_schedule_requeues_task_once(tmp_path: Path) -> None:
     state_dir = _state_dir(tmp_path)
     store = TaskStore(state_dir / "kanban.json")

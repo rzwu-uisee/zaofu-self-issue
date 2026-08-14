@@ -1281,6 +1281,44 @@ class TestApiTaskDetail:
 
 
 class TestApiWorkbenchProjections:
+    def test_long_run_truth_api_and_observability_snapshot_share_projection(
+        self,
+        state_dir,
+    ):
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="run.started",
+            id="evt-run-current",
+            correlation_id="run-current",
+            payload={"run_id": "run-current"},
+        ))
+        log.append(ZfEvent(
+            type="plan.artifact_package.admitted",
+            id="evt-plan-current",
+            correlation_id="run-current",
+            payload={
+                "workflow_run_id": "run-current",
+                "package_slot": "execution_plan",
+                "package_ref": "plan-packages/current.json",
+                "package_digest": "a" * 64,
+                "plan_revision": "map-current",
+                "task_map_generation": "map-current",
+            },
+        ))
+        local_client = TestClient(create_app(state_dir))
+
+        direct = local_client.get("/api/long-run-truth")
+        scoped = local_client.get("/api/projects/default/long-run-truth")
+        snapshot = local_client.get("/api/snapshot?slice=observability")
+
+        assert direct.status_code == 200
+        assert scoped.status_code == 200
+        assert snapshot.status_code == 200
+        assert direct.json()["schema_version"] == "long-run-truth.v1"
+        assert direct.json()["current"]["run_id"] == "run-current"
+        assert scoped.json() == direct.json()
+        assert snapshot.json()["long_run_truth"] == direct.json()
+
     def test_roles_workdirs_runtime_and_skills_projection(self, state_dir):
         import yaml
 
@@ -1372,6 +1410,10 @@ class TestApiWorkbenchProjections:
         assert skills["loaded"][0]["role"] == "dev-1"
         assert skills["loaded"][0]["name"] == "scan"
         assert skills["loaded"][0]["source"] == "agent-skills"
+        assert skills["invocation"]["schema_version"] == (
+            "skill-invocation-projection.v1"
+        )
+        assert skills["invocation"]["summary"]["invoked_count"] == 0
         assert skills["warnings"][0]["status"] == "materialized_hash_mismatch"
 
 
@@ -3309,6 +3351,27 @@ class TestApiCost:
         assert data["per_role"]["dev"]["input_tokens"] == 1_000_000
         assert data["per_role"]["dev"]["output_tokens"] == 500_000
         assert data["per_role"]["dev"]["entries"] == 1
+        assert data["precision"]["estimated_usd"] > 0
+        assert data["precision"]["unpriced_entries"] == 0
+        assert data["reconciliation"] is None
+
+    def test_project_scoped_cost_returns_precision_projection(
+        self, state_dir, client
+    ):
+        CostTracker(state_dir / "cost.jsonl").record_usage(
+            role="dev",
+            input_tokens=250_000,
+            output_tokens=50_000,
+            model="default",
+        )
+
+        response = client.get("/api/projects/default/cost")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_usd"] > 0
+        assert data["per_role"]["dev"]["input_tokens"] == 250_000
+        assert data["precision"]["estimated_usd"] > 0
 
     def test_state_embeds_nonempty_cost_projection(self, state_dir, client):
         CostTracker(state_dir / "cost.jsonl").record_usage(
@@ -3323,6 +3386,36 @@ class TestApiCost:
         cost = r.json()["cost"]
         assert cost["total_usd"] > 0
         assert cost["per_role"]["review"]["usd"] > 0
+
+    def test_cost_projection_exposes_reconciliation_without_relabeling_estimate(
+        self, state_dir, client
+    ):
+        from zf.core.cost.billing import BillingReconciliationStore
+
+        CostTracker(state_dir / "cost.jsonl").record_usage(
+            role="dev",
+            input_tokens=1_000,
+            output_tokens=100,
+            model="default",
+        )
+        BillingReconciliationStore(state_dir).persist({
+            "schema_version": "billing-reconciliation.v1",
+            "provider": "openai",
+            "accounting_mode": "api",
+            "window_start": "2026-08-01T00:00:00+00:00",
+            "window_end": "2026-08-02T00:00:00+00:00",
+            "project_id": "test",
+            "status": "reconciled",
+            "billed_usd": "1.25",
+            "estimated_usd": "1.10",
+            "variance_usd": "0.15",
+        })
+
+        cost = client.get("/api/cost").json()
+
+        assert cost["precision"]["estimated_usd"] > 0
+        assert cost["reconciliation"]["billed_usd"] == "1.25"
+        assert cost["total_usd"] != 1.25
 
 
 class TestApiWorkers:

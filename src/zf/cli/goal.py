@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from zf.core.config.loader import ConfigError
+from zf.core.config.schema import WorkflowRunLimitsConfig
 from zf.core.config.project_context import resolve_project_context
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
@@ -36,6 +37,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     set_cmd.add_argument("--state-dir", type=Path, default=None)
     set_cmd.add_argument("--objective", default="")
     set_cmd.add_argument("--status", default="", choices=("", *_SETTABLE_STATUSES))
+    set_cmd.add_argument("--timeout-seconds", type=float, default=None)
+    set_cmd.add_argument("--token-budget", type=int, default=None)
+    set_cmd.add_argument("--cost-budget-usd", type=float, default=None)
     set_cmd.add_argument("--reason", default="", help="operator reason (audit)")
     set_cmd.set_defaults(func=_run_set)
 
@@ -83,8 +87,16 @@ def _run_show(args: argparse.Namespace) -> int:
 def _run_set(args: argparse.Namespace) -> int:
     objective = str(args.objective or "").strip()
     status = str(args.status or "").strip()
-    if not objective and not status:
-        print("Error: provide --objective and/or --status", file=sys.stderr)
+    try:
+        run_limits_patch = _run_limits_patch(args)
+    except (TypeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if not objective and not status and not run_limits_patch:
+        print(
+            "Error: provide --objective, --status, and/or a run limit",
+            file=sys.stderr,
+        )
         return 2
     try:
         context = _context(args)
@@ -103,6 +115,8 @@ def _run_set(args: argparse.Namespace) -> int:
         payload["objective"] = objective
     if status:
         payload["status"] = status
+    if run_limits_patch:
+        payload["run_limits_patch"] = run_limits_patch
     if args.reason:
         payload["reason"] = str(args.reason)
     event = writer.append(ZfEvent(
@@ -115,6 +129,26 @@ def _run_set(args: argparse.Namespace) -> int:
     # _WAKE_EVENT_TYPES 含 run.goal.updated,tick 服务自动恢复点火)。
     print(f"run.goal.updated appended: {event.id}")
     return 0
+
+
+def _run_limits_patch(args: argparse.Namespace) -> dict[str, float | int]:
+    values = {
+        "timeout_seconds": getattr(args, "timeout_seconds", None),
+        "token_budget": getattr(args, "token_budget", None),
+        "cost_budget_usd": getattr(args, "cost_budget_usd", None),
+    }
+    patch = {key: value for key, value in values.items() if value is not None}
+    if not patch:
+        return {}
+    try:
+        WorkflowRunLimitsConfig(
+            timeout_seconds=float(patch.get("timeout_seconds", 0.0)),
+            token_budget=int(patch.get("token_budget", 0)),
+            cost_budget_usd=float(patch.get("cost_budget_usd", 0.0)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(str(exc)) from exc
+    return patch
 
 
 __all__ = ["register"]

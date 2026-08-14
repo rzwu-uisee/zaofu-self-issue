@@ -746,6 +746,7 @@ def test_signed_channel_setup_plan_auto_creates_and_starts_without_continuation(
                         "description": "Focused implementation review.",
                         "submit_payload": {
                             "template_id": "quick-change",
+                            "mode": "conversation",
                             "channel_id": "ch-feishu-auto",
                             "overrides": {
                                 "backend": "fake",
@@ -759,6 +760,7 @@ def test_signed_channel_setup_plan_auto_creates_and_starts_without_continuation(
                         "description": "Broader architecture review.",
                         "submit_payload": {
                             "template_id": "architecture-review",
+                            "mode": "multi_lens",
                             "channel_id": "ch-feishu-auto",
                             "overrides": {"backend": "fake"},
                         },

@@ -101,6 +101,9 @@ def reconcile_orchestrator_agent_operation_liveness(runtime: Any) -> None:
 
     events = runtime.event_log.read_all()
     operations = reduce_workflow_operations(events)
+    _redrive_explicitly_stopped_checkpoints(runtime, events, operations)
+    events = runtime.event_log.read_all()
+    operations = reduce_workflow_operations(events)
     candidates = [
         operation
         for operation in operations.values()
@@ -221,6 +224,170 @@ def reconcile_orchestrator_agent_operation_liveness(runtime: Any) -> None:
             source_event_type="orchestrator.dispatch_failed",
             retry_attempt=retry_count + 1,
         )
+
+
+def _redrive_explicitly_stopped_checkpoints(
+    runtime: Any,
+    events: list[ZfEvent],
+    operations: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Re-arm blocking OA checkpoints interrupted by an explicit stop."""
+
+    candidates = [
+        operation
+        for operation in operations.values()
+        if (
+            str(operation.get("operation_type") or "")
+            == "orchestrator_agent_semantic"
+            and str(operation.get("role_instance") or "") == "orchestrator"
+            and str(operation.get("status") or "") == "suspended"
+            and str(operation.get("reason") or "")
+            in {"graceful_stop", "fast_stop"}
+        )
+    ]
+    originals = {
+        str(operation.get("operation_id") or ""): _original_checkpoint_event(
+            events,
+            operation_id=str(operation.get("operation_id") or ""),
+        )
+        for operation in candidates
+    }
+    original_event_ids = {
+        event.id for event in originals.values() if event is not None
+    }
+    latest_plan_candidates: dict[str, ZfEvent] = {}
+    for event in events:
+        if event.id not in original_event_ids or not isinstance(
+            event.payload, Mapping
+        ):
+            continue
+        if str(event.payload.get("checkpoint") or "") != "plan_candidate":
+            continue
+        run_id = str(event.payload.get("workflow_run_id") or "")
+        latest_plan_candidates[run_id] = event
+
+    for operation in candidates:
+        operation_id = str(operation.get("operation_id") or "")
+        request_hash = str(operation.get("request_hash") or "")
+        workflow_run_id = str(operation.get("workflow_run_id") or "")
+        interruption_event_id = str(operation.get("last_event_id") or "")
+        active_attempt_id = str(operation.get("active_attempt_id") or "")
+        if not all((
+            operation_id,
+            request_hash,
+            workflow_run_id,
+            interruption_event_id,
+            active_attempt_id,
+        )):
+            workflow_operation_service(runtime).block(
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=workflow_run_id,
+                reason="explicit-stop OA recovery identity is incomplete",
+                causation_id=interruption_event_id,
+                correlation_id=workflow_run_id,
+            )
+            continue
+        original = originals.get(operation_id)
+        if original is None:
+            workflow_operation_service(runtime).block(
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=workflow_run_id,
+                reason="explicit-stop OA recovery checkpoint is missing",
+                causation_id=interruption_event_id,
+                correlation_id=workflow_run_id,
+            )
+            continue
+        latest_plan = latest_plan_candidates.get(workflow_run_id)
+        if (
+            isinstance(original.payload, Mapping)
+            and str(original.payload.get("checkpoint") or "")
+            == "plan_candidate"
+            and latest_plan is not None
+            and latest_plan.id != original.id
+        ):
+            workflow_operation_service(runtime).cancel(
+                operation_id=operation_id,
+                request_hash=request_hash,
+                workflow_run_id=workflow_run_id,
+                reason="OA plan_candidate superseded by newer revision",
+                causation_id=latest_plan.id,
+                correlation_id=workflow_run_id,
+            )
+            continue
+        redrive = workflow_operation_service(runtime).admit_redrive(
+            operation_id=operation_id,
+            request_hash=request_hash,
+            workflow_run_id=workflow_run_id,
+            task_id="",
+            source_attempt_id=active_attempt_id,
+            recovery_decision_event_id=interruption_event_id,
+            reason="OA checkpoint replay admitted after explicit runtime stop",
+            recovery_decision_owner="kernel_replay",
+        )
+        if redrive is None:
+            redrive = next(
+                (
+                    event
+                    for event in events
+                    if event.type == "workflow.operation.redrive_admitted"
+                    and isinstance(event.payload, Mapping)
+                    and str(event.payload.get("operation_id") or "")
+                    == operation_id
+                    and str(
+                        event.payload.get("recovery_decision_event_id") or ""
+                    )
+                    == interruption_event_id
+                ),
+                None,
+            )
+        if redrive is None:
+            continue
+        if any(
+            event.type == CHECKPOINT_REQUESTED
+            and isinstance(event.payload, Mapping)
+            and str(
+                event.payload.get("restart_interruption_event_id") or ""
+            )
+            == interruption_event_id
+            for event in runtime.event_log.read_all()
+        ):
+            continue
+        original_payload = dict(original.payload)
+        runtime.event_writer.append(ZfEvent(
+            type=CHECKPOINT_REQUESTED,
+            actor="zf-cli",
+            origin="kernel",
+            payload={
+                **original_payload,
+                "original_checkpoint_event_id": original.id,
+                "restart_interruption_event_id": interruption_event_id,
+                "restart_redrive_event_id": redrive.id,
+            },
+            causation_id=redrive.id,
+            correlation_id=workflow_run_id,
+        ))
+
+
+def _original_checkpoint_event(
+    events: list[ZfEvent],
+    *,
+    operation_id: str,
+) -> ZfEvent | None:
+    return next(
+        (
+            event
+            for event in events
+            if event.type == CHECKPOINT_REQUESTED
+            and isinstance(event.payload, Mapping)
+            and str(event.payload.get("operation_id") or "") == operation_id
+            and not str(
+                event.payload.get("restart_interruption_event_id") or ""
+            )
+        ),
+        None,
+    )
 
 
 def requeue_orchestrator_agent_checkpoint_after_respawn(

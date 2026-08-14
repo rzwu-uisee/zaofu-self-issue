@@ -14,9 +14,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.security.redaction import redact_obj
 from zf.runtime.sidecar_refs import write_sidecar_text
+from zf.runtime.workflow_request_concurrency import WorkflowRequestError
 
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -31,6 +33,57 @@ def workflow_run_id_for(*, event_id: str, task_id: str, pattern_id: str) -> str:
 
 def workflow_input_manifest_ref(workflow_run_id: str) -> str:
     return f"workflow-inputs/{_safe_id(workflow_run_id)}/manifest.json"
+
+
+def hydrate_request_workflow_input_manifest(
+    state_dir: Path,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Read the immutable effective input manifest bound to one Request."""
+
+    ref = str(request.get("workflow_input_manifest_ref") or "").strip()
+    expected_digest = str(
+        request.get("workflow_input_manifest_digest") or ""
+    ).strip()
+    if not ref or not expected_digest:
+        raise WorkflowRequestError(
+            "workflow request has no immutable input manifest identity"
+        )
+    state_root = Path(state_dir).expanduser().resolve()
+    path = Path(ref).expanduser()
+    if not path.is_absolute():
+        path = state_root / path
+    if path.is_symlink():
+        raise WorkflowRequestError("workflow input manifest ref is a symlink")
+    try:
+        path = PathGuard.assert_under(
+            path,
+            state_root / "workflow-requests",
+        ).resolve(strict=True)
+    except (OSError, PathGuardError) as exc:
+        raise WorkflowRequestError(
+            "workflow input manifest ref is outside canonical request state"
+        ) from exc
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowRequestError(
+            "workflow input manifest body is unreadable"
+        ) from exc
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise WorkflowRequestError("workflow input manifest digest mismatch")
+    if not isinstance(manifest, dict):
+        raise WorkflowRequestError(
+            "workflow input manifest body must be an object"
+        )
+    if str(manifest.get("request_id") or "") != str(
+        request.get("request_id") or ""
+    ):
+        raise WorkflowRequestError(
+            "workflow input manifest does not match the request"
+        )
+    return manifest
 
 
 def workflow_prompt_ref(workflow_run_id: str) -> str:

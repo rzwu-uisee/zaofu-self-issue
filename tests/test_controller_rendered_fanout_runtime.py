@@ -182,6 +182,20 @@ def test_rendered_controller_queue_releases_next_impl_task(
     config.workflow.flow_metadata["result_protocol"][
         "semantic_submit_profiles"
     ] = {}
+    # Queue release is independent of Product Acceptance. Standard controller
+    # profiles are blocking, so this synthetic fixture explicitly opts out of
+    # the Product port it does not materialize.
+    config.workflow.flow_metadata["product_acceptance"]["mode"] = "shadow"
+    artifact_package = config.workflow.flow_metadata["artifact_package"]
+    artifact_package["required_ports"] = [
+        item
+        for item in artifact_package["required_ports"]
+        if item != "product_acceptance_spec"
+    ]
+    artifact_package["conditional_ports"] = list(dict.fromkeys([
+        *artifact_package.get("conditional_ports", []),
+        "product_acceptance_spec",
+    ]))
     config.project.root = str(project)
     config.project.state_dir = str(project / f".zf-{kind}-rendered-sim")
     config.workflow.plan_approval_enabled = False

@@ -402,6 +402,10 @@ class ChannelTemplateActionsMixin:
             "member_count": len(materialized["members"]),
             "participants": list(materialized["discussion"]["participants"]),
             "max_rounds": int(materialized["discussion"]["max_rounds"]),
+            "mode": str(discussion.get("mode") or "conversation"),
+            "engine_mode": discussion_engine_mode(
+                discussion.get("mode") or "conversation"
+            ),
             "event_id": event.id,
         }
 
@@ -525,6 +529,11 @@ class ChannelTemplateActionsMixin:
                 "member_count": int(created.get("member_count") or 0),
                 "participants": participants,
                 "max_rounds": int(created.get("max_rounds") or 0),
+                "mode": str(created.get("mode") or "conversation"),
+                "engine_mode": str(created.get("engine_mode") or ""),
+                "reply_request_count": int(
+                    started.get("reply_request_count") or 0
+                ),
                 "message_id": message_id,
                 "thread_id": thread_id,
             },
@@ -542,6 +551,8 @@ class ChannelTemplateActionsMixin:
             "member_count": int(created.get("member_count") or 0),
             "participants": participants,
             "max_rounds": int(created.get("max_rounds") or 0),
+            "mode": str(created.get("mode") or "conversation"),
+            "engine_mode": str(created.get("engine_mode") or ""),
             "thread_id": thread_id,
             "message_id": message_id,
             "event_id": completion_event.id,

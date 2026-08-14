@@ -47,6 +47,9 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "test.passed",
     "test.failed",
     "human.escalate",
+    # External Task Pipeline gates resume only from an explicit operator-bound
+    # evidence resolution; do not wait for an unrelated periodic tick.
+    "human.resolved",
     # doc 78 W2: candidate-rework sweep emits this when a candidate failure is
     # plan-level; it must wake the orchestrator agent to re-decompose the
     # task_map (re-implementing the same slices would just repeat the failure).

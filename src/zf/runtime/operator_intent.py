@@ -18,6 +18,7 @@ from zf.core.security.redaction import redact_obj
 OPERATOR_INTENT_SCHEMA_VERSION = "operator.intent.v0"
 OPERATOR_INTENT_TYPES = {
     "project_status_query",
+    "kanban_detail_query",
     "idea_to_product",
     "runtime_diagnose",
     "runtime_restart",
@@ -69,6 +70,24 @@ def infer_operator_intent(
         "汇总",
     )):
         intent_type = "project_status_query"
+    if (
+        intent_type == "project_status_query"
+        and _has_any(lowered, (
+            "kanban",
+            "task",
+            "worker",
+            "dispatch",
+            "contract",
+            "timeline",
+            "看板",
+            "任务",
+            "合同",
+            "时间线",
+            "心跳",
+            "调度",
+        ))
+    ):
+        intent_type = "kanban_detail_query"
     if _has_any(lowered, (
         "idea",
         "product",

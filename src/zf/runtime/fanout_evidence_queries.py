@@ -11,8 +11,15 @@ from pathlib import Path
 
 from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
-from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
-from zf.runtime.run_scope import event_run_id, run_aliases
+from zf.runtime.run_admission import (
+    RUN_TERMINAL_EVENT_TYPES,
+    fold_terminal_run_scope,
+)
+from zf.runtime.run_scope import event_run_id
+from zf.runtime.task_pipeline_contexts import (
+    CANDIDATE_FREEZE_RECEIPT_SCHEMA,
+    latest_task_pipeline_generation_context,
+)
 from zf.runtime.transport import DispatchContext
 
 
@@ -20,7 +27,7 @@ def _terminal_event_for_fanout(
     events: list[ZfEvent],
     fanout_id: str,
 ) -> ZfEvent | None:
-    aliases = run_aliases(events)
+    aliases, terminal_runs = fold_terminal_run_scope(events)
     fanout_runs: set[str] = set()
     first_fanout_index: int | None = None
     for index, event in enumerate(events):
@@ -37,7 +44,8 @@ def _terminal_event_for_fanout(
     for event in reversed(events[first_fanout_index + 1:]):
         if event.type not in RUN_TERMINAL_EVENT_TYPES:
             continue
-        if event_run_id(event, aliases=aliases) in fanout_runs:
+        run_id = event_run_id(event, aliases=aliases)
+        if run_id in fanout_runs and run_id in terminal_runs:
             return event
     return None
 
@@ -59,6 +67,60 @@ def _fanout_report_evidence_fallback(payload: dict[str, object]) -> list[str]:
             if ref and ref not in refs:
                 refs.append(ref)
     return refs
+
+
+def _stale_task_pipeline_candidate_fanout(
+    events: list[ZfEvent],
+    fanout_id: str,
+) -> tuple[str, str]:
+    """Fence recovery of reader fanouts bound to an old Candidate freeze."""
+
+    for event in reversed(events):
+        if event.type != "fanout.started":
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if str(payload.get("fanout_id") or "") != fanout_id:
+            continue
+        trigger = (
+            payload.get("trigger_payload")
+            if isinstance(payload.get("trigger_payload"), dict)
+            else {}
+        )
+        if (
+            str(trigger.get("schema_version") or "")
+            != CANDIDATE_FREEZE_RECEIPT_SCHEMA
+        ):
+            return "", ""
+        workflow_run_id = str(
+            trigger.get("workflow_run_id")
+            or event.correlation_id
+            or payload.get("trace_id")
+            or ""
+        ).strip()
+        claimed_generation_id = str(
+            trigger.get("generation_id") or ""
+        ).strip()
+        if not workflow_run_id or not claimed_generation_id:
+            return "", ""
+        current = latest_task_pipeline_generation_context(
+            events,
+            workflow_run_id=workflow_run_id,
+        )
+        current_generation_id = str(
+            (current or {}).get("generation_id") or ""
+        ).strip()
+        if (
+            current_generation_id
+            and current_generation_id != claimed_generation_id
+        ):
+            return (
+                "candidate_ready_stale_task_pipeline_generation",
+                str(
+                    (current or {}).get("generation_admitted_event_id") or ""
+                ),
+            )
+        return "", ""
+    return "", ""
 
 
 class FanoutEvidenceQueriesMixin:
@@ -138,9 +200,13 @@ class FanoutEvidenceQueriesMixin:
     def _fanout_identity_stale_reason(
         self,
         fanout_id: str,
+        *,
+        currentness: dict[str, tuple[str, str]] | None = None,
     ) -> tuple[str, str]:
         if not fanout_id:
             return "", ""
+        if currentness is not None:
+            return currentness.get(fanout_id, ("", ""))
         try:
             from zf.runtime.fanout_identity import fanout_current_status
 
@@ -151,6 +217,12 @@ class FanoutEvidenceQueriesMixin:
                     f"workflow_run_terminal:{terminal_event.type}",
                     terminal_event.id,
                 )
+            generation_reason = _stale_task_pipeline_candidate_fanout(
+                events,
+                fanout_id,
+            )
+            if generation_reason[0]:
+                return generation_reason
             status = fanout_current_status(
                 events,
                 fanout_id,
@@ -581,6 +653,25 @@ class FanoutEvidenceQueriesMixin:
                     raw_report[key] = payload[key]
         else:
             raw_report = None
+        control_result = next(
+            (
+                value
+                for key in (
+                    "verification_result",
+                    "goal_closure_result",
+                    "artifact_delivery_result",
+                )
+                if isinstance((value := payload.get(key)), dict)
+            ),
+            {},
+        )
+        semantic_verdict = str(control_result.get("verdict") or "").strip().lower()
+        if (
+            isinstance(raw_report, dict)
+            and raw_report.get("status") == semantic_verdict
+            and semantic_verdict in {"rejected", "abstained"}
+        ):
+            raw_report["status"] = "failed"
         result = validate_fanout_report(
             raw_report,
             child_id=child_id,

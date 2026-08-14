@@ -58,8 +58,14 @@ def command_path_refs(command: str) -> list[str]:
             continue
         # The executable selects the host tool, not a repository input. Keep
         # relative command paths in scope so project-owned scripts still need
-        # an explicit task claim.
+        # an explicit task claim. Package-manager shims are generated
+        # dependency tools, however, and are not task-owned source paths.
         if command_position and normalized.startswith("/"):
+            command_position = False
+            continue
+        if command_position and normalized.startswith(
+            ("./node_modules/.bin/", "node_modules/.bin/")
+        ):
             command_position = False
             continue
         command_position = False

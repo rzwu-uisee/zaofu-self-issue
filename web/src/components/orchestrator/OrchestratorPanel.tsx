@@ -10,6 +10,7 @@ import { deriveComposerStatus } from "../../components/agent-session/workState";
 import { useWorkingTitle } from "../../components/agent-session/useWorkingTitle";
 import { buildKanbanConversation } from "../../components/agent-session/projection";
 import { proposalRunNotice } from "../../app/triageProposals";
+import { projectionNeedsFresh } from "../../app/pageLoadPolicy";
 import {
   defaultKanbanThreadKey,
   kanbanAgentConversationId,
@@ -599,16 +600,28 @@ export function OrchestratorPanel({
     let cancelled = false;
     setHeadlessHistoryLoading(true);
     setHeadlessHistoryError("");
-    void getAgentSessionHistory(headlessProjectId, kanbanAgentHistoryParams({
+    const request = kanbanAgentHistoryParams({
       threadId: headlessThreadKey,
       conversationId: headlessConversationId,
       backend: operatorBackend,
       limit: 160,
-    })).then((page) => {
+    });
+    void getAgentSessionHistory(headlessProjectId, request).then((page) => {
       if (cancelled) return;
       setHeadlessHistoryEvents(page.items ?? []);
       setHeadlessHistoryBeforeSeq(page.next_before_seq ?? null);
       setHeadlessHistoryHasMore(Boolean(page.has_more));
+      if (projectionNeedsFresh(page)) {
+        void getAgentSessionHistory(headlessProjectId, {
+          ...request,
+          requireFresh: true,
+        }).then((fresh) => {
+          if (cancelled) return;
+          setHeadlessHistoryEvents(fresh.items ?? []);
+          setHeadlessHistoryBeforeSeq(fresh.next_before_seq ?? null);
+          setHeadlessHistoryHasMore(Boolean(fresh.has_more));
+        }).catch(() => undefined);
+      }
     }).catch((err) => {
       if (!cancelled) {
         setHeadlessHistoryEvents([]);

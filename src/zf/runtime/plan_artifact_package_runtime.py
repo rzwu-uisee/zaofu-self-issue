@@ -13,6 +13,38 @@ from zf.runtime.plan_artifact_package import (
 )
 
 
+_TASK_MAP_GENERATION_IDENTITY_KEYS = (
+    "task_map_generation",
+    "task_map_digest",
+    "plan_revision",
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+    "artifact_package_status",
+)
+
+
+def _synthesized_plan_payload(
+    trigger_payload: dict[str, Any],
+    artifact_payload: dict[str, Any],
+    *,
+    stage_id: str,
+) -> dict[str, Any]:
+    payload = {**trigger_payload, **artifact_payload, "stage_id": stage_id}
+    trigger_task_map_ref = str(trigger_payload.get("task_map_ref") or "").strip()
+    result_task_map_ref = str(artifact_payload.get("task_map_ref") or "").strip()
+    if result_task_map_ref and result_task_map_ref != trigger_task_map_ref:
+        # A replan trigger carries the admitted package that supplied its
+        # context.  The synthesized Task Map is a new immutable artifact and
+        # must derive a fresh generation/package instead of reusing that input
+        # identity merely because it survived flow-identity projection.
+        for key in _TASK_MAP_GENERATION_IDENTITY_KEYS:
+            payload.pop(key, None)
+    return payload
+
+
 def admit_task_map_trigger_package(
     runtime: Any,
     event: ZfEvent,
@@ -76,7 +108,16 @@ def admit_synthesized_plan_package(
         if isinstance(manifest.get("trigger_payload"), dict)
         else {}
     )
-    payload = {**trigger_payload, **artifact_payload, "stage_id": stage_id}
+    payload = _synthesized_plan_payload(
+        trigger_payload,
+        artifact_payload,
+        stage_id=stage_id,
+    )
+    workflow_run_id = str(
+        payload.get("workflow_run_id")
+        or manifest.get("workflow_run_id")
+        or trace_id
+    ).strip()
     try:
         metadata = flow_metadata_for(runtime.config, payload=payload)
         identity = _admit(
@@ -91,7 +132,7 @@ def admit_synthesized_plan_package(
                 or manifest.get("feature_id")
                 or ""
             ),
-            workflow_run_id=trace_id,
+            workflow_run_id=workflow_run_id,
         )
         return final_status, recommendation, {**artifact_payload, **identity}
     except Exception as exc:

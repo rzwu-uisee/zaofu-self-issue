@@ -239,8 +239,20 @@ def build_run_continuation_projection(
     terminal_status, terminal_event_id = _terminal_status(scoped_events, goal)
     phase = "terminal" if terminal_status else _latest_phase(scoped_events)
     next_operation: dict[str, Any] | None = None
-    if not terminal_status and pending_actions:
-        selected = pending_actions[0]
+    pending_human = completion_profile.get("pending_human_decisions")
+    blocking_human = _blocking_human_decisions(pending_human)
+    selected = pending_actions[0] if pending_actions else None
+    may_materialize_human_gate = bool(
+        selected
+        and _materializes_legacy_human_gate(selected)
+        and blocking_human
+        and not any(_is_actionable_human_contract(item) for item in blocking_human)
+    )
+    if (
+        not terminal_status
+        and selected is not None
+        and (not blocking_human or may_materialize_human_gate)
+    ):
         next_operation = {
             key: selected.get(key)
             for key in (
@@ -285,6 +297,56 @@ def build_run_continuation_projection(
         "next_operation": next_operation,
         "pending_operation_count": len(pending_actions),
     }
+
+
+def _blocking_human_decisions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        item
+        for item in value
+        if isinstance(item, dict)
+        and str(item.get("blocking_scope") or "run").strip().lower() != "side"
+    ]
+
+
+def _is_manual_evidence_gate(action: dict[str, Any]) -> bool:
+    return (
+        str(action.get("safe_resume_action") or "") == "blocked_external_gate"
+        and str(action.get("failure_class") or "") == "manual_evidence_required"
+    )
+
+
+def _materializes_legacy_human_gate(action: dict[str, Any]) -> bool:
+    """Allow only typed migration operations past a legacy bare notice."""
+
+    if _is_manual_evidence_gate(action):
+        return True
+    return (
+        str(action.get("action") or "") == "diagnose-attention"
+        and str(action.get("safe_resume_action") or "") == "diagnose_attention"
+        and str(action.get("failure_class") or "") in {
+            "candidate_rework_exhausted_unresolved",
+            "human_attention_delivery",
+        }
+    )
+
+
+def _is_actionable_human_contract(decision: dict[str, Any]) -> bool:
+    """Distinguish a resumable owner gate from a legacy notification.
+
+    Old role agents emitted bare ``human.escalate`` notifications without a
+    checkpoint or approval route.  Such rows must not starve materialization
+    of a newer typed manual-evidence gate or their own bounded repair/resume
+    diagnosis.  They continue to block every other continuation operation,
+    and the typed gate blocks again as soon as its explicit contract is
+    present.
+    """
+
+    return any(
+        str(decision.get(key) or "").strip()
+        for key in ("checkpoint_id", "approval_command")
+    )
 
 
 def _latest_generation(events: list[ZfEvent]) -> str:

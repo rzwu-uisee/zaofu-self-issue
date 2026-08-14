@@ -31,6 +31,9 @@ from zf.runtime.workflow_submission_binding import (
 from zf.runtime.workflow_delivery_replay import (
     submitted_request_replay_result as _submitted_request_replay_result,
 )
+from zf.runtime.workflow_task_lifecycle import (
+    claim_submitted_workflow_task as _claim_submitted_workflow_task,
+)
 
 def build_flow_submit_preview(
     *,
@@ -578,6 +581,13 @@ def apply_flow_submit(
             "event_ids": event_ids,
             "state_dir": str(state_dir),
         }
+    _claim_submitted_workflow_task(
+        state_dir=state_dir,
+        task_id=task,
+        writer=writer,
+        source_event=submit_requested,
+        actor=str(payload.get("requested_by") or "zf-cli"),
+    )
     accepted = writer.append(ZfEvent(
         type="workflow.submit.accepted",
         actor="zf-cli",
@@ -747,6 +757,7 @@ def apply_flow_submit(
         "event_ids": event_ids,
         "state_dir": str(state_dir),
     }
+
 
 def _request_id_from_path(path: Path) -> str:
     stem = path.expanduser().name

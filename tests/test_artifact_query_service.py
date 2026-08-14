@@ -87,6 +87,7 @@ def _write_test_plan_package(
     *,
     workflow_run_id: str,
     task_map_generation: str,
+    plan_revision: str = "R1",
 ) -> tuple[dict, dict]:
     run_contract_body = {
         "schema_version": "run-contract.v1",
@@ -104,7 +105,7 @@ def _write_test_plan_package(
         flow_kind="prd",
         producer_stage_id="prd-plan",
         run_contract=run_contract,
-        plan_revision="R1",
+        plan_revision=plan_revision,
         task_map_generation=task_map_generation,
         produced=[],
     )
@@ -1237,6 +1238,101 @@ def test_handoff_resolver_rejects_stale_or_missing_task_authority(
         )
 
 
+def test_task_bound_handoff_uses_its_admitted_generation_package(
+    tmp_path: Path,
+) -> None:
+    project_root, state_dir, _ = _service(tmp_path)
+    first, first_ref = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-generations",
+        task_map_generation="G1",
+        plan_revision="R1",
+    )
+    second, second_ref = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-generations",
+        task_map_generation="G2",
+        plan_revision="R2",
+    )
+    log = EventLog(state_dir / "events.jsonl")
+    for event_id, package, descriptor in (
+        ("evt-package-g1", first, first_ref),
+        ("evt-package-g2", second, second_ref),
+    ):
+        log.append(ZfEvent(
+            id=event_id,
+            type="plan.artifact_package.admitted",
+            correlation_id="run-generations",
+            payload=package_event_payload(package, descriptor, status="admitted"),
+        ))
+    task = Task(
+        id="T-generation-g1",
+        title="Generation-local handoff",
+        status="in_progress",
+        assigned_to="dev",
+        contract=TaskContract(
+            behavior="finish an admitted earlier generation",
+            acceptance_criteria=["AC generation-local"],
+            verification="pytest -q",
+            evidence_contract={
+                "source_refs": {
+                    "task_map_generation": "G1",
+                    "task_map_ref": "artifacts/task-maps/g1.json",
+                    "plan_artifact_package_id": first_ref["package_id"],
+                    "plan_artifact_package_ref": first_ref["ref"],
+                    "plan_artifact_package_digest": first_ref["sha256"],
+                },
+            },
+        ),
+    )
+    TaskStore(state_dir / "kanban.json").add(task)
+    current = current_task_contract_identity(task)
+    snapshot = build_task_contract_snapshot(
+        task,
+        workflow_run_id="run-generations",
+        task_map_generation_id="G1",
+        base_commit="base-g1",
+        task_ref="refs/zf/tasks/T-generation-g1",
+    )
+    snapshot_ref = write_task_contract_snapshot(state_dir, snapshot)
+    payload = {
+        **current,
+        "workflow_run_id": "run-generations",
+        "task_ref": "refs/zf/tasks/T-generation-g1",
+        "base_commit": "base-g1",
+        "output_profile_id": "implementation",
+        "artifact_package_mode": "blocking",
+        "contract_snapshot_ref": snapshot_ref["ref"],
+        "contract_snapshot_digest": snapshot_ref["sha256"],
+        "plan_artifact_package_id": first_ref["package_id"],
+        "plan_artifact_package_ref": first_ref["ref"],
+        "plan_artifact_package_digest": first_ref["sha256"],
+    }
+    payload["handoff_authority_contract"] = build_handoff_authority_contract(
+        payload,
+        output_profile_id="implementation",
+        stage_id="impl",
+        operation_type="task-stage",
+    )
+
+    manifest, _ = CanonicalHandoffResolver(
+        state_dir=state_dir,
+        project_root=project_root,
+        config=None,
+    ).resolve_payload(
+        payload=payload,
+        workflow_run_id="run-generations",
+        task_id=task.id,
+        attempt_id="attempt-g1",
+        dispatch_id="dispatch-g1",
+    )
+
+    assert manifest["task_map_generation"] == "G1"
+    assert manifest["plan_artifact_package_id"] == first_ref["package_id"]
+    assert manifest["plan_artifact_package_ref"] == first_ref["ref"]
+    assert manifest["plan_artifact_package_digest"] == first_ref["sha256"]
+
+
 def test_blocking_handoff_distinguishes_initial_impl_from_rework(
     tmp_path: Path,
 ) -> None:
@@ -1563,6 +1659,22 @@ def test_candidate_verify_binds_frozen_candidate_not_workflow_anchor_contract(
             "freeze_receipt_ref": freeze_descriptor,
             "freeze_receipt_digest": freeze_descriptor["sha256"],
         },
+    ))
+    newer_package, newer_package_descriptor = _write_test_plan_package(
+        state_dir,
+        workflow_run_id="run-candidate-anchor",
+        task_map_generation="G4",
+        plan_revision="R2",
+    )
+    log.append(ZfEvent(
+        id="evt-package-candidate-anchor-newer",
+        type="plan.artifact_package.admitted",
+        correlation_id="run-candidate-anchor",
+        payload=package_event_payload(
+            newer_package,
+            newer_package_descriptor,
+            status="admitted",
+        ),
     ))
     aggregate_contract = {
         "schema_version": "task-contract-snapshot.v1",

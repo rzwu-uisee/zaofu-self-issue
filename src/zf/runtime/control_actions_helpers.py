@@ -540,6 +540,11 @@ def validate_shared_action_payload(
         stage = _workflow_stage(config, pattern_id)
         if stage is None:
             return f"execution pattern {pattern_id!r} is not declared in zf.yaml"
+    if action == "stage-replan-new-generation":
+        if not _required_text(payload, "escalation_event_id"):
+            return "escalation_event_id is required"
+        if not _required_text(payload, "approval_ref"):
+            return "approval_ref is required"
     if action == "research-start":
         if not _required_text(payload, "task_id"):
             return "task_id is required"

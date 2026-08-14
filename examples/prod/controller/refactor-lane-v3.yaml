@@ -19,6 +19,7 @@ spec:
   completionThreshold: close_p0_p1
   deliveryPolicy: ship_candidate
   artifactPackageMode: blocking
+  productAcceptanceMode: blocking
   # Scan/Planner readers submit one signed semantic result file. Their output
   # refs stay workdir-relative; the Kernel relocates canonical artifacts.
   semanticSubmitProfiles:

@@ -586,6 +586,8 @@ def test_wire_up_apply_housekeeping_handles_worker_heartbeat():
         "α-2 wire-up missing: orchestrator.py does not call "
         "apply_worker_heartbeat_event"
     )
+    assert "is_worker_activity_event(event.type)" in text
+    assert "apply_worker_activity_heartbeat(registry, event)" in text
 
 
 def _seed_busy(reg, instance_id, *, stale=False, tmp_path=None):
@@ -633,6 +635,34 @@ def test_activity_heartbeat_claude_backend_parity(tmp_path: Path):
     )
     _, payload = reg.get_last_heartbeat("dev-1")
     assert payload["source"] == "activity_liveness"
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["agent.thinking", "agent.text", "agent.tool.use", "agent.tool.result"],
+)
+def test_activity_heartbeat_refreshes_from_provider_transcript(
+    tmp_path: Path,
+    event_type: str,
+):
+    """Stream/tailer output is objective activity even when usage or provider
+    hooks are unavailable for the current backend invocation."""
+    from zf.runtime.heartbeat_sweep import sweep_heartbeats
+    from zf.runtime.housekeeping import apply_worker_activity_heartbeat
+
+    reg = _seed_busy(
+        RoleSessionRegistry(tmp_path / "role_sessions.yaml", project_root=str(tmp_path)),
+        "dev-1", stale=True,
+    )
+    apply_worker_activity_heartbeat(
+        reg,
+        ZfEvent(type=event_type, actor="dev-1"),
+    )
+
+    _, payload = reg.get_last_heartbeat("dev-1")
+    assert payload["source"] == "activity_liveness"
+    assert payload["state"] == "busy"
+    assert "dev-1" not in sweep_heartbeats(registry=reg).stuck_instances
 
 
 def test_activity_heartbeat_throttled_when_fresh(tmp_path: Path):

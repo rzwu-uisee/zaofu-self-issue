@@ -8,6 +8,9 @@ import {
   taskPriority,
   taskActorLabel,
   taskRiskBadge,
+  taskIsEffectivelyTerminal,
+  taskTerminalOutcome,
+  taskTerminalTone,
   latestEventAge,
   backlogRefsState,
   routeStatusTone,
@@ -191,6 +194,7 @@ export function TaskCard({
   const age = latestEventAge(task);
   const totalTokens = (telemetry?.inputTokens ?? 0) + (telemetry?.outputTokens ?? 0);
   const risk = taskRiskBadge(task, telemetry);
+  const effectiveTerminal = taskIsEffectivelyTerminal(task);
   const fanout = task.fanout;
   const fHue = fanoutHue(fanout?.fanout_id);
   const fanoutProgress = fanout?.progress;
@@ -209,9 +213,13 @@ export function TaskCard({
       <button className="task-open" type="button" onClick={() => onSelect(task.id)}>
         <span className="task-id mono">{task.id}</span>
         <span className="task-title">{task.title || "(untitled)"}</span>
-        {visibleSkills.length || task.retry_count > 0 || task.evidence_badges?.length || task.workflow_badges?.length || task.contract || telemetry ? (
+        {effectiveTerminal ? (
           <span className="task-chip-row">
-            <span className={`badge badge-${risk.tone}`}>{risk.label}</span>
+            <span className={`badge badge-${taskTerminalTone(task)}`}>{taskTerminalOutcome(task)}</span>
+          </span>
+        ) : visibleSkills.length || task.retry_count > 0 || task.evidence_badges?.length || task.workflow_badges?.length || task.contract || telemetry || risk.label ? (
+          <span className="task-chip-row">
+            {risk.label ? <span className={`badge badge-${risk.tone}`}>{risk.label}</span> : null}
             <WorkflowBadges task={task} compact />
             {visibleSkills.map((skill) => <span className="badge" key={skill}>{skill}</span>)}
             {task.retry_count > 0 ? <span className="badge badge-warn">rework {task.retry_count}</span> : null}
@@ -246,8 +254,8 @@ export function TaskCard({
             <BacklogRefsBadge task={task} />
           </span>
         ) : null}
-        <RouteSummaryStrip route={task.route_summary} compact />
-        {task.blocked_reason ? <span className="blocked-note">{task.blocked_reason}</span> : null}
+        {!effectiveTerminal ? <RouteSummaryStrip route={task.route_summary} compact /> : null}
+        {!effectiveTerminal && task.blocked_reason ? <span className="blocked-note">{task.blocked_reason}</span> : null}
         <span className="task-footer">
           {actorLabel ? (
             <span className="task-assignee">
@@ -264,7 +272,7 @@ export function TaskCard({
               {actorLabel}
             </span>
           ) : null}
-          <span className={`priority-pill priority-${priority}`}>P{priority}</span>
+          {!effectiveTerminal ? <span className={`priority-pill priority-${priority}`}>P{priority}</span> : null}
           {age !== "-" ? <span className="task-age">{age}</span> : null}
         </span>
       </button>

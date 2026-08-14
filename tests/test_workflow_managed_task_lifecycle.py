@@ -122,6 +122,7 @@ def test_accepted_workflow_activates_managed_task_once(
     tmp_path: Path,
 ) -> None:
     runtime, log, store = _runtime(tmp_path, workflow_managed=True)
+    store.update("TASK-RESEARCH", assigned_to="research-reader")
     invoke = _invoke()
 
     runtime.run_once(events=[invoke])
@@ -129,6 +130,7 @@ def test_accepted_workflow_activates_managed_task_once(
     task = store.get("TASK-RESEARCH")
     assert task is not None
     assert task.status == "in_progress"
+    assert task.assigned_to is None
     events = log.read_all()
     accepted = next(
         event
@@ -144,6 +146,8 @@ def test_accepted_workflow_activates_managed_task_once(
     ]
     assert len(status_events) == 1
     assert status_events[0].causation_id == accepted.id
+    assert status_events[0].payload["previous_assigned_to"] == "research-reader"
+    assert status_events[0].payload["assignment_released"] is True
     assert task.started_at == accepted.ts
 
     store.update("TASK-RESEARCH", status="backlog")

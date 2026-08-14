@@ -1,9 +1,7 @@
 """Controlled Project Request creation and explicit workflow ignition."""
 
 from __future__ import annotations
-
 import hashlib
-from dataclasses import asdict
 from pathlib import Path
 
 from zf.core.events import ZfEvent
@@ -14,11 +12,7 @@ from zf.runtime.workflow_delivery import (
     build_flow_submit_preview,
 )
 from zf.runtime.workflow_intake import build_flow_intake
-from zf.runtime.workflow_anchor import (
-    is_workflow_managed_task,
-    mark_workflow_managed_task,
-)
-from zf.runtime.workflow_request_acceptance import inherit_task_acceptance
+from zf.runtime.control_actions_workflow_replay import active_request_mutation_failure, replay_active_workflow_start
 from zf.runtime.workflow_origin import (
     WorkflowOriginError,
     assert_same_workflow_origin,
@@ -26,7 +20,13 @@ from zf.runtime.workflow_origin import (
     workflow_origin_from_request,
 )
 from zf.runtime.workflow_start import WorkflowStartService
-from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.workflow_request_acceptance import (
+    TaskWorkflowInputCoverageError,
+)
+from zf.runtime.workflow_start_inputs import (
+    ensure_workflow_managed_task,
+    prepare_approved_workflow_start,
+)
 from zf.runtime.workflow_task_request_rotation import (
     WorkflowTaskRequestRotationError,
     apply_task_request_binding,
@@ -109,65 +109,38 @@ class WorkflowRequestActionsMixin:
         route_id = str(normalized.get("route_id") or "")
         objective = str(normalized.get("objective") or "")
         route = dict(preview.get("route") or {})
-        parameters = (
-            dict(normalized.get("parameters"))
-            if isinstance(normalized.get("parameters"), dict)
-            else {}
-        )
-        task_store = TaskStore(self.state_dir / "kanban.json")
-        workflow_task = task_store.get(task_id)
-        parameters = inherit_task_acceptance(parameters, workflow_task)
-        if (
-            workflow_task is not None
-            and not is_workflow_managed_task(workflow_task)
-        ):
-            mark_workflow_managed_task(workflow_task)
-            task_store.update(task_id, contract=workflow_task.contract)
-            self.writer.emit(
-                "task.contract.update",
+        try:
+            prepared = prepare_approved_workflow_start(
+                state_dir=self.state_dir,
+                normalized=normalized,
+                route=route,
                 actor=self.actor,
-                task_id=task_id,
-                causation_id=requested.id,
-                correlation_id=requested.correlation_id,
-                payload={
-                    "source": "workflow_start",
-                    "contract": asdict(workflow_task.contract),
-                    "contract_digest": task_workflow_binding_digest(
-                        workflow_task
-                    ),
-                    "execution_owner": "workflow",
-                },
+                reason=_required_text(payload, "reason"),
             )
-        common_payload = {
-            **parameters,
-            "task_id": task_id,
-            "objective": objective,
-            "route_id": route_id,
-            "pattern_id": str(route.get("entry_pattern_id") or ""),
-            "requested_by": self.actor,
-            "reason": _required_text(payload, "reason")
-            or f"approved task workflow route {route_id}",
-        }
-        for key in (
-            "artifact_refs",
-            "channel_id",
-            "conversation_id",
-            "fresh_request",
-            "origin_binding",
-            "prior_request_id",
-            "prior_request_revision",
-            "prior_terminal_event_id",
-            "project_id",
-            "request_id",
-            "request_revision",
-            "source_refs",
-            "thread_id",
-            "thread_key",
-        ):
-            value = normalized.get(key)
-            if value not in (None, "", [], {}):
-                common_payload[key] = value
+        except ValueError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=task_id,
+                reason=str(exc),
+                status_code=409,
+                status="workflow_task_stale",
+            )
+        parameters = prepared.parameters
+        workflow_task = prepared.workflow_task
+        common_payload = prepared.common_payload
+        ensure_workflow_managed_task(
+            state_dir=self.state_dir,
+            workflow_task=workflow_task,
+            writer=self.writer,
+            actor=self.actor,
+            causation_id=requested.id,
+            correlation_id=requested.correlation_id,
+        )
         adapter = str(route.get("start_adapter") or "")
+        if normalized.get("active_request_replay"):
+            return replay_active_workflow_start(self, requested, action, requested_action, common_payload, route_id, route)
         if adapter in {"adaptive_research", "fixed_research"}:
             result = self._research_start(
                 requested=requested,
@@ -349,6 +322,9 @@ class WorkflowRequestActionsMixin:
                     status_code=409,
                     status="origin_binding_mismatch",
                 )
+            active_failure = active_request_mutation_failure(self, requested, action, requested_action, payload, existing_projection)
+            if active_failure is not None:
+                return active_failure
         elif bool(payload.get("fresh_request")):
             task_id = _required_text(payload, "task_id")
             task = TaskStore(self.state_dir / "kanban.json").get(task_id)
@@ -407,6 +383,10 @@ class WorkflowRequestActionsMixin:
                 strictness=(
                     _required_text(payload, "strictness") or "standard"
                 ),
+                scope=tuple(_string_list(payload.get("scope"))),
+                parity_scope=tuple(
+                    _string_list(payload.get("parity_scope"))
+                ),
                 acceptance=tuple(
                     _string_list(payload.get("acceptance"))
                 ),
@@ -426,6 +406,11 @@ class WorkflowRequestActionsMixin:
                 ),
                 thread_key=str(origin_binding.get("thread_key") or ""),
                 origin_binding=origin_binding,
+                artifact_refs=tuple(
+                    payload.get("artifact_refs")
+                    if isinstance(payload.get("artifact_refs"), list)
+                    else []
+                ),
                 source_refs=(
                     {
                         str(key): str(value)
@@ -438,12 +423,32 @@ class WorkflowRequestActionsMixin:
                     if isinstance(payload.get("source_refs"), dict)
                     else {}
                 ),
+                task_input_binding=(
+                    dict(payload.get("task_input_binding") or {})
+                    if isinstance(payload.get("task_input_binding"), dict)
+                    else {}
+                ),
+                task_input_contract=(
+                    dict(payload.get("task_input_contract") or {})
+                    if isinstance(payload.get("task_input_contract"), dict)
+                    else {}
+                ),
                 output=(
                     self.project_root
                     / "docs"
                     / "intake"
                     / f"{request_id}.md"
                 ),
+            )
+        except TaskWorkflowInputCoverageError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_required_text(payload, "task_id") or None,
+                reason=str(exc),
+                status_code=422,
+                status="workflow_input_incomplete",
             )
         except WorkflowRequestError as exc:
             return self._failed(

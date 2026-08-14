@@ -12,6 +12,8 @@ from zf.core.events import EventLog, EventWriter, ZfEvent
 from zf.core.task.schema import Task
 from zf.core.task.store import TaskStore
 from zf.runtime.channel_discussion import advance_discussion
+from zf.runtime.channel_discussion import discussion_state
+from zf.runtime.channel_discussion_contribution import valid_phase1_members
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_question_dedup import (
     apply_question_dedup_reply,
@@ -582,16 +584,22 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
 
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
+        detail = project_channel(state_dir, channel_id)
+        session = discussion_state(detail, thread_id)
         blind_replies = [
             event
             for event in log.read_all()
             if event.type == "channel.agent.reply.completed"
             and event.payload.get("thread_id") == thread_id
         ]
-        if len(blind_replies) == 4:
+        phase1_members = valid_phase1_members(detail, session, thread_id)
+        if len(blind_replies) == 4 and phase1_members == set(
+            session.get("roster") or []
+        ):
             break
         time.sleep(0.02)
     assert len(blind_replies) == 4
+    assert phase1_members == set(session.get("roster") or [])
 
     advance_discussion(
         state_dir,

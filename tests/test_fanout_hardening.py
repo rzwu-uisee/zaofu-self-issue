@@ -306,6 +306,49 @@ def test_pending_reader_fanout_dispatches_after_worker_recovers(tmp_path: Path):
     ]
 
 
+def test_pending_recycle_fanout_dispatches_after_fresh_restart_state(
+    tmp_path: Path,
+):
+    transport = _FlakyTransport(alive=True)
+    _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
+    orch._instance_state["review-a"] = "pending_recycle"
+    orch._last_worker_state["review-a"] = "pending_recycle"
+
+    _start(orch)
+    fanout_id = _fanout_id(log)
+    deferred = [
+        event for event in log.read_all()
+        if event.type == "fanout.child.dispatch_deferred"
+        and event.payload.get("fanout_id") == fanout_id
+    ]
+    assert deferred[-1].payload["reason"] == (
+        "worker_state_not_dispatchable:pending_recycle"
+    )
+
+    recovered = EventWriter(log).append(ZfEvent(
+        type="worker.state.changed",
+        actor="review-a",
+        payload={
+            "instance_id": "review-a",
+            "from": "respawning",
+            "to": "idle",
+            "reason": "fresh context restart complete",
+        },
+    ))
+    orch.run_once(events=[recovered])
+    orch.run_once(events=[])
+
+    events = log.read_all()
+    assert orch._instance_state["review-a"] == "healthy"
+    dispatched = [
+        event for event in events
+        if event.type == "fanout.child.dispatched"
+        and event.payload.get("fanout_id") == fanout_id
+    ]
+    assert len(dispatched) == 1
+    assert dispatched[0].payload["role_instance"] == "review-a"
+
+
 def test_busy_reader_fanout_dispatch_defer_is_debounced(tmp_path: Path):
     transport = _FlakyTransport(alive=True)
     _state_dir, log, _transport, orch = _state_with_transport(tmp_path, transport)
@@ -982,6 +1025,15 @@ def test_idle_child_caught_before_stage_timeout(tmp_path: Path):
     assert failed[-1].payload["reason"] == "idle"
     # the stage budget was nowhere near elapsed — this fired on liveness only
     assert any(event.type == "fanout.timed_out" for event in events)
+    aggregate = next(
+        event for event in events if event.type == "fanout.aggregate.completed"
+    )
+    assert aggregate.payload["failure_kind"] == "infra"
+    assert {
+        finding["category"] for finding in aggregate.payload["findings"]
+    } == {"runtime_failure"}
+    rejected = next(event for event in events if event.type == "review.rejected")
+    assert rejected.payload["failure_kind"] == "infra"
 
 
 def test_idle_child_retried_when_retries_available(tmp_path: Path):

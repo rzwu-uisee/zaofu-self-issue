@@ -53,6 +53,10 @@ def apply_orchestrator_agent_decision(runtime: Any, event: ZfEvent) -> dict[str,
         "decision": action,
         "decision_fingerprint": _decision_fingerprint(decision),
         "reason_codes": list(decision.get("reason_codes") or []),
+        "summary": str(decision.get("summary") or ""),
+        "explanation_status": str(
+            decision.get("explanation_status") or "degraded"
+        ),
         "decision_ref": dict(admission.decision_ref or {}),
         "status": "admitted",
     }

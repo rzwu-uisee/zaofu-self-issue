@@ -35,10 +35,17 @@ _STALE_MARKERS = (
     "current package mismatch",
     "current target mismatch",
 )
+_DEFAULT_SLA_SECONDS = 300
+_CHECKPOINT_SLA_SECONDS = {
+    "semantic_failure": 180,
+    "owner_delivery": 180,
+}
 
 
 def build_orchestrator_agent_metrics(
     events: Iterable[ZfEvent | tuple[int, ZfEvent]],
+    *,
+    observed_at: datetime | str | None = None,
 ) -> dict[str, Any]:
     """Project OA health without reading or mutating canonical state."""
     ordered = [item[1] if isinstance(item, tuple) else item for item in events]
@@ -87,6 +94,7 @@ def build_orchestrator_agent_metrics(
     required_read_closed = 0
     usage_by_operation = _operation_usage(ordered, operation_ids)
     decisions = _operation_decisions(ordered, operation_ids)
+    observed_time = _coerce_datetime(observed_at) or datetime.now(timezone.utc)
     for request in operation_requests:
         payload = _payload(request)
         operation_id = _text(payload, "operation_id")
@@ -99,6 +107,19 @@ def build_orchestrator_agent_metrics(
         if admitted and read_closed:
             required_read_closed += 1
         latency = _seconds_between(request.ts, terminal.ts) if terminal else None
+        age = latency
+        if age is None:
+            requested_at = _coerce_datetime(request.ts)
+            age = (
+                max(0.0, (observed_time - requested_at).total_seconds())
+                if requested_at is not None
+                else None
+            )
+        sla_threshold = _CHECKPOINT_SLA_SECONDS.get(
+            checkpoint,
+            _DEFAULT_SLA_SECONDS,
+        )
+        sla_breached = age is not None and age > sla_threshold
         if latency is not None:
             latencies.append(latency)
             checkpoint_groups.setdefault(checkpoint, []).append(latency)
@@ -110,6 +131,7 @@ def build_orchestrator_agent_metrics(
         if source_event_id in normal_event_ids:
             normal_turn_operations.add(operation_id)
         usage = usage_by_operation.get(operation_id, {})
+        decision_projection = decisions.get(operation_id, {})
         rows.append({
             "operation_id": operation_id,
             "workflow_run_id": _text(payload, "workflow_run_id"),
@@ -119,13 +141,21 @@ def build_orchestrator_agent_metrics(
             "terminal_event_id": terminal.id if terminal else "",
             "source_event_id": source_event_id,
             "latency_seconds": _rounded(latency),
+            "age_seconds": _rounded(age),
+            "sla_threshold_seconds": sla_threshold,
+            "sla_breached": sla_breached,
             "required_read_closed": read_closed if admitted else None,
             "usage_sample_count": int(usage.get("sample_count") or 0),
             "input_tokens": int(usage.get("input_tokens") or 0),
             "output_tokens": int(usage.get("output_tokens") or 0),
             "total_tokens": int(usage.get("total_tokens") or 0),
             "cost_usd": _rounded(float(usage.get("cost_usd") or 0.0)),
-            "decision": str(decisions.get(operation_id) or ""),
+            "decision": str(decision_projection.get("decision") or ""),
+            "reason_codes": list(decision_projection.get("reason_codes") or []),
+            "summary": str(decision_projection.get("summary") or ""),
+            "explanation_status": str(
+                decision_projection.get("explanation_status") or "degraded"
+            ),
         })
 
     target_requests = [
@@ -207,6 +237,15 @@ def build_orchestrator_agent_metrics(
             "latency_sample_count": len(values),
             "avg_operation_latency_seconds": _rounded(_average(values)),
             "max_operation_latency_seconds": _rounded(max(values)) if values else None,
+            "sla_threshold_seconds": _CHECKPOINT_SLA_SECONDS.get(
+                checkpoint,
+                _DEFAULT_SLA_SECONDS,
+            ),
+            "sla_breach_count": sum(row["sla_breached"] for row in checkpoint_rows),
+            "sla_breach_rate": _rate(
+                sum(row["sla_breached"] for row in checkpoint_rows),
+                len(checkpoint_rows),
+            ),
             "input_tokens": sum(row["input_tokens"] for row in checkpoint_rows),
             "output_tokens": sum(row["output_tokens"] for row in checkpoint_rows),
             "total_tokens": sum(row["total_tokens"] for row in checkpoint_rows),
@@ -233,6 +272,19 @@ def build_orchestrator_agent_metrics(
             "operation_latency_sample_count": len(latencies),
             "avg_operation_latency_seconds": _rounded(_average(latencies)),
             "p95_operation_latency_seconds": _rounded(_percentile_95(latencies)),
+            "sla_breach_count": sum(row["sla_breached"] for row in rows),
+            "sla_breach_rate": _rate(
+                sum(row["sla_breached"] for row in rows),
+                len(rows),
+            ),
+            "pending_sla_breach_count": sum(
+                row["sla_breached"] and row["status"] == "pending"
+                for row in rows
+            ),
+            "degraded_explanation_count": sum(
+                row["explanation_status"] == "degraded" and bool(row["decision"])
+                for row in rows
+            ),
             "stale_reject_count": len(stale_rejections),
             "admitted_result_count": admitted_count,
             "required_read_closed_count": required_read_closed,
@@ -357,8 +409,8 @@ def _operation_usage(
 def _operation_decisions(
     events: list[ZfEvent],
     operation_ids: set[str],
-) -> dict[str, str]:
-    decisions: dict[str, str] = {}
+) -> dict[str, dict[str, Any]]:
+    decisions: dict[str, dict[str, Any]] = {}
     for event in events:
         if event.type not in {
             "orchestrator.semantic.decision.applied",
@@ -368,8 +420,35 @@ def _operation_decisions(
         operation_id = _text(event.payload, "operation_id")
         decision = _text(event.payload, "decision")
         if operation_id in operation_ids and decision:
-            decisions[operation_id] = decision
+            payload = _payload(event)
+            decisions[operation_id] = {
+                "decision": decision,
+                "reason_codes": [
+                    str(item) for item in payload.get("reason_codes", [])
+                    if str(item).strip()
+                ] if isinstance(payload.get("reason_codes"), list) else [],
+                "summary": _text(payload, "summary"),
+                "explanation_status": (
+                    _text(payload, "explanation_status")
+                    or ("complete" if _text(payload, "summary") else "degraded")
+                ),
+            }
     return decisions
+
+
+def _coerce_datetime(value: datetime | str | None) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _checkpoint_name(

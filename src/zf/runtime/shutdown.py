@@ -233,16 +233,6 @@ class GracefulShutdown:
         self._snapshot_memory()
         self.steps_completed.append("save_memory")
 
-        # Step 7: snapshot current state to .zf/last-shutdown/ for
-        # post-mortem inspection. (Prior version used CheckpointManager
-        # but restore() was never called from production — removed
-        # 2026-04-20 per backlog P1-2.)
-        self._save_last_shutdown_snapshot()
-        self.steps_completed.append("save_shutdown_snapshot")
-
-        self.event_log.append(ZfEvent(type="loop.stopped", actor="zf-cli"))
-        self.steps_completed.append("emit_completion")
-
         preserved_roles = self._apply_resident_run_manager_preserve(
             reason="graceful_stop",
         )
@@ -253,6 +243,22 @@ class GracefulShutdown:
         self._stop_feishu_projection_sidecar()
         self.steps_completed.append("stop_feishu_projection_sidecar")
 
+        # Provider CLIs can append their final cumulative token snapshot while
+        # exiting. Stop them before closing the EventLog, then reconcile that
+        # tail into the same agent.usage/cost path used by lifecycle polling.
+        self.transport.shutdown(exclude_roles=preserved_roles)
+        self.steps_completed.append("kill_session")
+        self._reconcile_provider_usage_tail(excluded_roles=preserved_roles)
+        self.steps_completed.append("reconcile_provider_usage_tail")
+
+        # Snapshot only after the final provider receipt is durable so cold
+        # start and post-mortem views see the same cost ledger as live state.
+        self._save_last_shutdown_snapshot()
+        self.steps_completed.append("save_shutdown_snapshot")
+
+        self.event_log.append(ZfEvent(type="loop.stopped", actor="zf-cli"))
+        self.steps_completed.append("emit_completion")
+
         # Final flush of the in-process event index so latest_event_by_*
         # mappings observed in the dying watcher survive into the next
         # cold start.
@@ -261,9 +267,6 @@ class GracefulShutdown:
         except Exception:
             pass
         self.steps_completed.append("flush_event_index")
-
-        self.transport.shutdown(exclude_roles=preserved_roles)
-        self.steps_completed.append("kill_session")
 
         # Phase 2.5 Bug 1: the foreground watcher process won't exit just
         # because loop.shutdown_requested was emitted — watcher.run()'s
@@ -331,13 +334,6 @@ class GracefulShutdown:
         ))
         self.steps_completed.append("emit_teardown_event")
 
-        self.event_log.append(ZfEvent(
-            type="loop.stopped",
-            actor="zf-cli",
-            payload={"mode": "fast"},
-        ))
-        self.steps_completed.append("emit_completion")
-
         preserved_roles = self._apply_resident_run_manager_preserve(
             reason="fast_stop",
         )
@@ -348,14 +344,23 @@ class GracefulShutdown:
         self._stop_feishu_projection_sidecar()
         self.steps_completed.append("stop_feishu_projection_sidecar")
 
+        self.transport.shutdown(exclude_roles=preserved_roles)
+        self.steps_completed.append("kill_session")
+        self._reconcile_provider_usage_tail(excluded_roles=preserved_roles)
+        self.steps_completed.append("reconcile_provider_usage_tail")
+
+        self.event_log.append(ZfEvent(
+            type="loop.stopped",
+            actor="zf-cli",
+            payload={"mode": "fast"},
+        ))
+        self.steps_completed.append("emit_completion")
+
         try:
             self.event_log.close()
         except Exception:
             pass
         self.steps_completed.append("flush_event_index")
-
-        self.transport.shutdown(exclude_roles=preserved_roles)
-        self.steps_completed.append("kill_session")
 
         self._kill_watcher()
         self.steps_completed.append("kill_watcher")
@@ -367,6 +372,59 @@ class GracefulShutdown:
         self.steps_completed.append("release_lock")
 
         return self.steps_completed
+
+    def _reconcile_provider_usage_tail(
+        self,
+        *,
+        excluded_roles: set[str],
+    ) -> None:
+        if self.config is None:
+            return
+        try:
+            session = self.session_store.load()
+            project_root = (
+                Path(session.project_root)
+                if session.project_root
+                else self.state_dir.parent
+            )
+            from zf.runtime.provider_usage_reconciliation import (
+                reconcile_provider_usage_tail,
+            )
+
+            result = reconcile_provider_usage_tail(
+                state_dir=self.state_dir,
+                project_root=project_root,
+                config=self.config,
+                event_log=self.event_log,
+                excluded_roles=excluded_roles,
+            )
+            if result.failed_roles:
+                self.event_log.append(ZfEvent(
+                    type="kernel.housekeeping.failed",
+                    actor="zf-cli",
+                    payload={
+                        "step": "provider_usage_shutdown_tail",
+                        "exc_type": "ProviderUsageTailReconciliationError",
+                        "exc_repr": (
+                            "failed_roles=" + ",".join(result.failed_roles)
+                        )[:500],
+                    },
+                ))
+        except Exception as exc:
+            # Stop remains bounded even when a provider transcript is missing or
+            # malformed; the last successful usage receipt remains auditable.
+            try:
+                self.event_log.append(ZfEvent(
+                    type="kernel.housekeeping.failed",
+                    actor="zf-cli",
+                    payload={
+                        "step": "provider_usage_shutdown_tail",
+                        "exc_type": type(exc).__name__,
+                        "exc_repr": repr(exc)[:500],
+                    },
+                ))
+            except Exception:
+                pass
 
     def _stop_autoresearch_sidecar(self) -> None:
         """Cross-process teardown of the autoresearch resident's process

@@ -158,6 +158,16 @@ def test_verification_commands_preserve_declared_producer_paths() -> None:
     assert commands[0]["producer_paths"] == ["artifacts/e2e/results.json"]
 
 
+def test_verification_commands_preserve_declared_producer_task() -> None:
+    commands = normalize_verification_commands([{
+        "id": "browser-e2e",
+        "command": "npm run test:e2e",
+        "producer_task_id": "TASK-EVIDENCE",
+    }])
+
+    assert commands[0]["producer_task_id"] == "TASK-EVIDENCE"
+
+
 def test_impl_self_check_round_trip_and_exact_target_reuse(tmp_path: Path) -> None:
     contract, target = _snapshots(tmp_path)
     body = normalize_impl_self_check(
@@ -241,6 +251,39 @@ def test_impl_self_check_requires_only_impl_owned_command_subset(
     assert template["impl_self_check"]["acceptance_results"][0][
         "command_receipt_ids"
     ] == ["receipt-unit-focused"]
+
+
+def test_impl_self_check_defers_command_to_declared_producer_task(
+    tmp_path: Path,
+) -> None:
+    contract, target = _snapshots(tmp_path)
+    contract["verification_commands"][0]["producer_task_id"] = "TASK-EVIDENCE"
+    payload = _payload(contract, target)
+    payload["impl_self_check"]["command_receipts"] = []
+    payload["impl_self_check"]["acceptance_results"][0][
+        "command_receipt_ids"
+    ] = []
+
+    body = normalize_impl_self_check(
+        payload,
+        contract_snapshot=contract,
+        target_snapshot=target,
+        expected_attempt_id="attempt-1",
+    )
+    template = completion_payload_template(
+        contract_snapshot=contract,
+        task_item={
+            "attempt_id": "attempt-1",
+            "contract_snapshot_ref": target["contract_snapshot_ref"],
+            "contract_snapshot_digest": target["contract_snapshot_digest"],
+        },
+        task_id=contract["task_id"],
+        run_id=contract["workflow_run_id"],
+        child_id="child-1",
+    )
+
+    assert body["command_receipts"] == []
+    assert template["impl_self_check"]["command_receipts"] == []
 
 
 @pytest.mark.parametrize(

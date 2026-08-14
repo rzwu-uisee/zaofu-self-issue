@@ -174,6 +174,167 @@ def test_missing_delivery_evidence_does_not_mark_active_run_completed() -> None:
     assert projection["next_operation"] is None
 
 
+def test_blocking_human_decision_pauses_pending_continuation() -> None:
+    events = _events()
+    actions = enrich_continuation_actions(
+        _actions(),
+        run_id="RUN-1",
+        generation="GEN-1",
+        current_progress_digest=progress_digest(events),
+    )
+
+    projection = build_run_continuation_projection(
+        events,
+        goal=_goal(),
+        pending_actions=actions,
+        completion_profile={
+            "status": "incomplete",
+            "pending_human_decisions": [{
+                "decision_token": "hdec-1",
+                "blocking_scope": "run",
+                "checkpoint_id": "manual-gate",
+                "approval_command": "zf action approve manual-gate",
+            }],
+        },
+    )
+
+    assert projection["terminal"] is False
+    assert projection["status"] == "active"
+    assert projection["pending_operation_count"] == 2
+    assert projection["next_operation"] is None
+
+
+def test_manual_evidence_gate_can_replace_legacy_bare_human_notice() -> None:
+    events = _events()
+    actions = enrich_continuation_actions(
+        [{
+            "action": "orchestrator-triage-advice-apply",
+            "safe_resume_action": "blocked_external_gate",
+            "checkpoint_id": "manual-evidence-gate-1",
+            "task_id": "TASK-VERIFY",
+            "failure_class": "manual_evidence_required",
+            "attempt_cap": 1,
+            "policy_decision": {"decision": "human_escalate"},
+            "preflight": {"status": "passed"},
+        }],
+        run_id="RUN-1",
+        generation="GEN-1",
+        current_progress_digest=progress_digest(events),
+    )
+
+    projection = build_run_continuation_projection(
+        events,
+        goal=_goal(),
+        pending_actions=actions,
+        completion_profile={
+            "status": "incomplete",
+            "pending_human_decisions": [{
+                "decision_token": "legacy-event-id",
+                "event_id": "legacy-event-id",
+                "blocking_scope": "run",
+            }],
+        },
+    )
+
+    assert projection["next_operation"]["checkpoint_id"] == (
+        "manual-evidence-gate-1"
+    )
+
+
+def test_bounded_human_gate_diagnosis_can_replace_legacy_bare_notice() -> None:
+    events = _events()
+    actions = enrich_continuation_actions(
+        [{
+            "action": "diagnose-attention",
+            "safe_resume_action": "diagnose_attention",
+            "checkpoint_id": "attention-diagnosis-1",
+            "failure_class": "human_attention_delivery",
+            "policy_decision": {"decision": "needs_diagnosis"},
+        }],
+        run_id="RUN-1",
+        generation="GEN-1",
+        current_progress_digest=progress_digest(events),
+    )
+
+    projection = build_run_continuation_projection(
+        events,
+        goal=_goal(),
+        pending_actions=actions,
+        completion_profile={
+            "status": "incomplete",
+            "pending_human_decisions": [{
+                "decision_token": "legacy-event-id",
+                "event_id": "legacy-event-id",
+                "blocking_scope": "run",
+            }],
+        },
+    )
+
+    assert projection["next_operation"]["checkpoint_id"] == (
+        "attention-diagnosis-1"
+    )
+
+
+def test_explicit_human_gate_blocks_repair_diagnosis() -> None:
+    events = _events()
+    actions = enrich_continuation_actions(
+        [{
+            "action": "diagnose-attention",
+            "safe_resume_action": "diagnose_attention",
+            "kind": "human_gate_repair_resume",
+            "checkpoint_id": "human-gate-repair-1",
+            "failure_class": "candidate_rework_exhausted_unresolved",
+            "policy_decision": {"decision": "needs_diagnosis"},
+        }],
+        run_id="RUN-1",
+        generation="GEN-1",
+        current_progress_digest=progress_digest(events),
+    )
+
+    projection = build_run_continuation_projection(
+        events,
+        goal=_goal(),
+        pending_actions=actions,
+        completion_profile={
+            "status": "incomplete",
+            "pending_human_decisions": [{
+                "decision_token": "hdec-explicit",
+                "blocking_scope": "run",
+                "checkpoint_id": "manual-evidence-gate-1",
+                "approval_command": "zf action approve manual-evidence-gate-1",
+            }],
+        },
+    )
+
+    assert projection["next_operation"] is None
+
+
+def test_legacy_bare_human_notice_still_pauses_non_gate_operation() -> None:
+    events = _events()
+    actions = enrich_continuation_actions(
+        _actions(),
+        run_id="RUN-1",
+        generation="GEN-1",
+        current_progress_digest=progress_digest(events),
+    )
+
+    projection = build_run_continuation_projection(
+        events,
+        goal=_goal(),
+        pending_actions=actions,
+        completion_profile={
+            "status": "incomplete",
+            "pending_human_decisions": [{
+                "decision_token": "legacy-event-id",
+                "event_id": "legacy-event-id",
+                "blocking_scope": "run",
+            }],
+        },
+    )
+
+    assert projection["next_operation"] is None
+
+
 def test_run_continuation_excludes_interleaved_run_facts() -> None:
     events = [
         ZfEvent(

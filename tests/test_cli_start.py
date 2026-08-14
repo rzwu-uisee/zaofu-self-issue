@@ -968,6 +968,9 @@ workflow:
         assert data["role"] == "dev"
         assert data["backend"] == "mock"
         assert data["instructions_ref"].endswith(".zf/instructions/dev.md")
+        assert data["harness_source"]["kind"] == "git_checkout"
+        assert len(data["harness_source"]["commit"]) == 40
+        assert data["harness_source"]["git_root"]
         assert "sk-test-secret-value-123456" not in encoded
         openai = [item for item in data["env"] if item["key"] == "OPENAI_API_KEY"]
         assert openai == [{"key": "OPENAI_API_KEY", "value": "<redacted>"}]

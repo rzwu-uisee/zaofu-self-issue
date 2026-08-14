@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+from importlib import metadata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -96,6 +98,7 @@ def write_launch_artifact(
         "transport": _transport_summary(transport),
         "argv": [_redact_arg(arg) for arg in argv],
         "env": _env_summary(),
+        "harness_source": _harness_source_summary(),
     }
     latest_path = runtime_dir / "launch.json"
     attempt_path = runtime_dir / f"launch-attempt-{attempt}.json"
@@ -112,6 +115,63 @@ def _next_attempt(runtime_dir: Path) -> int:
         if stem.isdigit():
             attempts.append(int(stem))
     return max(attempts, default=0) + 1
+
+
+def _harness_source_summary(
+    *,
+    source_file: Path | None = None,
+    cli_command: str | None = None,
+) -> dict[str, Any]:
+    """Describe the ZaoFu code checkout that produced this worker launch."""
+
+    module_ref = (source_file or Path(__file__)).resolve()
+    summary: dict[str, Any] = {
+        "kind": "unresolved",
+        "module_ref": str(module_ref),
+        "cli_command": _redact_arg(
+            cli_command if cli_command is not None else os.environ.get("ZF_CLI_CMD", "")
+        ),
+        "package_version": _package_version(),
+        "git_root": "",
+        "commit": "",
+        "branch": "",
+        "dirty": None,
+    }
+    root = _git_output(module_ref.parent, "rev-parse", "--show-toplevel")
+    if not root:
+        summary["kind"] = "installed"
+        return summary
+    git_root = Path(root).resolve()
+    summary.update({
+        "kind": "git_checkout",
+        "git_root": str(git_root),
+        "commit": _git_output(git_root, "rev-parse", "HEAD"),
+        "branch": _git_output(git_root, "symbolic-ref", "--short", "-q", "HEAD"),
+        "dirty": bool(_git_output(git_root, "status", "--porcelain")),
+    })
+    return summary
+
+
+def _git_output(cwd: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _package_version() -> str:
+    try:
+        return metadata.version("zaofu")
+    except metadata.PackageNotFoundError:
+        return ""
 
 
 def _transport_summary(transport: object | None) -> dict[str, str]:

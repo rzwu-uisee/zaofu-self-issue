@@ -286,6 +286,54 @@ def test_resume_packet_writes_short_runtime_fact_packet(tmp_path: Path) -> None:
     assert "next_required_action" in loaded
 
 
+def test_resume_packet_supports_structured_acceptance_criteria(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    task = _add_task(state_dir)
+    task.contract.acceptance_criteria = [
+        {
+            "id": "AC-ID",
+            "statement": "Evidence by stable id.",
+            "verification_owner": "candidate_verify",
+            "verification_tier": "runtime",
+        },
+        {"id": "AC-TEXT", "statement": "Evidence by statement."},
+        {"id": "AC-INDEX", "statement": "Evidence by legacy index."},
+    ]
+    task.contract.acceptance_evidence = {
+        "AC-ID": ["evt-id"],
+        "Evidence by statement.": ["evt-text"],
+        "2": ["evt-index"],
+    }
+    TaskStore(state_dir / "kanban.json").update(
+        task.id,
+        contract=task.contract,
+    )
+
+    packet = build_resume_packet(state_dir, task.id, dispatch_id="recovery")
+    projection = project_why_not_done(state_dir, task.id)
+    workpad = project_workpad(state_dir, task.id).to_dict()
+
+    assert packet["work_unit_id"] == "WU-TASK-1"
+    assert packet["objective"] == "Queue recovery works after worker crash"
+    assert projection.work_unit is not None
+    assert projection.work_unit.acceptance_criteria == [
+        "Evidence by stable id.",
+        "Evidence by statement.",
+        "Evidence by legacy index.",
+    ]
+    assert not any(
+        reason.kind == "missing_acceptance_evidence"
+        for reason in projection.why_not_done
+    )
+    assert [item["status"] for item in workpad["acceptance"]] == [
+        "done",
+        "done",
+        "done",
+    ]
+
+
 def test_resume_packet_includes_artifact_refs_and_sufficiency_requirements(
     tmp_path: Path,
 ) -> None:

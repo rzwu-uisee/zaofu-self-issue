@@ -479,7 +479,10 @@ def _archive_tasks(state_dir: Path, *, include_active: bool = False) -> list[dic
     if not tasks:
         return []
     from zf.web.projections.events import _events_with_seq, payload_search_texts
-    from zf.web.projections.tasks import _workflow_events_with_candidate_context
+    from zf.web.projections.tasks import (
+        _workflow_events_with_candidate_context,
+        task_card_projection,
+    )
 
     all_events = _events_with_seq(state_dir)
     search_texts = payload_search_texts(state_dir)
@@ -509,6 +512,13 @@ def _archive_tasks(state_dir: Path, *, include_active: bool = False) -> list[dic
             ),
         ).to_dict()
         projection = kanban_column_projection(task)
+        latest = (
+            {
+                "id": task_events[-1][1].id,
+                "ts": task_events[-1][1].ts,
+            }
+            if task_events else None
+        )
         row["kanban_column"] = projection.column
         row["kanban_column_label"] = projection.label
         row["kanban_column_reason"] = projection.reason
@@ -526,6 +536,20 @@ def _archive_tasks(state_dir: Path, *, include_active: bool = False) -> list[dic
             else "cancelled" if task.status == "cancelled"
             else ""
         )
+        card_projection = task_card_projection(
+            task,
+            display_status=task.status,
+            projection_reconciled=False,
+            phase=None,
+            latest=latest,
+            display_column=projection.column,
+        )
+        row["display_status"] = task.status
+        row["projection_reconciled"] = False
+        row["effective_terminal"] = card_projection["lifecycle"]["effective_terminal"]
+        row["canonical_drift"] = False
+        row["attention"] = card_projection["attention"]
+        row["task_card"] = card_projection
         rows.append(row)
     rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return rows
@@ -672,6 +696,13 @@ def _skills(
                         "status": "missing",
                     })
 
+    from zf.runtime.skill_invocation_projection import project_skill_invocations
+
+    invocation = project_skill_invocations(
+        state_dir,
+        config=config,
+        project_root=project_root,
+    )
     return {
         "pool_path": str(pool_path),
         "materialize": materialize_mode,
@@ -689,6 +720,7 @@ def _skills(
         "loaded": redact_obj(loaded),
         "lock": redact_obj(lock_entries),
         "manifests": manifests,
+        "invocation": redact_obj(invocation),
         "warnings": missing_enabled + hash_warnings,
     }
 

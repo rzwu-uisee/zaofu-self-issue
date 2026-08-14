@@ -23,6 +23,7 @@ _CANONICAL_PORTS = frozenset({
     "source_index",
     "plan_critique",
     "project_adapter",
+    "product_acceptance_spec",
 })
 
 _LEGACY_ALIASES = {

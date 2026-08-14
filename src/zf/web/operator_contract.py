@@ -38,6 +38,9 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "research-adopt",
     "workflow-batch-resume",
     "candidate-rework-apply",
+    "replan-approve",
+    "replan-defer",
+    "replan-reject",
     "idea-to-product",
     "start-collaboration",
     "channel-create-from-template",
@@ -74,6 +77,7 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "runtime-stop",
     "runtime-restart",
     "runtime-resume",
+    "stage-replan-new-generation",
 )
 
 PROJECT_OPERATOR_CONTROLLED_ACTIONS = frozenset({
@@ -109,6 +113,7 @@ PROJECT_OPERATOR_CONTROLLED_ACTIONS = frozenset({
     "runtime-resume",
     "failure-closeout",
     "failure-closeout-activate",
+    "stage-replan-new-generation",
     "real-e2e-run",
     "run-contract-review",
 })
@@ -367,6 +372,7 @@ CANONICAL_ACTIONS = {
     "failure.materialize.closeout": "failure-closeout",
     "failure.closeout.activate": "failure-closeout-activate",
     "failure.activate.closeout": "failure-closeout-activate",
+    "stage.replan.new_generation": "stage-replan-new-generation",
     "real.e2e.run": "real-e2e-run",
     "real_e2e.run": "real-e2e-run",
     "run.contract.review": "run-contract-review",
@@ -403,11 +409,12 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "discussion_seed containing only the business requirement, "
     "submit_label='Create & start', allow_other=false, and give every option "
     "a label, description, and exact option-level submit_payload containing "
-    "template_id plus optional name/overrides/mode. Include a non-empty top-level "
+    "template_id, an explicit mode, plus optional name/overrides. Include a "
+    "non-empty top-level "
     "question. Do not wrap Channel options in effect or put submit_payload under "
-    "effect. Templates default to conversation, which wakes one facilitator and "
-    "does not fan out all listed members. Use mode=multi_lens only inside "
-    "submit_payload when the operator "
+    "effect. Every option must choose conversation for one default responder, "
+    "clarification for facilitated relay, or multi_lens for bounded blind fanout "
+    "and synthesis. Use mode=multi_lens only inside submit_payload when the operator "
     "explicitly requests independent multi-role input or parallel review, never "
     "as effect.mode or submit_mode; otherwise preserve the template mode; use "
     "clarification for an owner-question-led pass. "
@@ -456,8 +463,9 @@ KANBAN_AGENT_CHANNEL_PROPOSAL_CONTRACT = (
     "approve every proposal before it runs; never claim the task was created. "
     "When a requirement benefits from a new collaboration Channel, use the "
     "action-bound Channel setup Plan above. Explain the tradeoff in each description; "
-    "the runtime displays exact member roles, member count, and max_rounds from "
-    "submit_payload. Do not ask the operator to create the Channel "
+    "the runtime displays exact mode, initial routing/fanout, member roles, member "
+    "count, and max_rounds from submit_payload. Do not ask the operator to create "
+    "the Channel "
     "or post the first message manually. For a direct non-chat API request, use "
     "action=channel-create-and-start with template_id and the requirement. "
     "When asked to start a discussion in an existing Channel, use "

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
+from zf.core.events.writer import EventWriter
 from zf.runtime.task_pipeline_rework import (
     derive_impl_rework_requests,
     impl_rework_feedback,
+    reconcile_task_ref_repair_replays,
 )
 
 
@@ -144,3 +149,126 @@ def test_stale_contract_rejection_does_not_reopen_impl_generation() -> None:
     )
 
     assert requests == {}
+
+
+def test_task_ref_repair_replays_existing_typed_result_once(tmp_path) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    writer = EventWriter(log)
+    result = _result()
+    rejected = ZfEvent(
+        id="evt-rejected",
+        type="task.ref.rejected",
+        task_id="TASK-A",
+        payload={
+            "trigger_event_id": result.id,
+            "reason": "source_commit changes outside task contract scope",
+        },
+    )
+    repair = ZfEvent(
+        id="evt-repair",
+        type="task.ref.repair.requested",
+        task_id="TASK-A",
+        payload={"source_event_id": result.id},
+    )
+    for event in (result, rejected, repair):
+        log.append(event)
+    calls: list[str] = []
+
+    def process(source: ZfEvent):
+        calls.append(source.id)
+        return SimpleNamespace(
+            status="updated",
+            payload={
+                "task_id": source.task_id,
+                "trigger_event_id": source.id,
+                "source_commit": source.payload["source_commit"],
+            },
+        )
+
+    runtime = SimpleNamespace(
+        event_log=log,
+        event_writer=writer,
+        _process_task_ref_for_progress_event=process,
+    )
+    contexts = {
+        "TASK-A": {
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-g1",
+        }
+    }
+
+    first = reconcile_task_ref_repair_replays(
+        runtime,
+        events=log.read_all(),
+        generation_contexts=contexts,
+    )
+    second = reconcile_task_ref_repair_replays(
+        runtime,
+        events=log.read_all(),
+        generation_contexts=contexts,
+    )
+
+    assert calls == [result.id]
+    assert len(first) == 1
+    assert second == []
+    updated = first[0]
+    assert updated.type == "task.ref.updated"
+    assert updated.causation_id == repair.id
+    assert updated.payload["trigger_event_id"] == result.id
+    assert updated.payload["source"] == "task_ref_repair_reconcile"
+
+
+def test_task_ref_repair_replay_keeps_semantic_rework_when_still_rejected(
+    tmp_path,
+) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    writer = EventWriter(log)
+    result = _result()
+    rejected = ZfEvent(
+        id="evt-rejected",
+        type="task.ref.rejected",
+        task_id="TASK-A",
+        payload={"trigger_event_id": result.id, "reason": "missing handoff"},
+    )
+    repair = ZfEvent(
+        id="evt-repair",
+        type="task.ref.repair.requested",
+        task_id="TASK-A",
+        payload={"source_event_id": result.id},
+    )
+    for event in (result, rejected, repair):
+        log.append(event)
+    calls: list[str] = []
+
+    def process(source: ZfEvent):
+        calls.append(source.id)
+        return SimpleNamespace(status="rejected", payload={"reason": "missing handoff"})
+
+    runtime = SimpleNamespace(
+        event_log=log,
+        event_writer=writer,
+        _process_task_ref_for_progress_event=process,
+    )
+    emitted = reconcile_task_ref_repair_replays(
+        runtime,
+        events=log.read_all(),
+        generation_contexts={
+            "TASK-A": {
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-g1",
+            }
+        },
+    )
+
+    assert calls == [result.id]
+    assert emitted == []
+    assert derive_impl_rework_requests(
+        events=log.read_all(),
+        generation_contexts={
+            "TASK-A": {
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-g1",
+            }
+        },
+        operation_rows=[_operation()],
+    )["TASK-A"]["event_id"] == rejected.id

@@ -92,6 +92,7 @@ def build_orchestrator_agent_operation_briefing(
                 "pre_closeout": "aggregate",
             }[prepared.checkpoint],
             "reason_codes": ["replace_with_evidence_grounded_reason"],
+            "summary": "replace with a concise owner-readable explanation",
             "affected_work_units": [],
             "required_followup": "continue",
             "expected_outcome": "continue admitted graph",

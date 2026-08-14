@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **68** top-level families and **257** addressable command paths.
+The parser currently exposes **68** top-level families and **258** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -610,6 +610,7 @@ Inspect or clean runtime state
 | `zf state` | Inspect or clean runtime state |
 | `zf state clean` | Clean rebuildable runtime projections |
 | `zf state reconcile` | Detect Kanban and tmux pane desync (in_progress without a live worker) |
+| `zf state retention-plan` | Inventory retention classes and safe reclaim candidates (read-only) |
 
 ## `zf status`
 

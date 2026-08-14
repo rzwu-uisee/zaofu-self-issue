@@ -45,6 +45,8 @@ def normalize_status(status: str) -> str:
 
 def event_status(event: ZfEvent) -> str:
     data = payload(event)
+    if event.type == "run.result.duplicate_suppressed":
+        return "settled"
     if (
         event.type == "run.result.rejected"
         and str(data.get("reason") or "").startswith("run_terminal:")

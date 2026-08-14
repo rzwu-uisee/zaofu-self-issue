@@ -20,6 +20,7 @@ from zf.runtime.run_manager_repair_router import (
     special_action_preflight,
     special_expected_downstream_events,
 )
+from zf.runtime.stage_replan_generation import STAGE_REPLAN_GENERATION_EXPECTED_EVENTS, stage_replan_generation_preflight
 
 
 SAFE_BATCH_ACTIONS = frozenset({"repair_failed_children", "reemit_candidate_ready"})
@@ -36,7 +37,7 @@ CANDIDATE_REWORK_ACTIONS = frozenset({"retrigger", "replan", "escalate"})
 DIAGNOSIS_ACTIONS = frozenset({"diagnose-attention"})
 WORKER_LIFECYCLE_ACTIONS = frozenset({"worker-lifecycle-recover"})
 RESIDENT_AGENT_ACTIONS = frozenset({"resident-agent-reprompt"})
-OWNER_APPROVAL_ACTIONS = frozenset({"failure-closeout-activate"})
+OWNER_APPROVAL_ACTIONS = frozenset({"failure-closeout-activate", "stage-replan-new-generation"})
 INTERVENTION_CLASSES = frozenset({
     "none",
     "wait",
@@ -516,6 +517,8 @@ def preflight_action(
             or "expected_downstream_event:" + ",".join(expected),
         }
     if action in OWNER_APPROVAL_ACTIONS:
+        if action == "stage-replan-new-generation":
+            return stage_replan_generation_preflight(payload)
         if not checkpoint_id:
             failures.append("missing_checkpoint_id")
         if not str(payload.get("manifest_ref") or ""):
@@ -884,6 +887,8 @@ def expected_downstream_events(safe_action: str) -> set[str]:
         return {"run.manager.resident.prompted"}
     if safe_action == "failure_closeout_activate":
         return {"failure.closeout.activated", "run.manager.action.applied"}
+    if safe_action == "stage_replan_new_generation":
+        return set(STAGE_REPLAN_GENERATION_EXPECTED_EVENTS)
     if safe_action == "needs_stage_dispatch":
         return {"task.dispatched", "workflow.resume.applied"}
     if safe_action == "needs_rework_dispatch":

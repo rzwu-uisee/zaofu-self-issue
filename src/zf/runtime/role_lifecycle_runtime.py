@@ -19,8 +19,7 @@ from zf.core.state.locks import FileLock
 from zf.core.state.role_sessions import RoleSessionRegistry
 from zf.runtime.event_window import read_runtime_events
 from zf.runtime.git_capture import capture_git_state
-from zf.runtime.run_admission import RUN_TERMINAL_EVENT_TYPES
-from zf.runtime.run_scope import event_run_id, run_aliases
+from zf.runtime.run_admission import fold_terminal_run_scope
 from zf.runtime.transport import (
     transport_error_diagnostics,
     transport_readiness_error,
@@ -256,6 +255,7 @@ class RoleLifecycleRuntimeMixin:
                 },
             )
 
+            launch_was_resume = False
             try:
                 effective_spawn_cwd = (
                     Path(spawn_cwd).resolve()
@@ -290,6 +290,9 @@ class RoleLifecycleRuntimeMixin:
                     role,
                     cwd=effective_spawn_cwd,
                 )
+                launch_was_resume = self._latest_role_launch_is_resume(
+                    role.instance_id
+                )
                 if not self._wait_role_ready(role):
                     raise transport_readiness_error(
                         self.transport,
@@ -302,6 +305,21 @@ class RoleLifecycleRuntimeMixin:
                 except Exception:
                     pass
                 registry = self._role_lifecycle_registry()
+                if (
+                    role.backend == "codex"
+                    and launch_was_resume
+                ):
+                    registry.clear(role.instance_id)
+                    self._emit_role_lifecycle_event(
+                        "role.lifecycle.continuity.downgraded",
+                        role,
+                        task_id=task_id,
+                        payload={
+                            "reason": "codex_resume_readiness_failed",
+                            "previous_state": previous,
+                            "fallback": "fresh_provider_session",
+                        },
+                    )
                 registry.update_instance_meta(
                     role.instance_id,
                     lifecycle_state=previous,
@@ -493,13 +511,7 @@ class RoleLifecycleRuntimeMixin:
 
         runtime_events = read_runtime_events(self.event_log, self.state_dir)
         operations = reduce_workflow_operations(runtime_events)
-        run_alias_map = run_aliases(runtime_events)
-        terminal_runs = {
-            run_id
-            for event in runtime_events
-            if event.type in RUN_TERMINAL_EVENT_TYPES
-            if (run_id := event_run_id(event, aliases=run_alias_map))
-        }
+        run_alias_map, terminal_runs = fold_terminal_run_scope(runtime_events)
         active_operations = [
             operation_id
             for operation_id, operation in operations.items()

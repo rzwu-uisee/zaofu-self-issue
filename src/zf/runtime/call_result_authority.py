@@ -165,12 +165,18 @@ class CallResultAuthorityMixin:
             ))
             return issues
 
-        # A global rescan audits the immutable continuation target pinned by
-        # its operation. It is not a verdict on the latest canonical candidate.
-        # TaskStore and both immutable snapshots above remain authoritative.
+        # Task Verify runs before candidate integration, and Global Rescan
+        # audits an immutable continuation target.  For both profiles the
+        # operation, TaskStore, and immutable snapshots above are authority;
+        # an older candidate.ready from this workflow must not supersede them.
+        output_profile_id = str(operation.get("output_profile_id") or "")
+        task_pipeline_verify = (
+            str(operation.get("operation_type") or "") == "task-stage"
+            and str(operation.get("task_pipeline_stage") or "") == "verify"
+        )
         if (
-            str(operation.get("output_profile_id") or "") == "global-rescan"
-            and str(operation.get("output_profile_revision") or "") == "1"
+            output_profile_id in {"task-verify", "global-rescan"}
+            or task_pipeline_verify
         ):
             return issues
 
@@ -307,7 +313,7 @@ class CallResultAuthorityMixin:
             )]
 
         workflow_run_id = str(identity.get("workflow_run_id") or "")
-        current_candidate = self._latest_candidate_for_run(workflow_run_id)
+        current_candidate = self._latest_frozen_candidate_for_run(workflow_run_id)
         if current_candidate is None:
             return [_currentness_issue(
                 "control_result.target_commit",
@@ -423,6 +429,7 @@ class CallResultAuthorityMixin:
     def _plan_package_currentness_issues(
         self,
         envelope: Mapping[str, Any],
+        operation: Mapping[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         control_result = (
             envelope.get("control_result")
@@ -446,13 +453,54 @@ class CallResultAuthorityMixin:
         workflow_run_id = str(identity.get("workflow_run_id") or "")
         if not workflow_run_id:
             return []
-        from zf.runtime.plan_artifact_package import reduce_plan_artifact_packages
+        from zf.runtime.plan_artifact_package import (
+            admitted_plan_artifact_package_for_generation,
+            reduce_plan_artifact_packages,
+        )
 
         reduced = reduce_plan_artifact_packages(
             self.event_log.read_all(),
             workflow_run_id=workflow_run_id,
         )
         current = reduced.get("current")
+        operation = operation or {}
+        task_bound = (
+            str(identity.get("attempt_domain") or "") == "task"
+            or str(operation.get("operation_type") or "") == "task-stage"
+        )
+        task_generation_current = True
+        task_id = str(identity.get("task_id") or "")
+        if task_bound and task_id:
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+            if task is not None:
+                try:
+                    task_generation = str(
+                        current_task_contract_identity(task).get(
+                            "task_map_generation"
+                        )
+                        or ""
+                    )
+                except TaskContractSnapshotError:
+                    task_generation = ""
+                result_generation = str(
+                    identity.get("task_map_generation") or ""
+                )
+                task_generation_current = (
+                    not task_generation
+                    or same_task_map_generation(
+                        result_generation,
+                        task_generation,
+                    )
+                )
+        if task_bound and task_generation_current:
+            generation_package = admitted_plan_artifact_package_for_generation(
+                reduced,
+                task_map_generation=str(
+                    identity.get("task_map_generation") or ""
+                ),
+            )
+            if generation_package:
+                current = generation_package
         if not isinstance(current, Mapping):
             return []
         actual_digest = str(identity.get("plan_artifact_package_digest") or "")
@@ -568,6 +616,30 @@ class CallResultAuthorityMixin:
             if event.type != "candidate.ready":
                 continue
             payload = event.payload if isinstance(event.payload, dict) else {}
+            event_run_id = str(
+                payload.get("workflow_run_id")
+                or payload.get("trace_id")
+                or event.correlation_id
+                or ""
+            )
+            if not workflow_run_id or event_run_id == workflow_run_id:
+                return event
+        return None
+
+    def _latest_frozen_candidate_for_run(
+        self,
+        workflow_run_id: str,
+    ) -> ZfEvent | None:
+        """Return immutable candidate authority, excluding recovery signals."""
+
+        for event in reversed(self.event_log.read_all()):
+            if event.type != "candidate.ready":
+                continue
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if str(payload.get("schema_version") or "") != (
+                "candidate-freeze-receipt.v1"
+            ):
+                continue
             event_run_id = str(
                 payload.get("workflow_run_id")
                 or payload.get("trace_id")
@@ -734,14 +806,24 @@ class CallResultAuthorityMixin:
                 "message": "no current closure fact for run/goal",
             })
         else:
-            for result_key, closure_key in {
+            closure_identity_fields = {
                 "task_map_generation": "task_map_generation",
                 "target_commit": "candidate_head_commit",
                 "goal_claim_set_ref": "goal_claim_set_ref",
                 "goal_claim_set_digest": "goal_claim_set_digest",
                 "closure_fact_ref": "closure_fact_ref",
                 "closure_fact_digest": "closure_fact_digest",
-            }.items():
+            }
+            if bool(current.get("product_acceptance_required")):
+                closure_identity_fields.update({
+                    "product_acceptance_spec_ref": "product_acceptance_spec_ref",
+                    "product_acceptance_spec_digest": "product_acceptance_spec_digest",
+                    "product_acceptance_report_ref": "product_acceptance_report_ref",
+                    "product_acceptance_report_digest": "product_acceptance_report_digest",
+                    "product_acceptance_verdict": "product_acceptance_verdict",
+                    "provider_qualification_status": "provider_qualification_status",
+                })
+            for result_key, closure_key in closure_identity_fields.items():
                 expected = str(current.get(closure_key) or "")
                 actual = str(result.get(result_key) or "")
                 if expected and actual != expected:

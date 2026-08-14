@@ -33,6 +33,13 @@ def test_operator_intent_classifier_marks_high_risk_actions() -> None:
     assert status["requires_owner_approval"] is False
     assert status["proposed_actions"] == []
 
+    detail = infer_operator_intent(
+        "当前任务进度如何，合同、时间线、worker状态也都一起汇报一下",
+        project_id="demo",
+    )
+    assert detail["intent_type"] == "kanban_detail_query"
+    assert detail["proposed_actions"] == []
+
     restart = infer_operator_intent("重启 runtime 并恢复工作流", project_id="demo")
     assert restart["intent_type"] == "runtime_restart"
     assert restart["risk"] == "high"

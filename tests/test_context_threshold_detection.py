@@ -260,6 +260,45 @@ class TestIdleRecyclingTrigger:
         assert "worker.recycled" in types
         assert orch._instance_state.get("dev") == "healthy"
 
+    def test_idle_recycle_releases_stale_worker_task_generation(
+        self, state_dir, claude_config
+    ):
+        transport = _RecordingRecycleTransport()
+        orch = Orchestrator(
+            state_dir,
+            claude_config,
+            transport,
+        )  # type: ignore[arg-type]
+        RoleSessionRegistry(
+            state_dir / "role_sessions.yaml",
+            project_root=str(state_dir.parent),
+        ).get_or_create("dev")
+        orch._set_worker_state(
+            "dev",
+            "busy",
+            task_id="TASK-SUPERSEDED",
+            force=True,
+        )
+        orch._set_worker_state(
+            "dev",
+            "recycling",
+            reason="superseded fanout drained",
+        )
+
+        orch._start_recycle(claude_config.roles[0])
+
+        assert orch._instance_state["dev"] == "healthy"
+        assert orch._last_worker_state["dev"] == "idle"
+        assert "dev" not in orch._last_worker_task_id
+        state_events = [
+            event
+            for event in EventLog(state_dir / "events.jsonl").read_all()
+            if event.type == "worker.state.changed" and event.actor == "dev"
+        ]
+        assert state_events[-1].payload["from"] == "recycling"
+        assert state_events[-1].payload["to"] == "idle"
+        assert state_events[-1].payload["generation_override"] is True
+
     def test_above_threshold_busy_compacts_first(
         self, state_dir, claude_config, transport
     ):
@@ -465,6 +504,17 @@ class TestPendingRecycleDrain:
         self, state_dir, claude_config, transport
     ):
         log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="worker.state.changed",
+            actor="dev",
+            task_id="TASK-SUPERSEDED",
+            payload={
+                "from": "idle",
+                "to": "busy",
+                "task_id": "TASK-SUPERSEDED",
+                "reason": "fanout child dispatched",
+            },
+        ))
         log.append(ZfEvent(
             type="worker.state.changed",
             actor="dev",

@@ -8,6 +8,7 @@ import type {
   TaskPipelineProjection,
 } from "../api/types";
 import type { ProjectRequestScope } from "./projectRequestScope";
+import { projectionNeedsFresh } from "./pageLoadPolicy";
 import { isObservabilityPage, parseEventFilter } from "./shared";
 import type { PageId } from "./sharedTypes";
 
@@ -53,7 +54,13 @@ export function useProjectObservabilityData({
     if (parsedFilter.failed) params.set("failed", "true");
     if (parsedFilter.blocked) params.set("blocked", "true");
     void getEventsPage(params, activeProjectId || undefined).then((next) => {
-      if (!cancelled && scope.isCurrent(ticket)) onEventsPage(next);
+      if (cancelled || !scope.isCurrent(ticket)) return;
+      onEventsPage(next);
+      if (projectionNeedsFresh(next)) {
+        void getEventsPage(params, activeProjectId || undefined, true).then((fresh) => {
+          if (!cancelled && scope.isCurrent(ticket)) onEventsPage(fresh);
+        }).catch(() => undefined);
+      }
     }).catch((error) => {
       if (!cancelled && scope.isCurrent(ticket)) {
         onError(error instanceof Error ? error.message : String(error));

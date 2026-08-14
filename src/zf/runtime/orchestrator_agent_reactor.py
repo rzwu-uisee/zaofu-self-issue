@@ -102,6 +102,11 @@ class OrchestratorAgentReactorMixin:
                 ),
                 "admission_status": str(outcome.get("status") or ""),
                 "decision": str(outcome.get("decision") or ""),
+                "reason_codes": list(outcome.get("reason_codes") or []),
+                "summary": str(outcome.get("summary") or ""),
+                "explanation_status": str(
+                    outcome.get("explanation_status") or "degraded"
+                ),
             },
             causation_id=event.id,
             correlation_id=event.correlation_id,

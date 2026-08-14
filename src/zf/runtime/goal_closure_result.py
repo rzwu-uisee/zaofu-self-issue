@@ -51,12 +51,44 @@ def validate_goal_closure_result(result: Mapping[str, Any]) -> None:
     missing = [field for field in required if not str(result.get(field) or "").strip()]
     if missing:
         raise GoalClosureResultError("goal closure result missing: " + ", ".join(missing))
+    product_required = bool(result.get("product_acceptance_required"))
+    product_identity = (
+        "product_acceptance_spec_ref",
+        "product_acceptance_spec_digest",
+        "product_acceptance_report_ref",
+        "product_acceptance_report_digest",
+        "product_acceptance_verdict",
+        "provider_qualification_status",
+    )
+    if product_required:
+        missing_product = [
+            field
+            for field in product_identity
+            if not str(result.get(field) or "").strip()
+        ]
+        if missing_product:
+            raise GoalClosureResultError(
+                "goal closure result missing Product Acceptance identity: "
+                + ", ".join(missing_product)
+            )
+    elif any(str(result.get(field) or "").strip() for field in product_identity):
+        present = [field for field in product_identity if str(result.get(field) or "").strip()]
+        if len(present) != len(product_identity):
+            raise GoalClosureResultError(
+                "partial Product Acceptance identity is not allowed"
+            )
     flow_kind = str(result.get("flow_kind") or "").lower()
     if flow_kind not in FLOW_KINDS:
         raise GoalClosureResultError(f"invalid flow_kind {flow_kind!r}")
     verdict = str(result.get("verdict") or "").lower()
     if verdict not in VERDICTS:
         raise GoalClosureResultError(f"invalid verdict {verdict!r}")
+    if product_required and verdict == "passed" and str(
+        result.get("product_acceptance_verdict") or ""
+    ) != "passed":
+        raise GoalClosureResultError(
+            "passed Goal closure requires passed Product Acceptance"
+        )
     coverage = result.get("goal_coverage")
     if not isinstance(coverage, list) or not coverage:
         raise GoalClosureResultError("goal_coverage must be a non-empty list")

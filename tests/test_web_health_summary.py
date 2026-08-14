@@ -63,3 +63,40 @@ def test_health_summary_consistent_with_board_column(client: TestClient) -> None
             board_blocked += 1
     assert body["blocked"] == board_blocked == 1
     assert body["queued"] + body["blocked"] == body["task_counts"]["blocked"]
+
+
+def test_health_summary_seq_uses_segmented_event_global_sequence(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    (state_dir / "events").mkdir(parents=True)
+    (state_dir / "events" / "2026-08-12.jsonl").write_text(
+        '{"type":"archive.one"}\n{"type":"archive.two"}\n',
+        encoding="utf-8",
+    )
+    (state_dir / "events.jsonl").write_text(
+        '{"type":"active.one"}\n',
+        encoding="utf-8",
+    )
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    web = TestClient(create_app(state_dir, project_root=tmp_path))
+
+    body = web.get("/api/projects/default/health/summary").json()
+
+    assert body["seq"] == 3
+
+
+def test_health_summary_seq_counts_archive_when_active_segment_is_empty(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    (state_dir / "events").mkdir(parents=True)
+    (state_dir / "events" / "2026-08-12.jsonl").write_text(
+        '{"type":"archive.one"}\n',
+        encoding="utf-8",
+    )
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    web = TestClient(create_app(state_dir, project_root=tmp_path))
+
+    assert web.get("/api/projects/default/health/summary").json()["seq"] == 1

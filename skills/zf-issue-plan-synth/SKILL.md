@@ -50,7 +50,7 @@ outputs.
 
 ## Task Design
 
-Prefer one or two vertical fixes:
+Prefer one or two user-observable vertical fixes:
 
 - `dev-core` for backend/runtime/kernel/CLI changes.
 - `dev-web` for dashboard/browser-visible changes.
@@ -60,6 +60,19 @@ handoff evidence for verify agents. One exclusive file must have exactly one
 task owner across the map. Dependency serialization does not permit duplicate
 `exclusive_files`; merge those changes into one owner task or mark a truly
 shared/read-only path as non-exclusive.
+
+Map the reproduction journey through implementation and regression evidence;
+do not split diagnosis, code, and its regression into unrelated horizontal
+tasks. If several fixes converge on one runnable entrypoint, declare one final
+assembly owner.
+
+When `product_acceptance_spec` is a required plan port, emit it through one
+top-level `plan_ports[]` descriptor using schema
+`product_acceptance_spec.v1`. The body declares the assembly owner, runnable
+entrypoints/health checks, mandatory reproduction and recovery journeys with
+observable assertions, and any real Provider qualification policy. Leave
+run/revision/generation identity to Plan Artifact Package binding; do not copy
+stale runtime identity from triage evidence.
 
 ## Completion Check
 

@@ -1178,3 +1178,48 @@ spec: {project: {name: demo}}
         config.write_text(config.read_text().replace("blocking", "surprise"))
         with pytest.raises(ConfigError, match="artifactPackageMode"):
             load_config(config)
+
+    def test_product_acceptance_mode_is_explicit_and_replay_compatible(self, tmp_path):
+        config = tmp_path / "prd.yaml"
+        config.write_text("""\
+apiVersion: zaofu.dev/v1
+kind: PrdFlow
+spec: {lanes: 1, productAcceptanceMode: blocking}
+---
+apiVersion: zaofu.dev/v1
+kind: ZfConfig
+spec: {project: {name: demo}}
+""")
+        blocking = load_config(config)
+        metadata = blocking.workflow.flow_metadata
+        assert metadata["product_acceptance"]["mode"] == "blocking"
+        assert "product_acceptance_spec" in metadata["artifact_package"][
+            "required_ports"
+        ]
+        assert "product_acceptance_spec" not in metadata["artifact_package"][
+            "conditional_ports"
+        ]
+
+        config.write_text(
+            config.read_text().replace(
+                ", productAcceptanceMode: blocking", ""
+            )
+        )
+        compatible = load_config(config)
+        metadata = compatible.workflow.flow_metadata
+        assert metadata["product_acceptance"]["mode"] == "shadow"
+        assert "product_acceptance_spec" not in metadata["artifact_package"][
+            "required_ports"
+        ]
+        assert "product_acceptance_spec" in metadata["artifact_package"][
+            "conditional_ports"
+        ]
+
+        config.write_text(
+            config.read_text().replace(
+                "spec: {lanes: 1}",
+                "spec: {lanes: 1, productAcceptanceMode: surprise}",
+            )
+        )
+        with pytest.raises(ConfigError, match="productAcceptanceMode"):
+            load_config(config)

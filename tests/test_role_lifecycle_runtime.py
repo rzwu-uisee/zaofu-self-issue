@@ -495,6 +495,64 @@ def test_on_demand_ready_failure_emits_structured_transport_diagnostics(
     assert failed.payload["last_screen_excerpt"] == "codex --enable hooks"
 
 
+def test_codex_resume_readiness_failure_falls_back_to_fresh_session(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    role.backend = "codex"
+    registry = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    session_id = "58585858-5858-5858-5858-585858585858"
+    rollout = (
+        orchestrator.state_dir
+        / "workdirs"
+        / role.instance_id
+        / "codex-home"
+        / "sessions"
+        / "2026"
+        / "08"
+        / "09"
+        / f"rollout-2026-08-09T00-00-00-{session_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text(
+        json.dumps({
+            "type": "session_meta",
+            "payload": {"cwd": str(tmp_path)},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    registry.bind_codex_session(
+        role.instance_id,
+        session_id,
+        session_path=rollout,
+    )
+    registry.mark_spawned(role.instance_id)
+    registry.update_instance_meta(
+        role.instance_id,
+        lifecycle_state="suspended",
+    )
+    transport.ready = False
+
+    with pytest.raises(Exception, match="provider readiness failed"):
+        orchestrator._ensure_role_active(role, task_id="TASK-CODEX-RESUME")
+
+    reloaded = RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    )
+    assert reloaded.get(role.instance_id) is None
+    assert "resume" in transport.spawned[-1][1]
+    downgraded = [
+        event
+        for event in orchestrator.event_log.read_all()
+        if event.type == "role.lifecycle.continuity.downgraded"
+    ]
+    assert downgraded[-1].payload["fallback"] == "fresh_provider_session"
+
+
 def test_active_workflow_operation_prevents_hibernation(
     tmp_path: Path,
 ) -> None:
@@ -579,6 +637,59 @@ def test_terminal_run_operation_does_not_prevent_hibernation(
 
     assert role.instance_id not in transport.alive
     assert role.instance_id in transport.terminated
+
+
+def test_reactivated_blocked_run_operation_prevents_hibernation(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, transport = _runtime(tmp_path)
+    orchestrator._ensure_role_active(role, task_id="TASK-RESUMED")
+    run_id = "run-reactivated-operation"
+    operation = {
+        "workflow_run_id": run_id,
+        "operation_id": "wop-reactivated-operation",
+        "operation_type": "agent",
+        "request_hash": "a" * 64,
+        "role_instance": role.instance_id,
+        "task_id": "TASK-RESUMED",
+    }
+    for event_type in (
+        "workflow.operation.requested",
+        "workflow.operation.started",
+    ):
+        orchestrator.event_writer.append(ZfEvent(
+            type=event_type,
+            actor="zf-cli",
+            task_id="TASK-RESUMED",
+            payload=operation,
+            correlation_id=run_id,
+        ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="kernel",
+        task_id="TASK-RESUMED",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        task_id="TASK-RESUMED",
+        payload={"run_id": run_id, "status": "active"},
+        correlation_id=run_id,
+    ))
+    RoleSessionRegistry(
+        orchestrator.state_dir / "role_sessions.yaml",
+        project_root=str(tmp_path),
+    ).record_heartbeat(role.instance_id, {
+        "state": "idle",
+        "last_action_ts": 1,
+    })
+
+    orchestrator._hibernate_idle_roles()
+
+    assert role.instance_id in transport.alive
+    assert role.instance_id not in transport.terminated
 
 
 def test_uncheckpointed_source_change_prevents_hibernation(

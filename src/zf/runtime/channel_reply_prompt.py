@@ -195,11 +195,6 @@ def channel_reply_response_contract(
     thread_id = str(request.get("thread_id") or "main")
     sessions = channel.get("discussions")
     session = sessions.get(thread_id) if isinstance(sessions, dict) else {}
-    scope = (
-        channel.get("scope")
-        if isinstance(channel.get("scope"), dict)
-        else {}
-    )
     state = str(session.get("state") or "") if isinstance(session, dict) else ""
     is_initial_blind_reply = (
         state == "phase1_blind"
@@ -208,14 +203,16 @@ def channel_reply_response_contract(
     )
     if (
         isinstance(session, dict)
-        and isinstance(scope.get("template"), dict)
         and (is_initial_blind_reply or state == "phase2_relay")
     ):
         return (
             "End with one JSON object named channel_contribution containing "
             "summary, questions (a list of explicit clarification questions), "
             "where each question may carry kind, depends_on, priority, "
-            "why_it_matters, recommended_answer, and target_member_id. When "
+            "why_it_matters, recommended_answer, and target_member_id. Each "
+            "question kind MUST be exactly one of fact|owner_decision|tradeoff|"
+            "clarification and priority MUST be exactly one of p0|p1|p2|p3; "
+            "do not use aliases such as critical, high, medium, or low. "
             "the answer space is enumerable, a question may also carry "
             "options (two or three mutually exclusive objects with id, "
             "label, description, and recommended; put the single recommended "

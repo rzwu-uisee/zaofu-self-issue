@@ -97,6 +97,94 @@ class TaskRefManager:
         self.refs_dir = state_dir / "refs"
         self.index_path = self.refs_dir / "task-index.json"
 
+    def admit_read_only_target(
+        self,
+        *,
+        task_id: str,
+        source_commit: str,
+        trigger_event_id: str,
+        trace_id: str,
+        workdir: str = "",
+        pdd_id: str = "",
+        feature_id: str = "",
+    ) -> TaskRefResult:
+        """Admit an exact no-patch TaskRef for a write-free pipeline entry."""
+
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id:
+            raise ValueError("read-only TaskRef requires task_id")
+        full_commit = self._git(
+            "rev-parse",
+            "--verify",
+            f"{str(source_commit or '').strip()}^{{commit}}",
+        ).strip()
+        resolved_workdir = ""
+        if str(workdir or "").strip():
+            path = Path(workdir).resolve()
+            PathGuard.assert_under(path, self.state_dir / "workdirs")
+            head = self._git_in(path, "rev-parse", "HEAD").strip()
+            if head != full_commit:
+                raise RuntimeError(
+                    "read-only TaskRef workdir is not at the frozen target"
+                )
+            dirty = self._git_in(
+                path,
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ).strip()
+            if dirty:
+                raise RuntimeError(
+                    "read-only TaskRef workdir has tracked modifications"
+                )
+            resolved_workdir = str(path)
+
+        task_ref = f"{self.config.runtime.git.task_ref_prefix}/{normalized_task_id}"
+        existing = self._read_index_unlocked().get(normalized_task_id)
+        try:
+            current_ref = self._git(
+                "rev-parse",
+                "--verify",
+                f"refs/heads/{task_ref}^{{commit}}",
+            ).strip()
+        except RuntimeError:
+            current_ref = ""
+        if (
+            isinstance(existing, dict)
+            and current_ref == full_commit
+            and str(existing.get("source_commit") or "") == full_commit
+            and str(existing.get("task_ref") or "") == task_ref
+            and (
+                not resolved_workdir
+                or str(existing.get("workdir") or "") == resolved_workdir
+            )
+        ):
+            return TaskRefResult(status="existing", payload=dict(existing))
+
+        self._git("check-ref-format", f"refs/heads/{task_ref}")
+        self._git("update-ref", f"refs/heads/{task_ref}", full_commit)
+        entry = self._upsert_index(
+            task_id=normalized_task_id,
+            source_commit=full_commit,
+            source_branch=f"read-only/{normalized_task_id}",
+            task_ref=task_ref,
+            actor="candidate-integrator",
+            trigger_event_id=str(trigger_event_id or ""),
+            trace_id=str(trace_id or ""),
+            run_id=str(trace_id or ""),
+            workdir=resolved_workdir,
+            pdd_id=str(pdd_id or ""),
+            feature_id=str(feature_id or ""),
+            diagnostics={
+                "read_only": True,
+                "write_free": True,
+                "admission": "task_pipeline_read_only_target",
+            },
+            changed_files=[],
+            reported_files=[],
+        )
+        return TaskRefResult(status="updated", payload=entry)
+
     def process_dev_build_done(self, event: ZfEvent) -> TaskRefResult | None:
         if event.type not in {"dev.build.done", "impl.child.completed"} or not event.task_id:
             return None
@@ -370,6 +458,13 @@ class TaskRefManager:
                 value = source.get(key)
                 if value not in (None, "") and enriched.get(key) in (None, ""):
                     enriched[key] = value
+            dispatch_base = str(
+                source.get("base_git_head") or source.get("base_commit") or ""
+            ).strip()
+            if dispatch_base:
+                # Scope the handoff to the exact kernel-dispatched checkout,
+                # not a project HEAD that may have advanced while the worker ran.
+                enriched["base_git_head"] = dispatch_base
             return enriched
         return payload
 
@@ -765,6 +860,8 @@ class TaskRefManager:
     ) -> list[str]:
         base = self._workdir_dependency_base(payload, source_commit)
         if not base:
+            base = self._feature_candidate_base(task_id, payload, source_commit)
+        if not base:
             base = str(payload.get("base_git_head") or "").strip()
         if not base:
             base = self._combined_dependency_task_ref_base(task_id, source_commit)
@@ -794,6 +891,69 @@ class TaskRefManager:
             for line in raw.splitlines()
             if self._normalize_artifact_path(line)
         ]
+
+    def _feature_candidate_base(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        source_commit: str,
+    ) -> str:
+        """Use a candidate adopted after dispatch as the handoff boundary.
+
+        A persistent task workspace can legitimately rebase onto an advancing
+        feature candidate during rework. The original dispatch base remains
+        authoritative unless that candidate is both newer than the dispatch
+        base and already present in the submitted source ancestry.
+        """
+        feature_ids = [
+            str(payload.get(key) or "").strip()
+            for key in ("pdd_id", "feature_id", "parent_task_id")
+        ]
+        try:
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+        except Exception:
+            task = None
+        if task is not None and task.contract is not None:
+            feature_ids.extend([
+                str(task.contract.feature_id or "").strip(),
+                str(task.contract.parent_task_id or "").strip(),
+            ])
+
+        dispatch_base = str(payload.get("base_git_head") or "").strip()
+        best = ""
+        best_distance = -1
+        prefix = self.config.runtime.git.candidate_branch_prefix
+        seen_feature_ids: set[str] = set()
+        for feature_id in feature_ids:
+            if not feature_id or feature_id in seen_feature_ids:
+                continue
+            seen_feature_ids.add(feature_id)
+            try:
+                candidate = self._git(
+                    "rev-parse",
+                    "--verify",
+                    f"refs/heads/{prefix}/{feature_id}^{{commit}}",
+                ).strip()
+            except Exception:
+                continue
+            if not self._is_ancestor(candidate, source_commit):
+                continue
+            if dispatch_base and not self._is_ancestor(dispatch_base, candidate):
+                continue
+            try:
+                distance = int(
+                    self._git(
+                        "rev-list",
+                        "--count",
+                        f"{candidate}..{source_commit}",
+                    ).strip(),
+                )
+            except Exception:
+                continue
+            if best_distance < 0 or distance < best_distance:
+                best = candidate
+                best_distance = distance
+        return best
 
     def _workdir_dependency_base(
         self,

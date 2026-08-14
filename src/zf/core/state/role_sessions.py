@@ -466,6 +466,17 @@ class RoleSessionRegistry:
                 self._entries.pop(instance, None)
                 meta["session_path"] = None
             elif session_id:
+                for existing_instance, existing_uuid in list(
+                    self._entries.items()
+                ):
+                    if existing_instance != instance and existing_uuid == session_id:
+                        self._entries.pop(existing_instance, None)
+                        old_meta = self._meta.setdefault(existing_instance, {})
+                        old_meta["session_path"] = None
+                        old_meta["unbound_at"] = _now_iso()
+                        old_meta["unbound_reason"] = (
+                            "task_stage_session_relocated"
+                        )
                 self._entries[instance] = session_id
                 session_path = str(binding.get("session_path") or "")
                 if session_path:
@@ -590,6 +601,7 @@ class RoleSessionRegistry:
                 binding["session_id"] = str(parsed_uuid)
                 binding["provider_session_observed"] = True
                 binding["provider_session_observed_at"] = _now_iso()
+                binding["provider_session_role_instance"] = instance_id
                 if session_path is not None:
                     binding["session_path"] = str(session_path)
                 self._task_stage_bindings[binding_key] = binding

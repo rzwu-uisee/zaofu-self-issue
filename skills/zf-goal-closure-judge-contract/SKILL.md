@@ -23,6 +23,8 @@ Read only the refs supplied by the briefing:
 - the original objective and accepted planning result;
 - the canonical `goal-claim-set.v1` ref and digest;
 - admitted task/candidate verification result refs;
+- the exact current Product Acceptance Spec/Report refs and digests when the
+  Plan Artifact Package declares that port required;
 - admitted waiver or human-decision refs, when present;
 - the current `flow.goal.closed` or `module.parity.closed` fact;
 - the immutable candidate/target snapshot.
@@ -52,6 +54,14 @@ Return one top-level `goal_closure_result` object:
     "candidate_ref": "<candidate ref>",
     "closure_fact_ref": "<closure fact ref>",
     "closure_fact_digest": "<closure fact digest>",
+    "product_acceptance_required": true,
+    "product_acceptance_spec_ref": "<exact current spec ref>",
+    "product_acceptance_spec_digest": "<exact current spec digest>",
+    "product_acceptance_report_ref": "<exact current report ref>",
+    "product_acceptance_report_digest": "<exact current report digest>",
+    "product_acceptance_verdict": "passed|rejected|blocked",
+    "provider_qualification_required": true,
+    "provider_qualification_status": "passed|missing|expired|waiting_external|not_required",
     "input_result_refs": ["<admitted result ref>"],
     "goal_coverage": [
       {
@@ -82,6 +92,15 @@ waiver ref.
   `open_gap_refs` and choose `gap_plan`, `replan`, or `candidate_verify`.
 - `blocked`: evidence cannot be evaluated because of an external dependency,
   missing admission, or required human decision; choose `human` or `hold`.
+
+If Product Acceptance is required, copy all Product identity fields from the
+briefing exactly and use only the current report bound to the same generation
+and target. A missing/stale report is `blocked`; a deterministic failed journey
+is `rejected`. When all semantic claims and deterministic journeys pass but
+only Provider qualification is missing, expired, or externally failed, keep
+the semantic Judge verdict `passed` and preserve the Provider status. The
+Kernel Goal Gate owns `waiting_external(provider)` and must not turn it into
+semantic rework.
 
 All three verdicts mean the Judge call itself executed successfully. Emit the
 configured child success event for a schema-valid result. Reserve the child

@@ -19,6 +19,7 @@ from zf.runtime.artifact_read_ledger import (
 from zf.runtime.candidate_result_binding import candidate_task_source_commits
 from zf.runtime.plan_artifact_package import (
     PlanArtifactPackageError,
+    admitted_plan_artifact_package_for_generation,
     hydrate_plan_artifact_package,
     reduce_plan_artifact_packages,
 )
@@ -404,7 +405,17 @@ class CanonicalHandoffResolver:
                 events,
                 workflow_run_id=workflow_run_id,
             )
-            current_package = reduced.get("current")
+            generation_bound_package = (
+                task_bound_profile or candidate_bound_profile
+            )
+            current_package = (
+                admitted_plan_artifact_package_for_generation(
+                    reduced,
+                    task_map_generation=result["task_map_generation"],
+                )
+                if generation_bound_package
+                else reduced.get("current")
+            )
             current_package = (
                 current_package if isinstance(current_package, Mapping) else {}
             )
@@ -555,7 +566,26 @@ class CanonicalHandoffResolver:
                     "candidate-verify handoff requires current candidate.ready"
                 )
             return {}
-        event = candidates[-1]
+        incoming_event_id = str(
+            payload.get("candidate_snapshot_event_id")
+            or payload.get("candidate_event_id")
+            or ""
+        ).strip()
+        if incoming_event_id:
+            event = next(
+                (
+                    candidate
+                    for candidate in reversed(candidates)
+                    if candidate.id == incoming_event_id
+                ),
+                None,
+            )
+            if event is None:
+                raise ArtifactReadError(
+                    "candidate-verify candidate event is missing"
+                )
+        else:
+            event = candidates[-1]
         body = dict(event.payload)
         candidate_head = str(body.get("candidate_head_commit") or "").strip()
         completed = [
@@ -566,15 +596,6 @@ class CanonicalHandoffResolver:
         if not candidate_head or not completed:
             raise ArtifactReadError(
                 "candidate-verify current candidate lacks head/tasks"
-            )
-        incoming_event_id = str(
-            payload.get("candidate_snapshot_event_id")
-            or payload.get("candidate_event_id")
-            or ""
-        ).strip()
-        if incoming_event_id and incoming_event_id != event.id:
-            raise ArtifactReadError(
-                "candidate-verify candidate event is stale"
             )
         incoming_target = str(currentness.get("target_commit") or "")
         if incoming_target != candidate_head:

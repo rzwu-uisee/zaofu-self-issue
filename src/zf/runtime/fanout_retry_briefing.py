@@ -13,6 +13,68 @@ from zf.runtime.stage_failure_replan import reader_stage_lineage_payload
 from zf.runtime.workflow_inputs import render_workflow_input_briefing_section
 
 
+def write_blocking_reader_retry_briefing(
+    runtime: Any,
+    *,
+    role: RoleConfig,
+    manifest: dict,
+    child: dict,
+    run_id: str,
+    contract_handoff_keys: tuple[str, ...],
+) -> Path | None:
+    """Reuse the durable reader briefing for a blocking operation retry."""
+
+    child_payload = (
+        dict(child.get("payload"))
+        if isinstance(child.get("payload"), dict)
+        else {}
+    )
+    for key in (
+        *contract_handoff_keys,
+        "semantic_result_submit_mode",
+        "output_profile_id",
+        "output_profile_revision",
+        "result_scratch_ref",
+    ):
+        value = child.get(key)
+        if value not in (None, "", [], {}):
+            child_payload.setdefault(key, value)
+    if (
+        str(manifest.get("topology") or "") != "fanout_reader"
+        or str(child_payload.get("semantic_result_submit_mode") or "")
+        != "blocking"
+        or not str(child_payload.get("operation_id") or "").strip()
+    ):
+        return None
+    stage = runtime._fanout_stage_by_id(str(manifest.get("stage_id") or ""))
+    aggregate = getattr(stage, "aggregate", None) if stage else None
+    if aggregate is None:
+        return None
+
+    from zf.runtime.fanout import FanoutContext
+
+    context = FanoutContext(
+        fanout_id=str(manifest.get("fanout_id") or ""),
+        stage_id=str(manifest.get("stage_id") or ""),
+        topology="fanout_reader",
+        trace_id=str(manifest.get("trace_id") or ""),
+        trigger_event_id=str(manifest.get("trigger_event_id") or ""),
+        target_ref=str(
+            child.get("target_ref") or manifest.get("target_ref") or ""
+        ),
+        expected_children=[],
+    )
+    return runtime._write_fanout_briefing(
+        role=role,
+        context=context,
+        child_id=str(child.get("child_id") or ""),
+        run_id=run_id,
+        aggregate=aggregate,
+        child_payload=child_payload,
+        skill_entries=[],
+    )
+
+
 def write_fanout_retry_briefing(
     runtime: Any,
     *,

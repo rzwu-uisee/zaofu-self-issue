@@ -9,6 +9,61 @@ from zf.core.events.model import ZfEvent
 
 TASK_PIPELINE_GENERATION_SCHEMA = "task-pipeline-generation.v1"
 TASK_PIPELINE_GENERATION_ADMITTED = "task.pipeline.generation.admitted"
+CANDIDATE_FREEZE_RECEIPT_SCHEMA = "candidate-freeze-receipt.v1"
+
+
+def latest_task_pipeline_generation_context(
+    events: Iterable[ZfEvent],
+    *,
+    workflow_run_id: str,
+) -> dict[str, Any] | None:
+    """Return the latest admitted Task Pipeline generation for one Run."""
+
+    run_id = str(workflow_run_id or "").strip()
+    if not run_id:
+        return None
+    latest: dict[str, Any] | None = None
+    for event in events:
+        if event.type != TASK_PIPELINE_GENERATION_ADMITTED:
+            continue
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if (
+            str(payload.get("schema_version") or "")
+            != TASK_PIPELINE_GENERATION_SCHEMA
+        ):
+            continue
+        admitted_run_id = str(
+            payload.get("workflow_run_id") or event.correlation_id or ""
+        ).strip()
+        if admitted_run_id != run_id:
+            continue
+        latest = {
+            **payload,
+            "generation_admitted_event_id": event.id,
+            "generation_admitted_at": event.ts,
+        }
+    return latest
+
+
+def task_pipeline_generation_is_current(
+    events: Iterable[ZfEvent],
+    *,
+    workflow_run_id: str,
+    generation_id: str,
+) -> bool:
+    """Check exact generation currentness within one Workflow Run."""
+
+    claimed_generation_id = str(generation_id or "").strip()
+    if not claimed_generation_id:
+        return False
+    latest = latest_task_pipeline_generation_context(
+        events,
+        workflow_run_id=workflow_run_id,
+    )
+    return bool(
+        latest
+        and str(latest.get("generation_id") or "") == claimed_generation_id
+    )
 
 
 def task_pipeline_generation_contexts(
@@ -42,8 +97,11 @@ def task_pipeline_managed_task_ids(runtime: Any) -> set[str]:
 
 
 __all__ = [
+    "CANDIDATE_FREEZE_RECEIPT_SCHEMA",
     "TASK_PIPELINE_GENERATION_ADMITTED",
     "TASK_PIPELINE_GENERATION_SCHEMA",
+    "latest_task_pipeline_generation_context",
     "task_pipeline_generation_contexts",
+    "task_pipeline_generation_is_current",
     "task_pipeline_managed_task_ids",
 ]

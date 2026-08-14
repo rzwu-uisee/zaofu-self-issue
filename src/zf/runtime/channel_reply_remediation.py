@@ -73,13 +73,16 @@ def classify_channel_reply_failure(
             or normalized_status in _NON_RETRYABLE_FAILURE_STATUSES
             or any(marker in reason_lower for marker in _NON_RETRYABLE_REASON_MARKERS)
         )
+    failure_class = (
+        "channel_reply_superseded"
+        if superseded
+        else "channel_contribution_contract_invalid"
+        if normalized_status == "contract_invalid"
+        else f"provider_{normalized_status.replace('-', '_')}"
+    )
     return {
         "failure_status": normalized_status,
-        "failure_class": (
-            "channel_reply_superseded"
-            if superseded
-            else f"provider_{normalized_status.replace('-', '_')}"
-        ),
+        "failure_class": failure_class,
         "retryable": is_retryable,
         "terminal_disposition": "superseded" if superseded else "failed",
     }
@@ -304,6 +307,7 @@ def remediate_channel_replies(
             )
             exhausted.append(request_id)
             continue
+        prior_reason = str(candidate.get("reason") or "").strip()
         writer.emit(
             _REQUESTED,
             actor="orchestrator-remediation",
@@ -318,7 +322,11 @@ def remediate_channel_replies(
                 "status": "pending",
                 "run_generation": generation + 1,
                 "routing_reason": "remediation_redispatch",
-                "reason": f"remediation redispatch after {candidate.get('status')} (gen {generation})",
+                "reason": (
+                    f"remediation redispatch after {candidate.get('status')} "
+                    f"(gen {generation})"
+                    + (f"; diagnostic: {prior_reason}" if prior_reason else "")
+                ),
                 "source": "runtime",
             },
         )

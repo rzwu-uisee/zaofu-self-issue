@@ -6,6 +6,7 @@ import json
 import shlex
 import subprocess
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from zf.core.config.loader import load_config
@@ -14,10 +15,15 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
 from zf.runtime.artifact_read_ledger import read_attempt_artifact
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.goal_completion_receipt import build_goal_completion_receipt
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.run_contract import hydrate_run_effective_config, load_run_contract
+from zf.runtime.product_acceptance import (
+    product_acceptance_binding_from_package,
+    product_acceptance_report_template,
+)
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.simulation_lifecycle import emit_simulation_done
 from zf.runtime.result_submit import (
@@ -183,6 +189,17 @@ def test_light_profile_mock_e2e_exact_verify(
         "task-verify": "blocking",
         "candidate-verify": "blocking",
     }
+    package_policy = config.workflow.flow_metadata["artifact_package"]
+    package_policy["required_ports"] = [
+        *package_policy["required_ports"],
+        "product_acceptance_spec",
+    ]
+    package_policy["conditional_ports"] = [
+        item
+        for item in package_policy.get("conditional_ports") or []
+        if item != "product_acceptance_spec"
+    ]
+    config.workflow.flow_metadata["product_acceptance"] = {"mode": "blocking"}
 
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
@@ -296,6 +313,13 @@ def test_light_profile_mock_e2e_exact_verify(
     task_map_path.write_text(json.dumps({
         "schema_version": "task-map.v1",
         "feature_id": "LIGHT-148",
+        "required_plan_ports": [
+            "requirement_spec",
+            "goal_claim_set",
+            "task_map",
+            "planning_result",
+            "product_acceptance_spec",
+        ],
         "tasks": [{
             "task_id": task_id,
             "title": f"Create verified result {index}",
@@ -343,6 +367,39 @@ def test_light_profile_mock_e2e_exact_verify(
             "source_refs": ["README.md"],
             "task_map_ref": task_map_ref,
             "flow_kind": "prd",
+            "plan_ports": [{
+                "logical_name": "product_acceptance_spec",
+                "schema_version": "product_acceptance_spec.v1",
+                "body": {
+                    "schema_version": "product_acceptance_spec.v1",
+                    "assembly_owner": "LIGHT-148-DELIVER-001",
+                    "entrypoints": [{
+                        "entrypoint_id": "result-files",
+                        "start_command": "test -f app/result-a.txt && test -f app/result-b.txt",
+                        "health_check": "grep -qx delivered-a app/result-a.txt && grep -qx delivered-b app/result-b.txt",
+                        "owner": "LIGHT-148-DELIVER-001",
+                    }],
+                    "user_journeys": [{
+                        "journey_id": f"journey-result-{index}",
+                        "title": f"Read delivered result {index}",
+                        "mandatory": True,
+                        "verification_tier": "runtime",
+                        "assertions": [{
+                            "assertion_id": f"result-{index}-content",
+                            "statement": f"{path} contains {content}",
+                            "observation_kind": "state",
+                            "mandatory": True,
+                        }],
+                    } for index, (_task_id, path, content, _lane) in enumerate(
+                        DELIVERABLES, start=1
+                    )],
+                    "provider_qualification": {
+                        "required_for_goal": True,
+                        "providers": ["mock-provider"],
+                        "ttl_seconds": 300,
+                    },
+                },
+            }],
             **{
                 key: entry_event.payload[key]
                 for key in (
@@ -362,6 +419,14 @@ def test_light_profile_mock_e2e_exact_verify(
     assert package_event.payload["run_contract_digest"] == run_contract[
         "contract_digest"
     ]
+    package_body = hydrate_sidecar_ref(
+        state_dir,
+        {
+            "ref": package_event.payload["package_ref"],
+            "sha256": package_event.payload["package_digest"],
+        },
+    ).payload
+    assert "product_acceptance_spec" in package_body["required_ports"]
 
     impl_started = next(
         event for event in log.read_all()
@@ -492,6 +557,50 @@ def test_light_profile_mock_e2e_exact_verify(
         )
         task_id = verify_payload["task_id"]
         verified_targets.add(verify_payload["target_commit"])
+        product_binding = product_acceptance_binding_from_package(
+            state_dir,
+            {
+                "ref": verify_payload["plan_artifact_package_ref"],
+                "sha256": verify_payload["plan_artifact_package_digest"],
+            },
+        )
+        product_evidence = write_immutable_json_sidecar(
+            state_dir,
+            {
+                "schema_version": "mock-product-evidence.v1",
+                "task_id": task_id,
+                "target_commit": verify_payload["target_commit"],
+                "journeys": ["journey-result-1", "journey-result-2"],
+            },
+            root="e2e/product-acceptance-evidence",
+            kind="mock_product_acceptance_evidence",
+            schema_version="mock-product-evidence.v1",
+            created_by="mock-candidate-verify",
+        )
+        product_report = product_acceptance_report_template(
+            spec=product_binding["spec"],
+            spec_ref=product_binding["spec_ref"],
+            spec_digest=product_binding["spec_digest"],
+            candidate_ref=verify_payload["candidate_ref"],
+            target_commit=verify_payload["target_commit"],
+        )
+        for journey in product_report["journey_results"]:
+            journey["evidence_refs"] = [dict(product_evidence)]
+            for assertion in journey["assertion_results"]:
+                assertion["evidence_refs"] = [dict(product_evidence)]
+        observed_at = datetime.now(timezone.utc)
+        product_report["provider_qualification_receipts"] = [{
+            "schema_version": "provider-qualification-receipt.v1",
+            "provider": "mock-provider",
+            "workflow_run_id": workflow_run_id,
+            "target_commit": verify_payload["target_commit"],
+            "status": "passed",
+            "deterministic": False,
+            "reusable": False,
+            "observed_at": observed_at.isoformat(),
+            "expires_at": (observed_at + timedelta(seconds=240)).isoformat(),
+            "evidence_refs": [dict(product_evidence)],
+        }]
         submitted_verify = submitter.submit(
             operation_id=verify_payload["operation_id"],
             semantic_result={
@@ -514,6 +623,7 @@ def test_light_profile_mock_e2e_exact_verify(
                     "evidence_refs": [f"mock://verify/{task_id}/probe"],
                 } for command in verify_contract["verification_commands"]],
                 "rework_items": [],
+                "product_acceptance_report": product_report,
                 "requirement_results": [{
                     "acceptance_id": item["acceptance_id"],
                     "status": "passed",
@@ -596,6 +706,10 @@ def test_light_profile_mock_e2e_exact_verify(
     )
     orchestrator.run_once(events=[judged])
     synthesized = _latest_event(log, "goal.closure.synthesized")
+    closure_result = synthesized.payload["goal_closure_result"]
+    assert closure_result["product_acceptance_required"] is True
+    assert closure_result["product_acceptance_verdict"] == "passed"
+    assert closure_result["provider_qualification_status"] == "passed"
     orchestrator.run_once(events=[synthesized])
     delivery_settled = _latest_event(log, "run.delivery.settled")
     orchestrator.run_once(events=[delivery_settled])
@@ -637,6 +751,19 @@ def test_light_profile_mock_e2e_exact_verify(
     assert len(completed) == 1
     assert verified_targets == {candidate.payload["candidate_head_commit"]}
     assert completed[0].payload["verified_target_commit"] == next(iter(verified_targets))
+    assert completed[0].payload["product_acceptance_verdict"] == "passed"
+    assert completed[0].payload["provider_qualification_status"] == "passed"
+    product_admissions = [
+        item for item in events
+        if item.type == "workflow.call.result.admitted"
+        and item.payload.get("control_result_schema") == "verification-result.v1"
+        and item.payload.get("product_acceptance_report_ref")
+    ]
+    assert len(product_admissions) == 2
+    assert all(
+        item.payload["provider_qualification_status"] == "passed"
+        for item in product_admissions
+    )
     receipt = build_goal_completion_receipt(
         events,
         run_id=workflow_run_id,

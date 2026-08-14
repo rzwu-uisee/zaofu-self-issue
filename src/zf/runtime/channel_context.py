@@ -421,6 +421,13 @@ def channel_contribution_index(
                 "artifact_digest": str(
                     item.get("artifact_digest") or ""
                 ),
+                "request_id": str(item.get("request_id") or ""),
+                "message_id": str(item.get("message_id") or ""),
+                "run_generation": int(item.get("run_generation") or 1),
+                "source_reply_event_id": str(
+                    item.get("source_reply_event_id") or ""
+                ),
+                "questions_frozen": item.get("questions_frozen") is True,
                 "source_refs": [
                     str(ref)
                     for ref in item.get("source_refs") or []
@@ -455,6 +462,13 @@ def channel_contribution_index(
             "contract_status": str(payload.get("contract_status") or ""),
             "artifact_ref": str(payload.get("artifact_ref") or ""),
             "artifact_digest": str(payload.get("artifact_digest") or ""),
+            "request_id": str(payload.get("request_id") or ""),
+            "message_id": str(payload.get("message_id") or ""),
+            "run_generation": int(payload.get("run_generation") or 1),
+            "source_reply_event_id": str(
+                payload.get("source_reply_event_id") or ""
+            ),
+            "questions_frozen": payload.get("questions_frozen") is True,
             "source_refs": [
                 str(item)
                 for item in payload.get("source_refs") or []

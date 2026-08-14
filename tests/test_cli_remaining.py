@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -132,8 +133,11 @@ class TestSkillsCli:
         result = main(["skills", "list", "--json"])
 
         assert result == 0
-        captured = capsys.readouterr()
-        assert '"enabled"' in captured.out
+        payload = json.loads(capsys.readouterr().out)
+        assert "enabled" in payload
+        assert payload["invocation"]["schema_version"] == (
+            "skill-invocation-projection.v1"
+        )
 
 
 class TestRules:

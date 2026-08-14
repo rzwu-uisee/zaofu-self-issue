@@ -55,6 +55,14 @@ _IDENTITY_KEYS = (
     "result_semantics",
     "goal_claim_set_ref",
     "goal_claim_set_digest",
+    "product_acceptance_required",
+    "product_acceptance_spec_ref",
+    "product_acceptance_spec_digest",
+    "product_acceptance_report_ref",
+    "product_acceptance_report_digest",
+    "product_acceptance_verdict",
+    "provider_qualification_required",
+    "provider_qualification_status",
     "plan_artifact_package_id",
     "plan_artifact_package_ref",
     "plan_artifact_package_digest",
@@ -236,6 +244,38 @@ def normalize_call_result_envelope(
         "goal_claim_set_digest": _text(
             payload,
             "goal_claim_set_digest",
+        ),
+        "product_acceptance_required": _text(
+            payload,
+            "product_acceptance_required",
+        ),
+        "product_acceptance_spec_ref": _text(
+            payload,
+            "product_acceptance_spec_ref",
+        ),
+        "product_acceptance_spec_digest": _text(
+            payload,
+            "product_acceptance_spec_digest",
+        ),
+        "product_acceptance_report_ref": _text(
+            payload,
+            "product_acceptance_report_ref",
+        ),
+        "product_acceptance_report_digest": _text(
+            payload,
+            "product_acceptance_report_digest",
+        ),
+        "product_acceptance_verdict": _text(
+            payload,
+            "product_acceptance_verdict",
+        ),
+        "provider_qualification_required": _text(
+            payload,
+            "provider_qualification_required",
+        ),
+        "provider_qualification_status": _text(
+            payload,
+            "provider_qualification_status",
         ),
         "plan_artifact_package_id": _text(
             payload,

@@ -1,15 +1,13 @@
-"""Model pricing — cache-aware per-model token rates with name resolution.
+"""Legacy in-process pricing compatibility helpers.
 
 Used by CostTracker as the *fallback* pricing path: when a turn carries a
 provider-reported ``total_cost_usd`` that value wins (it is authoritative);
 only token-derived turns (disk-reader / codex / tmux-hosted, which have no
 provider cost) are priced here.
 
-The table uses four-field rates (input / output / cache_creation / cache_read),
-a dated hardcoded fallback table, and multi-level model-name resolution
-(exact → dotted-to-dashed → case-insensitive → canonical). No network
-dependency — the fallback table is the source of truth; an optional litellm
-refresh can override it later.
+Runtime accounting resolves the versioned catalog in ``cost/catalog.py``.
+This table remains for external import compatibility and only permits exact,
+normalized identifiers. Unknown models are never mapped to a default rate.
 """
 
 from __future__ import annotations
@@ -56,50 +54,26 @@ def _normalize(model: str) -> str:
 
 
 def _canonical(s: str) -> str:
-    """Strip provider prefix (after last '/'), lowercase, keep alnum only."""
+    """Strip provider prefix and normalize case/dotted version separators."""
     if "/" in s:
         s = s.rsplit("/", 1)[1]
-    return "".join(c for c in s.lower() if c.isalnum())
+    return _normalize(s).lower()
 
 
 def resolve_rate(
     model: str | None,
     rates: dict[str, ModelRate] | None = None,
-) -> ModelRate:
+) -> ModelRate | None:
     """Resolve a model id to its rate.
 
-    Levels, falling through on miss:
-    1. exact, 2. dotted-to-dashed, 3. case-insensitive (exact + normalized),
-    4. canonical (provider-stripped, alnum-only) substring, then ``default``.
-    Never raises — unknown models fall back to ``default`` so recording a
-    cost never blocks on an unrecognised model name.
+    Exact matching tolerates case, dotted version separators, and an explicit
+    provider prefix. Missing/unknown models return ``None``.
     """
     table = rates or FALLBACK_RATES
     if not model:
-        return table["default"]
-    # 1. exact
-    if model in table:
-        return table[model]
-    # 2. dotted-to-dashed
-    norm = _normalize(model)
-    if norm != model and norm in table:
-        return table[norm]
-    # 3. case-insensitive (against both raw and normalized)
-    lower = model.lower()
-    lower_norm = norm.lower()
+        return None
+    target = _canonical(model)
     for key, rate in table.items():
-        kl = key.lower()
-        if kl == lower or kl == lower_norm:
+        if _canonical(key) == target:
             return rate
-    # 4. canonical: longest matching key wins so "claude-opus-4-8" prefers
-    #    the opus-4-8 entry over a bare "opus".
-    canon = _canonical(model)
-    best: tuple[int, ModelRate] | None = None
-    for key, rate in table.items():
-        ck = _canonical(key)
-        if ck and (ck in canon or canon in ck):
-            if best is None or len(ck) > best[0]:
-                best = (len(ck), rate)
-    if best is not None:
-        return best[1]
-    return table["default"]
+    return None

@@ -21,7 +21,9 @@
 - 代码目录: `src/zf/autoresearch/`
 - CLI: `src/zf/cli/autoresearch.py`
 - 默认内层 runner: `tests.e2e.run_mixed`
-- 默认配置模板: `examples/dev-codex-backends.yaml`
+- 默认配置模板: `examples/prod/controller/prd-task-pipeline-v4-canary.yaml`
+- 默认入口: `flow intake -> flow clarify -> flow submit`,不再用旧
+  `user.message` 语义驱动 controller workflow。
 
 ## 2. 前置条件
 
@@ -29,7 +31,8 @@
 
 - 当前仓库在 `/path/to/zaofu`。
 - `git`、`tmux`、`python3` 可用。
-- Codex/Claude 等 provider CLI 已登录,且 `examples/dev-codex-backends.yaml` 中的 backend 配置可用。
+- Codex/Claude 等 provider CLI 已登录,且 `examples/prod/controller/` 中
+  所选 v3/v4 controller 的 backend 配置可用。
 - 当前 repo 可以创建 `git worktree`。
 - 预算上限已明确,不要在未确认预算时加 `--confirm` 真跑。
 
@@ -69,7 +72,7 @@ WT="/tmp/zaofu-autoresearch-${STAMP}"
 PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
   --scenario self-eval-backlog \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 4 \
   --timeout 10800 \
   --budget-usd 500 \
@@ -127,7 +130,8 @@ PYTHONPATH=/path/to/zaofu/src python3 -m zf.cli.main kanban --board
 
 重点关注:
 
-- `task.status_changed` 到 `done` 的数量是否达到 `--expected-done`。
+- 正式 controller Flow 是否到达 `run.goal.completed`;task done 数仅作为
+  过程指标,不能替代 Run 终态。
 - 是否出现 fatal event。
 - 多 dev / multi-agent dispatch 是否真实分布到多个 worker。
 - 是否卡在同一 task 或同一 role 上。
@@ -194,7 +198,7 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
 |---|---:|---|
 | `--scenario` | `self-eval-backlog` | 内置评估场景名 |
 | `--worktree` | 必填 | 被测隔离 worktree 路径 |
-| `--config` | `examples/dev-codex-backends.yaml` | 生成被测 `zf.yaml` 的模板 |
+| `--config` | `examples/prod/controller/prd-task-pipeline-v4-canary.yaml` | 生成被测 `zf.yaml` 的 v4 controller 模板；兼容性验证可显式选择对应 v3 |
 | `--expected-done` | 场景默认值 | 期望完成 task 数 |
 | `--timeout` | 场景默认值 | 内层 runner 超时时间,单位秒 |
 | `--budget-usd` | `500` | 写入被测 `zf.yaml` 的全局预算 |
@@ -204,7 +208,7 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
 | `--run-id` | 自动生成 | 指定稳定 run id |
 | `--output-dir` | `$WT/.zf/autoresearch/runs/<run-id>` | 指定 run 产物目录 |
 | `--inject-worker-stuck` | false | 等目标 worker 收到真实 task 后注入 `autoresearch.inject.worker_stuck` |
-| `--inject-worker-stuck-instance` | `dev-1` | stuck 注入目标 instance 或 role |
+| `--inject-worker-stuck-instance` | `dev-lane-0` | stuck 注入目标 instance 或 role |
 | `--inject-worker-stuck-timeout` | `600` | 目标 dispatch 长时间未出现时记录等待告警的秒数；不会提前关闭注入窗口 |
 | `--tmux` | false | 启动外层 tmux supervisor |
 | `--confirm` | false | 真正执行内层 provider run |
@@ -218,18 +222,18 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
 PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch run \
   --scenario controlled-stuck-recovery \
   --worktree "$WT" \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --expected-done 1 \
   --timeout 7200 \
   --budget-usd 180 \
   --inject-worker-stuck \
-  --inject-worker-stuck-instance dev-1 \
+  --inject-worker-stuck-instance dev-lane-0 \
   --backlog-on-failure \
   --tmux \
   --confirm
 ```
 
-supervisor 会等待 `dev-1` 收到 `task.dispatched`,然后写入
+supervisor 会等待 `dev-lane-0` 收到 `task.dispatched`,然后写入
 `autoresearch.inject.worker_stuck`。内层 runtime 收到该事件后调用同一条
 `worker.stuck -> task.requeued -> worker.stuck.recovered -> re-dispatch`
 恢复路径。若前置 arch/critic/rework 阶段较慢,supervisor 只在日志中记录

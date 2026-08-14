@@ -6,12 +6,16 @@ import hashlib
 import json
 import shutil
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 
 import yaml
 
 from zf.core.config.loader import load_config
+from zf.core.events import ZfEvent
 from zf.core.events.log import EventLog
+from zf.core.task.schema import Task, TaskContract
+from zf.core.task.store import TaskStore
 from zf.cli.flow import (
     _git_delivery_baseline_diagnostics,
     _project_setup_readiness_diagnostics,
@@ -1077,6 +1081,26 @@ spec:
   version: "1.0"
   project: {name: demo, state_dir: .zf-apply}
 """)
+    task_store = TaskStore(tmp_path / ".zf-apply" / "kanban.json")
+    original_task = task_store.add(Task(
+        id="TASK-WF",
+        title="Fix checkout regression",
+        assigned_to="judge-issue",
+        contract=TaskContract(
+            behavior="Fix the checkout regression.",
+            verification="uv run pytest -q",
+            scope=["src/**", "tests/**"],
+        ),
+    ))
+    EventLog(tmp_path / ".zf-apply" / "events.jsonl").append(ZfEvent(
+        type="task.contract.update",
+        actor="zf-cli",
+        task_id=original_task.id,
+        payload={
+            "contract": asdict(original_task.contract),
+            "source": "task.create-from-contract",
+        },
+    ))
 
     rc = main([
         "flow",
@@ -1104,9 +1128,28 @@ spec:
     assert "workflow.submit.requested" in types
     assert "workflow.submit.accepted" in types
     assert "workflow.invoke.requested" in types
+    assert "task.contract.update" in types
     invoke = next(event for event in events if event.type == "workflow.invoke.requested")
     assert invoke.payload["workflow_input_manifest_ref"].endswith("workflow-input-manifest.json")
     assert invoke.payload["workflow_prompt_ref"].endswith("artifacts/intake/wfint-apply.json")
+    task = task_store.get("TASK-WF")
+    assert task is not None
+    assert task.contract.evidence_contract["execution_owner"] == "workflow"
+    assert task.assigned_to is None
+
+    orchestrator = Orchestrator(
+        tmp_path / ".zf-apply",
+        load_config(config),
+        _FlowTestTransport(),
+        project_root=tmp_path,
+    )
+    orchestrator.run_once()
+
+    events = EventLog(tmp_path / ".zf-apply" / "events.jsonl").read_all()
+    assert not any(
+        event.type == "task.dispatched" and event.task_id == "TASK-WF"
+        for event in events
+    )
 
 
 def test_flow_submit_binds_bootstrap_run_contract_to_first_request(tmp_path, capsys):

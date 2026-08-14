@@ -140,6 +140,13 @@ Map and Plan-port digests. At least one command linked to a mandatory criterion
 must match that criterion's `verification_owner`; additional linked commands
 may belong to a later layer such as `candidate_verify`.
 
+Set `producer_task_id` to the one Task that creates the command, runner, or
+required evidence paths. A consumer Task may reference that command for global
+coverage, but its Task Verify must not execute it or block while the producer
+Task is still downstream. In particular, production Docker/browser suites and
+release-evidence audits normally belong to the release-evidence or candidate
+audit Task, not to every feature Task that references the covered AC.
+
 This is the minimal closed shape used by runtime admission tests:
 
 ```json
@@ -207,8 +214,10 @@ the command to the target repository.
   row blocked merely because its future evidence has not been generated yet.
 - For browser rows, load `zf-browser-e2e-contract`; bind the exact Docker command
   and the task-owned runner/config/test/evidence paths before declaring the Plan
-  ready. A missing host browser is not a blocker when the sanctioned Docker
-  runner is available.
+  ready. Include the exact `bind_host`, owner-facing `service_url`, and
+  `browser_origin`; when WebCrypto/secure-context APIs are required, bind an
+  origin-specific capability probe and its evidence output. A missing host
+  browser is not a blocker when the sanctioned Docker runner is available.
 - Use real provider/env probes when the objective requires live LLM/gateway
   validation.
 - Do not use mock-only commands for release/full-parity validation unless the

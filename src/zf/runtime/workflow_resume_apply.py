@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,12 @@ from zf.runtime.workflow_resume import (
     WorkflowOperationResumeCheckpoint,
     WorkflowResumeCheckpoint,
     _batch_checkpoint_superseded_reason,
+    _candidate_reverify_checkpoint_recovered,
+    _later_successful_task_pipeline_operation,
+    _live_operation_attempt,
     _payload_has_resume_marker,
+    _resume_iso_epoch,
+    _task_attempt_rows,
     build_workflow_resume_projection,
     write_workflow_resume_projection,
 )
@@ -328,27 +334,86 @@ def _apply_operation_checkpoint(
         reduce_workflow_operations,
     )
 
-    current = reduce_workflow_operations(writer.event_log.read_all()).get(
-        checkpoint.operation_id
-    )
+    operations = reduce_workflow_operations(writer.event_log.read_all())
+    current = operations.get(checkpoint.operation_id)
     if current is None:
         return WorkflowResumeApplyResult(
             checkpoint=checkpoint,
             applied=False,
             reason="operation no longer exists",
         )
-    if str(current.get("status") or "") in {
-        "settled",
-        "failed",
-        "blocked",
-        "superseded",
-        "cancelled",
-    }:
+    superseding_operation_id = _later_successful_task_pipeline_operation(
+        current,
+        operations.values(),
+    )
+    if superseding_operation_id:
+        return WorkflowResumeApplyResult(
+            checkpoint=checkpoint,
+            applied=False,
+            reason=(
+                "operation was superseded by later successful Task Pipeline "
+                f"operation {superseding_operation_id}"
+            ),
+        )
+    redrive_actions = {
+        "redrive_interrupted_task_pipeline_operation",
+        "redrive_cancelled_interrupted_task_pipeline_operation",
+        "redrive_budget_amended_task_pipeline_operation",
+    }
+    current_status = str(current.get("status") or "")
+    live_attempt = _live_operation_attempt(
+        _task_attempt_rows(state_dir),
+        operation_id=checkpoint.operation_id,
+        now_epoch=datetime.now(timezone.utc).timestamp(),
+        created_after_epoch=(
+            _resume_iso_epoch(str(current.get("last_event_at") or ""))
+            if current_status == "suspended"
+            else 0.0
+        ),
+    )
+    if live_attempt is not None:
+        return WorkflowResumeApplyResult(
+            checkpoint=checkpoint,
+            applied=False,
+            reason=(
+                "operation has a newer live TaskAttempt; stale resume action "
+                "was not applied"
+            ),
+        )
+    if current_status in {"settled", "failed", "superseded"} or (
+        current_status == "blocked"
+        and checkpoint.safe_resume_action
+        != "redrive_budget_amended_task_pipeline_operation"
+    ) or (
+        current_status == "cancelled"
+        and checkpoint.safe_resume_action not in redrive_actions
+    ):
         return WorkflowResumeApplyResult(
             checkpoint=checkpoint,
             applied=False,
             reason="operation already terminal",
         )
+    if (
+        checkpoint.safe_resume_action
+        == "redrive_budget_amended_task_pipeline_operation"
+    ):
+        from zf.runtime.workflow_operation_task_pipeline import (
+            find_task_pipeline_budget_amendment,
+        )
+
+        amendment = find_task_pipeline_budget_amendment(
+            writer.event_log.read_all(),
+            current,
+        )
+        if (
+            amendment is None
+            or amendment.id != checkpoint.recovery_decision_event_id
+        ):
+            return WorkflowResumeApplyResult(
+                checkpoint=checkpoint,
+                applied=False,
+                reason="budget amendment is missing, stale, or out of scope",
+            )
     planned = writer.append(ZfEvent(
         type=WORKFLOW_RESUME_PLANNED_EVENT,
         actor="zf-cli",
@@ -365,6 +430,56 @@ def _apply_operation_checkpoint(
         event_log=writer.event_log,
         event_writer=writer,
     )
+    if checkpoint.safe_resume_action in redrive_actions:
+        budget_redrive = (
+            checkpoint.safe_resume_action
+            == "redrive_budget_amended_task_pipeline_operation"
+        )
+        redriven = service.admit_redrive(
+            operation_id=checkpoint.operation_id,
+            request_hash=checkpoint.request_hash,
+            workflow_run_id=checkpoint.workflow_run_id,
+            task_id=checkpoint.task_id,
+            source_attempt_id=str(current.get("active_attempt_id") or ""),
+            recovery_decision_event_id=(
+                checkpoint.recovery_decision_event_id
+                if budget_redrive
+                else planned.id
+            ),
+            reason=(
+                "Owner budget amendment admitted a bounded operation redrive"
+                if budget_redrive
+                else "Kernel replay admitted after explicit runtime restart"
+            ),
+            recovery_decision_owner=(
+                "operator_budget_amendment"
+                if budget_redrive
+                else "kernel_replay"
+            ),
+        )
+        emitted = [planned.id]
+        if redriven is not None:
+            emitted.append(redriven.id)
+        applied = writer.append(ZfEvent(
+            type=WORKFLOW_RESUME_APPLIED_EVENT,
+            actor="zf-cli",
+            task_id=checkpoint.task_id or checkpoint.parent_task_id or None,
+            payload={
+                **checkpoint.to_dict(),
+                "checkpoint_kind": "workflow_operation",
+                "mode": checkpoint.safe_resume_action,
+                "redrive_event_id": redriven.id if redriven is not None else "",
+            },
+            causation_id=redriven.id if redriven is not None else planned.id,
+            correlation_id=checkpoint.workflow_run_id or None,
+        ))
+        emitted.append(applied.id)
+        return WorkflowResumeApplyResult(
+            checkpoint=checkpoint,
+            applied=True,
+            reason="Task Pipeline operation admitted for restart replay",
+            emitted_event_ids=emitted,
+        )
     cancelled = service.cancel(
         operation_id=checkpoint.operation_id,
         request_hash=checkpoint.request_hash,
@@ -1038,6 +1153,11 @@ def _apply_batch_candidate_ready(
         "pdd_id": checkpoint.pdd_id,
         "feature_id": checkpoint.feature_id or checkpoint.pdd_id,
         "trace_id": checkpoint.trace_id or checkpoint.fanout_id,
+        "workflow_run_id": checkpoint.workflow_run_id or checkpoint.trace_id,
+        "flow_kind": checkpoint.flow_kind or checkpoint.request_kind,
+        "request_kind": checkpoint.request_kind or checkpoint.flow_kind,
+        "candidate_snapshot_event_id": checkpoint.candidate_snapshot_event_id,
+        "freeze_id": checkpoint.freeze_id,
         "candidate_ref": checkpoint.candidate_ref,
         "candidate_base_commit": checkpoint.candidate_base_commit,
         "candidate_head_commit": checkpoint.candidate_head_commit,
@@ -1877,6 +1997,8 @@ def _batch_idempotency_seen(
     events: list[ZfEvent],
     checkpoint: WorkflowBatchResumeCheckpoint,
 ) -> bool:
+    if checkpoint.safe_resume_action == "reemit_candidate_ready":
+        return _candidate_reverify_checkpoint_recovered(events, checkpoint)
     seen = False
     invalidated = False
     for event in events:

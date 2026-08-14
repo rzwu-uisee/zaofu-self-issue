@@ -65,6 +65,16 @@ context for runtime truth, task scope, and completion claims.
   commit; cover every mandatory `acceptance_id`, and record each declared
   command as an independent receipt. This is author evidence, not an
   independent verdict.
+- When Controlled Artifact Inputs include `product_acceptance_spec`, read it
+  through the sanctioned artifact command before editing. For the journeys
+  owned by this slice, self-check the real build/start or health path, reject
+  placeholder-only output, and exercise the key interaction or state change.
+  Record those facts in current-target command receipts/evidence refs; a source
+  inspection or mocked analytical answer is not a runnable product check.
+- A non-assembly slice verifies only its owned journeys and affected
+  integration boundary. The final assembly task additionally runs the declared
+  product entrypoint and an assembled smoke across all contributing slices. It
+  does not fabricate browser, Provider, or independent Verify verdicts.
 - Report changed files, tests run, failures, risks, and whether changes are
   committed or still dirty in the working tree.
 - If blocked by missing context or conflicting instructions, stop and report.

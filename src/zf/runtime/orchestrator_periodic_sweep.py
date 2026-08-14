@@ -80,18 +80,22 @@ def run_post_dispatch_sweep(
     events: Iterable[ZfEvent] | None,
     periodic_sweep: bool,
 ) -> None:
+    channel_reply_failed = any(
+        event.type == "channel.agent.reply.failed" for event in (events or [])
+    )
     if periodic_sweep:
         runtime._safe_housekeeping("orphaned_tasks", runtime._check_orphaned_tasks)
         runtime._safe_housekeeping(
             "unclaimed_new_tasks",
             runtime._check_unclaimed_new_tasks,
         )
+        runtime._safe_housekeeping("drift", runtime._check_drift)
+        runtime._safe_housekeeping("refresh", runtime._check_refresh_triggers)
+    if periodic_sweep or channel_reply_failed:
         runtime._safe_housekeeping(
             "channel_reply_remediation",
             runtime._check_channel_reply_remediation,
         )
-        runtime._safe_housekeeping("drift", runtime._check_drift)
-        runtime._safe_housekeeping("refresh", runtime._check_refresh_triggers)
     if periodic_sweep or any(
         event.type == "candidate.ready" for event in (events or [])
     ):

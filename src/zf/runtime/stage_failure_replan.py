@@ -16,6 +16,10 @@ from __future__ import annotations
 from typing import Any
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.plan_artifact_package import (
+    plan_artifact_package_binding,
+    reduce_plan_artifact_packages,
+)
 
 # stage 级 replan 上限:超过即该升级 human,不许无限重合成
 # (r5 教训:机械重试无界 = 烧钱活锁)。
@@ -79,6 +83,39 @@ _PLAN_PACKAGE_IDENTITY_KEYS = (
     "plan_artifact_package_ref",
     "plan_artifact_package_digest",
 )
+_CURRENT_PLAN_IDENTITY_GROUPS = (
+    ("task_map_ref", "task_map_digest"),
+    _PLAN_PACKAGE_IDENTITY_KEYS,
+)
+_CURRENT_PLAN_IDENTITY_KEYS = frozenset(
+    key for group in _CURRENT_PLAN_IDENTITY_GROUPS for key in group
+)
+_GOAL_CLAIM_SET_IDENTITY_KEYS = (
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+)
+
+
+def _bind_current_plan_package_identity(
+    payload: dict[str, Any],
+    *,
+    events: list[ZfEvent],
+    workflow_run_id: str,
+) -> None:
+    """Keep stage replans on the canonical admitted package for the run."""
+
+    if not workflow_run_id:
+        return
+    projection = reduce_plan_artifact_packages(
+        events,
+        workflow_run_id=workflow_run_id,
+    )
+    current = projection.get("current")
+    if not isinstance(current, dict) or not current:
+        return
+    for key in _GOAL_CLAIM_SET_IDENTITY_KEYS:
+        payload.pop(key, None)
+    payload.update(plan_artifact_package_binding(events, current))
 
 
 def _payload_target_ref(payload: dict[str, Any]) -> str:
@@ -177,6 +214,16 @@ def _same_replan_scope(event: ZfEvent, failure_event: ZfEvent) -> bool:
         failure_event.payload if isinstance(failure_event.payload, dict) else {}
     )
     event_payload = event.payload if isinstance(event.payload, dict) else {}
+    failure_generation = str(
+        failure_payload.get("stage_replan_generation") or ""
+    ).strip()
+    event_generation = str(
+        event_payload.get("stage_replan_generation") or ""
+    ).strip()
+    if (failure_generation or event_generation) and (
+        failure_generation != event_generation
+    ):
+        return False
     failure_pdd = str(
         failure_payload.get("pdd_id") or failure_payload.get("feature_id") or ""
     ).strip()
@@ -378,6 +425,11 @@ def plan_reader_stage_replan(
     config: Any,
     events: list[ZfEvent],
     failure_event: ZfEvent,
+    *,
+    authorized_generation: str = "",
+    generation_source_event_id: str = "",
+    authorization_event_id: str = "",
+    authorization_ref: str = "",
 ) -> tuple[ZfEvent | None, str]:
     """返回 (待 append 的 replan 事件, 说明)。None = 不 replan(附原因)。
 
@@ -507,14 +559,25 @@ def plan_reader_stage_replan(
     if 0 <= failure_index <= last_success_index:
         return None, "stale_failure"
         # 本失败已 replan 过?(replay/echo 安全)
-    for event in events:
-        if (
-            event.type == trigger_type
-            and str(event.causation_id or "") == failure_event.id
-        ):
-            return None, "already_replanned"
-    if prior_failures >= STAGE_REPLAN_CAP:
-        return None, "cap_exhausted"
+    if authorized_generation:
+        for event in events:
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if (
+                event.type == trigger_type
+                and str(payload.get("stage_replan_generation") or "")
+                == authorized_generation
+            ):
+                return None, "generation_already_started"
+        prior_failures = 0
+    else:
+        for event in events:
+            if (
+                event.type == trigger_type
+                and str(event.causation_id or "") == failure_event.id
+            ):
+                return None, "already_replanned"
+        if prior_failures >= STAGE_REPLAN_CAP:
+            return None, "cap_exhausted"
     target_ref = _payload_target_ref(failure_payload) or _payload_target_ref(
         origin_payload
     )
@@ -582,6 +645,8 @@ def plan_reader_stage_replan(
         "owner_decision_items",
         "owner_decision_resolution",
     ):
+        if key in _CURRENT_PLAN_IDENTITY_KEYS:
+            continue
         value = failure_payload.get(key)
         if value not in (None, "", [], {}) and (
             key in _CANONICAL_INPUT_KEYS or not origin_payload.get(key)
@@ -592,19 +657,34 @@ def plan_reader_stage_replan(
         str(failure_event.causation_id or "").strip(),
     }
     source_event_ids.discard("")
+    source_identity_payload: dict[str, Any] = {}
     for source_event in reversed(events):
         if source_event.id not in source_event_ids:
             continue
-        source_payload = (
+        source_identity_payload = (
             source_event.payload
             if isinstance(source_event.payload, dict)
             else {}
         )
-        for key in _PLAN_PACKAGE_IDENTITY_KEYS:
-            value = source_payload.get(key)
-            if value not in (None, "") and not origin_payload.get(key):
-                origin_payload[key] = value
         break
+    for identity_group in _CURRENT_PLAN_IDENTITY_GROUPS:
+        for current_payload in (source_identity_payload, failure_payload):
+            current_identity = {
+                key: current_payload.get(key) for key in identity_group
+            }
+            if all(value not in (None, "") for value in current_identity.values()):
+                origin_payload.update(current_identity)
+        for key in identity_group:
+            if origin_payload.get(key):
+                continue
+            value = failure_payload.get(key) or source_identity_payload.get(key)
+            if value not in (None, ""):
+                origin_payload[key] = value
+    _bind_current_plan_package_identity(
+        origin_payload,
+        events=events,
+        workflow_run_id=failure_run_id,
+    )
     if target_ref:
         origin_payload.setdefault("target_ref", target_ref)
         if trigger_type.startswith("issue."):
@@ -622,6 +702,15 @@ def plan_reader_stage_replan(
             f"{failure_event.type}"
         ),
     })
+    if authorized_generation:
+        origin_payload.update({
+            "stage_replan_generation": authorized_generation,
+            "stage_replan_generation_source_event_id": (
+                generation_source_event_id
+            ),
+            "operator_authorized": True,
+            "operator_authorization_ref": authorization_ref,
+        })
     attempt_domain = str(
         getattr(stage, "attempt_domain", "") or ""
     ).strip()
@@ -631,7 +720,11 @@ def plan_reader_stage_replan(
         type=trigger_type,
         actor="zf-cli",
         payload=origin_payload,
-        causation_id=failure_event.id,
+        causation_id=(
+            authorization_event_id
+            if authorized_generation and authorization_event_id
+            else failure_event.id
+        ),
         correlation_id=failure_event.correlation_id or None,
     ), f"replan {getattr(stage, 'id', '')}"
 

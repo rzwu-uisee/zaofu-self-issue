@@ -110,6 +110,8 @@ import type { TaskTelemetry } from "../lib/task-display";
 import { BacklogRefsBadge, RouteSummaryStrip, WorkflowBadges } from "../components/kanban/TaskCard";
 import { BoardColumn } from "../components/kanban/BoardColumn";
 import { buildObservabilityEventWindow } from "./observabilityModel";
+import { buildProjectCostPresentation } from "./costPrecision";
+import { useProjectCost } from "./useProjectCost";
 import { ProjectEventBus } from "./projectEventBus";
 import { pageTitle } from "./pageMetadata";
 import { LatestRequestGate } from "./latestRequestGate";
@@ -170,9 +172,13 @@ import { PAGES } from "./sharedTypes";
 import {
   BOARD_REFRESH_PAGES,
   MEASURE_REFRESH_PAGES,
+  type BootstrapResource,
+  bootstrapEventCursor,
   pageLoadsDeliveryFeatures,
   pageLoadsSnapshot,
+  pageOwnsBootstrapResource,
   pagePollsOperatorInbox,
+  projectionNeedsFresh,
   snapshotLoadKindForPage,
 } from "./pageLoadPolicy";
 // P1 frontend split: pages/shared extracted from this file.
@@ -809,11 +815,25 @@ export function App() {
     if (!projectRequestScope.isCurrent(ticket)) return next;
     setChannelsPage(next);
     setChannelLoadError(null);
-    if (!selectedChannelId || !next.channels.some((item) => channelIdOf(item) === selectedChannelId)) {
-      setSelectedChannelId(channelIdOf(next.channels[0]) || "ch-zaofu");
+    setSelectedChannelId((current) => (
+      current && next.channels.some((item) => channelIdOf(item) === current)
+        ? current
+        : channelIdOf(next.channels[0]) || "ch-zaofu"
+    ));
+    if (projectionNeedsFresh(next)) {
+      void getChannels(requestedProjectId || undefined, true).then((fresh) => {
+        if (!projectRequestScope.isCurrent(ticket)) return;
+        setChannelsPage(fresh);
+        setChannelLoadError(null);
+        setSelectedChannelId((current) => (
+          current && fresh.channels.some((item) => channelIdOf(item) === current)
+            ? current
+            : channelIdOf(fresh.channels[0]) || "ch-zaofu"
+        ));
+      }).catch(() => undefined);
     }
     return next;
-  }, [activeProjectId, selectedChannelId]);
+  }, [activeProjectId]);
 
   const loadKanbanProposals = useCallback(async () => {
     const requestedProjectId = activeProjectId || "";
@@ -843,7 +863,24 @@ export function App() {
       return;
     }
     try {
-      const requests: Array<Promise<unknown>> = [loadChannels()];
+      const owns = (resource: BootstrapResource) => (
+        pageOwnsBootstrapResource(page, resource)
+      );
+      const requests: Array<Promise<unknown>> = [
+        getProjectHealth(activeProjectId || undefined)
+          .then((health) => {
+            if (projectRequestScope.isCurrent(ticket)) setProjectHealth(health);
+          })
+          .catch(() => {
+            if (projectRequestScope.isCurrent(ticket)) setProjectHealth(null);
+          }),
+      ];
+      if (owns("channels.summary")) requests.push(loadChannels());
+      if (owns("events.recent")) {
+        requests.push(getRecentEventsPage(60, activeProjectId || undefined, true).then((recent) => {
+          if (projectRequestScope.isCurrent(ticket)) setEvents(recent.items.slice().reverse());
+        }));
+      }
       if (pageLoadsSnapshot(page)) requests.push(loadSnapshot());
       if (pageLoadsDeliveryFeatures(page)) requests.push(loadDeliveryFeatures());
       await Promise.all(requests);
@@ -900,8 +937,8 @@ export function App() {
         scheduleSlice("kanban-proposals", () => void loadKanbanProposals());
       }
       if (eventType.startsWith("channel.")) {
-        scheduleSlice("channels", () => void loadChannels());
         if (page === "channels") {
+          scheduleSlice("channels", () => void loadChannels());
           const channelId = textValue(payload.channel_id) || selectedChannelIdRef.current;
           if (!channelId || channelId === selectedChannelIdRef.current) {
             const ticket = projectRequestScope.capture(activeProjectId);
@@ -1043,6 +1080,9 @@ export function App() {
     async function bootstrap() {
       try {
         const snapshotKind = snapshotLoadKindForPage(page);
+        const owns = (resource: BootstrapResource) => (
+          pageOwnsBootstrapResource(page, resource)
+        );
         const projectsPage = await getWorkspaceProjects().catch(() => null);
         const projectId = activeProjectId || projectsPage?.active_project_id || "";
         if (cancelled) return;
@@ -1072,30 +1112,46 @@ export function App() {
         setSnapshot((current) => (
           current?.project?.project_id === projectId ? current : null
         ));
-        void getChannels(projectId || undefined).then((initialChannels) => {
-          if (cancelled) return;
-          setChannelsPage(initialChannels);
-          setChannelLoadError(null);
-          if (!selectedChannelId || !initialChannels.channels.some((item) => channelIdOf(item) === selectedChannelId)) {
-            setSelectedChannelId(channelIdOf(initialChannels.channels[0]) || "ch-zaofu");
-          }
-        }).catch((err) => {
-          if (cancelled) return;
-          setChannelLoadError(err instanceof Error ? err.message : String(err));
-        });
+        if (owns("channels.summary")) {
+          void getChannels(projectId || undefined).then((initialChannels) => {
+            if (cancelled) return;
+            setChannelsPage(initialChannels);
+            setChannelLoadError(null);
+            if (!selectedChannelId || !initialChannels.channels.some((item) => channelIdOf(item) === selectedChannelId)) {
+              setSelectedChannelId(channelIdOf(initialChannels.channels[0]) || "ch-zaofu");
+            }
+            if (projectionNeedsFresh(initialChannels)) {
+              void getChannels(projectId || undefined, true).then((freshChannels) => {
+                if (cancelled) return;
+                setChannelsPage(freshChannels);
+                setSelectedChannelId((current) => (
+                  current && freshChannels.channels.some((item) => channelIdOf(item) === current)
+                    ? current
+                    : channelIdOf(freshChannels.channels[0]) || "ch-zaofu"
+                ));
+              }).catch(() => undefined);
+            }
+          }).catch((err) => {
+            if (cancelled) return;
+            setChannelLoadError(err instanceof Error ? err.message : String(err));
+          });
+        }
         if (pageLoadsDeliveryFeatures(page)) {
           void getDeliveryFeatures(projectId || undefined).then((initialFeatures) => {
             if (cancelled) return;
             setDeliveryFeaturesPage(initialFeatures);
           }).catch(() => undefined);
         }
-        const [initialSnapshot, initialEventsPage] = await Promise.all([
+        const [initialSnapshot, initialEventsPage, initialHealth] = await Promise.all([
           snapshotKind === "none"
             ? Promise.resolve(null)
             : snapshotKind === "full"
               ? getSnapshot(projectId || undefined)
               : getSnapshotLight(projectId || undefined),
-          getRecentEventsPage(60, projectId || undefined),
+          owns("events.recent")
+            ? getRecentEventsPage(60, projectId || undefined)
+            : Promise.resolve(null),
+          getProjectHealth(projectId || undefined).catch(() => null),
         ]);
         if (cancelled) return;
         if (
@@ -1106,13 +1162,19 @@ export function App() {
         ) {
           return;
         }
-        const initialSeq = Math.max(
-          Number(initialSnapshot?.seq || 0),
-          Number(initialEventsPage.current_seq || 0),
-        );
+        const cursorFallback = initialHealth || initialEventsPage
+          ? null
+          : await getRecentEventsPage(1, projectId || undefined).catch(() => null);
+        const initialSeq = bootstrapEventCursor({
+          recentEventsSeq: initialEventsPage?.current_seq,
+          snapshotSeq: initialSnapshot?.seq,
+          healthSeq: initialHealth?.seq,
+          fallbackSeq: cursorFallback?.current_seq,
+        });
         lastSeqRef.current = initialSeq;
         if (initialSnapshot) setSnapshot(initialSnapshot);
-        setEvents(initialEventsPage.items.slice().reverse());
+        if (initialHealth) setProjectHealth(initialHealth);
+        setEvents(initialEventsPage ? initialEventsPage.items.slice().reverse() : []);
         setError(null);
         connectStream(initialSeq, projectId);
       } catch (err) {
@@ -1746,6 +1808,22 @@ export function App() {
     if (!snapshot && activeProjectId) {
       void loadSnapshot("light");
     }
+    if (!events.length && activeProjectId) {
+      const ticket = projectRequestScope.capture(activeProjectId);
+      void getRecentEvents(60, activeProjectId).then((recent) => {
+        if (projectRequestScope.isCurrent(ticket)) setEvents(recent.slice().reverse());
+      }).catch(() => undefined);
+    }
+  }
+
+  function openAddAgentModal() {
+    if (channelsPage) {
+      setAddAgentOpen(true);
+      return;
+    }
+    void loadChannels().then(() => setAddAgentOpen(true)).catch((err) => {
+      setChannelLoadError(err instanceof Error ? err.message : String(err));
+    });
   }
 
   async function submitAddAgentToChannel() {
@@ -1964,6 +2042,7 @@ export function App() {
           activePage={page}
           activeProjectId={activeProjectId}
           channels={channelsPage?.channels ?? []}
+          channelsLoaded={channelsPage !== null}
           inboxPendingCount={projectHealth?.runtime_state === "archived" ? 0 : inboxPendingCount}
           liveState={liveState}
           onAddProject={() => openProjectWizard()}
@@ -1991,6 +2070,7 @@ export function App() {
           ) : page === "project" ? (
             <ProjectHomePage
               onOpenPage={setPage}
+              projectId={activeProjectId}
               snapshot={snapshot}
               onOpenTask={openTask}
               onOpenProjection={(kind, id) => void openProjection(kind, id)}
@@ -2005,7 +2085,7 @@ export function App() {
                 detail={channelDetail}
                 events={events}
                 loadError={channelLoadError}
-                onAddAgent={() => setAddAgentOpen(true)}
+                onAddAgent={openAddAgentModal}
                 onNewChannel={() => setNewChannelOpen(true)}
                 onOpenChannel={openChannel}
                 onPostMessage={(text, refs, ingress) => submitChannelMessage(text, refs, ingress)}
@@ -2140,7 +2220,7 @@ export function App() {
                       backend: agent.backend || "",
                       reason: "added from agent roster",
                     });
-                    setAddAgentOpen(true);
+                    openAddAgentModal();
                   }}
                   onThemeModeChange={setThemeMode}
                   onOpenPage={(nextPage) => setPage(nextPage)}
@@ -2372,11 +2452,13 @@ function deliveryCardDetail(taskFlowStats: TaskFlowStats, metrics: MetricsSnapsh
 
 function ProjectHomePage({
   onOpenPage,
+  projectId,
   snapshot,
   onOpenProjection,
   onOpenTask,
 }: {
   onOpenPage: (page: PageId) => void;
+  projectId: string;
   snapshot: Snapshot | null;
   onOpenProjection: (kind: ProjectionKind, id: string) => void;
   onOpenTask: (taskId: string) => void;
@@ -2416,14 +2498,16 @@ function ProjectHomePage({
   const totalTasks = tasks.length;
   const completionRate = totalTasks ? doneCount / totalTasks : 0;
   const agents = snapshot?.agents ?? [];
-  const fleetMetrics = buildFleetMetrics(agents, snapshot?.agent_cockpit ?? null, snapshot?.cost ?? null);
+  const effectiveCost = useProjectCost(projectId, snapshot?.cost);
+  const fleetMetrics = buildFleetMetrics(agents, snapshot?.agent_cockpit ?? null, effectiveCost);
   const attentionRows = buildAgentAttentionRows(agents, snapshot?.agent_cockpit ?? null, snapshot?.recovery ?? null);
   const kernelMetrics = snapshot?.metrics_snapshot;
   const taskFlowStats = snapshot?.fleet_stats?.task_flow;
   // 2026-06-12: Q3 Cost 卡(方案 a,第五卡)。budget 占比待后端暴露 global_budget_usd 再显。
-  const costSummary = snapshot?.cost ?? null;
+  const costSummary = effectiveCost;
   const costRoles = costSummary ? Object.entries(costSummary.per_role ?? {}) : [];
-  const costTokens = costRoles.reduce((acc, [, r]) => acc + (r.input_tokens ?? 0) + (r.output_tokens ?? 0), 0);
+  const projectCost = buildProjectCostPresentation(costSummary);
+  const costTokens = projectCost.totalTokens;
   const topCostRole = costRoles.slice().sort((a, b) => (b[1].usd ?? 0) - (a[1].usd ?? 0))[0];
   const fmtTok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
   const allFeatures = snapshot?.features ?? [];
@@ -2470,14 +2554,14 @@ function ProjectHomePage({
     },
     {
       label: "Cost",
-      value: (costSummary?.total_usd ?? 0) > 0
-        ? `$${(costSummary?.total_usd ?? 0).toFixed(2)}`
+      value: projectCost.totalUsd > 0
+        ? `$${projectCost.totalUsd.toFixed(2)}`
         : costTokens > 0 ? `${fmtTok(costTokens)} tok` : "—",
       detail: costTokens > 0
-        ? `${topCostRole ? `top ${topCostRole[0]} $${(topCostRole[1].usd ?? 0).toFixed(2)} · ` : ""}${fmtTok(costTokens)} tok`
+        ? `${topCostRole ? `top ${topCostRole[0]} $${(topCostRole[1].usd ?? 0).toFixed(2)} · ` : ""}${fmtTok(costTokens)} tok${projectCost.precisionLabel ? ` · ${projectCost.precisionLabel}` : ""}`
         : "no usage recorded",
-      tone: "info",
-      zero: (costSummary?.total_usd ?? 0) === 0 && costTokens === 0,
+      tone: projectCost.precisionTone,
+      zero: !projectCost.hasUsage,
       onClick: () => onOpenPage("runtime"),
     },
     {

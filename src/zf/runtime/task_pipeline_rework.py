@@ -103,6 +103,86 @@ def derive_impl_rework_requests(
     return requests
 
 
+def reconcile_task_ref_repair_replays(
+    runtime: Any,
+    *,
+    events: Iterable[ZfEvent],
+    generation_contexts: Mapping[str, Mapping[str, Any]],
+) -> list[ZfEvent]:
+    """Retry the mechanical TaskRef gate before spending another Impl turn.
+
+    The provider result and its operation are already terminal when TaskRef
+    admission runs. A later kernel/config repair can make that same immutable
+    result admissible, so replay only the ref gate once per repair request and
+    let normal semantic rework handle results that remain invalid.
+    """
+
+    event_rows = list(events)
+    event_by_id = {event.id: event for event in event_rows}
+    latest_status_by_trigger: dict[str, str] = {}
+    latest_repair_by_source: dict[str, ZfEvent] = {}
+    for event in event_rows:
+        payload = _payload(event)
+        if event.type in _TASK_REF_STATUS_EVENTS:
+            trigger_id = str(payload.get("trigger_event_id") or "").strip()
+            if trigger_id:
+                latest_status_by_trigger[trigger_id] = event.type
+        elif event.type == "task.ref.repair.requested":
+            source_id = str(payload.get("source_event_id") or "").strip()
+            if source_id:
+                latest_repair_by_source[source_id] = event
+
+    attempted = getattr(runtime, "_task_ref_repair_replay_attempts", None)
+    if attempted is None:
+        attempted = set()
+        runtime._task_ref_repair_replay_attempts = attempted
+    emitted: list[ZfEvent] = []
+    for source_id, repair in latest_repair_by_source.items():
+        if repair.id in attempted:
+            continue
+        attempted.add(repair.id)
+        if latest_status_by_trigger.get(source_id) != "task.ref.rejected":
+            continue
+        source = event_by_id.get(source_id)
+        if source is None or source.type != "dev.build.done" or not source.task_id:
+            continue
+        context = generation_contexts.get(str(source.task_id))
+        source_payload = _payload(source)
+        if (
+            context is None
+            or str(source_payload.get("task_pipeline_stage") or "") != "impl"
+            or str(source_payload.get("workflow_run_id") or "")
+            != str(context.get("workflow_run_id") or "")
+            or str(source_payload.get("task_map_generation") or "")
+            != str(context.get("task_map_generation") or "")
+        ):
+            continue
+        processor = getattr(runtime, "_process_task_ref_for_progress_event", None)
+        if not callable(processor):
+            continue
+        try:
+            result = processor(source)
+        except Exception:
+            continue
+        if result is None or str(getattr(result, "status", "")) != "updated":
+            continue
+        payload = dict(getattr(result, "payload", {}) or {})
+        payload.update({
+            "source": "task_ref_repair_reconcile",
+            "repair_request_event_id": repair.id,
+        })
+        emitted.append(runtime.event_writer.append(ZfEvent(
+            type="task.ref.updated",
+            actor="zf-cli",
+            task_id=source.task_id,
+            payload=payload,
+            causation_id=repair.id,
+            correlation_id=source.correlation_id or repair.correlation_id,
+            origin="kernel",
+        )))
+    return emitted
+
+
 def impl_rework_feedback(
     request: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -145,4 +225,8 @@ def _strings(value: Any) -> list[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
-__all__ = ["derive_impl_rework_requests", "impl_rework_feedback"]
+__all__ = [
+    "derive_impl_rework_requests",
+    "impl_rework_feedback",
+    "reconcile_task_ref_repair_replays",
+]

@@ -13,7 +13,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from zf.core.config.schema import ZfConfig
 from zf.core.events.log import EventLog
@@ -23,6 +23,7 @@ from zf.core.state.atomic_io import atomic_write_text
 from zf.core.task.schema import Task
 from zf.core.task.store import TERMINAL_STATES, TaskStore
 from zf.runtime.recovery_sufficiency import build_artifact_recovery_refs
+from zf.runtime.task_contract_snapshot import criterion_text
 
 
 SUCCESS_EVENT_TYPES = {
@@ -666,7 +667,11 @@ def _role_from_assignee(assignee: str) -> str:
 def _acceptance_criteria_from_contract(contract: Any) -> list[str]:
     explicit = list(getattr(contract, "acceptance_criteria", []) or [])
     if explicit:
-        return [str(item).strip() for item in explicit if str(item).strip()]
+        return [
+            text
+            for item in explicit
+            if (text := criterion_text(item))
+        ]
     evidence = getattr(contract, "evidence_contract", {}) or {}
     if not isinstance(evidence, dict):
         return []
@@ -676,6 +681,31 @@ def _acceptance_criteria_from_contract(contract: Any) -> list[str]:
     if not acceptance or acceptance == "exit_code=0":
         return []
     return [acceptance]
+
+
+def _acceptance_evidence_for_criterion(
+    contract: Any,
+    criterion: Any,
+    index: int,
+) -> list[str]:
+    evidence = getattr(contract, "acceptance_evidence", {}) or {}
+    if not isinstance(evidence, dict):
+        return []
+    keys: list[str] = []
+    if isinstance(criterion, Mapping):
+        for field in ("acceptance_id", "id"):
+            value = str(criterion.get(field) or "").strip()
+            if value:
+                keys.append(value)
+    text = criterion_text(criterion)
+    if text:
+        keys.append(text)
+    keys.append(str(index))
+    for key in dict.fromkeys(keys):
+        refs = _coerce_list(evidence.get(key))
+        if refs:
+            return refs
+    return []
 
 
 def evaluate_success_criteria(
@@ -868,14 +898,23 @@ def project_why_not_done(
                 owner_role=work_unit.owner_role,
             ))
     for index, criterion in enumerate(task.contract.acceptance_criteria):
-        evidence = task.contract.acceptance_evidence.get(criterion)
-        evidence = evidence or task.contract.acceptance_evidence.get(str(index))
+        criterion_value = (
+            criterion_text(criterion) or f"criterion[{index}]"
+        )
+        evidence = _acceptance_evidence_for_criterion(
+            task.contract,
+            criterion,
+            index,
+        )
         if not evidence:
             reasons.append(WhyNotDoneReason(
                 kind="missing_acceptance_evidence",
                 severity="blocking",
-                message=f"acceptance criterion has no evidence: {criterion}",
-                expected=criterion,
+                message=(
+                    "acceptance criterion has no evidence: "
+                    f"{criterion_value}"
+                ),
+                expected=criterion_value,
                 owner_role=work_unit.owner_role,
             ))
     for result in evaluate_success_criteria(
@@ -1638,14 +1677,20 @@ def project_workpad(
         },
     ]
     acceptance = []
-    for index, criterion in enumerate(work_unit.acceptance_criteria):
-        evidence = (
-            task.contract.acceptance_evidence.get(criterion)
-            or task.contract.acceptance_evidence.get(str(index))
-            or []
+    raw_criteria = list(task.contract.acceptance_criteria or [])
+    if not raw_criteria:
+        raw_criteria = list(work_unit.acceptance_criteria)
+    for index, criterion in enumerate(raw_criteria):
+        criterion_value = (
+            criterion_text(criterion) or f"criterion[{index}]"
+        )
+        evidence = _acceptance_evidence_for_criterion(
+            task.contract,
+            criterion,
+            index,
         )
         acceptance.append({
-            "criterion": criterion,
+            "criterion": criterion_value,
             "status": "done" if evidence else "missing",
             "evidence_refs": list(evidence),
         })
@@ -1973,12 +2018,21 @@ def project_skill_set(
             "skill": "strict-harness",
             "reason": f"effective profile {profile}",
         })
+    from zf.runtime.skill_invocation_projection import project_skill_invocations
+
+    invocation = project_skill_invocations(
+        state_dir,
+        config=config,
+        task_id=task.id,
+        role_instance=task.assigned_to or "",
+    )
     return {
         "task_id": task.id,
         "role": role_name,
         "effective_profile": profile,
         "skills": skills,
         "load_reasons": reasons,
+        "invocation": invocation,
     }
 
 

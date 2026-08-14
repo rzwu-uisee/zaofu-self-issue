@@ -11,6 +11,7 @@ from zf.core.verification.event_schema import (
     EventSchemaRegistry,
     EventSchemaRule,
     SchemaViolation,
+    channel_event_schema_rules,
 )
 
 
@@ -107,6 +108,20 @@ class TestLoadFromDict:
         })
         assert registry.has_rule("good.event")
         assert not registry.has_rule("bad.event")
+
+    def test_channel_reply_failure_schema_declares_recovery_classification(self):
+        optional = set(
+            channel_event_schema_rules()["channel.agent.reply.failed"][
+                "optional"
+            ]
+        )
+
+        assert {
+            "failure_status",
+            "failure_class",
+            "retryable",
+            "terminal_disposition",
+        } <= optional
 
 
 class TestRegistry:

@@ -3,6 +3,8 @@ import { getAgentCockpit, getAgentLive, getAgents } from "../../api/client";
 import type { AgentSummary, ChannelSummary, CostSummary, ExecutionPatternProjection, FleetStats, MetricsSnapshotProjection, Task } from "../../api/types";
 import { formatTokens } from "../../lib/format";
 import { buildAgentAttentionRows, buildFleetMetrics, buildRoleFleetRows, contextPercent, isBackendWorker, needsAttention } from "../../app/cockpitModel";
+import { buildProjectCostPresentation } from "../../app/costPrecision";
+import { useProjectCost } from "../../app/useProjectCost";
 import { useEffect, useMemo, useState } from "react";
 import { KeyValuePanel, RuntimeDetailSection, RuntimeSummaryCard, TablePage, asRecord, formatUsd, needsOperatorAttention, textValue } from "../../app/shared";
 
@@ -108,9 +110,15 @@ export function AgentViewPage({
     [workers],
   );
   const [selectedId, setSelectedId] = useState("");
-  const fleetMetrics = buildFleetMetrics(effectiveAgents, effectiveAgentCockpit, cost);
+  const effectiveCost = useProjectCost(projectId, cost);
+  const fleetMetrics = buildFleetMetrics(effectiveAgents, effectiveAgentCockpit, effectiveCost);
+  const projectCost = buildProjectCostPresentation(effectiveCost);
+  const displayedTokens = projectCost.hasUsage
+    ? projectCost.totalTokens
+    : fleetMetrics.totalInputTokens + fleetMetrics.totalOutputTokens;
+  const displayedCost = projectCost.hasUsage ? projectCost.totalUsd : fleetMetrics.totalCostUsd;
   const agentAttentionRows = buildAgentAttentionRows(effectiveAgents, effectiveAgentCockpit, recovery);
-  const roleFleetRows = buildRoleFleetRows(effectiveAgents, cost);
+  const roleFleetRows = buildRoleFleetRows(effectiveAgents, effectiveCost);
 
   useEffect(() => {
     // Drawer semantics: nothing selected by default; only clear a selection
@@ -196,7 +204,7 @@ export function AgentViewPage({
     { key: "actions", value: (selected.allowed_actions ?? []).join(", ") || "-" },
   ] : [];
   const zeroCost = { usd: 0, input_tokens: 0, output_tokens: 0, entries: 0 };
-  const ledgerEntries = Object.entries(cost?.per_role ?? {});
+  const ledgerEntries = Object.entries(effectiveCost?.per_role ?? {});
   const hasLedgerUsage = ledgerEntries.some(([, entry]) => (
     (entry.entries ?? 0) > 0
     || (entry.input_tokens ?? 0) > 0
@@ -240,8 +248,8 @@ export function AgentViewPage({
   ])].sort((left, right) => left.localeCompare(right));
   const roleUsageRowsRaw = roleNames.map((role) => {
     const usage = hasLedgerUsage
-      ? (cost?.per_role[role] ?? workerCostByRole.get(role) ?? zeroCost)
-      : (workerCostByRole.get(role) ?? cost?.per_role[role] ?? zeroCost);
+      ? (effectiveCost?.per_role[role] ?? workerCostByRole.get(role) ?? zeroCost)
+      : (workerCostByRole.get(role) ?? effectiveCost?.per_role[role] ?? zeroCost);
     const meta = roleMeta.get(role);
     const totalTokens = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
     return {
@@ -413,11 +421,13 @@ export function AgentViewPage({
         />
         <RuntimeSummaryCard
           label="Tokens"
-          value={formatTokens(fleetMetrics.totalInputTokens + fleetMetrics.totalOutputTokens)}
+          value={formatTokens(displayedTokens)}
           meta={typeof metricsSnapshot?.cost_per_task === "number" && metricsSnapshot.cost_per_task > 0
-            ? `${formatUsd(fleetMetrics.totalCostUsd)} · $${metricsSnapshot.cost_per_task.toFixed(2)}/task`
-            : formatUsd(fleetMetrics.totalCostUsd)}
-          tone={fleetMetrics.totalInputTokens || fleetMetrics.totalOutputTokens ? "info" : "muted"}
+            ? `${formatUsd(displayedCost)} · $${metricsSnapshot.cost_per_task.toFixed(2)}/task${projectCost.precisionLabel ? ` · ${projectCost.precisionLabel}` : ""}`
+            : `${formatUsd(displayedCost)}${projectCost.precisionLabel ? ` · ${projectCost.precisionLabel}` : ""}`}
+          tone={displayedTokens || displayedCost
+            ? projectCost.hasUsage ? projectCost.precisionTone : "info"
+            : "muted"}
         />
         <RuntimeSummaryCard
           label="Providers"

@@ -120,6 +120,51 @@ def test_terminal_workflow_run_invalidates_active_child_and_recovery(
     )
 
 
+def test_active_goal_update_does_not_reopen_preblocked_fanout_child(
+    tmp_path: Path,
+) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    run_id = "workflow-resumed-1"
+    host.event_log.append(ZfEvent(
+        type="run.goal.started",
+        actor="zf-cli",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-verify-1",
+        "verify-lane-1",
+        "verify-lane-1",
+        workflow_run_id=run_id,
+        task_id="TASK-1",
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="run-manager",
+        task_id="TASK-1",
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        task_id="TASK-1",
+        payload={
+            "run_id": run_id,
+            "workflow_run_id": run_id,
+            "status": "active",
+        },
+        correlation_id=run_id,
+    ))
+
+    assert host._active_fanout_child_for_instance("verify-lane-1") is None
+    assert host._fanout_task_state_for_instance(
+        "verify-lane-1",
+        "TASK-1",
+    ) == "terminal"
+    assert host._fanout_identity_stale_reason("fanout-verify-1") == ("", "")
+
+
 def test_terminal_for_other_run_does_not_invalidate_live_child(
     tmp_path: Path,
 ) -> None:
@@ -148,6 +193,107 @@ def test_terminal_for_other_run_does_not_invalidate_live_child(
     assert child is not None
     assert child["fanout_id"] == "fanout-live"
     assert host._fanout_identity_stale_reason("fanout-live") == ("", "")
+
+
+def test_blocked_run_reopen_keeps_only_post_reopen_child_active(
+    tmp_path: Path,
+) -> None:
+    """R4: a legal goal reopen creates a new lifecycle epoch.
+
+    The pre-block child stays terminal, while a child dispatched after the
+    canonical ``run.goal.updated(status=active)`` must remain recoverable by
+    watchdog respawn.
+    """
+    host = _Host(tmp_path / "events.jsonl")
+    run_id = "workflow-resumed"
+    host.event_log.append(ZfEvent(
+        type="run.goal.started",
+        actor="zf-cli",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-before-block",
+        "old-child",
+        "dev-lane-0",
+        workflow_run_id=run_id,
+        task_id="TASK-OLD",
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.blocked",
+        actor="zf-cli",
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        payload={
+            "run_id": run_id,
+            "workflow_run_id": run_id,
+            "status": "active",
+        },
+        correlation_id=run_id,
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-after-reopen",
+        "new-child",
+        "dev-lane-0",
+        workflow_run_id=run_id,
+        task_id="TASK-NEW",
+    ))
+
+    child = host._active_fanout_child_for_instance("dev-lane-0")
+    assert child is not None
+    assert child["fanout_id"] == "fanout-after-reopen"
+    assert host._fanout_task_state_for_instance(
+        "dev-lane-0",
+        "TASK-OLD",
+    ) == "terminal"
+    assert host._fanout_task_state_for_instance(
+        "dev-lane-0",
+        "TASK-NEW",
+    ) == "active"
+
+
+def test_hard_terminal_cannot_be_reopened_by_goal_update(tmp_path: Path) -> None:
+    host = _Host(tmp_path / "events.jsonl")
+    run_id = "workflow-complete"
+    host.event_log.append(ZfEvent(
+        type="run.goal.started",
+        actor="zf-cli",
+        payload={"run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.completed",
+        actor="zf-cli",
+        payload={"run_id": run_id, "workflow_run_id": run_id},
+        correlation_id=run_id,
+    ))
+    host.event_log.append(ZfEvent(
+        type="run.goal.updated",
+        actor="operator",
+        payload={
+            "run_id": run_id,
+            "workflow_run_id": run_id,
+            "status": "active",
+        },
+        correlation_id=run_id,
+    ))
+    host.event_log.append(_dispatched(
+        "fanout-after-complete",
+        "new-child",
+        "dev-lane-0",
+        workflow_run_id=run_id,
+        task_id="TASK-NEW",
+    ))
+
+    assert host._active_fanout_child_for_instance("dev-lane-0") is None
+    assert host._fanout_task_state_for_instance(
+        "dev-lane-0",
+        "TASK-NEW",
+    ) == "terminal"
 
 
 def test_stale_completion_terminates_exact_superseded_child(tmp_path: Path) -> None:

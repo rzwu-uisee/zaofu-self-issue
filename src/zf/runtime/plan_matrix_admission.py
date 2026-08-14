@@ -11,6 +11,7 @@ _MATRIX_ROWS = {
     "capability_matrix": ("capabilities",),
     "acceptance_matrix": ("acceptance", "acceptances"),
     "test_matrix": ("commands",),
+    "real_e2e_matrix": ("rows",),
 }
 
 
@@ -225,6 +226,15 @@ def plan_matrix_admission_errors(
             has_command_registry=bool(_rows(test_body, "commands")),
         )
 
+    real_e2e_body = ports.get("real_e2e_matrix")
+    if real_e2e_body is not None:
+        _real_e2e_matrix_errors(
+            errors,
+            body=real_e2e_body,
+            task_acceptance=task_acceptance,
+            task_commands=task_commands,
+        )
+
     capability_body = ports.get("capability_matrix")
     capability_rows = _rows(capability_body or {}, "capabilities")
     capability_by_id = _unique_rows(
@@ -435,6 +445,169 @@ def _test_reference_errors(
             f"{field}.acceptance_ids",
             "acceptance",
         )
+
+
+def _real_e2e_matrix_errors(
+    errors: list[dict[str, str]],
+    *,
+    body: Mapping[str, Any],
+    task_acceptance: Mapping[str, tuple[str, Mapping[str, Any]]],
+    task_commands: Mapping[str, tuple[str, Mapping[str, Any], str]],
+) -> None:
+    rows = _rows(body, "rows")
+    acceptance_ids = set(task_acceptance)
+    for index, row in enumerate(rows):
+        row_id = _row_id(row, "id") or str(index)
+        field = f"real_e2e_matrix.rows[{row_id}]"
+        acceptance_refs = _refs(row, "acceptance_id", "acceptance_ids")
+        _known_refs(
+            errors,
+            acceptance_refs,
+            acceptance_ids,
+            f"{field}.acceptance_ids",
+            "acceptance",
+        )
+        command_id = str(row.get("command_id") or "").strip()
+        command_required = row.get("command_required")
+        execution_mode = str(row.get("execution_mode") or "").strip()
+
+        if execution_mode == "immutable_baseline_only":
+            _immutable_e2e_baseline_errors(errors, row=row, field=field)
+            continue
+        if not command_id:
+            continue
+        task_command = task_commands.get(command_id)
+        if task_command is None:
+            _error(
+                errors,
+                "real_e2e_command_ref_unknown",
+                f"{field}.command_id",
+                f"unknown canonical command {command_id!r}",
+            )
+            continue
+        canonical = task_command[1]
+        tier = str(canonical.get("tier") or "").strip()
+        if tier not in {"e2e", "real_e2e", "manual_evidence"}:
+            _error(
+                errors,
+                "real_e2e_command_tier_invalid",
+                f"{field}.command_id",
+                f"command {command_id!r} has tier {tier!r}; runtime/static "
+                "aggregation is not real E2E evidence",
+            )
+        canonical_acceptance = _refs(
+            canonical,
+            "acceptance_id",
+            "acceptance_ids",
+        )
+        if acceptance_refs != canonical_acceptance:
+            _error(
+                errors,
+                "real_e2e_acceptance_set_mismatch",
+                f"{field}.acceptance_ids",
+                f"expected {sorted(canonical_acceptance)}, "
+                f"got {sorted(acceptance_refs)}",
+            )
+        row_command = str(row.get("command") or row.get("cmd") or "").strip()
+        canonical_command = str(
+            canonical.get("command") or canonical.get("cmd") or ""
+        ).strip()
+        if row_command and row_command != canonical_command:
+            _error(
+                errors,
+                "real_e2e_command_definition_mismatch",
+                f"{field}.command",
+                f"real-E2E row does not match canonical command {command_id!r}",
+            )
+        if command_required is False:
+            _error(
+                errors,
+                "real_e2e_command_requirement_invalid",
+                f"{field}.command_required",
+                "a command-backed real-E2E row cannot disable command execution",
+            )
+
+    for acceptance_id, (_task_id, criterion) in task_acceptance.items():
+        if str(criterion.get("evidence_mode") or "") != "immutable_baseline_only":
+            continue
+        matching = [
+            row
+            for row in rows
+            if acceptance_id in _refs(row, "acceptance_id", "acceptance_ids")
+            and str(row.get("execution_mode") or "")
+            == "immutable_baseline_only"
+        ]
+        if not matching:
+            _error(
+                errors,
+                "immutable_baseline_real_e2e_row_missing",
+                f"real_e2e_matrix.acceptance[{acceptance_id}]",
+                "immutable E2E criterion requires a matching immutable baseline row",
+            )
+
+
+def _immutable_e2e_baseline_errors(
+    errors: list[dict[str, str]],
+    *,
+    row: Mapping[str, Any],
+    field: str,
+) -> None:
+    if row.get("command_required") is not False:
+        _error(
+            errors,
+            "immutable_baseline_command_requirement_invalid",
+            f"{field}.command_required",
+            "immutable baseline row must set command_required=false",
+        )
+    if str(row.get("command_id") or row.get("command") or row.get("cmd") or "").strip():
+        _error(
+            errors,
+            "immutable_baseline_command_present",
+            f"{field}.command_id",
+            "immutable baseline row must not redispatch or relabel a command",
+        )
+    if not str(row.get("origin_command") or "").strip():
+        _error(
+            errors,
+            "immutable_baseline_origin_command_missing",
+            f"{field}.origin_command",
+            "immutable baseline row requires the exact origin command",
+        )
+    target_commit = str(row.get("target_commit") or "").strip().lower()
+    if not _is_commit_digest(target_commit):
+        _error(
+            errors,
+            "immutable_baseline_target_commit_invalid",
+            f"{field}.target_commit",
+            "immutable baseline row requires a full target commit digest",
+        )
+    evidence_refs = {
+        str(value).strip()
+        for value in row.get("evidence_refs", [])
+        if str(value).strip()
+    }
+    if target_commit and f"git:{target_commit}" not in {
+        value.lower() for value in evidence_refs
+    }:
+        _error(
+            errors,
+            "immutable_baseline_commit_ref_missing",
+            f"{field}.evidence_refs",
+            "immutable baseline evidence must include git:<target_commit>",
+        )
+    if not any(value.startswith("artifacts/") for value in evidence_refs):
+        _error(
+            errors,
+            "immutable_baseline_artifact_ref_missing",
+            f"{field}.evidence_refs",
+            "immutable baseline evidence must include retained artifact refs",
+        )
+
+
+def _is_commit_digest(value: str) -> bool:
+    return len(value) in {40, 64} and all(
+        character in "0123456789abcdef" for character in value
+    )
 
 
 def _task_command_rows(task: Mapping[str, Any]) -> list[Mapping[str, Any]]:

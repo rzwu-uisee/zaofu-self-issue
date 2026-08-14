@@ -78,6 +78,36 @@ def test_diagnose_attention_policy_routes_to_run_manager_diagnosis() -> None:
     assert decision["intervention_class"] == "diagnose"
 
 
+def test_stage_replan_generation_requires_owner_approval_evidence() -> None:
+    missing = preflight_action(
+        action="stage-replan-new-generation",
+        payload={"escalation_event_id": "evt-escalation"},
+    )
+    payload = {
+        "escalation_event_id": "evt-escalation",
+        "approval_ref": "operator:test",
+    }
+
+    preflight = preflight_action(
+        action="stage-replan-new-generation",
+        payload=payload,
+    )
+    decision = decide_action_policy(
+        action="stage-replan-new-generation",
+        payload=payload,
+    )
+
+    assert missing["status"] == "blocked"
+    assert missing["failures"] == ["missing_approval_ref"]
+    assert preflight["status"] == "passed"
+    assert preflight["expected_downstream_events"] == [
+        "run.goal.updated",
+        "run.manager.action.applied",
+    ]
+    assert decision["decision"] == "needs_approval"
+    assert decision["executable"] is False
+
+
 def test_unclassified_action_routes_to_run_manager_diagnosis() -> None:
     decision = decide_action_policy(
         action="new-runtime-attention",

@@ -22,10 +22,13 @@ from zf.runtime.task_workflow_plans import (
 )
 from zf.runtime.workflow_anchor import workflow_task_request_binding
 from zf.runtime.workflow_origin import workflow_origin_digest
+from zf.runtime.workflow_request_acceptance import bind_task_workflow_inputs
 from zf.runtime.workflow_requests import (
     WorkflowRequestError,
+    hydrate_workflow_requirement,
     require_current_workflow_request,
 )
+from zf.runtime.workflow_inputs import hydrate_request_workflow_input_manifest
 from zf.runtime.workflow_route_catalog import (
     resolve_workflow_route,
     workflow_route_catalog,
@@ -134,6 +137,7 @@ class WorkflowStartService:
                 status_code=422,
                 task_id=task_id,
             )
+        requested_parameters = dict(parameters)
 
         task = TaskStore(self.state_dir / "kanban.json").get(task_id)
         if task is None:
@@ -338,6 +342,39 @@ class WorkflowStartService:
                     status_code=422,
                     task_id=task_id,
                 )
+            parameters = dict(parameters)
+            for key in ("artifact_refs", "source_refs"):
+                if key not in parameters and payload.get(key) not in (
+                    None, "", [], {},
+                ):
+                    parameters[key] = payload[key]
+            prior_binding = (
+                payload.get("task_input_binding")
+                if isinstance(payload.get("task_input_binding"), dict)
+                else None
+            )
+            try:
+                (
+                    parameters,
+                    task_input_binding,
+                    _task_input_contract,
+                    requested_parameters,
+                ) = bind_task_workflow_inputs(
+                    parameters,
+                    task,
+                    task_contract_digest=task_digest,
+                    prior_binding=prior_binding,
+                )
+            except ValueError as exc:
+                return _failure(
+                    "workflow_task_stale",
+                    str(exc),
+                    status_code=409,
+                    task_id=task_id,
+                )
+        else:
+            task_input_binding = {}
+            task_input_contract = {}
 
         objective = str(
             payload.get("objective")
@@ -351,6 +388,42 @@ class WorkflowStartService:
                 status_code=422,
                 task_id=task_id,
             )
+        active_request_replay = False
+        if str(request_projection.get("status") or "") in {
+            "submitted",
+            "running",
+        }:
+            try:
+                requirement = hydrate_workflow_requirement(
+                    self.state_dir,
+                    request_projection,
+                )
+                manifest = hydrate_request_workflow_input_manifest(
+                    self.state_dir,
+                    request_projection,
+                )
+            except WorkflowRequestError as exc:
+                return _failure(
+                    "workflow_task_stale",
+                    str(exc),
+                    status_code=409,
+                    task_id=task_id,
+                )
+            replay_error = _active_request_replay_error(
+                objective=objective,
+                parameters=requested_parameters,
+                requirement=requirement,
+                manifest=manifest,
+                route=route,
+            )
+            if replay_error:
+                return _failure(
+                    "workflow_request_active",
+                    replay_error,
+                    status_code=409,
+                    task_id=task_id,
+                )
+            active_request_replay = True
         normalized = {
             "schema_version": WORKFLOW_START_SCHEMA_VERSION,
             "task_id": task_id,
@@ -365,6 +438,10 @@ class WorkflowStartService:
             "config_digest": config_digest,
             "origin": str(payload.get("origin") or origin or ""),
         }
+        if task_input_binding:
+            normalized["task_input_binding"] = task_input_binding
+        if active_request_replay:
+            normalized["active_request_replay"] = True
         if request_projection:
             normalized.update({
                 "request_id": str(request_projection["request_id"]),
@@ -436,6 +513,11 @@ class WorkflowStartService:
             "thread_id",
             "thread_key",
         ):
+            if task_input_binding and key in {"artifact_refs", "source_refs"}:
+                # Delivery refs were already compiled into effective
+                # parameters.  Re-copying the raw top-level override here can
+                # discard inherited Task refs after approval.
+                continue
             if (request_projection or terminal_rotation) and key in {
                 "channel_id",
                 "conversation_id",
@@ -602,6 +684,67 @@ def _matches_canonical_origin(
         supplied_conversation,
         supplied_thread_key,
     ))
+
+
+def _active_request_replay_error(
+    *,
+    objective: str,
+    parameters: dict[str, Any],
+    requirement: dict[str, Any],
+    manifest: dict[str, Any],
+    route: dict[str, Any],
+) -> str:
+    """Return why an active Request cannot be treated as exact replay."""
+
+    if objective != str(requirement.get("objective") or "").strip():
+        return (
+            "active Workflow Request objective is immutable; use controlled "
+            "recovery/replan instead of workflow-start"
+        )
+    route_kind = str(route.get("kind") or "").strip()
+    if route_kind and route_kind != str(requirement.get("kind") or "").strip():
+        return "active Workflow Request kind does not match the selected route"
+
+    aliases = {
+        "source_ref": (manifest, "source_ref"),
+        "source_root": (requirement, "source_root"),
+        "target": (requirement, "target_root"),
+        "target_root": (requirement, "target_root"),
+        "acceptance": (requirement, "acceptance"),
+        "constraints": (requirement, "constraints"),
+        "open_questions": (requirement, "open_questions"),
+        "backend": (manifest, "requested_backend"),
+        "lanes": (manifest, "requested_lanes"),
+        "requested_lanes": (manifest, "requested_lanes"),
+        "strictness": (manifest, "strictness"),
+    }
+    ignored = {"request_id", "request_revision"}
+    for key, supplied in parameters.items():
+        if key in ignored or supplied in (None, "", [], {}):
+            continue
+        binding = aliases.get(str(key))
+        if binding is None:
+            return (
+                f"active Workflow Request parameter {key!r} cannot be "
+                "proven identical; use controlled recovery/replan"
+            )
+        owner, canonical_key = binding
+        canonical = owner.get(canonical_key)
+        if isinstance(supplied, (list, tuple)):
+            same = list(supplied) == list(canonical or [])
+        elif key in {"lanes", "requested_lanes"}:
+            try:
+                same = int(supplied) == int(canonical or 0)
+            except (TypeError, ValueError):
+                same = False
+        else:
+            same = str(supplied).strip() == str(canonical or "").strip()
+        if not same:
+            return (
+                f"active Workflow Request parameter {key!r} is immutable; "
+                "use controlled recovery/replan instead of workflow-start"
+            )
+    return ""
 
 
 def workflow_start_proposal(

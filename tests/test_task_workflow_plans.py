@@ -24,6 +24,7 @@ from zf.runtime.task_workflow_plans import (
 from zf.runtime.workflow_anchor import is_workflow_managed_task
 from zf.runtime.workflow_origin import build_workflow_origin_binding
 from zf.runtime.workflow_route_catalog import workflow_route_catalog
+from zf.runtime.workflow_start_inputs import prepare_approved_workflow_start
 from zf.runtime.wake_patterns import WAKE_PATTERNS
 from zf.runtime.watcher import EventWatcher
 
@@ -580,6 +581,11 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         "# Requirement\n\nImplement and verify the requested behavior.\n",
         encoding="utf-8",
     )
+    specification = tmp_path / "phase1-spec.md"
+    specification.write_text(
+        "# Specification\n\nPreserve the approved phase-one contract.\n",
+        encoding="utf-8",
+    )
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     writer = EventWriter(EventLog(state_dir / "events.jsonl"))
@@ -596,8 +602,21 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
                     "id": "AC-ROUTE",
                     "statement": "The selected route is implemented and verified.",
                 },
+                {
+                    "id": "AC-SPEC",
+                    "statement": "The approved specification remains authoritative.",
+                },
             ],
-            evidence_contract={"execution_owner": "workflow"},
+            source_ref="requirement.md",
+            spec_ref="phase1-spec.md",
+            handoff_artifacts=["requirement.md", "phase1-spec.md"],
+            scope=["src/**"],
+            exclusions=["docs/generated/**"],
+            explicit_non_goals=["Do not rewrite the approved specification."],
+            evidence_contract={
+                "execution_owner": "workflow",
+                "required_source_outputs": ["implementation-report.md"],
+            },
         ),
     )
     TaskStore(state_dir / "kanban.json").add(task)
@@ -623,21 +642,7 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         "thread_id": "delivery-thread",
         "parameters": {
             "backend": "mock",
-            "source_ref": str(requirement),
             "target_root": str(tmp_path),
-            "synthesis_event_id": "evt-channel-prd",
-            "source_refs": {
-                "channel_id": "ch-prd",
-                "thread_id": "main",
-                "synthesis_event_id": "evt-channel-prd",
-                "channel_prd_ref": str(requirement),
-                "channel_prd_digest": "sha256:canonical-prd",
-            },
-            "artifact_refs": [{
-                "kind": "channel_prd",
-                "ref": str(requirement),
-                "digest": "sha256:canonical-prd",
-            }],
         },
     })
 
@@ -659,12 +664,20 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         result["workflow_request"]["workflow_input_manifest_ref"]
     ).read_text(encoding="utf-8"))
     assert input_manifest["source_ref"] == str(requirement)
-    assert input_manifest["source_refs"]["channel_prd_ref"] == str(
-        requirement
-    )
-    assert input_manifest["source_refs"]["channel_prd_digest"] == (
-        "sha256:canonical-prd"
-    )
+    assert input_manifest["source_refs"]["task_source_ref"] == "requirement.md"
+    assert input_manifest["source_refs"]["task_spec_ref"] == "phase1-spec.md"
+    task_input_ref = Path(input_manifest["task_input_contract_ref"])
+    assert task_input_ref.exists()
+    task_input_contract = json.loads(task_input_ref.read_text(encoding="utf-8"))
+    assert task_input_contract["source_ref"] == "requirement.md"
+    assert task_input_contract["spec_ref"] == "phase1-spec.md"
+    assert task_input_contract["evidence_contract"] == {
+        "required_source_outputs": ["implementation-report.md"],
+    }
+    assert [
+        item["id"] for item in task_input_contract["acceptance_criteria"]
+    ] == ["AC-ROUTE", "AC-SPEC"]
+    assert input_manifest["task_input_contract_digest"]
     request_id = result["workflow_request"]["request_id"]
     request_projection = json.loads(
         (state_dir / "workflow-requests" / f"{request_id}.json").read_text(
@@ -687,8 +700,11 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
         )
     )
     assert requirement_spec["acceptance"] == [
-        "The selected route is implemented and verified."
+        "The selected route is implemented and verified.",
+        "The approved specification remains authoritative.",
     ]
+    assert requirement_spec["source_refs"]["task_spec_ref"] == "phase1-spec.md"
+    assert requirement_spec["task_input_contract_ref"] == str(task_input_ref)
     invoke = next(
         event
         for event in writer.event_log.read_all()
@@ -699,19 +715,64 @@ def test_task_workflow_start_runs_delivery_request_and_submit(
     assert invoke.payload["origin_binding"] == request_projection[
         "origin_binding"
     ]
-    assert invoke.payload["source_refs"]["channel_id"] == "ch-prd"
-    assert invoke.payload["source_refs"]["channel_prd_ref"] == str(
-        requirement
-    )
-    assert invoke.payload["source_refs"]["channel_prd_digest"] == (
-        "sha256:canonical-prd"
-    )
+    assert invoke.payload["source_refs"]["task_source_ref"] == "requirement.md"
+    assert invoke.payload["source_refs"]["task_spec_ref"] == "phase1-spec.md"
     assert any(
-        item.get("ref") == str(requirement)
-        or item.get("path") == str(requirement)
+        item.get("ref") == "requirement.md"
+        or item.get("path") == "requirement.md"
         for item in invoke.payload["artifact_refs"]
         if isinstance(item, dict)
     )
+    assert any(
+        item.get("ref") == "phase1-spec.md"
+        or item.get("path") == "phase1-spec.md"
+        for item in invoke.payload["artifact_refs"]
+        if isinstance(item, dict)
+    )
+    assert any(
+        item.get("ref") == str(task_input_ref)
+        or item.get("path") == str(task_input_ref)
+        for item in invoke.payload["artifact_refs"]
+        if isinstance(item, dict)
+    )
+
+
+def test_approved_workflow_start_rechecks_current_task_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    task = Task(id="TASK-RACE", title="Original title")
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(task)
+    normalized = {
+        "task_id": task.id,
+        "task_contract_digest": task_workflow_binding_digest(task),
+        "route_id": "research:fixed",
+        "objective": "Inspect the Task",
+        "parameters": {},
+    }
+
+    store.update(task.id, title="Changed after preview")
+
+    with pytest.raises(ValueError, match="changed after preview"):
+        prepare_approved_workflow_start(
+            state_dir=state_dir,
+            normalized=normalized,
+            route={"entry_pattern_id": "research"},
+            actor="web",
+            reason="",
+        )
+
+    normalized["task_id"] = "TASK-MISSING"
+    with pytest.raises(ValueError, match="does not exist"):
+        prepare_approved_workflow_start(
+            state_dir=state_dir,
+            normalized=normalized,
+            route={"entry_pattern_id": "research"},
+            actor="web",
+            reason="",
+        )
 
 
 def test_plan_selection_rejects_a_changed_task_contract(

@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
-from zf.runtime.run_scope import known_run_ids
+from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.terminal_events import (
-    event_run_scope,
     latest_quiescent_run_terminal,
     terminal_after_event,
 )
@@ -296,12 +295,23 @@ def run_standard_tick_services(
         )
         mark_quiescent_transition(event_writer, _q_events, status=_q_status)
         if _q_status.quiescent:
-            return TickServiceResult(
-                goal_dossier_delivery=goal_dossier_delivery,
-                owner_visible_delivery=early_owner_visible_delivery,
-                workflow_synthesis_consumed=workflow_synthesis_consumed,
-                channel_result_receipts=channel_result_receipts,
+            from zf.runtime.escalation_terminal import (
+                converge_unrecoverable_escalations,
             )
+
+            terminalized = converge_unrecoverable_escalations(
+                _q_events,
+                writer=event_writer,
+                task_store=getattr(orchestrator, "task_store", None),
+                request_autoresearch=True,
+            )
+            if not terminalized:
+                return TickServiceResult(
+                    goal_dossier_delivery=goal_dossier_delivery,
+                    owner_visible_delivery=early_owner_visible_delivery,
+                    workflow_synthesis_consumed=workflow_synthesis_consumed,
+                    channel_result_receipts=channel_result_receipts,
+                )
     except Exception:
         pass
 
@@ -1467,15 +1477,23 @@ def _emit_cost_blackout_if_needed(
     # a completed run's historical dispatch/usage window poison a later run.
     if terminal_after_event(events, last_dispatch) is not None:
         return False
-    dispatch_scope = event_run_scope(events, last_dispatch)
-    if not dispatch_scope and len(known_run_ids(events)) > 1:
+    aliases = run_aliases(events)
+    run_ids = set(aliases.values())
+
+    def _scope(event: ZfEvent) -> str:
+        return event_run_id(event, aliases=aliases) or (
+            next(iter(run_ids)) if len(run_ids) == 1 else ""
+        )
+
+    dispatch_scope = _scope(last_dispatch)
+    if not dispatch_scope and len(run_ids) > 1:
         return False
     last_dispatch_ts = last_dispatch.ts
     last_usage_ts = None
     for event in events:
         if event.type != "agent.usage":
             continue
-        if dispatch_scope and event_run_scope(events, event) != dispatch_scope:
+        if dispatch_scope and _scope(event) != dispatch_scope:
             continue
         last_usage_ts = event.ts
 

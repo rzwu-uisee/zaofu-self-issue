@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 
 from zf.core.events.model import ZfEvent
 from zf.runtime.candidate_rework_identity import (
     _CANDIDATE_REWORK_IDENTITY_KEYS,
+)
+from zf.runtime.candidate_rework_evidence import (
+    plan_rejection_feedback,
+    plan_rejection_required_actions,
+)
+from zf.runtime.plan_artifact_package import (
+    plan_artifact_package_binding,
+    reduce_plan_artifact_packages,
+)
+
+
+_PLAN_PACKAGE_PAYLOAD_KEYS = (
+    "plan_artifact_package_id",
+    "plan_artifact_package_ref",
+    "plan_artifact_package_digest",
+)
+_GOAL_CLAIM_SET_IDENTITY_KEYS = (
+    "goal_claim_set_ref",
+    "goal_claim_set_digest",
+)
+_REPLAN_SEMANTIC_PASSTHROUGH_KEYS = (
+    "source_commit",
+    "candidate_base_commit",
+    "previous_plan_candidate_refs",
+    "required_actions",
+    "orchestration_delta",
+    "orchestration_delta_ref",
+    "orchestration_delta_digest",
+    "reason_codes",
+    "operator_override",
+    "owner_authorization",
 )
 
 
@@ -34,6 +65,41 @@ def build_replan_resynth_event(
         trace_id=str(getattr(plan, "trace_id", "") or ""),
     )
     payload = dict(base_payload)
+    source_event = _event_by_id(
+        events,
+        str(getattr(plan, "source_event_id", "") or ""),
+    )
+    source_payload = _event_payload(source_event)
+    feedback = list(getattr(plan, "feedback", ()) or ())
+    source_type = str(
+        getattr(source_event, "type", "")
+        if source_event is not None and not isinstance(source_event, Mapping)
+        else (source_event or {}).get("type", "")
+    ).strip()
+    if source_type == "plan.rejected" or str(
+        getattr(plan, "source_event_type", "") or ""
+    ) == "plan.rejected":
+        feedback = list(dict.fromkeys([
+            *plan_rejection_feedback(source_payload),
+            *feedback,
+        ]))
+        required_actions = [
+            action
+            for _directive_id, action in plan_rejection_required_actions(source_payload)
+        ]
+        if required_actions:
+            payload["required_actions"] = required_actions
+        for key in (
+            "orchestration_delta",
+            "orchestration_delta_ref",
+            "orchestration_delta_digest",
+            "reason_codes",
+            "operator_override",
+            "owner_authorization",
+        ):
+            value = source_payload.get(key)
+            if value not in (None, "", [], {}):
+                payload[key] = value
     payload.update({
         "pdd_id": getattr(plan, "pdd_id", ""),
         "trace_id": getattr(plan, "trace_id", ""),
@@ -41,15 +107,23 @@ def build_replan_resynth_event(
         "rework_of": getattr(plan, "source_event_id", ""),
         "rework_attempt": getattr(plan, "attempt", 0),
         "rework_source": getattr(plan, "source_event_type", ""),
-        "rework_feedback": list(getattr(plan, "feedback", ()) or ()),
+        "rework_feedback": feedback,
         "rework_categories": list(getattr(plan, "failure_categories", ()) or ()),
         "rework_summary": dict(getattr(plan, "rework_summary", {}) or {}),
         "replan_classification": getattr(plan, "classification", ""),
     })
+    human_resolution = getattr(plan, "human_resolution", None)
+    if isinstance(human_resolution, Mapping) and human_resolution:
+        payload["human_resolution"] = dict(human_resolution)
+    for key in _REPLAN_SEMANTIC_PASSTHROUGH_KEYS:
+        value = getattr(plan, key, None)
+        if value not in (None, "", [], {}):
+            payload[key] = value
     for key in _CANDIDATE_REWORK_IDENTITY_KEYS:
         value = getattr(plan, key, None)
         if value not in (None, "", [], {}):
             payload[key] = value
+    _bind_current_plan_package(payload, plan=plan, events=events)
     for key in (
         "failed_task_ids",
         "task_ids",
@@ -65,6 +139,72 @@ def build_replan_resynth_event(
         payload=payload,
         correlation_id=str(getattr(plan, "trace_id", "") or ""),
     )
+
+
+def _event_by_id(events: Sequence[ZfEvent], event_id: str) -> object | None:
+    if not event_id:
+        return None
+    for event in reversed(events):
+        if str(
+            event.get("id", "") if isinstance(event, Mapping) else getattr(event, "id", "")
+        ) == event_id:
+            return event
+    return None
+
+
+def _event_payload(event: object | None) -> dict:
+    if event is None:
+        return {}
+    payload = event.get("payload", {}) if isinstance(event, Mapping) else getattr(
+        event,
+        "payload",
+        {},
+    )
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
+
+def _bind_current_plan_package(
+    payload: dict,
+    *,
+    plan: object,
+    events: Sequence[ZfEvent],
+) -> None:
+    """Replace inherited identity with an admitted package for this run."""
+
+    workflow_run_id = str(
+        getattr(plan, "workflow_run_id", "")
+        or payload.get("workflow_run_id")
+        or getattr(plan, "trace_id", "")
+        or payload.get("trace_id")
+        or ""
+    ).strip()
+    if not workflow_run_id:
+        return
+
+    package_events = [
+        event
+        if isinstance(event, (ZfEvent, Mapping))
+        else {
+            "type": str(getattr(event, "type", "") or ""),
+            "id": str(getattr(event, "id", "") or ""),
+            "payload": dict(getattr(event, "payload", {}) or {}),
+        }
+        for event in events
+    ]
+    projection = reduce_plan_artifact_packages(
+        package_events,
+        workflow_run_id=workflow_run_id,
+    )
+    current = projection.get("current")
+    if not isinstance(current, dict) or not current:
+        if str(getattr(plan, "source_event_type", "") or "") != "plan.rejected":
+            return
+        for key in (*_PLAN_PACKAGE_PAYLOAD_KEYS, *_GOAL_CLAIM_SET_IDENTITY_KEYS):
+            payload.pop(key, None)
+        return
+    for key in _GOAL_CLAIM_SET_IDENTITY_KEYS:
+        payload.pop(key, None)
+    payload.update(plan_artifact_package_binding(package_events, current))
 
 
 def _resynth_trigger(config: object, *, flow_kind: str) -> str:
@@ -143,6 +283,16 @@ def plan_missing_replan_resynth_events(
             ),
             "resume_scope": str(payload.get("resume_scope") or ""),
         }
+        human_resolution = _causal_human_resolution(
+            events,
+            marker=marker,
+        )
+        if human_resolution:
+            plan_data["human_resolution"] = human_resolution
+        for key in _REPLAN_SEMANTIC_PASSTHROUGH_KEYS:
+            value = payload.get(key)
+            if value not in (None, "", [], {}):
+                plan_data[key] = value
         for key in _CANDIDATE_REWORK_IDENTITY_KEYS:
             value = payload.get(key)
             if value not in (None, "", [], {}):
@@ -185,6 +335,78 @@ def plan_missing_replan_resynth_events(
         if not advanced:
             repairs.append(desired)
     return repairs
+
+
+def _causal_human_resolution(
+    events: Sequence[ZfEvent],
+    *,
+    marker: object,
+) -> dict[str, object]:
+    """Bind an operator's exact new-generation decision to its replan."""
+
+    marker_payload = _event_payload(marker)
+    causation_id = str(
+        marker.get("causation_id", "")
+        if isinstance(marker, Mapping)
+        else getattr(marker, "causation_id", "")
+    ).strip()
+    resolved = _event_by_id(events, causation_id)
+    resolved_type = str(
+        resolved.get("type", "")
+        if isinstance(resolved, Mapping)
+        else getattr(resolved, "type", "")
+    ).strip()
+    if resolved_type != "human.resolved":
+        return {}
+
+    resolved_payload = _event_payload(resolved)
+    action = str(resolved_payload.get("action") or "").strip()
+    response = str(resolved_payload.get("response") or "").strip()
+    source_failure_event_id = str(
+        resolved_payload.get("source_failure_event_id") or ""
+    ).strip()
+    rework_of = str(marker_payload.get("rework_of") or "").strip()
+    if (
+        action != "start_new_generation"
+        or not response
+        or (
+            source_failure_event_id
+            and rework_of
+            and source_failure_event_id != rework_of
+        )
+    ):
+        return {}
+
+    event_id = str(
+        resolved.get("id", "")
+        if isinstance(resolved, Mapping)
+        else getattr(resolved, "id", "")
+    ).strip()
+    actor = str(
+        resolved.get("actor", "")
+        if isinstance(resolved, Mapping)
+        else getattr(resolved, "actor", "")
+    ).strip()
+    evidence_refs = [
+        str(ref).strip()
+        for ref in resolved_payload.get("contract_evidence_refs", [])
+        if str(ref).strip()
+    ] if isinstance(resolved_payload.get("contract_evidence_refs"), list) else []
+    return {
+        "schema_version": str(
+            resolved_payload.get("schema_version") or "human-resolution.v1"
+        ),
+        "source_event_id": event_id,
+        "source_ref": f"events.jsonl#{event_id}",
+        "actor": actor,
+        "resolved_event_id": str(
+            resolved_payload.get("resolved_event_id") or ""
+        ).strip(),
+        "source_failure_event_id": source_failure_event_id,
+        "action": action,
+        "response": response,
+        "contract_evidence_refs": evidence_refs,
+    }
 
 
 def _string_list(value: object) -> list[str]:

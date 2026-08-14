@@ -12,6 +12,7 @@ from zf.runtime.agent_session_stream import (
 )
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.provider_usage import normalize_provider_usage
+from zf.runtime.provider_usage import canonical_usage_tokens
 
 
 def test_codex_cumulative_usage_uses_last_as_turn_delta() -> None:
@@ -41,6 +42,17 @@ def test_codex_cumulative_usage_uses_last_as_turn_delta() -> None:
         "total_tokens": 88,
     }
     assert accounting["budget_usage"] == accounting["turn"]
+    assert accounting["receipt"] == {
+        "schema_version": "provider-usage-receipt.v1",
+        "input_semantics": "combined_includes_cache",
+        "fresh_input_tokens": 20,
+        "combined_input_tokens": 80,
+        "cache_read_input_tokens": 60,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 88,
+    }
 
 
 def test_channel_projection_sums_turn_usage_without_recounting_total(
@@ -110,3 +122,22 @@ def test_flat_claude_usage_is_one_turn() -> None:
     assert accounting["turn"]["input_tokens"] == 12
     assert accounting["turn"]["output_tokens"] == 4
     assert accounting["turn"]["cached_input_tokens"] == 9
+
+
+def test_codex_combined_input_splits_cache_without_double_counting() -> None:
+    receipt = canonical_usage_tokens(
+        {
+            "input_tokens": 45_000,
+            "cached_input_tokens": 35_000,
+            "cache_write_input_tokens": 2_000,
+            "output_tokens": 700,
+            "reasoning_output_tokens": 120,
+        },
+        backend="codex",
+    )
+
+    assert receipt["fresh_input_tokens"] == 8_000
+    assert receipt["cache_read_input_tokens"] == 35_000
+    assert receipt["cache_creation_input_tokens"] == 2_000
+    assert receipt["total_tokens"] == 45_700
+    assert receipt["reasoning_output_tokens"] == 120

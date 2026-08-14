@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -86,6 +87,7 @@ def _channel_setup_answer() -> str:
         "description": "Broader architecture and security review.",
         "submit_payload": {
           "template_id": "architecture-review",
+          "mode": "multi_lens",
           "overrides": {
             "backend": "fake",
             "budget": {"max_rounds": 6}
@@ -687,6 +689,13 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
     }
     assert quick["submit_details"]["member_count"] == 3
     assert quick["submit_details"]["mode"] == "multi_lens"
+    assert quick["submit_details"]["engine_mode"] == (
+        "fanout_then_synthesis"
+    )
+    assert quick["submit_details"]["routing_strategy"] == (
+        "blind_fanout_then_synthesis"
+    )
+    assert quick["submit_details"]["first_pass_reply_count"] == 3
     assert [
         member["role"] for member in quick["submit_details"]["members"]
     ] == ["tech_leader", "dev_reviewer", "qa_analyst"]
@@ -717,6 +726,77 @@ def test_action_bound_channel_plan_materializes_exact_member_and_round_summary()
     assert gate["question_id"] == request["question_id"]
     assert gate["submit_action"] == "channel-create-and-start"
     assert gate["submit_payload"] == quick["submit_payload"]
+
+
+def test_channel_setup_plan_requires_explicit_mode_at_extract_and_apply() -> None:
+    missing_mode = extract_plan_request(
+        _channel_setup_answer().replace(
+            '          "mode": "multi_lens",\n',
+            "",
+            1,
+        )
+    )
+    assert missing_mode is not None
+    assert missing_mode["valid"] is False
+    assert "submit_payload.mode is required" in missing_mode["validation_error"]
+
+    request = extract_plan_request(_channel_setup_answer())
+    assert request is not None and request["valid"] is True
+    stale_request = deepcopy(request)
+    stale_request["questions"][0]["options"][0]["submit_payload"].pop(
+        "mode"
+    )
+    source = ZfEvent(
+        id="evt-stale-channel-plan",
+        type=PLAN_REQUESTED_EVENT,
+        actor="web",
+        payload={"request": stale_request},
+    )
+
+    gate = plan_response_gate(
+        [source],
+        request_event_id=source.id,
+        request_id=stale_request["request_id"],
+        revision=stale_request["revision"],
+        question_id=stale_request["question_id"],
+        option_id="quick",
+        answer="Quick change (Recommended)",
+    )
+
+    assert gate == {
+        "ok": False,
+        "status": "plan_channel_mode_required",
+    }
+
+    answered = ZfEvent(
+        id="evt-stale-channel-plan-answer",
+        type=PLAN_ANSWERED_EVENT,
+        actor="web",
+        payload={
+            "request_event_id": source.id,
+            "request_id": stale_request["request_id"],
+            "revision": stale_request["revision"],
+            "question_id": stale_request["question_id"],
+            "option_id": "quick",
+            "answer": "Quick change (Recommended)",
+            "answers": [{
+                "question_id": stale_request["question_id"],
+                "option_id": "quick",
+                "answer": "Quick change (Recommended)",
+            }],
+        },
+    )
+    duplicate = plan_response_gate(
+        [source, answered],
+        request_event_id=source.id,
+        request_id=stale_request["request_id"],
+        revision=stale_request["revision"],
+        question_id=stale_request["question_id"],
+        option_id="quick",
+        answer="Quick change (Recommended)",
+    )
+    assert duplicate["ok"] is True
+    assert duplicate["status"] == "already_answered"
 
 
 def test_channel_plan_defaults_missing_presentation_header() -> None:

@@ -1783,6 +1783,16 @@ class GoalConfig:
 
 
 @dataclass
+class CostConfig:
+    """Provider pricing and accounting route configuration."""
+
+    pricing_catalog_url: str = ""
+    pricing_refresh_ttl_seconds: int = 86_400
+    pricing_refresh_timeout_seconds: float = 10.0
+    backend_accounting_modes: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ZfConfig:
     version: str = "1.0"
     preset: str = ""
@@ -1805,6 +1815,7 @@ class ZfConfig:
     autopilot: AutopilotConfig = field(default_factory=AutopilotConfig)
     autoresearch: AutoresearchConfig = field(default_factory=AutoresearchConfig)
     skill_sources: list[SkillSourceConfig] = field(default_factory=list)
+    cost: CostConfig = field(default_factory=CostConfig)
     # G-COST-BLOCK-1: global hard cost cap. None = no cap.
     global_budget_usd: float | None = None
     # Global kill switch for dispatch-time hard budget enforcement.

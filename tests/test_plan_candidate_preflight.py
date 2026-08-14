@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 from zf.core.config.schema import (
@@ -181,6 +182,22 @@ def _matrix_metadata() -> dict:
     }
 
 
+def _previous_task_map_descriptor(tmp_path, task_map: dict) -> dict:
+    path = tmp_path / "previous-task-map.json"
+    raw = json.dumps(
+        task_map,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    ).encode("utf-8")
+    path.write_bytes(raw)
+    return {
+        "ref": path.name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "kind": "plan_candidate_task_map",
+    }
+
+
 def test_plan_candidate_preflight_accepts_closed_plan_handoff(tmp_path) -> None:
     result = evaluate_plan_candidate_preflight(
         state_dir=tmp_path / ".zf",
@@ -214,6 +231,172 @@ def test_plan_candidate_preflight_accepts_closed_plan_handoff(tmp_path) -> None:
 
     assert result["status"] == "passed"
     assert result["summary"] == {"error_count": 0, "task_count": 1}
+
+
+def test_plan_candidate_preflight_rejects_inherited_goal_contract_weakening(
+    tmp_path,
+) -> None:
+    previous = _task_map()
+    previous["goal_claims"][0].update({
+        "acceptance_ids": ["AC-1"],
+        "verification_command_ids": ["test-command"],
+        "verification_owner": "task_verify",
+        "verification_tier": "runtime",
+    })
+    descriptor = _previous_task_map_descriptor(tmp_path, previous)
+    current = json.loads(json.dumps(previous))
+    current["goal_claims"][0].update({
+        "acceptance_ids": ["AC-RELEASE"],
+        "verification_command_ids": ["release-audit"],
+        "verification_owner": "candidate_verify",
+    })
+
+    result = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": current,
+            "source_index": _source_index(),
+            "source_index_ref": "inline:source-index",
+            "plan_md": "# Plan\n\nDo not weaken inherited claims.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+            "previous_plan_candidate_refs": [descriptor],
+        }},
+        metadata={
+            "flow_kind": "prd",
+            "artifact_package": {"required_ports": [
+                "requirement_spec",
+                "goal_claim_set",
+                "task_map",
+                "planning_result",
+            ]},
+        },
+    )
+
+    assert "mandatory_goal_claim_contract_rewritten" in {
+        item["code"] for item in result["errors"]
+    }
+
+
+def test_plan_candidate_preflight_accepts_pinned_immutable_e2e_baseline(
+    tmp_path,
+) -> None:
+    task_map = _task_map()
+    criterion = task_map["tasks"][0]["acceptance_criteria"][0]
+    criterion.update({
+        "verification_owner": "candidate_verify",
+        "verification_tier": "e2e",
+        "evidence_mode": "immutable_baseline_only",
+        "evidence_refs": [
+            f"git:{'a' * 40}",
+            "artifacts/evidence/browser/manifest.json",
+        ],
+    })
+    criterion["verification_command_ids"] = []
+    task_map["tasks"][0]["validation"]["commands"][0][
+        "acceptance_ids"
+    ] = []
+
+    admitted = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": task_map,
+            "source_index": _source_index(),
+            "source_index_ref": "inline:source-index",
+            "plan_md": "# Plan\n\nRetain pinned browser evidence.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+        }},
+        metadata={
+            "flow_kind": "prd",
+            "artifact_package": {"required_ports": [
+                "requirement_spec",
+                "goal_claim_set",
+                "task_map",
+                "planning_result",
+            ]},
+        },
+    )
+    assert admitted["status"] == "passed", admitted["errors"]
+
+    criterion["evidence_refs"] = [
+        "artifacts/evidence/browser/manifest.json",
+    ]
+    unpinned = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": task_map,
+            "source_index": _source_index(),
+            "source_index_ref": "inline:source-index",
+            "plan_md": "# Plan\n\nReject unpinned browser evidence.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+        }},
+        metadata={
+            "flow_kind": "prd",
+            "artifact_package": {"required_ports": [
+                "requirement_spec",
+                "goal_claim_set",
+                "task_map",
+                "planning_result",
+            ]},
+        },
+    )
+    assert "immutable_baseline_evidence_unpinned" in {
+        item["code"] for item in unpinned["errors"]
+    }
+
+
+def test_plan_candidate_preflight_rejects_command_on_immutable_e2e_baseline(
+    tmp_path,
+) -> None:
+    task_map = _task_map()
+    task_map["tasks"][0]["acceptance_criteria"][0].update({
+        "verification_owner": "candidate_verify",
+        "verification_tier": "e2e",
+        "evidence_mode": "immutable_baseline_only",
+        "evidence_refs": [
+            f"git:{'a' * 40}",
+            "artifacts/evidence/browser/manifest.json",
+        ],
+    })
+
+    result = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": task_map,
+            "source_index": _source_index(),
+            "source_index_ref": "inline:source-index",
+            "plan_md": "# Plan\n\nReuse immutable browser evidence.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+        }},
+        metadata={
+            "flow_kind": "prd",
+            "artifact_package": {"required_ports": [
+                "requirement_spec",
+                "goal_claim_set",
+                "task_map",
+                "planning_result",
+            ]},
+        },
+    )
+
+    assert "immutable_baseline_command_refs_present" in {
+        item["code"] for item in result["errors"]
+    }
 
 
 def test_plan_candidate_preflight_accepts_cross_task_command_refs(tmp_path) -> None:
@@ -509,6 +692,109 @@ def test_plan_candidate_preflight_accepts_closed_matrix_registry(tmp_path) -> No
     )
 
     assert result["status"] == "passed"
+
+
+def test_plan_candidate_preflight_rejects_runtime_audit_as_real_e2e(
+    tmp_path,
+) -> None:
+    ports = _plan_ports()
+    ports.append({
+        "logical_name": "real_e2e_matrix",
+        "body": {
+            "schema_version": "real-e2e-matrix.v1",
+            "status": "ready",
+            "metadata": {"enrichment_contract": {"status": "fulfilled"}},
+            "rows": [{
+                "id": "AUDIT-AS-E2E",
+                "acceptance_ids": ["AC-1"],
+                "command_id": "test-command",
+                "command": "pytest -q tests/test_command.py",
+                "command_required": True,
+            }],
+        },
+    })
+
+    result = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": _task_map(),
+            "source_index": _source_index(),
+            "plan_ports": ports,
+            "plan_md": "# Plan\n\nKeep runtime audits out of real E2E.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+        }},
+        metadata=_matrix_metadata(),
+    )
+
+    assert "real_e2e_command_tier_invalid" in {
+        item["code"] for item in result["errors"]
+    }
+
+
+def test_plan_candidate_preflight_accepts_immutable_real_e2e_baseline_row(
+    tmp_path,
+) -> None:
+    task_map = _task_map()
+    criterion = task_map["tasks"][0]["acceptance_criteria"][0]
+    criterion.update({
+        "verification_owner": "candidate_verify",
+        "verification_tier": "e2e",
+        "verification_command_ids": [],
+        "evidence_mode": "immutable_baseline_only",
+        "evidence_refs": [
+            f"git:{'a' * 40}",
+            "artifacts/evidence/browser/manifest.json",
+        ],
+    })
+    task_map["tasks"][0]["validation"]["commands"][0][
+        "acceptance_ids"
+    ] = []
+    ports = _plan_ports()
+    ports[0]["body"]["capabilities"][0]["command_ids"] = ["test-command"]
+    ports[1]["body"]["acceptance"][0]["verification_command_ids"] = []
+    ports[2]["body"]["commands"][0]["acceptance_ids"] = []
+    ports.append({
+        "logical_name": "real_e2e_matrix",
+        "body": {
+            "schema_version": "real-e2e-matrix.v1",
+            "status": "ready",
+            "metadata": {"enrichment_contract": {"status": "fulfilled"}},
+            "rows": [{
+                "id": "BASELINE-AC-1",
+                "acceptance_ids": ["AC-1"],
+                "execution_mode": "immutable_baseline_only",
+                "command_required": False,
+                "origin_command": "docker compose up --abort-on-container-exit",
+                "target_commit": "a" * 40,
+                "evidence_refs": [
+                    f"git:{'a' * 40}",
+                    "artifacts/evidence/browser/manifest.json",
+                ],
+            }],
+        },
+    })
+
+    result = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": task_map,
+            "source_index": _source_index(),
+            "plan_ports": ports,
+            "plan_md": "# Plan\n\nReuse pinned browser evidence.",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "prd",
+            "prd_ref": "docs/requirement.md",
+        }},
+        metadata=_matrix_metadata(),
+    )
+
+    assert result["status"] == "passed", result["errors"]
 
 
 def test_plan_candidate_preflight_accepts_tests_that_reference_command_registry(
@@ -811,3 +1097,31 @@ def test_plan_candidate_preflight_uses_writer_path_ownership_gate(tmp_path) -> N
     assert result["status"] == "failed"
     assert len(writer_errors) == 1
     assert "overlapping allowed paths" in writer_errors[0]["message"]
+
+
+def test_plan_candidate_preflight_returns_skills_required_diagnostic(tmp_path) -> None:
+    task_map = _task_map()
+    task_map["tasks"][0]["skills_required"] = "can-domain"
+
+    result = evaluate_plan_candidate_preflight(
+        state_dir=tmp_path / ".zf",
+        project_root=tmp_path,
+        reports=[{"report": {
+            "task_map": task_map,
+            "source_index": _source_index(),
+            "plan_md": "# Plan",
+        }}],
+        manifest={"trigger_payload": {
+            "flow_kind": "issue",
+            "issue_ref": "docs/issue.md",
+        }},
+        metadata={"flow_kind": "issue"},
+    )
+
+    writer_errors = [
+        item for item in result["errors"]
+        if item["code"] == "writer_fanout_task_map_invalid"
+    ]
+    assert result["status"] == "failed"
+    assert len(writer_errors) == 1
+    assert "skills_required must be a list" in writer_errors[0]["message"]

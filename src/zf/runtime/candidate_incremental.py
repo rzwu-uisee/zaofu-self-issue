@@ -14,7 +14,11 @@ from zf.core.events.writer import EventWriter
 from zf.core.state.locks import locked_path
 from zf.core.verification.evidence import command_evidence
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
-from zf.runtime.candidates import CandidateRebuilder, CandidateResult
+from zf.runtime.candidates import (
+    CandidateRebuilder,
+    CandidateResult,
+    _candidate_reportable_status,
+)
 from zf.runtime.git_capture import git_env
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.task_pipeline_identity import task_pipeline_operation_identity
@@ -127,7 +131,7 @@ def integrate_task_candidate(
     pdd_id = rebuilder.pdd_id_for_task(task_id)
     branch = f"{rebuilder.config.runtime.git.candidate_branch_prefix}/{pdd_id}"
     base_commit = _resolve_commit(rebuilder.project_root, dispatch_base_commit)
-    expected_head, branch_exists = _candidate_head(
+    live_head, branch_exists = _candidate_head(
         rebuilder.project_root,
         branch=branch,
         base_commit=base_commit,
@@ -179,12 +183,21 @@ def integrate_task_candidate(
             task_map_generation,
         ),
         "candidate_branch": branch,
-        "expected_candidate_head": expected_head,
+        "expected_candidate_head": live_head,
         "dispatch_base_commit": base_commit,
         "contract_revision": contract_revision,
         "integration_strategy": rebuilder.config.runtime.git.candidate_strategy,
         "partial_candidate_auto_ship": "forbidden",
     }
+    request = _pinned_integration_request(
+        rebuilder,
+        operation_id=identity.operation_id,
+        current_request=request,
+    )
+    expected_head = _resolve_commit(
+        rebuilder.project_root,
+        str(request["expected_candidate_head"]),
+    )
     operations = WorkflowOperationService(
         state_dir=rebuilder.state_dir,
         event_log=rebuilder.event_log,
@@ -391,8 +404,22 @@ def _integrate_locked(
         branch=branch,
         base_commit=base_commit,
     )
+    reconciled_head = expected_head
+    advancement_receipt_refs: list[dict[str, Any]] = []
     if current_head != expected_head or current_exists != branch_exists:
-        raise CandidateIncrementalError("candidate_head_cas_mismatch")
+        advancement_receipt_refs = _candidate_advancement_receipt_refs(
+            rebuilder,
+            workflow_run_id=workflow_run_id,
+            task_map_generation=task_map_generation,
+            candidate_generation=candidate_generation,
+            branch=branch,
+            expected_head=expected_head,
+            current_head=current_head,
+        )
+        if not advancement_receipt_refs:
+            raise CandidateIncrementalError("candidate_head_cas_mismatch")
+        reconciled_head = current_head
+        branch_exists = current_exists
     tasks = rebuilder.tasks_from_index(
         rebuilder.pdd_id_for_task(task_id),
         [task_id],
@@ -406,12 +433,27 @@ def _integrate_locked(
     if rebuilder.config.runtime.git.candidate_strategy != "cherry-pick":
         raise CandidateIncrementalError("v4 incremental integration requires cherry-pick")
 
+    (
+        integration_base_head,
+        successor_base_adopted,
+        supersedes_task_ids,
+        adopted_base_commits,
+    ) = _select_integration_base(
+        rebuilder,
+        task_id=task_id,
+        task_source_commit=task_ref.source_commit,
+        expected_candidate_head=reconciled_head,
+        dispatch_base_commit=base_commit,
+    )
     pdd_id = rebuilder.pdd_id_for_task(task_id)
-    rebuilder._prepare_worktree(pdd_id, expected_head)
+    rebuilder._prepare_worktree(pdd_id, integration_base_head)
     worktree = rebuilder._worktree_path(pdd_id)
-    declared_files = rebuilder._candidate_task_scope_files(expected_head, task_ref)
+    declared_files = rebuilder._candidate_task_scope_files(
+        integration_base_head,
+        task_ref,
+    )
     commits, skipped_commits = rebuilder._task_commits(
-        expected_head,
+        integration_base_head,
         task_ref,
         declared_files=declared_files,
     )
@@ -443,13 +485,13 @@ def _integrate_locked(
         source_event_id=source_event_id,
     )
     dirty = _git(rebuilder.project_root, "-C", str(worktree), "status", "--porcelain")
-    if dirty:
+    if _candidate_reportable_status(dirty):
         raise CandidateIncrementalError("rolling smoke left candidate worktree dirty")
     _update_candidate_ref(
         rebuilder.project_root,
         branch=branch,
         new_head=new_head,
-        expected_head=expected_head,
+        expected_head=reconciled_head,
         branch_exists=branch_exists,
     )
     patch_identity = _patch_identity(
@@ -470,7 +512,13 @@ def _integrate_locked(
         "candidate_generation": candidate_generation,
         "candidate_branch": branch,
         "expected_candidate_head": expected_head,
-        "previous_candidate_head": expected_head,
+        "previous_candidate_head": reconciled_head,
+        "candidate_head_reconciled": reconciled_head != expected_head,
+        "candidate_advancement_receipt_refs": advancement_receipt_refs,
+        "integration_base_head": integration_base_head,
+        "successor_base_adopted": successor_base_adopted,
+        "supersedes_task_ids": supersedes_task_ids,
+        "adopted_base_commits": adopted_base_commits,
         "new_candidate_head": new_head,
         "integration_strategy": "cherry-pick",
         "patch_identity": patch_identity,
@@ -655,6 +703,537 @@ def _candidate_head(
     if result.returncode == 0:
         return result.stdout.strip(), True
     return base_commit, False
+
+
+def _pinned_integration_request(
+    rebuilder: CandidateRebuilder,
+    *,
+    operation_id: str,
+    current_request: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Keep a blocked operation's immutable request identity on redrive."""
+
+    for event in reversed(rebuilder.event_log.read_all()):
+        if event.type != "workflow.operation.requested":
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        if str(payload.get("operation_id") or "") != operation_id:
+            continue
+        descriptor = payload.get("request_ref")
+        if not isinstance(descriptor, Mapping):
+            return dict(current_request)
+        try:
+            body = hydrate_sidecar_ref(
+                rebuilder.state_dir,
+                dict(descriptor),
+            ).payload
+        except (OSError, TypeError, ValueError):
+            return dict(current_request)
+        persisted = body.get("request") if isinstance(body, Mapping) else None
+        if not isinstance(persisted, Mapping):
+            return dict(current_request)
+        stable_fields = set(current_request) - {"expected_candidate_head"}
+        if any(
+            persisted.get(field) != current_request.get(field)
+            for field in stable_fields
+        ):
+            return dict(current_request)
+        expected_head = str(persisted.get("expected_candidate_head") or "")
+        if not expected_head:
+            return dict(current_request)
+        try:
+            _resolve_commit(rebuilder.project_root, expected_head)
+        except CandidateIncrementalError:
+            return dict(current_request)
+        return dict(persisted)
+    return dict(current_request)
+
+
+def _candidate_advancement_receipt_refs(
+    rebuilder: CandidateRebuilder,
+    *,
+    workflow_run_id: str,
+    task_map_generation: str,
+    candidate_generation: str,
+    branch: str,
+    expected_head: str,
+    current_head: str,
+) -> list[dict[str, Any]]:
+    """Prove a stale CAS head advanced only through admitted integrations."""
+
+    if (
+        not expected_head
+        or expected_head == current_head
+        or not _commit_is_ancestor(
+            rebuilder.project_root,
+            ancestor=expected_head,
+            descendant=current_head,
+        )
+    ):
+        return []
+    edges: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for event in rebuilder.event_log.read_all():
+        if event.type != "candidate.updated" or event.origin != "kernel":
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        descriptor = payload.get("receipt_ref")
+        if (
+            str(payload.get("workflow_run_id") or "") != workflow_run_id
+            or str(payload.get("task_map_generation") or "")
+            != task_map_generation
+            or str(payload.get("candidate_generation") or "")
+            != candidate_generation
+            or str(payload.get("candidate_branch") or "") != branch
+            or not isinstance(descriptor, Mapping)
+        ):
+            continue
+        try:
+            receipt = hydrate_task_integration_receipt(
+                rebuilder,
+                dict(descriptor),
+                task_id=str(event.task_id or ""),
+                workflow_run_id=workflow_run_id,
+                task_map_generation=task_map_generation,
+            )
+        except (CandidateIncrementalError, OSError, TypeError, ValueError):
+            continue
+        previous = str(
+            receipt.get("previous_candidate_head")
+            or receipt.get("expected_candidate_head")
+            or ""
+        )
+        new_head = str(receipt.get("new_candidate_head") or "")
+        if any((
+            not previous,
+            not new_head,
+            previous == new_head,
+            str(payload.get("candidate_head") or "") != new_head,
+            str(payload.get("operation_id") or "")
+            != str(receipt.get("integration_operation_id") or ""),
+            not _commit_is_ancestor(
+                rebuilder.project_root,
+                ancestor=previous,
+                descendant=new_head,
+            ),
+        )):
+            continue
+        edges.setdefault(previous, []).append((new_head, dict(descriptor)))
+
+    cursor = expected_head
+    refs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while cursor != current_head and cursor not in seen:
+        seen.add(cursor)
+        candidates = {
+            (new_head, str(ref.get("sha256") or "")): ref
+            for new_head, ref in edges.get(cursor, [])
+            if new_head == current_head
+            or _commit_is_ancestor(
+                rebuilder.project_root,
+                ancestor=new_head,
+                descendant=current_head,
+            )
+        }
+        if len(candidates) != 1:
+            return []
+        (next_head, _digest), descriptor = next(iter(candidates.items()))
+        refs.append(descriptor)
+        cursor = next_head
+    return refs if cursor == current_head else []
+
+
+def _select_integration_base(
+    rebuilder: CandidateRebuilder,
+    *,
+    task_id: str,
+    task_source_commit: str,
+    expected_candidate_head: str,
+    dispatch_base_commit: str,
+) -> tuple[str, bool, list[str], list[str]]:
+    """Choose a pinned base without silently discarding candidate ancestry."""
+
+    if _commit_is_ancestor(
+        rebuilder.project_root,
+        ancestor=dispatch_base_commit,
+        descendant=expected_candidate_head,
+    ):
+        return expected_candidate_head, False, [], []
+    if not _commit_is_ancestor(
+        rebuilder.project_root,
+        ancestor=expected_candidate_head,
+        descendant=dispatch_base_commit,
+    ):
+        raise CandidateIncrementalError(
+            "dispatch_base_commit diverges from current candidate head"
+        )
+
+    task = rebuilder.task_store.get(task_id)
+    evidence = (
+        task.contract.evidence_contract
+        if task is not None and isinstance(task.contract.evidence_contract, dict)
+        else {}
+    )
+    supersedes_task_ids = list(dict.fromkeys(
+        str(item).strip()
+        for item in evidence.get("supersedes_task_ids", [])
+        if str(item).strip()
+    )) if isinstance(evidence.get("supersedes_task_ids"), list) else []
+    expected_source_ref = f"git:{dispatch_base_commit}"
+    task_successor_authorized = bool(
+        supersedes_task_ids
+        and _successor_contract_binds_base(
+            rebuilder,
+            task_id=task_id,
+            expected_source_ref=expected_source_ref,
+            supersedes_task_ids=supersedes_task_ids,
+        )
+    )
+    generation_continuation_authorized = _generation_continuation_binds_base(
+        rebuilder,
+        task_id=task_id,
+        expected_candidate_head=expected_candidate_head,
+        dispatch_base_commit=dispatch_base_commit,
+    )
+    if not task_successor_authorized and not generation_continuation_authorized:
+        raise CandidateIncrementalError(
+            "newer dispatch_base_commit requires a successor contract bound "
+            f"to {expected_source_ref} or an admitted generation continuation"
+        )
+    if not _commit_is_ancestor(
+        rebuilder.project_root,
+        ancestor=dispatch_base_commit,
+        descendant=task_source_commit,
+    ):
+        raise CandidateIncrementalError(
+            "successor TaskRef does not descend from dispatch_base_commit"
+        )
+    adopted_base_commits = [
+        item
+        for item in _git(
+            rebuilder.project_root,
+            "rev-list",
+            "--reverse",
+            f"{expected_candidate_head}..{dispatch_base_commit}",
+        ).splitlines()
+        if item
+    ]
+    if not adopted_base_commits:
+        raise CandidateIncrementalError(
+            "successor base adoption produced no immutable commit range"
+        )
+    return (
+        dispatch_base_commit,
+        True,
+        supersedes_task_ids,
+        adopted_base_commits,
+    )
+
+
+def _generation_continuation_binds_base(
+    rebuilder: CandidateRebuilder,
+    *,
+    task_id: str,
+    expected_candidate_head: str,
+    dispatch_base_commit: str,
+) -> bool:
+    """Verify a generation-wide continuation without task supersession.
+
+    Plan amendments can advance the shared writer base for every Task while
+    preserving Task identities.  Accept that base only when the immutable
+    package, Task Map, generation admission, and original candidate target all
+    agree.  A bare descendant commit remains unauthorized.
+    """
+
+    task = rebuilder.task_store.get(task_id)
+    if task is None or not isinstance(task.contract.evidence_contract, dict):
+        return False
+    evidence = task.contract.evidence_contract
+    source_refs = evidence.get("source_refs")
+    if not isinstance(source_refs, dict):
+        return False
+    workflow_run_id = str(evidence.get("workflow_run_id") or "").strip()
+    task_map_generation = str(
+        source_refs.get("task_map_generation") or ""
+    ).strip()
+    task_map_ref = str(source_refs.get("task_map_ref") or "").strip()
+    package_ref = str(
+        source_refs.get("plan_artifact_package_ref") or ""
+    ).strip()
+    package_digest = str(
+        source_refs.get("plan_artifact_package_digest") or ""
+    ).strip()
+    if not all((
+        workflow_run_id,
+        task_map_generation,
+        task_map_ref,
+        package_ref,
+        package_digest,
+        expected_candidate_head,
+        dispatch_base_commit,
+    )):
+        return False
+
+    try:
+        from zf.runtime.plan_artifact_package import (
+            validate_plan_artifact_package_shape,
+        )
+        from zf.runtime.task_pipeline_contexts import (
+            task_pipeline_generation_contexts,
+        )
+
+        package = hydrate_sidecar_ref(
+            rebuilder.state_dir,
+            {"ref": package_ref, "sha256": package_digest},
+        ).payload
+        if not isinstance(package, Mapping):
+            return False
+        validate_plan_artifact_package_shape(package)
+        if (
+            str(package.get("workflow_run_id") or "") != workflow_run_id
+            or str(package.get("task_map_generation") or "")
+            != task_map_generation
+        ):
+            return False
+        prior_ref = str(package.get("supersedes_package_ref") or "").strip()
+        prior_digest = str(
+            package.get("supersedes_package_digest") or ""
+        ).strip()
+        if not prior_ref or not prior_digest:
+            return False
+        prior_package = hydrate_sidecar_ref(
+            rebuilder.state_dir,
+            {"ref": prior_ref, "sha256": prior_digest},
+        ).payload
+        if not isinstance(prior_package, Mapping):
+            return False
+        validate_plan_artifact_package_shape(prior_package)
+        if str(prior_package.get("workflow_run_id") or "") != workflow_run_id:
+            return False
+
+        task_map_port = next(
+            (
+                port
+                for port in [
+                    *package.get("produced", []),
+                    *package.get("inherited", []),
+                ]
+                if isinstance(port, Mapping)
+                and str(port.get("logical_name") or "") == "task_map"
+                and str(port.get("ref") or "") == task_map_ref
+                and str(port.get("sha256") or "")
+            ),
+            None,
+        )
+        if task_map_port is None:
+            return False
+        task_map = hydrate_sidecar_ref(
+            rebuilder.state_dir,
+            {
+                "ref": task_map_ref,
+                "sha256": str(task_map_port["sha256"]),
+            },
+        ).payload
+        if not isinstance(task_map, Mapping):
+            return False
+        metadata = task_map.get("metadata")
+        if not isinstance(metadata, Mapping) or str(
+            metadata.get("writer_dispatch_base_commit") or ""
+        ).strip() != dispatch_base_commit:
+            return False
+        raw_task = next(
+            (
+                item
+                for key in ("tasks", "task_items", "items")
+                for item in task_map.get(key, [])
+                if isinstance(item, Mapping)
+                and str(item.get("task_id") or item.get("id") or "") == task_id
+            ),
+            None,
+        )
+        if raw_task is None:
+            return False
+
+        events = rebuilder.event_log.read_all()
+        context = task_pipeline_generation_contexts(events).get(task_id)
+        if context is None or any((
+            str(context.get("workflow_run_id") or "") != workflow_run_id,
+            str(context.get("task_map_generation") or "")
+            != task_map_generation,
+            str(context.get("task_map_ref") or "") != task_map_ref,
+            str(context.get("plan_artifact_package_ref") or "") != package_ref,
+            str(context.get("plan_artifact_package_digest") or "")
+            != package_digest,
+            str(context.get("dispatch_base_commit") or "")
+            != dispatch_base_commit,
+        )):
+            return False
+        generation_event_id = str(
+            context.get("generation_admitted_event_id") or ""
+        )
+        generation_event = next(
+            (event for event in events if event.id == generation_event_id),
+            None,
+        )
+        if generation_event is None or generation_event.origin != "kernel":
+            return False
+        trigger_event_id = str(context.get("trigger_event_id") or "")
+        trigger = next(
+            (event for event in events if event.id == trigger_event_id),
+            None,
+        )
+        if trigger is None or trigger.type != "task_map.ready":
+            return False
+        trigger_payload = (
+            trigger.payload if isinstance(trigger.payload, Mapping) else {}
+        )
+        if any((
+            str(trigger_payload.get("task_map_generation") or "")
+            != task_map_generation,
+            str(trigger_payload.get("plan_artifact_package_ref") or "")
+            != package_ref,
+            str(trigger_payload.get("plan_artifact_package_digest") or "")
+            != package_digest,
+        )):
+            return False
+        target_ref = str(
+            trigger_payload.get("target_ref")
+            or trigger_payload.get("candidate_base_commit")
+            or trigger_payload.get("source_commit")
+            or ""
+        ).strip()
+        return bool(
+            target_ref
+            and _resolve_commit(rebuilder.project_root, target_ref)
+            == expected_candidate_head
+        )
+    except (CandidateIncrementalError, OSError, TypeError, ValueError):
+        return False
+
+
+def _successor_contract_binds_base(
+    rebuilder: CandidateRebuilder,
+    *,
+    task_id: str,
+    expected_source_ref: str,
+    supersedes_task_ids: list[str],
+) -> bool:
+    """Verify direct or legacy plan-package-backed successor provenance."""
+
+    task = rebuilder.task_store.get(task_id)
+    if task is None:
+        return False
+    if str(task.contract.source_ref or "").strip() == expected_source_ref:
+        return True
+
+    evidence = task.contract.evidence_contract
+    if not isinstance(evidence, dict):
+        return False
+    source_refs = evidence.get("source_refs")
+    if not isinstance(source_refs, dict):
+        return False
+    package_ref = str(source_refs.get("plan_artifact_package_ref") or "").strip()
+    package_digest = str(
+        source_refs.get("plan_artifact_package_digest") or ""
+    ).strip()
+    task_map_ref = str(source_refs.get("task_map_ref") or "").strip()
+    task_map_generation = str(source_refs.get("task_map_generation") or "").strip()
+    if not package_ref or not package_digest or not task_map_ref:
+        return False
+
+    try:
+        from zf.runtime.plan_artifact_package import (
+            validate_plan_artifact_package_shape,
+        )
+        from zf.runtime.task_map_successor import (
+            successor_base_errors,
+            task_map_successor_base_commit,
+            task_map_supersedes_task_ids,
+        )
+
+        package = hydrate_sidecar_ref(
+            rebuilder.state_dir,
+            {"ref": package_ref, "sha256": package_digest},
+        ).payload
+        if not isinstance(package, Mapping):
+            return False
+        validate_plan_artifact_package_shape(package)
+        if task_map_generation and str(
+            package.get("task_map_generation") or ""
+        ) != task_map_generation:
+            return False
+        workflow_run_id = str(evidence.get("workflow_run_id") or "").strip()
+        if workflow_run_id and str(
+            package.get("workflow_run_id") or ""
+        ) != workflow_run_id:
+            return False
+        task_map_port = next(
+            (
+                port
+                for port in [
+                    *package.get("produced", []),
+                    *package.get("inherited", []),
+                ]
+                if isinstance(port, Mapping)
+                and str(port.get("logical_name") or "") == "task_map"
+                and str(port.get("ref") or "") == task_map_ref
+                and str(port.get("sha256") or "")
+            ),
+            None,
+        )
+        if task_map_port is None:
+            return False
+        task_map = hydrate_sidecar_ref(
+            rebuilder.state_dir,
+            {
+                "ref": task_map_ref,
+                "sha256": str(task_map_port["sha256"]),
+            },
+        ).payload
+        if not isinstance(task_map, Mapping):
+            return False
+        raw_task = next(
+            (
+                item
+                for key in ("tasks", "task_items", "items")
+                for item in task_map.get(key, [])
+                if isinstance(item, dict)
+                and str(item.get("task_id") or item.get("id") or "") == task_id
+            ),
+            None,
+        )
+        if raw_task is None or successor_base_errors(raw_task, task_id=task_id):
+            return False
+        expected_commit = expected_source_ref.removeprefix("git:")
+        return (
+            task_map_successor_base_commit(raw_task) == expected_commit
+            and task_map_supersedes_task_ids(raw_task) == supersedes_task_ids
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _commit_is_ancestor(
+    project_root: Path,
+    *,
+    ancestor: str,
+    descendant: str,
+) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=git_env(),
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = result.stderr.strip() or result.stdout.strip()
+    raise CandidateIncrementalError(
+        f"git merge-base ancestry check failed: {detail}"
+    )
 
 
 def _update_candidate_ref(

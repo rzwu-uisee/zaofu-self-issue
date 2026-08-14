@@ -149,6 +149,46 @@ def _phase_changes(log: EventLog) -> list[ZfEvent]:
     return [e for e in log.read_all() if e.type == "channel.discussion.phase.changed"]
 
 
+def _valid_contribution(
+    log: EventLog,
+    *,
+    member_id: str,
+    request_id: str,
+    reply_event_id: str,
+    generation: int = 1,
+) -> None:
+    log.append(ZfEvent(
+        type="channel.finding.recorded",
+        actor=member_id,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "member_id": member_id,
+            "contract_status": "structured",
+            "artifact_ref": f"channels/{CHANNEL_ID}/{member_id}.json",
+            "artifact_digest": f"digest-{member_id}-{generation}",
+            "request_id": request_id,
+            "message_id": TRIGGER,
+            "run_generation": generation,
+            "source_reply_event_id": reply_event_id,
+            "questions_frozen": True,
+            "source": "test",
+        },
+        correlation_id=CHANNEL_ID,
+    ))
+    log.append(ZfEvent(
+        type="channel.questions.frozen",
+        actor=member_id,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "member_id": member_id,
+            "source": "test",
+        },
+        correlation_id=CHANNEL_ID,
+    ))
+
+
 def test_final_reply_completed_advances_phase_live_not_via_deadline_sweep(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
 ) -> None:
@@ -160,6 +200,18 @@ def test_final_reply_completed_advances_phase_live_not_via_deadline_sweep(
     """
     log = EventLog(state_dir / "events.jsonl")
     _seed_phase1_two_of_three_replied(log)
+    prior_completed = {
+        event.payload["target_member_id"]: event
+        for event in log.read_all()
+        if event.type == "channel.agent.reply.completed"
+    }
+    for member in ("pm-1", "arch-1"):
+        _valid_contribution(
+            log,
+            member_id=member,
+            request_id=f"reply-{member}",
+            reply_event_id=prior_completed[member].id,
+        )
 
     # Precondition: two replies in, still phase1_blind (critic-1 pending).
     detail = project_channel(state_dir, CHANNEL_ID)
@@ -182,6 +234,12 @@ def test_final_reply_completed_advances_phase_live_not_via_deadline_sweep(
         },
         correlation_id=CHANNEL_ID,
     )
+    _valid_contribution(
+        log,
+        member_id="critic-1",
+        request_id="reply-critic-1",
+        reply_event_id=final.id,
+    )
 
     orch.run_once(events=[final])
 
@@ -199,6 +257,100 @@ def test_final_reply_completed_advances_phase_live_not_via_deadline_sweep(
 
     detail = project_channel(state_dir, CHANNEL_ID)
     assert detail["discussions"]["main"]["state"] == "phase2_relay"
+
+
+def test_transport_completion_without_valid_contribution_does_not_advance(
+    state_dir: Path,
+    config: ZfConfig,
+    transport: TmuxTransport,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase1_two_of_three_replied(log)
+    orch = Orchestrator(state_dir, config, transport)
+    final = orch.event_writer.emit(
+        "channel.agent.reply.completed",
+        actor="critic-1",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-critic-1",
+            "message_id": TRIGGER,
+            "target_member_id": "critic-1",
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    )
+
+    orch.run_once(events=[final])
+
+    assert _phase_changes(log) == []
+    assert project_channel(state_dir, CHANNEL_ID)["discussions"]["main"][
+        "state"
+    ] == "phase1_blind"
+
+
+def test_old_generation_contribution_cannot_complete_current_reply(
+    state_dir: Path,
+    config: ZfConfig,
+    transport: TmuxTransport,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase1_two_of_three_replied(log)
+    for member in ("pm-1", "arch-1"):
+        completed = next(
+            event
+            for event in log.read_all()
+            if event.type == "channel.agent.reply.completed"
+            and event.payload.get("target_member_id") == member
+        )
+        _valid_contribution(
+            log,
+            member_id=member,
+            request_id=f"reply-{member}",
+            reply_event_id=completed.id,
+        )
+    log.append(ZfEvent(
+        type="channel.agent.reply.requested",
+        actor="orchestrator-remediation",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-critic-1",
+            "message_id": TRIGGER,
+            "target_member_id": "critic-1",
+            "status": "pending",
+            "run_generation": 2,
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    ))
+    current = ZfEvent(
+        type="channel.agent.reply.completed",
+        actor="critic-1",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-critic-1",
+            "message_id": TRIGGER,
+            "target_member_id": "critic-1",
+            "run_generation": 2,
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    )
+    log.append(current)
+    _valid_contribution(
+        log,
+        member_id="critic-1",
+        request_id="reply-critic-1",
+        reply_event_id="evt-old-generation",
+        generation=1,
+    )
+    orch = Orchestrator(state_dir, config, transport)
+
+    orch.run_once(events=[current])
+
+    assert _phase_changes(log) == []
 
 
 def test_non_final_reply_completed_does_not_advance(

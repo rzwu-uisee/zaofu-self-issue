@@ -42,6 +42,13 @@ def dispatch_task_pipeline_stage(
         generation_context.get("task_map_generation") or ""
     )
     operation_generation = int(assignment.get("operation_generation") or 1)
+    from zf.runtime.task_pipeline_entry import (
+        task_pipeline_entry_mode,
+        task_pipeline_entry_target,
+        task_pipeline_external_evidence_bindings,
+    )
+
+    entry_mode = task_pipeline_entry_mode(task)
     role = runtime._find_role_by_instance(
         str(assignment.get("role_instance") or "")
     )
@@ -80,17 +87,26 @@ def dispatch_task_pipeline_stage(
     )
     from zf.runtime.task_pipeline_terminal import task_pipeline_workspace_base
 
+    workspace_base = (
+        task_pipeline_workspace_base(
+            runtime,
+            task=task,
+            generation_context=generation_context,
+        )
+        if entry_mode == "standard"
+        else task_pipeline_entry_target(
+            task,
+            generation_context,
+            project_root=Path(runtime.project_root),
+        )
+    )
     workspace = workspace_manager.prepare(
         role=role,
         workflow_run_id=workflow_run_id,
         task_id=task_id,
         task_map_generation=task_map_generation,
         workspace_generation=workspace_generation,
-        base_ref=task_pipeline_workspace_base(
-            runtime,
-            task=task,
-            generation_context=generation_context,
-        ),
+        base_ref=workspace_base,
     )
     if not workspace.enabled or workspace.mode != "worktree":
         raise TaskPipelineRuntimeError(
@@ -127,6 +143,9 @@ def dispatch_task_pipeline_stage(
             task_map_generation=task_map_generation,
             operation_generation=operation_generation,
             workspace=workspace,
+            task=task,
+            generation_context=generation_context,
+            entry_mode=entry_mode,
             contract_snapshot=contract_snapshot,
             contract_descriptor=contract_descriptor,
         )
@@ -166,14 +185,14 @@ def dispatch_task_pipeline_stage(
         if str(row.get("task_id") or "") == task_id
         and str(row.get("task_pipeline_stage") or "") == stage
     }
-    placement_epoch = 1 + max(
-        (
-            int(row.get("placement_epoch") or 0)
-            for row in attempt_rows
-            if str(row.get("operation_id") or "")
-            in (stage_operation_ids | {operation_identity.operation_id})
-        ),
-        default=0,
+    placement_epoch = _next_task_stage_placement_epoch(
+        runtime,
+        workflow_run_id=workflow_run_id,
+        task_id=task_id,
+        task_map_generation=task_map_generation,
+        stage=stage,
+        operation_ids=stage_operation_ids | {operation_identity.operation_id},
+        attempt_rows=attempt_rows,
     )
     role_config_digest = _role_config_digest(runtime, role, task)
     binding = _activate_task_stage_binding(
@@ -201,12 +220,22 @@ def dispatch_task_pipeline_stage(
         "verify": "task-verify",
         "acceptance_review": "integration-acceptance-review",
     }[stage]
+    external_evidence_bindings = (
+        task_pipeline_external_evidence_bindings(
+            runtime,
+            task=task,
+            context=generation_context,
+        )
+        if stage == "verify"
+        else []
+    )
     operation_payload: dict[str, Any] = {
         "workflow_run_id": workflow_run_id,
         "trace_id": workflow_run_id,
         "task_id": task_id,
         "stage_id": stage,
         "task_pipeline_stage": stage,
+        "task_pipeline_entry_mode": entry_mode,
         "operation_generation": operation_generation,
         "task_map_generation": task_map_generation,
         "workspace_generation": workspace_generation,
@@ -245,6 +274,13 @@ def dispatch_task_pipeline_stage(
         "source_branch": str(workspace.branch),
         "workdir": str(project_path),
         "instruction": _task_instruction(task),
+        "verification_owner": str(
+            contract_snapshot.get("verification_owner") or "task_verify"
+        ),
+        "verification_tier": str(
+            contract_snapshot.get("verification_tier") or "runtime"
+        ),
+        "external_evidence_bindings": external_evidence_bindings,
         "skills": list(role.skills),
         **snapshot_payload_fields(contract_descriptor),
         "contract_revision": str(contract_snapshot.get("contract_revision") or ""),
@@ -412,6 +448,46 @@ def dispatch_task_pipeline_stage(
             f"dispatched to {role.instance_id}"
         ),
     )
+
+
+def _next_task_stage_placement_epoch(
+    runtime: Any,
+    *,
+    workflow_run_id: str,
+    task_id: str,
+    task_map_generation: str,
+    stage: str,
+    operation_ids: set[str],
+    attempt_rows: list[dict[str, Any]],
+) -> int:
+    """Advance past durable attempts and pre-attempt session bindings."""
+
+    highest_epoch = max(
+        (
+            int(row.get("placement_epoch") or 0)
+            for row in attempt_rows
+            if str(row.get("operation_id") or "") in operation_ids
+        ),
+        default=0,
+    )
+    from zf.core.state.role_sessions import RoleSessionRegistry
+
+    registry = RoleSessionRegistry(
+        Path(runtime.state_dir) / "role_sessions.yaml",
+        project_root=str(runtime.project_root),
+    )
+    binding = registry.task_stage_binding(
+        workflow_run_id=workflow_run_id,
+        task_id=task_id,
+        stage=stage,
+        rework_affinity_id=f"{task_map_generation}:{stage}",
+    )
+    if binding is not None:
+        highest_epoch = max(
+            highest_epoch,
+            int(binding.get("current_placement_epoch") or 0),
+        )
+    return highest_epoch + 1
 
 
 def _task_instruction(task: Any) -> str:

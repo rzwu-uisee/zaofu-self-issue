@@ -8,8 +8,6 @@ self._* 缓存(去重/冷却/熔断登记)仍由宿主 __init__ 持有,mixin
 
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +21,7 @@ from zf.runtime.owner_channel_liveness import (
     channel_liveness,
 )
 from zf.runtime.remediation_cascade import SAFE_HALTED_EVENT
+from zf.runtime.provider_usage_reconciliation import build_disk_usage_event
 
 if TYPE_CHECKING:
     from zf.core.config.schema import RoleConfig
@@ -34,35 +33,6 @@ if TYPE_CHECKING:
 # (file mid-write / brief race) or the early-boot observe→cache window
 # doesn't false-alarm.
 _USAGE_CAPTURE_MISS_THRESHOLD = 3
-
-
-def _disk_usage_sample_id(
-    *,
-    actor: str,
-    backend: str,
-    model: str,
-    model_context_window: int,
-    usage_timestamp: object,
-    usage: dict,
-    usage_series_id: str = "",
-) -> str:
-    payload = {
-        "actor": actor,
-        "backend": backend,
-        "model": model,
-        "model_context_window": model_context_window,
-        "source": "disk_reader",
-        "usage": usage,
-        "usage_series_id": usage_series_id,
-        "usage_timestamp": usage_timestamp,
-    }
-    data = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:24]
 
 
 class LifecycleObservationMixin:
@@ -318,32 +288,6 @@ class LifecycleObservationMixin:
         recycle can otherwise immediately put the fresh worker back into
         pending_recycle before it has produced a new turn.
         """
-        usage_semantics = str(
-            getattr(usage, "usage_semantics", "incremental") or "incremental"
-        )
-        report_series_id = str(getattr(usage, "usage_series_id", "") or "")
-        usage_series_id = (
-            ":".join((
-                "disk_reader",
-                role.instance_id,
-                role.backend,
-                report_series_id or usage.model or "default",
-            ))
-            if usage_semantics == "cumulative"
-            else ""
-        )
-        key = (role.instance_id, usage_series_id, str(usage.timestamp))
-        if key in self._synth_usage_seen:
-            return False
-        self._synth_usage_seen.add(key)
-        raw = dict(usage.raw or {})
-        # CostTracker expects the Claude-style payload shape
-        normalised = {
-            "input_tokens": raw.get("input_tokens", usage.effective_input_tokens),
-            "output_tokens": raw.get("output_tokens", usage.output_tokens),
-            "cache_read_input_tokens": raw.get("cache_read_input_tokens", 0),
-            "cache_creation_input_tokens": raw.get("cache_creation_input_tokens", 0),
-        }
         if str(getattr(role, "name", "") or "") == "orchestrator":
             attempt_identity, attempt_lookup_complete = {}, True
         else:
@@ -365,44 +309,21 @@ class LifecycleObservationMixin:
             and operation_lookup_complete
         ):
             task_id = self._active_task_id_for_usage_role(role)
-        sample_id = _disk_usage_sample_id(
-            actor=role.instance_id,
-            backend=role.backend,
-            model=usage.model,
-            model_context_window=usage.model_context_window,
-            usage_timestamp=usage.timestamp,
-            usage=normalised,
-            usage_series_id=usage_series_id,
+        event = build_disk_usage_event(
+            role=role,
+            usage=usage,
+            config=getattr(self, "config", None),
+            usage_identity=usage_identity,
+            task_id=task_id,
         )
-        payload = {
-            **usage_identity,
-            "task_id": task_id,
-            "usage": normalised,
-            "source": "disk_reader",
-            "usage_semantics": usage_semantics,
-            "context_usage_ratio": round(usage.ratio, 4),
-            "ratio": round(usage.ratio, 4),
-            "model_context_window": usage.model_context_window,
-            # B-COST-01: carry the model id so the cost tracker can pick
-            # a per-model rate (disk-reader path has no provider cost).
-            "model": usage.model,
-            # B-1203-02: tag backend so events.jsonl consumers can
-            # split per-backend without a second lookup.
-            "backend": role.backend,
-            "usage_timestamp": usage.timestamp,
-            "usage_sample_id": sample_id,
-        }
-        if usage_series_id:
-            payload["usage_series_id"] = usage_series_id
-        event = ZfEvent(
-            type="agent.usage",
-            actor=role.instance_id,
-            task_id=task_id or None,
-            payload=payload,
-            correlation_id=(
-                str(usage_identity.get("workflow_run_id") or "") or None
-            ),
+        key = (
+            role.instance_id,
+            str(event.payload.get("usage_series_id") or ""),
+            str(usage.timestamp),
         )
+        if key in self._synth_usage_seen:
+            return False
+        self._synth_usage_seen.add(key)
         try:
             self.event_writer.append(event)
         except Exception:

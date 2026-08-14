@@ -10,6 +10,7 @@ from zf.core.cost.tracker import CostTracker
 from zf.core.events.model import ZfEvent
 from zf.runtime.event_window import read_runtime_events
 from zf.runtime.run_admission import build_run_admission_projection
+from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
@@ -72,6 +73,7 @@ def enforce_active_workflow_budgets(
         getattr(getattr(runtime.config, "workflow", None), "run_limits", None)
     )
     events_by_id = {event.id: event for event in events if event.id}
+    aliases = run_aliases(events)
     for entry in run_projection.runs.values():
         if not entry.active or not entry.admitted_event_id:
             continue
@@ -79,11 +81,12 @@ def enforce_active_workflow_budgets(
         if admitted is None:
             continue
         payload = admitted.payload if isinstance(admitted.payload, dict) else {}
-        pinned_limits = payload.get("run_limits")
-        run_limits = (
-            _limits_dict(pinned_limits)
-            if isinstance(pinned_limits, Mapping)
-            else configured_run_limits
+        run_limits, budget_revision_event_id = _effective_run_limits(
+            events,
+            admitted_event=admitted,
+            workflow_run_id=entry.run_id,
+            configured_run_limits=configured_run_limits,
+            aliases=aliases,
         )
         if not _has_limits(run_limits):
             continue
@@ -91,6 +94,9 @@ def enforce_active_workflow_budgets(
             baseline=payload.get("budget_snapshot"),
             current=usage_meter_snapshot(runtime),
             elapsed_seconds=max(0.0, now - _event_epoch(admitted)),
+            cost_fail_closed=bool(
+                getattr(runtime.config, "budget_fail_closed", False)
+            ),
         )
         exceeded = _exceeded_dimensions(run_limits, measurement)
         if not exceeded:
@@ -107,7 +113,8 @@ def enforce_active_workflow_budgets(
             limits=run_limits,
             measurement=measurement,
             exceeded=exceeded,
-            causation_id=admitted.id,
+            causation_id=budget_revision_event_id or admitted.id,
+            budget_revision_event_id=budget_revision_event_id,
         ))
 
     for operation in operations.values():
@@ -126,6 +133,9 @@ def enforce_active_workflow_budgets(
             elapsed_seconds=max(
                 0.0,
                 now - _timestamp_epoch(str(operation.get("started_at") or "")),
+            ),
+            cost_fail_closed=bool(
+                getattr(runtime.config, "budget_fail_closed", False)
             ),
         )
         exceeded = _exceeded_dimensions(limits, measurement)
@@ -168,9 +178,15 @@ def _trip_run(
     exceeded: list[str],
     causation_id: str,
     blocked_operation_id: str = "",
+    budget_revision_event_id: str = "",
 ) -> list[ZfEvent]:
     emitted: list[ZfEvent] = []
-    if _budget_event_exists(events, scope=scope, scope_id=scope_id):
+    if _budget_event_exists(
+        events,
+        scope=scope,
+        scope_id=scope_id,
+        budget_revision_event_id=budget_revision_event_id,
+    ):
         return emitted
     detail = {
         "schema_version": BUDGET_EVENT_SCHEMA,
@@ -183,6 +199,8 @@ def _trip_run(
         "limits": dict(limits),
         "measurement": dict(measurement),
     }
+    if budget_revision_event_id:
+        detail["budget_revision_event_id"] = budget_revision_event_id
     budget_event = runtime.event_writer.append(ZfEvent(
         type="workflow.budget.exceeded",
         actor="zf-cli",
@@ -276,6 +294,66 @@ def _operation_limits(
     return _limits_dict(limits)
 
 
+def _effective_run_limits(
+    events: list[ZfEvent],
+    *,
+    admitted_event: ZfEvent,
+    workflow_run_id: str,
+    configured_run_limits: Mapping[str, float | int],
+    aliases: Mapping[str, str],
+) -> tuple[dict[str, float | int], str]:
+    admitted_payload = (
+        admitted_event.payload
+        if isinstance(admitted_event.payload, Mapping)
+        else {}
+    )
+    pinned_limits = admitted_payload.get("run_limits")
+    effective = (
+        _limits_dict(pinned_limits)
+        if isinstance(pinned_limits, Mapping)
+        else dict(configured_run_limits)
+    )
+    revision_event_id = ""
+    admitted_seen = False
+    for event in events:
+        if event.id == admitted_event.id:
+            admitted_seen = True
+            continue
+        if not admitted_seen or event.type != "run.goal.updated":
+            continue
+        if event_run_id(event, aliases=aliases) != workflow_run_id:
+            continue
+        payload = event.payload if isinstance(event.payload, Mapping) else {}
+        patch = payload.get("run_limits_patch")
+        if not isinstance(patch, Mapping):
+            continue
+        candidate = dict(effective)
+        for key in (
+            "timeout_seconds",
+            "token_budget",
+            "cost_budget_usd",
+        ):
+            if key in patch:
+                candidate[key] = patch[key]
+        try:
+            effective = _validated_limits(candidate)
+        except (TypeError, ValueError):
+            continue
+        revision_event_id = event.id
+    return effective, revision_event_id
+
+
+def _validated_limits(value: Mapping[str, Any]) -> dict[str, float | int]:
+    limits = _limits_dict(value)
+    if not 0 <= float(limits["timeout_seconds"]) <= 86_400:
+        raise ValueError("invalid timeout_seconds")
+    if not 0 <= int(limits["token_budget"]) <= 100_000_000:
+        raise ValueError("invalid token_budget")
+    if not 0 <= float(limits["cost_budget_usd"]) <= 10_000:
+        raise ValueError("invalid cost_budget_usd")
+    return limits
+
+
 def _limits_dict(value: object) -> dict[str, float | int]:
     if isinstance(value, Mapping):
         source = value
@@ -303,6 +381,7 @@ def _measurement(
     baseline: object,
     current: Mapping[str, Any],
     elapsed_seconds: float,
+    cost_fail_closed: bool = False,
 ) -> dict[str, Any]:
     baseline_map = baseline if isinstance(baseline, Mapping) else {}
     available = bool(
@@ -327,6 +406,12 @@ def _measurement(
             float(current.get("total_usd") or 0.0)
             - float(baseline_map.get("total_usd") or 0.0),
         ), 6),
+        "unpriced_entries": max(
+            0,
+            int(current.get("unpriced_entries") or 0)
+            - int(baseline_map.get("unpriced_entries") or 0),
+        ),
+        "cost_fail_closed": bool(cost_fail_closed),
         "baseline": dict(baseline_map),
         "current": dict(current),
     }
@@ -341,6 +426,12 @@ def _exceeded_dimensions(
         or float(limits.get("cost_budget_usd") or 0) > 0
     ):
         return ["meter_unavailable"]
+    if (
+        measurement.get("cost_fail_closed")
+        and float(limits.get("cost_budget_usd") or 0) > 0
+        and int(measurement.get("unpriced_entries") or 0) > 0
+    ):
+        return ["pricing_unavailable"]
     exceeded: list[str] = []
     checks = (
         ("wall_clock", "timeout_seconds", "elapsed_seconds"),
@@ -371,11 +462,15 @@ def _budget_event_exists(
     *,
     scope: str,
     scope_id: str,
+    budget_revision_event_id: str = "",
 ) -> bool:
     return any(
         event.type == "workflow.budget.exceeded"
         and str((event.payload or {}).get("scope") or "") == scope
         and str((event.payload or {}).get("scope_id") or "") == scope_id
+        and str(
+            (event.payload or {}).get("budget_revision_event_id") or ""
+        ) == budget_revision_event_id
         for event in events
     )
 

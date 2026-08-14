@@ -1250,8 +1250,8 @@ def test_channel_summary_caches_and_invalidates_on_new_event(
     assert cached is not None
     assert "ch-a" in json.dumps(cached, default=str)
 
-    # A new channel event advances the projected seq → cache invalidated →
-    # recompute (hydrate allowed again) and reflect the new channel.
+    # A new event first returns the bounded last-known summary and schedules
+    # catch-up. The selected Channel page then opts into one fresh follow-up.
     monkeypatch.undo()
     log.append(ZfEvent(
         type="channel.created",
@@ -1259,8 +1259,21 @@ def test_channel_summary_caches_and_invalidates_on_new_event(
         payload={"channel_id": "ch-b", "name": "beta", "source": "web"},
         correlation_id="ch-b",
     ))
-    refreshed = read_model.channel_summary(state_dir)
+    scheduled = []
+    monkeypatch.setattr(
+        read_model,
+        "request_catch_up",
+        lambda state_dir, *, config=None: scheduled.append(state_dir),
+    )
+    stale = read_model.channel_summary(state_dir)
+    assert stale is not None
+    assert stale["tail_behind"] is True
+    assert "ch-b" not in json.dumps(stale, default=str)
+    assert scheduled == [state_dir]
+
+    refreshed = read_model.channel_summary(state_dir, require_fresh=True)
     assert refreshed is not None
+    assert refreshed["tail_behind"] is False
     assert "ch-b" in json.dumps(refreshed, default=str)
 
 
@@ -1279,13 +1292,65 @@ def test_channel_summary_caches_empty_result_without_rehydrating(
     # A non-channel event so the log/projection is non-empty but has 0 channels.
     log.append(ZfEvent(type="task.created", actor="web", payload={"task_id": "t-1"}))
 
-    assert read_model.channel_summary(state_dir) is None
+    first = read_model.channel_summary(state_dir)
+    assert first is not None
+    assert first["channels"] == []
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("channel_summary re-hydrated an empty-result cache hit")
 
     monkeypatch.setattr(read_model, "hydrate_events", _boom)
-    assert read_model.channel_summary(state_dir) is None
+    cached = read_model.channel_summary(state_dir)
+    assert cached is not None
+    assert cached["channels"] == []
+
+
+def test_channel_summary_binds_payload_to_selected_projection_watermark(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from zf.web.projections import read_model
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        type="channel.created",
+        actor="web",
+        payload={"channel_id": "ch-a", "name": "alpha", "source": "web"},
+        correlation_id="ch-a",
+    ))
+    read_model.rebuild(state_dir)
+    log.append(ZfEvent(
+        type="channel.created",
+        actor="web",
+        payload={"channel_id": "ch-b", "name": "beta", "source": "web"},
+        correlation_id="ch-b",
+    ))
+
+    monkeypatch.setattr(read_model, "request_catch_up", lambda *args, **kwargs: None)
+    real_hydrate = read_model.hydrate_events
+
+    def _catch_up_before_hydrate(*args, **kwargs):
+        read_model.rebuild(state_dir)
+        return real_hydrate(*args, **kwargs)
+
+    monkeypatch.setattr(read_model, "hydrate_events", _catch_up_before_hydrate)
+    stale = read_model.channel_summary(state_dir)
+
+    assert stale is not None
+    assert stale["projected_seq"] == 1
+    assert [item["channel_id"] for item in stale["channels"]] == ["ch-a"]
+    assert read_model.get_cached_projection(
+        state_dir,
+        "channel_summary",
+        source_seq=2,
+    ) is None
+
+    fresh = read_model.channel_summary(state_dir, require_fresh=True)
+    assert fresh is not None
+    assert fresh["projected_seq"] == 2
+    assert [item["channel_id"] for item in fresh["channels"]] == ["ch-a", "ch-b"]
 
 
 def test_channel_id_normalized_consistently_across_create_invite_post(

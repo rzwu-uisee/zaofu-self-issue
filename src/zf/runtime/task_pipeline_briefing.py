@@ -62,6 +62,9 @@ def write_task_pipeline_briefing(
             "Do not update candidate/main refs or runtime truth directly.",
         ]
     elif stage == "verify":
+        verification_owner = str(
+            contract_snapshot.get("verification_owner") or "task_verify"
+        )
         success_payload = {
             "verification_result": verification_result_template(
                 contract_snapshot
@@ -78,9 +81,21 @@ def write_task_pipeline_briefing(
         stage_instructions = [
             "Independently verify only this Task Contract against target_commit.",
             "Do not edit product files or substitute another branch/HEAD.",
-            "Run the declared checks and attach durable evidence to every result.",
+            f"Run only checks owned by this task's {verification_owner} layer; "
+            "a command produced by another Task or owned by another layer is "
+            "retained evidence and must not be rerun by this stage.",
+            "For acceptance criteria owned by another verification layer, keep "
+            "the requirement row as not_applicable; do not claim that it passed "
+            "and do not reject/block this Task for evidence that layer will produce.",
+            "Attach durable evidence to every result adjudicated by this stage.",
             "For a product gap, submit verdict=rejected with exact rework_items.",
         ]
+        if payload.get("external_evidence_bindings"):
+            stage_instructions.append(
+                "Before running a command that references an external evidence "
+                "environment variable, export the exact env/value binding in "
+                "Compact Execution Context; do not recompute or replace it."
+            )
     else:
         success_payload = {
             "integration_acceptance_result": (
@@ -213,6 +228,7 @@ def verification_result_template(
         and verification_command_required_for_stage(
             item,
             verification_owner=verification_owner,
+            task_id=str(contract_snapshot.get("task_id") or ""),
         )
     }
     probes = [
@@ -247,26 +263,47 @@ def verification_result_template(
         "rework_items": [],
         "evidence_refs": ["<durable verification report ref>"],
         "requirement_results": [
-            {
-                "acceptance_id": str(item.get("acceptance_id") or ""),
-                "status": "passed",
-                "verification_owner": str(
-                    item.get("verification_owner") or "task_verify"
-                ),
-                "verification_tier": str(
-                    item.get("verification_tier") or "runtime"
-                ),
-                "evidence_refs": ["<durable AC evidence ref>"],
-                "findings": [],
-                "reproduction_commands": [
-                    str(commands[command_id].get("command") or "")
-                    for command_id in item.get("verification_command_ids") or []
-                    if command_id in commands
-                ],
-            }
+            _verification_requirement_template(
+                item,
+                verification_owner=verification_owner,
+                commands=commands,
+            )
             for item in contract_snapshot.get("acceptance_criteria") or []
             if isinstance(item, Mapping)
         ],
+    }
+
+
+def _verification_requirement_template(
+    criterion: Mapping[str, Any],
+    *,
+    verification_owner: str,
+    commands: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    criterion_owner = str(
+        criterion.get("verification_owner") or "task_verify"
+    )
+    owned_here = criterion_owner == verification_owner
+    return {
+        "acceptance_id": str(criterion.get("acceptance_id") or ""),
+        "status": "passed" if owned_here else "not_applicable",
+        "verification_owner": criterion_owner,
+        "verification_tier": str(
+            criterion.get("verification_tier") or "runtime"
+        ),
+        "evidence_refs": (
+            ["<durable AC evidence ref>"] if owned_here else []
+        ),
+        "findings": [],
+        "reproduction_commands": (
+            [
+                str(commands[command_id].get("command") or "")
+                for command_id in criterion.get("verification_command_ids") or []
+                if command_id in commands
+            ]
+            if owned_here
+            else []
+        ),
     }
 
 

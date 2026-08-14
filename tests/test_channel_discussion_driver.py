@@ -356,7 +356,32 @@ def test_agent_can_mark_assumption(tmp_path: Path) -> None:
 
 
 def test_convergence_requires_full_freeze(tmp_path: Path) -> None:
-    state_dir, writer = _run_to_phase2(tmp_path)
+    state_dir, writer = _setup_trio(tmp_path)
+    writer.emit(
+        "channel.discussion.started",
+        actor="test",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "roster": ["pm-1", "arch-1", "critic-1"],
+            "synthesizer": "pm-1",
+            "requirement_message_id": "m-phase2",
+            "source": "test",
+        },
+    )
+    writer.emit(
+        "channel.discussion.phase.changed",
+        actor="test",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "phase": "phase2_relay",
+            "reason": "test_phase2",
+            "source": "test",
+        },
+    )
     _open_question(writer, "q-1")
     _resolve(writer, "q-1", resolution="answered", actor="operator")
     _freeze(writer, "pm-1")
@@ -758,12 +783,12 @@ def test_phase1_deadline_quorum_degrades_to_phase2(tmp_path: Path) -> None:
     detail = project_channel(state_dir, CH)
     assert detail["discussions"]["main"]["state"] == "phase2_relay"
 
-    # phase2 deadline: no activity past 120s -> stalled
+    # Valid zero-question contributions already froze the complete roster, so
+    # convergence wins over an elapsed deadline on the next tick.
     future = datetime.now(timezone.utc) + timedelta(seconds=600)
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main", now=future)
     detail = project_channel(state_dir, CH)
-    assert detail["discussions"]["main"]["state"] == "idle"
-    assert detail["discussions"]["main"]["last_outcome"] == "stalled"
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
 
 
 def test_phase2_convergence_wins_over_elapsed_deadline(
@@ -825,7 +850,8 @@ def test_no_deadline_config_never_stalls(tmp_path: Path) -> None:
     future = datetime.now(timezone.utc) + timedelta(days=30)
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main", now=future)
     detail = project_channel(state_dir, CH)
-    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert detail["discussions"]["main"].get("last_outcome") != "stalled"
 
 
 def test_sweep_ticks_active_discussions(tmp_path: Path) -> None:
@@ -837,5 +863,5 @@ def test_sweep_ticks_active_discussions(tmp_path: Path) -> None:
     ticked = sweep_discussion_deadlines(state_dir, writer, now=future)
     assert ticked == 1
     detail = project_channel(state_dir, CH)
-    assert detail["discussions"]["main"]["state"] == "idle"
-    assert detail["discussions"]["main"]["last_outcome"] == "stalled"
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert detail["discussions"]["main"].get("last_outcome") != "stalled"

@@ -177,6 +177,93 @@ def _admit_package(
     )
 
 
+def test_package_admission_reuses_historical_generation_without_regression(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    state_dir = project_root / ".zf-doc152-replay"
+    state_dir.mkdir(parents=True)
+    requirement_ref = _write_json(
+        project_root,
+        "inputs/requirement.json",
+        {
+            "schema_version": "requirement-spec.v1",
+            "acceptance": [{"id": "GOAL-152", "text": "deliver current sentinel"}],
+        },
+    )
+    task_map_r0_ref = _write_json(
+        project_root,
+        "inputs/task-map-r0.json",
+        _task_map(generation="G0", sentinel="baseline"),
+    )
+    task_map_r2_ref = _write_json(
+        project_root,
+        "inputs/task-map-r2.json",
+        _task_map(generation="G2", sentinel="current-r2"),
+    )
+    contract_body = {
+        "schema_version": "run-contract.v1",
+        "workflow": {"kind": "prd"},
+        "project": {"root": str(project_root), "state_dir": str(state_dir)},
+    }
+    contract_body["contract_digest"] = stable_json_sha256(contract_body)
+    write_run_contract(state_dir, contract_body)
+    runtime = _runtime(project_root, state_dir)
+
+    baseline_payload = _package_payload(
+        requirement_ref=requirement_ref,
+        task_map_ref=task_map_r0_ref,
+        revision="R0",
+        generation="G0",
+    )
+    baseline = _admit_package(
+        runtime,
+        payload=baseline_payload,
+        source_event_id="evt-plan-r0",
+    )
+    current = _admit_package(
+        runtime,
+        payload=_package_payload(
+            requirement_ref=requirement_ref,
+            task_map_ref=task_map_r2_ref,
+            revision="R2",
+            generation="G2",
+        ),
+        source_event_id="evt-plan-r2",
+    )
+    admitted_before = [
+        event.id
+        for event in runtime.event_log.read_all()
+        if event.type == "plan.artifact_package.admitted"
+    ]
+
+    replay = _admit_package(
+        runtime,
+        payload=baseline_payload,
+        source_event_id="evt-plan-r0-replay",
+    )
+
+    assert replay["plan_artifact_package_id"] == baseline[
+        "plan_artifact_package_id"
+    ]
+    assert replay["plan_artifact_package_digest"] == baseline[
+        "plan_artifact_package_digest"
+    ]
+    admitted_after = [
+        event.id
+        for event in runtime.event_log.read_all()
+        if event.type == "plan.artifact_package.admitted"
+    ]
+    assert admitted_after == admitted_before
+    reduced = reduce_plan_artifact_packages(
+        runtime.event_log.read_all(),
+        workflow_run_id=WORKFLOW_RUN_ID,
+    )
+    assert reduced["current"]["package_digest"] == current[
+        "plan_artifact_package_digest"
+    ]
+
+
 def test_doc152_package_currentness_and_restart_closure(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     state_dir = project_root / ".zf-doc152"

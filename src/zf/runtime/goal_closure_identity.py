@@ -71,6 +71,14 @@ def build_closure_identity(
         workflow_run_id=workflow_run_id,
         task_map_generation=generation,
     )
+    product_acceptance_identity = _current_product_acceptance_identity(
+        events,
+        state_dir=state_dir,
+        workflow_run_id=workflow_run_id,
+        task_map_generation=generation,
+        candidate_head_commit=candidate_head,
+        package_identity=package_identity,
+    )
     closure_source = {
         "schema_version": "closure-source.v1",
         "workflow_run_id": workflow_run_id,
@@ -79,6 +87,7 @@ def build_closure_identity(
         "task_map_generation": generation,
         "candidate_head_commit": candidate_head,
         **package_identity,
+        **product_acceptance_identity,
         "source_event_type": source_event.type,
         "source_payload": _stable_source_payload(payload),
     }
@@ -97,6 +106,7 @@ def build_closure_identity(
         "task_map_generation": generation,
         "candidate_head_commit": candidate_head,
         **package_identity,
+        **product_acceptance_identity,
         "closure_fact_digest": str(descriptor.get("sha256") or ""),
     }
     identity = _digest(identity_fields)
@@ -271,6 +281,103 @@ def _current_plan_package_identity(
         "plan_artifact_package_ref": str(current.get("package_ref") or ""),
         "plan_artifact_package_digest": str(current.get("package_digest") or ""),
     }
+
+
+def _current_product_acceptance_identity(
+    events: list[ZfEvent],
+    *,
+    state_dir: Path,
+    workflow_run_id: str,
+    task_map_generation: str,
+    candidate_head_commit: str,
+    package_identity: Mapping[str, str],
+) -> dict[str, Any]:
+    """Select the latest exact Candidate Verify Product report identity."""
+
+    from zf.runtime.candidate_result_binding import same_task_map_generation
+
+    package_ref = str(package_identity.get("plan_artifact_package_ref") or "")
+    package_digest = str(
+        package_identity.get("plan_artifact_package_digest") or ""
+    )
+    for event in reversed(events):
+        if event.type != "workflow.call.result.admitted":
+            continue
+        body = event.payload if isinstance(event.payload, Mapping) else {}
+        if str(body.get("workflow_run_id") or "") != workflow_run_id:
+            continue
+        if str(body.get("control_result_schema") or "") != "verification-result.v1":
+            continue
+        if str(body.get("product_acceptance_report_ref") or "") == "":
+            continue
+        descriptor = body.get("envelope_ref")
+        if not isinstance(descriptor, Mapping):
+            continue
+        try:
+            from zf.runtime.call_result_envelope import (
+                hydrate_call_result_envelope,
+            )
+
+            envelope = hydrate_call_result_envelope(
+                state_dir,
+                descriptor,
+            )
+        except Exception:
+            continue
+        identity = (
+            envelope.get("identity")
+            if isinstance(envelope.get("identity"), Mapping)
+            else {}
+        )
+        generation = str(
+            identity.get("task_map_generation")
+            or body.get("task_map_generation")
+            or ""
+        )
+        target = str(
+            identity.get("target_commit")
+            or body.get("target_commit")
+            or ""
+        )
+        result_package_ref = str(
+            identity.get("plan_artifact_package_ref")
+            or body.get("plan_artifact_package_ref")
+            or ""
+        )
+        result_package_digest = str(
+            identity.get("plan_artifact_package_digest")
+            or body.get("plan_artifact_package_digest")
+            or ""
+        )
+        if not generation or not same_task_map_generation(
+            generation,
+            task_map_generation,
+        ):
+            continue
+        if not target or target != candidate_head_commit:
+            continue
+        if package_ref and result_package_ref != package_ref:
+            continue
+        if (
+            package_digest
+            and result_package_digest != package_digest
+        ):
+            continue
+        return {
+            "product_acceptance_report_ref": str(
+                body.get("product_acceptance_report_ref") or ""
+            ),
+            "product_acceptance_report_digest": str(
+                body.get("product_acceptance_report_digest") or ""
+            ),
+            "product_acceptance_verdict": str(
+                body.get("product_acceptance_verdict") or ""
+            ),
+            "provider_qualification_status": str(
+                body.get("provider_qualification_status") or ""
+            ),
+        }
+    return {}
 
 
 def _task_map_generation(

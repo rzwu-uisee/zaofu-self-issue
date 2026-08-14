@@ -21,7 +21,7 @@ PYTHONPATH="$(pwd)/src" python3 -m zf.cli.main autoresearch campaign plan \
   --campaign full-validation \
   --output-dir /tmp/zaofu-ar-campaign-plan \
   --worktree-root /tmp/zaofu-ar-campaign \
-  --config examples/dev-codex-backends.yaml
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 ```
 
 不希望脚本使用 tmux supervisor 时加:
@@ -56,7 +56,7 @@ built-in scenarios。它只生成计划,不直接启动真实 provider 长跑:
 只做本地 deterministic 检查和 plan 生成:
 
 ```bash
-uv run zf validate --path examples/dev-codex-backends.yaml
+uv run zf validate --path examples/prod/controller/prd-task-pipeline-v4-canary.yaml
 
 PYTHONPATH="$(pwd)/src" uv run pytest -q tests/test_autoresearch_campaign.py
 
@@ -64,7 +64,7 @@ uv run zf autoresearch campaign plan \
   --campaign full-validation \
   --output-dir /tmp/zf-ar-full-validation-campaign-plan \
   --worktree-root /tmp/zf-ar-full-validation-wt \
-  --config examples/dev-codex-backends.yaml \
+  --config examples/prod/controller/prd-task-pipeline-v4-canary.yaml \
   --no-tmux
 ```
 

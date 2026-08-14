@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -69,12 +70,74 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     reconcile.set_defaults(func=_run_reconcile)
 
+    retention = sub.add_parser(
+        "retention-plan",
+        help="Inventory retention classes and safe reclaim candidates (read-only)",
+    )
+    retention.add_argument(
+        "--state-dir",
+        default=None,
+        help="Override project state_dir (default: from zf.yaml).",
+    )
+    retention.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the stable machine-readable inventory.",
+    )
+    retention.set_defaults(func=_run_retention_plan)
+
     parser.set_defaults(func=_run_help)
 
 
 def _run_help(args: argparse.Namespace) -> int:
-    print("Usage: zf state <clean>", file=sys.stderr)
+    print("Usage: zf state <clean|reconcile|retention-plan>", file=sys.stderr)
     return 2
+
+
+def _run_retention_plan(args: argparse.Namespace) -> int:
+    try:
+        context = resolve_project_context(
+            explicit_state_dir=getattr(args, "state_dir", None),
+        )
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    from zf.runtime.retention_inventory import build_retention_inventory
+
+    report = build_retention_inventory(context.state_dir)
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    else:
+        _print_retention_plan(report)
+    return 1 if report["status"] == "missing" else 0
+
+
+def _print_retention_plan(report: dict[str, Any]) -> None:
+    totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
+    print("State retention plan (read-only dry-run)")
+    print(f"State: {report.get('state_dir', '')}")
+    print(f"Status: {report.get('status', 'unknown')}")
+    print(f"Files: {int(totals.get('file_count') or 0)}")
+    print(f"Bytes: {int(totals.get('bytes') or 0)}")
+    print(
+        "Estimated reclaim bytes: "
+        f"{int(totals.get('estimated_reclaim_bytes') or 0)}"
+    )
+    candidates = report.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    if candidates:
+        print("Eligible candidates:")
+        for item in candidates:
+            print(
+                f"  - {item.get('path', '')}: {int(item.get('bytes') or 0)} bytes "
+                f"({item.get('reason', '')})"
+            )
+    else:
+        print("No proven reclaim candidates.")
+    blocked = report.get("blocked")
+    blocked = blocked if isinstance(blocked, list) else []
+    if blocked:
+        print(f"Blocked/unknown groups: {len(blocked)}")
 
 
 def _run_clean(args: argparse.Namespace) -> int:

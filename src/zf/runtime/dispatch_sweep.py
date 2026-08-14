@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from zf.core.events.model import ZfEvent
+from zf.core.task.schema import Task
 
 
 _DEFAULT_SILENT_STALL_THRESHOLD_S = 30.0
@@ -131,6 +132,8 @@ def sweep_silent_dispatches(
     events: Iterable[ZfEvent],
     now: datetime | None = None,
     silent_stall_threshold_s: float = _DEFAULT_SILENT_STALL_THRESHOLD_S,
+    ignored_task_ids: set[str] | None = None,
+    tasks: Iterable[Task] = (),
 ) -> DispatchSweepResult:
     """Find (task_id, assignee) pairs where task.assigned has no
     matching task.dispatched within the threshold window.
@@ -146,6 +149,12 @@ def sweep_silent_dispatches(
     task.dispatched.
     """
     sweep_now = now or datetime.now(timezone.utc)
+    ignored = set(ignored_task_ids or ())
+    from zf.runtime.workflow_anchor import is_workflow_dispatch_managed_task
+
+    ignored.update(
+        task.id for task in tasks if is_workflow_dispatch_managed_task(task)
+    )
 
     # latest_assigned: (task_id, assignee) -> latest task.assigned ts
     latest_assigned: dict[tuple[str, str], datetime] = {}
@@ -164,7 +173,7 @@ def sweep_silent_dispatches(
             continue
         payload = ev.payload if isinstance(ev.payload, dict) else {}
         task_id = (ev.task_id or str(payload.get("task_id") or "")).strip()
-        if not task_id:
+        if not task_id or task_id in ignored:
             continue
         ts = _parse_ts(ev.ts)
         if ts is None:

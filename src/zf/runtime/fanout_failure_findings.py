@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from zf.runtime.candidate_rework import candidate_quality_failure_message
+from zf.runtime.verification_result import (
+    verification_findings_from_payload,
+    verification_result_from_payload,
+    verification_rework_items_from_payload,
+)
 
 
 def fanout_failure_findings(
@@ -71,10 +76,8 @@ def fanout_failure_recovery(
     if typed_handoff:
         return typed_handoff
     for payload in payloads:
-        result = payload.get("verification_result")
-        if not isinstance(result, dict):
-            continue
-        if str(result.get("schema_version") or "") != "verification-result.v1":
+        result = verification_result_from_payload(payload)
+        if not result:
             continue
         control_ref = payload.get("control_result_ref")
         if (
@@ -226,6 +229,8 @@ def findings_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw_findings, list):
         raw_findings = payload.get("blocked_rework_findings")
     if not isinstance(raw_findings, list):
+        raw_findings = verification_findings_from_payload(payload)
+    if not isinstance(raw_findings, list):
         raw_findings = []
 
     out: list[dict[str, Any]] = []
@@ -263,6 +268,30 @@ def findings_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
             })
     if out:
         return out
+    rework_items = verification_rework_items_from_payload(payload)
+    for index, raw in enumerate(rework_items):
+        message = str(
+            raw.get("required_delta")
+            or raw.get("observed")
+            or raw.get("expected")
+            or raw.get("done_when")
+            or ""
+        ).strip()
+        if not message:
+            continue
+        out.append({
+            "finding_id": str(raw.get("rework_item_id") or "")
+            or f"{child_id or task_id or 'child'}-rework-{index + 1}",
+            "acceptance_id": str(raw.get("acceptance_id") or ""),
+            "severity": "high",
+            "category": "verification",
+            "child_id": child_id,
+            "task_id": task_id,
+            "message": message,
+            "files_or_scope": list(raw.get("allowed_scope") or []),
+        })
+    if out:
+        return out
     reason = str(
         payload.get("reason")
         or payload.get("failure_reason")
@@ -272,10 +301,19 @@ def findings_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
     ).strip()
     if not reason:
         return []
+    semantic_verdict = str(
+        payload.get("semantic_verdict")
+        or report.get("verdict")
+        or ""
+    ).strip()
     return [{
         "finding_id": f"{child_id or task_id or 'child'}-reason",
         "severity": "high",
-        "category": "runtime_failure",
+        "category": (
+            "verification"
+            if semantic_verdict in {"rejected", "blocked"}
+            else "runtime_failure"
+        ),
         "child_id": child_id,
         "task_id": task_id,
         "message": reason,

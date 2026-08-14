@@ -250,6 +250,117 @@ def failed_acceptance_ids(result: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def verification_result_from_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return an admitted verification result embedded in an event payload."""
+
+    for key in ("verification_result", "report"):
+        raw = payload.get(key)
+        if (
+            isinstance(raw, Mapping)
+            and str(raw.get("schema_version") or "") == SCHEMA_VERSION
+        ):
+            return dict(raw)
+    return {}
+
+
+def verification_findings_from_payload(
+    payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Flatten requirement findings without discarding acceptance context."""
+
+    result = verification_result_from_payload(payload)
+    if not result:
+        return []
+    out: list[dict[str, Any]] = []
+    top_level = result.get("findings")
+    if isinstance(top_level, list):
+        out.extend(dict(item) for item in top_level if isinstance(item, Mapping))
+    if out:
+        return out
+    matrix = result.get("requirement_results")
+    if not isinstance(matrix, list):
+        return []
+    for requirement in matrix:
+        if not isinstance(requirement, Mapping):
+            continue
+        acceptance_id = str(requirement.get("acceptance_id") or "").strip()
+        evidence_refs = _string_list(requirement.get("evidence_refs"))
+        commands = _string_list(requirement.get("reproduction_commands"))
+        for raw in _list(requirement.get("findings")):
+            if not isinstance(raw, Mapping):
+                continue
+            finding = dict(raw)
+            if acceptance_id:
+                finding.setdefault("acceptance_id", acceptance_id)
+            if evidence_refs:
+                finding.setdefault("evidence_refs", evidence_refs)
+            if commands:
+                finding.setdefault("verification_command", "; ".join(commands))
+            finding.setdefault("category", "verification")
+            out.append(finding)
+    return out
+
+
+def verification_rework_items_from_payload(
+    payload: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    result = verification_result_from_payload(payload)
+    raw_items = result.get("rework_items") if result else None
+    if not isinstance(raw_items, list):
+        return []
+    requirements = {
+        str(item.get("acceptance_id") or ""): item
+        for item in result.get("requirement_results") or []
+        if isinstance(item, Mapping) and str(item.get("acceptance_id") or "")
+    }
+    control_ref = payload.get("control_result_ref")
+    control_ref_value = (
+        str(control_ref.get("ref") or "").strip()
+        if isinstance(control_ref, Mapping)
+        else ""
+    )
+    out: list[dict[str, Any]] = []
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        requirement = requirements.get(str(item.get("acceptance_id") or ""), {})
+        if isinstance(requirement, Mapping):
+            commands = _string_list(requirement.get("reproduction_commands"))
+            evidence = _string_list(requirement.get("evidence_refs"))
+            if commands:
+                item.setdefault("verification_commands", commands)
+            if evidence:
+                item.setdefault("evidence_refs", evidence)
+        source_refs = _string_list(item.get("source_refs"))
+        if control_ref_value and control_ref_value not in source_refs:
+            source_refs.append(control_ref_value)
+        source_refs.extend(
+            ref
+            for ref in _string_list(item.get("evidence_refs"))
+            if ref not in source_refs
+        )
+        if source_refs:
+            item["source_refs"] = source_refs
+        out.append(item)
+    return out
+
+
+def verification_rework_paths_from_payload(
+    payload: Mapping[str, Any],
+) -> list[str]:
+    paths = [
+        str(item.get("path") or "").strip()
+        for item in verification_findings_from_payload(payload)
+        if str(item.get("path") or "").strip()
+    ]
+    for item in verification_rework_items_from_payload(payload):
+        paths.extend(_string_list(item.get("allowed_scope")))
+    return list(dict.fromkeys(paths))
+
+
 def _legacy_result(
     payload: Mapping[str, Any],
     *,
@@ -491,4 +602,8 @@ __all__ = [
     "normalize_verification_result",
     "recovery_owner",
     "validate_verification_result",
+    "verification_findings_from_payload",
+    "verification_result_from_payload",
+    "verification_rework_items_from_payload",
+    "verification_rework_paths_from_payload",
 ]

@@ -43,7 +43,11 @@ def prepare_candidate_verification_authority(
     """
 
     events = runtime.event_log.read_all()
-    candidate = _latest_frozen_candidate(events, workflow_run_id)
+    candidate = _frozen_candidate_for_payload(
+        events,
+        workflow_run_id,
+        payload=payload,
+    )
     if candidate is None:
         return {}
     body = dict(candidate.payload)
@@ -287,6 +291,80 @@ def _latest_frozen_candidate(
             continue
         if str(body.get("schema_version") or "") == "candidate-freeze-receipt.v1":
             return event
+    return None
+
+
+def _frozen_candidate_for_payload(
+    events: list[ZfEvent],
+    workflow_run_id: str,
+    *,
+    payload: Mapping[str, Any],
+) -> ZfEvent | None:
+    """Resolve the exact triggering freeze before falling back to latest."""
+
+    trigger_payload = payload.get("trigger_payload")
+    trigger_payload = (
+        trigger_payload if isinstance(trigger_payload, Mapping) else {}
+    )
+    candidate_event_id = str(
+        payload.get("candidate_snapshot_event_id")
+        or payload.get("candidate_event_id")
+        or trigger_payload.get("candidate_snapshot_event_id")
+        or trigger_payload.get("candidate_event_id")
+        or ""
+    ).strip()
+    freeze_id = str(
+        payload.get("freeze_id")
+        or trigger_payload.get("freeze_id")
+        or ""
+    ).strip()
+    if not candidate_event_id and not freeze_id:
+        return _latest_frozen_candidate(events, workflow_run_id)
+    candidates = {
+        event.id: event
+        for event in events
+        if event.type == "candidate.ready"
+        and isinstance(event.payload, Mapping)
+    }
+    current = candidates.get(candidate_event_id) if candidate_event_id else None
+    visited: set[str] = set()
+    while current is not None and current.id not in visited:
+        visited.add(current.id)
+        body = current.payload
+        event_run_id = str(
+            body.get("workflow_run_id")
+            or current.correlation_id
+            or ""
+        )
+        if event_run_id != workflow_run_id:
+            return None
+        if str(body.get("schema_version") or "") == "candidate-freeze-receipt.v1":
+            if freeze_id and str(body.get("freeze_id") or "") != freeze_id:
+                return None
+            return current
+        parent_id = str(
+            body.get("candidate_snapshot_event_id")
+            or body.get("candidate_event_id")
+            or ""
+        ).strip()
+        current = candidates.get(parent_id) if parent_id else None
+    if freeze_id:
+        for event in reversed(events):
+            if event.type != "candidate.ready" or not isinstance(event.payload, Mapping):
+                continue
+            body = event.payload
+            event_run_id = str(
+                body.get("workflow_run_id")
+                or event.correlation_id
+                or ""
+            )
+            if (
+                event_run_id == workflow_run_id
+                and str(body.get("schema_version") or "")
+                == "candidate-freeze-receipt.v1"
+                and str(body.get("freeze_id") or "") == freeze_id
+            ):
+                return event
     return None
 
 

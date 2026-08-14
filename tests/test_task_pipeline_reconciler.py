@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from zf.core.config.schema import (
     ProjectConfig,
@@ -21,6 +21,9 @@ from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.task_pipeline_reconciler import (
     TaskPipelineReconciler,
     task_pipeline_policy_partitions,
+)
+from zf.runtime.task_pipeline_semantic_exhaustion import (
+    reconcile_task_pipeline_semantic_exhaustion,
 )
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
@@ -140,6 +143,120 @@ def test_shadow_streams_impl_to_verify_without_waiting_for_other_tasks() -> None
     ]
 
 
+def test_external_gate_never_dispatches_impl_and_enters_integration_when_satisfied() -> None:
+    task = _task("HUMAN", priority=1)
+    task["status"] = "blocked"
+    task["blocked_reason"] = "legacy worker recovery exhausted"
+    task["contract"] = {
+        "evidence_contract": {
+            "required_manual_evidence": "/tmp/human.json",
+        },
+        "acceptance_criteria": [{
+            "id": "AC8",
+            "mandatory": True,
+            "verification_owner": "human",
+            "verification_tier": "manual_evidence",
+        }],
+    }
+    stale_impl = _operation("HUMAN", "impl", "suspended")
+
+    waiting = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[task],
+        operations=[stale_impl],
+        attempts=[],
+    )
+    admitted = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[task],
+        operations=[stale_impl],
+        attempts=[],
+        external_gate_satisfied_task_ids={"HUMAN"},
+    )
+
+    assert waiting["tasks"][0]["stage"] == "external_gate_waiting"
+    assert waiting["queues"]["external_gate_waiting"] == ["HUMAN"]
+    assert waiting["dispatchable"]["impl"] == []
+    assert waiting["occupancy"]["pools"]["impl"] == 0
+    assert admitted["tasks"][0]["stage"] == "integration_ready"
+    assert admitted["queues"]["integration_ready"] == ["HUMAN"]
+
+
+def test_verify_only_starts_at_verify_and_never_reworks_through_impl() -> None:
+    task = _task("AUDIT", priority=1)
+    task["contract"] = {
+        "evidence_contract": {"runtime_only": True, "write_free": True},
+    }
+    stale_impl = _operation("AUDIT", "impl", "suspended")
+
+    ready = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[task],
+        operations=[stale_impl],
+        attempts=[],
+    )
+    rejected_verify = _operation("AUDIT", "verify", "settled")
+    rejected_verify["semantic_verdict"] = "rejected"
+    rejected = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[task],
+        operations=[stale_impl, rejected_verify],
+        attempts=[],
+    )
+
+    assert ready["tasks"][0]["stage"] == "verify_ready"
+    assert ready["dispatchable"]["verify"][0]["task_id"] == "AUDIT"
+    assert ready["dispatchable"]["impl"] == []
+    assert rejected["tasks"][0]["stage"] == "blocked"
+    assert "verify_only_verification_rejected" in rejected["tasks"][0]["blockers"]
+    assert rejected["dispatchable"]["impl"] == []
+
+
+def test_reconciler_prefers_task_stage_session_owner_when_slot_is_idle() -> None:
+    policy = _policy()
+    policy["pools"]["impl"].update({
+        "capacity": 2,
+        "role_instances": ["impl-1", "impl-2"],
+    })
+
+    projection = TaskPipelineReconciler().reconcile(
+        policy=policy,
+        tasks=[_task("A", priority=1)],
+        operations=[],
+        attempts=[],
+        preferred_role_instances={"A": {"impl": "impl-2"}},
+    )
+
+    assert projection["dispatchable"]["impl"][0]["role_instance"] == "impl-2"
+
+
+def test_request_hash_divergence_gets_one_compatibility_replay_probe() -> None:
+    operation = _operation("A", "impl", "blocked", generation=3)
+    operation["reason"] = "request_hash_divergence"
+
+    projection = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[_task("A", priority=1)],
+        operations=[operation],
+        attempts=[],
+    )
+
+    assert projection["tasks"][0]["stage"] == "impl_ready"
+    assert projection["dispatchable"]["impl"][0][
+        "operation_generation"
+    ] == "3"
+
+    operation["reason"] = "request_hash_compatibility_failed"
+    blocked = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[_task("A", priority=1)],
+        operations=[operation],
+        attempts=[],
+    )
+    assert blocked["tasks"][0]["stage"] == "blocked"
+    assert blocked["dispatchable"]["impl"] == []
+
+
 def test_task_ref_rejection_opens_new_impl_generation_not_legacy_repair() -> None:
     policy = _policy()
     policy["max_rework_attempts"] = 2
@@ -189,6 +306,165 @@ def test_task_ref_rejection_opens_new_impl_generation_not_legacy_repair() -> Non
 
     assert second["tasks"][0]["stage"] == "verify_ready"
     assert second["dispatchable"]["verify"][0]["operation_generation"] == "2"
+
+
+def test_verify_rejection_at_rework_cap_exposes_semantic_blocker() -> None:
+    policy = _policy()
+    policy["max_rework_attempts"] = 2
+    verify = _operation("A", "verify", "settled", generation=3)
+    verify.update({
+        "semantic_verdict": "blocked",
+        "call_result_admitted_event_id": "evt-verify-admitted",
+        "admitted_control_result_ref": {
+            "ref": "artifacts/verify/A.json",
+            "sha256": "a" * 64,
+        },
+    })
+
+    projection = TaskPipelineReconciler().reconcile(
+        policy=policy,
+        tasks=[_task("A", priority=1)],
+        operations=[
+            _operation("A", "impl", "settled", generation=3),
+            verify,
+        ],
+        attempts=[],
+    )
+
+    view = projection["tasks"][0]
+    assert view["stage"] == "blocked"
+    assert view["blockers"] == ["semantic_rework_exhausted"]
+    assert view["semantic_blocker"] == {
+        "stage": "verify",
+        "operation_id": "op-A-verify-3",
+        "operation_generation": 3,
+        "semantic_verdict": "blocked",
+        "max_rework_attempts": 2,
+        "source_event_id": "evt-verify-admitted",
+        "control_result_ref": {
+            "ref": "artifacts/verify/A.json",
+            "sha256": "a" * 64,
+        },
+    }
+
+
+def test_semantic_rework_exhaustion_event_is_idempotent(tmp_path: Path) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    from zf.core.events.writer import EventWriter
+
+    writer = EventWriter(log, default_origin="kernel")
+    runtime = SimpleNamespace(event_log=log, event_writer=writer)
+    projection = {
+        "tasks": [{
+            "task_id": "A",
+            "semantic_blocker": {
+                "stage": "verify",
+                "operation_id": "op-A-verify-3",
+                "operation_generation": 3,
+                "semantic_verdict": "blocked",
+                "max_rework_attempts": 2,
+                "source_event_id": "evt-verify-admitted",
+                "control_result_ref": {
+                    "ref": "artifacts/verify/A.json",
+                    "sha256": "a" * 64,
+                },
+            },
+        }],
+    }
+    contexts = {
+        "A": {
+            "workflow_run_id": "RUN-1",
+            "task_map_generation": "GEN-1",
+            "profile_id": "prd-v4",
+            "profile_digest": "p" * 64,
+        },
+    }
+
+    first = reconcile_task_pipeline_semantic_exhaustion(
+        runtime,
+        projection=projection,
+        generation_contexts=contexts,
+    )
+    second = reconcile_task_pipeline_semantic_exhaustion(
+        runtime,
+        projection=projection,
+        generation_contexts=contexts,
+    )
+
+    assert len(first) == 1
+    assert second == []
+    event = first[0]
+    assert event.type == "task.pipeline.semantic_rework.exhausted"
+    assert event.task_id == "A"
+    assert event.payload["owner_route"] == "run_manager"
+    assert event.payload["semantic_triage_contract_version"] == 1
+    assert event.payload["semantic_triage_required"] is True
+    assert event.payload["failure_count"] == 3
+    assert event.payload["retry_count"] == 2
+    assert event.payload["failure_event_ids"] == ["evt-verify-admitted"]
+    assert event.payload["failure_fingerprint"].startswith(
+        "task-pipeline-semantic:A:verify:blocked:"
+    )
+    assert event.payload["control_result_ref"]["sha256"] == "a" * 64
+
+
+def test_semantic_rework_exhaustion_upgrades_legacy_event_once(
+    tmp_path: Path,
+) -> None:
+    log = EventLog(tmp_path / "events.jsonl")
+    from zf.core.events.writer import EventWriter
+
+    writer = EventWriter(log, default_origin="kernel")
+    writer.append(ZfEvent(
+        type="task.pipeline.semantic_rework.exhausted",
+        actor="zf-runtime",
+        task_id="A",
+        correlation_id="RUN-1",
+        payload={
+            "schema_version": "task-pipeline.semantic-rework-exhausted.v1",
+            "task_id": "A",
+            "workflow_run_id": "RUN-1",
+            "task_map_generation": "GEN-1",
+            "operation_id": "op-A-verify-3",
+            "operation_generation": 3,
+        },
+    ))
+    runtime = SimpleNamespace(event_log=log, event_writer=writer)
+    projection = {
+        "tasks": [{
+            "task_id": "A",
+            "semantic_blocker": {
+                "stage": "verify",
+                "operation_id": "op-A-verify-3",
+                "operation_generation": 3,
+                "semantic_verdict": "blocked",
+                "max_rework_attempts": 2,
+                "source_event_id": "evt-verify-admitted",
+                "control_result_ref": {"sha256": "a" * 64},
+            },
+        }],
+    }
+    contexts = {"A": {
+        "workflow_run_id": "RUN-1",
+        "task_map_generation": "GEN-1",
+        "profile_id": "prd-v4",
+        "profile_digest": "p" * 64,
+    }}
+
+    upgraded = reconcile_task_pipeline_semantic_exhaustion(
+        runtime,
+        projection=projection,
+        generation_contexts=contexts,
+    )
+    replay = reconcile_task_pipeline_semantic_exhaustion(
+        runtime,
+        projection=projection,
+        generation_contexts=contexts,
+    )
+
+    assert len(upgraded) == 1
+    assert upgraded[0].payload["semantic_triage_contract_version"] == 1
+    assert replay == []
 
 
 def test_existing_pipeline_rework_does_not_require_fresh_global_capacity() -> None:
@@ -258,6 +534,160 @@ def test_integration_high_water_stops_new_impl_but_never_blocks_drain() -> None:
     assert projection["backpressure"]["integration_limit_reached"] is True
     assert projection["queues"]["integration_ready"] == ["A"]
     assert projection["dispatchable"]["impl"] == []
+
+
+def test_superseded_integration_rotates_only_the_integration_generation() -> None:
+    projection = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[_task("A", priority=1)],
+        operations=[
+            _operation("A", "impl", "settled"),
+            _operation("A", "verify", "settled"),
+            _operation("A", "integration", "superseded"),
+        ],
+        attempts=[],
+    )
+
+    view = projection["tasks"][0]
+    assert view["stage"] == "integration_ready"
+    assert view["next_operation_generation"] == 2
+    assert projection["queues"]["integration_ready"] == ["A"]
+
+
+def test_requested_integration_redrive_preserves_its_operation_generation() -> None:
+    projection = TaskPipelineReconciler().reconcile(
+        policy=_policy(),
+        tasks=[_task("A", priority=1)],
+        operations=[
+            _operation("A", "impl", "settled"),
+            _operation("A", "verify", "settled"),
+            _operation("A", "integration", "requested", generation=2),
+        ],
+        attempts=[],
+    )
+
+    view = projection["tasks"][0]
+    assert view["stage"] == "integration_ready"
+    assert view["next_operation_generation"] == 2
+    assert projection["queues"]["integration_ready"] == ["A"]
+
+
+def test_integration_bridge_uses_rotated_projection_generation() -> None:
+    from zf.runtime.task_pipeline_integration import (
+        reconcile_task_pipeline_integration,
+    )
+
+    task = Task(id="A", title="rotated integration")
+    integrate = Mock(return_value=SimpleNamespace(status="integrated"))
+    runtime = SimpleNamespace(
+        state_dir=Path("/tmp/zf-test"),
+        project_root=Path("/tmp/project"),
+        config=SimpleNamespace(),
+        event_log=SimpleNamespace(),
+        event_writer=SimpleNamespace(),
+        task_store=SimpleNamespace(get=lambda task_id: task if task_id == "A" else None),
+    )
+    projection = {
+        "queues": {"integration_ready": ["A"]},
+        "tasks": [{
+            "task_id": "A",
+            "stage": "integration_ready",
+            "next_operation_generation": 2,
+        }],
+    }
+    contexts = {
+        "A": {
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-1",
+            "dispatch_base_commit": "base-1",
+        },
+    }
+    operations = [{
+        "task_id": "A",
+        "task_pipeline_stage": "verify",
+        "status": "settled",
+        "semantic_verdict": "passed",
+        "operation_generation": 1,
+        "pipeline_key": "pipeline-1",
+    }]
+
+    with patch(
+        "zf.runtime.candidates.CandidateRebuilder",
+        return_value=SimpleNamespace(integrate_task_pipeline_task=integrate),
+    ):
+        decisions = reconcile_task_pipeline_integration(
+            runtime,
+            projection=projection,
+            generation_contexts=contexts,
+            operation_rows=operations,
+        )
+
+    assert decisions[0].action == "task_pipeline_integrated"
+    assert integrate.call_args.kwargs["operation_generation"] == 2
+
+
+def test_external_gate_satisfaction_is_an_integration_source() -> None:
+    from zf.runtime.task_pipeline_integration import (
+        reconcile_task_pipeline_integration,
+    )
+
+    task = Task(id="HUMAN", title="manual gate")
+    task.contract.evidence_contract = {
+        "required_manual_evidence": "/tmp/ac8.json",
+    }
+    task.contract.acceptance_criteria = [{
+        "id": "AC8",
+        "mandatory": True,
+        "verification_owner": "human",
+        "verification_tier": "manual_evidence",
+    }]
+    satisfied = ZfEvent(
+        type="task.pipeline.external_gate.satisfied",
+        task_id=task.id,
+        correlation_id="run-1",
+        payload={
+            "workflow_run_id": "run-1",
+            "task_map_generation": "map-1",
+            "operation_generation": 1,
+            "pipeline_key": "external-pipeline",
+        },
+    )
+    integrate = Mock(return_value=SimpleNamespace(status="integrated"))
+    runtime = SimpleNamespace(
+        state_dir=Path("/tmp/zf-test"),
+        project_root=Path("/tmp/project"),
+        config=SimpleNamespace(),
+        event_log=SimpleNamespace(read_all=lambda: [satisfied]),
+        event_writer=SimpleNamespace(),
+        task_store=SimpleNamespace(
+            get=lambda task_id: task if task_id == task.id else None
+        ),
+    )
+
+    with patch(
+        "zf.runtime.candidates.CandidateRebuilder",
+        return_value=SimpleNamespace(integrate_task_pipeline_task=integrate),
+    ):
+        decisions = reconcile_task_pipeline_integration(
+            runtime,
+            projection={
+                "queues": {"integration_ready": [task.id]},
+                "tasks": [{
+                    "task_id": task.id,
+                    "next_operation_generation": 1,
+                }],
+            },
+            generation_contexts={task.id: {
+                "workflow_run_id": "run-1",
+                "task_map_generation": "map-1",
+                "dispatch_base_commit": "base-1",
+            }},
+            operation_rows=[],
+        )
+
+    assert decisions[0].action == "task_pipeline_integrated"
+    assert integrate.call_args.kwargs["pipeline_key"] == "external-pipeline"
+    assert integrate.call_args.kwargs["causation_id"] == satisfied.id
 
 
 def test_cancelled_or_blocked_predecessor_does_not_unlock_dependency() -> None:
