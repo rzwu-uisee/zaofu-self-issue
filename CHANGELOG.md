@@ -7,6 +7,35 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 - 暂无。
 
+## v0.0.4 - 2026-08-14
+
+Release notes: [中文](docs/releases/v0.0.4.md) |
+[English](docs/releases/v0.0.4.en.md)
+
+Developer Preview 运行时权威与恢复版本，将 v0.0.3 后的 Task Pipeline、成本预算、
+Task Contract Authority 和 Kanban 可观测性改动收口为公开 release。
+
+### Added
+
+- Task Pipeline orchestration runtime、Task workspace、Stage Worker、Candidate integration
+  和 Orchestrator Agent 受控语义 checkpoint。
+- Provider usage / pricing catalog / hard budget enforcement、Long-Run Truth、Recovery Case
+  和 retention inventory。
+- Task Contract Authority、current execution target、stale result fail-closed 和对应 doctor。
+- Kanban Agent turn delta/timing observability、Web cost/resource projections 和 interaction policy。
+
+### Changed
+
+- Goal Closure、Reader/Writer fanout、workflow resume/rework 和 terminal convergence 统一绑定
+  current generation、artifact ref、digest 与 execution target。
+- Web Dashboard 更清晰地区分 current truth、历史 attempt、raw event 和需要关注的终态事实。
+
+### Validation
+
+- 分批 focused validation：268 passed、627 passed、261 passed、198 passed / 1 skipped。
+- Web unit validation 覆盖 Channel action、Kanban session、cost precision、task display、
+  page load policy 和 Kanban Agent interaction policy。
+
 ## v0.0.3 - 2026-08-08
 
 Release notes: [中文](docs/releases/v0.0.3.md) |

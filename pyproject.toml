@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zaofu"
-version = "0.0.3"
+version = "0.0.4"
 description = "ZaoFu multi-agent harness scaffold"
 readme = "README.md"
 requires-python = ">=3.11"
