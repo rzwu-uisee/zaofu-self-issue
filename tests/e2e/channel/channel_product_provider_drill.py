@@ -119,6 +119,28 @@ def _new_events(
     ]
 
 
+def _wait_for_turn_terminal(
+    log: EventLog,
+    turn_id: str,
+    *,
+    timeout_seconds: float = 180,
+) -> Any:
+    terminal_types = {
+        "kanban.agent.turn.completed",
+        "kanban.agent.turn.failed",
+    }
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        for event in reversed(log.read_all()):
+            if (
+                event.type in terminal_types
+                and str(event.payload.get("turn_id") or "") == turn_id
+            ):
+                return event
+        time.sleep(0.1)
+    raise RuntimeError(f"timed out waiting for Kanban Agent turn {turn_id}")
+
+
 def _real_plan_to_proposal(
     *,
     state_dir: Path,
@@ -144,6 +166,7 @@ def _real_plan_to_proposal(
         )
     ) as client:
         headers = {"x-zf-web-token": token}
+        accepted_at = time.monotonic()
         response = client.post(
             "/api/actions/chat-orchestrator",
             headers=headers,
@@ -153,7 +176,6 @@ def _real_plan_to_proposal(
                 "project_id": "channel-real-provider-drill",
                 "conversation_id": f"channel:{CHANNEL_ID}",
                 "thread_key": f"channel-plan:{CHANNEL_ID}:main",
-                "sync": True,
                 "source": "web-channel-workflow-plan",
                 "message": (
                     "Propose creating one Task from the exact confirmed "
@@ -172,15 +194,59 @@ def _real_plan_to_proposal(
                 "workflow_context": authority,
             },
         )
-        if response.status_code != 200:
+        accept_duration_ms = int((time.monotonic() - accepted_at) * 1000)
+        if response.status_code != 202:
             raise RuntimeError(
                 f"Kanban Agent Plan failed: {response.status_code} "
                 f"{response.text}"
             )
         body = response.json()
+        turn_id = str(body.get("turn_id") or "")
+        if not turn_id:
+            raise RuntimeError(f"Kanban Agent did not return turn_id: {body}")
+        if accept_duration_ms > 2_000:
+            raise RuntimeError(
+                "Kanban Agent async admission exceeded 2s: "
+                f"{accept_duration_ms}ms"
+            )
+
+        snapshot_started_at = time.monotonic()
+        snapshot = client.get("/api/snapshot/light")
+        snapshot_duration_ms = int(
+            (time.monotonic() - snapshot_started_at) * 1000
+        )
+        if snapshot.status_code != 200 or snapshot_duration_ms > 2_000:
+            raise RuntimeError(
+                "Web became unresponsive while Provider turn was active: "
+                f"status={snapshot.status_code} duration={snapshot_duration_ms}ms"
+            )
+
+        terminal = _wait_for_turn_terminal(
+            EventLog(state_dir / "events.jsonl"),
+            turn_id,
+        )
+        if terminal.type == "kanban.agent.turn.failed":
+            raise RuntimeError(
+                "Kanban Agent Plan failed asynchronously: "
+                f"{terminal.payload.get('reason') or terminal.payload}"
+            )
+        reply_event_id = str(terminal.payload.get("reply_event_id") or "")
+        reply_event = next(
+            (
+                event
+                for event in EventLog(state_dir / "events.jsonl").read_all()
+                if event.id == reply_event_id
+                and event.type == "kanban.agent.reply"
+            ),
+            None,
+        )
+        if reply_event is None:
+            raise RuntimeError(
+                f"Kanban Agent terminal has no durable reply: {terminal.payload}"
+            )
         plan = (
-            body.get("reply", {}).get("plan_request")
-            if isinstance(body.get("reply"), dict)
+            reply_event.payload.get("plan_request")
+            if isinstance(reply_event.payload, dict)
             else None
         )
         if not isinstance(plan, dict) or not plan.get("valid"):
@@ -229,6 +295,11 @@ def _real_plan_to_proposal(
             "plan_request_id": plan["request_id"],
             "plan_option_id": option["id"],
             "proposal_id": result.get("proposal_id"),
+            "turn_id": turn_id,
+            "accept_duration_ms": accept_duration_ms,
+            "snapshot_duration_ms": snapshot_duration_ms,
+            "turn_duration_ms": int(terminal.payload.get("duration_ms") or 0),
+            "turn_timing": terminal.payload.get("timing") or {},
         }
 
 

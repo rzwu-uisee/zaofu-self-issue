@@ -5,7 +5,7 @@ const token = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
 test.describe.configure({ timeout: 120_000 });
 
 async function expectWorkbenchLoaded(page: import("@playwright/test").Page) {
-  await expect(page.locator('.status-pill[title*="stream live"]'))
+  await expect(page.locator(".status-pill.status-live"))
     .toBeVisible({ timeout: 90_000 });
 }
 

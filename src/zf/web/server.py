@@ -161,10 +161,13 @@ from zf.web.project_init_service import (
     initialize_admitted_project,
 )
 from zf.web.headless_agent import (
-    HeadlessMessage,
     HeadlessThreadStore,
     KanbanHeadlessAgent,
     canonical_headless_backend,
+)
+from zf.web.headless_turn_observability import (
+    HeadlessDeltaEmitter as _HeadlessDeltaEmitter,
+    kanban_turn_timing_payload as _kanban_turn_timing_payload,
 )
 from zf.web.proposal_extraction import (
     default_validate_payload,
@@ -7241,108 +7244,6 @@ def _kanban_agent_sidecar_threshold_bytes() -> int:
     return max(1, value)
 
 
-class _HeadlessDeltaEmitter:
-    def __init__(
-        self,
-        *,
-        writer: EventWriter,
-        task_id: str | None,
-        turn_started: ZfEvent,
-        user_message: ZfEvent,
-        turn_id: str,
-        thread_key: str,
-        project_id: str,
-        conversation_id: str,
-        backend: str,
-        agent_session_emitter: AgentSessionStreamEmitter | None = None,
-        flush_interval_s: float = _HEADLESS_STREAM_FLUSH_INTERVAL_S,
-    ) -> None:
-        self.writer = writer
-        self.task_id = task_id
-        self.turn_started = turn_started
-        self.user_message = user_message
-        self.turn_id = turn_id
-        self.thread_key = thread_key
-        self.project_id = project_id
-        self.conversation_id = conversation_id
-        self.backend = backend
-        self.agent_session_emitter = agent_session_emitter
-        self.flush_interval_s = flush_interval_s
-        self.delta_seq = 0
-        self._pending_text: list[str] = []
-        self._pending_thinking: list[str] = []
-        self._last_flush_at = time.monotonic()
-        self._content_started = False
-
-    def emit(self, message: HeadlessMessage) -> None:
-        if self.agent_session_emitter is not None:
-            self.agent_session_emitter.emit_message(message)
-        if message.type == "text":
-            if message.content:
-                self._pending_text.append(message.content)
-            self._flush_first_content_or_due()
-            return
-        if message.type == "thinking":
-            if message.content:
-                self._pending_thinking.append(message.content)
-            self._flush_first_content_or_due()
-            return
-        self.flush()
-        self._emit_one(message)
-
-    def flush(self) -> None:
-        if self.agent_session_emitter is not None:
-            self.agent_session_emitter.flush()
-        if self._pending_thinking:
-            content = "".join(self._pending_thinking)
-            self._pending_thinking.clear()
-            self._emit_one(HeadlessMessage(type="thinking", content=content))
-        if self._pending_text:
-            content = "".join(self._pending_text)
-            self._pending_text.clear()
-            self._emit_one(HeadlessMessage(type="text", content=content))
-        self._last_flush_at = time.monotonic()
-
-    def _flush_if_due(self) -> None:
-        if time.monotonic() - self._last_flush_at >= self.flush_interval_s:
-            self.flush()
-
-    def _flush_first_content_or_due(self) -> None:
-        if not self._content_started:
-            self._content_started = True
-            self.flush()
-            return
-        self._flush_if_due()
-
-    def _emit_one(self, message: HeadlessMessage) -> None:
-        # doc 106 B axis: turn deltas are ephemeral UI transport — published
-        # to the LiveDeltaBus (SSE merges them), never to events.jsonl. The
-        # committed truth is kanban.agent.reply (full answer). The old dual
-        # kanban.agent.message.delta emit is gone entirely (pure duplicate).
-        self.delta_seq += 1
-        payload = {
-            "turn_id": self.turn_id,
-            "thread_key": self.thread_key,
-            "project_id": self.project_id,
-            "conversation_id": self.conversation_id,
-            "backend": self.backend,
-            "seq": self.delta_seq,
-            **_headless_message_event_payload(message),
-        }
-        bus = live_delta_bus_for_writer(self.writer)
-        if bus is None:
-            return
-        bus.publish(
-            "kanban.agent.turn.delta",
-            payload,
-            key=self.turn_id,
-            actor="web",
-            task_id=self.task_id,
-            causation_id=self.turn_started.id,
-            correlation_id=self.user_message.correlation_id,
-        )
-
-
 def _run_headless_kanban_agent_turn(
     *,
     state_dir: Path,
@@ -7366,6 +7267,8 @@ def _run_headless_kanban_agent_turn(
     permission_profile: str = "read_only",
     config: ZfConfig | None = None,
 ) -> dict:
+    turn_started_at = time.monotonic()
+    context_started_at = turn_started_at
     runtime_snapshot_ref = ""
     task = None
     try:
@@ -7492,6 +7395,8 @@ def _run_headless_kanban_agent_turn(
     )
 
     channel_prd_context = canonical_channel_prd_context(state_dir)
+    context_completed_at = time.monotonic()
+    provider_started_at = time.monotonic()
     try:
         agent = KanbanHeadlessAgent(
             state_dir=state_dir,
@@ -7525,6 +7430,7 @@ def _run_headless_kanban_agent_turn(
         )
         delta_emitter.flush()
     except Exception as exc:
+        provider_completed_at = time.monotonic()
         delta_emitter.flush()
         reason = str(exc)
         agent_stream.fail(reason=reason, status="failed")
@@ -7543,6 +7449,14 @@ def _run_headless_kanban_agent_turn(
                 "status": "failed",
                 "reason": reason,
                 "delta_count": delta_emitter.delta_seq,
+                **_kanban_turn_timing_payload(
+                    turn_started_at=turn_started_at,
+                    context_started_at=context_started_at,
+                    context_completed_at=context_completed_at,
+                    provider_started_at=provider_started_at,
+                    provider_completed_at=provider_completed_at,
+                    first_output_at=delta_emitter.first_output_at,
+                ),
             },
         )
         writer.emit(
@@ -7585,6 +7499,8 @@ def _run_headless_kanban_agent_turn(
             "turn_id": turn_id,
             "thread_key": thread_key,
         }
+    provider_completed_at = time.monotonic()
+    plan_started_at = provider_completed_at
     origin_message_event_id = str(payload.get("plan_origin_message_event_id") or "")
     prior_events = writer.event_log.read_all()
     action_proposal = _headless_action_proposal(
@@ -7702,6 +7618,7 @@ def _run_headless_kanban_agent_turn(
             "proposal": redact_obj(action_proposal),
         }
         writer.append(proposal_event)
+    plan_completed_at = time.monotonic()
     if not result.ok:
         agent_stream.fail(
             reason=result.error or result.status,
@@ -7740,6 +7657,16 @@ def _run_headless_kanban_agent_turn(
                 "reason": result.error or result.status,
                 "delta_count": delta_emitter.delta_seq,
                 "reply_event_id": reply_event.id,
+                **_kanban_turn_timing_payload(
+                    turn_started_at=turn_started_at,
+                    context_started_at=context_started_at,
+                    context_completed_at=context_completed_at,
+                    provider_started_at=provider_started_at,
+                    provider_completed_at=provider_completed_at,
+                    first_output_at=delta_emitter.first_output_at,
+                    plan_started_at=plan_started_at,
+                    plan_completed_at=plan_completed_at,
+                ),
             },
         )
         writer.emit(
@@ -7823,6 +7750,16 @@ def _run_headless_kanban_agent_turn(
             "delta_count": delta_emitter.delta_seq,
             "reply_event_id": reply_event.id,
             "has_action_proposal": action_proposal is not None,
+            **_kanban_turn_timing_payload(
+                turn_started_at=turn_started_at,
+                context_started_at=context_started_at,
+                context_completed_at=context_completed_at,
+                provider_started_at=provider_started_at,
+                provider_completed_at=provider_completed_at,
+                first_output_at=delta_emitter.first_output_at,
+                plan_started_at=plan_started_at,
+                plan_completed_at=plan_completed_at,
+            ),
         },
     )
     # Terminal: drop the turn's ephemeral delta scratch so new SSE
@@ -7895,20 +7832,6 @@ def _run_headless_kanban_agent_turn(
         "permission_profile": permission_profile,
         "reply": redact_obj(reply),
     }
-
-
-def _headless_message_event_payload(message: HeadlessMessage) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "message_type": message.type,
-        "content": message.content,
-        "session_id": message.session_id,
-        "tool": message.tool,
-    }
-    if message.input is not None:
-        payload["input"] = redact_obj(message.input)
-    if message.output:
-        payload["output"] = message.output
-    return payload
 
 
 # Extraction logic moved verbatim to zf/web/proposal_extraction.py so the

@@ -14,6 +14,7 @@ from zf.core.config.schema import (
 )
 from zf.core.workflow.lane_pipeline import parse_lane_pipeline
 from zf.core.workflow.inspection import (
+    _classify_runtime_event_consumers,
     build_workflow_inspection_report,
     _graph_diagnostics,
 )
@@ -71,6 +72,64 @@ def test_workflow_inspection_accepts_kernel_flow_discovery_bridge() -> None:
     )
 
     assert diagnostics == []
+
+
+def test_workflow_inspection_classifies_research_runtime_consumer(
+    tmp_path: Path,
+) -> None:
+    cfg = ZfConfig(
+        project=ProjectConfig(name="research-runtime-consumer"),
+        workflow=WorkflowConfig(stages=[
+                WorkflowStageConfig(
+                id="research-fanout",
+                trigger="workflow.invoke.requested",
+                topology="fanout_reader",
+                roles=["researcher"],
+                aggregate=FanoutAggregateConfig(
+                    child_success_event="research.child.completed",
+                    child_failure_event="research.child.failed",
+                    success_event="research.fanout.completed",
+                    failure_event="research.fanout.failed",
+                    ),
+                ),
+                WorkflowStageConfig(
+                    id="delivery-smoke",
+                    trigger="workflow.invoke.requested",
+                    topology="fanout_reader",
+                    roles=["delivery"],
+                    aggregate=FanoutAggregateConfig(
+                        child_success_event="workflow.child.completed",
+                        child_failure_event="workflow.child.failed",
+                        success_event="workflow.stage.completed",
+                        failure_event="workflow.stage.failed",
+                    ),
+                ),
+            ]),
+        roles=[
+            RoleConfig(name="researcher", role_kind="reader"),
+            RoleConfig(name="delivery", role_kind="reader"),
+        ],
+    )
+
+    report = build_workflow_inspection_report(cfg, project_root=tmp_path)
+    research = next(
+        item for item in report["diagnostics"]
+        if item["event"] == "research.fanout.completed"
+    )
+    assert research["kind"] == "expected_event_without_consumer"
+    assert research["severity"] == "INFO"
+    assert research["detail"]["expected_consumer"] == (
+        "kernel research delivery bridge"
+    )
+    unknown = _classify_runtime_event_consumers([{
+        "kind": "event_without_consumer",
+        "severity": "WARN",
+        "source": "workflow_graph",
+        "event": "foo.completed",
+        "detail": {},
+    }])[0]
+    assert unknown["kind"] == "event_without_consumer"
+    assert unknown["severity"] == "WARN"
 
 
 def test_workflow_inspection_fails_closed_for_reserved_event_and_missing_skill(

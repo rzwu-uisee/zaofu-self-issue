@@ -2312,6 +2312,83 @@ class TestApiTraceCandidateFanoutEventsSearchDiagnostics:
         assert trace["execution_route"]["summary"] == task["route_summary"]["summary"]
         assert trace["execution_route"]["dag"]["nodes"]
 
+    def test_task_card_route_is_current_run_while_detail_preserves_history(
+        self,
+        state_dir,
+        client,
+    ):
+        task_id = "TASK-ROUTE-CURRENT"
+        TaskStore(state_dir / "kanban.json").add(
+            Task(id=task_id, title="current route", status="in_progress"),
+        )
+        log = EventLog(state_dir / "events.jsonl")
+        for run_id, fanout_id, role in (
+            ("run-research", "fanout-research", "source_researcher"),
+            ("run-delivery", "fanout-delivery", "delivery_worker"),
+        ):
+            log.append(ZfEvent(
+                type="run.started",
+                actor="zf-cli",
+                task_id=task_id,
+                correlation_id=run_id,
+                payload={"run_id": run_id, "workflow_run_id": run_id},
+            ))
+            log.append(ZfEvent(
+                type="fanout.started",
+                actor="zf-cli",
+                task_id=task_id,
+                correlation_id=run_id,
+                payload={
+                    "fanout_id": fanout_id,
+                    "workflow_run_id": run_id,
+                    "stage_id": "research" if "research" in run_id else "impl",
+                },
+            ))
+            log.append(ZfEvent(
+                type="fanout.child.dispatched",
+                actor="zf-cli",
+                task_id=task_id,
+                correlation_id=run_id,
+                payload={
+                    "fanout_id": fanout_id,
+                    "workflow_run_id": run_id,
+                    "role_instance": role,
+                    "child_id": f"child-{role}",
+                },
+            ))
+            manifest_dir = state_dir / "fanouts" / fanout_id
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "manifest.json").write_text(json.dumps({
+                "fanout_id": fanout_id,
+                "workflow_run_id": run_id,
+                "stage_id": "research" if "research" in run_id else "impl",
+                "status": "started",
+                "children": [{
+                    "task_id": task_id,
+                    "child_id": f"child-{role}",
+                    "role_instance": role,
+                    "status": "dispatched",
+                }],
+            }), encoding="utf-8")
+
+        snapshot = client.get("/api/snapshot").json()
+        task = next(item for item in snapshot["tasks"] if item["id"] == task_id)
+        card_route = task["route_summary"]
+        assert "delivery_worker" in card_route["summary"]
+        assert "source_researcher" not in card_route["summary"]
+        assert card_route["run_scope"] == {
+            "kind": "current_run",
+            "workflow_run_id": "run-delivery",
+            "fanout_id": "fanout-delivery",
+        }
+        assert card_route["history_available"] is True
+        assert task["fanout"]["workflow_run_id"] == "run-delivery"
+
+        detail = client.get(f"/api/tasks/{task_id}").json()
+        full_summary = detail["execution_route"]["summary"]
+        assert "source_researcher" in full_summary
+        assert "delivery_worker" in full_summary
+
     def test_candidate_detail_reads_manifest_projection(self, state_dir, client):
         manifest_dir = state_dir / "candidates" / "F-11111111"
         manifest_dir.mkdir(parents=True)

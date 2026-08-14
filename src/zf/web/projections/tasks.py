@@ -25,6 +25,9 @@ from zf.runtime.goal_terminal_settlement import (
     goal_terminal_matches_current_task,
 )
 from zf.runtime.run_archive import read_task_runs
+from zf.runtime.run_admission import task_workflow_run_id
+from zf.runtime.run_scope import event_run_id
+from zf.runtime.run_scope import run_aliases
 from zf.runtime.workflow_anchor import is_workflow_managed_task
 from zf.web.operator_contract import kanban_agent_evidence_model
 from zf.web.operator_contract import kanban_agent_status_model
@@ -629,6 +632,7 @@ def _latest_task_fanout_runtime(
             projected = {
                 "fanout_id": fanout_id,
                 "stage_id": str(manifest.get("stage_id") or ""),
+                "workflow_run_id": str(manifest.get("workflow_run_id") or ""),
                 "fanout_status": str(manifest.get("status") or "observed"),
                 "child": projected_child,
                 "child_id": str(projected_child.get("child_id") or ""),
@@ -693,6 +697,62 @@ def _fanout_workflow_override(
     })
     out["badges"] = badges
     return out
+
+
+def _task_card_route_summary(
+    task: Task,
+    task_events: list[tuple[int, ZfEvent]],
+    *,
+    latest_fanout: dict[str, Any],
+    aliases: dict[str, str],
+) -> dict[str, Any]:
+    """Project the current run on cards while preserving history elsewhere."""
+
+    event_rows = [event for _, event in task_events]
+    current_run_id = str(
+        latest_fanout.get("workflow_run_id")
+        or task_workflow_run_id(task, events=event_rows)
+        or ""
+    ).strip()
+    scope_kind = "task_history_legacy"
+    scoped_events = task_events
+    if current_run_id:
+        canonical_run_id = aliases.get(current_run_id, "")
+        task_run_ids = {
+            resolved
+            for event in event_rows
+            if (resolved := event_run_id(event, aliases=aliases))
+        }
+        scoped_events = []
+        if canonical_run_id:
+            include_unscoped = task_run_ids == {canonical_run_id}
+            scoped_events = [
+                (seq, event)
+                for seq, event in task_events
+                if event_run_id(event, aliases=aliases) == canonical_run_id
+                or (
+                    include_unscoped
+                    and not event_run_id(event, aliases=aliases)
+                )
+            ]
+        scope_kind = "current_run"
+    elif latest_fanout and int(latest_fanout.get("seq") or 0) > 0:
+        # Older fanout manifests may not carry run identity. The latest start
+        # boundary is safer for a card than merging every historical fanout.
+        start_seq = int(latest_fanout["seq"])
+        scoped_events = [
+            (seq, event) for seq, event in task_events if seq >= start_seq
+        ]
+        scope_kind = "latest_fanout"
+
+    summary = project_route_summary(scoped_events, task_id=task.id)
+    summary["run_scope"] = {
+        "kind": scope_kind,
+        "workflow_run_id": current_run_id,
+        "fanout_id": str(latest_fanout.get("fanout_id") or ""),
+    }
+    summary["history_available"] = len(scoped_events) < len(task_events)
+    return summary
 
 
 def _kanban_display_projection(
@@ -1345,6 +1405,7 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
         except Exception:
             events = []
     all_events = _events_with_seq(state_dir, config=config)
+    aliases = run_aliases(event for _, event in all_events)
     legacy_completed_closeout = _current_completed_run_closeout_for_projection(
         all_events
     )
@@ -1443,7 +1504,12 @@ def _kanban(state_dir: Path, config: ZfConfig | None = None) -> list[dict]:
         source = _task_source_from_events(task_events)
         phase = derive_phase(t, events) if events else None
         phase = _fanout_phase_override(latest_fanout) or phase
-        route_summary = project_route_summary(task_events, task_id=t.id)
+        route_summary = _task_card_route_summary(
+            t,
+            task_events,
+            latest_fanout=latest_fanout,
+            aliases=aliases,
+        )
         fanout_projection = _task_fanout_projection(state_dir, refs, latest_fanout)
         workflow = workflow_projection(
             t,
@@ -1761,6 +1827,7 @@ def _task_fanout_projection(
             for key in (
                 "fanout_id",
                 "child_id",
+                "workflow_run_id",
                 "run_id",
                 "workdir",
                 "source_branch",

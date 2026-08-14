@@ -199,7 +199,7 @@ docker run --rm --network host \
   -e ZF_REAL_CODING_PROJECT_ROOT=/zf-run/project \
   -e ZF_PLAYWRIGHT_EVIDENCE_DIR=/zf-evidence \
   "$DOCKER_IMAGE" \
-  -lc 'set -euo pipefail; mkdir -p "$HOME"; timeout 180s ./node_modules/.bin/playwright install chromium; ./node_modules/.bin/playwright test tests/kanban-agent-real-coding.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
+  -lc 'set -euo pipefail; mkdir -p "$HOME"; chromium_path="$(find /ms-playwright -type f -path "*/chrome-linux64/chrome" 2>/dev/null | sort | tail -1 || true)"; if [[ -n "$chromium_path" ]]; then export ZF_E2E_CHROMIUM_EXECUTABLE_PATH="$chromium_path"; else timeout 180s ./node_modules/.bin/playwright install chromium; fi; ./node_modules/.bin/playwright test tests/kanban-agent-real-coding.spec.ts --config playwright.config.ts --project=chromium --workers=1 --reporter=line --output=/zf-run/test-results'
 
 (
   cd "$PROJECT_ROOT"

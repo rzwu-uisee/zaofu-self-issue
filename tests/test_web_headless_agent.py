@@ -1342,6 +1342,49 @@ def test_chat_orchestrator_can_use_claude_headless_backend(
     snapshots = [event for event in events if event.type == "provider.permission.snapshot.recorded"]
     assert snapshots[-1].payload["snapshot"]["permission_profile"] == "read_only"
     assert snapshots[-1].payload["runtime_snapshot_ref"] == runtime_snapshots[-1].payload["snapshot_ref"]
+    turn_completed = [
+        event for event in events
+        if event.type == "kanban.agent.turn.completed"
+    ][-1]
+    assert turn_completed.payload["duration_ms"] >= 0
+    assert turn_completed.payload["timing"]["context_duration_ms"] >= 0
+    assert turn_completed.payload["timing"]["provider_duration_ms"] >= 0
+    assert turn_completed.payload["timing"]["time_to_first_output_ms"] >= 0
+    assert turn_completed.payload["timing"]["plan_projection_duration_ms"] >= 0
+
+
+def test_chat_orchestrator_failed_turn_carries_timing(
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_turn(_self, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("provider failed before output")
+
+    monkeypatch.setattr(KanbanHeadlessAgent, "run_turn", fail_turn)
+    monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+    client = TestClient(create_app(state_dir, project_root=state_dir.parent))
+
+    response = client.post(
+        "/api/actions/chat-orchestrator",
+        headers={"x-zf-web-token": "test-token"},
+        json={
+            "backend": "claude-headless",
+            "message": "fail this turn deterministically",
+            "sync": True,
+        },
+    )
+
+    assert response.status_code == 503
+    failed = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "kanban.agent.turn.failed"
+    ][-1]
+    assert failed.payload["duration_ms"] >= 0
+    assert failed.payload["timing"]["context_duration_ms"] >= 0
+    assert failed.payload["timing"]["provider_duration_ms"] >= 0
+    assert failed.payload["timing"]["time_to_first_output_ms"] is None
+    assert failed.payload["timing"]["plan_projection_duration_ms"] is None
 
 
 def _bus_rows(state_dir: Path, type_: str = ""):

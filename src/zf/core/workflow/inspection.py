@@ -40,6 +40,13 @@ _GRAPH_DIAGNOSTIC_SEVERITY: dict[str, str] = {
 
 _STATUS_ORDER = {"GO": 0, "INFO": 1, "WARN": 2, "STOP": 3}
 
+_RUNTIME_EVENT_CONSUMERS: dict[str, str] = {
+    # orchestrator_fanout -> settle_research_delivery ->
+    # emit_research_result_available. This consumer is deterministic runtime,
+    # not a configured role/stage node in the static graph.
+    "research.fanout.completed": "kernel research delivery bridge",
+}
+
 
 def build_workflow_inspection_report(
     config: ZfConfig,
@@ -63,6 +70,7 @@ def build_workflow_inspection_report(
         event_consumers=event_consumers,
         same_lane_rework_events=same_lane_rework_events,
     ))
+    diagnostics = _classify_runtime_event_consumers(diagnostics)
     diagnostics.extend(_reserved_event_diagnostics(config))
     diagnostics.extend(_terminal_policy_diagnostics(config, graph))
     diagnostics.extend(_explicit_rework_route_diagnostics(config, graph))
@@ -220,6 +228,36 @@ def _has_event_consumer(event: str, consumers: dict[str, list[str]]) -> bool:
     if not parts:
         return False
     return all(part in consumers for part in parts)
+
+
+def _classify_runtime_event_consumers(
+    diagnostics: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    classified: list[dict[str, Any]] = []
+    for item in diagnostics:
+        event = str(item.get("event") or "")
+        consumer = _RUNTIME_EVENT_CONSUMERS.get(event, "")
+        if item.get("kind") != "event_without_consumer" or not consumer:
+            classified.append(item)
+            continue
+        detail = dict(item.get("detail") or {})
+        detail.update({
+            "expected_consumer": consumer,
+            "original_kind": "event_without_consumer",
+            "original_source": item.get("source", ""),
+        })
+        classified.append({
+            **item,
+            "severity": "INFO",
+            "kind": "expected_event_without_consumer",
+            "source": "runtime_consumer_registry",
+            "message": (
+                f"event `{event}` has no static graph consumer but is "
+                f"consumed by {consumer}"
+            ),
+            "detail": detail,
+        })
+    return classified
 
 
 def _reserved_event_diagnostics(config: ZfConfig) -> list[dict[str, Any]]:

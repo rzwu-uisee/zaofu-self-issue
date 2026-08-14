@@ -133,6 +133,7 @@ export interface Task {
   fanout?: {
     fanout_id?: string;
     child_id?: string;
+    workflow_run_id?: string;
     run_id?: string;
     workdir?: string;
     source_branch?: string;
@@ -1877,6 +1878,12 @@ export interface ExecutionRouteSummary {
   step_count: number;
   parallel: boolean;
   empty: boolean;
+  run_scope?: {
+    kind: "current_run" | "latest_fanout" | "task_history_legacy" | string;
+    workflow_run_id?: string;
+    fanout_id?: string;
+  };
+  history_available?: boolean;
 }
 
 export interface ExecutionRouteNode {
@@ -2605,6 +2612,7 @@ export interface ActionResponse {
   status: string;
   action: string;
   requested_action?: string;
+  applied_action?: string;
   reason: string;
   event_id?: string;
   trace_id?: string;

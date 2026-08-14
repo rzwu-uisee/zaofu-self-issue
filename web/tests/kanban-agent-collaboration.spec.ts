@@ -222,10 +222,14 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
       && event.payload?.channel_id === channelId
     ))
     && events.some((event) => (
-      event.type === "channel.synthesis.proposed"
+      event.type === "channel.agent.reply.completed"
       && event.payload?.channel_id === channelId
     ))
   ), 90_000);
+  expect(channelEvents.some((event) => (
+    event.type === "channel.synthesis.proposed"
+    && event.payload?.channel_id === channelId
+  ))).toBe(false);
   const seededMessages = await Promise.all(channelEvents
     .filter((event) => (
       event.type === "channel.message.posted"
@@ -256,7 +260,12 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   expect(channelText).toContain("tech_leader");
   expect(channelText).toContain("dev_reviewer");
   expect(channelText).toContain("qa_analyst");
-  expect(channelText).toContain("workspace_writer");
+  expect((channel.members as Array<Record<string, unknown>>).every(
+    (member) => member.permission_profile === "read_only",
+  )).toBe(true);
+  expect((channel.members as Array<Record<string, unknown>>).find(
+    (member) => member.member_id === "tech_leader",
+  )?.permissions).toContain("propose_workflow");
 
   await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
   await page.goto(
@@ -355,9 +364,19 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   await expect(channelPage).toContainText(followupMarker, { timeout: 30_000 });
   await capturePage(page, "05-channel-chat");
 
+  await page.locator(".channel-tabs").getByRole("button", { name: "Details" }).click();
+  await page
+    .locator(".channel-workspace-controls")
+    .getByRole("button", { name: "Synthesize" })
+    .click();
+  const synthesisEvents = await waitForEvents(request, id, cursor, (events) => events.some((event) => (
+    event.type === "channel.synthesis.proposed"
+    && event.payload?.channel_id === channelId
+  )), 90_000);
+
   await page.getByRole("button", { name: "Open Kanban Agent" }).click();
   await expect(page.getByRole("dialog", { name: "Kanban Agent" })).toBeVisible();
-  const synthesisSummary = channelEvents.find((event) => (
+  const synthesisSummary = synthesisEvents.find((event) => (
     event.type === "channel.synthesis.proposed"
     && event.payload?.channel_id === channelId
   ));

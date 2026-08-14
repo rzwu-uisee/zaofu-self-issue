@@ -25,6 +25,7 @@ from zf.runtime.channel_synthesis_reactor import (
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.orchestrator_reactor import EventReactorMixin
+from zf.runtime.supervisor_plan_integrity import build_plan_integrity_projection
 from zf.runtime.workflow_anchor import workflow_task_request_binding
 from zf.runtime.workflow_requests import load_workflow_request
 from tests.e2e.scripts import (
@@ -145,6 +146,30 @@ def test_doc156_browser_helpers_follow_request_first_contract(
         "TASK-DOC156-HELPER"
     )
     assert task is not None
+    assert task.contract.source_ref == (
+        "docs/intake/REQ-DOC156-HELPER.md"
+    )
+    source_path = tmp_path / task.contract.source_ref
+    assert source_path.is_file()
+    assert "Use Doc 156 research evidence before delivery starts." in (
+        source_path.read_text(encoding="utf-8")
+    )
+    contract_update = [
+        event
+        for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "task.contract.update"
+        and event.task_id == task.id
+    ][-1]
+    assert contract_update.payload["source_ref"] == task.contract.source_ref
+    assert (
+        contract_update.payload["contract"]["source_ref"]
+        == task.contract.source_ref
+    )
+    integrity = build_plan_integrity_projection(
+        state_dir,
+        project_root=tmp_path,
+    )
+    assert integrity["summary"]["missing_plan_refs"] == 0
     assert workflow_task_request_binding(task) == {
         "request_id": "REQ-DOC156-HELPER",
         "request_revision": int(request["revision"]),

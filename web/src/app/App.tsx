@@ -118,6 +118,7 @@ import { LatestRequestGate } from "./latestRequestGate";
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute } from "./lazyRoutes";
 import { createChannelActionAdapter } from "./channelActionAdapter";
+import { shouldRefreshChannelsAfterAction } from "./kanbanAgentInteractionPolicy";
 import { useProjectObservabilityData } from "./useProjectObservabilityData";
 import { useProjectStreamGapRecovery } from "./projectStreamGapRecovery";
 import {
@@ -1440,7 +1441,7 @@ export function App() {
     } catch {
       // SSE remains the primary live path; this fallback only tightens action feedback.
     }
-    if (action.startsWith("channel")) {
+    if (shouldRefreshChannelsAfterAction(action, result)) {
       void loadChannels();
     } else {
       void refresh();

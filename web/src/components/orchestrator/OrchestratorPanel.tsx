@@ -10,6 +10,7 @@ import { deriveComposerStatus } from "../../components/agent-session/workState";
 import { useWorkingTitle } from "../../components/agent-session/useWorkingTitle";
 import { buildKanbanConversation } from "../../components/agent-session/projection";
 import { proposalRunNotice } from "../../app/triageProposals";
+import { planDiscussionBackend } from "../../app/kanbanAgentInteractionPolicy";
 import { projectionNeedsFresh } from "../../app/pageLoadPolicy";
 import {
   defaultKanbanThreadKey,
@@ -747,7 +748,6 @@ export function OrchestratorPanel({
 
   async function submitHeadlessMessage(messageOverride?: string, options: SubmitHeadlessOptions = {}) {
     const message = (messageOverride ?? headlessMessage).trim();
-    const targetBackend = options.backendOverride ?? operatorBackend;
     const turnPermissionProfile = options.permissionProfileOverride ?? permissionProfile;
     const explicitRequestPatch = options.requestPatch ?? {};
     const discussionRequestPatch = (
@@ -766,6 +766,15 @@ export function OrchestratorPanel({
       ...explicitRequestPatch,
     };
     const isPlanDiscussion = "plan_discussion" in requestPatch;
+    const boundDiscussionBackend = isPlanDiscussion
+      ? kanbanChatBackend(
+          asOperatorBackend(planDiscussionBackend(
+            headlessPlanDiscussion?.backend,
+            operatorBackend,
+          )) ?? operatorBackend,
+        )
+      : null;
+    const targetBackend = options.backendOverride ?? boundDiscussionBackend ?? operatorBackend;
     if (!message || !isChatBackend(targetBackend) || headlessSubmitting) return;
     if (activeThreadBusy && !options.force && !isPlanDiscussion) {
       queueHeadlessMessage(message, requestPatch);
@@ -799,6 +808,7 @@ export function OrchestratorPanel({
     const stillOnUncorrectedDefault = (
       !operatorBackendTouched
       && !options.backendOverride
+      && !boundDiscussionBackend
       && operatorBackend === "claude-headless"
       && !!configuredChatBackend
       && configuredChatBackend !== "claude-headless"

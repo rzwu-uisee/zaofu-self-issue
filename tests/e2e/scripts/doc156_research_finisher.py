@@ -20,6 +20,7 @@ from zf.runtime.workflow_anchor import (
 )
 from zf.runtime.workflow_origin import workflow_origin_digest
 from zf.runtime.workflow_requests import load_workflow_request
+from zf.runtime.supervisor_plan_integrity import build_plan_integrity_projection
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,8 +69,26 @@ def _prepare_request(args: argparse.Namespace) -> int:
         request_revision=int(projection.get("revision") or 0),
         origin_binding_digest=workflow_origin_digest(origin_binding),
     )
+    project_root = args.project_root.resolve()
+    intake_path = Path(str(result["intake_ref"])).resolve()
+    try:
+        source_ref = str(intake_path.relative_to(project_root))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Doc 156 intake escaped project root: {intake_path}"
+        ) from exc
+    if not intake_path.is_file():
+        raise RuntimeError(f"Doc 156 intake is missing: {intake_path}")
+    task.contract.source_ref = source_ref
+    task.contract.source_mode = "direct"
+    task.contract.source_title = "Doc 156 live collaboration workflow intake"
+    task.contract.verification = (
+        "Run the Doc 156 Channel, Research adoption, Delivery, and browser E2E."
+    )
+    task.contract.verification_tiers = ["e2e"]
     task_store.update(task.id, contract=task.contract)
-    _writer(args.project_root, args.state_dir).emit(
+    writer = _writer(args.project_root, args.state_dir)
+    writer.emit(
         "task.contract.update",
         actor="doc156-e2e",
         task_id=task.id,
@@ -82,8 +101,22 @@ def _prepare_request(args: argparse.Namespace) -> int:
             "origin_binding_digest": workflow_origin_digest(
                 origin_binding
             ),
+            "source_ref": source_ref,
         },
     )
+    integrity = build_plan_integrity_projection(
+        args.state_dir,
+        project_root=project_root,
+        tasks=[task_store.get(task.id)],
+        events=writer.event_log.read_all(),
+    )
+    if int(integrity["summary"]["missing_plan_refs"]) != 0:
+        raise RuntimeError(
+            "Doc 156 Task source contract failed plan integrity: "
+            f"{integrity['findings']}"
+        )
+    result["task_source_ref"] = source_ref
+    result["plan_integrity_missing_plan_refs"] = 0
     print(json.dumps(result, sort_keys=True))
     return 0
 

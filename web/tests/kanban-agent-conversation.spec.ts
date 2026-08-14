@@ -364,6 +364,47 @@ test("KBA-PLAN Plan choice resumes into Approve and survives reload", async ({ p
   await expect(planCard.getByRole("button", { name: "Chat about" })).toBeEnabled();
   await expect(planCard.getByRole("button", { name: "Continue" })).toBeDisabled();
 
+  await planCard.getByRole("button", { name: "Chat about" }).click();
+  // Simulate a stale browser preference that differs from the provider-bound
+  // Plan. The discussion turn must still use the Plan's original backend.
+  await page.getByRole("button", { name: "Agent backend: Claude" }).click();
+  const codexOption = page.getByRole("option").filter({ hasText: "Codex" }).first();
+  await codexOption.evaluate((node) => {
+    const button = node as HTMLButtonElement;
+    button.disabled = false;
+    button.click();
+  });
+  await expect(page.getByRole("button", { name: "Agent backend: Codex" })).toBeVisible();
+  const discussionMarker = `KBA_PLAN_DISCUSS_BACKEND_${Date.now().toString(36)}`;
+  const discussionCursor = await eventCursor(request, id);
+  const discussionComposer = page.getByPlaceholder("Ask about Delivery route...");
+  await discussionComposer.fill(`${discussionMarker} compare the routes without answering`);
+  await page.getByRole("button", { name: "Send message" }).click();
+  const discussionEvents = await waitForEvents(
+    request,
+    id,
+    discussionCursor,
+    (items) => eventChainForMarker(items, discussionMarker).some(
+      (event) => event.type === "kanban.agent.turn.completed",
+    ),
+  );
+  const discussionChain = eventChainForMarker(discussionEvents, discussionMarker);
+  const discussionUser = await hydrateEvent(
+    request,
+    id,
+    discussionChain.find((event) => event.type === "user.message") as EventItem,
+  );
+  const discussionRequest = discussionUser.payload?.request as
+    | Record<string, unknown>
+    | undefined;
+  expect(discussionRequest?.backend).toBe("claude-headless");
+  expect(discussionChain.some(
+    (event) => event.type === "kanban.agent.plan.answered",
+  )).toBeFalsy();
+  expect(discussionChain.some(
+    (event) => event.type === "operator.action.proposed",
+  )).toBeFalsy();
+
   await planCard.getByLabel("Direct (Recommended)").check();
   await planCard.getByRole("button", { name: "Continue" }).click();
   await expect(planCard).toContainText("Plan summary", { timeout: 30_000 });
@@ -417,10 +458,10 @@ test("KBA-PLAN Plan choice resumes into Approve and survives reload", async ({ p
   const planAnswer = events.find((event) => event.type === "kanban.agent.plan.answered");
   expect(planAnswer?.payload?.answer).toBe("Direct (Recommended)");
   const completedTurns = events.filter((event) => event.type === "kanban.agent.turn.completed");
-  expect(completedTurns).toHaveLength(2);
-  expect(completedTurns[0]?.payload?.provider_session_id).toBe(
-    completedTurns[1]?.payload?.provider_session_id,
-  );
+  expect(completedTurns).toHaveLength(3);
+  expect(new Set(completedTurns.map(
+    (event) => event.payload?.provider_session_id,
+  )).size).toBe(1);
 });
 
 test("KBA-PLAN multiple clarification questions submit atomically", async ({
