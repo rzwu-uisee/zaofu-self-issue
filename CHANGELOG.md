@@ -5,10 +5,35 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 ## Unreleased
 
-- v0.0.5 发布草案：[中文](docs/releases/v0.0.5.md) |
-  [English](docs/releases/v0.0.5.en.md)。本草案聚焦 Channel Group 与 Kanban Agent 的共享
-  Conversation Surface、人类可读结构化回复投影、轻量分页 API、诊断按需加载和长回复完整性。
-  当前包元数据仍为 `0.0.4`；正式发布 v0.0.5 前需要统一版本元数据并重新执行 release 验证。
+- 暂无。
+
+## v0.0.5 - 2026-08-17
+
+Release notes: [中文](docs/releases/v0.0.5.md) |
+[English](docs/releases/v0.0.5.en.md)
+
+Developer Preview 对话体验版本，将 Channel Group 与 Kanban Agent 收敛到共享 Conversation
+Surface，并降低长历史、长回复和诊断详情的首屏成本。
+
+### Added
+
+- Channel conversation projection 和轻量 conversation API，支持 `before` 分页、`has_more`
+  和 `next_before`。
+- Channel Group / Kanban Agent 共用的 `AgentSessionTimeline` 展示层和 Kanban Agent
+  interaction policy。
+- 人类可读 Markdown、结构化 contribution card、tool/artifact/AskUserQuestion 状态和 lazy
+  diagnostics 的统一投影。
+
+### Changed
+
+- 主聊天时间线隐藏原始 `channel_contribution` JSON、重复 preview 和 sidecar truncated 提示。
+- 长历史滚动保留 anchor；active run 持续增长同一条回复，settled turn 降低布局成本。
+- v0.0.4 正式 release 元数据和 public export 边界在本轮 merge 后重新校准。
+
+### Validation
+
+- Conversation / export / prompt / Web server 回归：271 passed, 1 skipped。
+- Web conversation projection / state / Kanban session 单测通过。
 
 ## v0.0.4 - 2026-08-14
 
