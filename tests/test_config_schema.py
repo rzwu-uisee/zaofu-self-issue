@@ -195,7 +195,6 @@ def test_full_codex_autoresearch_template_uses_single_state_tree():
     template = (
         Path(__file__).parent.parent
         / "examples"
-        / "tmp"
         / "zf-full-codex-autoresearch.yaml"
     )
 

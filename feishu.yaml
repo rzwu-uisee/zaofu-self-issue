@@ -13,14 +13,14 @@ feishu_identity:
   verification_token_env: FEISHU_CH_SECRET
   replay_window_seconds: 300
   users:
-    ${FEISHU_OPENID}:
+    "${FEISHU_OPENID:-__zf_feishu_openid_unset__}":
       operator: min
       level: approver
     # open_id 是 per-app 的:上面是主 app 视角;RUNM app 的卡片按钮回调
     # (card.action.trigger)看到的是同一 operator 在 RUNM app 下的另一个
     # open_id。缺这条映射时,RUNM bot 卡上的一切按钮(含既有 run-manager
     # human-decision 卡)都会被身份门拒(unmapped→VIEWER,2026-07-17 实弹证实)。
-    ${FEISHU_OPENID_RUNM}:
+    "${FEISHU_OPENID_RUNM:-__feishu_openid_runm_unset__}":
       operator: min
       level: operator
   action_token_secret_env: FEISHU_RUNM_SECRET
@@ -28,13 +28,13 @@ feishu_identity:
   require_signed_actions: false
 
 feishu_routing:
-  "${FEISHU_KANBAN}:${ZF_OWNER_VISIBLE_CHAT}":
+  "${FEISHU_KANBAN:-__feishu_kanban_unset__}:${ZF_OWNER_VISIBLE_CHAT:-__zf_owner_visible_chat_unset__}":
     target: kanban_agent
     default_member: zf-product-manager
-  "${FEISHU_RUNM}:${ZF_OWNER_VISIBLE_CHAT}":
+  "${FEISHU_RUNM:-__feishu_runm_unset__}:${ZF_OWNER_VISIBLE_CHAT:-__zf_owner_visible_chat_unset__}":
     target: run_manager
     default_member: run-manager
-  ${ZF_OWNER_VISIBLE_CHAT}:
+  "${ZF_OWNER_VISIBLE_CHAT:-__zf_owner_visible_chat_unset__}":
     target: channel
     channel_id: zaofu
     default_member: min
