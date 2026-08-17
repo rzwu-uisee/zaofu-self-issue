@@ -13,6 +13,7 @@ import type {
   AgentSessionRun,
   AgentSessionStatus,
   AgentSessionThread,
+  AgentSessionTurn,
 } from "./types";
 import { getAgentSessionRawOutput } from "../../api/client";
 import { MarkdownText } from "./MarkdownText";
@@ -271,7 +272,10 @@ function ThreadPane({
       ) : null}
       <div className="agent-turn-list">
         {thread.turns.length ? thread.turns.map((turn) => (
-          <article className="agent-turn-group" key={turn.id}>
+          <article
+            className={`agent-turn-group ${isSettledTurn(turn) ? "is-settled" : "is-active"}`}
+            key={turn.id}
+          >
             {turn.user ? (
               <div className={`agent-user-message ${turn.user.role}`}>
                 <div className="agent-message-meta">
@@ -1102,6 +1106,9 @@ function StackedCards({
         const isPlan = card.kind === "plan" || card.kind === "question";
         const isApprove = card.kind === "approve" || card.kind === "proposal";
         const isResult = card.kind === "workflow-result";
+        if (card.kind === "contribution") {
+          return <ContributionCard card={card} key={card.id} />;
+        }
         const planCompleted = Boolean(isPlan && card.planRequest?.response);
         const compatibilityClass = isPlan
           ? "plan question"
@@ -1229,6 +1236,87 @@ function StackedCards({
       )})}
     </div>
   );
+}
+
+function isSettledTurn(turn: AgentSessionTurn): boolean {
+  const runActive = turn.runs.some((run) => (
+    run.status === "streaming"
+    || run.status === "submitted"
+    || run.status === "queued"
+    || run.status === "waiting_input"
+  ));
+  const cardActive = turn.cards.some((card) => (
+    card.status !== "completed" && card.status !== "stale" && card.status !== "cancelled"
+  ));
+  return !runActive && !cardActive;
+}
+
+function ContributionCard({ card }: { card: AgentSessionCard }) {
+  const payload = card.payload ?? {};
+  const sections = [
+    ["Findings", semanticContributionRows(payload.findings)],
+    ["Risks", semanticContributionRows(payload.risks)],
+    ["Contradictions", semanticContributionRows(payload.contradictions)],
+    ["Questions", semanticContributionRows(payload.questions)],
+  ] as const;
+  const populated = sections.filter(([, rows]) => rows.length);
+  const itemCount = populated.reduce((count, [, rows]) => count + rows.length, 0);
+  return (
+    <div
+      className="agent-contribution-card"
+      data-agent-card-kind="contribution"
+      data-testid="agent-card-contribution"
+    >
+      <div className="agent-contribution-head">
+        <span className="agent-contribution-icon"><ListChecks aria-hidden="true" size={15} /></span>
+        <div>
+          <span>Analysis</span>
+          <MarkdownText content={card.body || card.title} />
+        </div>
+      </div>
+      <div className="agent-contribution-counts">
+        {populated.map(([label, rows]) => (
+          <span key={label}>{rows.length} {label.toLowerCase()}</span>
+        ))}
+      </div>
+      {itemCount ? (
+        <details className="agent-contribution-details">
+          <summary>View structured details</summary>
+          <div className="agent-contribution-sections">
+            {populated.map(([label, rows]) => (
+              <section key={label}>
+                <strong>{label}</strong>
+                <ul>
+                  {rows.map((row, index) => (
+                    <li key={row.id || `${label}-${index}`}>
+                      {row.label ? <small>{row.label}</small> : null}
+                      <span>{row.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      <AttachmentChips refs={card.refs} />
+    </div>
+  );
+}
+
+function semanticContributionRows(value: unknown): Array<{ id: string; label: string; text: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const row = item as Record<string, unknown>;
+    const text = String(row.text || row.statement || row.risk || row.question || "").trim();
+    if (!text) return [];
+    return [{
+      id: String(row.id || ""),
+      label: String(row.label || row.type || row.priority || ""),
+      text,
+    }];
+  });
 }
 
 function WorkflowResultIdentity({

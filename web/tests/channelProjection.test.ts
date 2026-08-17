@@ -61,6 +61,33 @@ const messagePart = messageConversation.threads
 assert(messagePart?.kind === "text", `assistant channel message should render as text, got ${messagePart?.kind}`);
 assert(messagePart?.content === "无新增实质 finding。", `assistant channel message should strip Result heading, got ${messagePart?.content}`);
 
+const contributionConversation = buildChannelConversation({
+  messages: [{
+    message_id: "msg-contribution",
+    role: "assistant",
+    member_id: "arch",
+    source: "codex",
+    text: "Readable recommendation.",
+    ts: "2026-08-17T09:00:00.000Z",
+    refs: { request_id: "reply-contribution", run_id: "run-contribution" },
+    structured_contribution: {
+      summary: "Use one controlled gateway.",
+      findings: [{ id: "f1", label: "finding", text: "One authority owns state." }],
+      risks: [{ id: "r1", label: "p0", text: "Dual writes diverge." }],
+      questions: [],
+      artifact_ref: "channels/ch-test/contracts/contribution/reply.json",
+      artifact_digest: "a".repeat(64),
+    },
+  }],
+} as unknown as ChannelDetail, "ch-test", "main");
+const contributionTurn = contributionConversation.threads[0]?.turns[0];
+const contributionCard = contributionTurn?.cards.find((card) => card.kind === "contribution");
+assert(contributionCard?.body === "Use one controlled gateway.", "structured contribution becomes a semantic card");
+assert(
+  contributionCard?.refs?.artifact_ref === "channels/ch-test/contracts/contribution/reply.json",
+  "semantic card retains the immutable artifact ref",
+);
+
 const compactJson = '{"status":"healthy","details":{"surface":"channel_group"}}';
 const jsonMessageConversation = buildChannelConversation({
   messages: [{

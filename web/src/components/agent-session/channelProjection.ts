@@ -211,6 +211,23 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
         updatedAt: recordString(message, "ts"),
         refs: refs ?? undefined,
       });
+      const contribution = recordValue(message.structured_contribution);
+      if (contribution) {
+        addCard(turn, {
+          id: `contribution-${requestId || messageId}`,
+          kind: "contribution",
+          title: "Structured analysis",
+          body: recordString(contribution, "summary"),
+          status: "completed",
+          runId: run.id,
+          threadId,
+          payload: contribution,
+          refs: {
+            artifact_ref: recordString(contribution, "artifact_ref"),
+            artifact_digest: recordString(contribution, "artifact_digest"),
+          },
+        });
+      }
     } else {
       const turn = ensureTurn(thread, messageId, recordString(message, "ts"));
       const origin = recordValue(message.origin);

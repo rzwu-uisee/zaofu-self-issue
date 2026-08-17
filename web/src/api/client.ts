@@ -799,6 +799,17 @@ export function getChannelDetail(channelId: string, projectId?: string): Promise
   return requestJson<ChannelDetail>(`${projectPrefix(projectId)}/channels/${encodeURIComponent(channelId)}`);
 }
 
+export function getChannelConversation(
+  channelId: string,
+  projectId?: string,
+  options: { before?: string; limit?: number; requireFresh?: boolean } = {},
+): Promise<ChannelDetail> {
+  const params = new URLSearchParams({ limit: String(options.limit ?? 50) });
+  if (options.before) params.set("before", options.before);
+  const path = `${projectPrefix(projectId)}/channels/${encodeURIComponent(channelId)}/conversation?${params.toString()}`;
+  return requestJson<ChannelDetail>(path, { bypassCache: Boolean(options.requireFresh) });
+}
+
 export function searchChannelHistory(
   channelId: string,
   q: string,

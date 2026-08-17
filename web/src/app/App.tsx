@@ -55,6 +55,7 @@ import {
 } from "lucide-react";
 import {
   fetchOverviewPulse,
+  getChannelConversation,
   getChannelDetail,
   getChannels,
   getCandidateDetail,
@@ -68,7 +69,6 @@ import {
   getRecentEvents,
   getRecentEventsPage,
   getProjectHealth,
-  getRoles,
   getRunDetail,
   getSnapshot,
   getSnapshotLight,
@@ -115,6 +115,10 @@ import { useProjectCost } from "./useProjectCost";
 import { ProjectEventBus } from "./projectEventBus";
 import { pageTitle } from "./pageMetadata";
 import { LatestRequestGate } from "./latestRequestGate";
+import {
+  mergeChannelConversationPages,
+  mergeChannelConversationRefresh,
+} from "./channelConversationState";
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute } from "./lazyRoutes";
 import { createChannelActionAdapter } from "./channelActionAdapter";
@@ -154,7 +158,6 @@ import type {
   RecentEvent,
   RepairActionProjection,
   RepairActionRecord,
-  RoleSummary,
   RuntimeSummary,
   RunSummary,
   SearchResult,
@@ -614,7 +617,6 @@ export function App() {
   );
   const projectRequestScope = useProjectRequestScope(activeProjectId);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [channelWorkflowRoles, setChannelWorkflowRoles] = useState<RoleSummary[]>([]);
   const [deliveryFeaturesPage, setDeliveryFeaturesPage] = useState<DeliveryFeaturesPage | null>(null);
   const [events, setEvents] = useState<RecentEvent[]>([]);
   const [eventsPage, setEventsPage] = useState<EventsPage | null>(null);
@@ -629,6 +631,9 @@ export function App() {
   const [selectedChannelId, setSelectedChannelId] = useState(initial.channel);
   const [channelDetail, setChannelDetail] = useState<ChannelDetail | null>(null);
   const [channelLoadError, setChannelLoadError] = useState<string | null>(null);
+  const [channelDiagnosticsDetail, setChannelDiagnosticsDetail] = useState<ChannelDetail | null>(null);
+  const [channelDiagnosticsLoading, setChannelDiagnosticsLoading] = useState(false);
+  const [channelDiagnosticsError, setChannelDiagnosticsError] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initial.task);
   const [taskDetail, setTaskDetail] = useState<TaskDetailModel | null>(null);
   const [taskDiff, setTaskDiff] = useState<TaskDiff | null>(null);
@@ -642,27 +647,6 @@ export function App() {
   useEffect(() => {
     if (page === "runtime" || page === "control-room") setPage("observability");
   }, [page]);
-
-  // Channel skips the bundled snapshot, so its Details workspace reads the
-  // existing role projection independently.
-  useEffect(() => {
-    if (page !== "channels" || !activeProjectId) {
-      setChannelWorkflowRoles([]);
-      return;
-    }
-    let cancelled = false;
-    setChannelWorkflowRoles([]);
-    void getRoles(activeProjectId)
-      .then((roles) => {
-        if (!cancelled) setChannelWorkflowRoles(roles);
-      })
-      .catch(() => {
-        if (!cancelled) setChannelWorkflowRoles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProjectId, page]);
 
   const [viewMode, setViewMode] = useState<ViewMode>(initial.view);
   const [statusFilter, setStatusFilter] = useState(initial.status);
@@ -729,9 +713,14 @@ export function App() {
   const lastSeqRef = useRef(0);
   const selectedChannelIdRef = useRef(selectedChannelId);
   const channelDetailRequestGateRef = useRef(new LatestRequestGate());
+  const channelHistoryRequestGateRef = useRef(new LatestRequestGate());
+  const channelDiagnosticsRequestGateRef = useRef(new LatestRequestGate());
   const recoverStreamGap = useProjectStreamGapRecovery({
     activeProjectId, page, selectedChannelId, lastSeqRef, setEvents, setSnapshot, setDeliveryFeaturesPage,
-    setChannelsPage, setChannelLoadError, setSelectedChannelId, setChannelDetail,
+    setChannelsPage, setChannelLoadError, setSelectedChannelId,
+    setChannelDetail: (fresh) => setChannelDetail((current) => (
+      mergeChannelConversationRefresh(current, fresh)
+    )),
     channelDetailRequestGate: channelDetailRequestGateRef.current,
     setKanbanPendingProposals, setError,
   });
@@ -760,6 +749,14 @@ export function App() {
   useEffect(() => {
     selectedChannelIdRef.current = selectedChannelId;
   }, [selectedChannelId]);
+
+  useEffect(() => {
+    channelHistoryRequestGateRef.current.invalidate();
+    channelDiagnosticsRequestGateRef.current.invalidate();
+    setChannelDiagnosticsDetail(null);
+    setChannelDiagnosticsLoading(false);
+    setChannelDiagnosticsError(null);
+  }, [activeProjectId, selectedChannelId]);
 
   useEffect(() => {
     if (activeProjectId) {
@@ -835,6 +832,51 @@ export function App() {
     }
     return next;
   }, [activeProjectId]);
+
+  const loadEarlierChannelMessages = useCallback(async () => {
+    const channelId = selectedChannelId || "ch-zaofu";
+    const cursor = channelDetail?.next_before || channelDetail?.page?.next_before || "";
+    if (!cursor || !channelDetail?.has_more) return;
+    const projectId = activeProjectId || undefined;
+    const ticket = channelHistoryRequestGateRef.current.issue();
+    const earlier = await getChannelConversation(channelId, projectId, {
+      before: cursor,
+      limit: 50,
+      requireFresh: true,
+    });
+    if (!channelHistoryRequestGateRef.current.isCurrent(ticket)) return;
+    if (selectedChannelIdRef.current !== channelId) return;
+    setChannelDetail((current) => (
+      current ? mergeChannelConversationPages(current, earlier) : earlier
+    ));
+  }, [activeProjectId, channelDetail, selectedChannelId]);
+
+  const loadChannelDiagnostics = useCallback(async () => {
+    const channelId = selectedChannelId || "ch-zaofu";
+    const conversationSeq = Number(channelDetail?.seq || 0);
+    if (channelDiagnosticsLoading) return;
+    if (
+      channelDiagnosticsDetail?.channel_id === channelId
+      && Number(channelDiagnosticsDetail.seq || 0) >= conversationSeq
+    ) return;
+    const projectId = activeProjectId || undefined;
+    const ticket = channelDiagnosticsRequestGateRef.current.issue();
+    setChannelDiagnosticsLoading(true);
+    setChannelDiagnosticsError(null);
+    try {
+      const detail = await getChannelDetail(channelId, projectId);
+      if (!channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) return;
+      if (selectedChannelIdRef.current !== channelId) return;
+      setChannelDiagnosticsDetail(detail);
+    } catch (err) {
+      if (!channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) return;
+      setChannelDiagnosticsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) {
+        setChannelDiagnosticsLoading(false);
+      }
+    }
+  }, [activeProjectId, channelDetail?.seq, channelDiagnosticsDetail, channelDiagnosticsLoading, selectedChannelId]);
 
   const loadKanbanProposals = useCallback(async () => {
     const requestedProjectId = activeProjectId || "";
@@ -944,11 +986,17 @@ export function App() {
           if (!channelId || channelId === selectedChannelIdRef.current) {
             const ticket = projectRequestScope.capture(activeProjectId);
             const detailTicket = channelDetailRequestGateRef.current.issue();
-            void getChannelDetail(selectedChannelIdRef.current || "ch-zaofu", activeProjectId || undefined)
+            void getChannelConversation(
+              selectedChannelIdRef.current || "ch-zaofu",
+              activeProjectId || undefined,
+              { requireFresh: true },
+            )
               .then((detail) => {
                 if (!projectRequestScope.isCurrent(ticket)) return;
                 if (!channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
-                if (selectedChannelIdRef.current === channelId || !channelId) setChannelDetail(detail);
+                if (selectedChannelIdRef.current === channelId || !channelId) {
+                  setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
+                }
               })
               .catch(() => undefined);
           }
@@ -1308,8 +1356,14 @@ export function App() {
       return;
     }
     const detailTicket = channelDetailRequestGateRef.current.issue();
-    void getChannelDetail(selectedChannelId, activeProjectId || undefined).then((detail) => {
-      if (!cancelled && channelDetailRequestGateRef.current.isCurrent(detailTicket)) setChannelDetail(detail);
+    void getChannelConversation(
+      selectedChannelId,
+      activeProjectId || undefined,
+      { requireFresh: true },
+    ).then((detail) => {
+      if (!cancelled && channelDetailRequestGateRef.current.isCurrent(detailTicket)) {
+        setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
+      }
     }).catch((err) => {
       if (cancelled || !channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
       const message = err instanceof Error ? err.message : String(err);
@@ -1319,7 +1373,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeProjectId, page, selectedChannelId, channelsPage?.seq]);
+  }, [activeProjectId, page, selectedChannelId]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
@@ -1583,13 +1637,13 @@ export function App() {
     async function refreshChannelProjection() {
       const detailTicket = channelDetailRequestGateRef.current.issue();
       const [detail, recent] = await Promise.all([
-        getChannelDetail(channelId, projectId),
+        getChannelConversation(channelId, projectId, { requireFresh: true }),
         getRecentEvents(60, projectId),
       ]);
       if (!projectRequestScope.isCurrent(ticket)) return;
       if (selectedChannelIdRef.current === channelId
         && channelDetailRequestGateRef.current.isCurrent(detailTicket)) {
-        setChannelDetail(detail);
+        setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
       }
       setEvents(recent.slice().reverse());
     }
@@ -2084,6 +2138,9 @@ export function App() {
                 actionResult={actionResult}
                 channels={channelsPage?.channels ?? []}
                 detail={channelDetail}
+                diagnosticsDetail={channelDiagnosticsDetail}
+                diagnosticsError={channelDiagnosticsError}
+                diagnosticsLoading={channelDiagnosticsLoading}
                 events={events}
                 loadError={channelLoadError}
                 onAddAgent={openAddAgentModal}
@@ -2095,6 +2152,8 @@ export function App() {
                 onClearHistory={(threadId) => clearChannelHistory(threadId)}
                 onDeleteChannel={() => deleteChannel()}
                 onMarkRead={(threadId) => markChannelRead(threadId)}
+                onLoadDiagnostics={loadChannelDiagnostics}
+                onLoadEarlier={loadEarlierChannelMessages}
                 onPinMessage={(messageId, threadId, pinned) => (
                   pinChannelMessage(messageId, threadId, pinned)
                 )}
@@ -2109,7 +2168,6 @@ export function App() {
                 onSetMemberPermission={(memberId, permissionProfile) => setChannelMemberPermission(memberId, permissionProfile)}
                 onWorkflowRequest={channelActions.submitWorkflowRequest}
                 selectedChannelId={selectedChannelId}
-                workflowRoles={channelWorkflowRoles}
               />
           ) : page === "triage" ? (
             <TriagePage

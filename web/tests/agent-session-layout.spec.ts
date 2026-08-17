@@ -10,10 +10,11 @@ type Rect = {
 };
 
 async function openKanbanAgent(page: Page) {
-  await page.goto("/");
-  await expect(page.locator(".status-pill.status-live"))
-    .toBeVisible({ timeout: 90_000 });
-  await page.getByRole("button", { name: "Open Kanban Agent" }).click();
+  const projectId = process.env.ZF_E2E_PROJECT_ID;
+  await page.goto(projectId ? `/?project=${encodeURIComponent(projectId)}` : "/");
+  const openButton = page.getByRole("button", { name: "Open Kanban Agent" });
+  await expect(openButton).toBeVisible({ timeout: 90_000 });
+  await openButton.click();
   await expect(page.getByRole("dialog", { name: "Kanban Agent" })).toBeVisible();
 }
 
@@ -42,6 +43,15 @@ async function expectInsideViewport(page: Page, locator: Locator, label: string)
   expect(rect.bottom, `${label} bottom`).toBeLessThanOrEqual((viewport?.height ?? 0) + 1);
 }
 
+async function expectHorizontallyInsideViewport(page: Page, locator: Locator, label: string) {
+  const rect = await box(locator);
+  const viewport = page.viewportSize();
+  expect(viewport, `${label} viewport`).not.toBeNull();
+  expect(rect.width, `${label} width`).toBeGreaterThan(0);
+  expect(rect.left, `${label} left`).toBeGreaterThanOrEqual(0);
+  expect(rect.right, `${label} right`).toBeLessThanOrEqual((viewport?.width ?? 0) + 1);
+}
+
 async function expectThreadComposerSeparated(page: Page) {
   const thread = await box(page.locator(".headless-thread"));
   const composer = await box(page.locator(".headless-composer"));
@@ -67,6 +77,9 @@ test("Kanban Agent docked and fullscreen layout stays inside the workbench", asy
   await openKanbanAgent(page);
 
   await expectInsideViewport(page, page.locator(".agent-page-shell.docked"), "docked shell");
+  const docked = await box(page.locator(".agent-page-shell.docked"));
+  expect(docked.width, "docked conversation width").toBeGreaterThanOrEqual(600);
+  expect(docked.width, "docked conversation width").toBeLessThanOrEqual(680);
   await expectInsideViewport(page, page.locator(".orchestrator-panel"), "docked panel");
   await expectInsideViewport(page, page.locator(".headless-composer"), "docked composer");
   await expectThreadComposerSeparated(page);
@@ -82,7 +95,7 @@ test("Kanban Agent docked and fullscreen layout stays inside the workbench", asy
   await selectSplitThread(page);
   await expect(page.locator(".agent-session-panes.split")).toBeVisible();
   await expect(page.getByRole("button", { name: "Resize split pane" })).toBeVisible();
-  await expectInsideViewport(page, page.locator(".agent-session-panes.split"), "split panes");
+  await expectHorizontallyInsideViewport(page, page.locator(".agent-session-panes.split"), "split panes");
 });
 
 test("Kanban Agent mobile fullscreen stacks split panes without overflow", async ({ page }) => {

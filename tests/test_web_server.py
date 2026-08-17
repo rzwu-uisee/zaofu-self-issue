@@ -1428,6 +1428,46 @@ class TestApiChannels:
         assert data["members"] == []
         assert data["messages"] == []
 
+    def test_channel_conversation_endpoint_is_paginated_and_lightweight(
+        self,
+        state_dir,
+        client,
+    ):
+        log = EventLog(state_dir / "events.jsonl")
+        log.append(ZfEvent(
+            type="channel.created",
+            actor="web",
+            payload={"channel_id": "ch-chat", "channel_name": "# chat"},
+        ))
+        for index in range(3):
+            log.append(ZfEvent(
+                type="channel.message.posted",
+                actor="web",
+                payload={
+                    "channel_id": "ch-chat",
+                    "message_id": f"msg-{index}",
+                    "thread_id": "main",
+                    "member_id": "operator",
+                    "role": "user",
+                    "text": f"message {index}",
+                },
+            ))
+
+        response = client.get("/api/channels/ch-chat/conversation?limit=2")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["schema_version"] == "channel.conversation.v1"
+        assert [item["message_id"] for item in data["messages"]] == [
+            "msg-1",
+            "msg-2",
+        ]
+        assert data["has_more"] is True
+        assert data["next_before"] == "msg-1"
+        assert "recent_messages" not in data
+        assert "linked_events" not in data
+        assert "context_packs" not in data
+
     def test_channel_projection_rebuilds_from_events_and_redacts(self, state_dir, client):
         log = EventLog(state_dir / "events.jsonl")
         log.append(ZfEvent(

@@ -10,6 +10,7 @@ from zf.core.config.loader import load_config, validate_config, ConfigError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXAMPLES = Path(__file__).parent.parent / "examples"
+LEGACY_EXAMPLES = EXAMPLES / "tmp"
 
 
 def test_load_valid_config():
@@ -1378,11 +1379,11 @@ def test_validate_rejects_recycle_ratio_out_of_range(tmp_path: Path):
 
 
 def test_validate_passes_for_dev_mixed_backends_example():
-    """The motivating real config — examples/dev-mixed-backends.yaml —
+    """The motivating legacy config — examples/tmp/dev-mixed-backends.yaml —
     must remain valid after the loader/validator merge."""
-    candidate = EXAMPLES / "dev-mixed-backends.yaml"
+    candidate = LEGACY_EXAMPLES / "dev-mixed-backends.yaml"
     if not candidate.exists():
-        pytest.skip("examples/dev-mixed-backends.yaml not present")
+        pytest.skip("examples/tmp/dev-mixed-backends.yaml not present")
     errors = validate_config(candidate)
     assert errors == [], f"unexpected validate errors: {errors}"
 
@@ -1436,14 +1437,15 @@ def test_validate_rejects_invalid_autopilot_mode(tmp_path: Path):
 def test_validate_passes_for_dev_codex_backends_example():
     """The all-Codex test preset keeps homogeneous Codex pools and splits
     design critique into an explicit critic role."""
-    candidate = EXAMPLES / "dev-codex-backends.yaml"
+    candidate = LEGACY_EXAMPLES / "dev-codex-backends.yaml"
     if not candidate.exists():
-        pytest.skip("examples/dev-codex-backends.yaml not present")
+        pytest.skip("examples/tmp/dev-codex-backends.yaml not present")
     errors = validate_config(candidate)
     assert errors == [], f"unexpected validate errors: {errors}"
     cfg = load_config(candidate)
     # 11 roles since the example trimmed to orchestrator/arch/critic +
-    # 4 dev + review + 2 test + judge.
+    # 4 dev + review + 2 test + judge (this test sat skipped while the
+    # yaml lived in examples/tmp/, so the old 13 never got updated).
     assert len(cfg.roles) == 11
     assert all(role.backend == "codex" for role in cfg.roles)
     assert cfg.skill_sources[0].path == "./skills/external"
@@ -1646,9 +1648,9 @@ def test_design_first_rework_can_still_route_to_arch(tmp_path: Path):
 
 def test_validate_passes_for_dev_codex_star_example():
     """The all-Codex star preset must declare a real fanout_reader stage."""
-    candidate = EXAMPLES / "dev-codex-star.yaml"
+    candidate = LEGACY_EXAMPLES / "dev-codex-star.yaml"
     if not candidate.exists():
-        pytest.skip("examples/dev-codex-star.yaml not present")
+        pytest.skip("examples/tmp/dev-codex-star.yaml not present")
     errors = validate_config(candidate)
     assert errors == [], f"unexpected validate errors: {errors}"
     cfg = load_config(candidate)
@@ -1699,7 +1701,7 @@ def test_validate_passes_for_current_star_mode_examples():
             "synth_role": "refactor-plan-synth",
         },
     }
-    root = EXAMPLES
+    root = LEGACY_EXAMPLES
     for filename, expected in examples.items():
         candidate = root / filename
         errors = validate_config(candidate)
@@ -1716,7 +1718,7 @@ def test_validate_passes_for_current_star_mode_examples():
 
 
 def test_hermes_refactor_example_uses_product_delivery_wave_ready():
-    root = EXAMPLES
+    root = LEGACY_EXAMPLES
     candidate = root / "hermes-refactor-product-delivery-wave.yaml"
 
     errors = validate_config(candidate)

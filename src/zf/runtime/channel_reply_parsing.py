@@ -59,6 +59,63 @@ def structured_reply_payload(reply: str, key: str) -> dict[str, Any]:
     return payload
 
 
+def structured_reply_display_text(reply: str, key: str) -> str:
+    """Return human prose with a typed reply contract removed.
+
+    Channel providers intentionally return concise Markdown followed by a
+    machine-readable JSON contract. The contract is persisted separately and
+    must not leak into the conversation transcript. Providers can still place
+    human text after that contract, so remove only the decoded contract range
+    rather than trimming the whole suffix.
+    """
+
+    source = str(reply or "")
+    decoder = json.JSONDecoder()
+    for match in re.finditer(
+        r"```(?:json)?\s*([\s\S]*?)```",
+        source,
+        re.IGNORECASE,
+    ):
+        candidate = match.group(1)
+        for position, char in enumerate(candidate):
+            if char != "{":
+                continue
+            try:
+                decoded, _end = decoder.raw_decode(candidate[position:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict) and isinstance(decoded.get(key), dict):
+                return _without_display_range(source, match.start(), match.end())
+    for position, char in enumerate(source):
+        if char != "{":
+            continue
+        try:
+            decoded, end = decoder.raw_decode(source[position:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict) and isinstance(decoded.get(key), dict):
+            return _without_display_range(source, position, position + end)
+    # A projected preview can end in the middle of an otherwise valid sidecar
+    # body. If the stable contract marker is present, fail closed for display
+    # and keep only the prose that precedes it.
+    marker = re.search(
+        rf"(?:^|\n)\s*(?:```(?:json)?\s*)?\{{\s*\"{re.escape(key)}\"\s*:",
+        source,
+        re.IGNORECASE,
+    )
+    if marker:
+        return source[:marker.start()].rstrip()
+    return source.replace("\n[... sidecar body truncated ...]", "").rstrip()
+
+
+def _without_display_range(source: str, start: int, end: int) -> str:
+    before = source[:start].rstrip()
+    after = source[end:].lstrip()
+    if before and after:
+        return f"{before}\n\n{after}".rstrip()
+    return (before or after).rstrip()
+
+
 def reply_question_texts(contribution: dict[str, Any]) -> list[str]:
     questions: list[str] = []
     for key in ("questions", "open_questions"):
@@ -98,5 +155,6 @@ __all__ = [
     "reply_question_texts",
     "string_items",
     "structured_reply_payload",
+    "structured_reply_display_text",
     "structured_reply_payload_with_error",
 ]

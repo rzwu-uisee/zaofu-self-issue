@@ -2167,6 +2167,38 @@ def create_app(
             raise HTTPException(404, f"channel {channel_id!r} not found")
         return JSONResponse(detail)
 
+    @app.get("/api/projects/{project_id}/channels/{channel_id}/conversation")
+    def project_channel_conversation_page(
+        project_id: str,
+        channel_id: str,
+        limit: int = 50,
+        before: str = "",
+    ) -> JSONResponse:
+        from zf.runtime.channel_conversation_projection import (
+            empty_channel_conversation,
+            project_channel_conversation,
+        )
+        from zf.runtime.channel_projection import DEFAULT_CHANNEL_IDS
+
+        context = _resolve_api_project(
+            project_id,
+            default_project_id=default_project_id,
+            default_state_dir=state_dir,
+            default_config=config,
+            default_project_root=project_root,
+        )
+        conversation = project_channel_conversation(
+            context.state_dir,
+            channel_id,
+            limit=limit,
+            before=before,
+        )
+        if conversation is None:
+            if channel_id.strip().lower() in DEFAULT_CHANNEL_IDS:
+                return JSONResponse(empty_channel_conversation(channel_id))
+            raise HTTPException(404, f"channel {channel_id!r} not found")
+        return JSONResponse(conversation)
+
     @app.get("/api/projects/{project_id}/channels/{channel_id}/history/search")
     def project_channel_history_search(
         project_id: str,
@@ -3164,6 +3196,30 @@ def create_app(
                 return JSONResponse(project_empty_channel(channel_id))
             raise HTTPException(404, f"channel {channel_id!r} not found")
         return JSONResponse(detail)
+
+    @app.get("/api/channels/{channel_id}/conversation")
+    def channel_conversation_page(
+        channel_id: str,
+        limit: int = 50,
+        before: str = "",
+    ) -> JSONResponse:
+        from zf.runtime.channel_conversation_projection import (
+            empty_channel_conversation,
+            project_channel_conversation,
+        )
+        from zf.runtime.channel_projection import DEFAULT_CHANNEL_IDS
+
+        conversation = project_channel_conversation(
+            state_dir,
+            channel_id,
+            limit=limit,
+            before=before,
+        )
+        if conversation is None:
+            if channel_id.strip().lower() in DEFAULT_CHANNEL_IDS:
+                return JSONResponse(empty_channel_conversation(channel_id))
+            raise HTTPException(404, f"channel {channel_id!r} not found")
+        return JSONResponse(conversation)
 
     @app.get("/api/channels/{channel_id}/history/search")
     def channel_history_search(

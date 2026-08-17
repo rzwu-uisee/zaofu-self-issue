@@ -67,7 +67,22 @@ const turn: AgentSessionTurn = {
   id: "t1", threadId: "main", ts: new Date(Date.now() - 130_000).toISOString(),
   user: { id: "u1", role: "user", label: "You", content: "Build the project and report **failures** in `tests/`.", ts: new Date(Date.now() - 130_000).toISOString() },
   runs: [completedRun, streamingRun],
-  cards: [],
+  cards: [{
+    id: "contribution-1",
+    kind: "contribution",
+    title: "Structured analysis",
+    body: "Use one controlled gateway and keep the state authority explicit.",
+    status: "completed",
+    payload: {
+      findings: [{ id: "f1", label: "finding", text: "One authority owns state." }],
+      risks: [{ id: "r1", label: "p0", text: "Dual writes make replay diverge." }],
+      questions: [{ id: "q1", label: "scope", text: "Which vertical slice ships first?" }],
+    },
+    refs: {
+      artifact_ref: "channels/ch-fixture/contracts/contribution/reply.json",
+      artifact_digest: "fixture-digest",
+    },
+  }],
 };
 
 const thread: AgentSessionThread = {

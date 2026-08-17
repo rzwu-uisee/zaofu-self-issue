@@ -184,6 +184,53 @@
   grid-column: 1 / -1;
 }
 
+.channel-workspace-loading {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+}
+
+.channel-workspace-loading.is-error {
+  flex-direction: column;
+  color: var(--err);
+}
+
+.channel-workspace-diagnostics {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.channel-workspace-diagnostics > summary {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 2px;
+  cursor: pointer;
+}
+
+.channel-workspace-diagnostics > summary > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.channel-workspace-diagnostics > summary small {
+  color: var(--muted-foreground);
+}
+
+.channel-workspace-diagnostics-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+  gap: 12px;
+  padding-top: 8px;
+}
+
 .channel-workspace-panel-head,
 .channel-workspace-chip-row,
 .channel-workspace-row {
@@ -257,37 +304,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.channel-role-chip-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 6px;
-}
-
-.channel-role-chip {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: color-mix(in oklab, var(--surface) 84%, transparent);
-  padding: 8px;
-}
-
-.channel-role-chip strong,
-.channel-role-chip span,
-.channel-role-chip small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.channel-role-chip span,
-.channel-role-chip small {
-  color: var(--muted-foreground);
-  font-size: var(--text-11);
 }
 
 .channel-workspace-empty {

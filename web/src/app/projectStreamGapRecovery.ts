@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
-  getChannelDetail,
+  getChannelConversation,
   getChannels,
   getDeliveryFeatures,
   getKanbanPendingProposals,
@@ -99,7 +99,11 @@ export function useProjectStreamGapRecovery(
         recoveredChannelId = channelIdOf(nextChannels.channels[0]) || "ch-zaofu";
       }
       channelDetailTicket = current.channelDetailRequestGate.issue();
-      nextChannelDetail = await getChannelDetail(recoveredChannelId, projectId);
+      nextChannelDetail = await getChannelConversation(
+        recoveredChannelId,
+        projectId,
+        { requireFresh: true },
+      );
     }
 
     current = optionsRef.current;

@@ -1,13 +1,13 @@
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { search } from "../../api/client";
-import type { ActionResponse, ChannelDetail, ChannelHistorySearchResult, ChannelSummary, RecentEvent, RoleSummary, Task } from "../../api/types";
+import type { ActionResponse, ChannelDetail, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
 import type { AgentSessionMessage } from "../../components/agent-session/types";
 import { buildChannelConversation } from "../../components/agent-session/projection";
 import { channelLiveStreamRows, compactChannelLiveRows, foldChannelLiveStream } from "../agent-session/channelLiveStream";
 import { mergeEventsByIdentity } from "../orchestrator/kanbanSessionEvents";
 import { formatTime } from "../../lib/format";
-import { Archive, ArrowUp, AtSign, Bell, Bold, Boxes, ChevronDown, Code, FileText, GitFork, Hash, Info, Italic, Link, List, ListOrdered, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Settings, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
+import { Archive, ArrowUp, AtSign, Bell, Bold, Boxes, ChevronDown, Code, FileText, GitFork, Hash, Info, Italic, Link, List, ListOrdered, Loader2, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Settings, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent as ReactUIEvent } from "react";
@@ -388,6 +388,9 @@ export function ChannelPage({
   actionResult,
   channels,
   detail,
+  diagnosticsDetail,
+  diagnosticsError,
+  diagnosticsLoading,
   loadError,
   onAddAgent,
   onClearHistory,
@@ -395,6 +398,8 @@ export function ChannelPage({
   onDrainReplies,
   onGenerateOwnerReport,
   onMarkRead,
+  onLoadDiagnostics,
+  onLoadEarlier,
   onPinMessage,
   onNewChannel,
   onOpenChannel,
@@ -410,13 +415,15 @@ export function ChannelPage({
   onConsensusDecision,
   onWorkflowRequest,
   selectedChannelId,
-  workflowRoles,
   events = [],
 }: {
   actionReady: boolean;
   actionResult: ActionResponse | null;
   channels: ChannelSummary[];
   detail: ChannelDetail | null;
+  diagnosticsDetail: ChannelDetail | null;
+  diagnosticsError: string | null;
+  diagnosticsLoading: boolean;
   events?: RecentEvent[];
   loadError: string | null;
   onAddAgent: () => void;
@@ -425,6 +432,8 @@ export function ChannelPage({
   onDrainReplies: () => Promise<void>;
   onGenerateOwnerReport: (threadId: string) => Promise<void>;
   onMarkRead: (threadId: string) => Promise<void>;
+  onLoadDiagnostics: () => Promise<void>;
+  onLoadEarlier: () => Promise<void>;
   onPinMessage: (
     messageId: string,
     threadId: string,
@@ -448,7 +457,6 @@ export function ChannelPage({
   onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string) => Promise<void>;
   onWorkflowRequest: (taskId: string, reason: string, threadId: string) => Promise<void>;
   selectedChannelId: string;
-  workflowRoles: RoleSummary[];
 }) {
   const [composerText, setComposerText] = useState("");
   const [postingCount, setPostingCount] = useState(0);
@@ -464,6 +472,7 @@ export function ChannelPage({
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyResult, setHistoryResult] = useState<ChannelHistorySearchResult | null>(null);
   const [historySearching, setHistorySearching] = useState(false);
+  const [historyLoadingEarlier, setHistoryLoadingEarlier] = useState(false);
   const [historySearchOpen, setHistorySearchOpen] = useState(false);
   const [formattingOpen, setFormattingOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -483,6 +492,7 @@ export function ChannelPage({
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const composerRef = useRef<HTMLDivElement | null>(null);
   const channelTimelineRef = useRef<HTMLDivElement | null>(null);
+  const historyPrependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const historyInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const visibleChannels = channels.length
@@ -689,6 +699,7 @@ export function ChannelPage({
     if (activeTab !== "chat") return;
     const node = channelTimelineRef.current;
     if (!node) return;
+    if (historyPrependAnchorRef.current) return;
     if (channelPinnedToBottom || isScrollElementNearBottom(node)) {
       scrollElementToBottom(node);
       setChannelHasNewBelow(false);
@@ -696,6 +707,9 @@ export function ChannelPage({
     }
     setChannelHasNewBelow(true);
   }, [activeTab, channelPinnedToBottom, channelScrollSignature]);
+  useEffect(() => {
+    if (activeTab === "workspace") void onLoadDiagnostics();
+  }, [activeTab, detail?.seq, onLoadDiagnostics, selectedChannelId]);
   useEffect(() => {
     setHistoryQuery("");
     setHistoryResult(null);
@@ -715,7 +729,8 @@ export function ChannelPage({
     ...visibleChannels.filter((channel) => channelIdOf(channel) === selectedChannelId),
     ...visibleChannels.filter((channel) => channelIdOf(channel) !== selectedChannelId),
   ].slice(0, 3);
-  const members = detail?.members ?? [];
+  const workspaceDetail = diagnosticsDetail ?? detail;
+  const members = detail?.members ?? workspaceDetail?.members ?? [];
   const mentionChoices = useMemo(() => {
     const mentionableMembers = members.filter((member) => canMentionMember(member));
     return [
@@ -764,19 +779,20 @@ export function ChannelPage({
     Object.keys((member["workflow_role_binding"] as Record<string, unknown> | undefined) ?? {}).length > 0
   );
   const messages = detail?.messages ?? detail?.recent_messages ?? [];
-  const syntheses = detail?.syntheses ?? [];
+  const syntheses = workspaceDetail?.syntheses ?? [];
   const controlThreadId = activeChannelThreadId || discussionBand?.threadId || "main";
-  const canonicalPrd = canonicalChannelPrd(detail, controlThreadId);
-  const threadConsensus = detail?.consensus?.[controlThreadId] ?? {};
-  const workflowRequests = detail?.workflow_requests ?? [];
-  const replyRequests = detail?.reply_requests ?? [];
-  const contextPacks = detail?.context_packs ?? [];
-  const handoffs = detail?.handoffs ?? [];
-  const stateUpdates = detail?.state_updates ?? [];
-  const ownerReports = detail?.owner_reports ?? [];
-  const automationReports = detail?.automation_reports ?? [];
-  const resultReceipts = detail?.result_receipts ?? [];
-  const discussionMode = recordString(detail?.discussion ?? {}, "mode", "conversation");
+  const canonicalPrd = canonicalChannelPrd(workspaceDetail, controlThreadId);
+  const threadConsensus = workspaceDetail?.consensus?.[controlThreadId] ?? {};
+  const workflowRequests = workspaceDetail?.workflow_requests ?? [];
+  const replyRequests = workspaceDetail?.reply_requests ?? [];
+  const conversationReplyRequests = detail?.reply_requests ?? [];
+  const contextPacks = workspaceDetail?.context_packs ?? [];
+  const handoffs = workspaceDetail?.handoffs ?? [];
+  const stateUpdates = workspaceDetail?.state_updates ?? [];
+  const ownerReports = workspaceDetail?.owner_reports ?? [];
+  const automationReports = workspaceDetail?.automation_reports ?? [];
+  const resultReceipts = workspaceDetail?.result_receipts ?? [];
+  const discussionMode = recordString(workspaceDetail?.discussion ?? {}, "mode", "conversation");
   const latestThreadRequirement = [...messages]
     .reverse()
     .map((message) => message as unknown as Record<string, unknown>)
@@ -795,11 +811,11 @@ export function ChannelPage({
     ? recordString(latestThreadRequirement, "message_id")
     : "";
   const currentDiscussionState = recordString(
-    detail?.discussions?.[controlThreadId] ?? {},
+    workspaceDetail?.discussions?.[controlThreadId] ?? {},
     "state",
     "idle",
   );
-  const defaultResponderId = recordString(detail?.discussion ?? {}, "default_responder_id");
+  const defaultResponderId = recordString(workspaceDetail?.discussion ?? {}, "default_responder_id");
   const replyCapableMembers = members.filter((member) => {
     const status = recordString(member, "status");
     const memberType = recordString(member, "member_type");
@@ -809,7 +825,7 @@ export function ChannelPage({
   const channelMemberIds = new Set(
     members.map((member) => recordString(member, "member_id")).filter(Boolean),
   );
-  const latestReplyRowsByTarget = latestChannelRepliesByTarget(replyRequests).filter((request) => {
+  const latestReplyRowsByTarget = latestChannelRepliesByTarget(conversationReplyRequests).filter((request) => {
     const target = recordString(request, "target_member_id") || recordString(request, "member_id");
     return !target || channelMemberIds.has(target);
   });
@@ -826,16 +842,6 @@ export function ChannelPage({
   const attentionCount = pendingReplies + failedReplyRows.length;
   const mentionRows = (detail?.mentions_detected ?? []).filter((item): item is Record<string, unknown> => Boolean(recordValue(item)));
   const mentionDigests = buildChannelMentionDigests(mentionRows, messages as Record<string, unknown>[], channelMemberIds);
-  const timeline = [
-    ...messages,
-    ...stateUpdates.map((item) => ({ ...item, role: "state_update", text: item.summary })),
-    ...resultReceipts.map((item) => ({
-      ...item,
-      role: "state_update",
-      text: recordString(item, "summary")
-        || `${recordString(item, "receipt_kind", "result")} ${recordString(item, "status", "available")}`,
-    })),
-  ] as Record<string, unknown>[];
   const drawerTitles: Record<ChannelDrawerKey, string> = {
     members: "Members",
     attention: "Attention",
@@ -866,7 +872,36 @@ export function ChannelPage({
     setMentionQuery("");
     setHistorySearchOpen(false);
     setConsensusBlocker("");
+    setHistoryLoadingEarlier(false);
+    historyPrependAnchorRef.current = null;
   }, [selectedChannelId]);
+  async function loadEarlierMessages() {
+    if (historyLoadingEarlier || !detail?.has_more) return;
+    const node = channelTimelineRef.current;
+    if (node) {
+      historyPrependAnchorRef.current = {
+        height: node.scrollHeight,
+        top: node.scrollTop,
+      };
+    }
+    setHistoryLoadingEarlier(true);
+    try {
+      await onLoadEarlier();
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const anchor = historyPrependAnchorRef.current;
+          const timeline = channelTimelineRef.current;
+          if (anchor && timeline) {
+            timeline.scrollTop = anchor.top + timeline.scrollHeight - anchor.height;
+          }
+          historyPrependAnchorRef.current = null;
+          setChannelHasNewBelow(false);
+        });
+      });
+    } finally {
+      setHistoryLoadingEarlier(false);
+    }
+  }
   function toggleDrawer(nextDrawer: ChannelDrawerKey) {
     setDrawer((current) => current === nextDrawer ? null : nextDrawer);
   }
@@ -1764,16 +1799,29 @@ export function ChannelPage({
       </div>
     );
   }
-  function renderWorkspaceReplyFlow() {
-    const latestReplies = latestWorkspaceRows(replyRequests, 7);
+  function renderWorkspaceReplyFlow(includeHistory = false) {
+    const attentionRows = replyRequests.filter((row) => {
+      const status = workspaceStatusFromRow(row);
+      return status === "pending" || status === "running" || status === "started"
+        || status === "queued" || status === "failed" || status === "rejected"
+        || status === "escalated";
+    });
+    const latestReplies = latestWorkspaceRows(
+      includeHistory ? replyRequests : attentionRows,
+      includeHistory ? 10 : 7,
+    );
     const completed = countWorkspaceRows(replyRequests, (row) => workspaceStatusFromRow(row) === "completed");
     const failed = countWorkspaceRows(replyRequests, (row) => workspaceStatusFromRow(row) === "failed");
     return (
-      <section className="channel-workspace-panel span-2">
+      <section className={`channel-workspace-panel ${includeHistory ? "span-2" : ""}`.trim()}>
         <div className="channel-workspace-panel-head">
           <div>
-            <h3>Reply Flow</h3>
-            <span className="muted">{replyRequests.length} requests across channel history</span>
+            <h3>{includeHistory ? "Reply history" : "Reply attention"}</h3>
+            <span className="muted">
+              {includeHistory
+                ? `${replyRequests.length} requests across channel history`
+                : `${attentionRows.length} pending or failed requests`}
+            </span>
           </div>
           <div className="channel-workspace-chip-row">
             <span className="metric-chip">{completed} done</span>
@@ -1802,7 +1850,9 @@ export function ChannelPage({
             })}
           </div>
         ) : (
-          <div className="channel-workspace-empty">No reply requests yet.</div>
+          <div className="channel-workspace-empty">
+            {includeHistory ? "No reply requests yet." : "No replies need attention."}
+          </div>
         )}
       </section>
     );
@@ -1845,36 +1895,27 @@ export function ChannelPage({
       </section>
     );
   }
-  function renderWorkspaceRoles() {
+  function renderWorkspaceDiagnostics() {
+    const linkedEventCount = workspaceDetail?.linked_events?.length
+      ?? Number(detail?.diagnostics_summary?.linked_event_count || 0);
     return (
-      <section className="channel-workspace-panel">
-        <div className="channel-workspace-panel-head">
-          <div>
-            <h3>Workflow Roles</h3>
-            <span className="muted">{workflowRoles.length} configured roles</span>
-          </div>
+      <details className="channel-workspace-diagnostics span-2" data-testid="channel-diagnostics">
+        <summary>
+          <span>
+            <strong>Diagnostics</strong>
+            <small>Reply history, context construction and linked events</small>
+          </span>
+          <span className="channel-workspace-chip-row">
+            <span className="metric-chip">{replyRequests.length} replies</span>
+            <span className="metric-chip">{contextPacks.length} contexts</span>
+            <span className="metric-chip">{linkedEventCount} events</span>
+          </span>
+        </summary>
+        <div className="channel-workspace-diagnostics-grid">
+          {renderWorkspaceReplyFlow(true)}
+          {renderWorkspaceContextFlow()}
         </div>
-        {workflowRoles.length ? (
-          <div className="channel-role-chip-list">
-            {workflowRoles.map((role) => {
-              const row = role as unknown as Record<string, unknown>;
-              const id = recordString(row, "instance_id") || recordString(row, "name") || recordString(row, "role");
-              const label = recordString(row, "name") || id || "role";
-              const backend = recordString(row, "backend") || "-";
-              const kind = recordString(row, "role_kind") || recordString(row, "origin") || "role";
-              return (
-                <div className="channel-role-chip" key={id || label}>
-                  <strong>{label}</strong>
-                  <span>{kind}</span>
-                  <small>{backend}</small>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="channel-workspace-empty">No workflow roles configured.</div>
-        )}
-      </section>
+      </details>
     );
   }
   function renderWorkspaceRequests() {
@@ -2021,21 +2062,46 @@ export function ChannelPage({
     );
   }
   function renderChannelWorkspace() {
+    if (diagnosticsLoading && !diagnosticsDetail) {
+      return (
+        <div className="channel-workspace-loading" data-testid="channel-details-loading">
+          <Loader2 className="spin" size={18} />
+          <span>Loading channel details…</span>
+        </div>
+      );
+    }
+    if (diagnosticsError && !diagnosticsDetail) {
+      return (
+        <div className="channel-workspace-loading is-error" data-testid="channel-details-error">
+          <span>{diagnosticsError}</span>
+          <button className="icon-button" type="button" onClick={() => void onLoadDiagnostics()}>
+            Retry
+          </button>
+        </div>
+      );
+    }
     return (
-      <div className="channel-workspace-dashboard">
+      <div
+        className="channel-workspace-dashboard"
+        data-testid={diagnosticsDetail ? "channel-details-loaded" : "channel-details-summary"}
+      >
         <section className="channel-workspace-hero">
           {renderWorkspaceMetric("Members", members.length, `${boundMembers.length} runtime bound`, Users)}
-          {renderWorkspaceMetric("Messages", messages.length, `${mentionDigests.length} mention events`, MessageSquare)}
+          {renderWorkspaceMetric(
+            "Messages",
+            Number(workspaceDetail?.message_count ?? messages.length),
+            `${mentionDigests.length} mention events`,
+            MessageSquare,
+          )}
           {renderWorkspaceMetric("Replies", replyRequests.length, `${pendingReplies} pending / ${failedReplyRows.length} failed`, Bell)}
           {renderWorkspaceMetric("Context", contextPacks.length, `${stateUpdates.length} state updates`, Boxes)}
           {renderWorkspaceMetric("Reports", ownerReports.length + automationReports.length, `${automationReports.length} automation`, FileText)}
         </section>
         <div className="channel-workspace-main-grid">
           {renderWorkspaceReplyFlow()}
-          {renderWorkspaceContextFlow()}
-          {renderWorkspaceRoles()}
           {renderWorkspaceRequests()}
           {renderWorkspaceControls()}
+          {renderWorkspaceDiagnostics()}
         </div>
       </div>
     );
@@ -2331,7 +2397,10 @@ export function ChannelPage({
               className={`channel-tab ${activeTab === "workspace" ? "active" : ""}`}
               data-testid="channel-details-tab"
               type="button"
-              onClick={() => setActiveTab("workspace")}
+              onClick={() => {
+                setActiveTab("workspace");
+                void onLoadDiagnostics();
+              }}
             >
               <Info size={16} />
               Details
@@ -2508,6 +2577,17 @@ export function ChannelPage({
                 aria-live="polite"
                 onScroll={handleChannelTimelineScroll}
               >
+                {detail?.has_more ? (
+                  <button
+                    className="agent-history-load channel-history-load"
+                    data-testid="channel-load-earlier"
+                    disabled={historyLoadingEarlier}
+                    type="button"
+                    onClick={() => void loadEarlierMessages()}
+                  >
+                    {historyLoadingEarlier ? "Loading…" : "Load earlier messages"}
+                  </button>
+                ) : null}
                 <AgentSessionTimeline
                   actionBusyId={researchActionBusyId}
                   activeThreadId={activeChannelThreadId}

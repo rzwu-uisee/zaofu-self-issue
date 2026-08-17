@@ -736,6 +736,10 @@
     grid-template-columns: 1fr;
   }
 
+  .channel-workspace-diagnostics-grid {
+    grid-template-columns: 1fr;
+  }
+
   .channel-workspace-panel.span-2 {
     grid-column: auto;
   }

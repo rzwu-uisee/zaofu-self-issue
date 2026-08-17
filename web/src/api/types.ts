@@ -1638,6 +1638,7 @@ export interface ChannelSummary {
   scope?: Record<string, unknown>;
   members?: Array<Record<string, unknown>>;
   messages?: Array<Record<string, unknown>>;
+  message_count?: number;
   threads?: Record<string, unknown>;
   read_state?: Record<string, unknown>;
   attention?: Array<Record<string, unknown>>;
@@ -2285,6 +2286,16 @@ export interface ChannelDetail extends ChannelSummary {
   history_cleared_at?: string;
   history_clear_event_id?: string;
   history_clear_reason?: string;
+  has_more?: boolean;
+  next_before?: string;
+  page?: {
+    limit?: number;
+    returned?: number;
+    before?: string;
+    has_more?: boolean;
+    next_before?: string;
+  };
+  diagnostics_summary?: Record<string, number>;
 }
 
 export interface ChannelHistorySearchResult {

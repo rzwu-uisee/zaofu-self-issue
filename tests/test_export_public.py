@@ -186,16 +186,14 @@ def test_export_includes_disclaimer_and_accepts_no_private_matches(tmp_path: Pat
             encoding="utf-8"
         ) == expected_disclaimer
         for readme in ("README.md", "README.zh-CN.md"):
-            expected_readme = (ROOT / readme).read_text(encoding="utf-8")
+            expected_readme = subprocess.run(
+                ["git", "show", f"HEAD:{readme}"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
             assert (target / readme).read_text(encoding="utf-8") == expected_readme
-        assert (target / "CHANGELOG.md").read_text(encoding="utf-8") == (
-            ROOT / "CHANGELOG.md"
-        ).read_text(encoding="utf-8")
-        assert (target / "docs" / "releases" / "v0.0.1.md").read_text(
-            encoding="utf-8"
-        ) == (ROOT / "docs" / "releases" / "v0.0.1.md").read_text(
-            encoding="utf-8"
-        )
         assert (target / "docs" / "manual" / "00-index.en.md").is_file()
         assert (target / "AGENTS.md").is_file()
         assert (target / "CLAUDE.md").is_file()

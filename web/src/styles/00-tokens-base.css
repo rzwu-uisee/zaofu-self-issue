@@ -554,7 +554,7 @@ h3 {
 .agent-page-shell.docked {
   right: 18px;
   bottom: 18px;
-  width: min(500px, calc(100vw - 32px));
+  width: min(660px, 44vw, calc(100vw - 32px));
   height: min(720px, calc(100vh - 36px));
 }
 
