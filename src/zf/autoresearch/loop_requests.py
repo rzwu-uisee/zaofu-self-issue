@@ -32,6 +32,9 @@ LOOP_EVENTS = {
     LOOP_FAILED,
 }
 DEFAULT_LOOP_SCENARIOS = ["controlled-stuck-recovery"]
+RESEARCH_MODE_DEFAULT_SCENARIOS: dict[str, list[str]] = {
+    "simplify": ["simplification-audit"],
+}
 DEFAULT_EXPECTED_OUTPUT = ["diagnosis_report", "reproduction_steps", "patch_proposal"]
 RESEARCH_MODE_CONTRACTS: dict[str, dict[str, Any]] = {
     "probe": {
@@ -70,6 +73,18 @@ RESEARCH_MODE_CONTRACTS: dict[str, dict[str, Any]] = {
         "budget_cap": {"max_runs": 1, "max_minutes": 10},
         "expected_output": ["capability_deposition", "trigger_conditions", "verification_refs"],
     },
+    "simplify": {
+        "artifact_kind": "simplification_audit.v1",
+        "output_kind": "simplification_audit",
+        "budget_cap": {"max_runs": 1, "max_minutes": 20},
+        "expected_output": [
+            "surveyed_areas",
+            "protected_seams",
+            "simplification_candidates",
+            "rejected_candidates",
+            "verification_plans",
+        ],
+    },
 }
 RESEARCH_MODE_EXPECTED_OUTPUTS: dict[str, list[str]] = {
     mode: list(contract["expected_output"])
@@ -105,6 +120,12 @@ def research_mode_contract(mode: Any) -> dict[str, Any]:
     contract["expected_output"] = list(contract.get("expected_output") or [])
     contract["budget_cap"] = dict(contract.get("budget_cap") or {})
     return contract
+
+
+def default_scenarios_for_mode(mode: Any) -> list[str]:
+    normalized = normalize_research_mode(mode)
+    scenarios = RESEARCH_MODE_DEFAULT_SCENARIOS.get(normalized, DEFAULT_LOOP_SCENARIOS)
+    return list(scenarios)
 
 
 def build_research_mode_artifact_envelope(payload: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +166,12 @@ def build_research_mode_artifact_envelope(payload: dict[str, Any]) -> dict[str, 
             "verification_refs": _string_list(payload.get("verification_refs")),
             "status": "proposal_only",
         }
+    elif mode == "simplify":
+        envelope["simplification_audit"] = {
+            "schema_version": "simplification_audit.v1",
+            "status": "proposal_only",
+            "direct_apply": False,
+        }
     return redact_obj(envelope)
 
 
@@ -167,11 +194,14 @@ def build_loop_request_payload(
         trigger_payload,
         fallback=source_event_id,
     )
-    scenarios = _string_list(trigger_payload.get("scenarios")) or DEFAULT_LOOP_SCENARIOS
     mode = normalize_research_mode(
         trigger_payload.get("research_mode")
         or trigger_payload.get("mode")
         or "debug"
+    )
+    scenarios = (
+        _string_list(trigger_payload.get("scenarios"))
+        or default_scenarios_for_mode(mode)
     )
     expected_output = (
         _string_list(trigger_payload.get("expected_output"))
@@ -335,9 +365,11 @@ __all__ = [
     "LOOP_FAILED",
     "LOOP_EVENTS",
     "DEFAULT_LOOP_SCENARIOS",
+    "RESEARCH_MODE_DEFAULT_SCENARIOS",
     "RESEARCH_MODE_EXPECTED_OUTPUTS",
     "RESEARCH_MODE_CONTRACTS",
     "build_research_mode_artifact_envelope",
+    "default_scenarios_for_mode",
     "build_loop_request_payload",
     "handled_loop_request_ids",
     "loop_request_exists",

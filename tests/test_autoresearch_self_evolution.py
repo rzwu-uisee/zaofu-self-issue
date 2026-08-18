@@ -446,6 +446,90 @@ def test_resident_dry_run_exposes_research_mode_envelope(tmp_path):
     assert row["artifact_envelope"]["apply_policy"] == "proposal_only"
 
 
+def test_simplify_mode_runs_dedicated_proposal_only_scenario(tmp_path):
+    state_dir = tmp_path / ".zf"
+    payload = build_loop_request_payload(
+        {
+            "trigger_id": "t-simplify",
+            "mode": "simplify",
+            "reason": "repeated fallback growth",
+        },
+        source_event_id="evt-simplify",
+    )
+    assert payload["scenarios"] == ["simplification-audit"]
+    assert payload["mode_contract"]["artifact_kind"] == "simplification_audit.v1"
+    assert payload["mode_contract"]["budget_cap"]["max_minutes"] == 20
+    assert payload["direct_mainline_apply"] is False
+
+    scenario = resolve_scenario("simplification-audit")
+    assert scenario.expected_done == 1
+    assert "zf-find-simplifications" in scenario.seed_text
+    assert "Do not edit production source" in scenario.seed_text
+
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(type=LOOP_REQUESTED, actor="test", payload=payload))
+
+    def _fake_runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout="audit archived", stderr="")
+
+    actions = run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_fake_runner,
+    )
+
+    action = actions[0]
+    scenario_index = action.command.index("--scenarios") + 1
+    assert action.command[scenario_index] == "simplification-audit"
+    assert action.research_mode == "simplify"
+    assert action.expected_output == [
+        "surveyed_areas",
+        "protected_seams",
+        "simplification_candidates",
+        "rejected_candidates",
+        "verification_plans",
+    ]
+    completed = [event for event in log.read_all() if event.type == LOOP_COMPLETED][-1]
+    envelope = completed.payload["artifact_envelope"]
+    assert completed.payload["mode"] == "simplify"
+    assert envelope["artifact_kind"] == "simplification_audit.v1"
+    assert envelope["proposal_only"] is True
+    assert envelope["direct_mainline_apply"] is False
+    assert envelope["simplification_audit"] == {
+        "schema_version": "simplification_audit.v1",
+        "status": "proposal_only",
+        "direct_apply": False,
+    }
+
+
+def test_resident_defaults_raw_simplify_request_to_simplification_scenario(tmp_path):
+    state_dir = tmp_path / ".zf"
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        type=LOOP_REQUESTED,
+        actor="test",
+        payload={
+            "loop_request_id": "raw-simplify",
+            "mode": "simplify",
+            "apply_policy": "proposal_only",
+        },
+    ))
+
+    actions = run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=False,
+    )
+
+    assert actions[0].command[actions[0].command.index("--scenarios") + 1] == (
+        "simplification-audit"
+    )
+
+
 def test_resident_completed_event_carries_learn_deposition_envelope(tmp_path):
     state_dir = tmp_path / ".zf"
     payload = build_loop_request_payload(

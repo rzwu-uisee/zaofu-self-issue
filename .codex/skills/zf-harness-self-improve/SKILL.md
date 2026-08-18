@@ -1,6 +1,7 @@
 ---
 name: zf-harness-self-improve
 description: "ZaoFu project-level harness self-improvement workflow for Claude or Codex. Use when asked to review recent ZaoFu work, session history, runtime events, manual operations, backlogs, skills, docs, or repeated agent workflows to identify improvements that should become project skills, commands, hooks, cron jobs, Supervisor checks, Autoresearch scenarios, docs, or backlog items. Requires evidence-first read-only discovery before any asset creation."
+dependencies: [zf-find-simplifications]
 ---
 
 # ZaoFu Harness Self-Improve
@@ -66,8 +67,13 @@ useful evidence, but they are not ZaoFu truth.
 3. Review existing asset descriptions and trigger text before declaring a gap.
    If an existing asset should have handled the workflow, prefer improving its
    name, description, scope, or usage instructions over creating a parallel one.
-4. Classify each candidate by asset form.
-5. Produce a shortlist and stop for approval.
+4. When the evidence points to repeated compatibility layers, duplicate facts,
+   growing fallback branches, unused public surface, or repair churn in the same
+   module, invoke `zf-find-simplifications` for a separate proposal-only audit.
+   Do not load it for an ordinary retrospective that has no simplification
+   signal, and do not treat its candidates as approved implementation work.
+5. Classify each candidate by asset form.
+6. Produce a shortlist and stop for approval.
 
 Shortlist format:
 
@@ -163,6 +169,7 @@ Tie recommendations to measurable harness outcomes:
 |---|---|---|
 | Supervisor Inspection | Lightweight online detection of attention-worthy drift | Consume findings and suggest assets/backlogs |
 | Autoresearch | Heavy reproduce-fix-verify-reflect loop for ZaoFu bugs | Propose scenarios or repair backlogs, not run campaigns by default |
+| Simplification Audit | Evidence-backed removal/coalescing review for ZaoFu or an app built with it | Invoke `zf-find-simplifications` conditionally; retain proposal-only output |
 | Project Spine Review | Product delivery alignment | Detect repeated process gaps that need reusable assets |
 | Harness Self-Improve | Offline productization of repeated harness workflows | This skill |
 

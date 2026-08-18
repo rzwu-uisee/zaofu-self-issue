@@ -159,6 +159,29 @@ SPEC_VALIDATE_HARDENING = AutoresearchScenario(
     ),
 )
 
+SIMPLIFICATION_AUDIT = AutoresearchScenario(
+    name="simplification-audit",
+    expected_done=1,
+    timeout_seconds=3600,
+    description=(
+        "Run one proposal-only, evidence-backed simplification audit without "
+        "changing production behavior or applying a candidate."
+    ),
+    seed_text=(
+        "Run one proposal-only simplification audit for the current repository. "
+        "Use the zf-find-simplifications skill and create exactly one audit "
+        "deliverable at reports/autoresearch/simplification-audit.md. Survey "
+        "production, dynamic, test, and documentation consumers; identify "
+        "protected architecture seams; list evidence-backed candidates and "
+        "rejected candidates; state net surface reduction, behavior given up, "
+        "risk, and a focused verification plan for each accepted candidate. "
+        "Do not edit production source, tests, configuration, runtime truth, or "
+        "apply any simplification. The report is a proposal artifact only. "
+        "Acceptance command: test -f "
+        "reports/autoresearch/simplification-audit.md."
+    ),
+)
+
 
 BUILTIN_SCENARIOS: dict[str, AutoresearchScenario] = {
     SELF_EVAL_BACKLOG.name: SELF_EVAL_BACKLOG,
@@ -167,6 +190,7 @@ BUILTIN_SCENARIOS: dict[str, AutoresearchScenario] = {
     FAIL_REWORK_CONVERGE.name: FAIL_REWORK_CONVERGE,
     MANUAL_INTERVENTION_GUARD.name: MANUAL_INTERVENTION_GUARD,
     SPEC_VALIDATE_HARDENING.name: SPEC_VALIDATE_HARDENING,
+    SIMPLIFICATION_AUDIT.name: SIMPLIFICATION_AUDIT,
 }
 
 

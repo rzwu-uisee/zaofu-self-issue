@@ -24,6 +24,7 @@ from zf.autoresearch.loop_requests import (
     LOOP_SKIPPED,
     LOOP_STARTED,
     build_research_mode_artifact_envelope,
+    default_scenarios_for_mode,
     loop_request_id_from_payload,
     normalize_research_mode,
     research_mode_contract,
@@ -201,7 +202,8 @@ def _command_for_request(
     output_root: Path,
 ) -> list[str]:
     request_id = loop_request_id_from_payload(payload, fallback="request")
-    scenarios = _string_list(payload.get("scenarios")) or ["controlled-stuck-recovery"]
+    mode = normalize_research_mode(payload.get("mode") or payload.get("research_mode"))
+    scenarios = _string_list(payload.get("scenarios")) or default_scenarios_for_mode(mode)
     fix_wait = str(payload.get("fix_wait_strategy") or "none")
     return [
         sys.executable,

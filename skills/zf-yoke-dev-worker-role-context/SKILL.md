@@ -3,7 +3,7 @@ name: zf-yoke-dev-worker-role-context
 description: "Use for ZaoFu dev workers that need yoke-style isolated, evidence-first implementation discipline."
 stages: [impl, fix]
 tags: [yoke, role-context, implementation]
-dependencies: [tdd-evidence, incremental-delivery, debugging-triage, git-evidence, source-verification, zf-harness-done-contract]
+dependencies: [tdd-evidence, incremental-delivery, debugging-triage, git-evidence, source-verification, zf-harness-done-contract, zf-find-simplifications]
 auto_inject: true
 load_on_demand: false
 ---
@@ -29,6 +29,8 @@ methodology family — do not restate their content here:
   清单读、现网能力先 grep、宣称附出处、查不到标 UNVERIFIED。
 - `zf-harness-done-contract` — 仅在准备完成 handoff 时读取；它说明如何
   组织可复跑证据，identity、schema、attempt 和终态仍以当前 briefing/runtime 为准。
+- `zf-find-simplifications` — 仅在 owner 明确要求简化、当前 owned diff 需要
+  行为保持式精简，或任务要求 proposal-only 审计时按需读取；普通 Impl 不自动加载。
 
 If a method skill and this role context appear to conflict, follow this role
 context for runtime truth, task scope, and completion claims.
