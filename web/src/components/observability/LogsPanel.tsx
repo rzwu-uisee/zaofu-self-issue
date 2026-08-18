@@ -41,7 +41,7 @@ export function LogsPanel({ projectId }: LogsPanelProps) {
   return (
     <section className="subsection" data-testid="diagnostics-logs">
       <div className="inline-heading">
-        <h3>Logs</h3>
+        <h3>Event Logs</h3>
         <span className="muted">event summaries · newest first</span>
         <select value={level} onChange={(e) => setLevel(e.target.value)} aria-label="Minimum level">
           {LEVELS.map((lv) => (

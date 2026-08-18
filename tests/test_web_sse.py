@@ -21,6 +21,7 @@ pytest.importorskip("fastapi")
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.core.security.signing import EventSigner
+from zf.runtime.observability_alerts import observability_sse_gap_path
 from zf.web.server import _tail_events
 
 
@@ -125,6 +126,12 @@ async def test_cursor_gap_emits_degraded_signal(state_dir):
     text = out.decode("utf-8", errors="replace")
     assert "event: stream.gap" in text
     assert "cursor is outside active replay window" in text
+    projection = json.loads(
+        observability_sse_gap_path(state_dir).read_text(encoding="utf-8")
+    )
+    assert projection["latest"]["cursor"] == 99
+    assert projection["latest"]["current"] == 1
+    assert projection["latest"]["observed_at"]
 
 
 @pytest.mark.asyncio

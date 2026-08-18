@@ -3,7 +3,7 @@
 > Generated from `capability-coverage.yaml`; do not edit by hand.
 > This maps release-facing capabilities to manual/code/test evidence; it is not a module inventory.
 
-Last manually verified: `2026-08-08`.
+Last manually verified: `2026-08-18`.
 
 | Capability | Status | Manual | Implementation | Tests |
 |---|---|---|---|---|
@@ -18,6 +18,7 @@ Last manually verified: `2026-08-08`.
 | `research-generation-five-workflow-terminal`<br>Research generation and five-Workflow terminal acceptance | `partial` | [`18-product-fanout-real-e2e.md`](../18-product-fanout-real-e2e.md)<br>[`18-product-fanout-real-e2e.en.md`](../18-product-fanout-real-e2e.en.md) | `src/zf/runtime/research_generation.py`<br>`src/zf/runtime/control_actions_product.py` | `tests/test_control_actions_research.py`<br>`tests/e2e/test_five_workflow_terminal_runner.py` |
 | `bounded-agent-swarm`<br>Bounded multi-Agent swarm and elastic Workers | `implemented` | [`architecture.md`](../architecture.md)<br>[`13-plan-task-map-orchestrator-dispatch.md`](../13-plan-task-map-orchestrator-dispatch.md)<br>[`18-product-fanout-real-e2e.md`](../18-product-fanout-real-e2e.md)<br>[`architecture.en.md`](../architecture.en.md)<br>[`13-plan-task-map-orchestrator-dispatch.en.md`](../13-plan-task-map-orchestrator-dispatch.en.md)<br>[`18-product-fanout-real-e2e.en.md`](../18-product-fanout-real-e2e.en.md) | `src/zf/runtime/fanout.py`<br>`src/zf/runtime/agent_view_runtime.py`<br>`src/zf/runtime/role_lifecycle_runtime.py` | `tests/test_reader_fanout_runtime.py`<br>`tests/test_writer_fanout_runtime.py`<br>`tests/test_role_lifecycle_runtime.py` |
 | `delivery-observability`<br>Delivery, Runs, Graph, and Loop observability | `implemented` | [`observe-delivery.md`](../operations/observe-delivery.md)<br>[`06-web-observability-e2e.md`](../06-web-observability-e2e.md)<br>[`observe-delivery.en.md`](../operations/observe-delivery.en.md)<br>[`06-web-observability-e2e.en.md`](../06-web-observability-e2e.en.md) | `src/zf/runtime/delivery_trace.py`<br>`web/src/components/delivery-trace/DeliveryTracePage.tsx` | `tests/test_delivery_trace.py`<br>`tests/test_web_delivery_trace.py` |
+| `provider-native-operations-observability`<br>Provider native telemetry, Runtime Logs, and Operations metrics | `partial` | [`21-metrics-observability-operations.md`](../21-metrics-observability-operations.md)<br>[`22-provider-native-telemetry.md`](../22-provider-native-telemetry.md)<br>[`21-metrics-observability-operations.en.md`](../21-metrics-observability-operations.en.md)<br>[`22-provider-native-telemetry.en.md`](../22-provider-native-telemetry.en.md) | `src/zf/runtime/provider_telemetry.py`<br>`src/zf/runtime/runtime_logs.py`<br>`src/zf/runtime/operations_metrics.py`<br>`src/zf/runtime/otlp_exporter.py`<br>`src/zf/runtime/observability_alerts.py`<br>`web/src/components/observability/OperationsPanel.tsx`<br>`web/src/components/observability/RuntimeLogsPanel.tsx` | `tests/test_provider_telemetry.py`<br>`tests/test_otlp_exporter.py`<br>`tests/test_observability_alerts.py`<br>`tests/test_web_operations_observability.py` |
 | `goal-dossier`<br>Goal Dossier delivery sign-off | `implemented` | [`observe-delivery.md`](../operations/observe-delivery.md)<br>[`observe-delivery.en.md`](../operations/observe-delivery.en.md) | `src/zf/runtime/goal_dossier.py`<br>`src/zf/runtime/goal_dossier_delivery.py` | `tests/test_goal_dossier.py`<br>`tests/test_goal_dossier_owner_delivery.py` |
 | `goal-coverage`<br>Claim-centered Goal Coverage | `implemented` | [`observe-delivery.md`](../operations/observe-delivery.md)<br>[`observe-delivery.en.md`](../operations/observe-delivery.en.md) | `src/zf/runtime/goal_coverage_graph.py`<br>`src/zf/runtime/task_map_goal_coverage.py` | `tests/test_goal_coverage_graph.py` |
 | `long-run-continuation`<br>Long-horizon Run continuation and recovery | `implemented` | [`recover-long-running-run.md`](../operations/recover-long-running-run.md)<br>[`recover-long-running-run.en.md`](../operations/recover-long-running-run.en.md) | `src/zf/runtime/run_continuation.py`<br>`src/zf/runtime/task_attempt_runtime.py` | `tests/test_run_continuation.py`<br>`tests/test_task_attempt_recovery.py` |
@@ -105,6 +106,13 @@ Last manually verified: `2026-08-08`.
 - **Readback**: Cross-check Overview, Runs, Graph, Loop, Goal Dossier, and Task trace against the event/store/artifact sources.
 - **Rollback**: Rebuild or disable the affected read projection; do not mutate canonical state to make the UI look healthy.
 - **Authority**: Web/SQLite/Trace/Graph/Loop are read projections and cannot become dispatch truth.
+
+### `provider-native-operations-observability` - Provider native telemetry, Runtime Logs, and Operations metrics
+
+- **Activation**: Opt in through observability config using environment-variable names only; run the runtime tick for exporter/attention work and Web for readback.
+- **Readback**: Inspect Operations capability/exporter health, redacted Runtime Logs, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
+- **Rollback**: Disable the relevant observability block in a new runtime generation and retain projections/logs/cursor for audit; never mutate Task/Event/Delivery truth.
+- **Authority**: Provider telemetry, logs, metrics, exporter, and alerts are diagnostic projections. They cannot write canonical stores, dispatch providers, or decide a gate/verdict.
 
 ### `goal-dossier` - Goal Dossier delivery sign-off
 

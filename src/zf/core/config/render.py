@@ -634,6 +634,11 @@ def file_sha256(path: Path) -> str:
 
 def _is_secret_key(key: str) -> bool:
     normalized = key.lower()
+    # ``*_env`` values are environment-variable *names*, not their secret
+    # values. Keeping the pointer is required for a rendered config to reload
+    # and lets operators provide the secret only through the process env.
+    if normalized.endswith("_env"):
+        return False
     if any(part in normalized for part in _SECRET_KEY_PARTS):
         return True
     if normalized in {
@@ -644,7 +649,7 @@ def _is_secret_key(key: str) -> bool:
         "bearer_token",
     }:
         return True
-    return normalized.endswith("_token") or normalized.endswith("_token_env")
+    return normalized.endswith("_token")
 
 
 def _role_name(role: Any) -> str:

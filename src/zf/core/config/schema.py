@@ -1793,6 +1793,65 @@ class CostConfig:
 
 
 @dataclass
+class ProviderTelemetryConfig:
+    """Opt-in provider-native telemetry profile; values remain in env only."""
+
+    mode: str = "off"  # off | managed | host_managed
+    profile_id: str = "zaofu-managed-v1"
+    endpoint_env: str = ""
+    enable_traces: bool = False
+
+
+@dataclass
+class OperationsMetricsConfig:
+    """Prometheus exposure is opt-in and token-gated when enabled."""
+
+    enabled: bool = False
+    access_token_env: str = ""
+
+
+@dataclass
+class RuntimeLogsConfig:
+    enabled: bool = True
+
+
+@dataclass
+class OtlpExporterConfig:
+    """Optional OTLP HTTP exporter; credentials stay in environment variables."""
+
+    enabled: bool = False
+    endpoint_env: str = ""
+    headers_env: str = ""
+    interval_seconds: float = 15.0
+    request_timeout_seconds: float = 3.0
+    batch_size: int = 64
+    retry_initial_seconds: float = 5.0
+    retry_max_seconds: float = 300.0
+    healthy_sample_rate: float = 0.1
+
+
+@dataclass
+class ObservabilityAlertConfig:
+    """Projection-only alerting; it cannot change workflow state or verdicts."""
+
+    enabled: bool = False
+    cooldown_seconds: float = 300.0
+
+
+@dataclass
+class ObservabilityConfig:
+    provider_telemetry: ProviderTelemetryConfig = field(
+        default_factory=ProviderTelemetryConfig
+    )
+    metrics: OperationsMetricsConfig = field(default_factory=OperationsMetricsConfig)
+    runtime_logs: RuntimeLogsConfig = field(default_factory=RuntimeLogsConfig)
+    otlp_exporter: OtlpExporterConfig = field(default_factory=OtlpExporterConfig)
+    alerts: ObservabilityAlertConfig = field(
+        default_factory=ObservabilityAlertConfig
+    )
+
+
+@dataclass
 class ZfConfig:
     version: str = "1.0"
     preset: str = ""
@@ -1816,6 +1875,7 @@ class ZfConfig:
     autoresearch: AutoresearchConfig = field(default_factory=AutoresearchConfig)
     skill_sources: list[SkillSourceConfig] = field(default_factory=list)
     cost: CostConfig = field(default_factory=CostConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     # G-COST-BLOCK-1: global hard cost cap. None = no cap.
     global_budget_usd: float | None = None
     # Global kill switch for dispatch-time hard budget enforcement.

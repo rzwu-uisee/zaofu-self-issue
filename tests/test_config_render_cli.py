@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from zf.core.config.render import renderable_config_to_primitive
+from zf.core.config.render import redact_config, renderable_config_to_primitive
 from zf.core.config.loader import load_config
 from zf.cli.main import main
 
@@ -94,6 +94,57 @@ def test_config_render_writes_redacted_config_and_lock(tmp_path, capsys):
     assert "coverage" in data
     assert "generated" in data
     assert json.loads(capsys.readouterr().out)["summary"]["stages"] == 1
+
+
+def test_config_render_preserves_environment_reference_names(tmp_path, capsys):
+    path = _config(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\nobservability:\n"
+        + "  metrics:\n"
+        + "    enabled: true\n"
+        + "    access_token_env: ZF_TEST_METRICS_TOKEN\n"
+        + "  provider_telemetry:\n"
+        + "    mode: managed\n"
+        + "    endpoint_env: ZF_TEST_OTLP_ENDPOINT\n"
+        + "  otlp_exporter:\n"
+        + "    enabled: true\n"
+        + "    endpoint_env: ZF_TEST_OTLP_EXPORTER_ENDPOINT\n"
+        + "    headers_env: ZF_TEST_OTLP_HEADERS\n"
+        + "security:\n"
+        + "  event_signing:\n"
+        + "    secret_env: ZF_TEST_EVENT_SECRET\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rendered-zf.yaml"
+
+    rc = main([
+        "config",
+        "render",
+        "--config",
+        str(path),
+        "--output",
+        str(output),
+    ])
+
+    assert rc == 0
+    rendered = yaml.safe_load(output.read_text(encoding="utf-8"))
+    observability = rendered["observability"]
+    assert observability["metrics"]["access_token_env"] == "ZF_TEST_METRICS_TOKEN"
+    assert observability["provider_telemetry"]["endpoint_env"] == "ZF_TEST_OTLP_ENDPOINT"
+    assert observability["otlp_exporter"]["headers_env"] == "ZF_TEST_OTLP_HEADERS"
+    assert rendered["security"]["event_signing"]["secret_env"] == "ZF_TEST_EVENT_SECRET"
+    assert load_config(output).observability.metrics.access_token_env == "ZF_TEST_METRICS_TOKEN"
+    capsys.readouterr()
+
+    redacted = redact_config({
+        "api_token": "inline-secret",
+        "access_token_env": "ZF_TEST_METRICS_TOKEN",
+        "secret_env": "ZF_TEST_EVENT_SECRET",
+    })
+    assert redacted["api_token"] == "<redacted>"
+    assert redacted["access_token_env"] == "ZF_TEST_METRICS_TOKEN"
+    assert redacted["secret_env"] == "ZF_TEST_EVENT_SECRET"
 
 
 def test_config_rendered_controller_yaml_is_reloadable(tmp_path, capsys):

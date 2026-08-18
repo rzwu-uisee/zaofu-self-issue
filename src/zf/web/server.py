@@ -862,6 +862,17 @@ def create_app(
             "state_dir": str(state_dir),
         })
 
+    from zf.web.observability import register_observability_routes
+
+    register_observability_routes(
+        app,
+        state_dir=state_dir,
+        config=config,
+        default_project_id=default_project_id,
+        default_project_root=project_root,
+        resolve_api_project=_resolve_api_project,
+    )
+
     # ---- HTML root ----
 
     @app.get("/")
@@ -7454,9 +7465,12 @@ def _run_headless_kanban_agent_turn(
     context_completed_at = time.monotonic()
     provider_started_at = time.monotonic()
     try:
-        agent = KanbanHeadlessAgent(
+        from zf.web.observability import create_observed_headless_agent
+
+        agent = create_observed_headless_agent(
             state_dir=state_dir,
             project_root=project_root,
+            config=config,
         )
         result = agent.run_turn(
             backend=backend,
@@ -7465,7 +7479,9 @@ def _run_headless_kanban_agent_turn(
             task_id=task_id or "",
             thread_key=thread_key,
             context={
-                "trace_id": str(payload.get("trace_id") or ""),
+                "trace_id": str(
+                    payload.get("trace_id") or user_message.correlation_id or ""
+                ),
                 "pdd_id": str(payload.get("pdd_id") or ""),
                 "fanout_id": str(payload.get("fanout_id") or ""),
                 "requested_action": requested_action,
@@ -7474,6 +7490,9 @@ def _run_headless_kanban_agent_turn(
                 "run_thread_id": run_thread_id,
                 "project_id": project_id,
                 "conversation_id": conversation_id,
+                "operation_kind": (
+                    "channel_turn" if payload.get("channel_id") else "kanban_turn"
+                ),
                 "runtime_snapshot_ref": runtime_snapshot_ref,
                 "workflow_route_catalog": workflow_route_catalog(config),
                 "canonical_channel_prds": channel_prd_context,
@@ -7556,6 +7575,15 @@ def _run_headless_kanban_agent_turn(
             "thread_key": thread_key,
         }
     provider_completed_at = time.monotonic()
+    from zf.web.observability import emit_headless_telemetry_events
+
+    emit_headless_telemetry_events(
+        writer=writer,
+        result=result,
+        task_id=task_id,
+        causation_id=turn_started.id,
+        correlation_id=user_message.correlation_id,
+    )
     plan_started_at = provider_completed_at
     origin_message_event_id = str(payload.get("plan_origin_message_event_id") or "")
     prior_events = writer.event_log.read_all()

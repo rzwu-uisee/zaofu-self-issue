@@ -17,6 +17,7 @@
 | Decide whether a long-running goal is actually complete | [Observe a delivery](operations/observe-delivery.en.md) | Goal, Claims, Tasks, Evidence, Gaps, and Closure explain the result |
 | Recover a stalled, failed, or no-progress Run | [Recover a long-running Run](operations/recover-long-running-run.en.md) | The Run advances or converges with evidence to blocked/failed/cancelled |
 | Understand context and evidence inheritance across agents | [Context, Artifacts, and Handoff](operations/context-handoff-artifacts.en.md) | You can locate the current contract, required reads, result, and lineage |
+| Diagnose Provider, SSE, Runtime Log, OTLP, or system operations signals | [Metrics, Observability, and Operations](21-metrics-observability-operations.en.md) | You can distinguish delivery facts, events, runtime logs, low-cardinality metrics, and exporter health |
 | Connect Feishu, Automations, or a provider | [Integrations](integrations/README.en.md) | External surfaces use projections and controlled actions without creating another truth |
 | Look up commands, configuration, or stable contracts | [Reference](reference/README.en.md) | The generated command inventory or a focused reference gives the current entrypoint |
 | Develop, review, or validate ZaoFu itself | [Architecture overview](architecture.en.md) | You can separate Kernel, Agent, Store, Artifact, Projection, and orchestration modes |
@@ -85,6 +86,8 @@ the outcome routes above first.
 - [18 Product fanout and Five-Workflow real E2E](18-product-fanout-real-e2e.en.md)
 - [19 Feishu AI-Native Bridge, live conversations, and approvals](19-feishu-ai-native-direct-bridge.en.md)
 - [20 Project, bootstrap, and Workflow start](20-project-bootstrap-workflow-ignition.en.md)
+- [21 Metrics, Observability, and Operations](21-metrics-observability-operations.en.md)
+- [22 Provider Native Telemetry and OTLP](22-provider-native-telemetry.en.md)
 
 ## Documentation Status
 

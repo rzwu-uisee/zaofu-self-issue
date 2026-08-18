@@ -139,6 +139,9 @@ class TickServiceResult:
     stillness_redriven: int = 0
     workflow_synthesis_consumed: int = 0
     channel_result_receipts: int = 0
+    observability_exporter_scheduled: bool = False
+    observability_alerts_emitted: int = 0
+    observability_alerts_status: str = "disabled"
 
 
 def run_autoresearch_trigger_scan(
@@ -189,6 +192,28 @@ def run_standard_tick_services(
     state_dir = Path(orchestrator.state_dir)
     config = orchestrator.config
     project_root = Path(orchestrator.project_root)
+
+    def _run_observability_tick() -> Any:
+        """Keep optional export/alert work outside deterministic workflow control."""
+
+        try:
+            from zf.core.workspace.registry import stable_project_id
+            from zf.runtime.observability_tick import run_observability_tick
+
+            return run_observability_tick(
+                state_dir=state_dir,
+                event_log=event_log,
+                event_writer=event_writer,
+                config=config,
+                project_id=stable_project_id(
+                    name=str(
+                        getattr(getattr(config, "project", None), "name", "") or ""
+                    ),
+                    root=project_root,
+                ),
+            )
+        except Exception:
+            return None
 
     # ZF-STOP-TAIL-01:停机排空窗内探针/RM 立案全体跳过。`zf stop` 第一步
     # 写入标记,watcher 拖尾期间 pane 已被杀,继续探测只会制造
@@ -306,11 +331,21 @@ def run_standard_tick_services(
                 request_autoresearch=True,
             )
             if not terminalized:
+                observability_result = _run_observability_tick()
                 return TickServiceResult(
                     goal_dossier_delivery=goal_dossier_delivery,
                     owner_visible_delivery=early_owner_visible_delivery,
                     workflow_synthesis_consumed=workflow_synthesis_consumed,
                     channel_result_receipts=channel_result_receipts,
+                    observability_exporter_scheduled=bool(
+                        getattr(observability_result, "exporter_scheduled", False)
+                    ),
+                    observability_alerts_emitted=int(
+                        getattr(observability_result, "alerts_emitted", 0)
+                    ),
+                    observability_alerts_status=str(
+                        getattr(observability_result, "alerts_status", "disabled")
+                    ),
                 )
     except Exception:
         pass
@@ -571,6 +606,7 @@ def run_standard_tick_services(
         state_dir=state_dir,
         event_log=event_log,
     )
+    observability_result = _run_observability_tick()
 
     return TickServiceResult(
         heartbeat_sweep=heartbeat_sweep,
@@ -598,6 +634,15 @@ def run_standard_tick_services(
         control_plane_health=control_plane_health,
         workflow_synthesis_consumed=workflow_synthesis_consumed,
         channel_result_receipts=channel_result_receipts,
+        observability_exporter_scheduled=bool(
+            getattr(observability_result, "exporter_scheduled", False)
+        ),
+        observability_alerts_emitted=int(
+            getattr(observability_result, "alerts_emitted", 0)
+        ),
+        observability_alerts_status=str(
+            getattr(observability_result, "alerts_status", "disabled")
+        ),
     )
 
 

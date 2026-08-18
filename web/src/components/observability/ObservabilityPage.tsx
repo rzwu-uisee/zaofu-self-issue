@@ -2,7 +2,9 @@
 import { search } from "../../api/client";
 import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueueProjection, LongRunTruthMilestone, LongRunTruthProjection, RepairActionProjection, RepairActionRecord, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
 import { LogsPanel } from "../../components/observability/LogsPanel";
+import { OperationsPanel } from "../../components/observability/OperationsPanel";
 import { RunDossierPanel } from "../../components/observability/RunDossierPanel";
+import { RuntimeLogsPanel } from "../../components/observability/RuntimeLogsPanel";
 import { formatTokens } from "../../lib/format";
 import { buildObservabilityEventWindow } from "../../app/observabilityModel";
 import { buildProjectCostPresentation } from "../../app/costPrecision";
@@ -12,7 +14,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import type { LiveState, PageId, ParsedEventFilter, ProjectionKind, ProjectionMetricSpec, UiTone } from "../../app/sharedTypes";
 import { EventTable, KeyValuePanel, PreBlock, ProjectionEmptyState, ProjectionList, ProjectionMetricGrid, TablePage, TraceDetailPanel, TraceIndexList, asRecord, asStringArray, eventChannelId, eventFamily, eventKey, eventPayload, eventSummary, formatUsd, parseEventFilter, stringify, textValue, truncateInline } from "../../app/shared";
 
-type ObservabilityTab = "traces" | "events" | "logs" | "runs" | "fanouts" | "candidates" | "pipeline" | "integration" | "repair" | "raw";
+type ObservabilityTab = "traces" | "events" | "logs" | "runtime_logs" | "operations" | "runs" | "fanouts" | "candidates" | "pipeline" | "integration" | "repair" | "raw";
 
 type TraceStatusFilter = "all" | "running" | "completed" | "failed" | "blocked" | "observed";
 
@@ -330,7 +332,9 @@ export function ObservabilityPage({
   const tabs: Array<{ id: ObservabilityTab; label: string; count?: number }> = [
     { id: "traces", label: "Traces", count: traces.length },
     { id: "events", label: "Events", count: scopedTraceMode ? undefined : eventItems.length },
-    { id: "logs", label: "Logs" },
+    { id: "logs", label: "Event Logs" },
+    { id: "runtime_logs", label: "Runtime Logs" },
+    { id: "operations", label: "Operations" },
     { id: "runs", label: "Runs", count: scopedTraceMode ? undefined : runs.length },
     { id: "fanouts", label: "Fanouts", count: scopedTraceMode ? undefined : fanouts.length },
     { id: "candidates", label: "Candidates", count: scopedTraceMode ? undefined : candidates.length },
@@ -619,6 +623,12 @@ export function ObservabilityPage({
       ) : null}
       {tab === "logs" ? (
         <LogsPanel projectId={activeProjectId || snapshot?.project.project_id} />
+      ) : null}
+      {tab === "runtime_logs" ? (
+        <RuntimeLogsPanel projectId={activeProjectId || snapshot?.project.project_id} />
+      ) : null}
+      {tab === "operations" ? (
+        <OperationsPanel projectId={activeProjectId || snapshot?.project.project_id} />
       ) : null}
       {tab === "raw" ? (
         <div className="observability-resource-grid">
@@ -1324,6 +1334,8 @@ function isObservabilityTab(value: string | null): value is ObservabilityTab {
     "traces",
     "events",
     "logs",
+    "runtime_logs",
+    "operations",
     "runs",
     "fanouts",
     "candidates",

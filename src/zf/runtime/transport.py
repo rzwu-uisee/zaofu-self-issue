@@ -744,6 +744,8 @@ def make_transport(config: ZfConfig, *, dry_run: bool = False) -> TransportAdapt
     """
     from pathlib import Path as _Path
     from zf.core.state.role_sessions import RoleSessionRegistry
+    from zf.runtime.operations_metrics import OperationsMetricsRegistry
+    from zf.runtime.provider_telemetry import ProviderTelemetryRuntime
     from zf.runtime.transport_stream_json import StreamJsonTransport
 
     session_name = config.session.tmux_session
@@ -781,6 +783,18 @@ def make_transport(config: ZfConfig, *, dry_run: bool = False) -> TransportAdapt
 
     by_role: dict[str, TransportAdapter] = {}
     sj_transport: StreamJsonTransport | None = None
+    observability = getattr(config, "observability", None)
+    telemetry = ProviderTelemetryRuntime(
+        state_dir,
+        getattr(observability, "provider_telemetry", None),
+    )
+    operations_metrics = OperationsMetricsRegistry(
+        state_dir,
+        enabled=bool(getattr(getattr(observability, "metrics", None), "enabled", False)),
+    )
+    runtime_logs_enabled = bool(
+        getattr(getattr(observability, "runtime_logs", None), "enabled", True)
+    )
     for role in roles:
         # G-INST-3: route by instance_id so replicas of the same role_type
         # get independent transport entries. For single-instance configs
@@ -795,6 +809,9 @@ def make_transport(config: ZfConfig, *, dry_run: bool = False) -> TransportAdapt
                     timeout_s=config.orchestrator.transport_timeout_s,
                     max_turns=config.orchestrator.max_turns,
                     background_dispatch=True,
+                    telemetry=telemetry,
+                    operations_metrics=operations_metrics,
+                    runtime_logs_enabled=runtime_logs_enabled,
                 )
             sj_transport.register_role(role)
             by_role[role.instance_id] = sj_transport

@@ -5,12 +5,13 @@ from datetime import datetime
 from datetime import timezone
 from fastapi import Request
 from pathlib import Path
+from zf.core.events.segments import list_event_segments
 from zf.core.security.redaction import redact_event
 from zf.core.security.redaction import redact_obj
 from zf.core.state.locks import locked_path
 import json
 import os
-from zf.web.projections.common import _append_jsonl, _read_jsonl_dicts
+from zf.web.projections.common import _append_jsonl, _line_count, _read_jsonl_dicts
 
 
 async def _request_json(request: Request) -> dict:
@@ -187,6 +188,28 @@ def _sse_gap(*, cursor: int, current: int) -> bytes:
         "event: stream.gap\n"
         f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
     ).encode("utf-8")
+
+
+def _record_sse_gap_projection(state_dir: Path, *, cursor: int, current: int) -> None:
+    """Best-effort SSE diagnostics that cannot interrupt a reconnect."""
+
+    try:
+        from zf.runtime.observability_alerts import record_sse_gap
+
+        record_sse_gap(state_dir=state_dir, cursor=cursor, current=current)
+    except Exception:
+        return
+
+
+def _active_event_seq_window(state_dir: Path, active_path: Path) -> tuple[int, int]:
+    """Return ``(active_base, current_global_seq)`` for the SSE active file."""
+
+    active_base = sum(
+        _line_count(segment.path)
+        for segment in list_event_segments(state_dir)
+        if segment.kind == "archive"
+    )
+    return active_base, active_base + _line_count(active_path)
 
 
 def _parse_cursor(value: str | None) -> int | None:

@@ -22,13 +22,12 @@ import asyncio
 import json
 import threading
 from zf.web.projections.common import _first_nonempty, _is_blocked_event, _is_failed_event, _line_count, _matches_event_filters, _matches_task_filters, _parse_search_query, _payload_first_string, _payload_mentions, _payload_ref, _raw_event_has_task_id, _read_events_with_seq
-from zf.web.projections.request_util import _sse_event, _sse_gap
+from zf.web.projections.request_util import _active_event_seq_window, _record_sse_gap_projection, _sse_event, _sse_gap
 from zf.web.projections.summaries import _archive_tasks, _refs_from_events
 from zf.web.projections.task_pipeline_events import task_pipeline_trace
 
 
 _EVENT_LOG_RUN_ID = "event-log-latest"
-
 
 def _trace_detail(
     state_dir: Path,
@@ -906,6 +905,7 @@ async def _tail_events(
         if cursor is not None and (
             cursor < active_seq_base or cursor > last_seq
         ):
+            _record_sse_gap_projection(state_dir, cursor=cursor, current=last_seq)
             yield _sse_gap(cursor=cursor, current=last_seq)
         else:
             # P1-8 (2026-07-09): the replay read (_read_events_with_seq) does a
@@ -925,6 +925,7 @@ async def _tail_events(
                 yield _sse_event(global_seq, event)
     except FileNotFoundError:
         if cursor is not None and cursor != last_seq:
+            _record_sse_gap_projection(state_dir, cursor=cursor, current=last_seq)
             yield _sse_gap(cursor=cursor, current=last_seq)
 
     while True:
@@ -987,14 +988,3 @@ async def _tail_events(
             except Exception:
                 pass
         await asyncio.sleep(0.5)
-
-
-def _active_event_seq_window(state_dir: Path, active_path: Path) -> tuple[int, int]:
-    """Return ``(active_base, current_global_seq)`` for the SSE active file."""
-
-    active_base = sum(
-        _line_count(segment.path)
-        for segment in list_event_segments(state_dir)
-        if segment.kind == "archive"
-    )
-    return active_base, active_base + _line_count(active_path)

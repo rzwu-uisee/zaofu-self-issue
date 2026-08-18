@@ -25,6 +25,12 @@ from typing import Any, Callable, Iterator, Protocol
 from zf import __version__
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import FileLock
+from zf.runtime.operations_metrics import OperationsMetricsRegistry
+from zf.runtime.provider_telemetry import (
+    ProviderTelemetryRuntime,
+    TelemetryOperationContextV1,
+)
+from zf.runtime.runtime_logs import write_runtime_log
 from zf.runtime.channel_contracts import (
     normalize_permission_profile,
     permission_profile_write_policy,
@@ -59,7 +65,7 @@ TASK_WORKFLOW_PARAMETER_KEYS_TEXT = ", ".join(
 )
 
 
-def _headless_subprocess_env() -> dict[str, str]:
+def _headless_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
     for key in tuple(env):
         if key.startswith("ZF_") and any(
@@ -68,6 +74,7 @@ def _headless_subprocess_env() -> dict[str, str]:
         ):
             env.pop(key, None)
     env[ZF_CLI_CMD_ENV] = _headless_zf_cli_cmd()
+    env.update(extra_env or {})
     return env
 
 
@@ -115,6 +122,7 @@ class HeadlessTurnResult:
     error: str = ""
     permission_snapshot: dict[str, Any] = field(default_factory=dict)
     permission_drift: dict[str, Any] = field(default_factory=dict)
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +139,7 @@ class HeadlessTurnResult:
             "error": self.error,
             "permission_snapshot": self.permission_snapshot,
             "permission_drift": self.permission_drift,
+            "telemetry": self.telemetry,
         }
 
 
@@ -341,6 +350,10 @@ class ClaudeHeadlessBackend:
         if max_turns is None:
             max_turns = int(os.environ.get("ZF_KANBAN_AGENT_CLAUDE_MAX_TURNS", "500"))
         self.max_turns = max_turns
+        self._telemetry_env: dict[str, str] = {}
+
+    def set_telemetry_env(self, env: dict[str, str]) -> None:
+        self._telemetry_env = dict(env)
 
     def available(self) -> bool:
         parts = shlex.split(self.command)
@@ -436,7 +449,7 @@ class ClaudeHeadlessBackend:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=_headless_subprocess_env(),
+                env=_headless_subprocess_env(self._telemetry_env),
             )
             session_key = run_key(
                 run_id=run_id,
@@ -513,6 +526,19 @@ class ClaudeHeadlessBackend:
 
 def _claude_permission_mode_for_profile(permission_profile: str) -> str:
     return claude_permission_mode_for_profile(permission_profile)
+
+
+def _headless_failure_class(status: str) -> str:
+    normalized = str(status or "failed").strip().lower()
+    if normalized == "timeout":
+        return "provider_timeout"
+    if normalized == "cancelled":
+        return "provider_cancelled"
+    if normalized == "sandbox_unsupported":
+        return "sandbox_unsupported"
+    if normalized == "permission_drift_blocked":
+        return "permission_drift"
+    return "provider_turn_failed"
 
 
 def _codex_security_config(permission_profile: str) -> dict[str, str]:
@@ -652,6 +678,10 @@ class CodexHeadlessBackend:
             if tool_timeout_s > 0
             else DEFAULT_CODEX_HEADLESS_TOOL_TIMEOUT_S
         )
+        self._telemetry_env: dict[str, str] = {}
+
+    def set_telemetry_env(self, env: dict[str, str]) -> None:
+        self._telemetry_env = dict(env)
 
     def available(self) -> bool:
         parts = shlex.split(self.command)
@@ -705,6 +735,7 @@ class CodexHeadlessBackend:
             timeout_s=timeout_s,
             tool_timeout_s=self.tool_timeout_s,
             permission_profile=permission_profile,
+            env=_headless_subprocess_env(self._telemetry_env),
         )
         resumed = bool(provider_session_id)
         fallback_reason = ""
@@ -819,6 +850,9 @@ class KanbanHeadlessAgent:
         project_root: Path,
         backends: dict[str, HeadlessBackend] | None = None,
         timeout_s: float | None = None,
+        telemetry: ProviderTelemetryRuntime | None = None,
+        operations_metrics: OperationsMetricsRegistry | None = None,
+        runtime_logs_enabled: bool = True,
     ) -> None:
         self.state_dir = Path(state_dir)
         self.project_root = Path(project_root)
@@ -830,6 +864,9 @@ class KanbanHeadlessAgent:
             "claude-headless": ClaudeHeadlessBackend(),
             "codex-headless": CodexHeadlessBackend(),
         }
+        self.telemetry = telemetry
+        self.operations_metrics = operations_metrics
+        self.runtime_logs_enabled = runtime_logs_enabled
         self.timeout_s = timeout_s or float(os.environ.get(
             "ZF_KANBAN_AGENT_HEADLESS_TIMEOUT_S",
             str(DEFAULT_KANBAN_AGENT_HEADLESS_IDLE_TIMEOUT_S),
@@ -926,6 +963,15 @@ class KanbanHeadlessAgent:
                 )
 
             prompt = self._build_prompt(message=message, task_id=task_id, context=context)
+            telemetry_launch = self._prepare_telemetry(
+                adapter=adapter,
+                backend=backend,
+                task_id=task_id,
+                thread_id=thread_id,
+                provider_session_id=provider_session_id,
+                context=context,
+            )
+            started_at = time.monotonic()
             result = adapter.run_turn(
                 prompt=prompt,
                 cwd=self.project_root,
@@ -971,9 +1017,108 @@ class KanbanHeadlessAgent:
                 result,
                 permission_snapshot=final_snapshot,
                 permission_drift=drift,
+                telemetry=(
+                    self._telemetry_result_payload(telemetry_launch)
+                    if telemetry_launch is not None else {}
+                ),
             )
             self.store.record_turn(thread, result=result, workdir=str(self.project_root))
+            self._record_telemetry_result(
+                telemetry_launch,
+                result=result,
+                duration_s=time.monotonic() - started_at,
+            )
             return result
+
+    def _prepare_telemetry(
+        self,
+        *,
+        adapter: HeadlessBackend,
+        backend: str,
+        task_id: str,
+        thread_id: str,
+        provider_session_id: str,
+        context: dict[str, Any],
+    ) -> Any | None:
+        if self.telemetry is None:
+            return None
+        operation_kind = str(context.get("operation_kind") or "kanban_turn")
+        if operation_kind not in {"kanban_turn", "channel_turn", "sidecar_operation"}:
+            operation_kind = "kanban_turn"
+        operation = TelemetryOperationContextV1.interaction(
+            operation_kind=operation_kind,
+            correlation_id=str(context.get("trace_id") or ""),
+            project_id=str(context.get("project_id") or ""),
+            workflow_run_id=str(context.get("workflow_run_id") or context.get("turn_id") or ""),
+            task_id=task_id,
+            dispatch_id=str(context.get("turn_id") or ""),
+            attempt_id=str(context.get("attempt_id") or ""),
+            role_instance_id="kanban-agent",
+            provider=backend,
+            conversation_id=str(context.get("conversation_id") or ""),
+            thread_id=thread_id,
+            provider_session_id=provider_session_id,
+        )
+        launch = self.telemetry.launch(operation, route="headless")
+        configure = getattr(adapter, "set_telemetry_env", None)
+        if callable(configure):
+            configure(launch.env)
+        return launch
+
+    @staticmethod
+    def _telemetry_result_payload(launch: Any) -> dict[str, Any]:
+        capability = launch.capability
+        return {
+            "capability": capability.to_dict(),
+            "context": launch.context.public_identity(),
+        }
+
+    def _record_telemetry_result(
+        self,
+        launch: Any | None,
+        *,
+        result: HeadlessTurnResult,
+        duration_s: float,
+    ) -> None:
+        capability = launch.capability if launch is not None else None
+        context = launch.context.operation if launch is not None else None
+        failure_class = "" if result.ok else _headless_failure_class(result.status)
+        write_runtime_log(
+            self.state_dir,
+            level="INFO" if result.ok else "ERROR",
+            component="headless-agent",
+            message="provider turn completed" if result.ok else "provider turn failed",
+            failure_class=failure_class,
+            fields={
+                "zaofu_correlation_id": context.correlation_id if context else "",
+                "task_id": context.task_id if context else "",
+                "workflow_run_id": context.workflow_run_id if context else "",
+                "dispatch_id": context.dispatch_id if context else "",
+                "attempt_id": context.attempt_id if context else "",
+                "role_instance_id": "kanban-agent",
+                "provider": result.backend,
+                "provider_session_id": result.provider_session_id,
+                "route": "headless",
+                "operation_kind": context.operation_kind if context else "kanban_turn",
+                "status": result.status,
+            },
+            enabled=self.runtime_logs_enabled,
+        )
+        if self.operations_metrics is None:
+            return
+        labels = {
+            "provider": result.backend,
+            "operation": context.operation_kind if context else "kanban_turn",
+            "result": "completed" if result.ok else "failed",
+        }
+        if failure_class:
+            labels["failure_class"] = failure_class
+        self.operations_metrics.increment("zf_provider_operations_total", labels=labels)
+        self.operations_metrics.observe(
+            "zf_provider_operation_duration_seconds",
+            duration_s,
+            labels=labels,
+        )
 
     def _system_prompt(self, permission_profile: str = "read_only") -> str:
         profile = normalize_permission_profile(permission_profile)
@@ -1607,12 +1752,14 @@ class _CodexRpcClient:
         timeout_s: float,
         tool_timeout_s: float,
         permission_profile: str = "read_only",
+        env: dict[str, str] | None = None,
     ) -> None:
         self.args = args
         self.cwd = cwd
         self.timeout_s = timeout_s
         self.tool_timeout_s = tool_timeout_s
         self.permission_profile = normalize_permission_profile(permission_profile)
+        self.env = dict(env or _headless_subprocess_env())
         self.write_policy = permission_profile_write_policy(self.permission_profile)
         self.process: subprocess.Popen[str] | None = None
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -1632,7 +1779,7 @@ class _CodexRpcClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=_headless_subprocess_env(),
+            env=self.env,
         )
         thread = threading.Thread(target=self._reader, daemon=True)
         thread.start()

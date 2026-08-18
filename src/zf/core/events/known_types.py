@@ -763,6 +763,13 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "codex.hook.session_start", "codex.hook.user_prompt_submit",
     "codex.hook.pre_tool_use", "codex.hook.post_tool_use", "codex.hook.stop",
     "provider.turn.closed",
+    # Provider-native telemetry is a diagnostic projection only. These events
+    # never wake a workflow or participate in Gate/task transitions.
+    "provider.telemetry.capability.observed",
+    "provider.telemetry.context.bound",
+    "provider.telemetry.export.degraded",
+    "telemetry.exporter.degraded",
+    "telemetry.exporter.recovered",
     # LH-4: error taxonomy — circuit breaker + per-category escalate
     "circuit.tripped",               # breaker refuses dispatch (role, task)
     "circuit.closed",                # breaker reset after success probe

@@ -37,7 +37,13 @@ from zf.core.config.schema import RoleConfig
 from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_text
 from zf.core.state.role_sessions import RoleSessionRegistry
+from zf.runtime.operations_metrics import OperationsMetricsRegistry
+from zf.runtime.provider_telemetry import (
+    ProviderTelemetryRuntime,
+    TelemetryOperationContextV1,
+)
 from zf.runtime.provider_stop import classify_provider_stop
+from zf.runtime.runtime_logs import write_runtime_log
 from zf.runtime.session_mutex import SessionLock
 from zf.runtime.session_tailer import claude_session_path
 from zf.runtime.spawn_coordinator import purge_stale_claude_session_lock
@@ -140,6 +146,9 @@ class StreamJsonTransport(TransportAdapter):
         timeout_s: float = 120.0,
         max_turns: int = 30,
         background_dispatch: bool = False,
+        telemetry: ProviderTelemetryRuntime | None = None,
+        operations_metrics: OperationsMetricsRegistry | None = None,
+        runtime_logs_enabled: bool = True,
     ) -> None:
         self.state_dir = state_dir
         self.registry = registry
@@ -150,6 +159,9 @@ class StreamJsonTransport(TransportAdapter):
         self._timeout_s = timeout_s
         self._max_turns = max_turns
         self._background_dispatch = background_dispatch
+        self._telemetry = telemetry
+        self._operations_metrics = operations_metrics
+        self._runtime_logs_enabled = runtime_logs_enabled
         self._messages: dict[str, list[Any]] = {}
         self._roles: dict[str, RoleConfig] = {}
         self._cwd_by_role: dict[str, Path] = {}
@@ -390,6 +402,15 @@ class StreamJsonTransport(TransportAdapter):
             role_name=role_name,
             briefing_path=briefing_path,
         )
+        launch = None
+        if self._telemetry is not None:
+            launch = self._telemetry.launch(
+                TelemetryOperationContextV1.from_dispatch(context),
+                route="stream-json",
+            )
+            role_env.update(launch.env)
+            self._record_telemetry_launch(context, launch)
+        started_at = time.monotonic()
         def _drain_once(sid: str, resume: bool):
             with SessionLock(self.lock_dir, sid):
                 return asyncio.run(
@@ -418,9 +439,21 @@ class StreamJsonTransport(TransportAdapter):
                     messages, status = _drain_once(session_id, False)
                 except Exception:
                     self._last_query_ok[role_name] = False
+                    self._record_provider_operation(
+                        context,
+                        result="failed",
+                        failure_class="provider_dispatch_error",
+                        duration_s=time.monotonic() - started_at,
+                    )
                     raise
             else:
                 self._last_query_ok[role_name] = False
+                self._record_provider_operation(
+                    context,
+                    result="failed",
+                    failure_class="provider_dispatch_error",
+                    duration_s=time.monotonic() - started_at,
+                )
                 raise
 
         self._session_used.add(role_name)
@@ -482,7 +515,101 @@ class StreamJsonTransport(TransportAdapter):
         else:
             self._last_query_ok[role_name] = True
 
+        self._record_provider_operation(
+            context,
+            result="completed" if self._last_query_ok[role_name] else "failed",
+            failure_class=(
+                "provider_rate_limited"
+                if status == DrainStatus.RATE_LIMITED
+                else "provider_timeout" if status == DrainStatus.TIMEOUT else ""
+            ),
+            duration_s=time.monotonic() - started_at,
+        )
+
         self._queue_pending_events(agent_events)
+
+    def _record_telemetry_launch(self, context: DispatchContext, launch: Any) -> None:
+        capability = launch.capability
+        payload = {
+            "provider": capability.provider,
+            "route": capability.route,
+            "requested": capability.requested,
+            "detected": capability.detected,
+            "effective": capability.effective,
+            "join_kind": capability.join_kind,
+            "w3c_inbound": capability.w3c_inbound,
+            "signals": capability.signals,
+            "failure_class": capability.failure_class,
+            "evidence_ref": "projection:provider_telemetry.json",
+        }
+        events = [ZfEvent(
+            type="provider.telemetry.capability.observed",
+            actor="zf-cli",
+            task_id=context.task_id,
+            correlation_id=context.trace_id,
+            payload={**context.to_payload(), **payload},
+        )]
+        if capability.effective == "active":
+            events.append(ZfEvent(
+                type="provider.telemetry.context.bound",
+                actor="zf-cli",
+                task_id=context.task_id,
+                correlation_id=context.trace_id,
+                payload={
+                    **context.to_payload(),
+                    **payload,
+                    "otel_trace_id": launch.context.otel_trace_id,
+                    "otel_parent_span_id": launch.context.otel_parent_span_id,
+                },
+            ))
+        self._queue_pending_events(events)
+
+    def _record_provider_operation(
+        self,
+        context: DispatchContext,
+        *,
+        result: str,
+        failure_class: str,
+        duration_s: float,
+    ) -> None:
+        provider = str(context.backend or "claude")
+        write_runtime_log(
+            self.state_dir,
+            level="ERROR" if result == "failed" else "INFO",
+            component="stream-json",
+            message="provider dispatch completed" if result == "completed" else "provider dispatch failed",
+            failure_class=failure_class,
+            fields={
+                "zaofu_correlation_id": context.trace_id,
+                "task_id": context.task_id,
+                "workflow_run_id": context.run_id,
+                "dispatch_id": context.dispatch_id,
+                "attempt_id": context.attempt_id,
+                "role_instance_id": context.instance_id,
+                "provider": provider,
+                "route": "stream-json",
+                "operation_kind": "workflow_dispatch",
+                "status": result,
+            },
+            enabled=self._runtime_logs_enabled,
+        )
+        if self._operations_metrics is not None:
+            labels = {
+                "provider": provider,
+                "operation": "workflow_dispatch",
+                "result": result,
+            }
+            if failure_class:
+                labels["failure_class"] = failure_class
+            self._operations_metrics.increment(
+                "zf_provider_operations_total",
+                labels=labels,
+            )
+            self._operations_metrics.observe(
+                "zf_provider_operation_duration_seconds",
+                duration_s,
+                labels=labels,
+            )
 
     def _session_exists_on_disk(self, session_id: str, *, cwd: Path | None = None) -> bool:
         option_cwd = cwd or self.cwd

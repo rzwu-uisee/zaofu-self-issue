@@ -3,6 +3,8 @@
 [中文](README.md) · [Manual home](../00-index.en.md)
 
 - [Observe a delivery](observe-delivery.en.md): Delivery, Runs, Coverage, Work, Goal Dossier, and Inbox.
+- [Metrics, Observability, and Operations](../21-metrics-observability-operations.en.md): distinguish delivery facts, Event Logs, Runtime Logs, Provider capability, OTLP exporter, and low-cardinality metrics.
+- [Provider Native Telemetry and OTLP](../22-provider-native-telemetry.en.md): managed Claude per-turn telemetry, Codex/tmux boundaries, canary, readback, and rollback.
 - [Recover a long-running Run](recover-long-running-run.en.md): continuation, no-progress, replan, and terminal convergence.
 - [Context, Artifacts, and Handoff](context-handoff-artifacts.en.md): required reads, lineage, and cross-agent continuation.
 - [Web maintenance and E2E validation](web-maintainer-validation.en.md): launcher, Docker Playwright, scripted and real-provider tiers.

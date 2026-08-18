@@ -16,6 +16,7 @@ import type {
   DeliveryFeaturesPage,
   DiagnosticsDetail,
   DiagnosticsLogsPage,
+  OperationsObservability,
   EventsPage,
   FanoutDetail,
   IntegrationQueueProjection,
@@ -36,6 +37,7 @@ import type {
   GoalDossier,
   RunDetail,
   RuntimeResourceProjection,
+  RuntimeLogsPage,
   RuntimeSummary,
   SearchResult,
   SkillsSummary,
@@ -588,6 +590,27 @@ export function getDiagnosticsLogs(
   const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestJson<DiagnosticsLogsPage>(
     `/api/projects/${encodeURIComponent(projectId || "default")}/diagnostics/logs${suffix}`,
+  );
+}
+
+export function getRuntimeLogs(
+  projectId?: string,
+  params?: { limit?: number; level?: string; provider?: string; taskId?: string },
+): Promise<RuntimeLogsPage> {
+  const search = new URLSearchParams();
+  if (params?.limit) search.set("limit", String(params.limit));
+  if (params?.level) search.set("level", params.level);
+  if (params?.provider) search.set("provider", params.provider);
+  if (params?.taskId) search.set("task_id", params.taskId);
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return requestJson<RuntimeLogsPage>(
+    `/api/projects/${encodeURIComponent(projectId || "default")}/observability/runtime-logs${suffix}`,
+  );
+}
+
+export function getOperationsObservability(projectId?: string): Promise<OperationsObservability> {
+  return requestJson<OperationsObservability>(
+    `/api/projects/${encodeURIComponent(projectId || "default")}/observability/operations`,
   );
 }
 

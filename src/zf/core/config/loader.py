@@ -76,6 +76,7 @@ _VALID_REPAIR_BACKENDS = ("codex", "claude-code")
 _VALID_FEISHU_INBOUND_MODES = ("bridge",)
 _VALID_FEISHU_PROJECTION_BACKENDS = ("lark-cli",)
 _VALID_SEVERITIES = ("low", "medium", "high", "critical")
+_VALID_PROVIDER_TELEMETRY_MODES = ("off", "managed", "host_managed")
 _ENV_SUB_RE = re.compile(
     r"\$\{(?P<name>[A-Z_][A-Z0-9_]*)(?::-(?P<default>[^}]*))?\}"
 )
@@ -119,6 +120,12 @@ from zf.core.config.schema import (  # noqa: E402
     EventSigningConfig,
     SafetyConfig,
     CostConfig,
+    ObservabilityConfig,
+    OperationsMetricsConfig,
+    ObservabilityAlertConfig,
+    OtlpExporterConfig,
+    ProviderTelemetryConfig,
+    RuntimeLogsConfig,
     VerificationConfig,
     ContractDConfig,
     SemanticDConfig,
@@ -292,7 +299,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "autopilot", "autoresearch", "skill_sources", "global_budget_usd",
     "budget_enforcement", "budget_enforcement_enabled",
     # P0-8 存量遗漏(与 attempt_lease_grace_s 同族白名单坑)+ 133/G 批
-    "budget_fail_closed", "goal", "channel", "cost",
+    "budget_fail_closed", "goal", "channel", "cost", "observability",
 })
 _KNOWN_COST_KEYS = frozenset({
     "pricing_catalog_url",
@@ -2954,6 +2961,7 @@ def load_config(path: Path) -> ZfConfig:
         autoresearch=_build_autoresearch(raw.get("autoresearch")),
         skill_sources=_build_skill_sources(raw.get("skill_sources")),
         cost=_build_cost(raw.get("cost")),
+        observability=_build_observability(raw.get("observability")),
         global_budget_usd=(
             float(raw["global_budget_usd"])
             if raw.get("global_budget_usd") is not None else None
@@ -4401,6 +4409,183 @@ _KNOWN_GOAL_KEYS = frozenset({
     "enabled", "max_rescans", "idle_progress_ticks",
     "rework_fingerprint", "quiescent_after_escalate", "micro_loop",
 })
+_KNOWN_OBSERVABILITY_KEYS = frozenset({
+    "provider_telemetry", "metrics", "runtime_logs", "otlp_exporter", "alerts",
+})
+_KNOWN_PROVIDER_TELEMETRY_KEYS = frozenset({
+    "mode", "profile_id", "endpoint_env", "enable_traces",
+})
+_KNOWN_OPERATIONS_METRICS_KEYS = frozenset({"enabled", "access_token_env"})
+_KNOWN_RUNTIME_LOGS_KEYS = frozenset({"enabled"})
+_KNOWN_OTLP_EXPORTER_KEYS = frozenset({
+    "enabled", "endpoint_env", "headers_env", "interval_seconds",
+    "request_timeout_seconds", "batch_size", "retry_initial_seconds",
+    "retry_max_seconds", "healthy_sample_rate",
+})
+_KNOWN_OBSERVABILITY_ALERT_KEYS = frozenset({"enabled", "cooldown_seconds"})
+
+
+def _build_observability(data: object) -> ObservabilityConfig:
+    if data in (None, ""):
+        return ObservabilityConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("observability must be a mapping")
+    _reject_unknown_keys(data, _KNOWN_OBSERVABILITY_KEYS, "observability")
+    telemetry_raw = data.get("provider_telemetry") or {}
+    metrics_raw = data.get("metrics") or {}
+    runtime_logs_raw = data.get("runtime_logs") or {}
+    exporter_raw = data.get("otlp_exporter") or {}
+    alerts_raw = data.get("alerts") or {}
+    if not isinstance(telemetry_raw, dict):
+        raise ConfigError("observability.provider_telemetry must be a mapping")
+    if not isinstance(metrics_raw, dict):
+        raise ConfigError("observability.metrics must be a mapping")
+    if not isinstance(runtime_logs_raw, dict):
+        raise ConfigError("observability.runtime_logs must be a mapping")
+    if not isinstance(exporter_raw, dict):
+        raise ConfigError("observability.otlp_exporter must be a mapping")
+    if not isinstance(alerts_raw, dict):
+        raise ConfigError("observability.alerts must be a mapping")
+    _reject_unknown_keys(
+        telemetry_raw,
+        _KNOWN_PROVIDER_TELEMETRY_KEYS,
+        "observability.provider_telemetry",
+    )
+    _reject_unknown_keys(
+        metrics_raw,
+        _KNOWN_OPERATIONS_METRICS_KEYS,
+        "observability.metrics",
+    )
+    _reject_unknown_keys(
+        runtime_logs_raw,
+        _KNOWN_RUNTIME_LOGS_KEYS,
+        "observability.runtime_logs",
+    )
+    _reject_unknown_keys(
+        exporter_raw,
+        _KNOWN_OTLP_EXPORTER_KEYS,
+        "observability.otlp_exporter",
+    )
+    _reject_unknown_keys(
+        alerts_raw,
+        _KNOWN_OBSERVABILITY_ALERT_KEYS,
+        "observability.alerts",
+    )
+    mode = str(telemetry_raw.get("mode", "off") or "off").strip().lower()
+    if mode not in _VALID_PROVIDER_TELEMETRY_MODES:
+        raise ConfigError(
+            "observability.provider_telemetry.mode must be one of "
+            f"{_VALID_PROVIDER_TELEMETRY_MODES}"
+        )
+    endpoint_env = str(telemetry_raw.get("endpoint_env") or "").strip()
+    if endpoint_env and not _ENV_NAME_RE.fullmatch(endpoint_env):
+        raise ConfigError(
+            "observability.provider_telemetry.endpoint_env must be an "
+            "environment variable name"
+        )
+    if mode == "managed" and not endpoint_env:
+        raise ConfigError(
+            "observability.provider_telemetry.endpoint_env is required when "
+            "mode is managed"
+        )
+    metrics_enabled = _bool_value(metrics_raw.get("enabled"), default=False)
+    access_token_env = str(metrics_raw.get("access_token_env") or "").strip()
+    if access_token_env and not _ENV_NAME_RE.fullmatch(access_token_env):
+        raise ConfigError(
+            "observability.metrics.access_token_env must be an environment "
+            "variable name"
+        )
+    if metrics_enabled and not access_token_env:
+        raise ConfigError(
+            "observability.metrics.access_token_env is required when metrics "
+            "are enabled"
+        )
+    exporter_enabled = _bool_value(exporter_raw.get("enabled"), default=False)
+    exporter_endpoint_env = str(exporter_raw.get("endpoint_env") or "").strip()
+    exporter_headers_env = str(exporter_raw.get("headers_env") or "").strip()
+    for key, value in (
+        ("endpoint_env", exporter_endpoint_env),
+        ("headers_env", exporter_headers_env),
+    ):
+        if value and not _ENV_NAME_RE.fullmatch(value):
+            raise ConfigError(
+                f"observability.otlp_exporter.{key} must be an environment "
+                "variable name"
+            )
+    if exporter_enabled and not exporter_endpoint_env:
+        raise ConfigError(
+            "observability.otlp_exporter.endpoint_env is required when "
+            "enabled"
+        )
+    try:
+        exporter_interval = float(exporter_raw.get("interval_seconds", 15.0))
+        exporter_timeout = float(
+            exporter_raw.get("request_timeout_seconds", 3.0)
+        )
+        exporter_batch_size = int(exporter_raw.get("batch_size", 64))
+        retry_initial = float(exporter_raw.get("retry_initial_seconds", 5.0))
+        retry_max = float(exporter_raw.get("retry_max_seconds", 300.0))
+        healthy_sample_rate = float(
+            exporter_raw.get("healthy_sample_rate", 0.1)
+        )
+        alert_cooldown = float(alerts_raw.get("cooldown_seconds", 300.0))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("observability exporter and alert values must be numeric") from exc
+    if not 1.0 <= exporter_interval <= 3_600.0:
+        raise ConfigError("observability.otlp_exporter.interval_seconds must be 1..3600")
+    if not 0.1 <= exporter_timeout <= 60.0:
+        raise ConfigError(
+            "observability.otlp_exporter.request_timeout_seconds must be 0.1..60"
+        )
+    if not 1 <= exporter_batch_size <= 512:
+        raise ConfigError("observability.otlp_exporter.batch_size must be 1..512")
+    if not 1.0 <= retry_initial <= retry_max <= 3_600.0:
+        raise ConfigError(
+            "observability.otlp_exporter retry seconds must satisfy "
+            "1 <= initial <= max <= 3600"
+        )
+    if not 0.0 <= healthy_sample_rate <= 1.0:
+        raise ConfigError(
+            "observability.otlp_exporter.healthy_sample_rate must be 0..1"
+        )
+    if not 30.0 <= alert_cooldown <= 86_400.0:
+        raise ConfigError(
+            "observability.alerts.cooldown_seconds must be 30..86400"
+        )
+    return ObservabilityConfig(
+        provider_telemetry=ProviderTelemetryConfig(
+            mode=mode,
+            profile_id=str(
+                telemetry_raw.get("profile_id") or "zaofu-managed-v1"
+            ).strip(),
+            endpoint_env=endpoint_env,
+            enable_traces=_bool_value(
+                telemetry_raw.get("enable_traces"), default=False
+            ),
+        ),
+        metrics=OperationsMetricsConfig(
+            enabled=metrics_enabled,
+            access_token_env=access_token_env,
+        ),
+        runtime_logs=RuntimeLogsConfig(
+            enabled=_bool_value(runtime_logs_raw.get("enabled"), default=True),
+        ),
+        otlp_exporter=OtlpExporterConfig(
+            enabled=exporter_enabled,
+            endpoint_env=exporter_endpoint_env,
+            headers_env=exporter_headers_env,
+            interval_seconds=exporter_interval,
+            request_timeout_seconds=exporter_timeout,
+            batch_size=exporter_batch_size,
+            retry_initial_seconds=retry_initial,
+            retry_max_seconds=retry_max,
+            healthy_sample_rate=healthy_sample_rate,
+        ),
+        alerts=ObservabilityAlertConfig(
+            enabled=_bool_value(alerts_raw.get("enabled"), default=False),
+            cooldown_seconds=alert_cooldown,
+        ),
+    )
 
 
 def _build_cost(data: object) -> CostConfig:

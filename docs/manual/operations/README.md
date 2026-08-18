@@ -3,6 +3,8 @@
 [English](README.en.md) · [手册首页](../00-index.md)
 
 - [观察一次交付](observe-delivery.md): Delivery、Runs、Coverage、Work、Goal Dossier 与 Inbox。
+- [Metrics、Observability 与 Operations](../21-metrics-observability-operations.md): 区分交付事实、Event Logs、Runtime Logs、Provider capability、OTLP exporter 与低基数 metrics。
+- [Provider Native Telemetry 与 OTLP](../22-provider-native-telemetry.md): 受管 Claude per-turn telemetry、Codex/tmux 边界、canary、回读和回退。
 - [恢复长期 Run](recover-long-running-run.md): continuation、no-progress、replan 和终态收敛。
 - [上下文、Artifact 与 Handoff](context-handoff-artifacts.md): required reads、lineage 和跨 Agent 接力。
 - [Web 维护与 E2E 验证](web-maintainer-validation.md): launcher、Docker Playwright、scripted/real-provider tiers。

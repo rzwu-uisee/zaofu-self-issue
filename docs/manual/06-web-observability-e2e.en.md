@@ -113,7 +113,9 @@ budget, or replan boundary.
 |---|---|
 | Traces | find causation by Task/actor/type/status/duration |
 | Events | inspect append-only occurrences and sequence windows |
-| Logs | inspect runtime and provider log projections |
+| Event Logs | inspect EventLog-derived semantic audit logs |
+| Runtime Logs | inspect redacted process, transport, and sidecar diagnostics |
+| Operations | inspect provider capability, OTLP exporter, SSE, and runtime health |
 | Runs / Fanouts | inspect Run, child, barrier, and aggregation state |
 | Candidates / Repair | inspect diagnostic candidates and controlled repair proposals |
 | Integration | inspect Feishu/external projection queues and failures |
@@ -121,6 +123,35 @@ budget, or replan boundary.
 
 Use Tasks, Delivery, and Goal Dossier for normal acceptance. Use Observability to explain why execution did
 not continue or which attempt/projection failed.
+
+### Optional OTLP, Provider telemetry, and Operations
+
+The OTLP exporter is off by default and is scheduled only by the `zf start` runtime tick. Running `zf web`
+alone only reads existing state; it never starts an exporter, collector, or extra background thread. Store
+only environment-variable names under `ZfConfig.spec` in `zf.yaml` (or at the root of a legacy single-document
+config):
+
+```yaml
+observability:
+  otlp_exporter:
+    enabled: true
+    endpoint_env: ZF_OTLP_ENDPOINT
+    headers_env: ZF_OTLP_HEADERS # optional JSON-object environment variable name
+    batch_size: 64
+    healthy_sample_rate: 0.1
+  alerts:
+    enabled: true
+    cooldown_seconds: 300
+```
+
+Provide endpoint/header values only through controlled runtime environment variables. Do not commit URLs,
+Bearer tokens, or header JSON to YAML, events, or screenshots. Operations shows health, backlog, last
+success/failure, sampling/drop/redaction counters, and the SSE-gap summary. The exporter emits redacted
+ZaoFu synthetic spans only; it does not query provider raw waterfalls in the Web UI and cannot change a
+Delivery Graph, Gate, or Task state. For the complete operations path, metrics token gate, Runtime Logs,
+Provider support matrix, canary, and rollback, see
+[Metrics, Observability, and Operations](21-metrics-observability-operations.en.md) and
+[Provider Native Telemetry and OTLP](22-provider-native-telemetry.en.md).
 
 ![Observe the same playgroud delivery across Delivery, Graph, Loop, and Observability](assets/observe-delivery.webp)
 

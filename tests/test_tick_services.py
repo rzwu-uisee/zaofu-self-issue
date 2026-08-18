@@ -11,6 +11,8 @@ from zf.core.config.schema import (
     AutoresearchConfig,
     AutoresearchTriggerPolicyConfig,
     GoalConfig,
+    ObservabilityAlertConfig,
+    ObservabilityConfig,
     ProjectConfig,
     RuntimeConfig,
     RuntimeRunManagerConfig,
@@ -276,6 +278,44 @@ def test_standard_tick_services_runs_supervisor_and_autoresearch(tmp_path: Path)
     assert "candidate_rework" not in orch.housekeeping
     assert result.control_plane_health is True
     assert (state_dir / "projections" / "control_plane_health.json").exists()
+
+
+def test_standard_tick_projects_observability_attention_without_task_mutation(
+    tmp_path: Path,
+) -> None:
+    state_dir = _state(tmp_path)
+    config = ZfConfig(
+        project=ProjectConfig(name="demo"),
+        observability=ObservabilityConfig(
+            alerts=ObservabilityAlertConfig(enabled=True, cooldown_seconds=60),
+        ),
+    )
+    orch = _FakeOrchestrator(state_dir, config)
+    orch.event_log.append(ZfEvent(type="agent.timeout", task_id="TASK-OBS"))
+
+    result = run_standard_tick_services(
+        orch,
+        state=TickServiceState(),
+        now=100.0,
+        intervals=TickServiceIntervals(
+            heartbeat_sweep_s=999,
+            bug_scan_s=999,
+            supervisor_inspection_s=999,
+            spine_projection_s=999,
+            cost_blackout_check_s=999,
+            stillness_audit_s=999,
+        ),
+    )
+
+    attention = [
+        event for event in orch.event_log.read_all()
+        if event.type == "runtime.attention.needed"
+        and event.actor == "zf-observability"
+    ]
+    assert result.observability_alerts_emitted == 1
+    assert result.observability_alerts_status == "degraded"
+    assert attention[0].payload["actionability"] == "observe"
+    assert (state_dir / "kanban.json").read_text(encoding="utf-8") == "[]\n"
 
 
 def test_standard_tick_surfaces_workflow_synthesis_consumer_failure(

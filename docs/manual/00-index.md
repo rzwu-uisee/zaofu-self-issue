@@ -16,6 +16,7 @@
 | 判断一个长期目标是否真的完成 | [观察一次交付](operations/observe-delivery.md) | 能从 Goal、Claim、Task、Evidence、Gap、Closure 解释结论 |
 | 处理停滞、失败或无进展 Run | [恢复长期 Run](operations/recover-long-running-run.md) | Run 恢复推进，或有证据地收敛为 blocked/failed/cancelled |
 | 理解跨 Agent 的上下文和证据如何继承 | [上下文、Artifact 与 Handoff](operations/context-handoff-artifacts.md) | 能定位 current contract、required reads、result 和 lineage |
+| 排查 Provider、SSE、Runtime Log、OTLP 或系统运维信号 | [Metrics、Observability 与 Operations](21-metrics-observability-operations.md) | 能区分交付事实、事件、运行日志、低基数 metrics 与 exporter health |
 | 接入飞书、Automation 或 Provider | [集成](integrations/README.md) | 外部入口通过 projection/controlled action 工作，不产生第二真相 |
 | 查命令、配置或稳定合同 | [参考](reference/README.md) | 从生成的当前命令目录或专题参考定位准确入口 |
 | 开发、评审或验证 ZaoFu 本身 | [架构总览](architecture.md) | 能区分 Kernel、Agent、Store、Artifact、Projection 和两种编排模式 |
@@ -80,6 +81,8 @@ Recovery Coordinator 收敛和 OpenCode Provider SPI 仍是候选设计。配置
 - [18 Product Fanout 与五类 Workflow 真实 E2E](18-product-fanout-real-e2e.md)
 - [19 Feishu AI-Native Bridge、实时会话与审批](19-feishu-ai-native-direct-bridge.md)
 - [20 Project、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
+- [21 Metrics、Observability 与 Operations](21-metrics-observability-operations.md)
+- [22 Provider Native Telemetry 与 OTLP](22-provider-native-telemetry.md)
 
 ## 文档状态
 

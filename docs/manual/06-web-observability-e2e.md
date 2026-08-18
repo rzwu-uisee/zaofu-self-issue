@@ -116,7 +116,9 @@ GAN/critic、recovery、autoresearch 或 profile 定义的其他 loop。判断�
 |---|---|
 | Traces | 按 Task/actor/type/status/duration 找因果链 |
 | Events | 查看 append-only occurrence 与 seq 窗口 |
-| Logs | 查看运行时和 Provider 日志投影 |
+| Event Logs | 查看 EventLog 派生的语义审计日志 |
+| Runtime Logs | 查看脱敏后的进程、transport、sidecar 诊断 |
+| Operations | 查看 provider capability、OTLP exporter、SSE 与运行健康摘要 |
 | Runs / Fanouts | 检查 Run、child、barrier 和聚合状态 |
 | Candidates / Repair | 查看诊断候选与受控修复建议 |
 | Integration | 查看 Feishu/外部投影队列与失败 |
@@ -124,6 +126,33 @@ GAN/critic、recovery、autoresearch 或 profile 定义的其他 loop。判断�
 
 正常验收优先使用 Tasks、Delivery 和 Goal Dossier；Observability 用于解释“为什么没继续”或
 “哪个 projection/attempt 出了问题”。
+
+### 可选的 OTLP、Provider telemetry 与 Operations
+
+OTLP exporter 默认关闭，只有 `zf start` 的 runtime tick 会调度它；单独运行 `zf web` 只读取
+已有状态，不会创建 exporter、collector 或额外后台线程。启用时只把环境变量名写进 `zf.yaml`
+的 `ZfConfig.spec`（legacy 单文档则在根级）中：
+
+```yaml
+observability:
+  otlp_exporter:
+    enabled: true
+    endpoint_env: ZF_OTLP_ENDPOINT
+    headers_env: ZF_OTLP_HEADERS  # 可选：JSON object 的环境变量名
+    batch_size: 64
+    healthy_sample_rate: 0.1
+  alerts:
+    enabled: true
+    cooldown_seconds: 300
+```
+
+endpoint/header 值只由受控 runtime 环境提供，例如 `ZF_OTLP_ENDPOINT` 与
+`ZF_OTLP_HEADERS`；不要把 URL、Bearer token 或 header JSON 提交到 YAML、事件或截图。Operations
+显示 health、backlog、上次成功/失败、采样/丢弃/脱敏计数和 SSE gap 摘要。它导出的是 ZaoFu
+synthetic、脱敏 span，不在 Web 中回读 provider 原文 waterfall，也不改变 Delivery Graph、Gate 或
+Task 状态。完整的操作、metrics token gate、Runtime Logs、Provider 支持矩阵、canary 与回退见
+[Metrics、Observability 与 Operations](21-metrics-observability-operations.md) 和
+[Provider Native Telemetry 与 OTLP](22-provider-native-telemetry.md)。
 
 ![同一 playgroud 交付在 Delivery、Graph、Loop 与 Observability 间的观测路径](assets/observe-delivery.webp)
 

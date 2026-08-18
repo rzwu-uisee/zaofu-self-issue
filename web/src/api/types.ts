@@ -1032,6 +1032,98 @@ export interface DiagnosticsLogsPage {
   count: number;
 }
 
+export interface RuntimeLogRow {
+  timestamp: string;
+  level: string;
+  component: string;
+  message: string;
+  failure_class?: string;
+  zaofu_correlation_id?: string;
+  task_id?: string;
+  workflow_run_id?: string;
+  dispatch_id?: string;
+  attempt_id?: string;
+  role_instance_id?: string;
+  provider?: string;
+  provider_session_id?: string;
+  route?: string;
+  operation_kind?: string;
+  status?: string;
+}
+
+export interface RuntimeLogsPage {
+  schema_version: string;
+  project_id: string;
+  scope: string;
+  summary: {
+    count: number;
+    levels: Record<string, number>;
+    latest_at: string;
+  };
+  rows: RuntimeLogRow[];
+  count: number;
+}
+
+export interface ProviderTelemetryCapability {
+  provider: string;
+  route: string;
+  requested: string;
+  detected: string;
+  effective: string;
+  join_kind: string;
+  w3c_inbound: boolean;
+  signals: Record<string, boolean>;
+  collector_delivery: string;
+  failure_class?: string;
+  observed_at?: string;
+}
+
+export interface OperationsObservability {
+  schema_version: string;
+  project_id: string;
+  scope: { kind: string; note: string };
+  provider_telemetry: {
+    requested_mode: string;
+    updated_at: string;
+    capabilities: ProviderTelemetryCapability[];
+    bindings: Array<Record<string, unknown>>;
+  };
+  runtime_logs: {
+    count: number;
+    levels: Record<string, number>;
+    latest_at: string;
+  };
+  otlp_exporter: {
+    enabled: boolean;
+    health: string;
+    backlog_events: number;
+    last_success_at: string;
+    last_failure_at: string;
+    last_failure_class: string;
+    pending: {
+      event_count: number;
+      span_count: number;
+      attempt: number;
+      created_at: string;
+    };
+    counters: Record<string, number>;
+  };
+  alerts: {
+    enabled: boolean;
+    last_scan_at: string;
+    emitted_total: number;
+    suppressed_total: number;
+    last_sse_gap_sequence: number;
+    last_exporter_health: string;
+  };
+  metrics: {
+    enabled: boolean;
+    updated_at: string;
+    counter_series: number;
+    histogram_series: number;
+  };
+}
+
 // 2026-06-10 delivery slice 1 — per-task flow metrics + workflow archetype.
 // All optional/defensive: older backends omit both fields entirely.
 export type DeliveryWorkflowArchetype = "feature" | "refactor" | "bugfix";

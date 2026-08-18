@@ -1,5 +1,5 @@
 schema_version: zf-manual-capability-coverage.v1
-last_verified: 2026-08-08
+last_verified: 2026-08-18
 capabilities:
   - id: project-bootstrap
     name: Project 初始化与 Bootstrap
@@ -256,6 +256,36 @@ capabilities:
       readback: Cross-check Overview, Runs, Graph, Loop, Goal Dossier, and Task trace against the event/store/artifact sources.
       rollback: Rebuild or disable the affected read projection; do not mutate canonical state to make the UI look healthy.
       authority: Web/SQLite/Trace/Graph/Loop are read projections and cannot become dispatch truth.
+
+  - id: provider-native-operations-observability
+    name: Provider Native Telemetry、Runtime Logs 与 Operations 指标
+    name_en: Provider native telemetry, Runtime Logs, and Operations metrics
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/21-metrics-observability-operations.md
+        - docs/manual/22-provider-native-telemetry.md
+      en:
+        - docs/manual/21-metrics-observability-operations.en.md
+        - docs/manual/22-provider-native-telemetry.en.md
+    code:
+      - src/zf/runtime/provider_telemetry.py
+      - src/zf/runtime/runtime_logs.py
+      - src/zf/runtime/operations_metrics.py
+      - src/zf/runtime/otlp_exporter.py
+      - src/zf/runtime/observability_alerts.py
+      - web/src/components/observability/OperationsPanel.tsx
+      - web/src/components/observability/RuntimeLogsPanel.tsx
+    tests:
+      - tests/test_provider_telemetry.py
+      - tests/test_otlp_exporter.py
+      - tests/test_observability_alerts.py
+      - tests/test_web_operations_observability.py
+    release:
+      activation: Opt in through observability config using environment-variable names only; run the runtime tick for exporter/attention work and Web for readback.
+      readback: Inspect Operations capability/exporter health, redacted Runtime Logs, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
+      rollback: Disable the relevant observability block in a new runtime generation and retain projections/logs/cursor for audit; never mutate Task/Event/Delivery truth.
+      authority: Provider telemetry, logs, metrics, exporter, and alerts are diagnostic projections. They cannot write canonical stores, dispatch providers, or decide a gate/verdict.
 
   - id: goal-dossier
     name: Goal Dossier 交付签收
