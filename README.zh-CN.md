@@ -228,13 +228,13 @@ repair proposal 或 backlog candidate。
 ## 社区交流
 
 欢迎加入 ZaoFu 技术交流群，讨论 coding harness、long-horizon 交付、
-multi-agent workflow 与工程落地实践。
+multi-agent workflow 与工程落地实践，也可以直接联系作者。
 
-| 飞书群 | 微信群 |
+| 飞书群 | 联系作者 |
 |:---:|:---:|
-| <img src="assets/readme/zaofu-feishu-group.jpg" alt="扫码加入 ZaoFu 飞书技术交流群" width="280"> | <img src="assets/readme/zaofu-wechat-group.jpg" alt="扫码加入 ZaoFu 微信技术交流群" width="280"> |
+| <img src="assets/readme/zaofu-feishu-group.png" alt="扫码加入 ZaoFu 飞书技术交流群" width="280"> | <img src="assets/readme/zaofu-author-wechat.png" alt="扫码通过微信联系 ZaoFu 作者" width="280"> |
 
-群二维码可能定期更新。如二维码失效，请通过仓库 Issue 反馈。
+飞书群二维码可能定期更新。如二维码失效，请通过右侧微信联系作者。
 
 ## 安全边界
 

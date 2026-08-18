@@ -248,14 +248,14 @@ apply remains human- or token-gated. See the
 ## Community
 
 Join the ZaoFu community to discuss coding harnesses, long-horizon delivery,
-multi-agent workflows, and practical adoption.
+multi-agent workflows, and practical adoption, or contact the author directly.
 
-| Feishu group | WeChat group |
+| Feishu group | Contact the author |
 |:---:|:---:|
-| <img src="assets/readme/zaofu-feishu-group.jpg" alt="Scan to join the ZaoFu Feishu group" width="280"> | <img src="assets/readme/zaofu-wechat-group.jpg" alt="Scan to join the ZaoFu WeChat group" width="280"> |
+| <img src="assets/readme/zaofu-feishu-group.png" alt="Scan to join the ZaoFu Feishu group" width="280"> | <img src="assets/readme/zaofu-author-wechat.png" alt="Scan to contact the ZaoFu author on WeChat" width="280"> |
 
-Group QR codes may be renewed periodically. If one has expired, please report
-it through the repository issues.
+The Feishu group QR code may be renewed periodically. If it has expired,
+contact the author via WeChat.
 
 ## Safety and Boundaries
 
