@@ -4,8 +4,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARATION = "> required_prompt_refs:"
@@ -41,10 +39,7 @@ def test_tracked_prompt_required_refs_are_in_git_source_closure() -> None:
 
 def test_five_workflow_prompt_is_standalone_in_fresh_worktree() -> None:
     relative = "prompt/2026-08-05-1559-kanban-agent-five-workflow-real-e2e.md"
-    path = ROOT / relative
-    if not path.exists():
-        pytest.skip(f"{relative} is not part of this source checkout")
-    text = path.read_text(encoding="utf-8")
+    text = (ROOT / relative).read_text(encoding="utf-8")
 
     assert _required_prompt_refs(text) == []
     assert "2026-08-04-0922-new-project-kanban-channel-workflow-real-e2e" not in text
