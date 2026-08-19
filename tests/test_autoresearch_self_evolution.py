@@ -627,6 +627,63 @@ def test_resident_execute_requires_authorization_and_emits_markers(tmp_path):
     assert "autoresearch.loop.completed" in event_types
 
 
+def test_resident_executes_evolution_request_with_identity_and_terminal(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        id="evt-evolution-trial-request",
+        type="evolution.trial.requested",
+        actor="run-manager",
+        payload={
+            "campaign_id": "campaign-1",
+            "trial_id": "trial-1",
+            "arm": "candidate",
+            "timeout_seconds": 30,
+        },
+    ))
+    calls: list[list[str]] = []
+
+    def _fake_runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="{}", stderr="failed")
+
+    actions = run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_fake_runner,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action == "run_evolution_trial"
+    assert "trial-execute" in calls[0]
+    events = log.read_all()
+    for event_type in (
+        "evolution.trial.execution.accepted",
+        "evolution.trial.execution.started",
+        "evolution.trial.execution.failed",
+    ):
+        event = next(event for event in events if event.type == event_type)
+        assert event.payload["request_event_id"] == "evt-evolution-trial-request"
+        assert event.payload["campaign_id"] == "campaign-1"
+        assert event.payload["trial_id"] == "trial-1"
+
+    # A settled resident execution is not executed again on a later poll.
+    assert run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_fake_runner,
+    ) == []
+    assert len(calls) == 1
+
+
 def test_resident_execute_respects_max_actions_per_tick(tmp_path):
     state_dir = tmp_path / ".zf"
     log = EventLog(state_dir / "events.jsonl")

@@ -75,6 +75,12 @@ _VALID_AUTORESEARCH_REPAIR_MODES = ("proposal_only", "bounded_repair")
 _VALID_REPAIR_BACKENDS = ("codex", "claude-code")
 _VALID_FEISHU_INBOUND_MODES = ("bridge",)
 _VALID_FEISHU_PROJECTION_BACKENDS = ("lark-cli",)
+_VALID_EVOLUTION_MODES = ("evaluate_only", "auto_low_risk")
+_VALID_EVOLUTION_AUTO_ASSET_KINDS = (
+    "memory_entry",
+    "runbook",
+    "regression_fixture",
+)
 _VALID_SEVERITIES = ("low", "medium", "high", "critical")
 _VALID_PROVIDER_TELEMETRY_MODES = ("off", "managed", "host_managed")
 _ENV_SUB_RE = re.compile(
@@ -134,6 +140,7 @@ from zf.core.config.schema import (  # noqa: E402
     EventSchemaValidationConfig,
     RuntimeConfig,
     RuntimeAutoresearchResidentConfig,
+    RuntimeEvolutionConfig,
     WorkdirConfig,
     GitIsolationConfig,
     RuntimeSkillsConfig,
@@ -3342,6 +3349,7 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
     skills_raw = data.get("skills") or {}
     run_manager_raw = data.get("run_manager") or {}
     autoresearch_resident_raw = data.get("autoresearch_resident") or {}
+    evolution_raw = data.get("evolution") or {}
     feishu_inbound_raw = data.get("feishu_inbound") or {}
     feishu_projection_raw = data.get("feishu_projection") or {}
     if not isinstance(workdirs_raw, dict):
@@ -3354,6 +3362,8 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
         raise ConfigError("runtime.run_manager must be a mapping")
     if not isinstance(autoresearch_resident_raw, dict):
         raise ConfigError("runtime.autoresearch_resident must be a mapping")
+    if not isinstance(evolution_raw, dict):
+        raise ConfigError("runtime.evolution must be a mapping")
     if not isinstance(feishu_inbound_raw, dict):
         raise ConfigError("runtime.feishu_inbound must be a mapping")
     if not isinstance(feishu_projection_raw, dict):
@@ -3514,6 +3524,93 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
             "Invalid runtime.autoresearch_resident.self_repair_backend "
             f"{autoresearch_resident_backend!r}: must be one of {_VALID_REPAIR_BACKENDS}"
         )
+    evolution_mode = str(
+        evolution_raw.get("mode", "evaluate_only") or "evaluate_only"
+    ).strip()
+    if evolution_mode not in _VALID_EVOLUTION_MODES:
+        raise ConfigError(
+            f"Invalid runtime.evolution.mode {evolution_mode!r}: "
+            f"must be one of {_VALID_EVOLUTION_MODES}"
+        )
+    evolution_backend = str(evolution_raw.get("backend", "") or "").strip()
+    if evolution_backend and evolution_backend not in _VALID_REPAIR_BACKENDS:
+        raise ConfigError(
+            f"Invalid runtime.evolution.backend {evolution_backend!r}: "
+            f"must be one of {_VALID_REPAIR_BACKENDS}"
+        )
+    evolution_enabled = _bool_value(evolution_raw.get("enabled"), default=False)
+    if evolution_enabled and not evolution_backend:
+        raise ConfigError(
+            "runtime.evolution.backend is required when runtime.evolution.enabled is true"
+        )
+    autoresearch_resident_enabled = _bool_value(
+        autoresearch_resident_raw.get("enabled"),
+        default=False,
+    )
+    evolution_sealed_root = str(
+        evolution_raw.get("sealed_root", "") or ""
+    ).strip()
+    if evolution_enabled and not autoresearch_resident_enabled:
+        raise ConfigError(
+            "runtime.autoresearch_resident.enabled must be true when "
+            "runtime.evolution.enabled is true"
+        )
+    if evolution_enabled and not evolution_sealed_root:
+        raise ConfigError(
+            "runtime.evolution.sealed_root is required when "
+            "runtime.evolution.enabled is true"
+        )
+    try:
+        evolution_trial_repetitions = int(
+            evolution_raw.get("trial_repetitions", 2) or 2
+        )
+        evolution_trial_timeout = int(
+            evolution_raw.get("trial_timeout_seconds", 300) or 300
+        )
+        evolution_lease_seconds = int(
+            evolution_raw.get("lease_seconds", 600) or 600
+        )
+        evolution_max_attempts = int(
+            evolution_raw.get("max_trial_attempts", 2) or 2
+        )
+        evolution_max_actions = int(
+            evolution_raw.get("max_actions_per_tick", 4) or 4
+        )
+        evolution_max_cost = float(
+            evolution_raw.get("max_cost_usd", 2.0) or 2.0
+        )
+        evolution_max_tokens = int(
+            evolution_raw.get("max_tokens", 50_000) or 50_000
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("runtime.evolution numeric values must be valid numbers") from exc
+    if min(
+        evolution_trial_repetitions,
+        evolution_trial_timeout,
+        evolution_lease_seconds,
+        evolution_max_attempts,
+        evolution_max_actions,
+        evolution_max_tokens,
+    ) <= 0 or evolution_max_cost <= 0:
+        raise ConfigError("runtime.evolution numeric values must be > 0")
+    evolution_auto_kinds = _string_list(
+        evolution_raw.get("auto_asset_kinds"),
+        default=list(_VALID_EVOLUTION_AUTO_ASSET_KINDS),
+    )
+    unsupported_evolution_kinds = sorted(
+        set(evolution_auto_kinds) - set(_VALID_EVOLUTION_AUTO_ASSET_KINDS)
+    )
+    if unsupported_evolution_kinds:
+        raise ConfigError(
+            "runtime.evolution.auto_asset_kinds may only contain low-risk kinds; "
+            f"unsupported: {unsupported_evolution_kinds}"
+        )
+    evolution_token_env = str(
+        evolution_raw.get("access_token_env", "ZF_EVOLUTION_EVALUATOR_TOKEN")
+        or "ZF_EVOLUTION_EVALUATOR_TOKEN"
+    ).strip()
+    if not _ENV_NAME_RE.fullmatch(evolution_token_env):
+        raise ConfigError("runtime.evolution.access_token_env must be an env variable name")
     feishu_inbound_mode = str(
         feishu_inbound_raw.get("mode", "bridge") or "bridge"
     ).strip()
@@ -3728,6 +3825,25 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
                 default=False,
             ),
             self_repair_backend=autoresearch_resident_backend,
+        ),
+        evolution=RuntimeEvolutionConfig(
+            enabled=evolution_enabled,
+            mode=evolution_mode,
+            backend=evolution_backend,
+            model=str(evolution_raw.get("model", "") or "").strip(),
+            model_reasoning_effort=str(
+                evolution_raw.get("model_reasoning_effort", "") or ""
+            ).strip(),
+            trial_repetitions=evolution_trial_repetitions,
+            trial_timeout_seconds=evolution_trial_timeout,
+            lease_seconds=evolution_lease_seconds,
+            max_trial_attempts=evolution_max_attempts,
+            max_actions_per_tick=evolution_max_actions,
+            max_cost_usd=evolution_max_cost,
+            max_tokens=evolution_max_tokens,
+            sealed_root=evolution_sealed_root,
+            access_token_env=evolution_token_env,
+            auto_asset_kinds=evolution_auto_kinds,
         ),
         feishu_inbound=RuntimeFeishuInboundConfig(
             enabled=_bool_value(feishu_inbound_raw.get("enabled"), default=False),

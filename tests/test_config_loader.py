@@ -458,6 +458,84 @@ def test_load_runtime_autoresearch_resident_config(tmp_path: Path):
     assert resident.self_repair_backend == "claude-code"
 
 
+def test_load_runtime_evolution_requires_resident_and_sealed_evaluator(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n"
+        "  evolution:\n"
+        "    enabled: true\n"
+        "    backend: codex\n"
+        "    sealed_root: .zf/evolution/sealed\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="autoresearch_resident.enabled"):
+        load_config(p)
+
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n"
+        "  autoresearch_resident:\n    enabled: true\n"
+        "  evolution:\n    enabled: true\n    backend: codex\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="runtime.evolution.sealed_root"):
+        load_config(p)
+
+
+def test_load_runtime_evolution_auto_low_risk_policy(tmp_path: Path) -> None:
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n"
+        "  autoresearch_resident:\n"
+        "    enabled: true\n"
+        "    max_actions_per_tick: 3\n"
+        "  evolution:\n"
+        "    enabled: true\n"
+        "    mode: auto_low_risk\n"
+        "    backend: codex\n"
+        "    model_reasoning_effort: low\n"
+        "    trial_repetitions: 1\n"
+        "    sealed_root: .zf/evolution/sealed\n"
+        "    auto_asset_kinds: [runbook, regression_fixture]\n",
+        encoding="utf-8",
+    )
+
+    evolution = load_config(p).runtime.evolution
+
+    assert evolution.enabled is True
+    assert evolution.mode == "auto_low_risk"
+    assert evolution.backend == "codex"
+    assert evolution.model_reasoning_effort == "low"
+    assert evolution.trial_repetitions == 1
+    assert evolution.auto_asset_kinds == ["runbook", "regression_fixture"]
+
+
+def test_load_runtime_evolution_rejects_high_risk_auto_asset(tmp_path: Path) -> None:
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n"
+        "  autoresearch_resident:\n    enabled: true\n"
+        "  evolution:\n"
+        "    enabled: true\n"
+        "    backend: codex\n"
+        "    sealed_root: .zf/evolution/sealed\n"
+        "    auto_asset_kinds: [framework_code]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="only contain low-risk kinds"):
+        load_config(p)
+
+
 def test_load_runtime_feishu_inbound_rejects_bad_mode(tmp_path: Path):
     p = tmp_path / "zf.yaml"
     p.write_text(

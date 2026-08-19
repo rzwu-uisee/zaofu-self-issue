@@ -29,6 +29,13 @@ from zf.autoresearch.loop_requests import (
     normalize_research_mode,
     research_mode_contract,
 )
+from zf.autoresearch.evolution_resident import (
+    evolution_accepted_ids,
+    evolution_acceptance,
+    pending_evolution_requests,
+    plan_evolution_actions,
+    run_evolution_action,
+)
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
@@ -131,11 +138,11 @@ def _handled_ids(events: list[ZfEvent]) -> set[str]:
 
 
 def _accepted_ids(events: list[ZfEvent]) -> set[str]:
-    out: set[str] = set()
+    out = evolution_accepted_ids(events)
     for event in events:
-        if event.type != LOOP_ACCEPTED:
-            continue
-        out.add(loop_request_id_from_payload(_payload(event), fallback=event.id))
+        payload = _payload(event)
+        if event.type == LOOP_ACCEPTED:
+            out.add(loop_request_id_from_payload(payload, fallback=event.id))
     return out
 
 
@@ -301,6 +308,9 @@ def plan_resident_actions(
     finally:
         log.close()
     actions: list[ResidentAction] = []
+    actions.extend(plan_evolution_actions(
+        events, state_dir=state_dir, action_factory=ResidentAction,
+    ))
     for event in pending_loop_requests(events):
         payload = _payload(event)
         request_id = loop_request_id_from_payload(payload, fallback=event.id)
@@ -447,23 +457,27 @@ def run_resident_once(
     # execution still emits STARTED, and _handled_ids keeps accepted-only
     # requests pending so later ticks run them.
     accepted: set[str] = set()
+    resident_events: list[ZfEvent] = []
     if execute and authorized:
         log = EventLog(Path(state_dir) / "events.jsonl")
         try:
-            accepted = _accepted_ids(log.read_all())
+            resident_events = log.read_all()
+            accepted = _accepted_ids(resident_events)
         finally:
             log.close()
         for action in actions:
-            if action.action != "run_loop" or action.loop_request_id in accepted:
+            if action.action not in {"run_loop", "run_evolution_trial"} or action.loop_request_id in accepted:
                 continue
+            acceptance = evolution_acceptance(action, events=resident_events)
+            event_payload = {
+                "loop_request_id": action.loop_request_id,
+                "queued": True,
+                "command": action.command,
+            }
             writer.append(ZfEvent(
-                type=LOOP_ACCEPTED,
+                type=acceptance[0] if acceptance else LOOP_ACCEPTED,
                 actor="zf-autoresearch-resident",
-                payload={
-                    "loop_request_id": action.loop_request_id,
-                    "queued": True,
-                    "command": action.command,
-                },
+                payload=acceptance[1] if acceptance else event_payload,
             ))
             accepted.add(action.loop_request_id)
     if max_actions_per_tick > 0:
@@ -485,6 +499,13 @@ def run_resident_once(
         if action.action == "run_self_repair":
             if execute and authorized:
                 runner(action.command, capture_output=True, text=True, check=False)
+            continue
+        if run_evolution_action(
+            writer=writer, action=action,
+            events=(resident_events or writer.event_log.read_all()),
+            enabled=execute and authorized,
+            timeout_s=_loop_runner_timeout_s(action.budget_cap), runner=runner,
+        ):
             continue
         if action.action != "run_loop":
             if action.action == "run_review_gate_prepare":
@@ -962,6 +983,7 @@ __all__ = [
     "REVIEW_GATE_SKIPPED",
     "actions_json",
     "pending_review_gate_requests",
+    "pending_evolution_requests",
     "pending_loop_requests",
     "plan_resident_actions",
     "run_resident_once",

@@ -1428,6 +1428,37 @@ class RuntimeAutoresearchResidentConfig:
 
 
 @dataclass
+class RuntimeEvolutionConfig:
+    """Policy for evidence-bound, unattended low-risk evolution campaigns."""
+
+    enabled: bool = False
+    mode: str = "evaluate_only"
+    backend: str = ""
+    model: str = ""
+    model_reasoning_effort: str = ""
+    trial_repetitions: int = 2
+    trial_timeout_seconds: int = 300
+    lease_seconds: int = 600
+    max_trial_attempts: int = 2
+    max_actions_per_tick: int = 4
+    max_cost_usd: float = 2.0
+    max_tokens: int = 50_000
+    sealed_root: str = ""
+    access_token_env: str = "ZF_EVOLUTION_EVALUATOR_TOKEN"
+    auto_asset_kinds: list[str] = field(default_factory=lambda: [
+        "memory_entry",
+        "runbook",
+        "regression_fixture",
+    ])
+
+    def __post_init__(self) -> None:
+        self.model_reasoning_effort = _normalize_model_reasoning_effort(
+            self.model_reasoning_effort,
+            owner="RuntimeEvolutionConfig",
+        )
+
+
+@dataclass
 class RuntimeFeishuInboundConfig:
     enabled: bool = False
     # Only the long-connection bridge is productized as a zf start sidecar.
@@ -1463,6 +1494,9 @@ class RuntimeConfig:
     )
     autoresearch_resident: RuntimeAutoresearchResidentConfig = field(
         default_factory=RuntimeAutoresearchResidentConfig,
+    )
+    evolution: RuntimeEvolutionConfig = field(
+        default_factory=RuntimeEvolutionConfig,
     )
     feishu_inbound: RuntimeFeishuInboundConfig = field(
         default_factory=RuntimeFeishuInboundConfig,

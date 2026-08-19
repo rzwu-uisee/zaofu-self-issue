@@ -714,17 +714,49 @@ def _run_manager_tick_due(
 ) -> bool:
     """Return whether Run Manager has new recovery input or needs a refresh."""
 
+    latest_input_id = _latest_run_manager_input_id(events)
+    latest_input = next((
+        event for event in reversed(events)
+        if str(getattr(event, "id", "") or "") == latest_input_id
+    ), None)
+    # Post-task evolution is legitimate mechanical work after a delivery
+    # terminal. It must reopen Run Manager without reopening the product run.
+    if (
+        latest_input_id != state.last_run_manager_input_event_id
+        and latest_input is not None
+        and _is_evolution_work_input(latest_input)
+    ):
+        return True
     # Do not keep a completed run alive merely to refresh its projections.  The
     # terminal predicate is run-scoped and reopens only on later mechanical
     # work, so this preserves recovery when a real same-run regression arrives.
     if latest_quiescent_run_terminal(events) is not None:
         return False
-    latest_input_id = _latest_run_manager_input_id(events)
     if not state.last_run_manager_tick_at:
         return True
     if latest_input_id != state.last_run_manager_input_event_id:
         return True
     return now - state.last_run_manager_tick_at >= max(1.0, idle_refresh_s)
+
+
+def _is_evolution_work_input(event: ZfEvent) -> bool:
+    event_type = str(getattr(event, "type", "") or "")
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    if event_type == "autoresearch.loop.completed":
+        return str(payload.get("mode") or "") == "learn"
+    return event_type in {
+        "evolution.campaign.requested",
+        "evolution.campaign.materialized",
+        "evolution.trial.completed",
+        "evolution.trial.retry.requested",
+        "evolution.trial.execution.completed",
+        "evolution.trial.execution.failed",
+        "evolution.comparison.completed",
+        "evolution.adoption.proposed",
+        "evolution.canary.completed",
+        "evolution.canary.failed",
+        "evolution.asset.outcome.recorded",
+    }
 
 
 def _latest_run_manager_input_id(events: list[ZfEvent]) -> str:

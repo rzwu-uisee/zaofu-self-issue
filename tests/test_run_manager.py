@@ -8011,6 +8011,32 @@ def test_run_manager_consumes_autoresearch_diagnosis_result(tmp_path: Path) -> N
     assert consumed[0].payload["next_route"] == "proposal_review"
 
 
+def test_run_manager_tick_invokes_evolution_reconciliation(tmp_path: Path) -> None:
+    state_dir, log, writer = _state(tmp_path)
+    evolution_result = MagicMock(action_count=3)
+
+    with patch(
+        "zf.runtime.evolution_automation.reconcile_evolution_automation",
+        return_value=evolution_result,
+    ) as reconcile:
+        result = run_manager_tick(
+            state_dir=state_dir,
+            writer=writer,
+            config=_config(),
+            event_log=log,
+            spawn_repairs=False,
+        )
+
+    assert result.evolution_actions == 3
+    reconcile.assert_called_once()
+    assert reconcile.call_args.kwargs["state_dir"] == state_dir
+    completed = [
+        event for event in log.read_all()
+        if event.type == "run.manager.tick.completed"
+    ][-1]
+    assert completed.payload["evolution_actions"] == 3
+
+
 def test_run_manager_owns_autoresearch_repair_exhaustion_escalation(
     tmp_path: Path,
 ) -> None:

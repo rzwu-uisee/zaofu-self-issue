@@ -74,6 +74,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     settle.add_argument("--failure-class", default="")
     settle.set_defaults(func=_trial_settle)
 
+    execute = commands.add_parser(
+        "trial-execute",
+        help="Execute one resident-owned evolution trial/canary request",
+    )
+    _state_arg(execute)
+    execute.add_argument("--request-event-id", required=True)
+    execute.set_defaults(func=_trial_execute)
+
     compare = commands.add_parser("compare", help="Compare settled repeated A/B trials")
     _state_arg(compare)
     compare.add_argument("--attempt-id", required=True)
@@ -321,6 +329,24 @@ def _trial_settle(args: argparse.Namespace) -> int:
         failure_class=args.failure_class,
     ))
     return 0
+
+
+def _trial_execute(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_trial_runner import execute_evolution_request
+
+    context = _context(args)
+    writer = EventWriter(
+        event_log_from_project(context.state_dir, config=context.config)
+    )
+    result = execute_evolution_request(
+        state_dir=context.state_dir,
+        project_root=context.project_root,
+        config=context.config,
+        request_event_id=args.request_event_id,
+        writer=writer,
+    )
+    _print(result)
+    return 0 if bool(result.get("ok")) else 1
 
 
 def _compare(args: argparse.Namespace) -> int:

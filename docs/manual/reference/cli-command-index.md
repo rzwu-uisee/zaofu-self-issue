@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **69** 个顶层命令 family、**281** 条可寻址命令路径。
+当前共 **69** 个顶层命令 family、**282** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -255,6 +255,7 @@ Manage evidence-bound self-evolution attempts and capabilities
 | `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
 | `zf evolution status` | Show the read-only evolution projection |
 | `zf evolution trial-ensure` | Ensure a stable A/B trial row |
+| `zf evolution trial-execute` | Execute one resident-owned evolution trial/canary request |
 | `zf evolution trial-settle` | Settle one trial attempt |
 | `zf evolution trial-start` | Claim a trial lease |
 | `zf evolution variant-compare` | Materialize a Pareto comparison for workflow/provider variants |

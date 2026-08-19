@@ -69,6 +69,8 @@ from zf.runtime.control_actions_ops import OpsActionsMixin
 from zf.runtime.control_actions_recovery import RECOVERY_ACTIONS, RecoveryActionsMixin
 from zf.runtime.control_actions_surgery import SurgeryActionsMixin
 from zf.runtime.control_actions_emit import ActionEmitMixin
+from zf.runtime.control_actions_evolution import EvolutionActionsMixin
+from zf.runtime.control_actions_extension_router import dispatch_extension_action
 from zf.runtime.control_actions_workflow_resume import WorkflowResumeActionsMixin
 from zf.runtime.control_actions_candidate_rework import CandidateReworkActionsMixin
 from zf.runtime.control_actions_research import ResearchActionsMixin
@@ -124,6 +126,7 @@ class ControlledActionService(
     SurgeryActionsMixin,
     RecoveryActionsMixin,
     ActionEmitMixin,
+    EvolutionActionsMixin,
 ):
     """Execute deterministic action requests from trusted control surfaces."""
 
@@ -545,27 +548,12 @@ class ControlledActionService(
                 requested_action=requested_action,
                 payload=payload,
             )
-        if action == "run-contract-review":
-            return self._run_contract_review_action(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-            )
-        if action == "workflow-batch-resume":
-            return self._workflow_batch_resume(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-            )
-        if action == "candidate-rework-apply":
-            return self._candidate_rework_apply(
-                requested=requested,
-                action=action,
-                requested_action=requested_action,
-                payload=payload,
-            )
+        extension = dispatch_extension_action(
+            self, requested=requested, action=action,
+            requested_action=requested_action, payload=payload,
+        )
+        if extension is not None:
+            return extension
         return self._failed(
             requested=requested,
             action=action,

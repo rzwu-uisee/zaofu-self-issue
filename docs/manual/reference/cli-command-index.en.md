@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **69** top-level families and **281** addressable command paths.
+The parser currently exposes **69** top-level families and **282** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -255,6 +255,7 @@ Manage evidence-bound self-evolution attempts and capabilities
 | `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
 | `zf evolution status` | Show the read-only evolution projection |
 | `zf evolution trial-ensure` | Ensure a stable A/B trial row |
+| `zf evolution trial-execute` | Execute one resident-owned evolution trial/canary request |
 | `zf evolution trial-settle` | Settle one trial attempt |
 | `zf evolution trial-start` | Claim a trial lease |
 | `zf evolution variant-compare` | Materialize a Pareto comparison for workflow/provider variants |

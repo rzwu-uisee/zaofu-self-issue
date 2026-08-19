@@ -230,6 +230,7 @@ class RunManagerTickResult:
     human_decisions_applied: int = 0
     human_decisions_rejected: int = 0
     closeout_events: int = 0
+    evolution_actions: int = 0
 
     @property
     def changed(self) -> bool:
@@ -249,6 +250,7 @@ class RunManagerTickResult:
             self.human_decisions_applied,
             self.human_decisions_rejected,
             self.closeout_events,
+            self.evolution_actions,
         ))
 
 
@@ -712,6 +714,47 @@ def _run_manager_tick_unlocked(
                 actions_blocked += 1
                 events = _read_events(state_dir, event_log=event_log)
 
+    evolution_actions = 0
+    try:
+        from zf.runtime.evolution_automation import (
+            reconcile_evolution_automation,
+        )
+
+        evolution_result = reconcile_evolution_automation(
+            state_dir=state_dir,
+            writer=writer,
+            config=config,
+            project_root=project_root or state_dir.parent,
+            events=_read_events(state_dir, event_log=event_log),
+        )
+        evolution_actions = evolution_result.action_count
+        if evolution_actions:
+            events = _read_events(state_dir, event_log=event_log)
+    except Exception as exc:
+        fingerprint = "evolution-automation:" + hashlib.sha1(
+            f"{type(exc).__name__}:{exc}".encode("utf-8")
+        ).hexdigest()[:16]
+        recent = _read_events(state_dir, event_log=event_log)[-200:]
+        if not any(
+            event.type == "evolution.automation.failed"
+            and str((event.payload or {}).get("fingerprint") or "") == fingerprint
+            for event in recent
+            if isinstance(event.payload, dict)
+        ):
+            writer.emit(
+                "evolution.automation.failed",
+                actor="run-manager",
+                causation_id=started.id,
+                payload={
+                    "schema_version": "evolution-automation-failure.v1",
+                    "fingerprint": fingerprint,
+                    "failure_class": type(exc).__name__,
+                    "reason": str(exc),
+                    "recommended_route": "autoresearch",
+                    "human_action_required": False,
+                },
+            )
+
     transition = _emit_tick_transition(
         writer,
         projection=projection,
@@ -753,6 +796,7 @@ def _run_manager_tick_unlocked(
             "human_decisions_applied": human_decisions_applied,
             "human_decisions_rejected": human_decisions_rejected,
             "closeout_events": closeout_events,
+            "evolution_actions": evolution_actions,
             "transition_event_id": transition.id if transition is not None else "",
             "transition_event_written": transition is not None,
             "transition": transition_name,
@@ -787,6 +831,7 @@ def _run_manager_tick_unlocked(
         "human_decisions_applied": human_decisions_applied,
         "human_decisions_rejected": human_decisions_rejected,
         "closeout_events": closeout_events,
+        "evolution_actions": evolution_actions,
     }
     write_run_manager_projections(state_dir, projection)
     return RunManagerTickResult(
@@ -805,6 +850,7 @@ def _run_manager_tick_unlocked(
         human_decisions_applied=human_decisions_applied,
         human_decisions_rejected=human_decisions_rejected,
         closeout_events=closeout_events,
+        evolution_actions=evolution_actions,
     )
 
 

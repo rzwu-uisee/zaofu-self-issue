@@ -318,6 +318,16 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # confirmation instead of relying on a later unrelated tick.
     "autoresearch.bug_candidate.confirmed",
     "autoresearch.loop.requested",
+    # Learn completion and provider-backed evolution terminals are emitted by
+    # resident/CLI processes outside run_once. Wake Run Manager immediately so
+    # campaign reconciliation does not depend on an unrelated workflow event
+    # or the periodic catch-up tick. Intermediate campaign events stay off the
+    # wake surface to avoid self-wake amplification.
+    "autoresearch.loop.completed",
+    "evolution.trial.execution.completed",
+    "evolution.trial.execution.failed",
+    "evolution.canary.completed",
+    "evolution.canary.failed",
     "plan.insight.discovered",
     "research.probe.requested",
     "research.probe.completed",
