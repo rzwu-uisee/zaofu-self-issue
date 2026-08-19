@@ -528,6 +528,7 @@ export function ChannelPage({
   const historyPrependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const historyInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const autoOpenedQuestionnaireRef = useRef("");
   const visibleChannels = channels.length
     ? channels
     : [{ channel_id: "ch-zaofu", name: "# zaofu", members: [], workflow_requests: [] } as ChannelSummary];
@@ -669,11 +670,27 @@ export function ChannelPage({
   }, [activeChannelThreadId, detail]);
   useEffect(() => {
     setOwnerQuestionsOpen(false);
-  }, [
-    activeChannelThreadId,
-    discussionBand?.questionGraphDigest,
-    selectedChannelId,
-  ]);
+    autoOpenedQuestionnaireRef.current = "";
+  }, [activeChannelThreadId, selectedChannelId]);
+  useEffect(() => {
+    if (!discussionBand?.ownerQuestions.length) return;
+    const attentionKind = discussionBand.attention.attention_kind ?? (
+      discussionBand.attention.owner_question_count > 0 ? "question" : "none"
+    );
+    if (
+      attentionKind !== "question"
+      || discussionBand.attention.active_agent_count > 0
+    ) return;
+    const revision = discussionBand.questionGraphDigest || discussionBand.ownerQuestions
+      .map((question) => question.id)
+      .sort()
+      .join(",");
+    const key = [selectedChannelId, discussionBand.threadId, revision].join(":");
+    if (autoOpenedQuestionnaireRef.current === key) return;
+    autoOpenedQuestionnaireRef.current = key;
+    setOwnerQuestionsOpen(true);
+    setDrawer(null);
+  }, [discussionBand, selectedChannelId]);
   function quoteDiscussionQuestion(text: string) {
     insertComposerText(`Re “${text}”: `);
   }
@@ -2644,27 +2661,29 @@ export function ChannelPage({
                         </span>
                       ) : null}
                     </div>
-                    <button
-                      className="icon-button"
-                      disabled={
-                        (
-                          discussionBand.presentation.action === "synthesize"
-                          && (
-                            controlsBusy
-                            || !actionReady
-                            || !discussionControls.canSynthesize
+                    {discussionBand.presentation.actionLabel ? (
+                      <button
+                        className="icon-button"
+                        disabled={
+                          (
+                            discussionBand.presentation.action === "synthesize"
+                            && (
+                              controlsBusy
+                              || !actionReady
+                              || !discussionControls.canSynthesize
+                            )
                           )
-                        )
-                        || (
-                          discussionBand.presentation.action === "questions"
-                          && !discussionBand.ownerQuestions.length
-                        )
-                      }
-                      type="button"
-                      onClick={handleDiscussionAttentionAction}
-                    >
-                      {discussionBand.presentation.actionLabel}
-                    </button>
+                          || (
+                            discussionBand.presentation.action === "questions"
+                            && !discussionBand.ownerQuestions.length
+                          )
+                        }
+                        type="button"
+                        onClick={handleDiscussionAttentionAction}
+                      >
+                        {discussionBand.presentation.actionLabel}
+                      </button>
+                    ) : null}
                   </div>
                   {recordString(threadConsensus, "artifact_ref") && !recordString(threadConsensus, "reached_event_id") ? (
                     <div className="channel-consensus-control">

@@ -17,7 +17,7 @@ function attention(
   overrides: Partial<ChannelDiscussionAttention> = {},
 ): ChannelDiscussionAttention {
   return {
-    schema_version: "channel.discussion-attention.v1",
+    schema_version: "channel.discussion-attention.v2",
     is_derived_projection: true,
     thread_id: "main",
     state,
@@ -48,6 +48,8 @@ function attention(
 }
 
 const running = attention("running", {
+  execution_state: "running",
+  attention_kind: "none",
   active_agent_count: 2,
   active_reply_count: 2,
   can_drain_replies: true,
@@ -56,8 +58,12 @@ const runningView = presentChannelDiscussionAttention(running);
 assert(runningView.label === "2 agents responding", "running state leads with real active work");
 assert(runningView.summary === "", "running state does not repeat an abstract status label");
 assert(runningView.action === "activity", "running opens activity details");
+assert(runningView.actionLabel === "", "running state has no redundant activity button");
 
 const needsInput = attention("needs_input", {
+  execution_state: "running",
+  attention_kind: "question",
+  blocks_transition: "synthesis",
   active_agent_count: 2,
   active_reply_count: 2,
   owner_question_count: 3,
@@ -65,10 +71,32 @@ const needsInput = attention("needs_input", {
   can_review_questions: true,
 });
 const needsInputView = presentChannelDiscussionAttention(needsInput);
-assert(needsInputView.label === "Needs input", "owner questions surface as needs input");
+assert(needsInputView.label === "2 agents responding", "active work remains the primary state");
 assert(needsInputView.action === "questions", "owner questions open the decision shelf");
-assert(needsInputView.summary.includes("3 owner decisions"), "decision count is explicit");
-assert(needsInputView.summary.includes("2 agents still responding"), "owner attention preserves concurrent work visibility");
+assert(needsInputView.summary.includes("3 decisions pending"), "decision count is explicit");
+assert(needsInputView.summary.includes("blocks synthesis"), "the blocked transition is explicit");
+
+const oneDecisionView = presentChannelDiscussionAttention({
+  ...needsInput,
+  owner_question_count: 1,
+  open_question_count: 1,
+});
+assert(
+  oneDecisionView.summary === "1 decision pending · blocks synthesis",
+  "single-decision copy uses singular grammar",
+);
+
+const waiting = attention("needs_input", {
+  execution_state: "ready",
+  attention_kind: "question",
+  blocks_transition: "synthesis",
+  owner_question_count: 2,
+  open_question_count: 2,
+  can_review_questions: true,
+});
+const waitingView = presentChannelDiscussionAttention(waiting);
+assert(waitingView.label === "Waiting for you", "idle owner gate becomes explicit waiting state");
+assert(waitingView.actionLabel === "Answer 2", "waiting state presents a bounded decision action");
 
 const ready = attention("ready", { can_synthesize: true });
 const readyView = presentChannelDiscussionAttention(ready);

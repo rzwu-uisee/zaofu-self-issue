@@ -393,6 +393,131 @@ def test_operator_inbox_does_not_create_ack_only_items(tmp_path: Path) -> None:
     assert inbox["items"] == []
 
 
+def test_operator_inbox_projects_only_owner_channel_questions(
+    tmp_path: Path,
+) -> None:
+    state_dir, log = _state(tmp_path)
+    log.append(ZfEvent(
+        id="evt-owner-question",
+        type="channel.question.opened",
+        actor="pm",
+        payload={
+            "channel_id": "ch-product",
+            "thread_id": "main",
+            "question_id": "q-owner",
+            "question": "Which audience should the first release target?",
+            "kind": "owner_decision",
+            "target_member_id": "owner",
+            "priority": "p0",
+            "asked_by": "pm",
+        },
+    ))
+    log.append(ZfEvent(
+        id="evt-agent-question",
+        type="channel.question.opened",
+        actor="critic",
+        payload={
+            "channel_id": "ch-product",
+            "thread_id": "main",
+            "question_id": "q-agent",
+            "question": "Which API version exists?",
+            "kind": "fact",
+            "target_member_id": "architect",
+        },
+    ))
+
+    pending = build_operator_inbox(state_dir, log.read_all())
+
+    assert pending["summary"]["decisions_pending"] == 1
+    assert pending["summary"]["action_required_pending"] == 1
+    assert pending["views"]["decisions"]["count"] == 1
+    assert [item["kind"] for item in pending["pending"]] == [
+        "channel_decision",
+    ]
+    decision = pending["pending"][0]
+    assert decision["channel_id"] == "ch-product"
+    assert decision["thread_id"] == "main"
+    assert decision["deep_link"] == "?page=channels&channel=ch-product"
+
+    log.append(ZfEvent(
+        id="evt-owner-merged",
+        type="channel.question.merged",
+        actor="pm",
+        payload={
+            "channel_id": "ch-product",
+            "thread_id": "main",
+            "question_id": "q-owner",
+            "into_question_id": "q-canonical",
+        },
+    ))
+    merged = build_operator_inbox(state_dir, log.read_all())
+    assert merged["summary"]["decisions_pending"] == 0
+    assert merged["items"][0]["status"] == "merged"
+
+
+def test_operator_inbox_keeps_only_latest_kanban_question_revision(
+    tmp_path: Path,
+) -> None:
+    state_dir, log = _state(tmp_path)
+
+    def request(event_id: str, revision: int, question: str) -> None:
+        log.append(ZfEvent(
+            id=event_id,
+            type="kanban.agent.plan.requested",
+            actor="kanban-agent",
+            payload={
+                "project_id": "project-a",
+                "conversation_id": "kanban:project-a",
+                "thread_key": "main",
+                "plan_request": {
+                    "request_id": "plan-route",
+                    "revision": revision,
+                    "header": "Choose route",
+                    "question_id": "route",
+                    "question": question,
+                    "options": [
+                        {"id": "research", "label": "Research"},
+                        {"id": "channel", "label": "Channel"},
+                    ],
+                    "valid": True,
+                },
+            },
+        ))
+
+    request("evt-plan-r1", 1, "Which route should run?")
+    request("evt-plan-r2", 2, "Which route should run first?")
+    revised = build_operator_inbox(state_dir, log.read_all())
+
+    assert revised["summary"]["decisions_pending"] == 1
+    pending = revised["pending"][0]
+    assert pending["kind"] == "kanban_question"
+    assert pending["revision"] == 2
+    assert pending["deep_link"] == "?page=project&agent=open"
+    statuses = {item["revision"]: item["status"] for item in revised["items"]}
+    assert statuses == {1: "superseded", 2: "pending"}
+
+    log.append(ZfEvent(
+        id="evt-plan-answer-r2",
+        type="kanban.agent.plan.answered",
+        actor="web",
+        payload={
+            "request_event_id": "evt-plan-r2",
+            "request_id": "plan-route",
+            "revision": 2,
+            "question_id": "route",
+            "option_id": "research",
+            "answer": "Research",
+        },
+    ))
+    answered = build_operator_inbox(state_dir, log.read_all())
+    assert answered["summary"]["decisions_pending"] == 0
+    assert answered["pending"] == []
+    assert {item["revision"]: item["status"] for item in answered["items"]} == {
+        1: "superseded",
+        2: "answered",
+    }
+
+
 def test_operator_inbox_read_model_includes_human_decision(tmp_path: Path) -> None:
     from zf.web.projections import read_model
 

@@ -11,6 +11,7 @@ from zf.core.security.redaction import redact_obj
 from zf.runtime.agent_session_stream import AgentSessionStreamEmitter
 from zf.runtime.live_delta_bus import live_delta_bus_for_writer
 from zf.web.headless_agent import HeadlessMessage
+from zf.web.headless_control_stream import HeadlessControlStreamFilter
 
 
 class HeadlessDeltaEmitter:
@@ -47,18 +48,34 @@ class HeadlessDeltaEmitter:
         self._pending_thinking: list[str] = []
         self._last_flush_at = time.monotonic()
         self._content_started = False
+        self._control_stream = HeadlessControlStreamFilter()
         self.first_output_at: float | None = None
 
     def emit(self, message: HeadlessMessage) -> None:
         if self.first_output_at is None:
             self.first_output_at = time.monotonic()
+        if message.type == "text":
+            batch = self._control_stream.feed(message.content)
+            for content in batch.visible_text:
+                visible = HeadlessMessage(type="text", content=content)
+                if self.agent_session_emitter is not None:
+                    self.agent_session_emitter.emit_message(visible)
+                self._pending_text.append(content)
+            self._flush_first_content_or_due()
+            for control_kind in batch.preparing:
+                self.flush()
+                self._emit_one(HeadlessMessage(
+                    type="status",
+                    content=(
+                        "Preparing choices..."
+                        if control_kind == "plan_request"
+                        else "Preparing action preview..."
+                    ),
+                    raw={"control_state": f"{control_kind}_buffering"},
+                ))
+            return
         if self.agent_session_emitter is not None:
             self.agent_session_emitter.emit_message(message)
-        if message.type == "text":
-            if message.content:
-                self._pending_text.append(message.content)
-            self._flush_first_content_or_due()
-            return
         if message.type == "thinking":
             if message.content:
                 self._pending_thinking.append(message.content)
@@ -170,4 +187,7 @@ def _message_event_payload(message: HeadlessMessage) -> dict[str, Any]:
         payload["input"] = redact_obj(message.input)
     if message.output:
         payload["output"] = message.output
+    control_state = str(message.raw.get("control_state") or "")
+    if control_state:
+        payload["control_state"] = control_state
     return payload

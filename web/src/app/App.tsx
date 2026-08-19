@@ -294,6 +294,7 @@ function readInitialQuery() {
     status: params.get("status") ?? "all",
     task: params.get("task"),
     channel: params.get("channel") ?? "",
+    openAgent: params.get("agent") === "open",
     project: params.get("project") ?? "",
     plan: params.get("plan"),
   };
@@ -669,8 +670,10 @@ export function App() {
   );
   const [webSessionStatus, setWebSessionStatus] = useState<NonNullable<RuntimeSummary["web_session"]> | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => storedThemeMode());
-  const [agentPanelMode, setAgentPanelMode] = useState<AgentPanelMode>("collapsed");
-  const [agentPanelHasOpened, setAgentPanelHasOpened] = useState(false);
+  const [agentPanelMode, setAgentPanelMode] = useState<AgentPanelMode>(
+    initial.openAgent ? "docked" : "collapsed",
+  );
+  const [agentPanelHasOpened, setAgentPanelHasOpened] = useState(initial.openAgent);
   const [commandOpen, setCommandOpen] = useState(false);
   const [newChannelOpen, setNewChannelOpen] = useState(false);
   const [newChannelDraft, setNewChannelDraft] = useState<NewChannelDraft>(() => emptyNewChannelDraft());
@@ -1095,7 +1098,7 @@ export function App() {
         const inbox = await getOperatorInbox(activeProjectId || undefined);
         if (!cancelled) {
           setInboxPendingCount((inbox?.pending ?? []).filter((item) => (
-            item.kind === "plan_approval" || item.kind === "human_decision"
+            item.actionability === "human_required"
           )).length);
         }
       } catch {
@@ -1724,6 +1727,19 @@ export function App() {
         ? ""
         : window.localStorage.getItem("zf.operatorBackend") ?? ""
     ),
+    refreshChannelDetail: async () => {
+      const channelId = selectedChannelId || "ch-zaofu";
+      const projectId = activeProjectId || undefined;
+      const projectTicket = projectRequestScope.capture(projectId || "");
+      const detailTicket = channelDetailRequestGateRef.current.issue();
+      const detail = await getChannelConversation(channelId, projectId, {
+        requireFresh: true,
+      });
+      if (!projectRequestScope.isCurrent(projectTicket)) return;
+      if (selectedChannelIdRef.current !== channelId) return;
+      if (!channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
+      setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
+    },
     selectedChannelId,
     snapshot,
     submitAction,

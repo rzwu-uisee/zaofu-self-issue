@@ -20,20 +20,22 @@ import { getOperatorInbox, getPlanPreview, postAction } from "../../api/client";
 import type { OperatorInboxItem, OperatorInboxProjection, PlanPreview } from "../../api/types";
 import { MarkdownText } from "../agent-session/MarkdownText";
 
-type InboxView = "action_required" | "runtime_attention" | "automation" | "notification" | "all" | "resolved";
-type InboxKindFilter = "all" | "plan_approval" | "human_decision" | "runtime_attention" | "approval" | "run_delivery";
+type InboxView = "decisions" | "runtime_attention" | "automation" | "notification" | "all" | "resolved";
+type InboxKindFilter = "all" | "plan_approval" | "human_decision" | "channel_decision" | "kanban_question" | "runtime_attention" | "approval" | "run_delivery";
 
 const KIND_OPTIONS: Array<{ value: InboxKindFilter; label: string }> = [
   { value: "all", label: "All types" },
   { value: "plan_approval", label: "Plan Ready" },
   { value: "human_decision", label: "Human Decision" },
+  { value: "channel_decision", label: "Channel Decision" },
+  { value: "kanban_question", label: "Kanban Question" },
   { value: "runtime_attention", label: "Runtime Attention" },
   { value: "approval", label: "Approval" },
   { value: "run_delivery", label: "Run Delivery" },
 ];
 
 const VIEW_OPTIONS: Array<{ value: InboxView; label: string }> = [
-  { value: "action_required", label: "Action" },
+  { value: "decisions", label: "Decisions" },
   { value: "runtime_attention", label: "Runtime" },
   { value: "automation", label: "Automation" },
   { value: "notification", label: "Delivery" },
@@ -53,7 +55,7 @@ export function PlanApprovalPanel(
   const [preview, setPreview] = useState<PlanPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [actionError, setActionError] = useState("");
-  const [view, setView] = useState<InboxView>("action_required");
+  const [view, setView] = useState<InboxView>("decisions");
   const [kindFilter, setKindFilter] = useState<InboxKindFilter>("all");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState("");
@@ -238,7 +240,7 @@ export function PlanApprovalPanel(
         <div>
           <h3>Inbox</h3>
           <span className="muted">
-            {initialLoading ? "loading" : pendingCount ? `${pendingCount} action required` : "clear"}
+            {initialLoading ? "loading" : pendingCount ? `${pendingCount} decisions` : "clear"}
             {diagnosticCount ? ` / ${diagnosticCount} diagnostics` : ""}
             {deliveryCount ? ` / ${deliveryCount} deliveries` : ""}
             {view === "all" && totalCount ? ` / ${totalCount} total` : ""}
@@ -306,6 +308,7 @@ export function PlanApprovalPanel(
               <InboxRow
                 key={item.id}
                 item={item}
+                projectId={projectId}
                 selected={item.id === selectedItem?.id}
                 busy={busy}
                 rejectReason={rejectReason[inboxItemReasonKey(item)] || ""}
@@ -325,7 +328,7 @@ export function PlanApprovalPanel(
             // groups by (kind, title) — 210 identical attention rows buried
             // the 15 real decisions on the r2 walk.
             const isDecision = (item: OperatorInboxItem) =>
-              item.kind === "plan_approval" || item.kind === "human_decision";
+              item.actionability === "human_required";
             const decisions = filteredItems.filter(isDecision);
             const rest = filteredItems.filter((item) => !isDecision(item));
             const groups = new Map<string, OperatorInboxItem[]>();
@@ -347,14 +350,6 @@ export function PlanApprovalPanel(
                 {decisions.length > 1 ? (
                   <div className="operator-inbox-inline-actions">
                     <span className="muted">{decisions.length} pending decisions</span>
-                    <button
-                      type="button"
-                      className="delivery-action-button"
-                      disabled={Boolean(busy)}
-                      onClick={() => { for (const entry of decisions) void actOnItem(entry, "human-decision-dismiss"); }}
-                    >
-                      Dismiss all
-                    </button>
                   </div>
                 ) : null}
                 {decisions.map(renderRow)}
@@ -407,6 +402,7 @@ export function PlanApprovalPanel(
 
 function InboxRow({
   item,
+  projectId,
   selected,
   busy,
   rejectReason,
@@ -419,6 +415,7 @@ function InboxRow({
   onAction,
 }: {
   item: OperatorInboxItem;
+  projectId: string;
   selected: boolean;
   busy: string;
   rejectReason: string;
@@ -459,6 +456,10 @@ function InboxRow({
             {item.trace_id ? <span>trace {item.trace_id}</span> : null}
             {item.checkpoint_id ? <span>checkpoint {item.checkpoint_id}</span> : null}
             {item.run_id ? <span>run {item.run_id}</span> : null}
+            {item.channel_id ? <span>channel {item.channel_id}</span> : null}
+            {item.thread_id ? <span>thread {item.thread_id}</span> : null}
+            {typeof item.revision === "number" ? <span>revision {item.revision}</span> : null}
+            {typeof item.question_count === "number" && item.question_count > 1 ? <span>{item.question_count} questions</span> : null}
             {item.category ? <span>{categoryLabel(item.category)}</span> : null}
             {item.source_role ? <span>{sourceLabel(item.source_role)}</span> : null}
             {Number(item.dedupe_count || 0) > 1 ? <span>{item.dedupe_count} grouped</span> : null}
@@ -469,7 +470,9 @@ function InboxRow({
         <>
           {item.deep_link ? (
             <div className="operator-inbox-inline-actions">
-              <a className="delivery-action-button" href={item.deep_link}>View run delivery</a>
+              <a className="delivery-action-button" href={inboxDeepLink(item.deep_link, projectId)}>
+                {item.deep_link_label || "Open source"}
+              </a>
             </div>
           ) : null}
           <InboxRowActions
@@ -650,6 +653,13 @@ function itemSearchText(item: OperatorInboxItem): string {
     item.checkpoint_id,
     item.fingerprint,
     item.attention_id,
+    item.question_id,
+    item.channel_id,
+    item.thread_id,
+    item.asked_by,
+    item.request_id,
+    item.subject_type,
+    item.conversation_id,
   ].filter(Boolean).join(" ").toLowerCase();
 }
 
@@ -662,14 +672,14 @@ function inboxItemActionKey(item: OperatorInboxItem): string {
 }
 
 function inboxItemPrimaryRef(item: OperatorInboxItem): string {
-  return String(item.plan_id || item.decision_token || item.attention_id || item.approval_ref || item.id || "");
+  return String(item.plan_id || item.decision_token || item.question_id || item.request_id || item.attention_id || item.approval_ref || item.id || "");
 }
 
 function inboxItemsForView(inbox: OperatorInboxProjection | null, view: InboxView): OperatorInboxItem[] {
   const items = inbox?.items ?? [];
   if (view === "all") return items;
   if (view === "resolved") return items.filter((item) => item.status !== "pending" || item.category === "resolved");
-  if (view === "action_required") {
+  if (view === "decisions") {
     return items.filter((item) => item.status === "pending" && item.actionability === "human_required");
   }
   if (view === "runtime_attention") {
@@ -703,6 +713,8 @@ function inboxActionPayload(item: OperatorInboxItem): Record<string, unknown> {
 function kindLabel(kind: string): string {
   if (kind === "plan_approval") return "Plan Ready";
   if (kind === "human_decision") return "Human Decision";
+  if (kind === "channel_decision") return "Channel Decision";
+  if (kind === "kanban_question") return "Kanban Question";
   if (kind === "runtime_attention") return "Runtime Attention";
   if (kind === "approval") return "Approval";
   if (kind === "run_delivery") return "Run Delivery";
@@ -710,7 +722,7 @@ function kindLabel(kind: string): string {
 }
 
 function categoryLabel(category: string): string {
-  if (category === "action_required") return "Action required";
+  if (category === "action_required") return "Decision";
   if (category === "automation_diagnostic") return "Automation";
   if (category === "runtime_attention") return "Runtime";
   if (category === "notification") return "Notification";
@@ -724,12 +736,16 @@ function sourceLabel(source: string): string {
   if (source === "supervisor") return "Supervisor";
   if (source === "orchestrator") return "Orchestrator";
   if (source === "worker") return "Worker";
+  if (source === "channel") return "Channel";
+  if (source === "kanban_agent") return "Kanban Agent";
   return source.replace(/_/g, " ");
 }
 
 function kindIcon(kind: string): LucideIcon {
   if (kind === "plan_approval") return FileText;
   if (kind === "human_decision") return ShieldCheck;
+  if (kind === "channel_decision") return MessageSquare;
+  if (kind === "kanban_question") return MessageSquare;
   if (kind === "runtime_attention") return AlertTriangle;
   if (kind === "approval") return CheckCircle2;
   return Bell;
@@ -749,4 +765,11 @@ function compactTime(value?: string): string {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d`;
   return new Date(parsed).toLocaleDateString();
+}
+
+function inboxDeepLink(value: string, projectId: string): string {
+  const target = new URL(value, window.location.href);
+  if (projectId) target.searchParams.set("project", projectId);
+  if (/^https?:\/\//i.test(value)) return target.toString();
+  return `${target.pathname}${target.search}${target.hash}`;
 }

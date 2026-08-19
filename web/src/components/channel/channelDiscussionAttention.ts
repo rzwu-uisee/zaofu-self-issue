@@ -56,33 +56,68 @@ export function selectChannelDiscussionAttention(
 export function presentChannelDiscussionAttention(
   attention: ChannelDiscussionAttention,
 ): ChannelDiscussionAttentionPresentation {
-  if (attention.state === "needs_input") {
-    if (attention.owner_question_count > 0) {
-      const activeSuffix = attention.active_agent_count > 0
-        ? ` · ${countLabel(attention.active_agent_count, "agent")} still responding`
-        : "";
+  const executionState = attention.execution_state ?? (
+    attention.active_agent_count > 0
+      ? "running"
+      : attention.state === "needs_input"
+        ? "ready"
+        : attention.state
+  );
+  const attentionKind = attention.attention_kind ?? (
+    attention.owner_question_count > 0
+      ? "question"
+      : attention.state === "needs_input"
+        ? "review"
+        : "none"
+  );
+  const transition = attention.blocks_transition || (
+    attentionKind === "question" ? "synthesis" : "consensus"
+  );
+
+  if (attentionKind === "question") {
+    const decisions = countLabel(attention.owner_question_count, "decision");
+    if (executionState === "running") {
       return {
-        label: "Needs input",
-        summary: `${countLabel(attention.owner_question_count, "owner decision")} waiting${activeSuffix}`,
-        tone: "warning",
+        label: `${countLabel(attention.active_agent_count, "agent")} responding`,
+        summary: `${decisions} pending · blocks ${transition}`,
+        tone: "info",
         action: "questions",
-        actionLabel: "Review decisions",
+        actionLabel: `Review ${attention.owner_question_count}`,
         visible: true,
       };
     }
-    const activeSuffix = attention.active_agent_count > 0
-      ? ` · ${countLabel(attention.active_agent_count, "agent")} still responding`
-      : "";
     return {
-      label: "Needs input",
-      summary: `The synthesized result needs an owner decision${activeSuffix}`,
+      label: "Waiting for you",
+      summary: `${decisions} ${attention.owner_question_count === 1 ? "blocks" : "block"} ${transition}`,
+      tone: "warning",
+      action: "questions",
+      actionLabel: `Answer ${attention.owner_question_count}`,
+      visible: true,
+    };
+  }
+
+  if (attentionKind === "review") {
+    if (executionState === "running") {
+      return {
+        label: `${countLabel(attention.active_agent_count, "agent")} responding`,
+        summary: `Result review pending · blocks ${transition}`,
+        tone: "info",
+        action: "result",
+        actionLabel: "Review result",
+        visible: true,
+      };
+    }
+    return {
+      label: "Waiting for review",
+      summary: `Owner decision blocks ${transition}`,
       tone: "warning",
       action: "result",
       actionLabel: "Review result",
       visible: true,
     };
   }
-  if (attention.state === "running") {
+
+  if (executionState === "running") {
     return {
       label: attention.active_agent_count > 0
         ? `${countLabel(attention.active_agent_count, "agent")} responding`
@@ -90,11 +125,11 @@ export function presentChannelDiscussionAttention(
       summary: "",
       tone: "info",
       action: "activity",
-      actionLabel: "View activity",
+      actionLabel: "",
       visible: true,
     };
   }
-  if (attention.state === "ready") {
+  if (executionState === "ready") {
     return {
       label: "Ready",
       summary: `${countLabel(attention.completed_reply_count, "reply", "replies")} complete`,
@@ -104,7 +139,7 @@ export function presentChannelDiscussionAttention(
       visible: true,
     };
   }
-  if (attention.state === "blocked") {
+  if (executionState === "blocked") {
     return {
       label: "Blocked",
       summary: attention.failed_reply_count > 0

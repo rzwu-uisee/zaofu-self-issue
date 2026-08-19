@@ -1120,6 +1120,24 @@ function StackedCards({
   return (
     <div className="agent-stacked-cards">
       {cards.map((card) => {
+        if (card.payload?.preparing === true) {
+          return (
+            <div
+              className="agent-stack-card plan"
+              data-agent-card-kind="preparing"
+              data-testid="agent-card-preparing"
+              key={card.id}
+            >
+              <div className="agent-action-receipt muted">
+                <Loader2 aria-hidden="true" className="spin" size={14} />
+                <span className="agent-plan-receipt-copy">
+                  <small>Preparing</small>
+                  <strong>{card.title}</strong>
+                </span>
+              </div>
+            </div>
+          );
+        }
         const isPlan = card.kind === "plan" || card.kind === "question";
         const isApprove = card.kind === "approve" || card.kind === "proposal";
         const isResult = card.kind === "workflow-result";

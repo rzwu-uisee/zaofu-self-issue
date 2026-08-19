@@ -39,7 +39,7 @@ def project_discussion_attention(
         session = channel["discussions"].get(thread_id)
         if not isinstance(session, dict):
             session = {}
-        started_at = str(session.get("started_at") or "")
+        session_started_at = str(session.get("started_at") or "")
 
         def current_session_item(
             item: dict[str, Any],
@@ -52,7 +52,11 @@ def project_discussion_attention(
                 (str(item.get(key) or "") for key in time_keys if item.get(key)),
                 "",
             )
-            return not started_at or not item_time or item_time >= started_at
+            return (
+                not session_started_at
+                or not item_time
+                or item_time >= session_started_at
+            )
 
         replies = [
             item for item in reply_requests
@@ -97,7 +101,7 @@ def project_discussion_attention(
             )
             if not member_id:
                 continue
-            started_at = str(
+            active_started_at = str(
                 item.get("started_at")
                 or item.get("updated_at")
                 or item.get("created_at")
@@ -107,10 +111,10 @@ def project_discussion_attention(
                 "member_id": member_id,
                 "request_id": str(item.get("request_id") or ""),
                 "status": str(item.get("status") or "pending"),
-                "started_at": started_at,
+                "started_at": active_started_at,
             }
             current = active_agents_by_id.get(member_id)
-            if current is None or started_at >= current["started_at"]:
+            if current is None or active_started_at >= current["started_at"]:
                 active_agents_by_id[member_id] = candidate
         active_agents = sorted(
             active_agents_by_id.values(),
@@ -126,9 +130,9 @@ def project_discussion_attention(
         ) if synthesis_requests else ""
         consensus_time = str(consensus.get("ts") or "")
         consensus_is_current = bool(consensus) and (
-            not started_at
+            not session_started_at
             or not consensus_time
-            or consensus_time >= started_at
+            or consensus_time >= session_started_at
         )
         consensus_reached = (
             consensus_is_current and bool(consensus.get("reached_event_id"))
@@ -156,6 +160,26 @@ def project_discussion_attention(
             owner_confirmed=owner_confirmed,
             open_questions=bool(open_questions),
         )
+        execution_state = _execution_state(
+            phase=phase,
+            outcome=outcome,
+            owner_questions=bool(owner_questions),
+            owner_confirmation_required=owner_confirmation_required,
+            active_replies=bool(active_replies),
+            failed_replies=failed_count,
+            synthesis_status=latest_synthesis_status,
+            has_synthesis=bool(syntheses),
+            consensus_reached=consensus_reached,
+            owner_confirmed=owner_confirmed,
+            open_questions=bool(open_questions),
+        )
+        attention_kind = (
+            "question"
+            if owner_questions
+            else "review"
+            if owner_confirmation_required
+            else "none"
+        )
         next_action = _next_action(
             state,
             reason=reason,
@@ -180,12 +204,28 @@ def project_discussion_attention(
         )
 
         projection[thread_id] = {
-            "schema_version": "channel.discussion-attention.v1",
+            "schema_version": "channel.discussion-attention.v2",
             "is_derived_projection": True,
             "thread_id": thread_id,
             "state": state,
             "reason": reason,
             "next_action": next_action,
+            "execution_state": execution_state,
+            "attention_kind": attention_kind,
+            "blocking_scope": (
+                "phase"
+                if attention_kind == "question"
+                else "workflow"
+                if attention_kind == "review"
+                else "none"
+            ),
+            "blocks_transition": (
+                "synthesis"
+                if attention_kind == "question"
+                else "consensus"
+                if attention_kind == "review"
+                else ""
+            ),
             "kernel_phase": phase,
             "last_outcome": outcome,
             "participant_count": len(session.get("roster") or []),
@@ -285,6 +325,46 @@ def _attention_state(
     if open_questions:
         return "blocked", "unresolved_questions"
     return "done", "discussion_idle"
+
+
+def _execution_state(
+    *,
+    phase: str,
+    outcome: str,
+    owner_questions: bool,
+    owner_confirmation_required: bool,
+    active_replies: bool,
+    failed_replies: int,
+    synthesis_status: str,
+    has_synthesis: bool,
+    consensus_reached: bool,
+    owner_confirmed: bool,
+    open_questions: bool,
+) -> str:
+    """Project work progress independently from operator attention."""
+    if phase == "idle" and outcome == "consensus":
+        return "done"
+    if phase == "idle" and outcome == "stalled":
+        return "blocked"
+    if active_replies:
+        return "running"
+    if failed_replies or synthesis_status == "blocked":
+        return "blocked"
+    if owner_questions or owner_confirmation_required:
+        return "ready"
+    if phase == "phase2_relay":
+        return "blocked" if open_questions else "ready"
+    if phase == "phase3_synthesis":
+        if consensus_reached or owner_confirmed:
+            return "done"
+        if has_synthesis:
+            return "ready"
+        return "running"
+    if phase in {"active", "phase1_blind"}:
+        return "running"
+    if open_questions:
+        return "blocked"
+    return "done"
 
 
 def _next_action(state: str, *, reason: str, has_result: bool) -> str:

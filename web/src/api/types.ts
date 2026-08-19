@@ -1743,6 +1743,10 @@ export interface ChannelDiscussionAttention {
   state: ChannelDiscussionAttentionState;
   reason: string;
   next_action: string;
+  execution_state?: "running" | "ready" | "blocked" | "done";
+  attention_kind?: "none" | "question" | "review";
+  blocking_scope?: "none" | "phase" | "workflow";
+  blocks_transition?: string;
   kernel_phase: string;
   last_outcome: string;
   participant_count: number;
@@ -2679,6 +2683,18 @@ export interface OperatorInboxItem {
   attention_id?: string;
   message_id?: string;
   run_id?: string;
+  question_id?: string;
+  channel_id?: string;
+  thread_id?: string;
+  asked_by?: string;
+  question_kind?: string;
+  priority?: string;
+  request_event_id?: string;
+  request_id?: string;
+  revision?: number;
+  subject_type?: string;
+  conversation_id?: string;
+  question_count?: number;
   goal_id?: string;
   terminal_status?: string;
   task_counts?: Record<string, number>;
@@ -2686,6 +2702,7 @@ export interface OperatorInboxItem {
   gap_count?: number;
   next_action?: string;
   deep_link?: string;
+  deep_link_label?: string;
   category?: "action_required" | "automation_diagnostic" | "runtime_attention" | "notification" | "resolved" | string;
   actionability?: "human_required" | "automation_owned" | "informational" | "resolved" | string;
   source_role?: string;
@@ -2711,6 +2728,10 @@ export interface OperatorInboxProjection {
     plan_approvals: number;
     attention: number;
     human_decisions?: number;
+    decisions?: number;
+    decisions_pending?: number;
+    channel_decisions?: number;
+    kanban_questions?: number;
     run_deliveries?: number;
     suppressed_acknowledged?: number;
   };

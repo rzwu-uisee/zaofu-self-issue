@@ -16,6 +16,15 @@ from zf.runtime.operator_plan_preview import (
     PLAN_REJECTED,
     plan_preview_available,
 )
+from zf.runtime.operator_inbox_decisions import (
+    bind_channel_question_aliases,
+    channel_decision_item,
+    channel_question_key,
+    is_owner_question,
+    kanban_plan_request,
+    kanban_question_item,
+    kanban_question_item_id,
+)
 
 GENERIC_APPROVAL_REQUESTED = "approval.requested"
 GENERIC_APPROVAL_RESOLVED = "approval.resolved"
@@ -32,7 +41,13 @@ OWNER_VISIBLE_MESSAGE_REQUESTED = "owner.visible_message.requested"
 
 OPERATOR_INBOX_SCHEMA_VERSION = "operator-inbox.v2"
 _HIDDEN_VISIBLE_STATUSES = {"acknowledged"}
-_ACTION_REQUIRED_KINDS = {"plan_approval", "approval", "human_decision"}
+_ACTION_REQUIRED_KINDS = {
+    "plan_approval",
+    "approval",
+    "human_decision",
+    "channel_decision",
+    "kanban_question",
+}
 
 
 def build_operator_inbox(
@@ -49,6 +64,9 @@ def build_operator_inbox(
 
     items: dict[str, dict[str, Any]] = {}
     attention_aliases: dict[str, str] = {}
+    channel_question_aliases: dict[str, str] = {}
+    plan_request_keys: dict[str, str] = {}
+    latest_plan_keys: dict[str, str] = {}
     suppressed_acknowledged = 0
     read_items: set[str] = set()
     read_all_at = ""
@@ -65,6 +83,97 @@ def build_operator_inbox(
             continue
         if etype == INBOX_ALL_READ:
             read_all_at = ts or read_all_at
+            continue
+
+        if etype == "channel.question.opened":
+            if not is_owner_question(payload):
+                continue
+            item = channel_decision_item(event=event, payload=payload)
+            key = str(item["id"])
+            items[key] = item
+            bind_channel_question_aliases(
+                channel_question_aliases,
+                payload,
+                key,
+            )
+            continue
+
+        if etype == "channel.question.updated":
+            key = channel_question_key(channel_question_aliases, payload)
+            existing = items.get(key)
+            if existing is not None:
+                existing["title"] = str(
+                    payload.get("header") or existing.get("title") or ""
+                )
+                existing["summary"] = str(
+                    payload.get("question") or existing.get("summary") or ""
+                )
+                existing["latest_event_id"] = event_id
+                existing["last_seen_at"] = ts
+            continue
+
+        if etype in {"channel.question.resolved", "channel.question.merged"}:
+            key = channel_question_key(channel_question_aliases, payload)
+            existing = items.get(key)
+            if existing is not None:
+                existing["status"] = (
+                    "merged" if etype.endswith(".merged") else "resolved"
+                )
+                existing["resolved_event_id"] = event_id
+                existing["resolved_ts"] = ts
+                existing["resolution"] = str(
+                    payload.get("resolution")
+                    or payload.get("into_question_id")
+                    or "resolved"
+                )
+            continue
+
+        if etype == "kanban.agent.plan.requested":
+            request = kanban_plan_request(payload)
+            if request.get("valid") is False:
+                continue
+            request_id = str(request.get("request_id") or event_id).strip()
+            if not request_id:
+                continue
+            revision = _int_or_none(request.get("revision")) or 1
+            key = kanban_question_item_id(request_id, revision)
+            prior_key = latest_plan_keys.get(request_id)
+            if prior_key and prior_key != key and prior_key in items:
+                prior = items[prior_key]
+                if prior.get("status") == "pending":
+                    prior["status"] = "superseded"
+                    prior["resolved_event_id"] = event_id
+                    prior["resolved_ts"] = ts
+                    prior["resolution"] = f"revision {revision} requested"
+            items[key] = kanban_question_item(
+                event=event,
+                payload=payload,
+                request=request,
+                request_id=request_id,
+                revision=revision,
+            )
+            latest_plan_keys[request_id] = key
+            plan_request_keys[event_id] = key
+            plan_request_keys[f"{request_id}:{revision}"] = key
+            continue
+
+        if etype == "kanban.agent.plan.answered":
+            request_event_id = str(
+                payload.get("request_event_id") or ""
+            ).strip()
+            request_id = str(payload.get("request_id") or "").strip()
+            revision = _int_or_none(payload.get("revision")) or 1
+            key = (
+                plan_request_keys.get(request_event_id)
+                or plan_request_keys.get(f"{request_id}:{revision}")
+                or ""
+            )
+            existing = items.get(key)
+            if existing is not None:
+                existing["status"] = "answered"
+                existing["resolved_event_id"] = event_id
+                existing["resolved_ts"] = ts
+                existing["resolution"] = str(payload.get("answer") or "answered")
             continue
 
         if etype == OWNER_VISIBLE_MESSAGE_REQUESTED and (
@@ -246,6 +355,10 @@ def build_operator_inbox(
             "plan_approvals": sum(1 for item in ordered if item.get("kind") == "plan_approval"),
             "attention": sum(1 for item in ordered if item.get("kind") == "runtime_attention"),
             "human_decisions": sum(1 for item in ordered if item.get("kind") == "human_decision"),
+            "decisions": sum(1 for item in ordered if item.get("kind") in {"channel_decision", "kanban_question"}),
+            "decisions_pending": sum(1 for item in pending if item.get("kind") in {"channel_decision", "kanban_question"}),
+            "channel_decisions": sum(1 for item in ordered if item.get("kind") == "channel_decision"),
+            "kanban_questions": sum(1 for item in ordered if item.get("kind") == "kanban_question"),
             "run_deliveries": sum(1 for item in ordered if item.get("kind") == "run_delivery"),
             "suppressed_acknowledged": suppressed_acknowledged + len(hidden),
             "unread": sum(1 for item in ordered if item.get("unread")),
@@ -326,6 +439,7 @@ def _decorate_item(
 def _build_views(items: list[dict[str, Any]]) -> dict[str, Any]:
     view_defs = {
         "action_required": lambda item: item.get("status") == "pending" and item.get("actionability") == "human_required",
+        "decisions": lambda item: item.get("status") == "pending" and item.get("kind") in _ACTION_REQUIRED_KINDS,
         "runtime_attention": lambda item: item.get("status") == "pending" and item.get("category") == "runtime_attention",
         "automation": lambda item: item.get("status") == "pending" and item.get("category") == "automation_diagnostic",
         "notification": lambda item: item.get("status") == "pending" and item.get("category") == "notification",
@@ -348,6 +462,8 @@ def _group_key_for_item(item: dict[str, Any]) -> str:
         ("human", "decision_token"),
         ("approval", "approval_ref"),
         ("attention", "attention_id"),
+        ("question", "question_id"),
+        ("kanban", "request_id"),
         ("event", "created_event_id"),
     ):
         value = str(item.get(key) or "").strip()

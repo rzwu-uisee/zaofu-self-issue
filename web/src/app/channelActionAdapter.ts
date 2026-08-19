@@ -27,6 +27,7 @@ interface ChannelActionAdapterArgs {
   channelDetail: ChannelDetail | null;
   prepareTaskAgent: (taskId: string) => void;
   readStoredBackend: () => string;
+  refreshChannelDetail: () => Promise<void>;
   selectedChannelId: string;
   snapshot: Snapshot | null;
   submitAction: SubmitAction;
@@ -97,7 +98,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     resolution: string,
     answer: string,
   ) {
-    await args.submitAction("channel-question-resolve", {
+    const result = await args.submitAction("channel-question-resolve", {
       channel_id: channelId(),
       thread_id: threadId,
       question_id: questionId,
@@ -106,6 +107,13 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       resolved_by: "owner:operator",
       source: "web-channel-question",
     });
+    if (!result.ok) return;
+    try {
+      await args.refreshChannelDetail();
+    } catch {
+      // The accepted action remains authoritative; live projection recovery
+      // can still converge after a transient refresh failure.
+    }
   }
 
   async function decideConsensus(

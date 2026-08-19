@@ -115,6 +115,38 @@ const conversation: AgentConversation = {
   id: "fixture", surface: "kanban_agent", activeThreadId: "main", threads: [thread],
 };
 
+const preparingConversation: AgentConversation = {
+  id: "fixture-preparing",
+  surface: "kanban_agent",
+  activeThreadId: "main",
+  threads: [{
+    id: "main",
+    title: "main",
+    status: "streaming",
+    turns: [{
+      id: "turn-preparing",
+      threadId: "main",
+      runs: [{
+        id: "run-preparing",
+        threadId: "main",
+        provider: "codex-headless",
+        status: "streaming",
+        parts: [],
+      }],
+      cards: [{
+        id: "control-pending-run-preparing",
+        kind: "plan",
+        title: "Preparing choices",
+        body: "Validating the available options.",
+        status: "submitted",
+        runId: "run-preparing",
+        threadId: "main",
+        payload: { preparing: true, controlKind: "plan_request" },
+      }],
+    }],
+  }],
+};
+
 // Same data as a channel_group surface — verifies channel activity now folds
 // via the same "See N steps" segmenter (Phase 1 #2).
 const channelConversation: AgentConversation = {
@@ -280,6 +312,19 @@ export function AgentSessionFixturePage() {
           compact
           compactRunHeader
           collapseCompletedRunDetails
+          minimalRunActivity
+          showRunDetails={false}
+          showRunProvider={false}
+        />
+      </div>
+
+      <h3 style={{ marginTop: 24 }}>Preparing choices — control JSON hidden</h3>
+      <div data-testid="fx-kanban-preparing">
+        <AgentSessionTimeline
+          activeThreadId="main"
+          conversation={preparingConversation}
+          compact
+          compactRunHeader
           minimalRunActivity
           showRunDetails={false}
           showRunProvider={false}

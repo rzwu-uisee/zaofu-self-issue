@@ -748,4 +748,171 @@ assert(!oldPlanCard?.planRequest?.response, "new answer does not bind to an olde
 assert(newPlanCard?.status === "completed", "answered latest Plan revision is completed");
 assert(newPlanCard?.planRequest?.response?.answer === "Channel", "latest Plan revision gets its exact answer");
 
+const preparingConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-preparing-message",
+      ts: "2026-07-16T00:04:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Which workflow should we use?",
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-preparing-created",
+      causation_id: "evt-preparing-message",
+      ts: "2026-07-16T00:04:01Z",
+      type: "kanban.agent.turn.created",
+      payload: { turn_id: "turn-preparing", thread_key: "main" },
+    },
+    {
+      id: "live-preparing",
+      ts: "2026-07-16T00:04:02Z",
+      type: "kanban.agent.turn.delta",
+      payload: {
+        turn_id: "turn-preparing",
+        thread_key: "main",
+        message_type: "status",
+        content: "Preparing choices...",
+        control_state: "plan_request_buffering",
+      },
+    },
+  ],
+});
+const preparingTurn = preparingConversation.threads[0]!.turns.find(
+  (turn) => turn.id === "evt-preparing-message",
+);
+assert(
+  preparingTurn?.cards.some((card) => card.payload?.preparing === true),
+  "typed control signal projects a non-submittable preparing card",
+);
+assert(
+  !preparingTurn?.runs[0]?.parts.some((part) => part.content?.includes("plan_request")),
+  "control protocol never becomes visible response text",
+);
+
+const preparedPlanConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-prepared-message",
+      ts: "2026-07-16T00:05:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Which workflow should we use?",
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-prepared-created",
+      causation_id: "evt-prepared-message",
+      ts: "2026-07-16T00:05:01Z",
+      type: "kanban.agent.turn.created",
+      payload: { turn_id: "turn-prepared", thread_key: "main" },
+    },
+    {
+      seq: 3,
+      id: "evt-prepared-plan",
+      ts: "2026-07-16T00:05:03Z",
+      type: "kanban.agent.plan.requested",
+      payload: {
+        thread_key: "main",
+        plan_request: {
+          ...planRequest,
+          request_event_id: "evt-prepared-plan",
+          turn_id: "turn-prepared",
+          originating_message_event_id: "evt-prepared-message",
+        },
+      },
+    },
+    {
+      id: "live-prepared",
+      ts: "2026-07-16T00:05:02Z",
+      type: "kanban.agent.turn.delta",
+      payload: {
+        turn_id: "turn-prepared",
+        thread_key: "main",
+        message_type: "status",
+        content: "Preparing choices...",
+        control_state: "plan_request_buffering",
+      },
+    },
+  ],
+});
+const preparedTurn = preparedPlanConversation.threads[0]!.turns.find(
+  (turn) => turn.id === "evt-prepared-message",
+);
+assert(
+  preparedTurn?.cards.some((card) => Boolean(card.planRequest)),
+  "canonical plan request replaces the preparing state",
+);
+assert(
+  !preparedTurn?.cards.some((card) => card.payload?.preparing === true),
+  "preparing card does not survive canonical replacement",
+);
+
+const invalidControlConversation = buildKanbanConversation({
+  activeThreadId: "main",
+  events: [
+    {
+      seq: 1,
+      id: "evt-invalid-message",
+      ts: "2026-07-16T00:06:00Z",
+      type: "user.message",
+      payload: {
+        target: "kanban-agent",
+        runtime_delivery: "headless",
+        thread_key: "main",
+        message: "Ask me a question.",
+      },
+    },
+    {
+      seq: 2,
+      id: "evt-invalid-created",
+      causation_id: "evt-invalid-message",
+      ts: "2026-07-16T00:06:01Z",
+      type: "kanban.agent.turn.created",
+      payload: { turn_id: "turn-invalid", thread_key: "main" },
+    },
+    {
+      seq: 3,
+      id: "evt-invalid-reply",
+      ts: "2026-07-16T00:06:03Z",
+      type: "kanban.agent.reply",
+      payload: {
+        turn_id: "turn-invalid",
+        thread_key: "main",
+        answer: "The request was invalid.",
+      },
+    },
+    {
+      id: "live-invalid",
+      ts: "2026-07-16T00:06:02Z",
+      type: "kanban.agent.turn.delta",
+      payload: {
+        turn_id: "turn-invalid",
+        thread_key: "main",
+        message_type: "status",
+        content: "Preparing choices...",
+        control_state: "plan_request_buffering",
+      },
+    },
+  ],
+});
+assert(
+  !invalidControlConversation.threads[0]!.turns.flatMap((turn) => turn.cards)
+    .some((card) => card.payload?.preparing === true),
+  "terminal reply clears preparing state when no valid plan is produced",
+);
+
 console.log("liveRunIndicator.test.ts OK");

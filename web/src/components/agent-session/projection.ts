@@ -225,6 +225,13 @@ function addCard(turn: AgentSessionTurn, card: AgentSessionCard): void {
   }
 }
 
+function removePreparingCards(turn: AgentSessionTurn, runId = ""): void {
+  turn.cards = turn.cards.filter((card) => !(
+    card.payload?.preparing === true
+    && (!runId || card.runId === runId)
+  ));
+}
+
 function shortThreadTitle(threadId: string): string {
   if (threadId === "main") return "main";
   if (threadId.startsWith("member:")) return `@${threadId.slice("member:".length)}`;
@@ -587,6 +594,7 @@ export function buildKanbanConversation(args: {
           updatedAt: event.ts,
         },
       );
+      removePreparingCards(turn, run.id);
       const response = (
         planResponsesByEvent.get(planRequest.requestEventId)
         ?? planResponsesByRevision.get(
@@ -643,6 +651,7 @@ export function buildKanbanConversation(args: {
           updatedAt: event.ts,
         },
       );
+      removePreparingCards(turn, run.id);
       const resolution = proposalResolutions.get(
         proposal.proposalEventId || "",
       );
@@ -718,8 +727,31 @@ export function buildKanbanConversation(args: {
           sourceEvent: event,
         });
       } else {
-        applyDelta(run, event, payload);
-        if (uiDeltaKind(payload) === "question") {
+        const controlState = textValue(payload.control_state).trim();
+        if (
+          controlState === "plan_request_buffering"
+          || controlState === "action_proposal_buffering"
+        ) {
+          const preparingPlan = controlState === "plan_request_buffering";
+          addCard(turn, {
+            id: `control-pending-${run.id}`,
+            kind: preparingPlan ? "plan" : "approve",
+            title: preparingPlan ? "Preparing choices" : "Preparing action preview",
+            body: preparingPlan
+              ? "Validating the available options."
+              : "Validating the proposed action and its impact.",
+            status: "submitted",
+            runId: run.id,
+            threadId: thread.id,
+            payload: {
+              preparing: true,
+              controlKind: preparingPlan ? "plan_request" : "action_proposal",
+            },
+          });
+        } else {
+          applyDelta(run, event, payload);
+        }
+        if (!controlState && uiDeltaKind(payload) === "question") {
           addCard(turn, {
             id: `question-${run.id}-${event.seq ?? turn.cards.length + 1}`,
             kind: "plan",
@@ -734,6 +766,7 @@ export function buildKanbanConversation(args: {
         }
       }
     } else if (event.type === "kanban.agent.reply") {
+      removePreparingCards(turn, run.id);
       if (run.status !== "cancelled") {
         run.status = textValue(payload.status) === "failed" ? "failed" : "completed";
       }
@@ -834,6 +867,7 @@ export function buildKanbanConversation(args: {
         sourceEvent: event,
       });
     } else {
+      removePreparingCards(turn, run.id);
       if (run.status !== "cancelled") {
         run.status = event.type.endsWith(".failed") ? "failed" : "completed";
       }

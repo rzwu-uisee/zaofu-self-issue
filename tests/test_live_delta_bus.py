@@ -141,6 +141,90 @@ def test_kanban_turn_deltas_bus_only_no_dual_emit(tmp_path: Path):
     assert rows[0].payload["turn_id"] == "turn-1"
 
 
+def test_kanban_control_envelope_is_hidden_from_live_text(tmp_path: Path):
+    from zf.core.events.model import ZfEvent
+    from zf.web.headless_agent import HeadlessMessage
+    from zf.web.headless_turn_observability import HeadlessDeltaEmitter
+
+    log = EventLog(tmp_path / "events.jsonl")
+    writer = EventWriter(log)
+    started = writer.emit("kanban.agent.turn.started", actor="web", payload={})
+    emitter = HeadlessDeltaEmitter(
+        writer=writer,
+        task_id=None,
+        turn_started=started,
+        user_message=ZfEvent(
+            type="user.message", actor="web", correlation_id="conv-1",
+        ),
+        turn_id="turn-control",
+        thread_key="main",
+        project_id="p",
+        conversation_id="c",
+        backend="codex",
+        flush_interval_s=0.0,
+    )
+
+    for chunk in (
+        "I need one choice.\n``",
+        "`json\n{\"plan_",
+        "request\": {\"question\": \"Which route?\"}}\n```",
+    ):
+        emitter.emit(HeadlessMessage(type="text", content=chunk))
+    emitter.flush()
+
+    rows, _ = LiveDeltaBus(tmp_path).read_since()
+    visible = "".join(
+        str(row.payload.get("content") or "")
+        for row in rows
+        if row.payload.get("message_type") == "text"
+    )
+    controls = [
+        row.payload.get("control_state")
+        for row in rows
+        if row.payload.get("control_state")
+    ]
+    assert visible == "I need one choice.\n"
+    assert "plan_request" not in visible
+    assert controls == ["plan_request_buffering"]
+
+
+def test_kanban_regular_fenced_json_remains_visible(tmp_path: Path):
+    from zf.core.events.model import ZfEvent
+    from zf.web.headless_agent import HeadlessMessage
+    from zf.web.headless_turn_observability import HeadlessDeltaEmitter
+
+    log = EventLog(tmp_path / "events.jsonl")
+    writer = EventWriter(log)
+    started = writer.emit("kanban.agent.turn.started", actor="web", payload={})
+    emitter = HeadlessDeltaEmitter(
+        writer=writer,
+        task_id=None,
+        turn_started=started,
+        user_message=ZfEvent(
+            type="user.message", actor="web", correlation_id="conv-1",
+        ),
+        turn_id="turn-json",
+        thread_key="main",
+        project_id="p",
+        conversation_id="c",
+        backend="codex",
+        flush_interval_s=0.0,
+    )
+
+    block = '```json\n{"status": "ok"}\n```'
+    emitter.emit(HeadlessMessage(type="text", content=block))
+    emitter.flush()
+
+    rows, _ = LiveDeltaBus(tmp_path).read_since()
+    visible = "".join(
+        str(row.payload.get("content") or "")
+        for row in rows
+        if row.payload.get("message_type") == "text"
+    )
+    assert visible == block
+    assert not any(row.payload.get("control_state") for row in rows)
+
+
 def test_bus_for_writer_derives_state_dir(tmp_path: Path):
     log = EventLog(tmp_path / "events.jsonl")
     bus = live_delta_bus_for_writer(EventWriter(log))
