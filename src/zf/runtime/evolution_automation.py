@@ -6,8 +6,6 @@ folds immutable facts into the next request or controlled action.
 
 from __future__ import annotations
 
-import os
-import platform
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +17,11 @@ from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.evolution_contracts import (
     EvolutionContractError,
     stable_digest,
+)
+from zf.runtime.evolution_environment import (
+    EnvironmentSnapshotter,
+    capture_evolution_environment,
+    freeze_campaign_environment,
 )
 from zf.runtime.evolution_coordinator import EvolutionCoordinator
 from zf.runtime.evolution_automation_support import (
@@ -94,6 +97,7 @@ def reconcile_evolution_automation(
     config: Any,
     project_root: Path,
     events: list[ZfEvent] | None = None,
+    environment_snapshotter: EnvironmentSnapshotter = capture_evolution_environment,
 ) -> EvolutionAutomationResult:
     """Advance all enabled campaigns by a bounded number of mechanical steps."""
 
@@ -202,6 +206,7 @@ def reconcile_evolution_automation(
                 deposition_ref=deposition_ref,
                 candidate=candidate,
                 policy=policy,
+                environment_snapshotter=environment_snapshotter,
                 workflow_run_id=(
                     event_run_id(event, aliases=aliases)
                     or str(payload.get("loop_request_id") or "")
@@ -372,7 +377,7 @@ def _advance_campaign(
             writer,
             campaign_event,
             campaign,
-            outcome="trial_attempts_exhausted",
+            outcome=_terminal_trial_outcome(trial_rows),
             adoption="rejected",
         )
         return counts
@@ -478,10 +483,12 @@ def _advance_campaign(
                 counts["trials_requested"] += 1
             return counts
         if canary.type == CANARY_FAILED:
+            canary_payload = _payload(canary)
+            retryable = bool(canary_payload.get("retryable", True))
             failed_attempts = _canary_failure_count(
                 events, str(asset["asset_id"]), int(asset["version"])
             )
-            if failed_attempts < int(getattr(policy, "max_trial_attempts", 2)):
+            if retryable and failed_attempts < int(getattr(policy, "max_trial_attempts", 2)):
                 if not _canary_request_open(
                     events, str(asset["asset_id"]), int(asset["version"])
                 ):
@@ -524,7 +531,7 @@ def _advance_campaign(
                 writer,
                 campaign_event,
                 campaign,
-                outcome="canary_infrastructure_exhausted",
+                outcome=_canary_terminal_outcome(canary_payload),
                 adoption="revoked",
                 comparison_id=str(comparison["comparison_id"]),
                 asset=asset,
@@ -596,6 +603,7 @@ def _materialize_campaign(
     deposition_ref: Mapping[str, Any],
     candidate: Mapping[str, Any],
     policy: Any,
+    environment_snapshotter: EnvironmentSnapshotter,
     workflow_run_id: str,
 ) -> dict[str, Any]:
     source_digest = str(deposition_ref["sha256"])
@@ -634,39 +642,34 @@ def _materialize_campaign(
             "mode": str(getattr(policy, "mode", "evaluate_only")),
             "backend": str(getattr(policy, "backend", "")),
             "model": str(getattr(policy, "model", "")),
+            "model_reasoning_effort": str(
+                getattr(policy, "model_reasoning_effort", "")
+            ),
             "trial_repetitions": int(getattr(policy, "trial_repetitions", 2)),
             "auto_asset_kinds": list(getattr(policy, "auto_asset_kinds", []) or []),
         },
         source_event.id,
     )
-    provider_snapshot = _snapshot(
-        state_dir,
-        "provider",
-        {
-            "backend": str(getattr(policy, "backend", "")),
-            "model": str(getattr(policy, "model", "") or "provider-default"),
-            "reasoning_effort": str(getattr(policy, "model_reasoning_effort", "")),
-        },
-        source_event.id,
+    environment_facts = freeze_campaign_environment(
+        project_root=project_root,
+        state_dir=state_dir,
+        source_event_id=source_event.id,
+        backend=str(getattr(policy, "backend", "")),
+        model=str(getattr(policy, "model", "")),
+        reasoning_effort=str(getattr(policy, "model_reasoning_effort", "")),
+        token_env=str(getattr(policy, "access_token_env", "")),
+        sealed_root=str(getattr(policy, "sealed_root", "")),
+        snapshotter=environment_snapshotter,
     )
-    toolchain_snapshot = _snapshot(
-        state_dir,
-        "toolchain",
-        {"python": platform.python_version(), "project_root": str(project_root)},
-        source_event.id,
-    )
-    environment_snapshot = _snapshot(
-        state_dir,
-        "environment",
-        {"system": platform.system(), "machine": platform.machine()},
-        source_event.id,
-    )
-    sandbox_snapshot = _snapshot(
-        state_dir,
-        "sandbox",
-        {"mode": "read_only_isolated_trial", "network": "provider_managed"},
-        source_event.id,
-    )
+    environment_capability = environment_facts.capability
+    capability_snapshot = environment_facts.capability_snapshot
+    provider_snapshot = environment_facts.provider_snapshot
+    toolchain_snapshot = environment_facts.toolchain_snapshot
+    environment_snapshot = environment_facts.environment_snapshot
+    sandbox_snapshot = environment_facts.sandbox_snapshot
+    network_snapshot = environment_facts.network_snapshot
+    credential_snapshot = environment_facts.credential_snapshot
+    environment_digests = environment_facts.digests
     diff_snapshot = _snapshot(
         state_dir,
         "mutation",
@@ -685,6 +688,9 @@ def _materialize_campaign(
         "provider_capability_digest": provider_snapshot["sha256"],
         "toolchain_digest": toolchain_snapshot["sha256"],
         "environment_digest": environment_snapshot["sha256"],
+        "sandbox_policy_digest": sandbox_snapshot["sha256"],
+        "network_policy_digest": network_snapshot["sha256"],
+        "credential_policy_digest": credential_snapshot["sha256"],
         "budget_digest": stable_digest(budget),
         "seed_policy_digest": stable_digest({"seed": "provider-managed-counterbalanced"}),
         "task_family": task_family,
@@ -762,12 +768,10 @@ def _materialize_campaign(
             "environment_digest": environment_snapshot["sha256"],
             "sandbox_policy_ref": sandbox_snapshot["ref"],
             "sandbox_policy_digest": sandbox_snapshot["sha256"],
-            "network_policy_ref": sandbox_snapshot["ref"],
-            "network_policy_digest": sandbox_snapshot["sha256"],
-            "credential_policy_digest": stable_digest({
-                "token_env": str(getattr(policy, "access_token_env", "")),
-                "secret_value_persisted": False,
-            }),
+            "network_policy_ref": network_snapshot["ref"],
+            "network_policy_digest": network_snapshot["sha256"],
+            "credential_policy_ref": credential_snapshot["ref"],
+            "credential_policy_digest": credential_snapshot["sha256"],
             "run_archive_manifest_ref": manifest_ref,
             "run_archive_manifest_digest": manifest_digest,
         },
@@ -877,6 +881,12 @@ def _materialize_campaign(
         "trial_repetitions": trial_repetitions,
         "policy": policy_body,
         "policy_digest": stable_digest(policy_body),
+        "environment_capability": {
+            "schema_version": str(environment_capability.get("schema_version") or ""),
+            "snapshot_ref": capability_snapshot,
+            "snapshot_digest": capability_snapshot["sha256"],
+            "frozen_digests": environment_digests,
+        },
     }
 
 
@@ -895,6 +905,28 @@ def _snapshot(
         created_by="run-manager",
         source_event_id=source_event_id,
     )
+
+
+def _terminal_trial_outcome(rows: list[Mapping[str, Any]]) -> str:
+    failure_classes = {
+        str(row.get("failure_class") or "")
+        for row in rows
+        if str(row.get("failure_class") or "")
+    }
+    if "evolution_environment_comparison_drift" in failure_classes:
+        return "environment_comparison_drift"
+    if any(value.startswith("evolution_environment_") for value in failure_classes):
+        return "environment_preflight_failed"
+    return "trial_attempts_exhausted"
+
+
+def _canary_terminal_outcome(payload: Mapping[str, Any]) -> str:
+    failure_class = str(payload.get("failure_class") or "")
+    if failure_class == "evolution_environment_comparison_drift":
+        return "environment_comparison_drift"
+    if failure_class.startswith("evolution_environment_"):
+        return "environment_preflight_failed"
+    return "canary_infrastructure_exhausted"
 
 
 def _next_asset_version(registry: Mapping[str, Any], asset_id: str) -> int:

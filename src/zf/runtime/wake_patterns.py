@@ -326,6 +326,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "autoresearch.loop.completed",
     "evolution.trial.execution.completed",
     "evolution.trial.execution.failed",
+    "evolution.environment.preflight.failed",
     "evolution.canary.completed",
     "evolution.canary.failed",
     "plan.insight.discovered",

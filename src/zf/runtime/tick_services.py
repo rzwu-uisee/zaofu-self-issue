@@ -751,6 +751,7 @@ def _is_evolution_work_input(event: ZfEvent) -> bool:
         "evolution.trial.retry.requested",
         "evolution.trial.execution.completed",
         "evolution.trial.execution.failed",
+        "evolution.environment.preflight.failed",
         "evolution.comparison.completed",
         "evolution.adoption.proposed",
         "evolution.canary.completed",

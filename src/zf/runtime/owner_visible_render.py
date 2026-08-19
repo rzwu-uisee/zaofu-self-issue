@@ -39,6 +39,7 @@ _REASON_HUMAN: tuple[tuple[str, str], ...] = (
     ("goal closure requires external input", "目标收尾需要外部输入或你的决定"),
     ("goal delivery operation failed", "目标交付操作失败,需要你关注"),
     ("goal delivery operation is blocked", "目标交付操作被阻塞,需要你关注"),
+    ("evolution environment preflight failed", "自进化运行环境检查未通过,需要先修复环境后再继续"),
     ("rm outcome circuit breaker", "监工连续动作无进展已熔断,需要你介入"),
     ("recycle_threshold_exceeded", "有执行单元反复重启、超过阈值,可能已经卡住"),
     ("stage replan cap exhausted", "某阶段重规划次数已用尽,反复未通过准入"),

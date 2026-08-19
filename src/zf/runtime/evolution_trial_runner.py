@@ -16,12 +16,21 @@ from zf.core.events.writer import EventWriter
 from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.evolution_contracts import EvolutionContractError, stable_digest
 from zf.runtime.evolution_coordinator import EvolutionCoordinator
+from zf.runtime.evolution_environment import (
+    capture_evolution_environment,
+    environment_archive_env,
+    evaluate_evolution_environment,
+)
 from zf.runtime.evolution_evaluator import SealedEvaluatorAuthority
 from zf.runtime.run_archive import archive_run
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 
 ProviderRunner = Callable[..., subprocess.CompletedProcess[str]]
+EnvironmentSnapshotter = Callable[..., Mapping[str, Any]]
+
+ENVIRONMENT_PREFLIGHT_COMPLETED = "evolution.environment.preflight.completed"
+ENVIRONMENT_PREFLIGHT_FAILED = "evolution.environment.preflight.failed"
 
 
 def execute_evolution_request(
@@ -32,6 +41,7 @@ def execute_evolution_request(
     request_event_id: str,
     writer: EventWriter,
     runner: ProviderRunner = subprocess.run,
+    environment_snapshotter: EnvironmentSnapshotter = capture_evolution_environment,
 ) -> dict[str, Any]:
     """Execute one EventLog request and settle it with immutable evidence."""
 
@@ -59,33 +69,32 @@ def execute_evolution_request(
         or "ZF_EVOLUTION_EVALUATOR_TOKEN"
     )
     token = os.environ.get(token_env, "")
-    if not sealed_root or len(token) < 16:
-        raise EvolutionContractError(
-            "evolution trial requires configured sealed_root and evaluator token"
-        )
-    authority = SealedEvaluatorAuthority(Path(sealed_root), access_token=token)
     if request.type == "evolution.trial.requested":
         return _execute_trial(
             state_dir=state_dir,
             project_root=project_root,
             request=request,
             campaign=campaign,
-            authority=authority,
             token=token,
+            token_env=token_env,
+            sealed_root=sealed_root,
             backend=backend,
             writer=writer,
             runner=runner,
+            environment_snapshotter=environment_snapshotter,
         )
     return _execute_canary(
         state_dir=state_dir,
         project_root=project_root,
         request=request,
         campaign=campaign,
-        authority=authority,
         token=token,
+        token_env=token_env,
+        sealed_root=sealed_root,
         backend=backend,
         writer=writer,
         runner=runner,
+        environment_snapshotter=environment_snapshotter,
     )
 
 
@@ -95,11 +104,13 @@ def _execute_trial(
     project_root: Path,
     request: ZfEvent,
     campaign: Mapping[str, Any],
-    authority: SealedEvaluatorAuthority,
     token: str,
+    token_env: str,
+    sealed_root: str,
     backend: str,
     writer: EventWriter,
     runner: ProviderRunner,
+    environment_snapshotter: EnvironmentSnapshotter,
 ) -> dict[str, Any]:
     payload = _payload(request)
     coordinator = EvolutionCoordinator(state_dir, writer=writer)
@@ -123,6 +134,32 @@ def _execute_trial(
             "trial": row,
         }
     arm = str(row["arm"])
+    preflight, preflight_ref = _record_environment_preflight(
+        state_dir=state_dir,
+        project_root=project_root,
+        request=request,
+        campaign=campaign,
+        backend=backend,
+        token_env=token_env,
+        sealed_root=sealed_root,
+        writer=writer,
+        environment_snapshotter=environment_snapshotter,
+    )
+    if not bool(preflight["ok"]):
+        return _settle_environment_failure(
+            state_dir=state_dir,
+            project_root=project_root,
+            request=request,
+            coordinator=coordinator,
+            row=row,
+            backend=backend,
+            preflight=preflight,
+            preflight_ref=preflight_ref,
+        )
+    authority = SealedEvaluatorAuthority(
+        _sealed_root_path(project_root, sealed_root),
+        access_token=token,
+    )
     try:
         evidence = _run_evaluator_cases(
             state_dir=state_dir,
@@ -143,6 +180,8 @@ def _execute_trial(
             run_id=f"evo-{trial_id}-a{row['attempt_number']}",
             backend=backend,
             arm=arm,
+            environment_preflight=preflight,
+            environment_preflight_ref=preflight_ref,
         )
         measurement = _measurement(
             campaign,
@@ -186,6 +225,8 @@ def _execute_trial(
             run_id=f"evo-{trial_id}-a{row['attempt_number']}-failed",
             backend=backend,
             reason=f"{type(exc).__name__}: {exc}",
+            environment_preflight=preflight,
+            environment_preflight_ref=preflight_ref,
         )
         settled = coordinator.settle_trial(
             trial_id,
@@ -211,11 +252,13 @@ def _execute_canary(
     project_root: Path,
     request: ZfEvent,
     campaign: Mapping[str, Any],
-    authority: SealedEvaluatorAuthority,
     token: str,
+    token_env: str,
+    sealed_root: str,
     backend: str,
     writer: EventWriter,
     runner: ProviderRunner,
+    environment_snapshotter: EnvironmentSnapshotter,
 ) -> dict[str, Any]:
     payload = _payload(request)
     evaluator = campaign.get("canary_evaluator")
@@ -223,6 +266,62 @@ def _execute_canary(
         raise EvolutionContractError("campaign has no independent canary evaluator")
     asset_id = str(payload.get("asset_id") or "")
     version = int(payload.get("version") or 0)
+    preflight, preflight_ref = _record_environment_preflight(
+        state_dir=state_dir,
+        project_root=project_root,
+        request=request,
+        campaign=campaign,
+        backend=backend,
+        token_env=token_env,
+        sealed_root=sealed_root,
+        writer=writer,
+        environment_snapshotter=environment_snapshotter,
+    )
+    if not bool(preflight["ok"]):
+        archive = _archive_infrastructure_failure(
+            state_dir=state_dir,
+            project_root=project_root,
+            request=request,
+            run_id="evocanary-" + stable_digest({
+                "asset_id": asset_id,
+                "version": version,
+                "request": request.id,
+                "preflight": preflight_ref["sha256"],
+            })[:20],
+            backend=backend,
+            reason=str(preflight["failure_class"]),
+            environment_preflight=preflight,
+            environment_preflight_ref=preflight_ref,
+        )
+        event = writer.emit(
+            "evolution.canary.failed",
+            actor="autoresearch-evolution-runner",
+            causation_id=request.id,
+            correlation_id=str(campaign["campaign_id"]),
+            payload={
+                "schema_version": "evolution-canary-failure.v1",
+                "campaign_id": campaign["campaign_id"],
+                "asset_id": asset_id,
+                "version": version,
+                "failure_class": str(preflight["failure_class"]),
+                "reason": _preflight_reason(preflight),
+                "retryable": False,
+                "environment_preflight_ref": preflight_ref,
+                "archive_ref": archive["manifest"],
+                "archive_digest": archive["digest"],
+            },
+        )
+        return {
+            "ok": False,
+            "status": "environment_failed",
+            "event_id": event.id,
+            "failure_class": preflight["failure_class"],
+            "environment_preflight_ref": preflight_ref,
+        }
+    authority = SealedEvaluatorAuthority(
+        _sealed_root_path(project_root, sealed_root),
+        access_token=token,
+    )
     try:
         evidence = _run_evaluator_cases(
             state_dir=state_dir,
@@ -247,6 +346,8 @@ def _execute_canary(
             })[:20],
             backend=backend,
             arm="candidate",
+            environment_preflight=preflight,
+            environment_preflight_ref=preflight_ref,
         )
         passed = bool(evidence["evaluation"]["gate_passed"])
         outcome = "passed" if passed else "regressed"
@@ -292,6 +393,8 @@ def _execute_canary(
                 "version": version,
                 "failure_class": type(exc).__name__,
                 "reason": str(exc),
+                "retryable": True,
+                "environment_preflight_ref": preflight_ref,
             },
         )
         return {"ok": False, "status": "failed", "event_id": event.id, "reason": str(exc)}
@@ -486,6 +589,129 @@ def _measurement(
     }
 
 
+def _record_environment_preflight(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    request: ZfEvent,
+    campaign: Mapping[str, Any],
+    backend: str,
+    token_env: str,
+    sealed_root: str,
+    writer: EventWriter,
+    environment_snapshotter: EnvironmentSnapshotter,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    attempt = campaign.get("attempt")
+    if not isinstance(attempt, Mapping):
+        raise EvolutionContractError("evolution campaign lacks attempt for environment preflight")
+    frozen = attempt.get("frozen_inputs")
+    if not isinstance(frozen, Mapping):
+        raise EvolutionContractError("evolution attempt lacks frozen environment inputs")
+    snapshot = dict(environment_snapshotter(
+        project_root=project_root,
+        state_dir=state_dir,
+        backend=backend,
+        model=str(_payload(request).get("model") or ""),
+        reasoning_effort=str(
+            _payload(request).get("model_reasoning_effort") or ""
+        ),
+        token_env=token_env,
+        sealed_root=sealed_root,
+    ))
+    preflight = evaluate_evolution_environment(snapshot, frozen_inputs=frozen)
+    descriptor = write_immutable_json_sidecar(
+        state_dir,
+        preflight,
+        root="evolution/environment-preflight",
+        kind="evolution_environment_preflight",
+        schema_version="evolution-environment-preflight.v1",
+        created_by="autoresearch-evolution-runner",
+        source_event_id=request.id,
+    )
+    payload = _payload(request)
+    writer.emit(
+        (
+            ENVIRONMENT_PREFLIGHT_COMPLETED
+            if bool(preflight["ok"])
+            else ENVIRONMENT_PREFLIGHT_FAILED
+        ),
+        actor="autoresearch-evolution-runner",
+        causation_id=request.id,
+        correlation_id=str(campaign.get("campaign_id") or ""),
+        payload={
+            "schema_version": "evolution-environment-preflight-event.v1",
+            "request_event_id": request.id,
+            "campaign_id": str(campaign.get("campaign_id") or ""),
+            "trial_id": str(payload.get("trial_id") or ""),
+            "asset_id": str(payload.get("asset_id") or ""),
+            "version": int(payload.get("version") or 0),
+            "status": str(preflight["status"]),
+            "failure_class": str(preflight["failure_class"]),
+            "retryable": False,
+            "environment_preflight_ref": descriptor,
+            "observed_digests": dict(preflight["observed_digests"]),
+            "expected_digests": dict(preflight["expected_digests"]),
+        },
+    )
+    return preflight, descriptor
+
+
+def _settle_environment_failure(
+    *,
+    state_dir: Path,
+    project_root: Path,
+    request: ZfEvent,
+    coordinator: EvolutionCoordinator,
+    row: Mapping[str, Any],
+    backend: str,
+    preflight: Mapping[str, Any],
+    preflight_ref: Mapping[str, Any],
+) -> dict[str, Any]:
+    archive = _archive_infrastructure_failure(
+        state_dir=state_dir,
+        project_root=project_root,
+        request=request,
+        run_id=(
+            f"evo-{row['trial_id']}-a{row['attempt_number']}-environment"
+        ),
+        backend=backend,
+        reason=_preflight_reason(preflight),
+        environment_preflight=preflight,
+        environment_preflight_ref=preflight_ref,
+    )
+    settled = coordinator.settle_trial(
+        str(row["trial_id"]),
+        lease_owner=f"autoresearch-resident:{request.id}",
+        attempt_number=int(row["attempt_number"]),
+        outcome="infrastructure_failed",
+        archive_ref=str(archive["manifest"]),
+        archive_digest=str(archive["digest"]),
+        failure_class=str(preflight["failure_class"]),
+        retryable=False,
+        actor="autoresearch-evolution-runner",
+    )
+    return {
+        "ok": False,
+        "status": "environment_failed",
+        "reason": _preflight_reason(preflight),
+        "failure_class": str(preflight["failure_class"]),
+        "environment_preflight_ref": dict(preflight_ref),
+        **settled,
+    }
+
+
+def _preflight_reason(preflight: Mapping[str, Any]) -> str:
+    for check in preflight.get("checks") or []:
+        if isinstance(check, Mapping) and not bool(check.get("ok")):
+            return str(check.get("detail") or check.get("failure_class") or "environment preflight failed")
+    return str(preflight.get("failure_class") or "environment preflight failed")
+
+
+def _sealed_root_path(project_root: Path, sealed_root: str) -> Path:
+    path = Path(sealed_root).expanduser()
+    return path if path.is_absolute() else project_root / path
+
+
 def _archive_provider_evidence(
     *,
     state_dir: Path,
@@ -495,6 +721,8 @@ def _archive_provider_evidence(
     run_id: str,
     backend: str,
     arm: str,
+    environment_preflight: Mapping[str, Any] | None = None,
+    environment_preflight_ref: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     live = state_dir / "evolution" / "live" / run_id
     live.mkdir(parents=True, exist_ok=True)
@@ -509,6 +737,14 @@ def _archive_provider_evidence(
         json.dumps({"backend": backend, **dict(evidence["usage"])}) + "\n",
         encoding="utf-8",
     )
+    preflight_path = _write_environment_preflight_artifact(
+        live,
+        preflight=environment_preflight,
+        descriptor=environment_preflight_ref,
+    )
+    supplemental_files: dict[str, Path] = {"provider-outputs.json": outputs}
+    if preflight_path is not None:
+        supplemental_files["environment-preflight.json"] = preflight_path
     archive = archive_run(
         project_root=project_root,
         state_dir=state_dir,
@@ -525,8 +761,15 @@ def _archive_provider_evidence(
                 for item in evidence["outputs"]
             ],
         },
-        summary={"arm": arm, "evolution": True, "request_event_id": request.id},
-        supplemental_files={"provider-outputs.json": outputs},
+        summary={
+            "arm": arm,
+            "evolution": True,
+            "request_event_id": request.id,
+            "environment_preflight_ref": dict(environment_preflight_ref or {}),
+        },
+        supplemental_files=supplemental_files,
+        env=(environment_archive_env(environment_preflight)
+             if environment_preflight is not None else {}),
     )
     shutil.rmtree(live, ignore_errors=True)
     return {"manifest": str(archive.manifest_path), "digest": archive.manifest_digest}
@@ -540,12 +783,22 @@ def _archive_infrastructure_failure(
     run_id: str,
     backend: str,
     reason: str,
+    environment_preflight: Mapping[str, Any] | None = None,
+    environment_preflight_ref: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     live = state_dir / "evolution" / "live" / run_id
     live.mkdir(parents=True, exist_ok=True)
     (live / "events.jsonl").write_text("", encoding="utf-8")
     failure = live / "failure.json"
     failure.write_text(json.dumps({"reason": reason}) + "\n", encoding="utf-8")
+    preflight_path = _write_environment_preflight_artifact(
+        live,
+        preflight=environment_preflight,
+        descriptor=environment_preflight_ref,
+    )
+    supplemental_files: dict[str, Path] = {"failure.json": failure}
+    if preflight_path is not None:
+        supplemental_files["environment-preflight.json"] = preflight_path
     archive = archive_run(
         project_root=project_root,
         state_dir=state_dir,
@@ -555,11 +808,40 @@ def _archive_infrastructure_failure(
         command=f"{backend} isolated evolution",
         exit_code=1,
         provider={"provider": backend},
-        summary={"reason": reason, "request_event_id": request.id},
-        supplemental_files={"failure.json": failure},
+        summary={
+            "reason": reason,
+            "request_event_id": request.id,
+            "environment_preflight_ref": dict(environment_preflight_ref or {}),
+        },
+        supplemental_files=supplemental_files,
+        env=(environment_archive_env(environment_preflight)
+             if environment_preflight is not None else {}),
     )
     shutil.rmtree(live, ignore_errors=True)
     return {"manifest": str(archive.manifest_path), "digest": archive.manifest_digest}
+
+
+def _write_environment_preflight_artifact(
+    live: Path,
+    *,
+    preflight: Mapping[str, Any] | None,
+    descriptor: Mapping[str, Any] | None,
+) -> Path | None:
+    if preflight is None:
+        return None
+    path = live / "environment-preflight.json"
+    path.write_text(
+        json.dumps(
+            {
+                "preflight": dict(preflight),
+                "sidecar_ref": dict(descriptor or {}),
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def _campaign(state_dir: Path, payload: Mapping[str, Any]) -> dict[str, Any]:

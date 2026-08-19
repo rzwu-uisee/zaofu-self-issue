@@ -192,6 +192,9 @@ def _measurement(
     provider_digest: str,
     toolchain_digest: str,
     environment_digest: str,
+    sandbox_digest: str,
+    network_digest: str,
+    credential_digest: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": "evolution-measurement.v1",
@@ -204,6 +207,9 @@ def _measurement(
             "provider_capability_digest": provider_digest,
             "toolchain_digest": toolchain_digest,
             "environment_digest": environment_digest,
+            "sandbox_policy_digest": sandbox_digest,
+            "network_policy_digest": network_digest,
+            "credential_policy_digest": credential_digest,
             "budget_digest": _sha("real-provider-budget"),
             "seed_policy_digest": _sha("provider-managed-seed"),
             "task_family": "self_evolution_real_provider",
@@ -348,6 +354,9 @@ def main() -> int:
         environment_digest = _sha(
             f"{os.uname().sysname}:{os.uname().machine}:read-only"
         )
+        sandbox_digest = _sha("codex-read-only-ephemeral")
+        network_digest = _sha("provider-managed-network")
+        credential_digest = _sha("real-evaluator-token-present")
         attempt = _attempt(evaluator)
         attempt["attempt_id"] = "real-provider-evolution-1"
         attempt["campaign_id"] = "real-provider-campaign-1"
@@ -359,6 +368,9 @@ def main() -> int:
             "provider_capability_digest": provider_digest,
             "toolchain_digest": toolchain_digest,
             "environment_digest": environment_digest,
+            "sandbox_policy_digest": sandbox_digest,
+            "network_policy_digest": network_digest,
+            "credential_policy_digest": credential_digest,
         })
         coordinator = EvolutionCoordinator(state_dir)
         coordinator.materialize_attempt(attempt)
@@ -464,6 +476,9 @@ def main() -> int:
                 provider_digest=provider_digest,
                 toolchain_digest=toolchain_digest,
                 environment_digest=environment_digest,
+                sandbox_digest=sandbox_digest,
+                network_digest=network_digest,
+                credential_digest=credential_digest,
             )
             settlement = coordinator.settle_trial(
                 trial["trial_id"],

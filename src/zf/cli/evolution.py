@@ -72,6 +72,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     settle.add_argument("--archive-digest", required=True)
     settle.add_argument("--cost-receipt-ref", action="append", default=[])
     settle.add_argument("--failure-class", default="")
+    settle.add_argument(
+        "--retryable",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override infrastructure retryability for a terminal trial fact",
+    )
     settle.set_defaults(func=_trial_settle)
 
     execute = commands.add_parser(
@@ -327,6 +333,7 @@ def _trial_settle(args: argparse.Namespace) -> int:
         archive_digest=args.archive_digest,
         cost_receipt_refs=list(args.cost_receipt_ref),
         failure_class=args.failure_class,
+        retryable=args.retryable,
     ))
     return 0
 

@@ -77,6 +77,8 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "evolution.trial.execution.started",
     "evolution.trial.execution.completed",
     "evolution.trial.execution.failed",
+    "evolution.environment.preflight.completed",
+    "evolution.environment.preflight.failed",
     "evolution.canary.requested", "evolution.canary.failed",
     "evolution.control_action.completed",
     "execution.route.selection.applied", "execution.route.switch.completed",

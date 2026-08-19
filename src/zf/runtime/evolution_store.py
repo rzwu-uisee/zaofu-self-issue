@@ -208,6 +208,7 @@ class EvolutionTrialStore:
         archive_digest: str,
         cost_receipt_refs: list[str],
         failure_class: str,
+        retryable: bool | None = None,
         settled_at: str,
     ) -> tuple[dict[str, Any], str]:
         if outcome not in {"passed", "semantic_failed", "infrastructure_failed"}:
@@ -221,6 +222,7 @@ class EvolutionTrialStore:
             "archive_digest": archive_digest,
             "cost_receipt_refs": list(cost_receipt_refs),
             "failure_class": failure_class,
+            "retryable": retryable,
         }
         settlement_id = "evoset-" + stable_digest(settlement_identity)[:20]
         with locked_path(self.path):
@@ -238,6 +240,25 @@ class EvolutionTrialStore:
             ):
                 return deepcopy(row), "stale"
             if outcome == "infrastructure_failed":
+                should_retry = True if retryable is None else bool(retryable)
+                if not should_retry:
+                    row.update({
+                        "status": "dead_letter",
+                        "outcome": outcome,
+                        "accepted_settlement_id": settlement_id,
+                        "settlement_ref": dict(settlement_ref),
+                        "archive_ref": archive_ref,
+                        "archive_digest": archive_digest,
+                        "cost_receipt_refs": list(cost_receipt_refs),
+                        "failure_class": failure_class or "infrastructure_failure",
+                        "retryable": False,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "settled_at": settled_at,
+                        "updated_at": settled_at,
+                    })
+                    self._save_unlocked(data)
+                    return deepcopy(row), "dead_letter"
                 row.update({
                     "status": "failed",
                     "retryable": True,

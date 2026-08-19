@@ -290,3 +290,14 @@ def _probe_provider_auth(backend: str) -> tuple[bool, str]:
         return True, "authenticated"
     detail = output.splitlines()[0] if output else "not authenticated"
     return False, f"{detail}; authenticate with {login_hint}"
+
+
+def probe_provider_auth(backend: str) -> tuple[bool, str]:
+    """Public bounded auth probe for isolated runtime admission checks.
+
+    Keep the private implementation name for existing tests and callers that
+    patch it, while allowing other runtime modules to reuse the same no-turn
+    authentication semantics instead of inventing a second probe.
+    """
+
+    return _probe_provider_auth(backend)

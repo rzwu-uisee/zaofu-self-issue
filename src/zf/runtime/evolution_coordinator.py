@@ -170,6 +170,7 @@ class EvolutionCoordinator:
         archive_digest: str,
         cost_receipt_refs: list[str] | None = None,
         failure_class: str = "",
+        retryable: bool | None = None,
         actor: str = "evolution-eval-runner",
     ) -> dict[str, Any]:
         normalized_archive_digest = normalize_digest(
@@ -233,6 +234,7 @@ class EvolutionCoordinator:
             archive_digest=normalized_archive_digest,
             cost_receipt_refs=list(cost_receipt_refs or []),
             failure_class=failure_class,
+            retryable=retryable,
             settled_at=_now(),
         )
         if settlement_status == "accepted":
@@ -264,6 +266,24 @@ class EvolutionCoordinator:
                     "attempt_number": attempt_number,
                     "failure_class": row["failure_class"],
                     "retry_policy": "infrastructure_only",
+                },
+            )
+        elif settlement_status == "dead_letter":
+            self.writer.emit(
+                "evolution.trial.completed",
+                actor=actor,
+                correlation_id=str(row["attempt_id"]),
+                payload={
+                    "attempt_id": row["attempt_id"],
+                    "trial_id": trial_id,
+                    "arm": row["arm"],
+                    "replicate": row["replicate"],
+                    "outcome": row["outcome"],
+                    "failure_class": row["failure_class"],
+                    "retryable": False,
+                    "settlement_id": row["accepted_settlement_id"],
+                    "archive_ref": archive_ref,
+                    "archive_digest": normalized_archive_digest,
                 },
             )
         return {

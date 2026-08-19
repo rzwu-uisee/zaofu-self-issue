@@ -9,9 +9,14 @@ from zf.core.events.factory import event_log_from_project
 from zf.core.events.writer import EventWriter
 from zf.runtime.evolution_automation import reconcile_evolution_automation
 from zf.runtime.evolution_contracts import stable_digest
+from zf.runtime.evolution_environment import (
+    capture_evolution_environment,
+    environment_identity_digests,
+)
 from zf.runtime.evolution_evaluator import SealedEvaluatorAuthority
 from zf.runtime.evolution_trial_runner import execute_evolution_request
 from zf.runtime.run_archive import archive_run
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 
 def _public_evaluator(generation_id: str) -> dict:
@@ -106,6 +111,29 @@ def _fake_codex(
         }),
     ])
     return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+
+def _fake_environment_command(
+    command: list[str],
+    **_kwargs,
+) -> subprocess.CompletedProcess[str]:
+    if command and command[0] == "git":
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="not a repository")
+    return subprocess.CompletedProcess(
+        command,
+        0,
+        stdout=f"{Path(command[0]).name} 1.0.0\n",
+        stderr="",
+    )
+
+
+def _test_environment_snapshot(**kwargs) -> dict:
+    return capture_evolution_environment(
+        **kwargs,
+        command_runner=_fake_environment_command,
+        which=lambda command: f"/mock/{command}",
+        auth_probe=lambda _backend: (True, "authenticated"),
+    )
 
 
 def _emit_execution_terminal(
@@ -229,6 +257,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=writer,
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert first.intake_materialized == 1
     trial_requests = [
@@ -236,6 +265,34 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         if event.type == "evolution.trial.requested"
     ]
     assert {event.payload["arm"] for event in trial_requests} == {"baseline", "candidate"}
+    campaign = hydrate_sidecar_ref(
+        state_dir,
+        trial_requests[0].payload["campaign_ref"],
+        purpose="test-evolution-environment-campaign",
+    ).payload
+    capability = hydrate_sidecar_ref(
+        state_dir,
+        campaign["environment_capability"]["snapshot_ref"],
+        purpose="test-evolution-environment-capability",
+    ).payload
+    frozen = campaign["attempt"]["frozen_inputs"]
+    digests = environment_identity_digests(capability)
+    assert campaign["environment_capability"]["snapshot_digest"] == stable_digest(capability)
+    assert campaign["environment_capability"]["frozen_digests"] == digests
+    for reference, digest in (
+        ("provider_capability_ref", "provider_capability_digest"),
+        ("toolchain_ref", "toolchain_digest"),
+        ("environment_ref", "environment_digest"),
+        ("sandbox_policy_ref", "sandbox_policy_digest"),
+        ("network_policy_ref", "network_policy_digest"),
+        ("credential_policy_ref", "credential_policy_digest"),
+    ):
+        section = hydrate_sidecar_ref(
+            state_dir,
+            {"ref": frozen[reference], "sha256": frozen[digest]},
+            purpose="test-evolution-environment-section",
+        ).payload
+        assert stable_digest(section) == frozen[digest] == digests[digest]
 
     # Recreate the executor for every request: no in-memory coordinator state
     # is required to resume the campaign.
@@ -247,6 +304,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
             request_event_id=request.id,
             writer=EventWriter(event_log_from_project(state_dir)),
             runner=_fake_codex,
+            environment_snapshotter=_test_environment_snapshot,
         )
         assert result["status"] == "settled"
         _emit_execution_terminal(writer, request.id)
@@ -256,6 +314,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=EventWriter(event_log_from_project(state_dir)),
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert second.comparisons_completed == 1
     assert second.assets_proposed == 1
@@ -273,6 +332,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         request_event_id=canary_request.id,
         writer=EventWriter(event_log_from_project(state_dir)),
         runner=_failed_provider,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert first_canary_result["status"] == "failed"
     _emit_execution_terminal(writer, canary_request.id, succeeded=False)
@@ -282,6 +342,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=EventWriter(event_log_from_project(state_dir)),
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert retry.trials_requested == 1
     canary_requests = [
@@ -298,6 +359,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         request_event_id=retry_request.id,
         writer=EventWriter(event_log_from_project(state_dir)),
         runner=_fake_codex,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert canary_result["status"] == "passed"
     _emit_execution_terminal(writer, retry_request.id)
@@ -307,6 +369,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=EventWriter(event_log_from_project(state_dir)),
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert third.campaigns_completed == 1
     registry = json.loads(
@@ -321,6 +384,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=EventWriter(event_log_from_project(state_dir)),
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert replay.changed is False
     events = writer.event_log.read_all()
@@ -344,6 +408,7 @@ def test_autoresearch_learn_to_retained_asset_is_unattended_and_resumable(
         writer=EventWriter(event_log_from_project(state_dir)),
         config=config,
         project_root=project,
+        environment_snapshotter=_test_environment_snapshot,
     )
     assert duplicate.intake_declined == 1
     events = writer.event_log.read_all()

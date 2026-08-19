@@ -26,6 +26,9 @@ DEFAULT_COMPARISON_IDENTITY_FIELDS = (
     "provider_capability_digest",
     "toolchain_digest",
     "environment_digest",
+    "sandbox_policy_digest",
+    "network_policy_digest",
+    "credential_policy_digest",
     "budget_digest",
     "seed_policy_digest",
     "task_family",
@@ -69,6 +72,7 @@ _FROZEN_REF_DIGEST_PAIRS = (
     ("environment_ref", "environment_digest"),
     ("sandbox_policy_ref", "sandbox_policy_digest"),
     ("network_policy_ref", "network_policy_digest"),
+    ("credential_policy_ref", "credential_policy_digest"),
     ("run_archive_manifest_ref", "run_archive_manifest_digest"),
 )
 
