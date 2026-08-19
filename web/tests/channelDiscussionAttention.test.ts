@@ -53,8 +53,8 @@ const running = attention("running", {
   can_drain_replies: true,
 });
 const runningView = presentChannelDiscussionAttention(running);
-assert(runningView.label === "Running", "running state uses operator-facing copy");
-assert(runningView.summary === "2 agents responding", "running count means active agents, not roster size");
+assert(runningView.label === "2 agents responding", "running state leads with real active work");
+assert(runningView.summary === "", "running state does not repeat an abstract status label");
 assert(runningView.action === "activity", "running opens activity details");
 
 const needsInput = attention("needs_input", {

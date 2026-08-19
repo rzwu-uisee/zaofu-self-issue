@@ -2630,7 +2630,9 @@ export function ChannelPage({
                     </span>
                     <div className="channel-discussion-attention-copy">
                       <strong>{discussionBand.presentation.label}</strong>
-                      <span>{discussionBand.presentation.summary}</span>
+                      {discussionBand.presentation.summary ? (
+                        <span>{discussionBand.presentation.summary}</span>
+                      ) : null}
                       {discussionBand.attention.active_agent_count > 0 ? (
                         <span className="channel-discussion-live-meta">
                           {channelActiveAgentLabel(discussionBand.attention) ? (

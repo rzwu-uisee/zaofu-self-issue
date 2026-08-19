@@ -30,6 +30,13 @@ import { cleanToolTitle, iconForToolName } from "./toolIcon";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { runStartTimestamp, toolCallCount } from "./liveRunIndicator";
 import { ApproveInteractionActions, PlanInteractionForm } from "./AgentInteractionControls";
+import {
+  contributionReferencePresentation,
+  contributionRowLabel,
+  presentContribution,
+  type ContributionSection,
+  type ContributionSectionKey,
+} from "./contributionPresentation";
 
 interface AgentSessionTimelineProps {
   conversation: AgentConversation;
@@ -1253,70 +1260,105 @@ function isSettledTurn(turn: AgentSessionTurn): boolean {
 
 function ContributionCard({ card }: { card: AgentSessionCard }) {
   const payload = card.payload ?? {};
-  const sections = [
-    ["Findings", semanticContributionRows(payload.findings)],
-    ["Risks", semanticContributionRows(payload.risks)],
-    ["Contradictions", semanticContributionRows(payload.contradictions)],
-    ["Questions", semanticContributionRows(payload.questions)],
-  ] as const;
-  const populated = sections.filter(([, rows]) => rows.length);
-  const itemCount = populated.reduce((count, [, rows]) => count + rows.length, 0);
+  const presentation = presentContribution(payload, card.body || "");
+  const references = contributionReferencePresentation(payload, card.refs);
+  if (!presentation.sections.length && !presentation.fallbackSummary && !references.total) return null;
   return (
     <div
       className="agent-contribution-card"
       data-agent-card-kind="contribution"
       data-testid="agent-card-contribution"
     >
-      <div className="agent-contribution-head">
-        <span className="agent-contribution-icon"><ListChecks aria-hidden="true" size={15} /></span>
-        <div>
-          <span>Analysis</span>
-          <MarkdownText content={card.body || card.title} />
-        </div>
-      </div>
-      <div className="agent-contribution-counts">
-        {populated.map(([label, rows]) => (
-          <span key={label}>{rows.length} {label.toLowerCase()}</span>
-        ))}
-      </div>
-      {itemCount ? (
-        <details className="agent-contribution-details">
-          <summary>View structured details</summary>
-          <div className="agent-contribution-sections">
-            {populated.map(([label, rows]) => (
-              <section key={label}>
-                <strong>{label}</strong>
-                <ul>
-                  {rows.map((row, index) => (
-                    <li key={row.id || `${label}-${index}`}>
-                      {row.label ? <small>{row.label}</small> : null}
-                      <span>{row.text}</span>
-                    </li>
-                  ))}
-                </ul>
-              </section>
+      {presentation.sections.map((section) => (
+        <ContributionSectionBlock key={section.key} section={section} rows={section.visibleRows} />
+      ))}
+      {presentation.fallbackSummary ? (
+        <section className="agent-contribution-section tone-findings">
+          <ContributionSectionHeading section="findings" title="Key takeaway" />
+          <MarkdownText content={presentation.fallbackSummary} />
+        </section>
+      ) : null}
+      {presentation.hiddenCount ? (
+        <details className="agent-contribution-more">
+          <summary>
+            <ChevronRight aria-hidden="true" size={13} />
+            Show {presentation.hiddenCount} more
+          </summary>
+          <div className="agent-contribution-more-body">
+            {presentation.sections.filter((section) => section.hiddenRows.length).map((section) => (
+              <ContributionSectionBlock key={section.key} section={section} rows={section.hiddenRows} supplementary />
             ))}
           </div>
         </details>
       ) : null}
-      <AttachmentChips refs={card.refs} />
+      {references.total ? (
+        <details className="agent-contribution-evidence">
+          <summary>
+            <Paperclip aria-hidden="true" size={12} />
+            {references.label}
+            <ChevronRight aria-hidden="true" className="agent-contribution-chevron" size={13} />
+          </summary>
+          <AttachmentChips refs={references.refs} />
+        </details>
+      ) : null}
     </div>
   );
 }
 
-function semanticContributionRows(value: unknown): Array<{ id: string; label: string; text: string }> {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const row = item as Record<string, unknown>;
-    const text = String(row.text || row.statement || row.risk || row.question || "").trim();
-    if (!text) return [];
-    return [{
-      id: String(row.id || ""),
-      label: String(row.label || row.type || row.priority || ""),
-      text,
-    }];
-  });
+function ContributionSectionBlock({
+  rows,
+  section,
+  supplementary = false,
+}: {
+  rows: ContributionSection["visibleRows"];
+  section: ContributionSection;
+  supplementary?: boolean;
+}) {
+  if (!rows.length) return null;
+  return (
+    <section className={`agent-contribution-section tone-${section.key} ${supplementary ? "is-supplementary" : ""}`.trim()}>
+      <ContributionSectionHeading
+        section={section.key}
+        title={supplementary ? `Additional ${section.title.toLowerCase()}` : section.title}
+      />
+      <ul>
+        {rows.map((row, index) => {
+          const label = contributionRowLabel(section.key, row.label);
+          return (
+            <li key={row.id || `${section.key}-${index}`}>
+              {label ? <small>{label}</small> : null}
+              <span>{row.text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function ContributionSectionHeading({
+  section,
+  title,
+}: {
+  section: ContributionSectionKey;
+  title: string;
+}) {
+  return (
+    <header>
+      <span aria-hidden="true" className="agent-contribution-section-icon">
+        {section === "risks" ? (
+          <AlertTriangle size={14} />
+        ) : section === "contradictions" ? (
+          <GitCompare size={14} />
+        ) : section === "questions" ? (
+          <MessageSquare size={14} />
+        ) : (
+          <ListChecks size={14} />
+        )}
+      </span>
+      <strong>{title}</strong>
+    </header>
+  );
 }
 
 function WorkflowResultIdentity({

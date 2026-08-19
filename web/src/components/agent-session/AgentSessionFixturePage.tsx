@@ -74,9 +74,29 @@ const turn: AgentSessionTurn = {
     body: "Use one controlled gateway and keep the state authority explicit.",
     status: "completed",
     payload: {
-      findings: [{ id: "f1", label: "finding", text: "One authority owns state." }],
-      risks: [{ id: "r1", label: "p0", text: "Dual writes make replay diverge." }],
-      questions: [{ id: "q1", label: "scope", text: "Which vertical slice ships first?" }],
+      findings: [
+        { id: "f1", label: "finding", text: "One authority owns state." },
+        { id: "f2", label: "fact", text: "Events preserve occurrence order." },
+        { id: "f3", text: "Artifacts retain complete semantic bodies." },
+        { id: "f4", text: "Web remains a read-oriented projection." },
+      ],
+      risks: [
+        { id: "r2", label: "p2", text: "Low-priority display drift." },
+        { id: "r1", label: "p0", text: "Dual writes make replay diverge." },
+        { id: "r3", label: "p1", text: "A stale projection hides owner input." },
+      ],
+      contradictions: [
+        { id: "c1", text: "Two documents claim canonical authority." },
+        { id: "c2", text: "A UI phase label conflicts with runtime state." },
+      ],
+      questions: [
+        { id: "q1", label: "scope", text: "Which vertical slice ships first?" },
+        { id: "q2", text: "Who owns the verification decision?" },
+      ],
+      source_refs: ["SPEC.md", "tasks/plan.md"],
+      evidence_refs: ["trace:fixture", "test:fixture"],
+      artifact_ref: "channels/ch-fixture/contracts/contribution/reply.json",
+      artifact_digest: "fixture-digest",
     },
     refs: {
       artifact_ref: "channels/ch-fixture/contracts/contribution/reply.json",

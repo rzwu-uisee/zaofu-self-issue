@@ -84,10 +84,10 @@ export function presentChannelDiscussionAttention(
   }
   if (attention.state === "running") {
     return {
-      label: "Running",
-      summary: attention.active_agent_count > 0
+      label: attention.active_agent_count > 0
         ? `${countLabel(attention.active_agent_count, "agent")} responding`
         : "Discussion work is in progress",
+      summary: "",
       tone: "info",
       action: "activity",
       actionLabel: "View activity",
