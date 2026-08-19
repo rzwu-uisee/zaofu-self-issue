@@ -338,14 +338,22 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
             goal_closure_judge_policy_plan,
             pure_aggregator_policy_plan,
         )
+        from zf.runtime.execution_route_state import route_policy_for_spawn
 
         state_dir = self.state_dir.resolve()
-        plan = pure_aggregator_policy_plan(self.config, role, state_dir=state_dir)
-        effective = apply_pure_aggregator_policy(
-            self.config, role, state_dir=state_dir,
+        routed, route_plan = route_policy_for_spawn(
+            state_dir=state_dir,
+            config=self.config,
+            role=role,
         )
-        if effective is not role and plan.get("applied"):
-            self._emit_policy_applied(role, plan)
+        if routed is not role and route_plan.get("applied"):
+            self._emit_policy_applied(role, route_plan)
+        plan = pure_aggregator_policy_plan(self.config, routed, state_dir=state_dir)
+        effective = apply_pure_aggregator_policy(
+            self.config, routed, state_dir=state_dir,
+        )
+        if effective is not routed and plan.get("applied"):
+            self._emit_policy_applied(routed, plan)
         judge_plan = goal_closure_judge_policy_plan(
             self.config, effective, state_dir=state_dir,
         )
@@ -371,10 +379,10 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
                     "changes": dict(plan.get("changes") or {}),
                     "original": dict(plan.get("original") or {}),
                     "effective": dict(plan.get("effective") or {}),
-                    "reason": (
-                        "read-only workflow role; runner permissions are "
-                        "narrowed for this spawn"
-                    ),
+                    **dict(plan.get("event_fields") or {}),
+                    "reason": str(plan.get("reason") or (
+                        "read-only workflow role; runner permissions are narrowed for this spawn"
+                    )),
                 },
             ))
         except Exception:

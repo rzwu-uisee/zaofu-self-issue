@@ -21,6 +21,11 @@ from zf.runtime.run_manager_repair_router import (
     special_expected_downstream_events,
 )
 from zf.runtime.stage_replan_generation import STAGE_REPLAN_GENERATION_EXPECTED_EVENTS, stage_replan_generation_preflight
+from zf.runtime.execution_policy_routing import (
+    execution_route_expected_events,
+    execution_route_preflight_for,
+    execution_route_router_decision,
+)
 
 
 SAFE_BATCH_ACTIONS = frozenset({"repair_failed_children", "reemit_candidate_ready"})
@@ -214,6 +219,10 @@ def decide_action_policy(
             preflight=preflight,
             reason="Run Manager owns the bounded orchestrator triage handoff",
         )
+    if route_decision := execution_route_router_decision(
+        action, payload, decision_factory=_decision
+    ):
+        return route_decision
     if action in DIAGNOSIS_ACTIONS:
         preflight = preflight_action(action=action, payload=payload)
         if preflight["status"] == "blocked":
@@ -451,6 +460,8 @@ def preflight_action(
     checkpoint_id = str(payload.get("checkpoint_id") or "")
     if action in ORCHESTRATOR_TRIAGE_ACTIONS:
         return triage_action_preflight(action, payload)
+    if route_preflight := execution_route_preflight_for(action, payload):
+        return route_preflight
     special_preflight = special_action_preflight(action, payload)
     if special_preflight is not None:
         return special_preflight
@@ -883,6 +894,8 @@ def expected_downstream_events(safe_action: str) -> set[str]:
         return {"run.manager.autoresearch.requested", "run.manager.resident.prompted"}
     if safe_action == "worker_lifecycle_recover":
         return {"worker.respawn.requested"}
+    if route_events := execution_route_expected_events(safe_action):
+        return route_events
     if safe_action == "resident_agent_reprompt":
         return {"run.manager.resident.prompted"}
     if safe_action == "failure_closeout_activate":

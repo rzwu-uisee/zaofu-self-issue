@@ -14,6 +14,7 @@ from zf.runtime.semantic_replan import (
     SEMANTIC_REPLAN_ACTION,
     SEMANTIC_REPLAN_SAFE_ACTION,
 )
+from zf.runtime.execution_policy_routing import recorded_execution_route_action
 
 
 TRIAGE_REQUESTED = "orchestrator.rework.triage.requested"
@@ -57,7 +58,6 @@ _REPLAN_RECOMMENDATIONS = frozenset({
 })
 _DIAGNOSIS_RECOMMENDATIONS = frozenset({"diagnose", "autoresearch"})
 _HUMAN_RECOMMENDATIONS = frozenset({"human", "escalate_human"})
-
 
 def pending_rework_triage_actions(
     events: list[ZfEvent],
@@ -471,6 +471,8 @@ def _recorded_advice_action(
             "expected_downstream_events": [],
             "verify_condition": "",
         }
+    if route_action := recorded_execution_route_action(recommendation, base, payload, capped):
+        return route_action
     if recommendation in _DIAGNOSIS_RECOMMENDATIONS:
         return {
             **base,

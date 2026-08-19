@@ -11,6 +11,7 @@ _EXTENSION_HANDLERS = {
     "candidate-rework-apply": "_candidate_rework_apply",
     "evolution-asset-outcome": "_evolution_asset_outcome",
     "evolution-asset-transition": "_evolution_asset_transition",
+    "execution-route-switch": "_execution_route_switch",
     "run-contract-review": "_run_contract_review_action",
     "workflow-batch-resume": "_workflow_batch_resume",
 }

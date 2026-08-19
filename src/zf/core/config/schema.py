@@ -1459,6 +1459,48 @@ class RuntimeEvolutionConfig:
 
 
 @dataclass
+class ExecutionRouteConfig:
+    """One pre-approved task-time provider execution route."""
+
+    id: str = ""
+    roles: list[str] = field(default_factory=list)
+    flow_kinds: list[str] = field(default_factory=list)
+    backend: str = ""
+    model: str = ""
+    model_reasoning_effort: str = ""
+    execution_profile: str = ""
+    provider_session: ProviderSessionConfig | None = None
+    automatic_triggers: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.model_reasoning_effort = _normalize_model_reasoning_effort(
+            self.model_reasoning_effort,
+            owner=f"ExecutionRouteConfig(id={self.id!r})",
+        )
+
+
+@dataclass
+class RuntimeExecutionRoutingConfig:
+    """Bounded application policy for task-scoped execution routes."""
+
+    enabled: bool = False
+    max_switches_per_task: int = 1
+    semantic_triage_attempt: int = 3
+    routes: list[ExecutionRouteConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.max_switches_per_task <= 3:
+            raise ValueError(
+                "RuntimeExecutionRoutingConfig.max_switches_per_task must be "
+                "between 0 and 3"
+            )
+        if self.semantic_triage_attempt < 1:
+            raise ValueError(
+                "RuntimeExecutionRoutingConfig.semantic_triage_attempt must be >= 1"
+            )
+
+
+@dataclass
 class RuntimeFeishuInboundConfig:
     enabled: bool = False
     # Only the long-connection bridge is productized as a zf start sidecar.
@@ -1497,6 +1539,9 @@ class RuntimeConfig:
     )
     evolution: RuntimeEvolutionConfig = field(
         default_factory=RuntimeEvolutionConfig,
+    )
+    execution_routing: RuntimeExecutionRoutingConfig = field(
+        default_factory=RuntimeExecutionRoutingConfig,
     )
     feishu_inbound: RuntimeFeishuInboundConfig = field(
         default_factory=RuntimeFeishuInboundConfig,

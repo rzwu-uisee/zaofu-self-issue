@@ -79,6 +79,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "evolution.trial.execution.failed",
     "evolution.canary.requested", "evolution.canary.failed",
     "evolution.control_action.completed",
+    "execution.route.selection.applied", "execution.route.switch.completed",
     "challenge.candidate.materialized", "challenge.promoted",
     "challenge.rejected",
     "projection.rebuild.requested",

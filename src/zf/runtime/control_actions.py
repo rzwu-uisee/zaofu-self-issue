@@ -70,6 +70,7 @@ from zf.runtime.control_actions_recovery import RECOVERY_ACTIONS, RecoveryAction
 from zf.runtime.control_actions_surgery import SurgeryActionsMixin
 from zf.runtime.control_actions_emit import ActionEmitMixin
 from zf.runtime.control_actions_evolution import EvolutionActionsMixin
+from zf.runtime.control_actions_execution_route import ExecutionRouteActionsMixin
 from zf.runtime.control_actions_extension_router import dispatch_extension_action
 from zf.runtime.control_actions_workflow_resume import WorkflowResumeActionsMixin
 from zf.runtime.control_actions_candidate_rework import CandidateReworkActionsMixin
@@ -127,6 +128,7 @@ class ControlledActionService(
     RecoveryActionsMixin,
     ActionEmitMixin,
     EvolutionActionsMixin,
+    ExecutionRouteActionsMixin,
 ):
     """Execute deterministic action requests from trusted control surfaces."""
 

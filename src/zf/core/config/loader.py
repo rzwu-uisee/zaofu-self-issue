@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import string
+from dataclasses import replace
 from pathlib import Path
 
 import yaml
@@ -81,6 +82,12 @@ _VALID_EVOLUTION_AUTO_ASSET_KINDS = (
     "runbook",
     "regression_fixture",
 )
+_VALID_EXECUTION_ROUTE_TRIGGERS = (
+    "provider_unavailable",
+    "provider_rate_limited",
+    "provider_capability_mismatch",
+    "provider_context_exhausted",
+)
 _VALID_SEVERITIES = ("low", "medium", "high", "critical")
 _VALID_PROVIDER_TELEMETRY_MODES = ("off", "managed", "host_managed")
 _ENV_SUB_RE = re.compile(
@@ -141,6 +148,8 @@ from zf.core.config.schema import (  # noqa: E402
     RuntimeConfig,
     RuntimeAutoresearchResidentConfig,
     RuntimeEvolutionConfig,
+    ExecutionRouteConfig,
+    RuntimeExecutionRoutingConfig,
     WorkdirConfig,
     GitIsolationConfig,
     RuntimeSkillsConfig,
@@ -2960,7 +2969,11 @@ def load_config(path: Path) -> ZfConfig:
                 (raw.get("autopilot") or {}).get("enabled", False)
             ),
         ),
-        runtime=_build_runtime(raw.get("runtime")),
+        runtime=_build_runtime(
+            raw.get("runtime"),
+            roles=roles,
+            execution_profiles=execution_profiles,
+        ),
         providers=_build_providers(raw.get("providers")),
         integrations=_build_integrations(raw.get("integrations")),
         channel=_build_channel(raw.get("channel")),
@@ -3339,7 +3352,165 @@ def _build_verification(
     )
 
 
-def _build_runtime(data: dict | None) -> RuntimeConfig:
+def _build_execution_routes(
+    data: dict,
+    *,
+    roles: list[RoleConfig],
+    execution_profiles: dict[str, ExecutionProfileConfig],
+) -> list[ExecutionRouteConfig]:
+    raw_routes = data.get("routes") or []
+    if not isinstance(raw_routes, list):
+        raise ConfigError("runtime.execution_routing.routes must be a list")
+    known_keys = frozenset({
+        "id",
+        "roles",
+        "flow_kinds",
+        "backend",
+        "model",
+        "model_reasoning_effort",
+        "execution_profile",
+        "provider_session",
+        "automatic_triggers",
+    })
+    route_id_re = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+    available_profiles = {"direct-v1", *execution_profiles}
+    role_refs = {
+        ref
+        for role in roles
+        for ref in (str(role.name or "").strip(), str(role.instance_id or "").strip())
+        if ref
+    }
+    seen: set[str] = set()
+    routes: list[ExecutionRouteConfig] = []
+    for index, raw_route in enumerate(raw_routes):
+        owner = f"runtime.execution_routing.routes[{index}]"
+        if not isinstance(raw_route, dict):
+            raise ConfigError(f"{owner} must be a mapping")
+        _reject_unknown_keys(raw_route, known_keys, owner)
+        route_id = str(raw_route.get("id") or "").strip()
+        if not route_id_re.fullmatch(route_id):
+            raise ConfigError(
+                f"{owner}.id must start with a lowercase letter and contain "
+                "only lowercase letters, digits, _ or -"
+            )
+        if route_id in seen:
+            raise ConfigError(
+                f"runtime.execution_routing.routes duplicates id {route_id!r}"
+            )
+        seen.add(route_id)
+        route_roles = _string_list(raw_route.get("roles"))
+        if not route_roles:
+            raise ConfigError(f"{owner}.roles must contain at least one role")
+        unknown_roles = sorted(set(route_roles) - role_refs)
+        if unknown_roles:
+            raise ConfigError(
+                f"{owner}.roles references unknown role(s): "
+                + ", ".join(unknown_roles)
+            )
+        flow_kinds = _string_list(raw_route.get("flow_kinds"))
+        unknown_flow_kinds = sorted(
+            set(flow_kinds) - {"issue", "prd", "refactor", "workflow"}
+        )
+        if unknown_flow_kinds:
+            raise ConfigError(
+                f"{owner}.flow_kinds contains unsupported value(s): "
+                + ", ".join(unknown_flow_kinds)
+            )
+        backend = str(raw_route.get("backend") or "").strip()
+        if backend not in _VALID_REPAIR_BACKENDS:
+            raise ConfigError(
+                f"{owner}.backend must be one of {_VALID_REPAIR_BACKENDS}"
+            )
+        execution_profile = str(
+            raw_route.get("execution_profile") or ""
+        ).strip()
+        if execution_profile and execution_profile not in available_profiles:
+            raise ConfigError(
+                f"{owner}.execution_profile references unknown profile "
+                f"{execution_profile!r}"
+            )
+        triggers = _string_list(raw_route.get("automatic_triggers"))
+        if not triggers:
+            raise ConfigError(
+                f"{owner}.automatic_triggers must contain at least one trigger"
+            )
+        unknown_triggers = sorted(
+            set(triggers) - set(_VALID_EXECUTION_ROUTE_TRIGGERS)
+        )
+        if unknown_triggers:
+            raise ConfigError(
+                f"{owner}.automatic_triggers contains unsupported value(s): "
+                + ", ".join(unknown_triggers)
+            )
+        provider_session = _build_provider_session(
+            raw_route.get("provider_session"),
+            role_name=f"execution route {route_id}",
+        )
+        try:
+            route = ExecutionRouteConfig(
+                id=route_id,
+                roles=route_roles,
+                flow_kinds=flow_kinds,
+                backend=backend,
+                model=str(raw_route.get("model") or "").strip(),
+                model_reasoning_effort=str(
+                    raw_route.get("model_reasoning_effort") or ""
+                ).strip(),
+                execution_profile=execution_profile,
+                provider_session=provider_session,
+                automatic_triggers=triggers,
+            )
+        except ValueError as exc:
+            raise ConfigError(f"Invalid {owner}: {exc}") from exc
+        matching_roles = [
+            role
+            for role in roles
+            if role.name in route_roles or role.instance_id in route_roles
+        ]
+        for role in matching_roles:
+            if execution_profile and execution_profile not in set(
+                role.execution.profile_allowlist
+            ):
+                raise ConfigError(
+                    f"{owner}.execution_profile {execution_profile!r} is not "
+                    f"allowed by role {role.instance_id!r}"
+                )
+            effective_execution = role.execution
+            if execution_profile:
+                effective_execution = replace(
+                    effective_execution,
+                    default_profile=execution_profile,
+                )
+            effective_role = replace(
+                role,
+                backend=backend,
+                model=route.model,
+                model_reasoning_effort=route.model_reasoning_effort,
+                provider_session=provider_session,
+                execution=effective_execution,
+            )
+            try:
+                from zf.runtime.backend import (
+                    get_adapter,
+                    validate_provider_session_config,
+                )
+
+                validate_provider_session_config(
+                    effective_role,
+                    capabilities=get_adapter(backend).capabilities,
+                )
+            except ValueError as exc:
+                raise ConfigError(f"Invalid {owner}: {exc}") from exc
+        routes.append(route)
+    return routes
+
+
+def _build_runtime(
+    data: dict | None,
+    *,
+    roles: list[RoleConfig] | None = None,
+    execution_profiles: dict[str, ExecutionProfileConfig] | None = None,
+) -> RuntimeConfig:
     if not data:
         return RuntimeConfig()
     if not isinstance(data, dict):
@@ -3350,6 +3521,7 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
     run_manager_raw = data.get("run_manager") or {}
     autoresearch_resident_raw = data.get("autoresearch_resident") or {}
     evolution_raw = data.get("evolution") or {}
+    execution_routing_raw = data.get("execution_routing") or {}
     feishu_inbound_raw = data.get("feishu_inbound") or {}
     feishu_projection_raw = data.get("feishu_projection") or {}
     if not isinstance(workdirs_raw, dict):
@@ -3364,10 +3536,59 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
         raise ConfigError("runtime.autoresearch_resident must be a mapping")
     if not isinstance(evolution_raw, dict):
         raise ConfigError("runtime.evolution must be a mapping")
+    if not isinstance(execution_routing_raw, dict):
+        raise ConfigError("runtime.execution_routing must be a mapping")
+    _reject_unknown_keys(
+        execution_routing_raw,
+        {
+            "enabled",
+            "max_switches_per_task",
+            "semantic_triage_attempt",
+            "routes",
+        },
+        "runtime.execution_routing",
+    )
     if not isinstance(feishu_inbound_raw, dict):
         raise ConfigError("runtime.feishu_inbound must be a mapping")
     if not isinstance(feishu_projection_raw, dict):
         raise ConfigError("runtime.feishu_projection must be a mapping")
+    execution_routes = _build_execution_routes(
+        execution_routing_raw,
+        roles=roles or [],
+        execution_profiles=execution_profiles or {},
+    )
+    execution_routing_enabled = _bool_value(
+        execution_routing_raw.get("enabled"),
+        default=False,
+    )
+    try:
+        execution_routing_max_switches = int(
+            execution_routing_raw.get("max_switches_per_task", 1)
+            if execution_routing_raw.get("max_switches_per_task") is not None
+            else 1
+        )
+        execution_routing_triage_attempt = int(
+            execution_routing_raw.get("semantic_triage_attempt", 3)
+            if execution_routing_raw.get("semantic_triage_attempt") is not None
+            else 3
+        )
+        RuntimeExecutionRoutingConfig(
+            enabled=execution_routing_enabled,
+            max_switches_per_task=execution_routing_max_switches,
+            semantic_triage_attempt=execution_routing_triage_attempt,
+            routes=execution_routes,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"Invalid runtime.execution_routing: {exc}") from exc
+    if execution_routing_enabled and not execution_routes:
+        raise ConfigError(
+            "runtime.execution_routing.routes is required when enabled is true"
+        )
+    if execution_routing_enabled and execution_routing_max_switches < 1:
+        raise ConfigError(
+            "runtime.execution_routing.max_switches_per_task must be >= 1 "
+            "when enabled is true"
+        )
     resident_raw = run_manager_raw.get("resident_agent") or {}
     if not isinstance(resident_raw, dict):
         raise ConfigError("runtime.run_manager.resident_agent must be a mapping")
@@ -3844,6 +4065,12 @@ def _build_runtime(data: dict | None) -> RuntimeConfig:
             sealed_root=evolution_sealed_root,
             access_token_env=evolution_token_env,
             auto_asset_kinds=evolution_auto_kinds,
+        ),
+        execution_routing=RuntimeExecutionRoutingConfig(
+            enabled=execution_routing_enabled,
+            max_switches_per_task=execution_routing_max_switches,
+            semantic_triage_attempt=execution_routing_triage_attempt,
+            routes=execution_routes,
         ),
         feishu_inbound=RuntimeFeishuInboundConfig(
             enabled=_bool_value(feishu_inbound_raw.get("enabled"), default=False),

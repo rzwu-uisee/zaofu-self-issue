@@ -75,6 +75,12 @@ from zf.runtime.run_manager_rework_triage import (
     pending_immediate_replan_actions,
     pending_rework_triage_actions,
 )
+from zf.runtime.execution_policy_routing import (
+    EXECUTION_ROUTE_SWITCH_ACTION,
+    enrich_execution_route_action,
+    execution_route_catalog_for_role,
+    pending_execution_route_actions,
+)
 from zf.runtime.recovery_context import write_task_recovery_context
 from zf.runtime.run_manager_router import (
     ACTION_POLICIES,
@@ -879,6 +885,15 @@ def build_run_manager_projection(
     workflow_resume = _workflow_resume_projection(state_dir, config, events)
     strict = getattr(config.workflow, "strict_triggers", None)
     triage_threshold = int(getattr(strict, "rework_attempts_gte", 0) or 0)
+    execution_routing_policy = getattr(
+        getattr(config, "runtime", None), "execution_routing", None
+    )
+    if triage_threshold <= 0 and bool(
+        getattr(execution_routing_policy, "enabled", False)
+    ):
+        triage_threshold = int(
+            getattr(execution_routing_policy, "semantic_triage_attempt", 3) or 3
+        )
     resident_agent = build_resident_agent_projection(events, config=config)
     immediate_replan_actions = pending_immediate_replan_actions(
         events,
@@ -907,6 +922,14 @@ def build_run_manager_projection(
         )
         for action in rework_triage_actions
     ]
+    rework_triage_actions = [
+        enrich_execution_route_action(
+            action,
+            state_dir=state_dir,
+            config=config,
+        )
+        for action in rework_triage_actions
+    ]
     from zf.runtime.recovery_delta import attach_recovery_proposal
 
     rework_triage_actions = [
@@ -918,6 +941,21 @@ def build_run_manager_projection(
         for action in rework_triage_actions
     ]
     for action in rework_triage_actions:
+        action_name = str(action.get("action") or "")
+        action["preflight"] = preflight_action(
+            action=action_name,
+            payload=action,
+        )
+        action["policy_decision"] = router_decide_action_policy(
+            action=action_name,
+            payload=action,
+        )
+    execution_route_actions = pending_execution_route_actions(
+        state_dir,
+        config=config,
+        events=events,
+    )
+    for action in execution_route_actions:
         action_name = str(action.get("action") or "")
         action["preflight"] = preflight_action(
             action=action_name,
@@ -960,6 +998,11 @@ def build_run_manager_projection(
     triage_owned_tasks.update(
         str(action.get("task_id") or "")
         for action in rework_triage_actions
+        if str(action.get("task_id") or "")
+    )
+    triage_owned_tasks.update(
+        str(action.get("task_id") or "")
+        for action in execution_route_actions
         if str(action.get("task_id") or "")
     )
     triage_owned_tasks.difference_update(legacy_replan_tasks)
@@ -1115,6 +1158,7 @@ def build_run_manager_projection(
     )
     base_pending_actions = [
         *rework_triage_actions,
+        *execution_route_actions,
         *workflow_actions,
         *attempt_recovery_actions,
         *worker_actions,
@@ -1405,6 +1449,8 @@ def _pending_action_priority(action: dict[str, Any]) -> tuple[int, str, str]:
         # replacement contract that would make progress possible.
         if action_name == SEMANTIC_REPLAN_ACTION:
             return (-5, action_name, str(action.get("checkpoint_id") or ""))
+        if action_name == EXECUTION_ROUTE_SWITCH_ACTION:
+            return (-4, action_name, str(action.get("checkpoint_id") or ""))
         if action_name in {"workflow-task-resume", "workflow-batch-resume"}:
             if safe_action in _SAFE_TASK_ACTIONS or safe_action in _SAFE_BATCH_ACTIONS:
                 return (0, action_name, str(action.get("checkpoint_id") or ""))
@@ -5597,6 +5643,15 @@ def _execute_controlled_run_action(
             action=action,
             causation_id=causation_id,
         )
+    if action_name == EXECUTION_ROUTE_SWITCH_ACTION:
+        return _execute_operator_controlled_action(
+            state_dir=state_dir,
+            writer=writer,
+            config=config,
+            project_root=project_root,
+            action=action,
+            causation_id=causation_id,
+        )
     if action_name == DYNAMIC_CONTINUATION_ACTION:
         return _execute_read_only_dynamic_continuation(
             state_dir=state_dir,
@@ -5719,6 +5774,22 @@ def _execute_orchestrator_triage_request(
         flow_kind=str(action.get("flow_kind") or ""),
         source=action,
     )
+    role_ref = str(
+        action.get("instance_id")
+        or action.get("role_instance")
+        or action.get("role")
+        or ""
+    )
+    matching_roles = [
+        role
+        for role in list(getattr(config, "roles", []) or [])
+        if role_ref in {role.name, role.instance_id}
+    ]
+    route_catalog = (
+        execution_route_catalog_for_role(config, role=matching_roles[0])
+        if len(matching_roles) == 1
+        else []
+    )
     requested = writer.emit(
         request_type,
         actor="run-manager",
@@ -5757,7 +5828,9 @@ def _execute_orchestrator_triage_request(
                 "replan",
                 "diagnose",
                 "human",
+                *(["switch_execution_route"] if route_catalog else []),
             ],
+            "execution_route_catalog": route_catalog,
         },
     )
     outcome = writer.emit(
@@ -6945,12 +7018,28 @@ def _resident_action_focus_prompt(action: dict[str, Any]) -> str:
     if semantic_request_id:
         task_id = str(action.get("task_id") or "").strip()
         fingerprint = str(action.get("fingerprint") or "").strip()
+        route_catalog = action.get("execution_route_catalog")
+        route_catalog = route_catalog if isinstance(route_catalog, list) else []
+        allowed_actions = (
+            "continue_rework, precise_rework, revise_contract, split_task, "
+            "replan, diagnose, human"
+            + (", switch_execution_route" if route_catalog else "")
+        )
         lines.extend([
             "",
             "这是第三次同指纹失败的 proposal-only 语义分诊。读取 source_ref 指向的 "
             "recovery context；不要直接改 TaskStore、重派任务或触发 replan。",
-            "选择且只选择一个 recommended_action: continue_rework, precise_rework, "
-            "revise_contract, split_task, replan, diagnose, human。",
+            f"选择且只选择一个 recommended_action: {allowed_actions}。",
+            *(
+                [
+                    "只有结构化证据证明 provider/capability/context 故障时才可选择 "
+                    "switch_execution_route；必须从以下 catalog 选择 route id: "
+                    f"{route_catalog}。",
+                    "选择 route switch 时还必须提交 execution_route_id 与 "
+                    "execution_route_trigger。",
+                ]
+                if route_catalog else []
+            ),
             "通过 `zf emit orchestrator.rework.triage.recorded` 返回建议，payload 必须包含:",
             f"- request_id: `{semantic_request_id}`",
             f"- task_id: `{task_id}`",
@@ -10807,6 +10896,31 @@ def _operator_controlled_action_payload(action: dict[str, Any]) -> dict[str, Any
                 action.get("summary")
                 or "rebuild aggregate from durable manifest"
             ),
+        }
+    if str(action.get("action") or "") == EXECUTION_ROUTE_SWITCH_ACTION:
+        fields = (
+            "action_id",
+            "checkpoint_id",
+            "workflow_run_id",
+            "task_id",
+            "role",
+            "instance_id",
+            "role_instance",
+            "dispatch_id",
+            "flow_kind",
+            "route_id",
+            "trigger_class",
+            "fingerprint",
+            "failure_class",
+            "source_event_id",
+            "source_event_type",
+            "source_event_ids",
+            "policy_digest",
+        )
+        return {
+            field: action.get(field)
+            for field in fields
+            if action.get(field) not in (None, "")
         }
     payload = {
         "source": "run-manager",

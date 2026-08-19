@@ -595,6 +595,11 @@ def _render_rework_triage_contract(event: ZfEvent) -> str:
         "evidence_event_ids": payload.get("failure_event_ids") or [],
         "apply_policy": "proposal_only",
     }
+    execution_routes = payload.get("execution_route_catalog")
+    execution_routes = execution_routes if isinstance(execution_routes, list) else []
+    if execution_routes:
+        advice["execution_route_id"] = "REQUIRED_ONLY_FOR_ROUTE_SWITCH"
+        advice["execution_route_trigger"] = "REQUIRED_ONLY_FOR_ROUTE_SWITCH"
     return "\n".join([
         "This is proposal-only semantic triage requested by Run Manager.",
         "Do not dispatch, reassign, edit TaskStore, emit `task_map.ready`, or emit "
@@ -609,7 +614,16 @@ def _render_rework_triage_contract(event: ZfEvent) -> str:
         ),
         "Choose exactly one `recommended_action`: `continue_rework`, "
         "`precise_rework`, `revise_contract`, `split_task`, `replan`, "
-        "`diagnose`, or `human`.",
+        "`diagnose`, `human`, or `switch_execution_route` when and only when "
+        "the evidence proves a structured provider/capability/context failure.",
+        (
+            "For `switch_execution_route`, choose exactly one id from "
+            f"`execution_route_catalog={execution_routes}` and set both "
+            "`execution_route_id` and `execution_route_trigger`; do not infer "
+            "a route from arbitrary error prose."
+            if execution_routes
+            else "No execution route catalog is available; do not choose route switch."
+        ),
         "Then emit exactly one advisory event with concise evidence-based guidance:",
         "```bash",
         f"{zf_cli_cmd()} emit orchestrator.rework.triage.recorded "
