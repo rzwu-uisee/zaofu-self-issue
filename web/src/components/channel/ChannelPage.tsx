@@ -20,6 +20,11 @@ import {
   AskUserQuestion,
   type AskUserQuestionAnswer,
 } from "../common/AskUserQuestion";
+import {
+  channelDiscussionControlPolicy,
+  presentChannelDiscussionAttention,
+  selectChannelDiscussionAttention,
+} from "./channelDiscussionAttention";
 
 const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((module) => ({
   default: module.ChannelEmojiPicker,
@@ -484,6 +489,7 @@ export function ChannelPage({
   const [channelSplitThreadId, setChannelSplitThreadId] = useState("");
   const [channelPinnedToBottom, setChannelPinnedToBottom] = useState(true);
   const [channelHasNewBelow, setChannelHasNewBelow] = useState(false);
+  const [ownerQuestionsOpen, setOwnerQuestionsOpen] = useState(false);
   const [memberSearch, setMemberSearch] = useState("");
   const [memberMenuId, setMemberMenuId] = useState("");
   const [memberProfileId, setMemberProfileId] = useState("");
@@ -557,33 +563,16 @@ export function ChannelPage({
     ),
     [activeChannelThreadId, conversationDetail, liveStreamBuffer, selectedChannelId],
   );
-  // visibility batch #10 (doc 122): the discussion state machine and the
-  // open-questions ledger are projection truth — surface them so the
-  // operator can supervise a debate without reading events.jsonl.
   const discussionBand = useMemo(() => {
-    const sessions = Object.entries(detail?.discussions ?? {});
-    const selectedActive = sessions.find(([threadId, session]) => {
-      const state = String(session.state || "");
-      return threadId === activeChannelThreadId && state && state !== "idle";
-    });
-    const activeEntry = selectedActive ?? sessions.find(([, session]) => {
-      const state = String(session.state || "");
-      return state && state !== "idle";
-    });
-    const active = activeEntry?.[1];
+    const attention = selectChannelDiscussionAttention(
+      detail,
+      activeChannelThreadId,
+    );
+    if (!attention) return null;
+    const presentation = presentChannelDiscussionAttention(attention);
+    const threadId = attention.thread_id || activeChannelThreadId || "main";
     const questions = Object.values(detail?.open_questions ?? {})
       .map((item) => item as Record<string, unknown>);
-    const questionThreadId = String(
-      questions.find((item) => String(item.status || "") === "open")
-        ?.thread_id || "",
-    );
-    const threadId = activeEntry?.[0]
-      || (questions.some((item) => (
-        String(item.status || "") === "open"
-        && String(item.thread_id || "main") === activeChannelThreadId
-      )) ? activeChannelThreadId : questionThreadId)
-      || activeChannelThreadId
-      || "main";
     const threadQuestions = questions.filter((item) => (
       String(item.thread_id || "main") === threadId
     ));
@@ -642,45 +631,22 @@ export function ChannelPage({
           skipLabel: "Out of scope",
         }];
       });
-    if (!active && !openQuestions.length) return null;
-    const phase = String(active?.state || "");
-    const phaseNum = phase === "phase1_blind" ? 1
-      : phase === "phase2_relay" ? 2
-      : phase === "phase3_synthesis" ? 3
-      : 0;
-    const phaseLabel = phase === "phase1_blind" ? "Blind answers"
-      : phase === "phase2_relay" ? "Open debate"
-      : phase === "phase3_synthesis" ? "Synthesis"
-      : "Open questions";
-    // A phase with no recent movement and no open ledger is a STALLED
-    // debate, not a live one — showing it as a proud full status card is
-    // misinformation (user feedback: zombie phase2 squatting on top of the
-    // channel). Downgrade to a thin warning chip after 10 quiet minutes.
-    const sessionStart = String(active?.started_at || "");
-    const lastSignals = [
-      String(active?.phase_changed_at || ""),
-      ...((detail?.reply_requests ?? [])
-        .filter((item): item is Record<string, unknown> => Boolean(recordValue(item)))
-        .filter((item) => !sessionStart || String(item.updated_at || item.created_at || "") >= sessionStart)
-        .map((item) => String(item.updated_at || item.created_at || ""))),
-    ].filter(Boolean).sort();
-    const lastActivity = lastSignals[lastSignals.length - 1] || "";
-    const quietMs = lastActivity ? Date.now() - new Date(lastActivity).getTime() : 0;
-    const stalled = Boolean(active) && !openQuestions.length && quietMs > 10 * 60 * 1000;
     return {
-      phaseNum,
-      phaseLabel,
+      attention,
+      presentation,
       threadId,
-      stalled,
-      quietMinutes: Math.max(1, Math.round(quietMs / 60000)),
-      roster: Array.isArray(active?.roster) ? (active?.roster as unknown[]) : [],
       openQuestions,
       ownerQuestions,
       questionGraphDigest: detail?.question_graph_digests?.[threadId] || "",
-      totalCount: threadQuestions.length,
-      resolvedCount: threadQuestions.length - openQuestions.length,
     };
   }, [activeChannelThreadId, detail]);
+  useEffect(() => {
+    setOwnerQuestionsOpen(false);
+  }, [
+    activeChannelThreadId,
+    discussionBand?.questionGraphDigest,
+    selectedChannelId,
+  ]);
   function quoteDiscussionQuestion(text: string) {
     insertComposerText(`Re “${text}”: `);
   }
@@ -780,7 +746,7 @@ export function ChannelPage({
   );
   const messages = detail?.messages ?? detail?.recent_messages ?? [];
   const syntheses = workspaceDetail?.syntheses ?? [];
-  const controlThreadId = activeChannelThreadId || discussionBand?.threadId || "main";
+  const controlThreadId = discussionBand?.threadId || activeChannelThreadId || "main";
   const canonicalPrd = canonicalChannelPrd(workspaceDetail, controlThreadId);
   const threadConsensus = workspaceDetail?.consensus?.[controlThreadId] ?? {};
   const workflowRequests = workspaceDetail?.workflow_requests ?? [];
@@ -815,6 +781,11 @@ export function ChannelPage({
     "state",
     "idle",
   );
+  const discussionControls = channelDiscussionControlPolicy(
+    discussionBand?.attention ?? null,
+    currentDiscussionState,
+    Boolean(latestThreadRequirementText),
+  );
   const defaultResponderId = recordString(workspaceDetail?.discussion ?? {}, "default_responder_id");
   const replyCapableMembers = members.filter((member) => {
     const status = recordString(member, "status");
@@ -839,7 +810,10 @@ export function ChannelPage({
   });
   const attentionReplyRows = [...pendingReplyRows, ...failedReplyRows];
   const pendingReplies = pendingReplyRows.length;
-  const attentionCount = pendingReplies + failedReplyRows.length;
+  const discussionAttentionCount = discussionBand?.attention.state === "needs_input"
+    ? Math.max(1, discussionBand.attention.owner_question_count)
+    : discussionBand?.attention.state === "blocked" ? 1 : 0;
+  const attentionCount = pendingReplies + failedReplyRows.length + discussionAttentionCount;
   const mentionRows = (detail?.mentions_detected ?? []).filter((item): item is Record<string, unknown> => Boolean(recordValue(item)));
   const mentionDigests = buildChannelMentionDigests(mentionRows, messages as Record<string, unknown>[], channelMemberIds);
   const drawerTitles: Record<ChannelDrawerKey, string> = {
@@ -903,6 +877,7 @@ export function ChannelPage({
     }
   }
   function toggleDrawer(nextDrawer: ChannelDrawerKey) {
+    setOwnerQuestionsOpen(false);
     setDrawer((current) => current === nextDrawer ? null : nextDrawer);
   }
   function channelMemberCount(channel: ChannelSummary): number {
@@ -1340,6 +1315,24 @@ export function ChannelPage({
     } finally {
       setControlsBusy(false);
     }
+  }
+  function handleDiscussionAttentionAction() {
+    const presentation = discussionBand?.presentation;
+    if (!presentation) return;
+    if (presentation.action === "questions") {
+      setOwnerQuestionsOpen(true);
+      setDrawer(null);
+      return;
+    }
+    if (presentation.action === "synthesize") {
+      if (!discussionControls.canSynthesize) return;
+      void runControl(() => onRequestSynthesis(
+        controlThreadId,
+        defaultResponderId || undefined,
+      ));
+      return;
+    }
+    setDrawer("attention");
   }
   function messageMember(memberId: string) {
     if (!memberId) return;
@@ -2016,7 +2009,7 @@ export function ChannelPage({
               disabled={
                 !actionReady
                 || controlsBusy
-                || !latestThreadRequirementText
+                || !discussionControls.canStartOrRestart
               }
               type="button"
               onClick={() => void runControl(() => onStartDiscussion(
@@ -2024,18 +2017,16 @@ export function ChannelPage({
                 latestThreadRequirementText,
                 latestThreadRequirementId,
                 discussionMode,
-                currentDiscussionState !== "idle",
+                discussionControls.restart,
               ))}
             >
               <PlayCircle size={16} />
-              {currentDiscussionState === "idle"
-                ? "Start discussion"
-                : "Restart discussion"}
+              {discussionControls.startLabel}
             </button>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onDrainReplies)}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canDrainReplies} type="button" onClick={() => void runControl(onDrainReplies)}>
               Drain Replies
             </button>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onRequestSynthesis(controlThreadId, defaultResponderId || undefined))}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canSynthesize} type="button" onClick={() => void runControl(() => onRequestSynthesis(controlThreadId, defaultResponderId || undefined))}>
               <FileText size={16} />
               Synthesize
             </button>
@@ -2106,6 +2097,107 @@ export function ChannelPage({
       </div>
     );
   }
+  function renderDiscussionActivity() {
+    if (!discussionBand) return null;
+    const { attention, presentation } = discussionBand;
+    return (
+      <section
+        className={`channel-discussion-activity tone-${presentation.tone}`}
+        data-discussion-state={attention.state}
+        data-testid="channel-discussion-activity"
+      >
+        <div className="channel-discussion-activity-head">
+          <span className="channel-discussion-state-icon"><Bell size={15} /></span>
+          <div>
+            <strong>{presentation.label}</strong>
+            <span>{presentation.summary}</span>
+          </div>
+        </div>
+        <div className="channel-discussion-activity-metrics">
+          <span><strong>{attention.active_agent_count}</strong> active agents</span>
+          <span><strong>{attention.completed_reply_count}</strong> replies complete</span>
+          <span><strong>{attention.open_question_count}</strong> open questions</span>
+          <span><strong>{attention.failed_reply_count}</strong> failed replies</span>
+        </div>
+        <dl className="channel-discussion-activity-meta">
+          <dt>Thread</dt>
+          <dd className="mono">{attention.thread_id}</dd>
+          <dt>Runtime phase</dt>
+          <dd className="mono">{attention.kernel_phase || "idle"}</dd>
+          <dt>Last activity</dt>
+          <dd>{formatTime(attention.last_activity_at) || "-"}</dd>
+        </dl>
+        {discussionBand.openQuestions.length ? (
+          <div className="channel-discussion-open-questions">
+            <strong>Open questions</strong>
+            {discussionBand.openQuestions.slice(0, 5).map((question) => (
+              <button
+                key={question.id}
+                type="button"
+                onClick={() => {
+                  setDrawer(null);
+                  quoteDiscussionQuestion(question.text);
+                  window.setTimeout(() => focusComposer(), 0);
+                }}
+              >
+                <span>{question.text}</span>
+                <Quote size={14} />
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="channel-discussion-activity-actions">
+          {attention.can_review_questions ? (
+            <button
+              className="icon-button primary"
+              type="button"
+              onClick={() => {
+                setOwnerQuestionsOpen(true);
+                setDrawer(null);
+              }}
+            >
+              Review decisions
+            </button>
+          ) : null}
+          <button
+            className="icon-button"
+            disabled={!actionReady || controlsBusy || !discussionControls.canDrainReplies}
+            type="button"
+            onClick={() => void runControl(onDrainReplies)}
+          >
+            Drain replies
+          </button>
+          <button
+            className="icon-button"
+            disabled={!actionReady || controlsBusy || !discussionControls.canSynthesize}
+            type="button"
+            onClick={() => void runControl(() => onRequestSynthesis(
+              controlThreadId,
+              defaultResponderId || undefined,
+            ))}
+          >
+            <FileText size={15} />
+            Synthesize
+          </button>
+          <button
+            className="icon-button"
+            disabled={!actionReady || controlsBusy || !discussionControls.canStartOrRestart}
+            type="button"
+            onClick={() => void runControl(() => onStartDiscussion(
+              controlThreadId,
+              latestThreadRequirementText,
+              latestThreadRequirementId,
+              discussionMode,
+              discussionControls.restart,
+            ))}
+          >
+            <PlayCircle size={15} />
+            {discussionControls.startLabel}
+          </button>
+        </div>
+      </section>
+    );
+  }
   function renderDrawerContent(activeDrawer: ChannelDrawerKey) {
     if (activeDrawer === "members") {
       return (
@@ -2142,11 +2234,12 @@ export function ChannelPage({
     if (activeDrawer === "attention") {
       return (
         <>
+          {renderDiscussionActivity()}
           <div className="channel-attention-strip">
             <span className="metric-chip">{pendingReplies} pending</span>
             <span className={`metric-chip ${failedReplyRows.length ? "chip-warn" : ""}`}>{failedReplyRows.length} failed</span>
             <span className="metric-chip">{mentionDigests.length} mentions</span>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(onDrainReplies)}>
+            <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canDrainReplies} type="button" onClick={() => void runControl(onDrainReplies)}>
               Drain Replies
             </button>
           </div>
@@ -2274,7 +2367,7 @@ export function ChannelPage({
             disabled={
               !actionReady
               || controlsBusy
-              || !latestThreadRequirementText
+              || !discussionControls.canStartOrRestart
             }
             type="button"
             onClick={() => void runControl(() => onStartDiscussion(
@@ -2282,13 +2375,11 @@ export function ChannelPage({
               latestThreadRequirementText,
               latestThreadRequirementId,
               discussionMode,
-              currentDiscussionState !== "idle",
+              discussionControls.restart,
             ))}
           >
             <PlayCircle size={16} />
-            {currentDiscussionState === "idle"
-              ? "Start discussion"
-              : "Restart discussion"}
+            {discussionControls.startLabel}
           </button>
         </div>
         <div className="channel-control-panel">
@@ -2482,45 +2573,51 @@ export function ChannelPage({
           {activeTab === "chat" ? (
             <>
               {renderHistorySearchPanel()}
-              {discussionBand?.stalled ? (
-                <div aria-label="Discussion stalled" className="channel-discussion-stalled">
-                  <span aria-hidden="true">⚠</span>
-                  Discussion stalled at {discussionBand.phaseLabel.toLowerCase()}
-                  {" "}(phase {discussionBand.phaseNum}/3) · quiet for {discussionBand.quietMinutes}m
-                  — agents stopped relaying; close it or restart with @all.
-                </div>
-              ) : null}
-              {discussionBand && !discussionBand.stalled ? (
-                <div aria-label="Discussion status" className="channel-discussion-band">
-                  <div className="channel-discussion-head">
-                    {discussionBand.phaseNum ? (
-                      <span aria-hidden="true" className="channel-discussion-dots">
-                        {[1, 2, 3].map((step) => (
-                          <i
-                            className={step < discussionBand.phaseNum ? "done"
-                              : step === discussionBand.phaseNum ? "on" : ""}
-                            key={step}
-                          />
-                        ))}
-                      </span>
-                    ) : null}
-                    <strong>{discussionBand.phaseLabel}</strong>
-                    {discussionBand.phaseNum ? (
-                      <span className="channel-discussion-meta">phase {discussionBand.phaseNum}/3</span>
-                    ) : null}
-                    <span className="channel-discussion-spacer" />
-                    {discussionBand.roster.length ? (
-                      <span className="channel-discussion-pill">
-                        {discussionBand.roster.length} debating
-                      </span>
-                    ) : null}
-                    {discussionBand.totalCount ? (
-                      <span className={`channel-discussion-pill ${
-                        discussionBand.resolvedCount === discussionBand.totalCount ? "ok" : "open"}`}
-                      >
-                        {discussionBand.resolvedCount}/{discussionBand.totalCount} resolved
-                      </span>
-                    ) : null}
+              {discussionBand?.presentation.visible ? (
+                <section
+                  aria-label="Discussion attention"
+                  aria-live="polite"
+                  className={`channel-discussion-attention tone-${discussionBand.presentation.tone}`}
+                  data-discussion-state={discussionBand.attention.state}
+                  data-testid="channel-discussion-attention"
+                >
+                  <div className="channel-discussion-attention-main">
+                    <span className="channel-discussion-state-icon" aria-hidden="true">
+                      {discussionBand.attention.state === "running" ? (
+                        <Loader2 className="spin" size={15} />
+                      ) : discussionBand.attention.state === "ready" ? (
+                        <FileText size={15} />
+                      ) : discussionBand.attention.state === "blocked" ? (
+                        <Info size={15} />
+                      ) : (
+                        <Bell size={15} />
+                      )}
+                    </span>
+                    <div className="channel-discussion-attention-copy">
+                      <strong>{discussionBand.presentation.label}</strong>
+                      <span>{discussionBand.presentation.summary}</span>
+                    </div>
+                    <button
+                      className="icon-button"
+                      disabled={
+                        (
+                          discussionBand.presentation.action === "synthesize"
+                          && (
+                            controlsBusy
+                            || !actionReady
+                            || !discussionControls.canSynthesize
+                          )
+                        )
+                        || (
+                          discussionBand.presentation.action === "questions"
+                          && !discussionBand.ownerQuestions.length
+                        )
+                      }
+                      type="button"
+                      onClick={handleDiscussionAttentionAction}
+                    >
+                      {discussionBand.presentation.actionLabel}
+                    </button>
                   </div>
                   {recordString(threadConsensus, "artifact_ref") && !recordString(threadConsensus, "reached_event_id") ? (
                     <div className="channel-consensus-control">
@@ -2569,6 +2666,43 @@ export function ChannelPage({
                       </button>
                     </div>
                   ) : null}
+                </section>
+              ) : null}
+              {ownerQuestionsOpen && discussionBand?.ownerQuestions.length ? (
+                <div className="channel-owner-question-shelf" data-testid="channel-owner-question-shelf">
+                  <AskUserQuestion
+                    busy={controlsBusy}
+                    disabled={!actionReady}
+                    onClose={() => setOwnerQuestionsOpen(false)}
+                    onDiscuss={(question) => {
+                      setOwnerQuestionsOpen(false);
+                      quoteDiscussionQuestion(question.question);
+                      window.setTimeout(() => focusComposer(), 0);
+                    }}
+                    onSubmit={(answers: AskUserQuestionAnswer[]) => {
+                      void runControl(async () => {
+                        for (const answer of answers) {
+                          await onResolveQuestion(
+                            answer.questionId,
+                            discussionBand.threadId,
+                            answer.skipped ? "out_of_scope" : "answered",
+                            answer.answer,
+                          );
+                        }
+                        setOwnerQuestionsOpen(false);
+                      });
+                    }}
+                    questions={discussionBand.ownerQuestions}
+                    requestId={[
+                      selectedChannelId,
+                      discussionBand.threadId,
+                      discussionBand.questionGraphDigest,
+                    ].join(":")}
+                    submitLabel={(answers) => (
+                      answers.length > 1 ? "Submit answers" : "Answer"
+                    )}
+                    variant="shelf"
+                  />
                 </div>
               ) : null}
               <div
@@ -2637,38 +2771,6 @@ export function ChannelPage({
                   <ChevronDown size={15} />
                   New messages
                 </button>
-              ) : null}
-              {discussionBand?.ownerQuestions.length ? (
-                <AskUserQuestion
-                  busy={controlsBusy}
-                  disabled={!actionReady}
-                  onDiscuss={(question) => {
-                    quoteDiscussionQuestion(question.question);
-                    window.setTimeout(() => focusComposer(), 0);
-                  }}
-                  onSubmit={(answers: AskUserQuestionAnswer[]) => {
-                    void runControl(async () => {
-                      for (const answer of answers) {
-                        await onResolveQuestion(
-                          answer.questionId,
-                          discussionBand.threadId,
-                          answer.skipped ? "out_of_scope" : "answered",
-                          answer.answer,
-                        );
-                      }
-                    });
-                  }}
-                  questions={discussionBand.ownerQuestions}
-                  requestId={[
-                    selectedChannelId,
-                    discussionBand.threadId,
-                    discussionBand.questionGraphDigest,
-                  ].join(":")}
-                  submitLabel={(answers) => (
-                    answers.length > 1 ? "Submit answers" : "Answer"
-                  )}
-                  variant="shelf"
-                />
               ) : null}
               <form
                 className="channel-composer"

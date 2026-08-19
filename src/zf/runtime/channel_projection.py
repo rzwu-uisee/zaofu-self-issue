@@ -23,6 +23,7 @@ from zf.runtime.channel_contracts import (
     normalize_visibility_profile,
     permission_profile_write_policy,
 )
+from zf.runtime.channel_discussion_attention import project_discussion_attention
 from zf.runtime.channel_roles import normalize_role_context_ref
 from zf.runtime.channel_question_graph import (
     normalize_question_payload,
@@ -2484,6 +2485,11 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         thread_id: question_graph_digest(channel, thread_id=thread_id)
         for thread_id in sorted(question_thread_ids)
     }
+    discussion_attention = project_discussion_attention(
+        channel,
+        reply_requests,
+        owner_questionnaires,
+    )
     out = {
         "schema_version": "channel.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2569,6 +2575,7 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "automation_reports": channel["automation_reports"],
         "discussion": channel["discussion"],
         "discussions": channel["discussions"],
+        "discussion_attention": discussion_attention,
         "open_questions": sorted(
             channel["open_questions"].values(),
             key=lambda item: str(item.get("ts") or ""),

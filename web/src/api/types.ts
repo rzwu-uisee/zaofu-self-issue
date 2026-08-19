@@ -1722,6 +1722,42 @@ export interface RepairActionProjection {
   issues: Array<Record<string, string>>;
 }
 
+export type ChannelDiscussionAttentionState =
+  | "running"
+  | "needs_input"
+  | "ready"
+  | "blocked"
+  | "done";
+
+export interface ChannelDiscussionAttention {
+  schema_version: "channel.discussion-attention.v1" | string;
+  is_derived_projection: boolean;
+  thread_id: string;
+  state: ChannelDiscussionAttentionState;
+  reason: string;
+  next_action: string;
+  kernel_phase: string;
+  last_outcome: string;
+  participant_count: number;
+  active_agent_count: number;
+  active_reply_count: number;
+  queued_reply_count: number;
+  running_reply_count: number;
+  completed_reply_count: number;
+  failed_reply_count: number;
+  open_question_count: number;
+  owner_question_count: number;
+  total_question_count: number;
+  resolved_question_count: number;
+  last_activity_at: string;
+  can_drain_replies: boolean;
+  can_synthesize: boolean;
+  can_restart: boolean;
+  can_review_questions: boolean;
+  can_review_result: boolean;
+  can_view_activity: boolean;
+}
+
 export interface ChannelSummary {
   channel_id: string;
   name?: string;
@@ -1740,6 +1776,7 @@ export interface ChannelSummary {
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
   discussions?: Record<string, Record<string, unknown>>;
+  discussion_attention?: Record<string, ChannelDiscussionAttention>;
   open_questions?: Array<Record<string, unknown>> | Record<string, Record<string, unknown>>;
   question_frontiers?: Record<string, Array<Record<string, unknown>>>;
   owner_questionnaires?: Record<string, Array<Record<string, unknown>>>;

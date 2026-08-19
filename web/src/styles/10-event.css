@@ -527,6 +527,24 @@
     max-height: none;
   }
 
+  .app-shell-channel {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .app-shell-channel .workspace {
+    min-height: 0;
+    grid-template-rows: max-content minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .app-shell-channel .board-panel {
+    min-height: 0;
+    max-height: none;
+    overflow: hidden;
+  }
+
   .agent-page-shell.docked,
   .agent-page-shell.fullscreen {
     inset: 10px;

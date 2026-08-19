@@ -42,6 +42,7 @@ interface AskUserQuestionProps {
   disabled?: boolean;
   discussLabel?: string;
   invalidMessage?: string;
+  onClose?: () => void;
   onDiscuss?: (question: AskUserQuestionItem) => void;
   onSubmit?: (answers: AskUserQuestionAnswer[]) => void;
   otherDescription?: string;
@@ -59,6 +60,7 @@ export function AskUserQuestion({
   disabled = false,
   discussLabel = "Discuss",
   invalidMessage = "",
+  onClose,
   onDiscuss,
   onSubmit,
   otherDescription = "Provide another constraint or decision.",
@@ -207,9 +209,15 @@ export function AskUserQuestion({
         <button
           aria-label="Close question"
           className="icon-button ask-user-close"
-          title="Collapse question"
+          title={onClose ? "Close question" : "Collapse question"}
           type="button"
-          onClick={() => setCollapsed(true)}
+          onClick={() => {
+            if (onClose) {
+              onClose();
+              return;
+            }
+            setCollapsed(true);
+          }}
         >
           <X aria-hidden="true" size={15} />
         </button>

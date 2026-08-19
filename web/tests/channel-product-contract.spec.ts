@@ -12,6 +12,7 @@ type ChannelDetail = {
   pinned_message_ids?: string[];
   unread_count?: number;
   consensus?: Record<string, Record<string, unknown>>;
+  discussion_attention?: Record<string, Record<string, unknown>>;
   result_receipts?: Array<Record<string, unknown>>;
 };
 
@@ -75,6 +76,45 @@ test("Channel product contract stays durable across Web actions and reload", asy
   page.on("pageerror", (error) => consoleErrors.push(error.message));
 
   await openChannel(page, id);
+  const discussionAttention = page.getByTestId("channel-discussion-attention");
+  await expect(discussionAttention).toHaveAttribute(
+    "data-discussion-state",
+    "needs_input",
+  );
+  await expect(discussionAttention).toContainText("Needs input");
+  await expect(discussionAttention).toContainText("Review result");
+  await expect(discussionAttention).not.toContainText("Open debate");
+  await expect(discussionAttention).not.toContainText("debating");
+  const initialDetail = await json<ChannelDetail>(request, detailPath);
+  expect(initialDetail.discussion_attention?.main?.state).toBe("needs_input");
+
+  await discussionAttention.getByRole("button", {
+    name: "Review result",
+  }).click();
+  await expect(page.getByTestId("channel-discussion-activity")).toBeVisible();
+  await page.getByTitle("Close drawer").click();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(discussionAttention).toBeVisible();
+  const mobileLayout = await page.evaluate(() => {
+    const timeline = document.querySelector<HTMLElement>(".channel-timeline");
+    const composer = document.querySelector<HTMLElement>(".channel-composer");
+    return {
+      documentHeight: document.documentElement.scrollHeight,
+      viewportHeight: window.innerHeight,
+      timelineClientHeight: timeline?.clientHeight ?? 0,
+      composerBottom: composer?.getBoundingClientRect().bottom ?? 0,
+    };
+  });
+  expect(mobileLayout.documentHeight).toBeLessThanOrEqual(
+    mobileLayout.viewportHeight + 2,
+  );
+  expect(mobileLayout.timelineClientHeight).toBeGreaterThan(20);
+  expect(mobileLayout.composerBottom).toBeLessThanOrEqual(
+    mobileLayout.viewportHeight + 1,
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
+
   await page.locator(".channel-tabs").getByRole("button", {
     name: "Details",
   }).click();

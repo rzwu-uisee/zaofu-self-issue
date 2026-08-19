@@ -106,6 +106,38 @@ def test_channel_conversation_projects_human_text_and_structured_card(
     assert card["artifact_ref"] == descriptor["ref"]
 
 
+def test_channel_conversation_carries_compact_discussion_attention(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    _append(log, "channel.created", {"name": "Attention"})
+    _append(log, "channel.discussion.started", {
+        "thread_id": "main",
+        "discussion_id": "discussion-1",
+        "roster": ["arch", "critic"],
+        "synthesizer": "arch",
+        "requirement_message_id": "msg-1",
+    })
+    _append(log, "channel.agent.reply.requested", {
+        "thread_id": "main",
+        "request_id": "reply-1",
+        "message_id": "msg-1",
+        "target_member_id": "arch",
+        "status": "pending",
+    })
+
+    conversation = project_channel_conversation(state_dir, CHANNEL_ID)
+
+    assert conversation is not None
+    attention = conversation["discussion_attention"]["main"]
+    assert attention["state"] == "running"
+    assert attention["active_agent_count"] == 1
+    assert attention["participant_count"] == 2
+    assert attention["is_derived_projection"] is True
+
+
 def test_channel_conversation_paginates_without_duplicates(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()

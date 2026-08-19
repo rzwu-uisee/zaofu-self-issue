@@ -2056,7 +2056,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${page === "channels" ? "app-shell-channel" : ""}`.trim()}>
       <header className="topbar">
         <div className="brand-block">
           <h1>{topbarProjectName}</h1>

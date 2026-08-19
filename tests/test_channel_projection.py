@@ -73,6 +73,170 @@ def test_channel_projection_rebuilds_roster_transcript_and_attention(tmp_path: P
     assert detail["attention"][0]["attention"]["reason"] == "delivery_failed"
 
 
+def test_channel_projection_derives_discussion_attention_and_actions(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+
+    def append(event_type: str, **payload: object) -> None:
+        log.append(ZfEvent(
+            type=event_type,
+            actor="operator",
+            payload={
+                "channel_id": "ch-attention",
+                "thread_id": "main",
+                "source": "test",
+                **payload,
+            },
+            correlation_id="ch-attention",
+        ))
+
+    append(
+        "channel.agent.reply.failed",
+        request_id="reply-old",
+        message_id="message-old",
+        target_member_id="arch-1",
+        status="failed",
+        reason="failure from a previous discussion",
+    )
+    append(
+        "channel.discussion.started",
+        discussion_id="discussion-1",
+        roster=["pm-1", "arch-1"],
+        synthesizer="pm-1",
+        requirement_message_id="message-1",
+    )
+    append(
+        "channel.agent.reply.completed",
+        request_id="reply-old",
+        message_id="message-old",
+        target_member_id="arch-1",
+        status="completed",
+    )
+    append(
+        "channel.agent.reply.requested",
+        request_id="reply-1",
+        message_id="message-1",
+        target_member_id="pm-1",
+        status="pending",
+    )
+
+    detail = project_channel(state_dir, "ch-attention")
+    listing = project_channels(state_dir)["channels"][0]
+    assert detail is not None
+    running = detail["discussion_attention"]["main"]
+    assert running["state"] == "running"
+    assert running["active_agent_count"] == 1
+    assert running["participant_count"] == 2
+    assert running["can_drain_replies"] is True
+    assert listing["discussion_attention"] == detail["discussion_attention"]
+
+    append(
+        "channel.agent.reply.completed",
+        request_id="reply-1",
+        message_id="message-1",
+        target_member_id="pm-1",
+        status="completed",
+    )
+    append(
+        "channel.question.opened",
+        question_id="question-1",
+        question="Which launch scope should be approved?",
+        kind="owner_decision",
+        target_member_id="owner",
+        category="scope",
+        asked_by="pm-1",
+    )
+
+    needs_input = project_channel(state_dir, "ch-attention")
+    assert needs_input is not None
+    attention = needs_input["discussion_attention"]["main"]
+    assert attention["state"] == "needs_input"
+    assert attention["next_action"] == "review_questions"
+    assert attention["owner_question_count"] == 1
+    assert attention["active_agent_count"] == 0
+
+    append(
+        "channel.question.resolved",
+        question_id="question-1",
+        resolution="answered",
+        resolved_by="operator",
+        answer="Launch the smallest playable scope.",
+    )
+    append(
+        "channel.discussion.phase.changed",
+        phase="phase2_relay",
+        reason="question_ledger_settled",
+    )
+
+    ready = project_channel(state_dir, "ch-attention")
+    assert ready is not None
+    attention = ready["discussion_attention"]["main"]
+    assert attention["state"] == "ready"
+    assert attention["can_synthesize"] is True
+    assert attention["resolved_question_count"] == 1
+
+    append(
+        "channel.agent.reply.failed",
+        request_id="reply-2",
+        message_id="message-1",
+        target_member_id="arch-1",
+        status="failed",
+        reason="provider unavailable",
+    )
+    blocked = project_channel(state_dir, "ch-attention")
+    assert blocked is not None
+    attention = blocked["discussion_attention"]["main"]
+    assert attention["state"] == "blocked"
+    assert attention["can_restart"] is True
+
+    append("channel.discussion.closed", outcome="stalled")
+    stalled = project_channel(state_dir, "ch-attention")
+    assert stalled is not None
+    assert stalled["discussion_attention"]["main"]["reason"] == "discussion_stalled"
+
+    append("channel.discussion.closed", outcome="consensus")
+    done = project_channel(state_dir, "ch-attention")
+    assert done is not None
+    attention = done["discussion_attention"]["main"]
+    assert attention["state"] == "done"
+    assert attention["can_restart"] is False
+
+    append(
+        "channel.discussion.started",
+        discussion_id="discussion-2",
+        roster=["pm-1"],
+        synthesizer="pm-1",
+        requirement_message_id="message-2",
+    )
+    append(
+        "channel.consensus.proposed",
+        artifact_ref="channels/ch-attention/prd/r2.json",
+        artifact_digest="a" * 64,
+        prd_revision=2,
+        proposed_by="pm-1",
+    )
+    review = project_channel(state_dir, "ch-attention")
+    assert review is not None
+    attention = review["discussion_attention"]["main"]
+    assert attention["state"] == "needs_input"
+    assert attention["next_action"] == "review_result"
+    assert attention["can_review_result"] is True
+
+    append(
+        "channel.discussion.started",
+        discussion_id="discussion-3",
+        roster=["arch-1"],
+        synthesizer="arch-1",
+        requirement_message_id="message-3",
+    )
+    fresh = project_channel(state_dir, "ch-attention")
+    assert fresh is not None
+    attention = fresh["discussion_attention"]["main"]
+    assert attention["state"] == "running"
+    assert attention["reason"] == "discussion_active"
+
+
 def test_channel_projection_hides_removed_members_and_cleared_history(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
