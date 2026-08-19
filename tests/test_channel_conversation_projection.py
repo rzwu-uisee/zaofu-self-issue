@@ -217,3 +217,41 @@ def test_channel_conversation_omits_diagnostics_and_duplicate_payloads(
     full_bytes = len(json.dumps(detail, ensure_ascii=False).encode())
     slim_bytes = len(json.dumps(conversation, ensure_ascii=False).encode())
     assert slim_bytes < full_bytes * 0.3
+
+
+def test_channel_conversation_skips_linked_event_materialization(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    for index in range(100):
+        _append(log, "channel.message.posted", {
+            "message_id": f"msg-{index}",
+            "thread_id": "main",
+            "member_id": "operator",
+            "role": "user",
+            "text": f"message {index}",
+        })
+
+    from zf.runtime import channel_projection
+
+    materialized: list[int] = []
+    original = channel_projection._event_record
+
+    def record_event(seq, event):
+        materialized.append(seq)
+        return original(seq, event)
+
+    monkeypatch.setattr(channel_projection, "_event_record", record_event)
+
+    conversation = project_channel_conversation(state_dir, CHANNEL_ID)
+    assert conversation is not None
+    assert materialized == []
+    assert conversation["diagnostics_summary"]["linked_event_count"] == 100
+
+    detail = project_channel(state_dir, CHANNEL_ID)
+    assert detail is not None
+    assert len(detail["linked_events"]) == 80
+    assert len(materialized) == 80

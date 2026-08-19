@@ -178,6 +178,7 @@ import {
   MEASURE_REFRESH_PAGES,
   type BootstrapResource,
   bootstrapEventCursor,
+  channelEventRefreshPlan,
   pageLoadsDeliveryFeatures,
   pageLoadsSnapshot,
   pageOwnsBootstrapResource,
@@ -819,16 +820,23 @@ export function App() {
         : channelIdOf(next.channels[0]) || "ch-zaofu"
     ));
     if (projectionNeedsFresh(next)) {
-      void getChannels(requestedProjectId || undefined, true).then((fresh) => {
-        if (!projectRequestScope.isCurrent(ticket)) return;
-        setChannelsPage(fresh);
-        setChannelLoadError(null);
-        setSelectedChannelId((current) => (
-          current && fresh.channels.some((item) => channelIdOf(item) === current)
-            ? current
-            : channelIdOf(fresh.channels[0]) || "ch-zaofu"
-        ));
-      }).catch(() => undefined);
+      const timers = sliceRefreshTimersRef.current;
+      const key = "channels-fresh";
+      const existing = timers.get(key);
+      if (existing !== undefined) window.clearTimeout(existing);
+      timers.set(key, window.setTimeout(() => {
+        timers.delete(key);
+        void getChannels(requestedProjectId || undefined, true).then((fresh) => {
+          if (!projectRequestScope.isCurrent(ticket)) return;
+          setChannelsPage(fresh);
+          setChannelLoadError(null);
+          setSelectedChannelId((current) => (
+            current && fresh.channels.some((item) => channelIdOf(item) === current)
+              ? current
+              : channelIdOf(fresh.channels[0]) || "ch-zaofu"
+          ));
+        }).catch(() => undefined);
+      }, 2500));
     }
     return next;
   }, [activeProjectId]);
@@ -979,26 +987,31 @@ export function App() {
       ) {
         scheduleSlice("kanban-proposals", () => void loadKanbanProposals());
       }
-      if (eventType.startsWith("channel.")) {
+      const channelRefresh = channelEventRefreshPlan(eventType);
+      if (channelRefresh.conversation) {
         if (page === "channels") {
-          scheduleSlice("channels", () => void loadChannels());
+          if (channelRefresh.summary) {
+            scheduleSlice("channels", () => void loadChannels());
+          }
           const channelId = textValue(payload.channel_id) || selectedChannelIdRef.current;
           if (!channelId || channelId === selectedChannelIdRef.current) {
-            const ticket = projectRequestScope.capture(activeProjectId);
-            const detailTicket = channelDetailRequestGateRef.current.issue();
-            void getChannelConversation(
-              selectedChannelIdRef.current || "ch-zaofu",
-              activeProjectId || undefined,
-              { requireFresh: true },
-            )
-              .then((detail) => {
-                if (!projectRequestScope.isCurrent(ticket)) return;
-                if (!channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
-                if (selectedChannelIdRef.current === channelId || !channelId) {
-                  setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
-                }
-              })
-              .catch(() => undefined);
+            scheduleSlice(`channel-conversation:${channelId || "selected"}`, () => {
+              const ticket = projectRequestScope.capture(activeProjectId);
+              const detailTicket = channelDetailRequestGateRef.current.issue();
+              void getChannelConversation(
+                selectedChannelIdRef.current || "ch-zaofu",
+                activeProjectId || undefined,
+                { requireFresh: true },
+              )
+                .then((detail) => {
+                  if (!projectRequestScope.isCurrent(ticket)) return;
+                  if (!channelDetailRequestGateRef.current.isCurrent(detailTicket)) return;
+                  if (selectedChannelIdRef.current === channelId || !channelId) {
+                    setChannelDetail((current) => mergeChannelConversationRefresh(current, detail));
+                  }
+                })
+                .catch(() => undefined);
+            });
           }
         }
         return;
@@ -1170,15 +1183,22 @@ export function App() {
               setSelectedChannelId(channelIdOf(initialChannels.channels[0]) || "ch-zaofu");
             }
             if (projectionNeedsFresh(initialChannels)) {
-              void getChannels(projectId || undefined, true).then((freshChannels) => {
-                if (cancelled) return;
-                setChannelsPage(freshChannels);
-                setSelectedChannelId((current) => (
-                  current && freshChannels.channels.some((item) => channelIdOf(item) === current)
-                    ? current
-                    : channelIdOf(freshChannels.channels[0]) || "ch-zaofu"
-                ));
-              }).catch(() => undefined);
+              const timers = sliceRefreshTimersRef.current;
+              const key = "channels-fresh";
+              const existing = timers.get(key);
+              if (existing !== undefined) window.clearTimeout(existing);
+              timers.set(key, window.setTimeout(() => {
+                timers.delete(key);
+                void getChannels(projectId || undefined, true).then((freshChannels) => {
+                  if (cancelled) return;
+                  setChannelsPage(freshChannels);
+                  setSelectedChannelId((current) => (
+                    current && freshChannels.channels.some((item) => channelIdOf(item) === current)
+                      ? current
+                      : channelIdOf(freshChannels.channels[0]) || "ch-zaofu"
+                  ));
+                }).catch(() => undefined);
+              }, 2500));
             }
           }).catch((err) => {
             if (cancelled) return;
@@ -1262,6 +1282,10 @@ export function App() {
     return () => {
       cancelled = true;
       eventBusRef.current?.close();
+      for (const timer of sliceRefreshTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      sliceRefreshTimersRef.current.clear();
     };
   }, [activeProjectId, page]);
 

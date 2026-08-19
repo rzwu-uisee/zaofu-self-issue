@@ -1,5 +1,6 @@
 import {
   bootstrapEventCursor,
+  channelEventRefreshPlan,
   pageLoadsChannels,
   pageLoadsDeliveryFeatures,
   pageLoadsRecentEvents,
@@ -92,6 +93,29 @@ function testProjectionFreshnessIncludesLayoutStale(): void {
   assert(!projectionNeedsFresh({ projection_state: "ready", tail_behind: false }), "ready projection should not refetch");
 }
 
+function testChannelEventRefreshPlanSeparatesSummaryFromConversation(): void {
+  assert(
+    channelEventRefreshPlan("channel.agent.reply.completed").summary,
+    "terminal replies change Channel attention summary",
+  );
+  assert(
+    channelEventRefreshPlan("channel.message.posted").summary,
+    "posted messages change Channel summary counts",
+  );
+  assert(
+    !channelEventRefreshPlan("channel.message.stream.delta").summary,
+    "stream deltas must not rebuild the Channel list",
+  );
+  assert(
+    channelEventRefreshPlan("channel.message.stream.delta").conversation,
+    "stream deltas still refresh the selected conversation",
+  );
+  assert(
+    !channelEventRefreshPlan("task.updated").conversation,
+    "non-Channel events do not refresh Channel slices",
+  );
+}
+
 testChannelsUseSlimPath();
 testWorkflowProposalsUseScopedProjection();
 testMeasureUsesDeliverySlice();
@@ -100,3 +124,4 @@ testInboxPollIsPageScoped();
 testBootstrapManifestIsPageOwned();
 testRecentWindowOwnsItsSseCursor();
 testProjectionFreshnessIncludesLayoutStale();
+testChannelEventRefreshPlanSeparatesSummaryFromConversation();

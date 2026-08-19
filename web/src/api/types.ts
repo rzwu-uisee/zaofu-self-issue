@@ -1729,6 +1729,13 @@ export type ChannelDiscussionAttentionState =
   | "blocked"
   | "done";
 
+export interface ChannelDiscussionActiveAgent {
+  member_id: string;
+  request_id: string;
+  status: string;
+  started_at: string;
+}
+
 export interface ChannelDiscussionAttention {
   schema_version: "channel.discussion-attention.v1" | string;
   is_derived_projection: boolean;
@@ -1740,6 +1747,8 @@ export interface ChannelDiscussionAttention {
   last_outcome: string;
   participant_count: number;
   active_agent_count: number;
+  active_agents?: ChannelDiscussionActiveAgent[];
+  oldest_active_started_at?: string;
   active_reply_count: number;
   queued_reply_count: number;
   running_reply_count: number;

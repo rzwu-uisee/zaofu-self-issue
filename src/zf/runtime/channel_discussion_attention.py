@@ -90,10 +90,32 @@ def project_discussion_attention(
             item for item in replies
             if str(item.get("status") or "") in _ACTIVE_REPLY_STATUSES
         ]
-        active_agents = {
-            str(item.get("target_member_id") or item.get("member_id") or "")
-            for item in active_replies
-        } - {""}
+        active_agents_by_id: dict[str, dict[str, str]] = {}
+        for item in active_replies:
+            member_id = str(
+                item.get("target_member_id") or item.get("member_id") or ""
+            )
+            if not member_id:
+                continue
+            started_at = str(
+                item.get("started_at")
+                or item.get("updated_at")
+                or item.get("created_at")
+                or ""
+            )
+            candidate = {
+                "member_id": member_id,
+                "request_id": str(item.get("request_id") or ""),
+                "status": str(item.get("status") or "pending"),
+                "started_at": started_at,
+            }
+            current = active_agents_by_id.get(member_id)
+            if current is None or started_at >= current["started_at"]:
+                active_agents_by_id[member_id] = candidate
+        active_agents = sorted(
+            active_agents_by_id.values(),
+            key=lambda item: (item["started_at"], item["member_id"]),
+        )
         failed_count = sum(
             status in _FAILED_REPLY_STATUSES for status in statuses
         )
@@ -168,6 +190,15 @@ def project_discussion_attention(
             "last_outcome": outcome,
             "participant_count": len(session.get("roster") or []),
             "active_agent_count": len(active_agents),
+            "active_agents": active_agents,
+            "oldest_active_started_at": min(
+                (
+                    item["started_at"]
+                    for item in active_agents
+                    if item["started_at"]
+                ),
+                default="",
+            ),
             "active_reply_count": len(active_replies),
             "queued_reply_count": sum(
                 status in _QUEUED_REPLY_STATUSES for status in statuses

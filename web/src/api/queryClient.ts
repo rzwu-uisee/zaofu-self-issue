@@ -10,9 +10,11 @@ const inFlight = new Map<string, Promise<unknown>>();
 export async function cachedGetJson<T>(path: string, options: { ttlMs?: number; bypassCache?: boolean } = {}): Promise<T> {
   const ttlMs = options.ttlMs ?? ttlForPath(path);
   const now = Date.now();
-  if (!options.bypassCache && ttlMs > 0) {
-    const cached = cache.get(path);
-    if (cached && cached.expiresAt > now) return cached.value as T;
+  if (ttlMs > 0) {
+    if (!options.bypassCache) {
+      const cached = cache.get(path);
+      if (cached && cached.expiresAt > now) return cached.value as T;
+    }
     const pending = inFlight.get(path);
     if (pending) return pending as Promise<T>;
   }
@@ -28,7 +30,7 @@ export async function cachedGetJson<T>(path: string, options: { ttlMs?: number; 
     .finally(() => {
       inFlight.delete(path);
     });
-  if (!options.bypassCache && ttlMs > 0) inFlight.set(path, promise);
+  if (ttlMs > 0) inFlight.set(path, promise);
   return promise;
 }
 

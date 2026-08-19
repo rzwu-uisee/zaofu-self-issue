@@ -58,18 +58,24 @@ export function presentChannelDiscussionAttention(
 ): ChannelDiscussionAttentionPresentation {
   if (attention.state === "needs_input") {
     if (attention.owner_question_count > 0) {
+      const activeSuffix = attention.active_agent_count > 0
+        ? ` · ${countLabel(attention.active_agent_count, "agent")} still responding`
+        : "";
       return {
         label: "Needs input",
-        summary: `${countLabel(attention.owner_question_count, "owner decision")} waiting`,
+        summary: `${countLabel(attention.owner_question_count, "owner decision")} waiting${activeSuffix}`,
         tone: "warning",
         action: "questions",
         actionLabel: "Review decisions",
         visible: true,
       };
     }
+    const activeSuffix = attention.active_agent_count > 0
+      ? ` · ${countLabel(attention.active_agent_count, "agent")} still responding`
+      : "";
     return {
       label: "Needs input",
-      summary: "The synthesized result needs an owner decision",
+      summary: `The synthesized result needs an owner decision${activeSuffix}`,
       tone: "warning",
       action: "result",
       actionLabel: "Review result",

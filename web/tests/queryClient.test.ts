@@ -49,5 +49,36 @@ async function testPrefixInvalidation(): Promise<void> {
   assert(calls === 3, `expected proj-a refetch after invalidation, got ${calls} calls`);
 }
 
+async function testBypassCacheStillSharesInFlightRequest(): Promise<void> {
+  clearGetCache();
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  globalThis.fetch = (async () => {
+    calls += 1;
+    await gate;
+    return new Response(JSON.stringify({ calls }), { status: 200 });
+  }) as typeof fetch;
+
+  const first = cachedGetJson<{ calls: number }>("/api/projects/p/channels/x/conversation", {
+    bypassCache: true,
+  });
+  const second = cachedGetJson<{ calls: number }>("/api/projects/p/channels/x/conversation", {
+    bypassCache: true,
+  });
+  assert(calls === 1, `bypass-cache GETs should still share one in-flight request, got ${calls}`);
+  release?.();
+  const rows = await Promise.all([first, second]);
+  assert(rows.every((row) => row.calls === 1), "shared bypass request returned inconsistent data");
+
+  await cachedGetJson<{ calls: number }>("/api/projects/p/channels/x/conversation", {
+    bypassCache: true,
+  });
+  assert(calls === 2, "a later bypass request must not reuse the completed cached response");
+}
+
 await testSingleFlightAndTtlCache();
 await testPrefixInvalidation();
+await testBypassCacheStillSharesInFlightRequest();

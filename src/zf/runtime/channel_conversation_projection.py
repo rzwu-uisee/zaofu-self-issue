@@ -66,7 +66,11 @@ def project_channel_conversation(
     """Project one bounded chat page without diagnostic-heavy duplicates."""
 
     state_dir = Path(state_dir)
-    detail = project_channel(state_dir, channel_id)
+    detail = project_channel(
+        state_dir,
+        channel_id,
+        include_linked_events=False,
+    )
     if detail is None:
         return None
     messages = [
@@ -224,7 +228,7 @@ def project_channel_conversation(
             "provider_run_count": len(detail.get("provider_runs") or []),
             "agent_session_run_count": len(detail.get("agent_session_runs") or []),
             "context_pack_count": len(detail.get("context_packs") or []),
-            "linked_event_count": len(detail.get("linked_events") or []),
+            "linked_event_count": int(detail.get("linked_event_count") or 0),
         },
     }
     return redact_obj(payload)

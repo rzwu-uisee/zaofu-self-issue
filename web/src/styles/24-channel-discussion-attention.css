@@ -62,6 +62,29 @@
   white-space: nowrap;
 }
 
+.channel-discussion-attention-copy .channel-discussion-live-meta {
+  flex: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  border-left: 1px solid var(--line);
+  padding-left: 8px;
+  color: var(--text);
+  overflow: visible;
+}
+
+.channel-discussion-live-meta > span,
+.channel-discussion-live-elapsed {
+  overflow: visible;
+  color: inherit;
+  font-family: var(--font-mono);
+  text-overflow: clip;
+}
+
+.channel-discussion-live-elapsed {
+  white-space: nowrap;
+}
+
 .channel-discussion-qtext {
   flex: 1;
   min-width: 0;
@@ -204,6 +227,12 @@
   .channel-discussion-attention-main { grid-template-columns: 28px minmax(0, 1fr); }
   .channel-discussion-attention-main > .icon-button { grid-column: 2; justify-self: start; }
   .channel-discussion-attention-copy { display: grid; gap: 0; }
+  .channel-discussion-attention-copy .channel-discussion-live-meta {
+    margin-top: 2px;
+    border-left: 0;
+    padding-left: 0;
+    color: var(--muted-foreground);
+  }
   .channel-owner-question-shelf {
     position: absolute;
     inset: 0;

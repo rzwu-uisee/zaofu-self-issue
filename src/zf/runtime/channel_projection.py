@@ -159,7 +159,11 @@ def project_channels(
     event_list = _with_seq(events if events is not None else EventLog(state_dir / "events.jsonl").read_all())
     channels = _build(event_list, state_dir=Path(state_dir))
     items = [
-        _public_channel(channel, include_messages=False)
+        _public_channel(
+            channel,
+            include_messages=False,
+            include_linked_events=False,
+        )
         for channel in sorted(channels.values(), key=lambda item: item["channel_id"])
         if channel.get("status") != "archived"
     ]
@@ -177,6 +181,7 @@ def project_channel(
     channel_id: str,
     *,
     events: list[ZfEvent] | None = None,
+    include_linked_events: bool = True,
 ) -> dict[str, Any] | None:
     event_list = _with_seq(events if events is not None else EventLog(state_dir / "events.jsonl").read_all())
     channels = _build(event_list, state_dir=Path(state_dir))
@@ -184,7 +189,11 @@ def project_channel(
     channel = channels.get(key) if key else None
     if channel is None:
         return None
-    return _public_channel(channel, include_messages=True)
+    return _public_channel(
+        channel,
+        include_messages=True,
+        include_linked_events=include_linked_events,
+    )
 
 
 def project_empty_channel(channel_id: str) -> dict[str, Any]:
@@ -387,7 +396,10 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
         channel["last_event_seq"] = seq
         channel["last_event_type"] = event.type
         channel["updated_at"] = event.ts
-        channel["linked_events"].append(_event_record(seq, event))
+        # Keep the raw in-memory reference while folding. Public serializers
+        # materialize and redact only the bounded rows they actually expose;
+        # eagerly redacting every historical event dominated Channel reads.
+        channel["linked_events"].append((seq, event))
         if event.type == "channel.created":
             channel["status"] = "open"
             channel["created_by_event"] = True
@@ -1096,6 +1108,9 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
             "ts": event.ts,
         }))
         return
+    if incoming_generation > current_generation:
+        item.pop("started_at", None)
+        item.pop("ended_at", None)
     run_id = (
         _payload_str(payload, "run_id")
         or _payload_str(payload, "provider_run_id")
@@ -1148,6 +1163,11 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
         ),
         "updated_at": event.ts,
     })
+    if status in {"running", "started"}:
+        item["started_at"] = str(item.get("started_at") or event.ts)
+        item.pop("ended_at", None)
+    elif status in {"completed", "failed", "rejected", "escalated"}:
+        item["ended_at"] = event.ts
     if not str(item.get("run_id") or "") and str(item.get("target_member_id") or ""):
         item["run_id"] = stable_provider_run_id(
             channel_id=str(channel.get("channel_id") or ""),
@@ -2413,7 +2433,12 @@ def _message_is_after_read(
     return True
 
 
-def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[str, Any]:
+def _public_channel(
+    channel: dict[str, Any],
+    *,
+    include_messages: bool,
+    include_linked_events: bool = True,
+) -> dict[str, Any]:
     messages = [
         channel["messages"][key]
         for key in sorted(channel["messages"], key=lambda item: str(channel["messages"][item].get("ts", "")))
@@ -2464,7 +2489,13 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         discussion=channel["discussion"],
         channel_id=str(channel.get("channel_id") or ""),
     ))
-    linked_events = channel["linked_events"]
+    linked_event_records = channel["linked_events"]
+    linked_event_count = len(linked_event_records)
+    linked_events = (
+        [_public_linked_event(item) for item in linked_event_records[-80:]]
+        if include_linked_events
+        else []
+    )
     question_thread_ids = {
         str(item.get("thread_id") or "main")
         for item in channel["open_questions"].values()
@@ -2610,7 +2641,8 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
         "last_event_type": channel["last_event_type"],
         "updated_at": channel["updated_at"],
         "recent_messages": messages[-20:],
-        "linked_events": linked_events[-80:],
+        "linked_event_count": linked_event_count,
+        "linked_events": linked_events,
         "source": "events.jsonl",
     }
     if include_messages:
@@ -2623,7 +2655,7 @@ def _public_channel(channel: dict[str, Any], *, include_messages: bool) -> dict[
             agent_session_runs=agent_session_runs,
             context_packs=context_packs,
             mentions_detected=channel["mentions_detected"],
-            linked_events=linked_events,
+            linked_event_count=linked_event_count,
         ))
     return out
 
@@ -2636,7 +2668,7 @@ def _compact_channel_summary_payload(
     agent_session_runs: list[dict[str, Any]],
     context_packs: list[dict[str, Any]],
     mentions_detected: list[dict[str, Any]],
-    linked_events: list[dict[str, Any]],
+    linked_event_count: int,
 ) -> dict[str, Any]:
     reply_status_counts: dict[str, int] = {}
     for item in reply_requests:
@@ -2667,7 +2699,7 @@ def _compact_channel_summary_payload(
         "agent_session_run_count": len(agent_session_runs),
         "context_pack_count": len(context_packs),
         "mention_count": len(mentions_detected),
-        "linked_event_count": len(linked_events),
+        "linked_event_count": linked_event_count,
         "latest_reply": _compact_reply_request(reply_requests[-1]) if reply_requests else {},
     }
 
@@ -2700,6 +2732,8 @@ def _compact_reply_request(item: dict[str, Any]) -> dict[str, Any]:
         "routing_reason": str(item.get("routing_reason") or ""),
         "reason": str(item.get("reason") or "")[:240],
         "created_at": str(item.get("created_at") or ""),
+        "started_at": str(item.get("started_at") or ""),
+        "ended_at": str(item.get("ended_at") or ""),
         "updated_at": str(item.get("updated_at") or ""),
     }
 
@@ -2906,6 +2940,17 @@ def _event_record(seq: int, event: ZfEvent) -> dict[str, Any]:
     data = asdict(event)
     data["seq"] = seq
     return redact_obj(data)
+
+
+def _public_linked_event(item: object) -> dict[str, Any]:
+    if (
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], int)
+        and isinstance(item[1], ZfEvent)
+    ):
+        return _event_record(item[0], item[1])
+    return redact_obj(item) if isinstance(item, dict) else {}
 
 
 def _public_channel_id(channel_id: str) -> str:

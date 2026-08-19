@@ -1,9 +1,10 @@
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { search } from "../../api/client";
-import type { ActionResponse, ChannelDetail, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
+import type { ActionResponse, ChannelDetail, ChannelDiscussionAttention, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
 import type { AgentSessionMessage } from "../../components/agent-session/types";
 import { buildChannelConversation } from "../../components/agent-session/projection";
+import { elapsedSecondsSince, formatElapsed } from "../../components/agent-session/liveRunIndicator";
 import { channelLiveStreamRows, compactChannelLiveRows, foldChannelLiveStream } from "../agent-session/channelLiveStream";
 import { mergeEventsByIdentity } from "../orchestrator/kanbanSessionEvents";
 import { formatTime } from "../../lib/format";
@@ -88,6 +89,32 @@ interface ChannelMentionDigest {
   targets: string[];
   unresolvedTargets: string[];
   text: string;
+}
+
+
+function ChannelLiveElapsed({ startedAt }: { startedAt: string }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return undefined;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  const seconds = elapsedSecondsSince(startedAt, nowMs);
+  if (seconds === undefined) return null;
+  return (
+    <span aria-hidden="true" className="channel-discussion-live-elapsed">
+      {formatElapsed(seconds)}
+    </span>
+  );
+}
+
+
+function channelActiveAgentLabel(attention: ChannelDiscussionAttention): string {
+  const activeAgents = attention.active_agents ?? [];
+  const first = activeAgents[0]?.member_id ?? "";
+  if (!first) return "";
+  const remaining = Math.max(activeAgents.length - 1, 0);
+  return remaining ? `@${first} +${remaining}` : `@${first}`;
 }
 
 
@@ -802,7 +829,7 @@ export function ChannelPage({
   });
   const pendingReplyRows = latestReplyRowsByTarget.filter((request) => {
     const status = recordString(request, "status", "pending");
-    return status === "pending" || status === "queued" || status === "running";
+    return status === "pending" || status === "queued" || status === "running" || status === "started";
   });
   const failedReplyRows = latestReplyRowsByTarget.filter((request) => {
     const status = recordString(request, "status");
@@ -1693,6 +1720,12 @@ export function ChannelPage({
               const reason = recordString(row, "reason") || recordString(row, "error") || recordString(row, "summary");
               const requestId = recordString(row, "request_id") || recordString(row, "event_id") || target;
               const ts = recordString(row, "updated_at") || recordString(row, "created_at") || recordString(row, "ts");
+              const active = status === "pending" || status === "queued" || status === "running" || status === "started";
+              const startedAt = recordString(row, "started_at") || (
+                status === "running" || status === "started"
+                  ? recordString(row, "updated_at")
+                  : recordString(row, "created_at")
+              );
               return (
                 <div className={`channel-attention-card ${failedReplyRows.includes(row) ? "failed" : ""}`} key={requestId}>
                   <div className="channel-attention-card-main">
@@ -1704,7 +1737,9 @@ export function ChannelPage({
                   </div>
                   <div className="channel-attention-card-meta">
                     <span className={`status-pill status-${status}`}>{status}</span>
-                    {ts ? <span className="mono muted">{formatTime(ts)}</span> : null}
+                    {active && startedAt ? (
+                      <ChannelLiveElapsed startedAt={startedAt} />
+                    ) : ts ? <span className="mono muted">{formatTime(ts)}</span> : null}
                   </div>
                 </div>
               );
@@ -2583,7 +2618,7 @@ export function ChannelPage({
                 >
                   <div className="channel-discussion-attention-main">
                     <span className="channel-discussion-state-icon" aria-hidden="true">
-                      {discussionBand.attention.state === "running" ? (
+                      {discussionBand.attention.active_agent_count > 0 ? (
                         <Loader2 className="spin" size={15} />
                       ) : discussionBand.attention.state === "ready" ? (
                         <FileText size={15} />
@@ -2596,6 +2631,16 @@ export function ChannelPage({
                     <div className="channel-discussion-attention-copy">
                       <strong>{discussionBand.presentation.label}</strong>
                       <span>{discussionBand.presentation.summary}</span>
+                      {discussionBand.attention.active_agent_count > 0 ? (
+                        <span className="channel-discussion-live-meta">
+                          {channelActiveAgentLabel(discussionBand.attention) ? (
+                            <span>{channelActiveAgentLabel(discussionBand.attention)}</span>
+                          ) : null}
+                          <ChannelLiveElapsed
+                            startedAt={discussionBand.attention.oldest_active_started_at ?? ""}
+                          />
+                        </span>
+                      ) : null}
                     </div>
                     <button
                       className="icon-button"

@@ -58,6 +58,8 @@ assert(runningView.summary === "2 agents responding", "running count means activ
 assert(runningView.action === "activity", "running opens activity details");
 
 const needsInput = attention("needs_input", {
+  active_agent_count: 2,
+  active_reply_count: 2,
   owner_question_count: 3,
   open_question_count: 3,
   can_review_questions: true,
@@ -66,6 +68,7 @@ const needsInputView = presentChannelDiscussionAttention(needsInput);
 assert(needsInputView.label === "Needs input", "owner questions surface as needs input");
 assert(needsInputView.action === "questions", "owner questions open the decision shelf");
 assert(needsInputView.summary.includes("3 owner decisions"), "decision count is explicit");
+assert(needsInputView.summary.includes("2 agents still responding"), "owner attention preserves concurrent work visibility");
 
 const ready = attention("ready", { can_synthesize: true });
 const readyView = presentChannelDiscussionAttention(ready);

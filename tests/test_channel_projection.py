@@ -132,13 +132,6 @@ def test_channel_projection_derives_discussion_attention_and_actions(tmp_path: P
     assert listing["discussion_attention"] == detail["discussion_attention"]
 
     append(
-        "channel.agent.reply.completed",
-        request_id="reply-1",
-        message_id="message-1",
-        target_member_id="pm-1",
-        status="completed",
-    )
-    append(
         "channel.question.opened",
         question_id="question-1",
         question="Which launch scope should be approved?",
@@ -147,7 +140,25 @@ def test_channel_projection_derives_discussion_attention_and_actions(tmp_path: P
         category="scope",
         asked_by="pm-1",
     )
+    concurrent_attention = project_channel(state_dir, "ch-attention")
+    assert concurrent_attention is not None
+    concurrent = concurrent_attention["discussion_attention"]["main"]
+    assert concurrent["state"] == "needs_input"
+    assert concurrent["active_agent_count"] == 1
+    assert concurrent["active_agents"] == [{
+        "member_id": "pm-1",
+        "request_id": "reply-1",
+        "status": "pending",
+        "started_at": concurrent["oldest_active_started_at"],
+    }]
 
+    append(
+        "channel.agent.reply.completed",
+        request_id="reply-1",
+        message_id="message-1",
+        target_member_id="pm-1",
+        status="completed",
+    )
     needs_input = project_channel(state_dir, "ch-attention")
     assert needs_input is not None
     attention = needs_input["discussion_attention"]["main"]
@@ -504,6 +515,48 @@ def test_channel_projection_records_provider_runs_and_member_runtime(tmp_path: P
     assert member["active_request_id"] == "reply-1"
     assert member["latest_run_id"] == "run-explicit"
     assert member["context_status"] == "built"
+
+
+def test_channel_reply_projection_records_stable_lifecycle_timestamps(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    base = {
+        "channel_id": "ch-timestamps",
+        "thread_id": "main",
+        "request_id": "reply-1",
+        "target_member_id": "codex-1",
+        "run_generation": 1,
+    }
+    log.append(ZfEvent(
+        type="channel.agent.reply.requested",
+        ts="2026-08-18T00:00:00+00:00",
+        actor="router",
+        payload={**base, "status": "pending"},
+    ))
+    log.append(ZfEvent(
+        type="channel.agent.reply.started",
+        ts="2026-08-18T00:00:05+00:00",
+        actor="router",
+        payload=base,
+    ))
+    log.append(ZfEvent(
+        type="channel.agent.reply.completed",
+        ts="2026-08-18T00:02:05+00:00",
+        actor="router",
+        payload=base,
+    ))
+
+    detail = project_channel(state_dir, "ch-timestamps")
+
+    assert detail is not None
+    reply = detail["reply_requests"][0]
+    assert reply["created_at"] == "2026-08-18T00:00:00+00:00"
+    assert reply["started_at"] == "2026-08-18T00:00:05+00:00"
+    assert reply["ended_at"] == "2026-08-18T00:02:05+00:00"
+    assert reply["updated_at"] == reply["ended_at"]
 
 
 def test_channel_projection_ignores_late_stale_run_generation(tmp_path: Path) -> None:

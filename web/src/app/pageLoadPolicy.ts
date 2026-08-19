@@ -27,6 +27,19 @@ export interface ProjectionFreshness {
   tail_behind?: boolean;
 }
 
+export interface ChannelEventRefreshPlan {
+  conversation: boolean;
+  summary: boolean;
+}
+
+const CHANNEL_CONVERSATION_ONLY_PREFIXES = [
+  "channel.typing.",
+  "channel.message.stream.",
+  "channel.context_pack.",
+  "channel.relay.",
+  "channel.finding.",
+] as const;
+
 export const BOARD_REFRESH_PAGES = new Set<PageId>(["board", "project", "task", "triage"]);
 export const MEASURE_REFRESH_PAGES = new Set<PageId>([
   "delivery",
@@ -125,6 +138,18 @@ export function projectionNeedsFresh(projection: ProjectionFreshness): boolean {
     projection.tail_behind
     || (projection.projection_state && projection.projection_state !== "ready"),
   );
+}
+
+export function channelEventRefreshPlan(eventType: string): ChannelEventRefreshPlan {
+  if (!eventType.startsWith("channel.")) {
+    return { conversation: false, summary: false };
+  }
+  return {
+    conversation: true,
+    summary: !CHANNEL_CONVERSATION_ONLY_PREFIXES.some((prefix) => (
+      eventType.startsWith(prefix)
+    )),
+  };
 }
 
 function validCursor(value: number | null | undefined): number {
