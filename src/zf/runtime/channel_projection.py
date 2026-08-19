@@ -30,6 +30,7 @@ from zf.runtime.channel_question_graph import (
     owner_questionnaire,
     question_frontier,
     question_graph_digest,
+    question_text_identity,
     validate_question_graph,
 )
 from zf.runtime.channel_run_owner import (
@@ -1154,6 +1155,14 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
         "provider_run_id": provider_run_id,
         "run_generation": incoming_generation,
         "reason": _payload_str(payload, "reason") or str(item.get("reason") or ""),
+        "continuation_count": _payload_int(
+            payload.get("continuation_count"),
+            _payload_int(item.get("continuation_count"), 0),
+        ),
+        "completion_reason": (
+            _payload_str(payload, "completion_reason")
+            or str(item.get("completion_reason") or "")
+        ),
         # P0.2: thread the originating handoff event id through projection so
         # channel_reply_remediation.emit_channel_reply_failed can wire failure back to
         # channel.handoff.failed via this field on the reply_request snapshot.
@@ -1538,6 +1547,29 @@ def _apply_context_pack(
         "cross_review_index_digest": _payload_str(payload, "cross_review_index_digest"),
         "contribution_index": payload.get("contribution_index") if isinstance(payload.get("contribution_index"), list) else [],
         "contribution_index_digest": _payload_str(payload, "contribution_index_digest"),
+        "semantic_source_required": bool(
+            payload.get("semantic_source_required")
+        ),
+        "semantic_source_stage": _payload_str(
+            payload, "semantic_source_stage"
+        ),
+        "semantic_source_complete": bool(
+            payload.get("semantic_source_complete")
+        ),
+        "semantic_source_reason": _payload_str(
+            payload, "semantic_source_reason"
+        ),
+        "semantic_source_manifest": (
+            payload.get("semantic_source_manifest")
+            if isinstance(payload.get("semantic_source_manifest"), list)
+            else []
+        ),
+        "semantic_source_manifest_digest": _payload_str(
+            payload, "semantic_source_manifest_digest"
+        ),
+        "semantic_source_required_digests": _string_list(
+            payload.get("semantic_source_required_digests")
+        ),
         "artifact_refs": payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else [],
         "report_refs": payload.get("report_refs") if isinstance(payload.get("report_refs"), list) else [],
         "limits": payload.get("limits") if isinstance(payload.get("limits"), dict) else {},
@@ -1761,6 +1793,14 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
         existing = channel["open_questions"].get(question_id)
         if isinstance(existing, dict):
             return
+        identity = question_text_identity(payload.get("question"))
+        if identity and any(
+            str(item.get("thread_id") or "main") == thread_id
+            and question_text_identity(item.get("question")) == identity
+            for item in channel["open_questions"].values()
+            if isinstance(item, dict)
+        ):
+            return
         normalized, error = normalize_question_payload(
             payload,
             question_id=question_id,
@@ -1943,6 +1983,21 @@ def _apply_cross_review(
         "artifact_digest": _payload_str(payload, "artifact_digest"),
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),
+        "consumed_message_digests": _string_list(
+            payload.get("consumed_message_digests")
+        ),
+        "source_coverage": payload.get("source_coverage")
+        if isinstance(payload.get("source_coverage"), list)
+        else [],
+        "semantic_source_manifest_digest": _payload_str(
+            payload, "semantic_source_manifest_digest"
+        ),
+        "semantic_coverage_ref": _payload_str(
+            payload, "semantic_coverage_ref"
+        ),
+        "semantic_coverage_digest": _payload_str(
+            payload, "semantic_coverage_digest"
+        ),
         "updated_at": event.ts,
     }))
 
@@ -2283,6 +2338,21 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         ),
         "consumed_contribution_digests": _string_list(
             payload.get("consumed_contribution_digests")
+        ),
+        "consumed_message_digests": _string_list(
+            payload.get("consumed_message_digests")
+        ),
+        "source_coverage": payload.get("source_coverage")
+        if isinstance(payload.get("source_coverage"), list)
+        else [],
+        "semantic_source_manifest_digest": _payload_str(
+            payload, "semantic_source_manifest_digest"
+        ),
+        "semantic_coverage_ref": _payload_str(
+            payload, "semantic_coverage_ref"
+        ),
+        "semantic_coverage_digest": _payload_str(
+            payload, "semantic_coverage_digest"
         ),
         "confidence": _payload_str(payload, "confidence"),
         "dissent": payload.get("dissent") if isinstance(payload.get("dissent"), list) else [],

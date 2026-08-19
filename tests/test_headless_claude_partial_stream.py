@@ -90,6 +90,38 @@ def test_flag_off_block_level_unchanged():
     assert acc.to_result().reply == "hello world"
 
 
+def test_result_max_tokens_is_reported_as_incomplete() -> None:
+    acc, _emitted = _make_accumulator()
+    acc.observe_message({
+        "type": "result",
+        "subtype": "success",
+        "stop_reason": "max_tokens",
+        "is_error": False,
+        "result": "partial answer",
+    })
+
+    result = acc.to_result()
+    assert result.incomplete is True
+    assert result.completion_reason == "max_tokens"
+
+
+def test_assistant_stop_reason_survives_success_result_envelope() -> None:
+    acc, _emitted = _make_accumulator()
+    acc.observe_message({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "partial"}],
+        },
+    })
+    acc.observe_message(_result("partial"))
+
+    result = acc.to_result()
+    assert result.incomplete is True
+    assert result.completion_reason == "max_tokens"
+
+
 def test_thinking_delta_redacted_and_no_double_signal():
     acc, emitted = _make_accumulator()
     # thinking block at index 0, text block at index 1 (typical order)

@@ -138,6 +138,52 @@ def test_channel_conversation_carries_compact_discussion_attention(
     assert attention["is_derived_projection"] is True
 
 
+def test_channel_conversation_compacts_internal_synthesis_repair_message(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    _append(log, "channel.created", {"name": "Repair"})
+    repair = channel_message_event_payload(
+        state_dir,
+        {
+            "channel_id": CHANNEL_ID,
+            "message_id": "msg-repair",
+            "thread_id": "main",
+            "member_id": "operator",
+            "role": "user",
+            "source": "runtime",
+            "text": (
+                "@synthesizer Correct synthesis contract. Contract diagnostic: "
+                "do-not-render-this-path/channels/private-invalid-reply.txt"
+            ),
+            "mentions": ["synthesizer"],
+            "refs": {
+                "synthesis_request_id": "synth-1",
+                "synthesis_repair_id": "repair-1",
+                "synthesis_repair_revision": 2,
+            },
+        },
+        created_by="test",
+    )
+    _append(log, "channel.message.posted", repair)
+
+    conversation = project_channel_conversation(state_dir, CHANNEL_ID)
+
+    assert conversation is not None
+    message = conversation["messages"][0]
+    assert message["role"] == "system"
+    assert message["member_id"] == "zf-kernel"
+    assert message["text"] == (
+        "ZaoFu retried synthesis after contract validation failed "
+        "(revision 2)."
+    )
+    assert "do-not-render" not in message["text"]
+    assert message["refs"]["synthesis_repair_id"] == "repair-1"
+    assert message["refs"]["synthesis_repair_revision"] == 2
+
+
 def test_channel_conversation_paginates_without_duplicates(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()

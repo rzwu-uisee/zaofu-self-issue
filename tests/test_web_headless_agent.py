@@ -46,6 +46,25 @@ def _proposal_intent(source_quote: str) -> dict[str, str]:
     }
 
 
+def test_codex_turn_completion_detects_output_and_context_exhaustion() -> None:
+    incomplete, reason = headless_agent._codex_turn_completion({
+        "params": {
+            "turn": {
+                "status": "incomplete",
+                "incompleteDetails": {"reason": "max_output_tokens"},
+            },
+        },
+    })
+    assert incomplete is True
+    assert reason == "max_output_tokens"
+
+    complete, complete_reason = headless_agent._codex_turn_completion({
+        "params": {"turn": {"status": "completed"}},
+    })
+    assert complete is False
+    assert complete_reason == "completed"
+
+
 @pytest.fixture
 def state_dir(tmp_path: Path) -> Path:
     sd = tmp_path / ".zf"

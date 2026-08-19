@@ -84,6 +84,47 @@ class _FailingHeadlessBackend(_FakeHeadlessBackend):
         )
 
 
+class _ScriptedHeadlessBackend(_FakeHeadlessBackend):
+    def __init__(self, turns: list[dict]) -> None:
+        super().__init__(available=True)
+        self.turns = list(turns)
+
+    def run_turn(self, **kwargs) -> HeadlessTurnResult:
+        self.calls.append(kwargs)
+        turn = self.turns.pop(0)
+        session_id = "codex-session-1"
+        kwargs["on_session_id"](session_id)
+        reply = str(turn.get("reply") or "")
+        on_message = kwargs.get("on_message")
+        if on_message is not None and reply:
+            on_message(
+                HeadlessMessage(
+                    type="text",
+                    content=reply,
+                    session_id=session_id,
+                )
+            )
+        incomplete = turn.get("incomplete") is True
+        return HeadlessTurnResult(
+            ok=not incomplete,
+            status="incomplete" if incomplete else "completed",
+            backend=self.backend_id,
+            thread_id=str(kwargs.get("thread_id") or ""),
+            provider_session_id=session_id,
+            reply=reply,
+            messages=[HeadlessMessage(type="text", content=reply)],
+            usage={"total_tokens": int(turn.get("tokens") or 1)},
+            resumed=bool(kwargs.get("provider_session_id")),
+            incomplete=incomplete,
+            completion_reason=(
+                str(turn.get("completion_reason") or "max_output_tokens")
+                if incomplete
+                else "completed"
+            ),
+            error="provider response incomplete" if incomplete else "",
+        )
+
+
 def test_channel_provider_headless_timeout_defaults_to_long_channel_turn(monkeypatch) -> None:
     monkeypatch.delenv("ZF_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S", raising=False)
     monkeypatch.delenv("ZF_KANBAN_AGENT_HEADLESS_TIMEOUT_S", raising=False)
@@ -1017,6 +1058,78 @@ def test_channel_router_dispatches_codex_provider_through_headless_backend(tmp_p
     assert detail["provider_runs"][0]["parts"]
 
 
+def test_channel_incomplete_provider_turn_auto_continues_same_session(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    backend = _ScriptedHeadlessBackend([
+        {
+            "reply": "First half ",
+            "incomplete": True,
+            "completion_reason": "max_output_tokens",
+            "tokens": 5,
+        },
+        {"reply": "and second half.", "tokens": 7},
+    ])
+    writer.emit(
+        "channel.member.invited",
+        actor="web",
+        correlation_id="ch-continue",
+        payload={
+            "channel_id": "ch-continue",
+            "member_id": "codex-1",
+            "member_type": "provider_agent",
+            "backend": "codex",
+            "channel_role": "reviewer",
+            "permissions": ["read", "message"],
+            "source": "web",
+        },
+    )
+    message = writer.emit(
+        "channel.message.posted",
+        actor="web",
+        correlation_id="ch-continue",
+        payload={
+            "channel_id": "ch-continue",
+            "thread_id": "main",
+            "message_id": "msg-continue",
+            "member_id": "operator",
+            "role": "user",
+            "source": "web",
+            "text": "@codex-1 explain the result",
+            "mentions": ["codex-1"],
+        },
+    )
+
+    route_channel_message(
+        state_dir=state_dir,
+        writer=writer,
+        message_event=message,
+        message_payload=message.payload,
+        actor="web",
+        source="web",
+        project_root=tmp_path,
+        headless_backends={"codex-headless": backend},
+    )
+
+    detail = project_channel(state_dir, "ch-continue")
+    assert detail is not None
+    assert len(backend.calls) == 2
+    assert backend.calls[0]["provider_session_id"] == ""
+    assert backend.calls[1]["provider_session_id"] == "codex-session-1"
+    assert "Continue exactly from the prior response" in backend.calls[1]["prompt"]
+    assert any(
+        item["text"] == "First half and second half."
+        for item in detail["messages"]
+    )
+    reply = detail["reply_requests"][0]
+    assert reply["status"] == "completed"
+    assert reply["continuation_count"] == 1
+    assert detail["usage_summary"]["total_tokens"] == 12
+
+
 def test_channel_headless_stream_never_publishes_machine_contract(
     tmp_path: Path,
     monkeypatch,
@@ -1101,9 +1214,11 @@ def test_channel_headless_stream_never_publishes_machine_contract(
     assert "channel_contribution" not in visible
 
 
-def test_channel_synthesis_repair_reuses_provider_session(
+def test_truncated_synthesis_is_not_marked_completed_or_sent_to_contract_repair(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("ZF_CHANNEL_PROVIDER_MAX_CONTINUATIONS", "0")
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     writer = EventWriter(EventLog(state_dir / "events.jsonl"))
@@ -1150,70 +1265,20 @@ def test_channel_synthesis_repair_reuses_provider_session(
         project_root=tmp_path,
         headless_backends={"codex-headless": backend},
     )
-    repair = next(
-        event
-        for event in writer.event_log.read_all()
-        if event.type == "channel.synthesis.repair.requested"
-    )
-    backend.reply = json.dumps({
-        "channel_synthesis": {
-            "summary": "The repaired synthesis is complete.",
-            "open_questions": [],
-            "readiness": {
-                "verdict": "needs_owner",
-                "implementation_start": False,
-                "gaps": ["owner approval"],
-                "risks": [],
-                "evidence_refs": [],
-                "reason": "owner approval remains",
-            },
-        },
-    })
-    repaired_payload = channel_message_event_payload(
-        state_dir,
-        {
-            "channel_id": "ch-repair",
-            "thread_id": "main",
-            "message_id": f"msg-{repair.payload['repair_id']}",
-            "member_id": "operator",
-            "role": "user",
-            "source": "runtime",
-            "text": "@synthesizer repair the synthesis contract",
-            "mentions": ["synthesizer"],
-            "refs": {
-                "synthesis_request_id": "synth-session",
-                "synthesis_repair_id": repair.payload["repair_id"],
-                "synthesis_repair_revision": 1,
-            },
-        },
-        created_by="test",
-        source_event_id=repair.id,
-    )
-    repaired = writer.emit(
-        "channel.message.posted",
-        actor="orchestrator-reactor",
-        causation_id=repair.id,
-        correlation_id="ch-repair",
-        payload=repaired_payload,
-    )
-    route_channel_message(
-        state_dir=state_dir,
-        writer=writer,
-        message_event=repaired,
-        message_payload=repaired.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=tmp_path,
-        headless_backends={"codex-headless": backend},
-    )
-
-    assert len(backend.calls) == 2
+    events = writer.event_log.read_all()
+    assert len(backend.calls) == 1
     assert backend.calls[0]["provider_session_id"] == ""
-    assert backend.calls[1]["provider_session_id"] == "codex-session-1"
-    assert sum(
-        event.type == "channel.synthesis.proposed"
-        for event in writer.event_log.read_all()
-    ) == 1
+    assert not any(
+        event.type == "channel.agent.reply.completed" for event in events
+    )
+    assert not any(
+        event.type == "channel.synthesis.repair.requested" for event in events
+    )
+    assert any(
+        event.type == "channel.agent.reply.failed"
+        and event.payload.get("failure_status") == "incomplete"
+        for event in events
+    )
 
 
 def test_channel_project_writer_legacy_policy_allows_project_skills(tmp_path: Path) -> None:

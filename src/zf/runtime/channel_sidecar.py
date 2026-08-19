@@ -188,6 +188,21 @@ def channel_context_pack_event_payload(
         "owner_questionnaire_digest": str(payload.get("owner_questionnaire_digest") or ""),
         "cross_review_index_digest": str(payload.get("cross_review_index_digest") or ""),
         "contribution_index_digest": str(payload.get("contribution_index_digest") or ""),
+        "semantic_source_required": bool(
+            payload.get("semantic_source_required")
+        ),
+        "semantic_source_stage": str(
+            payload.get("semantic_source_stage") or ""
+        ),
+        "semantic_source_complete": bool(
+            payload.get("semantic_source_complete")
+        ),
+        "semantic_source_reason": str(
+            payload.get("semantic_source_reason") or ""
+        ),
+        "semantic_source_manifest_digest": str(
+            payload.get("semantic_source_manifest_digest") or ""
+        ),
         "summary": _preview(str(payload.get("summary") or ""), CHANNEL_CONTEXT_SUMMARY_PREVIEW_CHARS),
         "routing_reason": str(payload.get("routing_reason") or ""),
         "source": str(payload.get("source") or ""),
@@ -198,6 +213,11 @@ def channel_context_pack_event_payload(
         "owner_question_count": len(payload.get("owner_questionnaire") if isinstance(payload.get("owner_questionnaire"), list) else []),
         "cross_review_count": len(payload.get("cross_review_index") if isinstance(payload.get("cross_review_index"), list) else []),
         "contribution_ref_count": len(payload.get("contribution_index") if isinstance(payload.get("contribution_index"), list) else []),
+        "semantic_source_count": len(
+            payload.get("semantic_source_manifest")
+            if isinstance(payload.get("semantic_source_manifest"), list)
+            else []
+        ),
         "artifact_ref_count": len(payload.get("artifact_refs") if isinstance(payload.get("artifact_refs"), list) else []),
         "report_ref_count": len(payload.get("report_refs") if isinstance(payload.get("report_refs"), list) else []),
         "context_pack_ref": descriptor["ref"],

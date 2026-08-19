@@ -22,10 +22,14 @@ from zf.runtime.channel_dispatch_capacity import (
 )
 from zf.runtime.channel_openclaw import dispatch_openclaw_channel_reply
 from zf.runtime.channel_projection import project_channel
-from zf.runtime.channel_reply_contract import (
-    channel_reply_response_contract,
-    emit_structured_reply_events,
-    fake_channel_reply_text,
+from zf.runtime.channel_reply_contract import emit_structured_reply_events
+from zf.runtime.channel_provider_completion import (
+    build_fake_channel_reply,
+    run_channel_provider_with_continuations,
+)
+from zf.runtime.channel_provider_prompt import (
+    build_channel_provider_prompt as _build_channel_prompt,
+    channel_context_pack_by_id,
 )
 from zf.runtime.channel_reply_remediation import emit_channel_reply_failed
 from zf.runtime.channel_reply_stream import ChannelVisibleMessageEmitter
@@ -218,7 +222,16 @@ def dispatch_reply_request(
 
     backend = str(member.get("backend") or request.get("backend") or "").strip().lower()
     if backend in FAKE_BACKENDS or str(member.get("member_type") or "") in {"persona", "persona_agent"}:
-        response = fake_channel_reply_text(member, message)
+        context_pack = channel_context_pack_by_id(
+            channel,
+            str(request.get("context_pack_id") or ""),
+            state_dir=Path(state_dir),
+        )
+        response = build_fake_channel_reply(
+            member,
+            message,
+            context_pack,
+        )
         reply_payload = channel_message_event_payload(Path(state_dir), {
             "channel_id": channel_id,
             "thread_id": str(request.get("thread_id") or "main"),
@@ -583,6 +596,12 @@ def _dispatch_headless_reply(
             "run_id": run_fields["run_id"],
             "provider_session_id": provider_session_id,
             "usage": usage,
+            "continuation_count": int(
+                getattr(result, "continuation_count", 0) or 0
+            ),
+            "completion_reason": str(
+                getattr(result, "completion_reason", "") or ""
+            ),
             **_origin_external_refs(message),
         },
     }, created_by=f"channel-adapter:{source}", source_event_id=started_event_id)
@@ -608,6 +627,12 @@ def _dispatch_headless_reply(
             "target_member_id": str(request.get("target_member_id") or ""),
             "context_pack_id": str(request.get("context_pack_id") or ""),
             "provider_session_id": provider_session_id,
+            "continuation_count": int(
+                getattr(result, "continuation_count", 0) or 0
+            ),
+            "completion_reason": str(
+                getattr(result, "completion_reason", "") or ""
+            ),
             "reason": "headless provider completed",
             **run_fields,
             "source": source,
@@ -779,21 +804,39 @@ def _run_headless_reply(
             )
 
         visible_stream = ChannelVisibleMessageEmitter(stream.emit_message)
-        result = adapter.run_turn(
-            prompt=_build_channel_prompt(channel=channel, member=member, message=message, request=request),
-            cwd=project_root,
-            system_prompt=_build_channel_system_prompt(member, channel=channel),
-            thread_id=thread_id,
+        system_prompt = _build_channel_system_prompt(member, channel=channel)
+
+        def run_provider_turn(turn_prompt: str, session_id: str) -> Any:
+            return adapter.run_turn(
+                prompt=turn_prompt,
+                cwd=project_root,
+                system_prompt=system_prompt,
+                thread_id=thread_id,
+                provider_session_id=session_id,
+                on_session_id=pin,
+                on_message=visible_stream.emit,
+                timeout_s=timeout_s,
+                thinking_level=str(member.get("thinking_level") or ""),
+                run_id=request_id,
+                run_thread_id=thread_key,
+                project_id=str(channel.get("channel_id") or channel_id),
+                conversation_id=channel_id,
+                permission_profile=permission_profile,
+            )
+
+        result = run_channel_provider_with_continuations(
+            run_turn=run_provider_turn,
+            initial_prompt=_build_channel_prompt(
+                channel=channel,
+                member=member,
+                message=message,
+                request=request,
+                state_dir=Path(state_dir),
+            ),
             provider_session_id=provider_session_id,
-            on_session_id=pin,
-            on_message=visible_stream.emit,
-            timeout_s=timeout_s,
-            thinking_level=str(member.get("thinking_level") or ""),
-            run_id=request_id,
-            run_thread_id=thread_key,
-            project_id=str(channel.get("channel_id") or channel_id),
-            conversation_id=channel_id,
-            permission_profile=permission_profile,
+            channel=channel,
+            request=request,
+            message=message,
         )
         visible_stream.finish()
         final_snapshot = snapshot_with_provider_session(
@@ -901,77 +944,6 @@ def _build_channel_system_prompt(
     if reply_contract:
         prompt = f"{prompt}\n\n{reply_contract}"
     return prompt
-
-
-def _build_channel_prompt(
-    *,
-    channel: dict[str, Any],
-    member: dict[str, Any],
-    message: dict[str, Any],
-    request: dict[str, Any],
-) -> str:
-    context_pack = _context_pack_by_id(channel, str(request.get("context_pack_id") or ""))
-    channel_id = str(channel.get("channel_id") or request.get("channel_id") or "")
-    response_contract = channel_reply_response_contract(
-        channel,
-        request,
-        message,
-    )
-    discussion = (
-        channel.get("discussion")
-        if isinstance(channel.get("discussion"), dict)
-        else {}
-    )
-    mode = discussion.get("mode") or discussion.get("product_mode") or "conversation"
-    skill_refs = active_channel_skill_refs(
-        member.get("skill_refs") or [],
-        discussion_mode=mode,
-    )
-    agent_context = (
-        context_pack.get("agent_context")
-        if isinstance(context_pack.get("agent_context"), dict)
-        else {}
-    )
-    repair_context = ""
-    if str(request.get("routing_reason") or "") == "remediation_redispatch":
-        repair_context = str(
-            redact_obj(
-                request.get("reason")
-                or "retry the rejected reply contract"
-            )
-        )
-    return "\n".join([
-        "ZaoFu Agent Channel reply request",
-        f"channel_id: {channel_id}",
-        f"thread_id: {request.get('thread_id') or 'main'}",
-        f"target_member_id: {request.get('target_member_id') or member.get('member_id') or ''}",
-        f"channel_role: {member.get('channel_role') or member.get('role') or ''}",
-        f"visibility_profile: {member.get('visibility_profile') or ''}",
-        f"permission_profile: {normalize_permission_profile(member.get('permission_profile'))}",
-        f"write_policy: {redact_obj(member.get('write_policy') if isinstance(member.get('write_policy'), dict) else permission_profile_write_policy(member.get('permission_profile')))}",
-        f"skill_refs: {redact_obj(skill_refs)}",
-        f"context_pack: {redact_obj(context_pack)}",
-        f"agent_context: {redact_obj(agent_context)}",
-        f"response_contract: {response_contract}",
-        f"repair_context: {repair_context}" if repair_context else "",
-        "",
-        "Trigger message:",
-        str(message.get("text") or message.get("message") or ""),
-    ])
-
-
-def _context_pack_by_id(channel: dict[str, Any], context_pack_id: str) -> dict[str, Any]:
-    if not context_pack_id:
-        return {}
-    for item in channel.get("context_packs") or []:
-        if isinstance(item, dict) and str(item.get("context_pack_id") or "") == context_pack_id:
-            return item
-    raw = channel.get("context_packs")
-    if isinstance(raw, dict):
-        item = raw.get(context_pack_id)
-        if isinstance(item, dict):
-            return item
-    return {}
 
 
 def _project_root_for_state(state_dir: Path, project_root: Path | None) -> Path:

@@ -36,6 +36,7 @@ _STATUS_BY_TYPE = {
 
 _NON_RETRYABLE_FAILURE_STATUSES = frozenset({
     "command_unavailable",
+    "incomplete",
     "permission_denied",
     "permission_drift_blocked",
     "provider_binding_missing",

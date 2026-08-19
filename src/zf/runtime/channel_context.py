@@ -22,6 +22,7 @@ from zf.runtime.channel_question_graph import (
     owner_questionnaire,
     question_frontier,
 )
+from zf.runtime.channel_semantic_sources import build_semantic_source_bundle
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
 
 
@@ -142,6 +143,12 @@ def build_channel_context_pack(
         channel,
         thread_id=thread_id,
     )
+    semantic_sources = build_semantic_source_bundle(
+        channel,
+        thread_id=thread_id,
+        trigger_message_id=trigger_message_id,
+        state_dir=state_dir,
+    )
     context_pack_id = _stable_context_pack_id(
         channel_id,
         thread_id,
@@ -211,6 +218,18 @@ def build_channel_context_pack(
         "cross_review_index_digest": _stable_digest(cross_review_index),
         "contribution_index": contribution_index,
         "contribution_index_digest": _stable_digest(contribution_index),
+        "semantic_source_required": semantic_sources["required"],
+        "semantic_source_stage": semantic_sources["stage"],
+        "semantic_source_complete": semantic_sources["complete"],
+        "semantic_source_reason": semantic_sources["reason"],
+        "semantic_source_manifest": semantic_sources["manifest"],
+        "semantic_source_manifest_digest": semantic_sources[
+            "manifest_digest"
+        ],
+        "semantic_source_required_digests": semantic_sources[
+            "required_message_digests"
+        ],
+        "semantic_source_documents": semantic_sources["documents"],
         "artifact_refs": _select_artifact_refs(
             channel,
             selected_messages=selected,
@@ -229,6 +248,13 @@ def build_channel_context_pack(
             "owner_questions": len(questionnaire),
             "cross_reviews": len(cross_review_index),
             "indexed_contributions": len(contribution_index),
+            "semantic_source_messages": len(
+                semantic_sources["manifest"]
+            ),
+            "semantic_source_chars": semantic_sources["source_chars"],
+            "max_semantic_source_chars": semantic_sources[
+                "max_source_chars"
+            ],
             "visibility_profile": profile,
             **source_limits,
         },

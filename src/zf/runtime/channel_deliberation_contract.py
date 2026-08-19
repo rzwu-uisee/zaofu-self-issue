@@ -9,12 +9,17 @@ from typing import Any
 from zf.core.events import EventWriter
 from zf.runtime.channel_contract_artifacts import (
     persist_channel_contract,
+    persist_channel_semantic_coverage,
     string_refs,
     typed_items,
     validate_channel_contract,
 )
+from zf.runtime.channel_semantic_sources import (
+    validate_semantic_source_coverage,
+)
 from zf.runtime.channel_question_graph import (
     normalize_question_payload,
+    question_text_identity,
     validate_question_graph,
 )
 
@@ -115,6 +120,9 @@ def apply_cross_review_reply(
         "questions": [],
         "source_refs": string_refs(review.get("source_refs")),
         "evidence_refs": string_refs(review.get("evidence_refs")),
+        "consumed_message_digests": string_refs(
+            review.get("consumed_message_digests")
+        ),
         "freeze": True,
     }
     validation_error = validate_channel_contract(
@@ -134,6 +142,24 @@ def apply_cross_review_reply(
             reason=validation_error,
         )
         return
+    coverage, coverage_error = validate_semantic_source_coverage(
+        channel,
+        request,
+        review_body["consumed_message_digests"],
+    )
+    if coverage_error:
+        _emit_cross_review_rejected(
+            writer=writer,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            request_id=request_id,
+            member_id=member_id,
+            reply_event_id=reply_event_id,
+            task_id=str(request.get("task_id") or "") or None,
+            source=source,
+            reason=coverage_error,
+        )
+        return
     descriptor = persist_channel_contract(
         state_dir,
         channel_id=channel_id,
@@ -147,7 +173,23 @@ def apply_cross_review_reply(
             "source_refs": review_body["source_refs"],
             "evidence_refs": review_body["evidence_refs"],
             "cross_review_request_id": request_id,
+            "semantic_source_manifest_digest": coverage[
+                "manifest_digest"
+            ],
         },
+    )
+    coverage_descriptor = (
+        persist_channel_semantic_coverage(
+            state_dir,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            identity=request_id,
+            coverage=coverage,
+            created_by=member_id or actor,
+            source_event_id=reply_event_id,
+        )
+        if coverage["required"]
+        else {}
     )
     completed = writer.emit(
         "channel.cross_review.completed",
@@ -168,6 +210,19 @@ def apply_cross_review_reply(
             "evidence_refs": review_body["evidence_refs"],
             "artifact_ref": descriptor["ref"],
             "artifact_digest": descriptor["sha256"],
+            "consumed_message_digests": coverage[
+                "consumed_message_digests"
+            ],
+            "source_coverage": coverage["sources"],
+            "semantic_source_manifest_digest": coverage[
+                "manifest_digest"
+            ],
+            "semantic_coverage_ref": str(
+                coverage_descriptor.get("ref") or ""
+            ),
+            "semantic_coverage_digest": str(
+                coverage_descriptor.get("sha256") or ""
+            ),
             "source": source,
         },
     )
@@ -189,6 +244,15 @@ def apply_cross_review_reply(
             "evidence_refs": review_body["evidence_refs"],
             "artifact_ref": descriptor["ref"],
             "artifact_digest": descriptor["sha256"],
+            "consumed_message_digests": coverage[
+                "consumed_message_digests"
+            ],
+            "semantic_coverage_ref": str(
+                coverage_descriptor.get("ref") or ""
+            ),
+            "semantic_coverage_digest": str(
+                coverage_descriptor.get("sha256") or ""
+            ),
             "contract_status": "cross_review",
             "source": source,
         },
@@ -371,9 +435,23 @@ def reply_question_records(
         if isinstance(existing_raw, dict)
         else list(existing_raw)
     )
+    existing_by_text: dict[str, str] = {}
+    for record in existing:
+        if (
+            not isinstance(record, dict)
+            or str(record.get("thread_id") or "main") != thread_id
+        ):
+            continue
+        identity = question_text_identity(record.get("question"))
+        question_id = str(record.get("question_id") or "").strip()
+        if not identity or not question_id:
+            continue
+        if str(record.get("status") or "") == "merged":
+            question_id = str(record.get("merged_into") or question_id)
+        existing_by_text.setdefault(identity, question_id)
     drafts: list[tuple[dict[str, Any], str, str]] = []
     local_to_global: dict[str, str] = {}
-    seen_text: set[str] = set()
+    current_by_text: dict[str, str] = {}
     for index, raw in enumerate(raw_questions, 1):
         item = dict(raw) if isinstance(raw, dict) else {}
         text = str(
@@ -381,22 +459,26 @@ def reply_question_records(
             or item.get("text")
             or (raw if isinstance(raw, str) else "")
         ).strip()
-        if not text or text in seen_text:
+        if not text:
             continue
-        seen_text.add(text)
         local_id = str(
             item.get("question_id") or item.get("id") or f"q{index}"
         ).strip()
         if local_id in local_to_global:
             return [], f"duplicate_local_question_id:{local_id}"
+        identity = question_text_identity(text)
+        reused_id = existing_by_text.get(identity) or current_by_text.get(
+            identity
+        )
+        if reused_id:
+            local_to_global[local_id] = reused_id
+            continue
         digest = hashlib.sha1(
-            (
-                f"{channel_id}:{thread_id}:{member_id}:{source_kind}:"
-                f"{local_id}:{text}"
-            ).encode("utf-8")
+            f"{channel_id}:{thread_id}:question:{identity}".encode("utf-8")
         ).hexdigest()[:16]
         question_id = f"q-{digest}"
         local_to_global[local_id] = question_id
+        current_by_text[identity] = question_id
         drafts.append((item, text, question_id))
     records: list[dict[str, Any]] = []
     for item, text, question_id in drafts:

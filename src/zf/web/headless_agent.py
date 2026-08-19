@@ -122,6 +122,9 @@ class HeadlessTurnResult:
     error: str = ""
     permission_snapshot: dict[str, Any] = field(default_factory=dict)
     permission_drift: dict[str, Any] = field(default_factory=dict)
+    incomplete: bool = False
+    completion_reason: str = ""
+    continuation_count: int = 0
     telemetry: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -139,6 +142,9 @@ class HeadlessTurnResult:
             "error": self.error,
             "permission_snapshot": self.permission_snapshot,
             "permission_drift": self.permission_drift,
+            "incomplete": self.incomplete,
+            "completion_reason": self.completion_reason,
+            "continuation_count": self.continuation_count,
             "telemetry": self.telemetry,
         }
 
@@ -508,8 +514,14 @@ class ClaudeHeadlessBackend:
                 error=f"claude headless timed out after {timeout_s:.0f}s",
             )
         error = _tail(stderr)
-        ok = process.returncode == 0 and not parsed.is_error
-        status = "completed" if ok else "failed"
+        ok = (
+            process.returncode == 0
+            and not parsed.is_error
+            and not parsed.incomplete
+        )
+        status = "completed" if ok else (
+            "incomplete" if parsed.incomplete else "failed"
+        )
         return HeadlessTurnResult(
             ok=ok,
             status=status,
@@ -520,7 +532,13 @@ class ClaudeHeadlessBackend:
             messages=parsed.messages,
             usage=parsed.usage,
             resumed=started_with_resume,
-            error="" if ok else (parsed.error or error or f"claude exited {process.returncode}"),
+            error="" if ok else (
+                f"provider response incomplete: {parsed.completion_reason}"
+                if parsed.incomplete
+                else parsed.error or error or f"claude exited {process.returncode}"
+            ),
+            incomplete=parsed.incomplete,
+            completion_reason=parsed.completion_reason,
         )
 
 
@@ -797,7 +815,12 @@ class CodexHeadlessBackend:
                 if thinking_level:
                     turn_params["effort"] = thinking_level
                 client.request("turn/start", turn_params)
-                reply, usage = client.wait_turn(on_message=on_message)
+                (
+                    reply,
+                    usage,
+                    incomplete,
+                    completion_reason,
+                ) = client.wait_turn(on_message=on_message)
                 if agent_session_run_cancelled(session_key):
                     return _cancelled_result(
                         self.backend_id,
@@ -807,8 +830,8 @@ class CodexHeadlessBackend:
                         resumed=resumed,
                     )
                 return HeadlessTurnResult(
-                    ok=True,
-                    status="completed",
+                    ok=not incomplete,
+                    status="incomplete" if incomplete else "completed",
                     backend=self.backend_id,
                     thread_id=thread_id,
                     provider_session_id=codex_thread_id,
@@ -817,24 +840,37 @@ class CodexHeadlessBackend:
                     usage=usage,
                     resumed=resumed,
                     fallback_reason=fallback_reason,
+                    error=(
+                        f"provider response incomplete: {completion_reason}"
+                        if incomplete
+                        else ""
+                    ),
+                    incomplete=incomplete,
+                    completion_reason=completion_reason,
                 )
         except Exception as exc:
             if agent_session_run_cancelled(session_key):
                 return _cancelled_result(self.backend_id, thread_id, resumed=resumed)
             error = str(exc)
             status = _codex_failure_status(error)
+            incomplete = _provider_completion_incomplete(status, error)
             return HeadlessTurnResult(
                 ok=False,
-                status=status,
+                status="incomplete" if incomplete else status,
                 backend=self.backend_id,
                 thread_id=thread_id,
-                provider_session_id="",
-                reply="",
+                provider_session_id=client.thread_id or provider_session_id,
+                reply=(
+                    client._completed_reply
+                    or "".join(client._reply_parts)
+                ).strip(),
                 messages=[],
-                usage={},
+                usage=dict(client._usage),
                 resumed=resumed,
                 fallback_reason=fallback_reason,
                 error=_codex_sandbox_error_with_hint(error) if status == "sandbox_unsupported" else error,
+                incomplete=incomplete,
+                completion_reason=error if incomplete else "",
             )
         finally:
             client.close()
@@ -1446,6 +1482,29 @@ def _build_claude_input(prompt: str) -> str:
     }, ensure_ascii=False) + "\n"
 
 
+def _provider_completion_incomplete(status: str, reason: str) -> bool:
+    normalized_status = (
+        str(status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    )
+    normalized_reason = (
+        str(reason or "").strip().lower().replace("-", "_").replace(" ", "_")
+    )
+    if normalized_status in {"incomplete", "truncated", "length"}:
+        return True
+    markers = (
+        "max_tokens",
+        "max_output_tokens",
+        "max_turns",
+        "context_length",
+        "context_window",
+        "context_limit",
+        "token_limit",
+        "output_length",
+        "response_incomplete",
+    )
+    return any(marker in normalized_reason for marker in markers)
+
+
 @dataclass(frozen=True)
 class _ParsedClaudeStream:
     provider_session_id: str
@@ -1454,6 +1513,8 @@ class _ParsedClaudeStream:
     usage: dict[str, Any]
     is_error: bool = False
     error: str = ""
+    incomplete: bool = False
+    completion_reason: str = ""
 
 
 def _parse_claude_stream(
@@ -1487,6 +1548,8 @@ class _ClaudeStreamAccumulator:
         self.result_text = ""
         self.is_error = False
         self.error = ""
+        self.incomplete = False
+        self.completion_reason = ""
         # B-STREAM-01 partial-message streaming: text streamed so far per
         # content-block index, and indices that already emitted a redacted
         # thinking signal. Both dedupe against the final assistant block, which
@@ -1521,7 +1584,23 @@ class _ClaudeStreamAccumulator:
                 self._observe_stream_event(event)
             return
         if msg_type == "assistant":
-            content = msg.get("message", {}).get("content", [])
+            assistant_message = (
+                msg.get("message")
+                if isinstance(msg.get("message"), dict)
+                else {}
+            )
+            assistant_stop_reason = str(
+                assistant_message.get("stop_reason")
+                or assistant_message.get("stopReason")
+                or ""
+            )
+            if assistant_stop_reason:
+                self.completion_reason = assistant_stop_reason
+                self.incomplete = _provider_completion_incomplete(
+                    "",
+                    assistant_stop_reason,
+                )
+            content = assistant_message.get("content", [])
             for idx, block in enumerate(content if isinstance(content, list) else []):
                 if not isinstance(block, dict):
                     continue
@@ -1572,6 +1651,16 @@ class _ClaudeStreamAccumulator:
             self.result_text = str(msg.get("result") or msg.get("result_text") or "")
             self.usage = dict(msg.get("usage") or {})
             self.is_error = bool(msg.get("is_error") or msg.get("isError"))
+            self.completion_reason = str(
+                msg.get("stop_reason")
+                or msg.get("stopReason")
+                or self.completion_reason
+                or msg.get("subtype")
+                or ""
+            )
+            self.incomplete = self.incomplete or _provider_completion_incomplete(
+                "", self.completion_reason
+            )
             if self.is_error:
                 self.error = self.result_text
             return
@@ -1642,6 +1731,8 @@ class _ClaudeStreamAccumulator:
             usage=self.usage,
             is_error=self.is_error,
             error=self.error,
+            incomplete=self.incomplete,
+            completion_reason=self.completion_reason,
         )
 
 
@@ -1743,6 +1834,29 @@ def _stream_claude_process(
     return accumulator.to_result(), "\n".join(stderr_parts), timed_out
 
 
+def _codex_turn_completion(item: dict[str, Any]) -> tuple[bool, str]:
+    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+    turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+    status = str(turn.get("status") or "").strip().lower()
+    details = (
+        turn.get("incompleteDetails")
+        if isinstance(turn.get("incompleteDetails"), dict)
+        else turn.get("incomplete_details")
+        if isinstance(turn.get("incomplete_details"), dict)
+        else {}
+    )
+    reason = str(
+        turn.get("stopReason")
+        or turn.get("stop_reason")
+        or turn.get("completionReason")
+        or turn.get("completion_reason")
+        or details.get("reason")
+        or _extract_codex_turn_error(turn)
+        or status
+    )
+    return _provider_completion_incomplete(status, reason), reason
+
+
 class _CodexRpcClient:
     def __init__(
         self,
@@ -1822,7 +1936,11 @@ class _CodexRpcClient:
     def notify(self, method: str) -> None:
         self._write({"jsonrpc": "2.0", "method": method})
 
-    def wait_turn(self, *, on_message: MessageCallback | None = None) -> tuple[str, dict[str, Any]]:
+    def wait_turn(
+        self,
+        *,
+        on_message: MessageCallback | None = None,
+    ) -> tuple[str, dict[str, Any], bool, str]:
         timeout_budget_s = self._inactivity_timeout_s()
         deadline = time.monotonic() + timeout_budget_s
         while True:
@@ -1844,9 +1962,16 @@ class _CodexRpcClient:
             if message is not None and on_message is not None:
                 on_message(message)
             if method.endswith("turn/completed") or method == "turn/completed":
-                self._raise_if_turn_failed(item)
+                incomplete, completion_reason = _codex_turn_completion(item)
+                if not incomplete:
+                    self._raise_if_turn_failed(item)
                 reply = self._completed_reply or "".join(part for part in self._reply_parts if part)
-                return reply.strip(), self._usage
+                return (
+                    reply.strip(),
+                    self._usage,
+                    incomplete,
+                    completion_reason,
+                )
         stderr = _codex_stderr_tail(self._stderr_parts)
         raise RuntimeError(_codex_timeout_error(
             "turn",

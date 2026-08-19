@@ -39,6 +39,9 @@ from zf.runtime.channel_sidecar import (
     channel_context_pack_event_payload,
     hydrate_channel_message_text,
 )
+from zf.runtime.channel_semantic_sources import (
+    reject_incomplete_semantic_source_bundle,
+)
 from zf.runtime.sidecar_refs import SidecarRefError
 
 
@@ -444,6 +447,25 @@ def route_channel_message(
             skipped.append({
                 "target_member_id": target_member_id,
                 "reason": f"profile_snapshot_{exc.code}",
+            })
+            continue
+        semantic_rejection = reject_incomplete_semantic_source_bundle(
+            writer=writer,
+            context_pack=context_pack,
+            actor=actor,
+            task_id=message_event.task_id,
+            causation_id=detected.id,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            target_member_id=target_member_id,
+            trigger_message_id=message_id,
+            routing_reason=routing_reason,
+            source=source,
+        )
+        if semantic_rejection:
+            skipped.append({
+                "target_member_id": target_member_id,
+                "reason": "semantic_source_bundle_incomplete",
             })
             continue
         writer.emit(

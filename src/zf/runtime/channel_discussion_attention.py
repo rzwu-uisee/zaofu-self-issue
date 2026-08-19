@@ -152,6 +152,7 @@ def project_discussion_attention(
             outcome=outcome,
             owner_questions=bool(owner_questions),
             owner_confirmation_required=owner_confirmation_required,
+            has_replies=bool(replies),
             active_replies=bool(active_replies),
             failed_replies=failed_count,
             synthesis_status=latest_synthesis_status,
@@ -165,6 +166,7 @@ def project_discussion_attention(
             outcome=outcome,
             owner_questions=bool(owner_questions),
             owner_confirmation_required=owner_confirmation_required,
+            has_replies=bool(replies),
             active_replies=bool(active_replies),
             failed_replies=failed_count,
             synthesis_status=latest_synthesis_status,
@@ -281,6 +283,7 @@ def _attention_state(
     outcome: str,
     owner_questions: bool,
     owner_confirmation_required: bool,
+    has_replies: bool,
     active_replies: bool,
     failed_replies: int,
     synthesis_status: str,
@@ -320,7 +323,13 @@ def _attention_state(
         if open_questions:
             return "blocked", "unresolved_questions"
         return "running", "synthesis_active"
-    if phase in {"active", "phase1_blind"}:
+    if phase == "active":
+        return (
+            ("done", "discussion_idle")
+            if has_replies
+            else ("running", "discussion_active")
+        )
+    if phase == "phase1_blind":
         return "running", "discussion_active"
     if open_questions:
         return "blocked", "unresolved_questions"
@@ -333,6 +342,7 @@ def _execution_state(
     outcome: str,
     owner_questions: bool,
     owner_confirmation_required: bool,
+    has_replies: bool,
     active_replies: bool,
     failed_replies: int,
     synthesis_status: str,
@@ -360,7 +370,9 @@ def _execution_state(
         if has_synthesis:
             return "ready"
         return "running"
-    if phase in {"active", "phase1_blind"}:
+    if phase == "active":
+        return "done" if has_replies else "running"
+    if phase == "phase1_blind":
         return "running"
     if open_questions:
         return "blocked"

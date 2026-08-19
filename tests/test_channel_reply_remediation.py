@@ -22,6 +22,7 @@ from zf.core.state.session import SessionStore
 from zf.runtime.channel_reply_remediation import (
     CHANNEL_REPLY_EXHAUSTED_EVENT,
     channel_reply_remediation_candidates,
+    classify_channel_reply_failure,
     pending_channel_reply_exhausted_actions,
     remediate_channel_replies,
 )
@@ -74,6 +75,16 @@ def test_failed_reply_is_immediate_redispatch_candidate():
     assert cands[0]["kind"] == "redispatch"
     assert cands[0]["status"] == "failed"
     assert cands[0]["run_generation"] == 1
+
+
+def test_bounded_continuation_exhaustion_is_terminal() -> None:
+    classified = classify_channel_reply_failure(
+        status="incomplete",
+        reason="max_output_tokens after bounded continuation",
+    )
+
+    assert classified["retryable"] is False
+    assert classified["failure_class"] == "provider_incomplete"
 
 
 def test_contract_failure_is_immediate_redispatch_candidate():

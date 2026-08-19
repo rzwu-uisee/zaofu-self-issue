@@ -1021,6 +1021,63 @@ def test_channel_context_pack_includes_resolved_question_ledger(
     assert built.payload["question_ref_count"] == 1
 
 
+def test_question_projection_folds_exact_revision_duplicates(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit(
+        "channel.created",
+        actor="web",
+        correlation_id="ch-revision",
+        payload={"channel_id": "ch-revision", "name": "Revision"},
+    )
+    first = writer.emit(
+        "channel.question.opened",
+        actor="synthesizer",
+        correlation_id="ch-revision",
+        payload={
+            "channel_id": "ch-revision",
+            "thread_id": "main",
+            "question_id": "q-r1",
+            "question": "Which API compatibility policy is required?",
+        },
+    )
+    writer.emit(
+        "channel.question.resolved",
+        actor="owner:operator",
+        correlation_id="ch-revision",
+        payload={
+            "channel_id": "ch-revision",
+            "thread_id": "main",
+            "question_id": "q-r1",
+            "resolution": "answered",
+            "resolved_by": "owner:operator",
+            "answer": "Preserve the current API.",
+        },
+    )
+    writer.emit(
+        "channel.question.opened",
+        actor="synthesizer",
+        correlation_id="ch-revision",
+        payload={
+            "channel_id": "ch-revision",
+            "thread_id": "main",
+            "question_id": "q-r2",
+            "question": "  WHICH API compatibility policy is required?  ",
+        },
+    )
+
+    detail = project_channel(state_dir, "ch-revision")
+
+    assert detail is not None
+    assert len(detail["open_questions"]) == 1
+    assert detail["open_questions"][0]["question_id"] == "q-r1"
+    assert detail["open_questions"][0]["status"] == "resolved"
+    assert detail["open_questions"][0]["opened_event_id"] == first.id
+
+
 def test_channel_context_pack_includes_state_update_artifact_refs(tmp_path: Path) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()

@@ -268,6 +268,20 @@ def _conversation_message(
     request_id = str(refs.get("request_id") or "")
     role = str(message.get("role") or "")
     text = str(message.get("text") or "")
+    synthesis_repair_id = str(refs.get("synthesis_repair_id") or "")
+    if synthesis_repair_id:
+        try:
+            revision = max(
+                1,
+                int(refs.get("synthesis_repair_revision") or 1),
+            )
+        except (TypeError, ValueError):
+            revision = 1
+        role = "system"
+        text = (
+            "ZaoFu retried synthesis after contract validation failed "
+            f"(revision {revision})."
+        )
     if role == "assistant" or request_id:
         text = hydrate_channel_message_text(state_dir, message)
         text = structured_reply_display_text(text, "channel_contribution")
@@ -297,6 +311,10 @@ def _conversation_message(
         if key in message
     }
     out["text"] = text
+    if synthesis_repair_id:
+        out["role"] = "system"
+        out["member_id"] = "zf-kernel"
+        out["actor"] = "zf-kernel"
     out["refs"] = _compact_refs(refs)
     contribution = contribution_by_request.get(request_id)
     if contribution:
@@ -378,6 +396,9 @@ def _compact_refs(refs: dict[str, Any]) -> dict[str, Any]:
             "provider_session_id",
             "artifact_ref",
             "artifact_digest",
+            "synthesis_request_id",
+            "synthesis_repair_id",
+            "synthesis_repair_revision",
         )
         if refs.get(key) not in (None, "")
     }

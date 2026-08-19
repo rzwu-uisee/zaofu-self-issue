@@ -11,13 +11,14 @@ from zf.core.events import EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
 from zf.runtime.channel_contract_artifacts import (
+    channel_template_binding,
     persist_channel_contract,
+    persist_channel_semantic_coverage,
     persist_channel_source_manifest,
     string_refs,
     typed_items,
     validate_channel_contract,
 )
-from zf.runtime.channel_context import channel_contribution_index
 from zf.runtime.channel_contribution_repair import reject_contribution_contract
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_deliberation_contract import (
@@ -30,6 +31,9 @@ from zf.runtime.channel_prd_revision import (
     persist_synthesis_prd_revision,
 )
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
+from zf.runtime.channel_semantic_sources import (
+    validate_semantic_source_coverage,
+)
 from zf.runtime.channel_question_dedup import apply_question_dedup_reply
 from zf.runtime.channel_reply_prompt import (
     channel_reply_response_contract,
@@ -45,6 +49,10 @@ from zf.runtime.channel_reply_parsing import (
 from zf.runtime.channel_synthesis_repair import (
     ignore_stale_synthesis_repair as _ignore_stale_synthesis_repair,
     reject_synthesis_contract as _reject_synthesis_contract,
+)
+from zf.runtime.channel_synthesis_coverage import (
+    contract_coverage_error,
+    synthesis_contract_sources,
 )
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
 
@@ -320,6 +328,63 @@ def _emit_synthesis_locked(
             synthesis_repair_revision=synthesis_repair_revision,
         )
         return
+    coverage, coverage_error = validate_semantic_source_coverage(
+        channel,
+        request,
+        synthesis.get("consumed_message_digests"),
+    )
+    if coverage_error:
+        _reject_synthesis_contract(
+            state_dir=state_dir,
+            writer=writer,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            member_id=member_id,
+            request=request,
+            reply=reply,
+            reply_event_id=reply_event_id,
+            actor=actor,
+            source=source,
+            status="invalid_semantic_source_coverage",
+            reason=coverage_error,
+            synthesis_request_id=synthesis_request_id,
+            synthesis_repair_revision=synthesis_repair_revision,
+        )
+        return
+    contribution_refs, contribution_digests = synthesis_contract_sources(
+        channel,
+        thread_id=thread_id,
+    )
+    declared_contribution_refs = string_refs(
+        synthesis.get("consumed_contribution_refs")
+    )
+    declared_contribution_digests = string_refs(
+        synthesis.get("consumed_contribution_digests")
+    )
+    contribution_coverage_error = contract_coverage_error(
+        required_refs=contribution_refs,
+        required_digests=contribution_digests,
+        consumed_refs=declared_contribution_refs,
+        consumed_digests=declared_contribution_digests,
+    )
+    if contribution_coverage_error:
+        _reject_synthesis_contract(
+            state_dir=state_dir,
+            writer=writer,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            member_id=member_id,
+            request=request,
+            reply=reply,
+            reply_event_id=reply_event_id,
+            actor=actor,
+            source=source,
+            status="invalid_contribution_coverage",
+            reason=contribution_coverage_error,
+            synthesis_request_id=synthesis_request_id,
+            synthesis_repair_revision=synthesis_repair_revision,
+        )
+        return
     if any(
         event.type == "channel.synthesis.proposed"
         and isinstance(event.payload, dict)
@@ -376,20 +441,17 @@ def _emit_synthesis_locked(
         f"channel:{channel_id}/{thread_id}",
     ]))
     evidence_refs = string_refs(synthesis.get("evidence_refs"))
-    contribution_refs, contribution_digests = _contribution_contract_refs(
-        channel,
-        thread_id=thread_id,
-    )
     typed_synthesis = {
         **synthesis,
-        "consumed_contribution_refs": list(dict.fromkeys([
-            *string_refs(synthesis.get("consumed_contribution_refs")),
-            *contribution_refs,
-        ])),
-        "consumed_contribution_digests": list(dict.fromkeys([
-            *string_refs(synthesis.get("consumed_contribution_digests")),
-            *contribution_digests,
-        ])),
+        "consumed_contribution_refs": declared_contribution_refs,
+        "consumed_contribution_digests": declared_contribution_digests,
+        "consumed_message_digests": coverage[
+            "consumed_message_digests"
+        ],
+        "source_coverage": coverage["sources"],
+        "semantic_source_manifest_digest": coverage[
+            "manifest_digest"
+        ],
     }
     contract_descriptor = persist_channel_contract(
         state_dir,
@@ -403,7 +465,23 @@ def _emit_synthesis_locked(
         provenance={
             "source_refs": source_refs,
             "evidence_refs": evidence_refs,
+            "semantic_source_manifest_digest": coverage[
+                "manifest_digest"
+            ],
         },
+    )
+    coverage_descriptor = (
+        persist_channel_semantic_coverage(
+            state_dir,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            identity=synthesis_request_id,
+            coverage=coverage,
+            created_by=member_id or actor,
+            source_event_id=reply_event_id,
+        )
+        if coverage["required"]
+        else {}
     )
     artifact_body = _render_prd_artifact(
         channel=channel,
@@ -472,6 +550,19 @@ def _emit_synthesis_locked(
             "consumed_contribution_digests": typed_synthesis[
                 "consumed_contribution_digests"
             ],
+            "consumed_message_digests": typed_synthesis[
+                "consumed_message_digests"
+            ],
+            "source_coverage": typed_synthesis["source_coverage"],
+            "semantic_source_manifest_digest": typed_synthesis[
+                "semantic_source_manifest_digest"
+            ],
+            "semantic_coverage_ref": str(
+                coverage_descriptor.get("ref") or ""
+            ),
+            "semantic_coverage_digest": str(
+                coverage_descriptor.get("sha256") or ""
+            ),
             "confidence": _display_value(synthesis.get("confidence")),
             "dissent": typed_items(synthesis.get("dissent")),
             "source": source,
@@ -671,7 +762,7 @@ def _emit_contribution(
         created_by=member_id or actor,
         source_event_id=reply_event_id,
         provenance={
-            "template": _template_binding(channel),
+            "template": channel_template_binding(channel),
             "source_refs": source_refs,
             "evidence_refs": evidence_refs,
         },
@@ -746,65 +837,6 @@ def _emit_contribution(
                 "source": source,
             },
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _template_binding(channel: dict[str, Any]) -> dict[str, str]:
-    scope = (
-        channel.get("scope")
-        if isinstance(channel.get("scope"), dict)
-        else {}
-    )
-    template = (
-        scope.get("template")
-        if isinstance(scope.get("template"), dict)
-        else {}
-    )
-    return {
-        "id": str(template.get("id") or ""),
-        "version": str(template.get("version") or ""),
-        "digest": str(template.get("digest") or ""),
-        "materialization_digest": str(
-            template.get("materialization_digest") or ""
-        ),
-    }
-
-
-def _contribution_contract_refs(
-    channel: dict[str, Any],
-    *,
-    thread_id: str,
-) -> tuple[list[str], list[str]]:
-    refs: list[str] = []
-    digests: list[str] = []
-    for contribution in channel_contribution_index(
-        channel,
-        thread_id=thread_id,
-    ):
-        if str(contribution.get("contract_status") or "") != "structured":
-            continue
-        artifact_ref = str(
-            contribution.get("artifact_ref") or ""
-        ).strip()
-        artifact_digest = str(
-            contribution.get("artifact_digest") or ""
-        ).strip()
-        if artifact_ref:
-            refs.append(artifact_ref)
-        if artifact_digest:
-            digests.append(artifact_digest)
-    return list(dict.fromkeys(refs)), list(dict.fromkeys(digests))
 
 
 def _render_prd_artifact(

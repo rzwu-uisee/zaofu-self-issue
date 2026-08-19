@@ -153,6 +153,21 @@ phase1 blind answers
 这一流程受 round/member/budget 约束，并与普通 conversation history 关联。它是一次显式
 讨论操作，不是 Channel 的永久默认状态。
 
+普通 conversation 的 Provider context 使用有界历史摘要；`multi_lens` 的 cross-review
+和 synthesis 会绑定此前各轮完整 message sidecar，并要求回复逐项声明已消费 digest。
+缺正文、hash 不匹配、漏读来源或来源超预算时，该阶段会明确失败，不会用 excerpt 生成
+“已完成”结论。Provider 因 max token/context/output length 停止时会在同一 session 最多
+续写两次；可用 `ZF_CHANNEL_PROVIDER_MAX_CONTINUATIONS=0..4` 调整，耗尽后状态为
+`incomplete`，不会进入 PRD/consensus。
+
+完整正文只在目标 Provider dispatch 时从当前 context-pack sidecar 严格校验并加载；Channel
+Web projection 只保留 manifest、ref、digest、计数和覆盖状态，不复制或返回正文数组。
+内部 synthesis repair 指令在对话 projection 中只显示一条简短的 Kernel 状态，不展示
+合同诊断或长 artifact 路径；完整诊断仍保存在审计 sidecar 和事件中。
+重复生成 PRD revision 时，同一 thread 中问题文本仅做保守的 whitespace/case 规范化
+去重并复用原 question identity；已回答的问题不会因为 revision 再次出现而重新打开，
+新问题仍会进入 Owner decision frontier。
+
 讨论收敛后 Channel 仍保持可交互；人可以继续追问、补充需求或显式重开多视角讨论，
 不需要重建 Channel。若 projection 中存在 Owner 问题 frontier，Web 最多逐题展示当前
 前三题：可枚举问题使用 2--3 个互斥选项和单推荐项，开放问题使用自由文本；提交后仍由

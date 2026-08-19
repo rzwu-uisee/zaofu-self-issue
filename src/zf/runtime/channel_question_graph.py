@@ -22,6 +22,11 @@ OWNER_QUESTION_KINDS = frozenset({
 _PRIORITY_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 
 
+def question_text_identity(value: object) -> str:
+    """Return the conservative identity used for exact question reuse."""
+    return " ".join(str(value or "").split()).casefold()
+
+
 def normalize_question_payload(
     raw: dict[str, Any],
     *,

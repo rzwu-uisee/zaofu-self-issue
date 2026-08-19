@@ -15,6 +15,7 @@ SYNTHESIS_SCHEMA_VERSION = "channel.synthesis.v2"
 CHANNEL_PRD_SCHEMA_VERSION = "channel-prd.v1"
 CHANNEL_PRD_READINESS_SCHEMA_VERSION = "channel-prd-readiness.v1"
 CHANNEL_CONCLUSION_SCHEMA_VERSION = "channel-conclusion.v1"
+CHANNEL_SEMANTIC_COVERAGE_SCHEMA_VERSION = "channel.semantic_coverage.v1"
 
 
 def validate_channel_contract(
@@ -34,6 +35,7 @@ def validate_channel_contract(
             "risks",
             "source_refs",
             "evidence_refs",
+            "consumed_message_digests",
         )
         if kind == "contribution"
         else (
@@ -48,6 +50,7 @@ def validate_channel_contract(
             "evidence_refs",
             "consumed_contribution_refs",
             "consumed_contribution_digests",
+            "consumed_message_digests",
             "dissent",
         )
     )
@@ -194,6 +197,62 @@ def persist_channel_source_manifest(
         retention={"class": "audit_required"},
         required=True,
         preview=f"{len(source_refs)} sources, {len(evidence_refs)} evidence refs",
+    )
+
+
+def persist_channel_semantic_coverage(
+    state_dir: Path,
+    *,
+    channel_id: str,
+    thread_id: str,
+    identity: str,
+    coverage: dict[str, Any],
+    created_by: str,
+    source_event_id: str,
+) -> dict[str, Any]:
+    """Persist the exact member/round/message coverage behind a conclusion."""
+
+    payload = redact_obj({
+        "schema_version": CHANNEL_SEMANTIC_COVERAGE_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "identity": identity,
+        "status": str(coverage.get("status") or ""),
+        "manifest_digest": str(coverage.get("manifest_digest") or ""),
+        "required_message_digests": coverage.get(
+            "required_message_digests"
+        ) if isinstance(coverage.get("required_message_digests"), list) else [],
+        "consumed_message_digests": coverage.get(
+            "consumed_message_digests"
+        ) if isinstance(coverage.get("consumed_message_digests"), list) else [],
+        "sources": coverage.get("sources")
+        if isinstance(coverage.get("sources"), list)
+        else [],
+    })
+    return write_sidecar_json(
+        Path(state_dir),
+        (
+            PurePosixPath("channels")
+            / _safe_segment(channel_id)
+            / "semantic-coverage"
+            / f"{_safe_segment(identity)}.json"
+        ),
+        payload,
+        kind="channel_semantic_coverage",
+        schema_version=CHANNEL_SEMANTIC_COVERAGE_SCHEMA_VERSION,
+        created_by=created_by,
+        source_event_id=source_event_id,
+        access_scope={
+            "visibility": "project",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+        },
+        retention={"class": "audit_required"},
+        required=True,
+        preview=(
+            f"{len(payload['consumed_message_digests'])}/"
+            f"{len(payload['required_message_digests'])} sources consumed"
+        ),
     )
 
 
@@ -364,6 +423,27 @@ def string_refs(value: object, *, limit: int = 64) -> list[str]:
     ))[:limit]
 
 
+def channel_template_binding(channel: dict[str, Any]) -> dict[str, str]:
+    scope = (
+        channel.get("scope")
+        if isinstance(channel.get("scope"), dict)
+        else {}
+    )
+    template = (
+        scope.get("template")
+        if isinstance(scope.get("template"), dict)
+        else {}
+    )
+    return {
+        "id": str(template.get("id") or ""),
+        "version": str(template.get("version") or ""),
+        "digest": str(template.get("digest") or ""),
+        "materialization_digest": str(
+            template.get("materialization_digest") or ""
+        ),
+    }
+
+
 def _safe_segment(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "")).strip(".-")
     return safe or "unknown"
@@ -375,10 +455,13 @@ __all__ = [
     "CHANNEL_CONCLUSION_SCHEMA_VERSION",
     "CHANNEL_PRD_READINESS_SCHEMA_VERSION",
     "CHANNEL_PRD_SCHEMA_VERSION",
+    "CHANNEL_SEMANTIC_COVERAGE_SCHEMA_VERSION",
+    "channel_template_binding",
     "persist_channel_conclusion",
     "persist_channel_contract",
     "persist_channel_prd",
     "persist_channel_prd_readiness",
+    "persist_channel_semantic_coverage",
     "persist_channel_source_manifest",
     "string_refs",
     "typed_items",

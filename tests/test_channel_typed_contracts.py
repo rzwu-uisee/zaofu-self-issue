@@ -8,10 +8,17 @@ from pathlib import Path
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.runtime.channel_context import build_channel_context_pack
+from zf.runtime.channel_deliberation_contract import reply_question_records
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_provider_prompt import build_channel_provider_prompt
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
 from zf.runtime.channel_reply_prompt import channel_reply_response_contract
 from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
+from zf.runtime.channel_semantic_sources import build_semantic_source_bundle
+from zf.runtime.channel_sidecar import (
+    channel_context_pack_event_payload,
+    channel_message_event_payload,
+)
 
 
 CHANNEL_ID = "ch-typed"
@@ -46,6 +53,86 @@ def _channel() -> dict:
             },
         },
     }
+
+
+def _semantic_context(
+    state_dir: Path,
+    *,
+    stage: str,
+) -> tuple[dict, dict]:
+    requirement = channel_message_event_payload(
+        state_dir,
+        {
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "message_id": "msg-requirement",
+            "member_id": "operator",
+            "role": "user",
+            "source": "web",
+            "text": "Design a resilient delivery service.",
+            "refs": {},
+        },
+        created_by="test",
+        source_event_id="evt-requirement",
+    )
+    long_reply = "Full architecture evidence. " + ("detail " * 500) + "TAIL-BOUNDARY"
+    contribution = channel_message_event_payload(
+        state_dir,
+        {
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "message_id": "msg-researcher-reply",
+            "member_id": "researcher",
+            "role": "assistant",
+            "source": "codex-headless",
+            "text": long_reply,
+            "refs": {"request_id": "reply-researcher"},
+        },
+        created_by="test",
+        source_event_id="evt-researcher-reply",
+    )
+    refs = (
+        {"cross_review_request_id": "xreview-semantic", "question_id": "q-1"}
+        if stage == "cross_review"
+        else {"synthesis_request_id": "synth-semantic"}
+    )
+    trigger = channel_message_event_payload(
+        state_dir,
+        {
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "message_id": f"msg-{stage}",
+            "member_id": "operator",
+            "role": "user",
+            "source": "runtime",
+            "text": f"@reviewer run {stage}",
+            "refs": refs,
+        },
+        created_by="test",
+        source_event_id=f"evt-{stage}",
+    )
+    channel = _channel()
+    channel["messages"] = [
+        {**requirement, "event_id": "evt-requirement"},
+        {**contribution, "event_id": "evt-researcher-reply"},
+        {**trigger, "event_id": f"evt-{stage}"},
+    ]
+    channel["reply_requests"] = [{
+        "request_id": "reply-researcher",
+        "message_id": "msg-requirement",
+        "target_member_id": "researcher",
+    }]
+    pack = build_channel_context_pack(
+        channel,
+        channel_id=CHANNEL_ID,
+        thread_id="main",
+        target_member_id="reviewer",
+        trigger_message_id=f"msg-{stage}",
+        visibility_profile="reviewer",
+        state_dir=state_dir,
+    )
+    channel["context_packs"] = [pack]
+    return channel, pack
 
 
 def _emit_contribution(
@@ -140,6 +227,257 @@ def test_consensus_review_prompt_pins_canonical_artifact_digest() -> None:
     assert 'artifact_digest="canonical-prd-digest"' in prompt
     assert "MUST equal that canonical digest exactly" in prompt
     assert "do not substitute a spec_digest" in prompt
+
+
+def test_deliberation_context_carries_complete_prior_message_bodies(
+    tmp_path: Path,
+) -> None:
+    state_dir, _writer_instance = _writer(tmp_path)
+    channel, pack = _semantic_context(state_dir, stage="synthesis")
+
+    assert pack["semantic_source_required"] is True
+    assert pack["semantic_source_complete"] is True
+    assert [
+        item["round"] for item in pack["semantic_source_manifest"]
+    ] == ["requirement", "contribution:1"]
+    assert all(
+        item["message_body_ref"] and item["message_body_digest"]
+        for item in pack["semantic_source_manifest"]
+    )
+    assert pack["semantic_source_documents"][1]["content"].endswith(
+        "TAIL-BOUNDARY"
+    )
+
+    ordinary = build_channel_context_pack(
+        channel,
+        channel_id=CHANNEL_ID,
+        thread_id="main",
+        target_member_id="reviewer",
+        trigger_message_id="msg-requirement",
+        visibility_profile="reviewer",
+        state_dir=state_dir,
+    )
+    assert ordinary["semantic_source_required"] is False
+    assert ordinary["semantic_source_documents"] == []
+    assert all(
+        len(item["text_excerpt"]) <= 240
+        for item in ordinary["message_refs"]
+    )
+
+    over_budget = build_semantic_source_bundle(
+        channel,
+        thread_id="main",
+        trigger_message_id="msg-synthesis",
+        state_dir=state_dir,
+        max_source_chars=32,
+    )
+    assert over_budget["complete"] is False
+    assert "semantic_source_budget_exceeded" in over_budget["reason"]
+    assert over_budget["documents"] == []
+
+
+def test_projection_keeps_semantic_bodies_sidecar_only_but_provider_hydrates(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    _channel_data, pack = _semantic_context(state_dir, stage="synthesis")
+    envelope = channel_context_pack_event_payload(
+        state_dir,
+        pack,
+        created_by="test",
+        source_event_id="evt-context-source",
+    )
+    writer.emit(
+        "channel.context_pack.built",
+        actor="test",
+        correlation_id=CHANNEL_ID,
+        payload=envelope,
+    )
+
+    projected = project_channel(state_dir, CHANNEL_ID)
+    projected_pack = projected["context_packs"][0]
+    assert "semantic_source_documents" not in projected_pack
+    assert projected_pack["semantic_source_required_digests"] == pack[
+        "semantic_source_required_digests"
+    ]
+
+    prompt = build_channel_provider_prompt(
+        channel=projected,
+        member={
+            "member_id": "reviewer",
+            "channel_role": "reviewer",
+            "permission_profile": "read_only",
+        },
+        message={"text": "Synthesize the evidence."},
+        request={
+            "thread_id": "main",
+            "target_member_id": "reviewer",
+            "context_pack_id": pack["context_pack_id"],
+        },
+        state_dir=state_dir,
+    )
+    assert "semantic_source_documents" in prompt
+    assert "TAIL-BOUNDARY" in prompt
+
+
+def test_synthesis_requires_exact_message_digest_coverage(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    channel, pack = _semantic_context(state_dir, stage="synthesis")
+    request = {
+        "request_id": "reply-synthesis",
+        "thread_id": "main",
+        "message_id": "msg-synthesis",
+        "target_member_id": "reviewer",
+        "context_pack_id": pack["context_pack_id"],
+    }
+    message = {
+        "message_id": "msg-synthesis",
+        "refs": {"synthesis_request_id": "synth-semantic"},
+    }
+
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message=message,
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "This claim omits its source coverage.",
+                "open_questions": [],
+                "consumed_message_digests": [],
+            },
+        }),
+        reply_event_id="evt-synthesis-missing-coverage",
+        actor="test",
+        source="test",
+    )
+    events = writer.event_log.read_all()
+    assert not any(event.type == "channel.synthesis.proposed" for event in events)
+    assert any(
+        event.type == "channel.synthesis.repair.requested"
+        and "semantic_source_coverage_missing" in str(
+            event.payload.get("contract_error") or ""
+        )
+        for event in events
+    )
+
+
+def test_cross_review_persists_exact_semantic_coverage(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    channel, pack = _semantic_context(state_dir, stage="cross_review")
+    channel["cross_reviews"] = [{
+        "request_id": "xreview-semantic",
+        "thread_id": "main",
+        "question_id": "q-1",
+        "target_member_id": "reviewer",
+        "status": "pending",
+    }]
+
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request={
+            "request_id": "reply-cross-review",
+            "thread_id": "main",
+            "message_id": "msg-cross_review",
+            "target_member_id": "reviewer",
+            "context_pack_id": pack["context_pack_id"],
+        },
+        message={
+            "message_id": "msg-cross_review",
+            "refs": {
+                "cross_review_request_id": "xreview-semantic",
+                "question_id": "q-1",
+            },
+        },
+        reply=json.dumps({
+            "channel_cross_review": {
+                "summary": "The complete prior round was reviewed.",
+                "answer": "",
+                "findings": [],
+                "contradictions": [],
+                "risks": [],
+                "source_refs": [],
+                "evidence_refs": [],
+                "consumed_message_digests": pack[
+                    "semantic_source_required_digests"
+                ],
+            },
+        }),
+        reply_event_id="evt-cross-review-covered",
+        actor="test",
+        source="test",
+    )
+
+    completed = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "channel.cross_review.completed"
+    )
+    assert completed.payload["consumed_message_digests"] == pack[
+        "semantic_source_required_digests"
+    ]
+    assert {
+        item["message_id"] for item in completed.payload["source_coverage"]
+    } == {"msg-requirement", "msg-researcher-reply"}
+    assert (
+        state_dir / completed.payload["semantic_coverage_ref"]
+    ).is_file()
+
+
+def test_synthesis_coverage_produces_independent_canonical_artifact(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    channel, pack = _semantic_context(state_dir, stage="synthesis")
+
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request={
+            "request_id": "reply-synthesis-covered",
+            "thread_id": "main",
+            "message_id": "msg-synthesis",
+            "target_member_id": "reviewer",
+            "context_pack_id": pack["context_pack_id"],
+        },
+        message={
+            "message_id": "msg-synthesis",
+            "refs": {"synthesis_request_id": "synth-semantic"},
+        },
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "The complete discussion is captured durably.",
+                "open_questions": [],
+                "consumed_message_digests": pack[
+                    "semantic_source_required_digests"
+                ],
+            },
+        }),
+        reply_event_id="evt-synthesis-covered",
+        actor="test",
+        source="test",
+    )
+
+    proposed = next(
+        event
+        for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.proposed"
+    )
+    assert proposed.payload["source_coverage"] == pack[
+        "semantic_source_manifest"
+    ]
+    assert proposed.payload["artifact_ref"] != proposed.payload["contract_ref"]
+    assert (state_dir / proposed.payload["artifact_ref"]).is_file()
+    assert (state_dir / proposed.payload["contract_ref"]).is_file()
+    assert (state_dir / proposed.payload["semantic_coverage_ref"]).is_file()
 
 
 def test_typed_contribution_and_synthesis_preserve_evidence_and_objects(
@@ -241,6 +579,12 @@ def test_typed_contribution_and_synthesis_preserve_evidence_and_objects(
                 "recommended_workflow": {"kind": "issue"},
                 "source_refs": ["https://example.test/spec"],
                 "evidence_refs": ["artifact:api-contract"],
+                "consumed_contribution_refs": [
+                    finding.payload["artifact_ref"]
+                ],
+                "consumed_contribution_digests": [
+                    finding.payload["artifact_digest"]
+                ],
                 "confidence": {"level": "high", "basis": "primary source"},
             },
         }),
@@ -365,9 +709,11 @@ def test_projection_keeps_contributions_beyond_recent_event_window(
 ) -> None:
     state_dir, writer = _writer(tmp_path)
     expected_refs = []
+    expected_digests = []
     for index in range(5):
         artifact_ref = f"channels/{CHANNEL_ID}/contracts/{index}.json"
         expected_refs.append(artifact_ref)
+        expected_digests.append(f"digest-{index}")
         writer.emit(
             "channel.finding.recorded",
             actor=f"member-{index}",
@@ -425,10 +771,12 @@ def test_projection_keeps_contributions_beyond_recent_event_window(
             "refs": {"synthesis_request_id": "synth-complete"},
         },
         reply=json.dumps({
-            "channel_synthesis": {
-                "summary": "All durable contributions were consumed.",
-                "open_questions": [],
-            },
+                "channel_synthesis": {
+                    "summary": "All durable contributions were consumed.",
+                    "open_questions": [],
+                    "consumed_contribution_refs": expected_refs,
+                    "consumed_contribution_digests": expected_digests,
+                },
         }),
         reply_event_id="evt-synthesis-complete",
         actor="test",
@@ -957,6 +1305,46 @@ def test_typed_contribution_preserves_question_dependencies_and_frontier(
     ] == [policy["question_id"]]
     assert policy["options"][0]["id"] == "preserve"
     assert policy["allow_other"] is False
+
+
+def test_reply_questions_reuse_existing_identity_across_revisions() -> None:
+    channel = _channel()
+    channel["open_questions"] = [{
+        "question_id": "q-existing",
+        "thread_id": "main",
+        "question": "Which compatibility policy is required?",
+        "status": "resolved",
+        "kind": "owner_decision",
+        "depends_on": [],
+    }]
+
+    records, error = reply_question_records(
+        {
+            "questions": [
+                {
+                    "id": "policy-r2",
+                    "question": "  WHICH compatibility policy is required? ",
+                },
+                {
+                    "id": "rollout-r2",
+                    "question": "Which rollout strategy should be used?",
+                    "depends_on": ["policy-r2"],
+                },
+            ],
+        },
+        channel=channel,
+        channel_id=CHANNEL_ID,
+        thread_id="main",
+        member_id="synthesizer",
+        source_kind="synthesis",
+    )
+
+    assert error == ""
+    assert len(records) == 1
+    assert records[0]["question"] == (
+        "Which rollout strategy should be used?"
+    )
+    assert records[0]["depends_on"] == ["q-existing"]
 
 
 def test_consensus_review_is_digest_bound_and_preserves_blocker(

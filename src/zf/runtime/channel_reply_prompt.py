@@ -12,6 +12,10 @@ from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
 def fake_channel_reply_text(
     member: dict[str, Any],
     message: dict[str, Any],
+    *,
+    semantic_source_digests: object = None,
+    contribution_refs: object = None,
+    contribution_digests: object = None,
 ) -> str:
     """Return a deterministic reply that still exercises the typed contract."""
     member_id = str(member.get("member_id") or "agent")
@@ -36,6 +40,9 @@ def fake_channel_reply_text(
                 "risks": [],
                 "source_refs": [],
                 "evidence_refs": [],
+                "consumed_message_digests": _string_list(
+                    semantic_source_digests
+                ),
             },
         }
     elif refs.get("consensus_review_id"):
@@ -96,8 +103,15 @@ def fake_channel_reply_text(
                 "dissent": [],
                 "source_refs": [],
                 "evidence_refs": [],
-                "consumed_contribution_refs": [],
-                "consumed_contribution_digests": [],
+                "consumed_contribution_refs": _string_list(
+                    contribution_refs
+                ),
+                "consumed_contribution_digests": _string_list(
+                    contribution_digests
+                ),
+                "consumed_message_digests": _string_list(
+                    semantic_source_digests
+                ),
                 "confidence": "deterministic-test",
             },
         }
@@ -144,7 +158,10 @@ def channel_reply_response_contract(
         return _contract_response_instruction(
             "one JSON object named channel_cross_review containing "
             "summary, answer, findings, contradictions, risks, source_refs, "
-            "and evidence_refs. Facts may be settled only with evidence_refs."
+            "evidence_refs, and consumed_message_digests. Copy every required "
+            "message digest from semantic_source_manifest only after reading its "
+            "complete semantic_source_document. Facts may be settled only with "
+            "evidence_refs."
         )
     if refs.get("consensus_review_id"):
         artifact_ref = str(refs.get("artifact_ref") or "")
@@ -185,6 +202,7 @@ def channel_reply_response_contract(
             "acceptance_criteria, verification_commands, open_questions, risks, "
             "recommended_workflow, source_refs, evidence_refs, "
             "consumed_contribution_refs, consumed_contribution_digests, "
+            "consumed_message_digests, "
             "classification, dissent, confidence, and readiness. "
             "recommended_workflow and classification must each be JSON "
             "objects; use {} when no structured value applies. readiness must "
@@ -203,13 +221,17 @@ def channel_reply_response_contract(
             "criterion ids, and producer_paths; do not rename acceptance_ids "
             "to covers. Commands must also declare owner, tier, deterministic, "
             "reusable, and timeout_seconds instead of relying on downstream "
-            "defaults. "
+            "defaults. consumed_contribution_refs and digests must cover every "
+            "structured contribution and completed cross-review artifact in the "
+            "context pack exactly. "
             "browser viewport, pointer, network, storage, refresh, or screenshot "
             "criteria require a repo-root executable Docker Playwright command, "
             "not only unit/build commands. Missing future screenshots or traces "
             "before implementation is not a readiness gap when a runnable command "
             "and producer paths can be planned; a missing or forbidden runner is. "
-            "All plural fields must "
+            "Read every semantic_source_document and copy every required digest "
+            "from semantic_source_manifest into consumed_message_digests. Do "
+            "not claim a digest that is not in that manifest. All plural fields must "
             "be JSON arrays. Keep the preceding Markdown concise."
         )
     thread_id = str(request.get("thread_id") or "main")
@@ -247,6 +269,16 @@ def channel_reply_response_contract(
             "finding or assumption."
         )
     return ""
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        str(item).strip()
+        for item in value
+        if isinstance(item, str) and str(item).strip()
+    ))
 
 
 __all__ = [

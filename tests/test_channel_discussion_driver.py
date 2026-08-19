@@ -295,13 +295,19 @@ def _run_to_phase2(tmp_path: Path):
     return state_dir, writer
 
 
-def _open_question(writer: EventWriter, qid: str, asked_by: str = "arch-1") -> None:
+def _open_question(
+    writer: EventWriter,
+    qid: str,
+    asked_by: str = "arch-1",
+    *,
+    question: str = "unclear bit",
+) -> None:
     writer.emit(
         "channel.question.opened",
         actor=asked_by,
         correlation_id=CH,
         payload={"channel_id": CH, "thread_id": "main", "question_id": qid,
-                 "question": "unclear bit", "category": "scope",
+                 "question": question, "category": "scope",
                  "asked_by": asked_by, "source": "web"},
     )
 
@@ -499,7 +505,12 @@ def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
             "source": "runtime",
         },
     )
-    _open_question(writer, "q-synthesis", asked_by="pm-1")
+    _open_question(
+        writer,
+        "q-synthesis",
+        asked_by="pm-1",
+        question="Which threshold is approved?",
+    )
 
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     detail = project_channel(state_dir, CH)
