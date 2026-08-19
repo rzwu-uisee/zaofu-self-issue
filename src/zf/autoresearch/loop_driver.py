@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ from zf.autoresearch.loop_types import (
     ReflectionResult,
     append_journal_entry,
 )
+from zf.core.state.locks import locked_path
+from zf.runtime.call_result_envelope import canonical_json_sha256
 
 
 SUCCESS_RUN_STATUSES = frozenset({"passed", "passed_after_rework"})
@@ -389,9 +392,17 @@ def _write_experiment_record(
             "review_gate": dict(record.review_gate),
         },
     }
-    row = {"event_type": "autoresearch.experiment.iteration", "payload": payload}
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    row = {
+        "schema_version": "autoresearch-experiment-ledger.v1",
+        "event_type": "autoresearch.experiment.iteration",
+        "payload": payload,
+    }
+    row["record_digest"] = canonical_json_sha256(row)
+    with locked_path(path):
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
     return path
 
 

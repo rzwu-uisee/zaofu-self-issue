@@ -762,6 +762,81 @@ def _render_repo_guidance_digest(
     return "\n".join(lines)
 
 
+def _render_task_learning_context(
+    *,
+    config: ZfConfig,
+    role: RoleConfig,
+    task: Task,
+    state_dir_ref: Path | str | None,
+    project_root: Path | str | None,
+) -> str:
+    """Render only applicable retained/canary learning into a worker turn."""
+
+    if state_dir_ref is None:
+        return ""
+    from zf.runtime.evolution_learning import learning_context_projection
+
+    validation = (
+        task.contract.validation
+        if task.contract and isinstance(task.contract.validation, dict)
+        else {}
+    )
+    raw_scopes = validation.get("canary_scope_refs") or []
+    canary_scopes = (
+        [str(item) for item in raw_scopes if str(item)]
+        if isinstance(raw_scopes, list)
+        else [str(raw_scopes)] if str(raw_scopes) else []
+    )
+    task_family = ""
+    language = ""
+    if task.contract:
+        task_family = str(
+            task.contract.campaign
+            or task.contract.phase
+            or role.flow_kind
+            or ""
+        )
+        language = str(task.contract.locale or "")
+    projection = learning_context_projection(
+        Path(state_dir_ref),
+        context={
+            "actor": role.instance_id,
+            "task_family": task_family,
+            "provider": role.backend,
+            "model": role.model,
+            "language": language,
+            "repository": str(
+                Path(project_root).resolve(strict=False)
+                if project_root is not None
+                else config.project.name
+            ),
+            "canary_scope_refs": canary_scopes,
+        },
+    )
+    selected = projection.get("selected") or []
+    excluded = projection.get("excluded") or []
+    if not selected and not excluded:
+        return ""
+    lines = ["## Retained Learning (read-only)"]
+    for item in selected:
+        lines.append(
+            f"- `{item['asset_id']}@{item['version']}` "
+            f"({item['asset_kind']}, {item['state']})"
+        )
+        if item.get("content"):
+            lines.append(f"  {item['content']}")
+    if excluded:
+        reasons = sorted({str(item.get("reason") or "unknown") for item in excluded})
+        lines.append(
+            "- Excluded retained learning: " + ", ".join(reasons)
+        )
+    lines.append(
+        "- This is context only. Do not mutate capability state; report usage "
+        "and outcomes through sanctioned evolution actions."
+    )
+    return "\n".join(lines)
+
+
 def generate_task_briefing(
     config: ZfConfig,
     role: RoleConfig,
@@ -811,6 +886,16 @@ def generate_task_briefing(
     # B-SKILL-10: per-task repo-guidance + enabled-skills digest (projection).
     lines.append(_render_repo_guidance_digest(role, project_root))
     lines.append("")
+    learning_context = _render_task_learning_context(
+        config=config,
+        role=role,
+        task=task,
+        state_dir_ref=state_dir_ref,
+        project_root=project_root,
+    )
+    if learning_context:
+        lines.append(learning_context)
+        lines.append("")
     # α-5: feature context at briefing TOP (before task section)
     if feature is not None:
         lines.append(_render_feature_context(feature))

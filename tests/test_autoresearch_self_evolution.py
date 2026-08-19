@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from zf.autoresearch.eval_result import (
@@ -25,6 +26,8 @@ from zf.autoresearch.loop import (
     ReflectionResult,
     run_loop,
 )
+from zf.autoresearch.loop_driver import _write_experiment_record
+from zf.autoresearch.loop_types import IterationRecord
 from zf.autoresearch.loop_requests import (
     LOOP_COMPLETED,
     LOOP_FAILED,
@@ -42,7 +45,9 @@ from zf.autoresearch.resident import (
     REVIEW_GATE_COMPLETED,
     REVIEW_GATE_REQUESTED,
     REVIEW_GATE_STARTED,
+    ResidentAction,
     _finalize_resident_worktree,
+    _resident_provider_metadata,
     run_resident_once,
 )
 from zf.autoresearch.scenarios import resolve_scenario
@@ -50,6 +55,7 @@ from zf.core.events.log import EventLog
 from zf.core.events.model import ZfEvent
 from zf.cli.main import main
 from zf.runtime.repair_dispatch import DISPATCH_REQUESTED, RUN_MANAGER_ACCEPTED
+from zf.runtime.call_result_envelope import canonical_json_sha256
 
 
 def _eval(
@@ -76,6 +82,36 @@ def _eval(
         },
         evidence_refs={"tests": ["tests/test_runtime_snapshot.py"]},
     )
+
+
+def test_resident_provider_metadata_records_real_artifact_or_explicit_unknown(
+    tmp_path: Path,
+) -> None:
+    action = ResidentAction(
+        loop_request_id="loop-1",
+        action="run",
+        reason="test",
+        command=["codex", "exec", "tiny task"],
+    )
+    unknown = _resident_provider_metadata(action, tmp_path)
+    assert unknown["status"] == "unknown"
+    assert unknown["command_digest"]
+
+    (tmp_path / "provider.json").write_text(json.dumps({
+        "provider": "codex",
+        "model": "gpt-test",
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+        "cost": {"usd": 0.01},
+    }), encoding="utf-8")
+    recorded = _resident_provider_metadata(action, tmp_path)
+    assert recorded == {
+        "status": "recorded",
+        "provider": "codex",
+        "model": "gpt-test",
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+        "cost": {"usd": 0.01},
+        "source": "provider.json",
+    }
 
 
 def test_eval_result_round_trips_and_computes_total(tmp_path):
@@ -831,7 +867,16 @@ def test_resident_self_repair_consumer_waits_for_run_manager_acceptance(tmp_path
     assert actions == []
 
 
-def test_run_loop_writes_eval_result_experiment_and_artifacts(tmp_path: Path):
+def test_run_loop_writes_eval_result_experiment_and_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    configured_state = tmp_path / "configured-project" / ".zf"
+    configured_state.mkdir(parents=True)
+    configured_events = configured_state / "events.jsonl"
+    configured_events.write_bytes(b'{"sentinel":"configured-state"}\n')
+    configured_before = configured_events.read_bytes()
+    monkeypatch.setenv("ZF_STATE_DIR", str(configured_state))
     state_dir = tmp_path / ".zf"
     output_dir = tmp_path / "loop"
     cfg = LoopConfig(
@@ -871,6 +916,51 @@ def test_run_loop_writes_eval_result_experiment_and_artifacts(tmp_path: Path):
     assert graph_path.exists()
     assert list((output_dir / "artifacts").glob("*reflection.json"))
     assert list((output_dir / "artifacts").glob("*deposition.json"))
+    assert configured_events.read_bytes() == configured_before
+
+
+def test_experiment_ledger_concurrent_writers_are_complete_and_digest_bound(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+
+    def write(index: int) -> None:
+        record = IterationRecord(
+            iter=index,
+            started_at=f"2026-01-01T00:00:{index:02d}+00:00",
+            scenario="controlled-stuck-recovery",
+            run_id=f"run-{index}",
+            run_status="passed",
+            tasks_done=1,
+            expected_done=1,
+            eval=EvalSnapshot(3, 0, 0, 0.1, 0, 0, 1),
+            delta=None,
+            reflect=None,
+            git_head=f"head-{index}",
+            head_changed_since_prev=True,
+            summary=f"iteration {index}",
+        )
+        _write_experiment_record(
+            state_dir=state_dir,
+            record=record,
+            prev=None,
+            eval_result=_eval(f"eval-{index}"),
+            eval_path=tmp_path / f"eval-{index}.json",
+            trace_refs=[f"trace://{index}"],
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(20)))
+
+    path = state_dir / "autoresearch" / "experiments" / "events.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 20
+    assert {row["payload"]["experiment_id"] for row in rows} == {
+        f"run-{index}" for index in range(20)
+    }
+    for row in rows:
+        digest = row.pop("record_digest")
+        assert digest == canonical_json_sha256(row)
 
 
 def test_autoresearch_projection_includes_loop_and_eval_results(tmp_path):

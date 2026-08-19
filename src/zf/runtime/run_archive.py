@@ -129,6 +129,7 @@ class RunArchiveResult:
     run_yaml_path: Path
     manifest_path: Path
     manifest: dict[str, Any]
+    manifest_digest: str = ""
 
 
 @dataclass
@@ -216,6 +217,7 @@ def archive_run(
 
     if manifest_path.exists() and allow_existing:
         manifest = _read_json_obj(manifest_path)
+        manifest_digest = verify_run_archive_manifest(manifest)
         return RunArchiveResult(
             run_id=run_id,
             status=str(manifest.get("status") or status),
@@ -223,6 +225,7 @@ def archive_run(
             run_yaml_path=run_yaml_path,
             manifest_path=manifest_path,
             manifest=manifest,
+            manifest_digest=manifest_digest,
         )
     if manifest_path.exists() and not allow_existing:
         raise RunArchiveError(f"run archive already exists: {manifest_path}")
@@ -452,7 +455,9 @@ def archive_run(
         "redacted": [record.path for record in records if record.redacted],
         "truncated": [record.path for record in records if record.truncated],
         "summary": summary,
+        "manifest_digest_scope": "manifest_without_manifest_digest",
     }
+    manifest["manifest_digest"] = _run_archive_manifest_digest(manifest)
     atomic_write_text(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -464,7 +469,80 @@ def archive_run(
         run_yaml_path=run_yaml_path,
         manifest_path=manifest_path,
         manifest=manifest,
+        manifest_digest=str(manifest["manifest_digest"]),
     )
+
+
+def verify_run_archive_manifest(manifest: dict[str, Any]) -> str:
+    """Verify the archive manifest's self digest, accepting legacy reads.
+
+    Legacy manifests did not carry a self digest. They remain readable, but
+    callers receive a computed digest and can classify them as legacy by the
+    absence of ``manifest_digest`` in the original body.
+    """
+
+    expected = str(manifest.get("manifest_digest") or "")
+    actual = _run_archive_manifest_digest(manifest)
+    if expected and expected != actual:
+        raise RunArchiveError("run archive manifest digest mismatch")
+    return actual
+
+
+def verify_run_archive(
+    manifest_path: Path,
+    *,
+    expected_digest: str = "",
+) -> dict[str, Any]:
+    """Hydrate and verify one immutable run archive and its artifact set."""
+
+    path = Path(manifest_path).expanduser().resolve(strict=True)
+    manifest = _read_json_obj(path)
+    manifest_digest = verify_run_archive_manifest(manifest)
+    normalized_expected = str(expected_digest or "").strip().lower().removeprefix(
+        "sha256:"
+    )
+    if normalized_expected and normalized_expected != manifest_digest:
+        raise RunArchiveError("run archive manifest binding mismatch")
+    root = path.parent
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise RunArchiveError("run archive artifacts must be a list")
+    for index, raw in enumerate(artifacts):
+        if not isinstance(raw, dict):
+            raise RunArchiveError(f"run archive artifact {index} must be an object")
+        relative = Path(str(raw.get("path") or ""))
+        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise RunArchiveError(f"unsafe run archive artifact path: {relative}")
+        artifact_path = PathGuard.assert_under(root / relative, root)
+        if not artifact_path.exists():
+            raise RunArchiveError(f"run archive artifact is missing: {relative}")
+        actual_digest = (
+            _hash_dir(artifact_path)
+            if artifact_path.is_dir()
+            else _hash_file(artifact_path)
+        )
+        recorded_digest = str(raw.get("sha256") or "").strip().lower()
+        if not recorded_digest or actual_digest != recorded_digest:
+            raise RunArchiveError(
+                f"run archive artifact digest mismatch: {relative}"
+            )
+    return manifest
+
+
+def _run_archive_manifest_digest(manifest: dict[str, Any]) -> str:
+    body = {
+        key: value
+        for key, value in manifest.items()
+        if key != "manifest_digest"
+    }
+    encoded = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class RunProjector:
@@ -839,6 +917,7 @@ def run_and_archive_command(
             "run_id": run_id,
             "artifact_dir": str(result.artifact_dir),
             "artifact_manifest": str(result.manifest_path),
+            "artifact_manifest_digest": result.manifest_digest,
         },
     )
     projector.rebuild(write=True)
@@ -1425,4 +1504,6 @@ __all__ = [
     "reconcile_runs",
     "run_and_archive_command",
     "validate_run_id",
+    "verify_run_archive_manifest",
+    "verify_run_archive",
 ]

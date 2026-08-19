@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.delivery_projection_common import dedupe
 
 LOOP_LEARNING_PROMOTION_REQUESTED = "loop.learning.promotion.requested"
@@ -113,7 +113,8 @@ def request_loop_learning_promotion(
         evidence_refs=evidence_refs,
         project_id=request.project_id,
     )
-    proposal_ref = _write_proposal(state_dir, promotion_id, proposal)
+    proposal_descriptor = _write_proposal(state_dir, promotion_id, proposal)
+    proposal_ref = str(proposal_descriptor["ref"])
     materialized = writer.append(ZfEvent(
         type=LOOP_LEARNING_PROMOTION_MATERIALIZED,
         actor="zf-loop",
@@ -131,6 +132,8 @@ def request_loop_learning_promotion(
             "artifact_ref": learning.get("artifact_ref") or "",
             "target": target,
             "proposal_ref": proposal_ref,
+            "proposal_descriptor": proposal_descriptor,
+            "proposal_digest": proposal_descriptor["sha256"],
             "status": "materialized",
             "evidence_refs": evidence_refs,
         },
@@ -228,15 +231,19 @@ def _title(target: str, learning: dict[str, Any]) -> str:
     return f"Promote {kind} to {target} for {fix_layer}"
 
 
-def _write_proposal(state_dir: Path, promotion_id: str, proposal: dict[str, Any]) -> str:
-    root = Path(state_dir) / "loop" / "promotions"
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{_safe_name(promotion_id)}.json"
-    path.write_text(
-        json.dumps(proposal, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+def _write_proposal(
+    state_dir: Path,
+    promotion_id: str,
+    proposal: dict[str, Any],
+) -> dict[str, Any]:
+    return write_immutable_json_sidecar(
+        Path(state_dir),
+        proposal,
+        root=f"loop/promotions/{_safe_name(promotion_id)}",
+        kind="loop_learning_promotion",
+        schema_version="loop-learning-promotion.v1",
+        created_by="zf-loop",
     )
-    return str(path.relative_to(Path(state_dir)))
 
 
 def _response(

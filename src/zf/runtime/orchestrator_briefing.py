@@ -90,6 +90,16 @@ def build_orchestrator_briefing(
     sections.append(_render_memory(state_dir))
     sections.append("")
 
+    retained_learning = _render_retained_learning(
+        state_dir,
+        config=config,
+        trigger_event=trigger_event,
+    )
+    if retained_learning:
+        sections.append("## Retained Learning")
+        sections.append(retained_learning)
+        sections.append("")
+
     # LH-1.T5: MetricsSnapshot summary. Always present (gives Layer 2 a
     # baseline each wake); uses ⚠ when thresholds breached.
     sections.append("## Current Health")
@@ -787,6 +797,48 @@ def _render_memory(state_dir: Path) -> str:
         parts.append("**Orchestrator-specific:**")
         parts.extend(f"- [{e.type}] {e.content}" for e in role_mem)
     return "\n".join(parts) if parts else "_(no memory entries)_"
+
+
+def _render_retained_learning(
+    state_dir: Path,
+    *,
+    config: ZfConfig,
+    trigger_event: ZfEvent,
+) -> str:
+    registry = state_dir / "evolution" / "capabilities.json"
+    if not registry.is_file():
+        return ""
+    from zf.runtime.evolution_learning import learning_context_projection
+
+    payload = trigger_event.payload if isinstance(trigger_event.payload, dict) else {}
+    raw_scopes = payload.get("canary_scope_refs") or []
+    canary_scopes = (
+        [str(item) for item in raw_scopes if str(item)]
+        if isinstance(raw_scopes, list)
+        else [str(raw_scopes)] if str(raw_scopes) else []
+    )
+    projection = learning_context_projection(
+        state_dir,
+        context={
+            "actor": "orchestrator",
+            "task_family": str(payload.get("task_family") or ""),
+            "provider": str(payload.get("provider") or ""),
+            "model": str(payload.get("model") or ""),
+            "repository": str(getattr(config.project, "root", "") or ""),
+            "language": str(payload.get("language") or ""),
+            "canary_scope_refs": canary_scopes,
+        },
+    )
+    rows: list[str] = []
+    for item in projection["selected"][:20]:
+        rows.append(
+            f"- `{item['asset_id']}@{item['version']}` "
+            f"kind={item['asset_kind']} state={item['state']}"
+        )
+        content = str(item.get("content") or "").strip()
+        if content:
+            rows.append(f"  {content}")
+    return "\n".join(rows)
 
 
 _DRIFT_WINDOW_SECONDS = 3600.0

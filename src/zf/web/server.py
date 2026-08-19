@@ -3658,7 +3658,8 @@ def create_app(
         resolve_ctx=_delivery_trace_ctx,
         authorize_mutation=_web_mutation_auth_error,
     ))
-
+    from zf.web.evolution_routes import build_evolution_router
+    app.include_router(build_evolution_router(resolve_ctx=_delivery_trace_ctx))
     # Measure Loop projection is the product-delivery metric companion to
     # doc94 loop.v1. It is read-only and stays out of snapshot fan-out.
     from zf.web.measure_loop_routes import build_measure_loop_router

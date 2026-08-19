@@ -260,12 +260,21 @@ def test_loop_learning_promotion_materializes_runtime_proposal(
     assert response.status_code == 202
     body = response.json()
     assert body["status"] == "materialized"
-    assert body["proposal_ref"].startswith("loop/promotions/")
+    assert body["proposal_ref"].startswith("artifacts/loop/promotions/")
     assert (state_dir / body["proposal_ref"]).exists()
     events = event_log_from_project(state_dir, config=None, warn=False).read_all()
     by_type = [event.type for event in events]
     assert "loop.learning.promotion.requested" in by_type
     assert "loop.learning.promotion.materialized" in by_type
+    materialized = next(
+        event
+        for event in events
+        if event.type == "loop.learning.promotion.materialized"
+    )
+    assert materialized.payload["proposal_descriptor"]["ref"] == body["proposal_ref"]
+    assert materialized.payload["proposal_digest"] == materialized.payload[
+        "proposal_descriptor"
+    ]["sha256"]
 
     projection = client.get("/api/projects/default/loops").json()
     row = next(item for item in projection["learning"] if item["learning_id"] == learning["learning_id"])

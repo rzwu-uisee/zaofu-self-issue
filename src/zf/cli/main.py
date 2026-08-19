@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
                         feishu, autopilot, skills, state, self_eval, panes,
                         autoresearch, update, guard, artifact, attempt, bridge, preflight,
                         self_repair, recover, projection, goal)
+    from zf.cli import evolution as evolution_cli
     from zf.cli import result as result_cli
     from zf.cli import config as config_cli
     from zf.cli import failure as failure_cli
@@ -114,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_cli.register(subparsers)
     eval_preset_cli.register(subparsers)
     failure_cli.register(subparsers)
+    evolution_cli.register(subparsers)
 
     return parser
 

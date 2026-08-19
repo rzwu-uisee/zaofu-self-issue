@@ -768,6 +768,7 @@ def _archive_resident_run(
                 "research_mode": action.research_mode,
                 "evidence_complete": evidence_complete,
             },
+            provider=_resident_provider_metadata(action, output_dir),
             supplemental_files=supplemental,
         )
     except Exception as exc:
@@ -798,6 +799,7 @@ def _archive_resident_run(
     refs = {
         "artifact_dir": str(result.artifact_dir),
         "manifest": str(result.manifest_path),
+        "manifest_digest": result.manifest_digest,
         "run_yaml": str(result.run_yaml_path),
         "loop_report": str(archived_loop_report),
         "journal": str(archived_journal),
@@ -808,6 +810,45 @@ def _archive_resident_run(
         "reason": "" if evidence_complete else "required_reports_missing",
         "manifest": str(result.manifest_path),
         "refs": refs,
+    }
+
+
+def _resident_provider_metadata(
+    action: ResidentAction,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Capture provider identity when the loop produced it; never invent it."""
+
+    candidates = (
+        Path(output_dir) / "provider.json",
+        Path(output_dir) / "usage.json",
+    )
+    for path in candidates:
+        try:
+            body = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(body, dict):
+            continue
+        provider = str(body.get("provider") or body.get("backend") or "").strip()
+        model = str(body.get("model") or body.get("model_id") or "").strip()
+        if provider or model:
+            return {
+                "status": "recorded",
+                "provider": provider or "unknown",
+                "model": model or "unknown",
+                "usage": dict(body.get("usage") or {}),
+                "cost": dict(body.get("cost") or {}),
+                "source": path.name,
+            }
+    return {
+        "status": "unknown",
+        "provider": "unknown",
+        "model": "unknown",
+        "reason": "resident loop emitted no provider identity artifact",
+        "command_digest": hashlib.sha256(
+            "\0".join(action.command).encode("utf-8")
+        ).hexdigest(),
     }
 
 

@@ -24,6 +24,8 @@ from zf.runtime.run_archive import (
     read_task_runs,
     reconcile_runs,
     run_and_archive_command,
+    verify_run_archive,
+    verify_run_archive_manifest,
 )
 
 
@@ -132,11 +134,42 @@ def test_archive_run_writes_manifest_and_redacts(tmp_path: Path):
     assert "events.jsonl" in paths
     assert "cost.jsonl" in manifest["missing"]
     assert "env_redacted.json" in manifest["redacted"]
+    assert result.manifest_digest == manifest["manifest_digest"]
+    assert verify_run_archive_manifest(manifest) == result.manifest_digest
+    assert verify_run_archive(
+        result.manifest_path,
+        expected_digest=result.manifest_digest,
+    )["run_id"] == "RUN-1"
     archive_text = result.artifact_dir.joinpath("env_redacted.json").read_text(encoding="utf-8")
     sessions_text = result.artifact_dir.joinpath("role_sessions.redacted.yaml").read_text(encoding="utf-8")
     assert "sk-1234567890abcdef" not in archive_text
     assert "sk-1234567890abcdef" not in sessions_text
     assert "[REDACTED" in archive_text
+
+
+def test_run_archive_manifest_digest_rejects_tampering(tmp_path: Path) -> None:
+    project_root, state_dir = _project(tmp_path)
+    result = archive_run(
+        project_root=project_root,
+        state_dir=state_dir,
+        live_state_dir=_live_state(tmp_path),
+        run_id="RUN-DIGEST",
+        status="passed",
+    )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = "failed"
+
+    with pytest.raises(RunArchiveError, match="manifest digest mismatch"):
+        verify_run_archive_manifest(manifest)
+
+    result.artifact_dir.joinpath("command.txt").write_text(
+        "tampered\n", encoding="utf-8"
+    )
+    with pytest.raises(RunArchiveError, match="artifact digest mismatch"):
+        verify_run_archive(
+            result.manifest_path,
+            expected_digest=result.manifest_digest,
+        )
 
 
 def test_archive_run_binds_supplemental_autoresearch_evidence(

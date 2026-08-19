@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **68** top-level families and **259** addressable command paths.
+The parser currently exposes **69** top-level families and **281** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -231,6 +231,35 @@ Query events
 |---|---|
 | `zf events` | Query events |
 | `zf events trace` | Show the causation chain of an event |
+
+## `zf evolution`
+
+Manage evidence-bound self-evolution attempts and capabilities
+
+| Command | Parser description |
+|---|---|
+| `zf evolution` | Manage evidence-bound self-evolution attempts and capabilities |
+| `zf evolution asset-export` | Export a retained asset |
+| `zf evolution asset-import` | Import a portable asset as an inactive target-validation candidate |
+| `zf evolution asset-outcome` | Record one idempotent learning-asset usage outcome |
+| `zf evolution asset-propose` | Propose a learning asset |
+| `zf evolution asset-target-validate` | Record controlled target-project validation for an imported asset |
+| `zf evolution asset-transition` | Record an externally controlled asset lifecycle receipt |
+| `zf evolution attempt` | Materialize an evolution attempt |
+| `zf evolution challenge-decide` | Promote or reject a stable shadow challenge with evaluator receipt |
+| `zf evolution challenge-materialize` | Materialize a visible shadow challenge candidate |
+| `zf evolution compare` | Compare settled repeated A/B trials |
+| `zf evolution economics` | Compute evidence-bound evolution economics without inventing values |
+| `zf evolution evaluator-register` | Register public evaluator metadata and sealed cases |
+| `zf evolution opportunity-propose` | Materialize a proposal-only evolution opportunity |
+| `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
+| `zf evolution status` | Show the read-only evolution projection |
+| `zf evolution trial-ensure` | Ensure a stable A/B trial row |
+| `zf evolution trial-settle` | Settle one trial attempt |
+| `zf evolution trial-start` | Claim a trial lease |
+| `zf evolution variant-compare` | Materialize a Pareto comparison for workflow/provider variants |
+| `zf evolution variant-current` | Check provider comparison fingerprints against current routes |
+| `zf evolution workflow-learning-propose` | Compile Loop Learning into a standard Workflow Proposal |
 
 ## `zf failure`
 
