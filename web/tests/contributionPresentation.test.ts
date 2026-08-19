@@ -28,25 +28,22 @@ const presentation = presentContribution({
     { question_id: "q1", category: "scope", question: "Which vertical slice ships first?" },
     { question_id: "q2", question: "Who owns the verification decision?" },
   ],
-}, "This duplicate summary should stay hidden.");
+});
 
-assert(presentation.sections.length === 4, "all semantic section kinds remain represented");
-assert(presentation.fallbackSummary === "", "structured rows suppress the duplicate summary");
-assert(presentation.hiddenCount === 4, "overflow rows remain available behind one disclosure");
-const findings = presentation.sections.find((section) => section.key === "findings");
-assert(findings?.visibleRows.length === 3, "top three findings stay directly visible");
-assert(findings?.hiddenRows[0]?.id === "f4", "additional findings preserve source order");
+assert(presentation.sections.length === 2, "only actionable risk and conflict sections enter chat");
+assert(!presentation.sections.some((section) => section.key === "findings"), "findings stay in the typed projection, not chat");
+assert(!presentation.sections.some((section) => section.key === "questions"), "questions are owned by AskUserQuestion");
 const risks = presentation.sections.find((section) => section.key === "risks");
 assert(risks?.visibleRows[0]?.id === "r0", "P0 risk is promoted ahead of lower priorities");
-assert(risks?.visibleRows[1]?.id === "r1", "P1 risk remains directly visible");
-assert(risks?.hiddenRows[0]?.id === "r2", "lower-priority risk remains inspectable");
+assert(risks?.visibleRows.length === 1, "only the highest risk is shown inline");
+const conflicts = presentation.sections.find((section) => section.key === "contradictions");
+assert(conflicts?.visibleRows[0]?.id === "c1", "the first unresolved conflict stays actionable");
 assert(contributionRowLabel("findings", "fact") === "", "generic FACT labels do not add visual noise");
 assert(contributionRowLabel("questions", "scope") === "", "generic scope labels stay out of the transcript");
 assert(contributionRowLabel("risks", "p0") === "P0", "risk priority remains explicit");
 
-const fallback = presentContribution({}, "One concise takeaway.");
+const fallback = presentContribution({});
 assert(fallback.sections.length === 0, "empty semantic payload has no invented sections");
-assert(fallback.fallbackSummary === "One concise takeaway.", "summary remains as a no-rows fallback");
 
 const references = contributionReferencePresentation({
   source_refs: ["SPEC.md", "SPEC.md", "tasks/plan.md"],

@@ -34,8 +34,6 @@ import {
   contributionReferencePresentation,
   contributionRowLabel,
   presentContribution,
-  type ContributionSection,
-  type ContributionSectionKey,
 } from "./contributionPresentation";
 
 interface AgentSessionTimelineProps {
@@ -278,7 +276,14 @@ function ThreadPane({
         </div>
       ) : null}
       <div className="agent-turn-list">
-        {thread.turns.length ? thread.turns.map((turn) => (
+        {thread.turns.length ? thread.turns.map((turn) => {
+          const attachedContributionIds = new Set(
+            turn.cards
+              .filter((card) => card.kind === "contribution" && turn.runs.some((run) => run.id === card.runId))
+              .map((card) => card.id),
+          );
+          const remainingCards = turn.cards.filter((card) => !attachedContributionIds.has(card.id));
+          return (
           <article
             className={`agent-turn-group ${isSettledTurn(turn) ? "is-settled" : "is-active"}`}
             key={turn.id}
@@ -332,6 +337,7 @@ function ThreadPane({
             {turn.runs.map((run) => (
               <RunBlock
                 compact={compact}
+                contributionCards={turn.cards.filter((card) => card.kind === "contribution" && card.runId === run.id)}
                 key={run.id}
                 onCancelRun={onCancelRun}
                 providerCapabilities={providerCapabilities}
@@ -344,10 +350,10 @@ function ThreadPane({
                 showRunProvider={showRunProvider}
               />
             ))}
-            {turn.cards.length ? (
+            {remainingCards.length ? (
               <StackedCards
                 actionBusyId={actionBusyId}
-                cards={turn.cards}
+                cards={remainingCards}
                 onAnswerQuestion={onAnswerQuestion}
                 onApproveProposal={onApproveProposal}
                 onRejectProposal={onRejectProposal}
@@ -359,7 +365,8 @@ function ThreadPane({
               />
             ) : null}
           </article>
-        )) : (
+          );
+        }) : (
           <div className="agent-session-empty inline">
             <MessageSquare size={20} />
             <strong>{emptyTitle}</strong>
@@ -387,6 +394,7 @@ function ThreadPane({
 
 function RunBlock({
   compact,
+  contributionCards,
   run,
   onCancelRun,
   providerCapabilities,
@@ -398,6 +406,7 @@ function RunBlock({
   showRunProvider,
 }: {
   compact: boolean;
+  contributionCards: AgentSessionCard[];
   run: AgentSessionRun;
   onCancelRun?: (runId: string) => void;
   providerCapabilities: AgentProviderCapability[];
@@ -564,6 +573,7 @@ function RunBlock({
           </div>
         )
       ) : null}
+      {contributionCards.map((card) => <ContributionCard card={card} key={card.id} />)}
     </div>
   );
 }
@@ -1260,37 +1270,30 @@ function isSettledTurn(turn: AgentSessionTurn): boolean {
 
 function ContributionCard({ card }: { card: AgentSessionCard }) {
   const payload = card.payload ?? {};
-  const presentation = presentContribution(payload, card.body || "");
+  const presentation = presentContribution(payload);
   const references = contributionReferencePresentation(payload, card.refs);
-  if (!presentation.sections.length && !presentation.fallbackSummary && !references.total) return null;
+  if (!presentation.sections.length && !references.total) return null;
   return (
     <div
       className="agent-contribution-card"
       data-agent-card-kind="contribution"
       data-testid="agent-card-contribution"
     >
-      {presentation.sections.map((section) => (
-        <ContributionSectionBlock key={section.key} section={section} rows={section.visibleRows} />
-      ))}
-      {presentation.fallbackSummary ? (
-        <section className="agent-contribution-section tone-findings">
-          <ContributionSectionHeading section="findings" title="Key takeaway" />
-          <MarkdownText content={presentation.fallbackSummary} />
-        </section>
-      ) : null}
-      {presentation.hiddenCount ? (
-        <details className="agent-contribution-more">
-          <summary>
-            <ChevronRight aria-hidden="true" size={13} />
-            Show {presentation.hiddenCount} more
-          </summary>
-          <div className="agent-contribution-more-body">
-            {presentation.sections.filter((section) => section.hiddenRows.length).map((section) => (
-              <ContributionSectionBlock key={section.key} section={section} rows={section.hiddenRows} supplementary />
-            ))}
+      {presentation.sections.flatMap((section) => section.visibleRows.map((row, index) => {
+        const label = contributionRowLabel(section.key, row.label);
+        return (
+          <div className={`agent-contribution-action tone-${section.key}`} key={row.id || `${section.key}-${index}`}>
+            <span aria-hidden="true" className="agent-contribution-action-icon">
+              {section.key === "risks" ? <AlertTriangle size={14} /> : <GitCompare size={14} />}
+            </span>
+            <span className="agent-contribution-action-copy">
+              <strong>{section.title}</strong>
+              {label ? <small>{label}</small> : null}
+              <span>{row.text}</span>
+            </span>
           </div>
-        </details>
-      ) : null}
+        );
+      }))}
       {references.total ? (
         <details className="agent-contribution-evidence">
           <summary>
@@ -1302,62 +1305,6 @@ function ContributionCard({ card }: { card: AgentSessionCard }) {
         </details>
       ) : null}
     </div>
-  );
-}
-
-function ContributionSectionBlock({
-  rows,
-  section,
-  supplementary = false,
-}: {
-  rows: ContributionSection["visibleRows"];
-  section: ContributionSection;
-  supplementary?: boolean;
-}) {
-  if (!rows.length) return null;
-  return (
-    <section className={`agent-contribution-section tone-${section.key} ${supplementary ? "is-supplementary" : ""}`.trim()}>
-      <ContributionSectionHeading
-        section={section.key}
-        title={supplementary ? `Additional ${section.title.toLowerCase()}` : section.title}
-      />
-      <ul>
-        {rows.map((row, index) => {
-          const label = contributionRowLabel(section.key, row.label);
-          return (
-            <li key={row.id || `${section.key}-${index}`}>
-              {label ? <small>{label}</small> : null}
-              <span>{row.text}</span>
-            </li>
-          );
-        })}
-      </ul>
-    </section>
-  );
-}
-
-function ContributionSectionHeading({
-  section,
-  title,
-}: {
-  section: ContributionSectionKey;
-  title: string;
-}) {
-  return (
-    <header>
-      <span aria-hidden="true" className="agent-contribution-section-icon">
-        {section === "risks" ? (
-          <AlertTriangle size={14} />
-        ) : section === "contradictions" ? (
-          <GitCompare size={14} />
-        ) : section === "questions" ? (
-          <MessageSquare size={14} />
-        ) : (
-          <ListChecks size={14} />
-        )}
-      </span>
-      <strong>{title}</strong>
-    </header>
   );
 }
 

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("structured contribution keeps the main transcript concise and inspectable", async ({ page }) => {
+test("structured contribution only adds actionable exceptions to the reply", async ({ page }) => {
   const browserErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") browserErrors.push(message.text());
@@ -10,28 +10,27 @@ test("structured contribution keeps the main transcript concise and inspectable"
   await page.goto("/?fixture=agent-session");
   const card = page.getByTestId("fx-channel-compact")
     .getByTestId("agent-card-contribution");
+  const completedRun = page.getByTestId("fx-channel-compact")
+    .locator(".agent-run-block")
+    .first();
 
-  await expect(card).toContainText("Key takeaways");
-  await expect(card).toContainText("One authority owns state.");
+  await expect(completedRun.getByTestId("agent-card-contribution")).toHaveCount(1);
+  await expect(page.getByTestId("fx-channel-compact").locator(".agent-stacked-cards").getByTestId("agent-card-contribution")).toHaveCount(0);
   await expect(card).toContainText("Risk");
   await expect(card).toContainText("P0");
   await expect(card).toContainText("Dual writes make replay diverge.");
-  await expect(card).toContainText("Decision needed");
-  await expect(card).toContainText("Which vertical slice ships first?");
+  await expect(card).toContainText("Conflict");
+  await expect(card).toContainText("Two documents claim canonical authority.");
+  await expect(card).not.toContainText("Key takeaways");
+  await expect(card).not.toContainText("One authority owns state.");
+  await expect(card).not.toContainText("Decision needed");
+  await expect(card).not.toContainText("Which vertical slice ships first?");
   await expect(card).not.toContainText("Analysis");
   await expect(card).not.toContainText("View structured details");
   await expect(card).not.toContainText("4 findings");
   await expect(card).not.toContainText("Use one controlled gateway and keep the state authority explicit.");
-  await expect(card.getByText("Web remains a read-oriented projection.", { exact: true })).not.toBeVisible();
-  await expect(card.getByText("Low-priority display drift.", { exact: true })).not.toBeVisible();
-
-  const more = card.locator(".agent-contribution-more");
-  await expect(more.getByText("Show 4 more", { exact: true })).toBeVisible();
-  await more.locator("summary").click();
-  await expect(card).toContainText("Web remains a read-oriented projection.");
-  await expect(card).toContainText("Low-priority display drift.");
-  await expect(card).toContainText("A UI phase label conflicts with runtime state.");
-  await expect(card).toContainText("Who owns the verification decision?");
+  await expect(card).not.toContainText("Low-priority display drift.");
+  await expect(card).not.toContainText("Who owns the verification decision?");
 
   const evidence = card.locator(".agent-contribution-evidence");
   await expect(evidence.getByText("2 sources · 2 evidence refs · 1 artifact", { exact: true })).toBeVisible();

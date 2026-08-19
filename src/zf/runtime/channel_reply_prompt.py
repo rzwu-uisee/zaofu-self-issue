@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from zf.core.security.redaction import redact_obj
+from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
 
 
 def fake_channel_reply_text(
@@ -108,7 +109,25 @@ def fake_channel_reply_text(
                 "freeze": True,
             },
         }
-    return summary + "\n" + json.dumps(contract, ensure_ascii=True)
+    return (
+        summary
+        + "\n"
+        + CHANNEL_CONTRACT_MARKER
+        + "\n"
+        + json.dumps(contract, ensure_ascii=True)
+    )
+
+
+def _contract_response_instruction(contract: str) -> str:
+    return (
+        "First write a concise user-facing Markdown response with the useful "
+        "answer. Never expose the machine contract as prose. Then, on its own "
+        "line, write the exact marker below without quotes or code fences:\n"
+        f"{CHANNEL_CONTRACT_MARKER}\n"
+        "On the next line, write "
+        f"{contract} The marker and JSON must be the final content; do not "
+        "wrap either in a Markdown fence and do not write prose after them."
+    )
 
 
 def channel_reply_response_contract(
@@ -122,8 +141,8 @@ def channel_reply_response_contract(
         else {}
     )
     if refs.get("cross_review_request_id"):
-        return (
-            "End with one JSON object named channel_cross_review containing "
+        return _contract_response_instruction(
+            "one JSON object named channel_cross_review containing "
             "summary, answer, findings, contradictions, risks, source_refs, "
             "and evidence_refs. Facts may be settled only with evidence_refs."
         )
@@ -139,16 +158,17 @@ def channel_reply_response_contract(
                 "MUST equal that canonical digest exactly; do not substitute a "
                 "spec_digest, Markdown digest, contract digest, or evidence digest."
             )
-        return (
-            "Read the exact synthesis artifact and end with one JSON object "
-            "named channel_consensus_review containing verdict signed|blocked, "
+        return _contract_response_instruction(
+            "one JSON object named channel_consensus_review containing verdict "
+            "signed|blocked, "
             "summary, artifact_digest, evidence_refs, and for blocked verdict "
-            "blocker_question plus optional blocker_question_id."
+            "blocker_question plus optional blocker_question_id. Read the exact "
+            "synthesis artifact before producing this object."
             + target_binding
         )
     if refs.get("question_dedup_request_id"):
-        return (
-            "End with one JSON object named channel_question_dedup. "
+        return _contract_response_instruction(
+            "one JSON object named channel_question_dedup. "
             "It must contain the exact ledger_digest from the context and "
             "groups. Each group contains canonical_question_id, "
             "merge_question_ids, and reason. It may also contain "
@@ -159,8 +179,8 @@ def channel_reply_response_contract(
             "by the request refs. Do not emit merge or cross-review events."
         )
     if refs.get("synthesis_request_id"):
-        return (
-            "End with one JSON object named channel_synthesis containing "
+        return _contract_response_instruction(
+            "one JSON object named channel_synthesis containing "
             "title, decision, summary, decisions, assumptions, out_of_scope, "
             "acceptance_criteria, verification_commands, open_questions, risks, "
             "recommended_workflow, source_refs, evidence_refs, "
@@ -205,8 +225,8 @@ def channel_reply_response_contract(
         isinstance(session, dict)
         and (is_initial_blind_reply or state == "phase2_relay")
     ):
-        return (
-            "End with one JSON object named channel_contribution containing "
+        return _contract_response_instruction(
+            "one JSON object named channel_contribution containing "
             "summary, questions (a list of explicit clarification questions), "
             "where each question may carry kind, depends_on, priority, "
             "why_it_matters, recommended_answer, and target_member_id. Each "

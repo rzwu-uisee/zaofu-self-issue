@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from zf.runtime.channel_contract_artifacts import typed_items
+from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
 
 
 def structured_reply_payload_with_error(
@@ -70,6 +71,12 @@ def structured_reply_display_text(reply: str, key: str) -> str:
     """
 
     source = str(reply or "")
+    marker_position = source.find(CHANNEL_CONTRACT_MARKER)
+    if marker_position >= 0:
+        # The marker defines a display/contract boundary. Everything after it
+        # is machine output, even if a provider incorrectly appends prose after
+        # the JSON. This keeps terminal projection identical to the live text.
+        return source[:marker_position].rstrip()
     decoder = json.JSONDecoder()
     for match in re.finditer(
         r"```(?:json)?\s*([\s\S]*?)```",

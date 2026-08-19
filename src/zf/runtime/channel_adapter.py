@@ -28,6 +28,7 @@ from zf.runtime.channel_reply_contract import (
     fake_channel_reply_text,
 )
 from zf.runtime.channel_reply_remediation import emit_channel_reply_failed
+from zf.runtime.channel_reply_stream import ChannelVisibleMessageEmitter
 from zf.runtime.channel_contracts import (
     active_channel_resolved_skill_refs,
     active_channel_skill_refs,
@@ -777,6 +778,7 @@ def _run_headless_reply(
                 permission_drift=drift,
             )
 
+        visible_stream = ChannelVisibleMessageEmitter(stream.emit_message)
         result = adapter.run_turn(
             prompt=_build_channel_prompt(channel=channel, member=member, message=message, request=request),
             cwd=project_root,
@@ -784,7 +786,7 @@ def _run_headless_reply(
             thread_id=thread_id,
             provider_session_id=provider_session_id,
             on_session_id=pin,
-            on_message=stream.emit_message,
+            on_message=visible_stream.emit,
             timeout_s=timeout_s,
             thinking_level=str(member.get("thinking_level") or ""),
             run_id=request_id,
@@ -793,6 +795,7 @@ def _run_headless_reply(
             conversation_id=channel_id,
             permission_profile=permission_profile,
         )
+        visible_stream.finish()
         final_snapshot = snapshot_with_provider_session(
             base_snapshot,
             str(getattr(result, "provider_session_id", "") or ""),

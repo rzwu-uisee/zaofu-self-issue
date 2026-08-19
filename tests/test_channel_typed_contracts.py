@@ -11,6 +11,7 @@ from zf.runtime.channel_context import build_channel_context_pack
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
 from zf.runtime.channel_reply_prompt import channel_reply_response_contract
+from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
 
 
 CHANNEL_ID = "ch-typed"
@@ -98,6 +99,28 @@ def test_contribution_prompt_states_exact_question_enums() -> None:
     assert "fact|owner_decision|tradeoff|clarification" in prompt
     assert "p0|p1|p2|p3" in prompt
     assert "critical, high, medium, or low" in prompt
+
+
+def test_all_typed_reply_prompts_separate_markdown_from_machine_contract() -> None:
+    cases = [
+        ({}, {}, {"refs": {"cross_review_request_id": "cross-1"}}),
+        ({}, {}, {"refs": {"consensus_review_id": "review-1"}}),
+        ({}, {}, {"refs": {"question_dedup_request_id": "dedup-1"}}),
+        ({}, {}, {"refs": {"synthesis_request_id": "synth-1"}}),
+        (
+            _channel(),
+            {"thread_id": "main", "message_id": "msg-requirement"},
+            {"message_id": "msg-requirement"},
+        ),
+    ]
+
+    for channel, request, message in cases:
+        prompt = channel_reply_response_contract(channel, request, message)
+        assert "First write a concise user-facing Markdown response" in prompt
+        assert CHANNEL_CONTRACT_MARKER in prompt
+        assert "without quotes or code fences" in prompt
+        assert "must be the final content" in prompt
+        assert "do not wrap either in a Markdown fence" in prompt
 
 
 def test_consensus_review_prompt_pins_canonical_artifact_digest() -> None:

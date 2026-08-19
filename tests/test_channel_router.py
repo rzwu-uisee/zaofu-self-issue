@@ -1017,6 +1017,90 @@ def test_channel_router_dispatches_codex_provider_through_headless_backend(tmp_p
     assert detail["provider_runs"][0]["parts"]
 
 
+def test_channel_headless_stream_never_publishes_machine_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from zf.runtime import agent_session_stream
+    from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
+
+    class RecordingBus:
+        def __init__(self) -> None:
+            self.rows: list[dict] = []
+
+        def publish(self, event_type, payload, **_kwargs) -> None:
+            self.rows.append({"type": event_type, "payload": payload})
+
+        def discard(self, _key) -> None:
+            return None
+
+    bus = RecordingBus()
+    monkeypatch.setattr(
+        agent_session_stream,
+        "live_delta_bus_for_writer",
+        lambda _writer: bus,
+    )
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    reply = (
+        "Keep one canonical state owner.\n\n"
+        f"{CHANNEL_CONTRACT_MARKER}\n"
+        '{"channel_contribution":{"summary":"hidden","risks":[]}}'
+    )
+    backend = _FakeHeadlessBackend(reply=reply)
+    writer.emit(
+        "channel.member.invited",
+        actor="web",
+        correlation_id="ch-stream-contract",
+        payload={
+            "channel_id": "ch-stream-contract",
+            "thread_id": "main",
+            "member_id": "codex-1",
+            "member_type": "provider_agent",
+            "backend": "codex",
+            "channel_role": "tech_leader",
+            "permissions": ["read", "message"],
+            "source": "web",
+        },
+    )
+    message = writer.emit(
+        "channel.message.posted",
+        actor="web",
+        correlation_id="ch-stream-contract",
+        payload={
+            "channel_id": "ch-stream-contract",
+            "thread_id": "main",
+            "message_id": "msg-stream-contract",
+            "member_id": "operator",
+            "role": "user",
+            "source": "web",
+            "text": "@codex review",
+            "mentions": ["codex-1"],
+        },
+    )
+
+    route_channel_message(
+        state_dir=state_dir,
+        writer=writer,
+        message_event=message,
+        message_payload=message.payload,
+        actor="web",
+        source="web",
+        project_root=tmp_path,
+        headless_backends={"codex-headless": backend},
+    )
+
+    visible = "".join(
+        str(row["payload"].get("delta") or "")
+        for row in bus.rows
+        if row["payload"].get("kind") == "text"
+    )
+    assert visible == "Keep one canonical state owner.\n\n"
+    assert CHANNEL_CONTRACT_MARKER not in visible
+    assert "channel_contribution" not in visible
+
+
 def test_channel_synthesis_repair_reuses_provider_session(
     tmp_path: Path,
 ) -> None:

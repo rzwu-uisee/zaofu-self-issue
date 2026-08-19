@@ -10,7 +10,6 @@ export interface ContributionSection {
   key: ContributionSectionKey;
   title: string;
   visibleRows: ContributionRow[];
-  hiddenRows: ContributionRow[];
 }
 
 export interface ContributionReferencePresentation {
@@ -20,20 +19,15 @@ export interface ContributionReferencePresentation {
 }
 
 export interface ContributionPresentation {
-  fallbackSummary: string;
-  hiddenCount: number;
   sections: ContributionSection[];
 }
 
 const SECTION_CONFIG: Array<{
   key: ContributionSectionKey;
   title: string;
-  visibleLimit: number;
 }> = [
-  { key: "findings", title: "Key takeaways", visibleLimit: 3 },
-  { key: "risks", title: "Risk", visibleLimit: 2 },
-  { key: "contradictions", title: "Conflict to resolve", visibleLimit: 1 },
-  { key: "questions", title: "Decision needed", visibleLimit: 1 },
+  { key: "risks", title: "Risk" },
+  { key: "contradictions", title: "Conflict" },
 ];
 
 const GENERIC_LABELS = new Set([
@@ -57,30 +51,23 @@ const RISK_RANK: Record<string, number> = {
   p3: 3,
 };
 
-export function presentContribution(
-  payload: Record<string, unknown>,
-  summary = "",
-): ContributionPresentation {
+export function presentContribution(payload: Record<string, unknown>): ContributionPresentation {
   const sections = SECTION_CONFIG.flatMap((config) => {
     const rows = semanticContributionRows(payload[config.key]);
     if (!rows.length) return [];
-    const ordered = config.key === "risks" ? orderRisks(rows) : rows;
+    const ordered = config.key === "risks"
+      ? orderRisks(rows).filter(isActionableRisk)
+      : rows;
+    if (!ordered.length) return [];
     return [{
       key: config.key,
       title: config.title,
-      visibleRows: ordered.slice(0, config.visibleLimit),
-      hiddenRows: ordered.slice(config.visibleLimit),
+      visibleRows: ordered.slice(0, 1),
     } satisfies ContributionSection];
   });
-  const hiddenCount = sections.reduce(
-    (count, section) => count + section.hiddenRows.length,
-    0,
-  );
-  return {
-    fallbackSummary: sections.length ? "" : summary.trim(),
-    hiddenCount,
-    sections,
-  };
+  // The natural-language reply owns summary/findings. Typed data is only
+  // allowed to add an actionable exception, never a second report.
+  return { sections };
 }
 
 export function contributionReferencePresentation(
@@ -140,7 +127,7 @@ export function semanticContributionRows(value: unknown): ContributionRow[] {
     if (!text) return [];
     return [{
       id: textValue(row.id ?? row.question_id),
-      label: textValue(row.label ?? row.type ?? row.priority ?? row.category),
+      label: textValue(row.priority ?? row.label ?? row.type ?? row.category),
       text,
     }];
   });
@@ -158,6 +145,10 @@ function orderRisks(rows: ContributionRow[]): ContributionRow[] {
 
 function riskRank(label: string): number {
   return RISK_RANK[label.trim().toLowerCase()] ?? 4;
+}
+
+function isActionableRisk(row: ContributionRow): boolean {
+  return riskRank(row.label) <= 1;
 }
 
 function uniqueStrings(value: unknown): string[] {

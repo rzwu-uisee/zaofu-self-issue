@@ -4,6 +4,7 @@ from zf.runtime.channel_reply_parsing import (
     structured_reply_display_text,
     structured_reply_payload_with_error,
 )
+from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_MARKER
 
 
 def test_structured_reply_parser_accepts_fenced_payload() -> None:
@@ -43,6 +44,20 @@ def test_structured_reply_display_text_removes_fenced_contract() -> None:
         reply,
         "channel_contribution",
     ) == "## Recommendation\n\nUse one controlled gateway."
+
+
+def test_structured_reply_display_text_uses_marker_as_terminal_boundary() -> None:
+    reply = (
+        "Readable answer.\n\n"
+        f"{CHANNEL_CONTRACT_MARKER}\n"
+        '{"channel_synthesis":{"summary":"ready"}}\n'
+        "provider prose after the contract must stay hidden"
+    )
+
+    assert structured_reply_display_text(
+        reply,
+        "channel_contribution",
+    ) == "Readable answer."
 
 
 def test_structured_reply_display_text_hides_truncated_contract_preview() -> None:

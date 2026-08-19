@@ -73,6 +73,7 @@ const turn: AgentSessionTurn = {
     title: "Structured analysis",
     body: "Use one controlled gateway and keep the state authority explicit.",
     status: "completed",
+    runId: "r2",
     payload: {
       findings: [
         { id: "f1", label: "finding", text: "One authority owns state." },

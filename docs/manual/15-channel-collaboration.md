@@ -133,8 +133,14 @@ channel-create-and-start
 - 人、Leader 或有权限 Member 发布消息；
 - @mention 只定向请求需要的成员；
 - thread 可以持续多轮，不需要重建 Channel；
-- reply delta 通过 SSE/sidecar 投影，terminal body 与 refs 持久化；
+- reply delta 通过 SSE 实时展示自然语言；尾部机器 contract 在服务端隔离，不会先以 JSON
+  出现在聊天中；terminal body、typed contract 与 refs 分别持久化；
 - provider 失败留下可诊断状态，不自动把所有成员重跑。
+
+普通 Agent 回复以自然语言为主，不会在下方重复生成一份 findings 报告。只有 P0/P1 风险、
+未解决冲突等可操作例外贴在对应回复下方；Owner 问题仍使用 AskUserQuestion，source、
+evidence 和 artifact refs 通过折叠入口按需查看。机器 contract 保留在 canonical
+projection/artifact 中，不作为聊天正文展示。
 
 明确需要独立视角时执行 Discuss / `multi_lens`：
 
