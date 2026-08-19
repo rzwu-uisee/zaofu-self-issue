@@ -11,6 +11,7 @@
 - [故障排查](../07-troubleshooting.md): 常见运行时和宿主问题。
 - [Supervisor Inspection](../12-supervisor-inspection-usage.md): 观察与 attention candidate。
 - [Autoresearch](../10-autoresearch-usage.md): 重复 harness 失败的深度诊断和隔离修复。
+- [自我进化与能力积累](../23-self-evolution-learning.md): 基于 Run Archive 的试验、canary、可撤销资产与复用边界。
 
 Operator 可以观察和请求受控动作，但 Web、CLI 集成和 Agent 都不能直接改写 canonical
 业务状态。

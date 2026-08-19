@@ -1,7 +1,7 @@
 # ZaoFu Public Export Manifest
 
-- Source ref: `ccd34037d9bf39060507c44f22ba59bfa0e81048`
-- Generated UTC: `2026-08-19T12:52:48Z`
+- Source ref: `2990c7a76bcdcd5daf5ec36864e175c5308a44ff`
+- Generated UTC: `2026-08-19T12:53:20Z`
 
 ## Included
 

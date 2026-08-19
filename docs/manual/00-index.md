@@ -15,6 +15,7 @@
 | 签收 PRD、Issue、Refactor、General、Research 五类真实 Workflow | [五类 Workflow 真实 E2E](18-product-fanout-real-e2e.md) | exact Run 到达 family 对应终态，identity、artifact 和 evidence 全程可回读 |
 | 判断一个长期目标是否真的完成 | [观察一次交付](operations/observe-delivery.md) | 能从 Goal、Claim、Task、Evidence、Gap、Closure 解释结论 |
 | 处理停滞、失败或无进展 Run | [恢复长期 Run](operations/recover-long-running-run.md) | Run 恢复推进，或有证据地收敛为 blocked/failed/cancelled |
+| 将已验证的经验变成可撤销的复用能力 | [自我进化与能力积累](23-self-evolution-learning.md) | 能从来源 Archive、trial、evaluator、canary 与 asset lifecycle 解释结论 |
 | 理解跨 Agent 的上下文和证据如何继承 | [上下文、Artifact 与 Handoff](operations/context-handoff-artifacts.md) | 能定位 current contract、required reads、result 和 lineage |
 | 排查 Provider、SSE、Runtime Log、OTLP 或系统运维信号 | [Metrics、Observability 与 Operations](21-metrics-observability-operations.md) | 能区分交付事实、事件、运行日志、低基数 metrics 与 exporter health |
 | 接入飞书、Automation 或 Provider | [集成](integrations/README.md) | 外部入口通过 projection/controlled action 工作，不产生第二真相 |
@@ -83,6 +84,7 @@ Recovery Coordinator 收敛和 OpenCode Provider SPI 仍是候选设计。配置
 - [20 Project、Bootstrap 与 Workflow 点火](20-project-bootstrap-workflow-ignition.md)
 - [21 Metrics、Observability 与 Operations](21-metrics-observability-operations.md)
 - [22 Provider Native Telemetry 与 OTLP](22-provider-native-telemetry.md)
+- [23 自我进化与能力积累](23-self-evolution-learning.md)
 
 ## 文档状态
 

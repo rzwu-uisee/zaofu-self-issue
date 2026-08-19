@@ -11,6 +11,7 @@
 - [Troubleshooting](../07-troubleshooting.en.md): common runtime and host problems.
 - [Supervisor inspection](../12-supervisor-inspection-usage.en.md): observation and attention candidates.
 - [Autoresearch](../10-autoresearch-usage.en.md): deep diagnosis and isolated repair for recurring harness failures.
+- [Self-evolution and capability accumulation](../23-self-evolution-learning.en.md): Run-Archive-backed trials, canaries, revocable assets, and reuse boundaries.
 
 Operators can observe and request controlled actions. Web, integrations, CLI
 agents, and workers may not mutate canonical business state directly.

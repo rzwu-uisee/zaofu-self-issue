@@ -16,6 +16,7 @@
 | Accept real PRD, Issue, Refactor, General, and Research Workflows | [Five-Workflow real E2E](18-product-fanout-real-e2e.en.md) | The exact Run reaches its family terminal with readable identity, artifacts, and evidence |
 | Decide whether a long-running goal is actually complete | [Observe a delivery](operations/observe-delivery.en.md) | Goal, Claims, Tasks, Evidence, Gaps, and Closure explain the result |
 | Recover a stalled, failed, or no-progress Run | [Recover a long-running Run](operations/recover-long-running-run.en.md) | The Run advances or converges with evidence to blocked/failed/cancelled |
+| Turn verified experience into a revocable reusable capability | [Self-evolution and capability accumulation](23-self-evolution-learning.en.md) | Source Archive, trials, evaluator, canary, and asset lifecycle explain the result |
 | Understand context and evidence inheritance across agents | [Context, Artifacts, and Handoff](operations/context-handoff-artifacts.en.md) | You can locate the current contract, required reads, result, and lineage |
 | Diagnose Provider, SSE, Runtime Log, OTLP, or system operations signals | [Metrics, Observability, and Operations](21-metrics-observability-operations.en.md) | You can distinguish delivery facts, events, runtime logs, low-cardinality metrics, and exporter health |
 | Connect Feishu, Automations, or a provider | [Integrations](integrations/README.en.md) | External surfaces use projections and controlled actions without creating another truth |
@@ -88,6 +89,7 @@ the outcome routes above first.
 - [20 Project, bootstrap, and Workflow start](20-project-bootstrap-workflow-ignition.en.md)
 - [21 Metrics, Observability, and Operations](21-metrics-observability-operations.en.md)
 - [22 Provider Native Telemetry and OTLP](22-provider-native-telemetry.en.md)
+- [23 Self-evolution and capability accumulation](23-self-evolution-learning.en.md)
 
 ## Documentation Status
 
