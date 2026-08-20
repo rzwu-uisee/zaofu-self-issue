@@ -2239,36 +2239,6 @@ def create_app(
             limit=limit,
         ))
 
-    @app.get("/api/projects/{project_id}/traces")
-    def project_traces(project_id: str) -> JSONResponse:
-        # Scoped list endpoint so the Event Traces page can fetch just the trace
-        # roll-up (fast, read-model slim) instead of pulling the whole snapshot.
-        context = _resolve_api_project(
-            project_id,
-            default_project_id=default_project_id,
-            default_state_dir=state_dir,
-            default_config=config,
-            default_project_root=project_root,
-        )
-        traces = _traces(context.state_dir, config=context.config)
-        return JSONResponse({
-            "schema_version": "traces.v1",
-            "is_derived_projection": True,
-            "items": traces,
-            "traces": traces,
-        })
-
-    @app.get("/api/projects/{project_id}/traces/{trace_id}")
-    def project_trace_detail(project_id: str, trace_id: str) -> JSONResponse:
-        context = _resolve_api_project(
-            project_id,
-            default_project_id=default_project_id,
-            default_state_dir=state_dir,
-            default_config=config,
-            default_project_root=project_root,
-        )
-        return JSONResponse(_trace_detail(context.state_dir, trace_id, config=context.config))
-
     @app.get("/api/projects/{project_id}/candidates/{pdd_id}")
     def project_candidate_detail(project_id: str, pdd_id: str) -> JSONResponse:
         context = _resolve_api_project(
@@ -3649,6 +3619,10 @@ def create_app(
         )
 
     app.include_router(build_delivery_trace_router(resolve_ctx=_delivery_trace_ctx))
+
+    from zf.web.trace_routes import build_trace_router
+
+    app.include_router(build_trace_router(resolve_ctx=_delivery_trace_ctx))
 
     # doc94: Loop projection is a read-only sibling router. It stays out of
     # snapshot fan-out and is loaded only when the Loop page/API is requested.

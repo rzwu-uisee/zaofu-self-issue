@@ -2,12 +2,12 @@
 // Usage tab bodies for the lifecycle drawer, plus the shared GateBadge.
 // 全部只读、空态降级:有什么数据渲染什么,缺数据显式说明,不造假。
 import type {
-  DeliveryRunTraceSpan,
   DeliveryTaskGateResult,
+  DeliveryTaskLifecycleState,
   DeliveryTaskTry,
   DeliveryTraceNode,
 } from "../../api/types";
-import { copyText, dtTone, seqRangeLabel } from "./DeliveryTraceViewUtils";
+import { copyText, seqRangeLabel } from "./DeliveryTraceViewUtils";
 
 export type GateWithTry = DeliveryTaskGateResult & { tryNumber: number };
 
@@ -57,17 +57,17 @@ function CopyIcon({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Events — per-try seq range hint + task-scoped span/event ids. Spans carry
-// no seq, so per-try slicing is honest only at the hint level.
+// Events — bounded refs already carried by task-lifecycle.v1. The Runs view
+// does not request the Trace span projection.
 export function LdEventsTab({
+  stateHistory,
   selectedTry,
   setSelectedTry,
-  spans,
   tries,
 }: {
+  stateHistory: DeliveryTaskLifecycleState[];
   selectedTry: number | null;
   setSelectedTry: (tryNumber: number) => void;
-  spans: DeliveryRunTraceSpan[];
   tries: DeliveryTaskTry[];
 }) {
   if (!tries.length) {
@@ -75,6 +75,11 @@ export function LdEventsTab({
   }
   const current = tries.find((item) => item.try === selectedTry) ?? tries[tries.length - 1];
   const seq = seqRangeLabel(current.seq_first, current.seq_last);
+  const eventRefs = Array.from(new Set([
+    current.dispatch_id,
+    ...stateHistory.filter((item) => item.try == null || item.try === current.try).map((item) => item.via_event_id),
+    ...current.gate_results.map((gate) => gate.event_id),
+  ].filter((value): value is string => Boolean(value))));
   return (
     <div className="ld-tab-body" data-testid="ld-events">
       <div className="ld-try-chips">
@@ -101,19 +106,17 @@ export function LdEventsTab({
           />
         )}
       </div>
-      {spans.length ? (
+      {eventRefs.length ? (
         <div className="ld-event-list">
-          {spans.slice(0, 40).map((span) => (
-            <div key={span.span_id} className="ld-evidence-row">
-              <span className={`badge badge-${dtTone(span.status)}`}>{span.status}</span>
-              <code title={span.span_id}>{span.span_id}</code>
-              <span className="muted">{span.role || span.backend || ""}</span>
+          {eventRefs.slice(0, 40).map((eventId) => (
+            <div key={eventId} className="ld-evidence-row">
+              <code title={eventId}>{eventId}</code>
+              <CopyIcon label={`copy event ref ${eventId}`} value={eventId} />
             </div>
           ))}
-          <span className="muted">task-scoped spans — per-try slicing needs seq on spans</span>
         </div>
       ) : (
-        <p className="ld-tab-empty">No spans for this task — open Observability and filter by the seq range above.</p>
+        <p className="ld-tab-empty">No event refs recorded for this try.</p>
       )}
     </div>
   );
@@ -153,9 +156,11 @@ export function LdArtifactsTab({
         </div>
       ))}
       {!snapshots.length && <span className="muted">No snapshot refs on tries.</span>}
-      <button type="button" className="ld-copy" onClick={() => copyText(traceId)} title={traceId}>
-        copy trace id
-      </button>
+      {traceId ? (
+        <button type="button" className="ld-copy" onClick={() => copyText(traceId)} title={traceId}>
+          copy trace id
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -199,7 +204,7 @@ export function LdContractTab({ node }: { node?: DeliveryTraceNode }) {
 }
 
 // Usage — per-try tool_calls / tokens_in / tokens_out rows, plus the
-// pre-existing task aggregate (flow metrics / span fallback) when available.
+// pre-existing task aggregate from flow metrics when available.
 export function LdUsageTab({
   costUsd,
   tokensIn,

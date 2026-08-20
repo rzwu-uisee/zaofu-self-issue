@@ -69,20 +69,6 @@ export function DeliveryFlowContext({ trace }: { trace: DeliveryTrace }) {
   );
 }
 
-export function DeliveryRawTab({ trace }: { trace: DeliveryTrace }) {
-  return (
-    <pre className="delivery-raw-block delivery-raw-tab" data-testid="delivery-raw-tab">
-      {JSON.stringify({
-        task_flow: trace.task_flow,
-        run_groups: trace.run_groups,
-        trace: trace.trace,
-        workflow_trace: trace.workflow_trace,
-        diagnostics: trace.diagnostics,
-      }, null, 2)}
-    </pre>
-  );
-}
-
 function DeliveryCyclesSection({ cycles, trace }: { cycles: DeliveryTraceCycle[]; trace: DeliveryTrace }) {
   if (!cycles.length) {
     const taskCount = trace.task_map?.task_count ?? trace.execution_graph?.task_count ?? trace.execution_graph?.nodes.length ?? 0;

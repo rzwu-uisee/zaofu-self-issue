@@ -17,9 +17,13 @@ test("observability cockpit supports desktop light and dark", async ({ page }) =
   await openObservability(page, "light", 1440, 920);
   await expect(page.locator(".observability-replay-bar")).toBeVisible();
   await expect(page.getByRole("button", { name: /Play|Pause/ })).toBeVisible();
-  await page.getByRole("button", { name: /^Traces/ }).click();
-  await expect(page.locator(".observability-filter-panel")).toBeVisible();
-  await expect(page.locator(".trace-index-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Runtime Logs", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Raw", exact: true })).toHaveCount(0);
+  await page.getByTestId("observability-page").getByRole("button", {
+    name: /^Traces/,
+  }).click();
+  await expect(page.getByTestId("traces-page")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Traces", exact: true })).toBeVisible();
 
   await openObservability(page, "dark", 1440, 920);
   await expect(page.locator(".observability-replay-bar")).toBeVisible();
@@ -30,18 +34,22 @@ test("observability cockpit remains usable on mobile", async ({ page }) => {
   await expect(page.locator(".observability-workbench.events-workbench")).toBeVisible();
   await expect(page.locator(".observability-replay-bar")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Event Views" })).toBeVisible();
-  await page.getByRole("button", { name: /^Traces/ }).click();
-  await expect(page.locator(".observability-workbench")).toBeVisible();
-  await expect(page.locator(".observability-filter-panel")).toBeVisible();
+  await page.getByTestId("observability-page").getByRole("button", {
+    name: /^Traces/,
+  }).click();
+  await expect(page.getByTestId("traces-page")).toBeVisible();
+  await expect(page.locator(".trace-index-panel")).toBeVisible();
 });
 
-test("trace compatibility route uses the Observability product surface", async ({ page }) => {
+test("trace route uses the scoped Traces product surface", async ({ page }) => {
   await page.goto(`/?project=${encodeURIComponent(projectId)}&page=traces`);
-  await expect(page.getByTestId("observability-page")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Observability" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /^Traces/ })).toHaveClass(/active/);
+  await expect(page.getByTestId("traces-page")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Traces", exact: true })).toBeVisible();
   await expect(page.locator(".trace-index-panel")).toBeVisible();
-  await expect(page.getByText("load on open", { exact: true })).toHaveCount(5);
+  await expect(page.locator(".projection-metric-grid")).toHaveCount(0);
+  await expect(page.locator(".runtime-health-strip")).toHaveCount(0);
+  await expect(page.getByTestId("long-run-truth")).toHaveCount(0);
+  await expect(page.locator(".event-inspector")).toHaveCount(0);
 });
 
 test("legacy entity routes open their canonical Observability tabs", async ({ page }) => {
@@ -59,7 +67,7 @@ test("core cockpit pages render on desktop and mobile", async ({ page }) => {
     { pageId: "delivery", heading: "Delivery" },
     { pageId: "agents", heading: "Agents" },
     { pageId: "runtime", heading: "Observability" },
-    { pageId: "observability", heading: "Observability" },
+    { pageId: "observability", heading: "Traces" },
     { pageId: "channels", selector: ".channel-shell" },
     { pageId: "automations", heading: "Automations" },
   ] as const;

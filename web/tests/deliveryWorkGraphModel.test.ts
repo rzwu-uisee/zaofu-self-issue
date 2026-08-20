@@ -74,4 +74,20 @@ const collapsedGoal = buildDeliveryWorkGraph(model, new Set([goalId]));
 equal(collapsedGoal.nodes.length, 1, "collapsed goal hides the full delivery subtree");
 equal(collapsedGoal.nodes[0]?.id, goalId, "collapsed graph keeps the goal hub");
 
+const missingStatusTrace = {
+  ...trace,
+  goal_coverage_graph: {
+    ...trace.goal_coverage_graph!,
+    nodes: trace.goal_coverage_graph!.nodes.map((node) => (
+      node.kind === "goal" ? { ...node, status: undefined } : node
+    )),
+  },
+} as unknown as DeliveryTrace;
+const missingStatusGraph = buildDeliveryWorkGraph(buildDeliveryWorkModel(missingStatusTrace));
+equal(
+  missingStatusGraph.nodes.find((node) => node.kind === "goal")?.status,
+  "",
+  "a malformed missing status remains distinct from an unevaluated goal",
+);
+
 console.log("deliveryWorkGraphModel tests passed");

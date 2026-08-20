@@ -64,7 +64,7 @@ These cases fail closed or degrade conservatively:
 ## 3. Read Back a Real State
 
 1. Run an isolated headless/stream-json Claude turn, or start the configured runtime.
-2. Open `Observability -> Operations` in Web.
+2. Open the Operations compatibility route `?page=observability&obs_tab=operations` in Web.
 3. Confirm Provider, Route, Effective, Join, Signals, and Reason in the `Provider Telemetry` table.
 4. Inspect `OTLP Exporter` Backlog, Last success, Last failure, and policy counters separately.
 5. To determine delivery impact, return to Delivery, Task trace, and Goal Dossier. Never infer a
@@ -113,7 +113,8 @@ observability:
 
 Optional `observability.metrics` exposes low-cardinality `/metrics`, still gated by
 `X-ZF-Metrics-Token`. Runtime Logs contain redacted process/transport/sidecar diagnostics and rotate
-by default. Alerts create operations attention projections only. None of them may:
+by default; their standalone Web panel is retired while the store and bounded HTTP API remain.
+Alerts create operations attention projections only. None of them may:
 
 - write or replace canonical current state in Task, Feature, Session, or RoleSession stores;
 - alter Workflow admission, stage gates, judge verdicts, rework routing, or controlled actions;
@@ -128,7 +129,8 @@ Use this sequence against isolated `/tmp/zf-<purpose>-<utc-timestamp>/` state:
 
 1. run `uv run zf validate --cold-start` to validate configuration and environment-variable names;
 2. start one controlled Claude headless/stream-json turn;
-3. inspect Operations capability, Runtime Log redaction, and the `/metrics` token gate;
+3. inspect Operations capability, redaction through the bounded Runtime Logs API, and the `/metrics`
+   token gate;
 4. observe a small synthetic-span batch against a controlled collector, then simulate a connection
    failure and confirm backoff/fail-open;
 5. confirm Delivery/Task/Graph did not change because of telemetry state;

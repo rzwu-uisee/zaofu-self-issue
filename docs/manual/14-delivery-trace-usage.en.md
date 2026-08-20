@@ -100,9 +100,24 @@ entry points are in `src/zf/cli/trace.py`.
 
 Important API routes include:
 
+Delivery Web Overview, Runs, and Graph explicitly request
+`?contract=v2&view=overview|runs|graph`, so the server builds only the selected
+view projection. Work first reuses the Goal summaries; after the operator selects
+a Goal, the tree immediately requests
+`?contract=v2&view=work&goal_id={exact_goal_id}`. V2 Work without `goal_id`
+remains compatible. A request without a query still returns the legacy delivery
+trace contract. The `/thick`, causation, and execution-graph compatibility
+routes are not removed merely because the primary Web surface is smaller.
+The v2 Overview ship value reuses the existing graph/drift/ship builders. The
+v2 Runs ship value is always `status=not_evaluated, summary_only=true` and never
+infers ready from completed Tasks. V2 omits `loop_summary`; the top-level Loop
+route and contract remain unchanged.
+
 | Route | Purpose |
 |---|---|
-| `/api/projects/{project_id}/delivery-traces/{feature_id}` | Basic trace |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}?contract=v2&view={overview,runs,graph}` | Minimal Web projection for one top-level Delivery view |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}?contract=v2&view=work&goal_id={goal_id}` | Bounded Work projection loaded after selecting one exact Goal |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}` | Legacy delivery trace contract without a query |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/thick` | Thick trace, cursors, and deltas |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/causation/{event_id}` | Event causation |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/execution-graph` | Execution graph |
@@ -110,7 +125,8 @@ Important API routes include:
 | `/api/projects/{project_id}/workflow-runs/{fanout_id}` | Fanout/workflow run |
 
 The Loop page links bug-fix, reflection, replan, and A/B loops to delivery
-traces.
+traces. It requests only the scoped `/loop-view`; a high-attempt Task shows 100
+attempts at a time while complete counts and the Timeline remain unchanged.
 
 ## 7. Principle
 

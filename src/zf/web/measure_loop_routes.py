@@ -16,6 +16,11 @@ from zf.runtime.stage_loop_projection import (
     LOOP_VIEW_CACHE_REVISION,
     build_loop_view,
 )
+from zf.web.projections.loop_view_source import (
+    LOOP_VIEW_SOURCE_FIELD,
+    loop_view_source_fingerprint,
+    read_stable_loop_view_source,
+)
 
 
 def _now() -> str:
@@ -81,48 +86,63 @@ def build_measure_loop_router(*, resolve_ctx: Callable[[str], Any]) -> APIRouter
     @router.get("/api/projects/{project_id}/loop-view")
     def loop_view(project_id: str) -> JSONResponse:
         ctx = resolve_ctx(project_id)
-        source_seq = 0
         cache_key = f"loop-view:{LOOP_VIEW_CACHE_REVISION}:{project_id}"
-        try:
-            from zf.web.projections import read_model
+        source_fingerprint = loop_view_source_fingerprint(
+            ctx.state_dir,
+            config=ctx.config,
+            project_root=ctx.project_root,
+        )
+        if source_fingerprint:
+            try:
+                from zf.web.projections import read_model
 
-            source_seq = read_model.current_projected_seq(ctx.state_dir, config=ctx.config)
-            cached = read_model.get_cached_projection(
-                ctx.state_dir,
-                cache_key,
-                source_seq=source_seq,
-            )
-            if cached is not None:
-                return JSONResponse(cached)
-        except Exception:
-            source_seq = 0
-        # 事件解析走 web 层指纹派生缓存(与 snapshot/measure-loop 共享,
-        # 冷路径不再重复付全量 read_all;RF 批教训)
-        try:
-            from zf.web.projections.events import _events_with_seq
-
-            events = _events_with_seq(ctx.state_dir, config=ctx.config)
-        except Exception:
-            events = None
+                cached = read_model.get_cached_projection(ctx.state_dir, cache_key)
+                if cached is not None:
+                    cached_fingerprint = str(cached.pop(LOOP_VIEW_SOURCE_FIELD, ""))
+                    verified_fingerprint = loop_view_source_fingerprint(
+                        ctx.state_dir,
+                        config=ctx.config,
+                        project_root=ctx.project_root,
+                    )
+                    if (
+                        cached_fingerprint == source_fingerprint
+                        and verified_fingerprint == source_fingerprint
+                    ):
+                        return JSONResponse(cached)
+            except Exception:
+                pass
+        source = read_stable_loop_view_source(
+            ctx.state_dir,
+            config=ctx.config,
+            project_root=ctx.project_root,
+        )
         projection = build_loop_view(
             ctx.state_dir,
             config=ctx.config,
             project_root=ctx.project_root,
             project_id=project_id,
-            events=events,
+            events=source.events,
             generated_at=_now(),
         )
-        if source_seq:
+        if source.cacheable:
             try:
                 from zf.web.projections import read_model
 
-                read_model.set_cached_projection(
+                if loop_view_source_fingerprint(
                     ctx.state_dir,
-                    cache_key,
-                    kind="loop-view",
-                    source_seq=source_seq,
-                    payload=projection,
-                )
+                    config=ctx.config,
+                    project_root=ctx.project_root,
+                ) == source.fingerprint:
+                    read_model.set_cached_projection(
+                        ctx.state_dir,
+                        cache_key,
+                        kind="loop-view",
+                        source_seq=source.source_seq,
+                        payload={
+                            **projection,
+                            LOOP_VIEW_SOURCE_FIELD: source.fingerprint,
+                        },
+                    )
             except Exception:
                 pass
         return JSONResponse(projection)

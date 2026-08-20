@@ -108,16 +108,16 @@ export function WorkspaceRail({
   const monitoringNav: RailNavItem[] = [
     { id: "delivery", icon: Route, label: "Delivery" },
     { id: "behavior-loop", icon: GitFork, label: "Loop" },
-    { id: "observability", icon: Radio, label: "Observability" },
+    { id: "traces", icon: Radio, label: "Traces" },
   ];
   const systemNav: RailNavItem[] = [
     { id: "settings", icon: Settings, label: "Settings" },
   ];
   const railActivePage = isObservabilityPage(activePage)
-    ? "observability"
+    ? "traces"
     : activePage === "runtime" || activePage === "traces" || activePage === "diagnostics"
-      ? "observability"
-      : activePage === "delivery-trace" || activePage === "delivery-graph" || activePage === "goal-coverage"
+      ? "traces"
+      : activePage === "delivery-trace" || activePage === "delivery-graph"
         ? "delivery"
         : activePage;
 

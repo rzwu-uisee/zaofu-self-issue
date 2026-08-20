@@ -15,16 +15,16 @@
 | What work exists and who owns it? | `Tasks` |
 | Is the overall goal deliverable? | `Delivery` |
 | How did stages, attempts, and retries advance? | `Delivery -> Runs` |
-| Is every Goal Claim covered? | `Delivery -> Delivery Map -> Coverage` |
-| How do Goal, Claims, and canonical Tasks relate? | `Delivery -> Delivery Map -> Work` |
-| What runtime/gate/artifact detail explains a problem? | `Delivery -> Delivery Map -> Diagnostics` |
-| What happened in exact causal order? | `Monitoring -> Observability -> Traces/Events` |
+| Is every Goal Claim covered by a Task with current evidence? | `Delivery -> Graph` |
+| What are a Task's tries, gates, results, and evidence? | `Delivery -> Runs -> Inspector` or the canonical Task |
+| What happened in exact causal order? | `Traces` |
+| How do behaviors, evaluations, and improvements converge? | `Loop` |
 | What is the human-readable package for one Run? | `Monitoring -> Observability -> Runs -> Goal Dossier` |
 | What needs a human decision or attention? | `Inbox` |
 
-The `playgroud` animation follows one diagnostic route through Overview, Runs,
-Coverage, Work, Diagnostics, Loop, and Observability. Every surface reads the
-same Feature, Run, and Event chain.
+The `playgroud` animation is a historical UI example. For current operation,
+follow `Overview -> Runs/Graph -> Task/Traces/Loop`. Every surface still reads
+the same Feature, Run, and Event chain.
 
 ![Observe one playgroud delivery through Overview, Runs, Graph, Loop, and Observability](../assets/observe-delivery.webp)
 
@@ -40,7 +40,7 @@ Overview first answers:
 
 It is a navigation summary. It does not re-decide Task, Run, or Closure state.
 
-## Runs And Spans
+## Runs And Inspector
 
 `Runs` presents execution by Run:
 
@@ -50,19 +50,23 @@ It is a navigation summary. It does not re-decide Task, Run, or Closure state.
 - fanout/fanin and dependency barriers;
 - gates, results, duration, and causation.
 
-`Spans` locates event order and call causation. When a Run is slow or appears to
-skip a step, inspect Runs first and then drill into Spans/Trace. Do not infer the
-cause from one status badge.
+Runs has one Run workbench. Select a Task to inspect tries, gates, events,
+evidence, and regression capture/replay. Use `Traces` for temporal order and a
+Span Tree/Waterfall. Runs shows that handoff only when the server returns a
+verified canonical Trace reference.
 
-## Coverage, Work, Diagnostics
+## Graph
 
-The three Graph views answer different questions:
+Graph opens on a lightweight Goal -> Claim -> canonical Task Coverage surface.
+Switch to Work when you need execution detail: it first reuses the loaded Goal
+summaries. Select a Goal and ZaoFu immediately loads that
+Goal's Work tree, ownership, current execution state, attempts, gates, and evidence.
+The Diagnostics lens is removed. In Coverage, each Claim shows:
 
-| View | Main audience | It explains... |
-|---|---|---|
-| Coverage | PM, Owner, Reviewer | Plan, Implementation, Verification, Closure, and Gap for each Claim |
-| Work | Engineer, Delivery Owner | Goal -> Claim -> Task, plus Task Try, Result, and Evidence |
-| Diagnostics | Operator, harness maintainer | runtime, gate, behavior, evaluation, and artifact relationships |
+- whether Plan has a covering Task;
+- Implementation and Verification results;
+- Closure, open Gaps, and generation/currentness;
+- a link to the covering canonical Task.
 
 A done Task with an open Claim usually means:
 
@@ -71,8 +75,10 @@ A done Task with an open Claim usually means:
 - evidence does not match target or contract identity;
 - Goal Closure still has an open gap.
 
-Work keeps one primary node per canonical Task. Secondary Claim coverage is a
-relation, not a duplicate Task state.
+Drill into the covering Task or Runs for detailed evidence, use a verified Trace
+handoff for temporal diagnosis, and use Loop for behavior/evaluation/improvement.
+Work does not request detail or its graph chunk before Goal selection. Graph does not duplicate
+Thick Graph, Trace/Span, or Loop diagnostic surfaces.
 
 ## Goal Dossier
 

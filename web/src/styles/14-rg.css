@@ -309,58 +309,6 @@
   white-space: nowrap;
 }
 
-/* ── T-刀①.5 lane/pool strip ── */
-.rg-pool-strip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-11);
-  white-space: nowrap;
-  overflow-x: auto;
-}
-
-.rg-lane {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 1px 7px;
-  border: 1px solid color-mix(in oklab, var(--rg-lane-accent, var(--line)) 45%, var(--line));
-  border-radius: 6px;
-  background: color-mix(in oklab, var(--rg-lane-accent, var(--line)) 8%, var(--panel));
-}
-
-.rg-lane-busy { --rg-lane-accent: var(--info); }
-.rg-lane-queued { --rg-lane-accent: var(--warn); }
-.rg-lane-idle { --rg-lane-accent: var(--muted-foreground); }
-
-.rg-lane-name {
-  font-family: var(--font-mono);
-  color: var(--text);
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.rg-lane-state {
-  font-family: var(--font-mono);
-  color: var(--rg-lane-accent, var(--muted-foreground));
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.rg-pool-stuck {
-  flex: none;
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted-foreground);
-}
-
-.rg-pool-stuck.is-bad {
-  color: var(--err);
-}
-
 /* ── T-刀② ⛓ causation 回放 ── */
 .rg-causal {
   flex: none;
@@ -399,6 +347,52 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
+}
+
+.delivery-run-surface-head,
+.run-regression-head,
+.run-regression-case {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.delivery-run-surface-head {
+  padding: 8px 2px;
+  font-size: var(--text-12);
+}
+
+.delivery-run-surface-head > strong {
+  font-weight: var(--font-weight-semibold);
+}
+
+.run-regression-actions {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--text-12);
+}
+
+.run-regression-head > div,
+.run-regression-cases {
+  display: flex;
+  gap: 6px;
+}
+
+.run-regression-cases {
+  flex-direction: column;
+}
+
+.run-regression-actions button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 3px 8px;
+  cursor: pointer;
 }
 
 .ld-head {
@@ -593,7 +587,7 @@
 .ld-task-id {
   min-width: 0;
   font-family: var(--font-mono);
-  font-weight: var(--font-weight-semibold);
+  font-weight: var(--font-weight-medium);
   font-size: var(--text-13);
   white-space: nowrap;
   overflow: hidden;

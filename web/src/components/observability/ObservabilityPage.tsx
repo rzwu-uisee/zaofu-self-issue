@@ -4,7 +4,6 @@ import type { EventRecord, EventsPage, IntegrationQueueEntry, IntegrationQueuePr
 import { LogsPanel } from "../../components/observability/LogsPanel";
 import { OperationsPanel } from "../../components/observability/OperationsPanel";
 import { RunDossierPanel } from "../../components/observability/RunDossierPanel";
-import { RuntimeLogsPanel } from "../../components/observability/RuntimeLogsPanel";
 import { formatTokens } from "../../lib/format";
 import { buildObservabilityEventWindow } from "../../app/observabilityModel";
 import { buildProjectCostPresentation } from "../../app/costPrecision";
@@ -12,9 +11,9 @@ import { useProjectCost } from "../../app/useProjectCost";
 import { Archive, Bell, Boxes, ChevronRight, FolderGit2, Gauge, GitFork, Map as MapIcon, PauseCircle, PlayCircle, Radio, SkipBack, SkipForward, Wrench, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import type { LiveState, PageId, ParsedEventFilter, ProjectionKind, ProjectionMetricSpec, UiTone } from "../../app/sharedTypes";
-import { EventTable, KeyValuePanel, PreBlock, ProjectionEmptyState, ProjectionList, ProjectionMetricGrid, TablePage, TraceDetailPanel, TraceIndexList, asRecord, asStringArray, eventChannelId, eventFamily, eventKey, eventPayload, eventSummary, formatUsd, parseEventFilter, stringify, textValue, truncateInline } from "../../app/shared";
+import { EventTable, PreBlock, ProjectionEmptyState, ProjectionList, ProjectionMetricGrid, TablePage, TraceDetailPanel, TraceIndexList, asRecord, asStringArray, eventChannelId, eventFamily, eventKey, eventPayload, eventSummary, formatUsd, parseEventFilter, stringify, textValue, truncateInline } from "../../app/shared";
 
-type ObservabilityTab = "traces" | "events" | "logs" | "runtime_logs" | "operations" | "runs" | "fanouts" | "candidates" | "pipeline" | "integration" | "repair" | "raw";
+type ObservabilityTab = "traces" | "events" | "logs" | "operations" | "runs" | "fanouts" | "candidates" | "pipeline" | "integration" | "repair";
 
 type TraceStatusFilter = "all" | "running" | "completed" | "failed" | "blocked" | "observed";
 
@@ -33,7 +32,7 @@ function observabilityTabForPage(page: PageId): ObservabilityTab {
   if (page === "runs") return "runs";
   if (page === "fanouts") return "fanouts";
   if (page === "candidates") return "candidates";
-  if (page === "diagnostics") return "raw";
+  if (page === "diagnostics") return "events";
   // Resources tab 已退役(operator 2026-07-11 整删):旧 workdirs/skills/
   // archives 深链落默认 traces。取证走 CLI(zf status/skills)或 Raw。
   if (page === "workdirs" || page === "skills" || page === "archives") return "traces";
@@ -333,7 +332,6 @@ export function ObservabilityPage({
     { id: "traces", label: "Traces", count: traces.length },
     { id: "events", label: "Events", count: scopedTraceMode ? undefined : eventItems.length },
     { id: "logs", label: "Event Logs" },
-    { id: "runtime_logs", label: "Runtime Logs" },
     { id: "operations", label: "Operations" },
     { id: "runs", label: "Runs", count: scopedTraceMode ? undefined : runs.length },
     { id: "fanouts", label: "Fanouts", count: scopedTraceMode ? undefined : fanouts.length },
@@ -344,10 +342,13 @@ export function ObservabilityPage({
     // Tokens/Context 与 Feedback tab 已退役(operator 2026-07-11):前者三重复
     // (顶部卡片 + Agents 页 FLEET 逐行同数据),后者的家是 Inbox(可行动)与
     // Agents Attention Queue。同数据不二渲染。
-    { id: "raw", label: "Raw" },
   ];
 
   function openTab(next: ObservabilityTab) {
+    if (next === "traces") {
+      onOpenPage("traces");
+      return;
+    }
     setTab(next);
     if (activePage !== "observability") onOpenPage("observability");
   }
@@ -402,7 +403,7 @@ export function ObservabilityPage({
       <div className="section-heading projection-page-heading">
         <div>
           <h2>Observability</h2>
-          <span className="muted">trace workspace, runtime signals, logs, tokens, feedback, and raw diagnostics</span>
+          <span className="muted">events, logs, and read-only operational signals</span>
         </div>
         <span className={`metric-chip tone-${streamTone}`}>{liveState}</span>
       </div>
@@ -417,7 +418,6 @@ export function ObservabilityPage({
         <span><strong>Stream</strong><em className={`badge badge-${streamTone}`}>{liveState}</em></span>
         <span><strong>Runtime</strong><em>{snapshot?.runtime.live ? "live" : "stopped"}</em></span>
         <span><strong>Truth</strong><em>EventLog / TaskStore</em></span>
-        <span><strong>Raw</strong><em>redacted read-only</em></span>
       </div>
       <LongRunTruthBand projection={snapshot?.long_run_truth} snapshotReady={snapshotReady} />
       <ProjectionMetricGrid metrics={metrics} />
@@ -624,31 +624,8 @@ export function ObservabilityPage({
       {tab === "logs" ? (
         <LogsPanel projectId={activeProjectId || snapshot?.project.project_id} />
       ) : null}
-      {tab === "runtime_logs" ? (
-        <RuntimeLogsPanel projectId={activeProjectId || snapshot?.project.project_id} />
-      ) : null}
       {tab === "operations" ? (
         <OperationsPanel projectId={activeProjectId || snapshot?.project.project_id} />
-      ) : null}
-      {tab === "raw" ? (
-        <div className="observability-resource-grid">
-          <KeyValuePanel
-            title="Raw Boundary"
-            rows={[
-              { key: "mode", value: "read-only projection" },
-              { key: "redaction", value: "client display redaction + server redaction" },
-              { key: "project_scope", value: activeProjectId || snapshot?.project.project_id || "-" },
-              { key: "event_count", value: eventItems.length },
-            ]}
-          />
-          <section className="subsection">
-            <div className="inline-heading">
-              <h3>Selected Raw</h3>
-              <span className="muted">redacted</span>
-            </div>
-            <PreBlock value={selectedEvent || projectionDetail || snapshot?.runtime || {}} />
-          </section>
-        </div>
       ) : null}
     </div>
   );
@@ -1334,7 +1311,6 @@ function isObservabilityTab(value: string | null): value is ObservabilityTab {
     "traces",
     "events",
     "logs",
-    "runtime_logs",
     "operations",
     "runs",
     "fanouts",
@@ -1342,7 +1318,6 @@ function isObservabilityTab(value: string | null): value is ObservabilityTab {
     "pipeline",
     "integration",
     "repair",
-    "raw",
   ].includes(value));
 }
 

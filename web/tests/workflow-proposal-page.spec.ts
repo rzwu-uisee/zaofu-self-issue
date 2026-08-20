@@ -177,4 +177,5 @@ test("reviews, approves, and follows a proposal without layout collisions", asyn
 
   await page.getByTestId("workflow-open-run").click();
   await expect(page).toHaveURL(/page=runs/);
+  await expect(page).toHaveURL(new RegExp(`run_id=${encodeURIComponent(requestId)}`));
 });

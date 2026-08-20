@@ -28,8 +28,14 @@ def test_pump_events_excluded_from_semantic_activity(tmp_path: Path) -> None:
     log = _log(tmp_path)
     log.append(ZfEvent(type="fanout.child.dispatched",
                        payload={"stage_id": "impl", "child_id": "c1"}))
-    for _ in range(5):
-        log.append(ZfEvent(type="run.manager.tick.started"))
+    for event_type in (
+        "run.manager.tick.started",
+        "worker.heartbeat",
+        "task.attempt.heartbeat",
+        "run.heartbeat",
+        "runtime.snapshot.recorded",
+    ):
+        log.append(ZfEvent(type=event_type))
     view = build_loop_view(_sd(tmp_path))
     assert view["run"]["event_count"] == 6
     assert view["run"]["semantic_event_count"] == 1

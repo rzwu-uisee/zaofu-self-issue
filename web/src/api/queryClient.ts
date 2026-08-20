@@ -7,30 +7,45 @@ const DEFAULT_TTL_MS = 750;
 const cache = new Map<string, CacheEntry<unknown>>();
 const inFlight = new Map<string, Promise<unknown>>();
 
-export async function cachedGetJson<T>(path: string, options: { ttlMs?: number; bypassCache?: boolean } = {}): Promise<T> {
+export async function cachedGetJson<T>(
+  path: string,
+  options: { ttlMs?: number; bypassCache?: boolean; signal?: AbortSignal } = {},
+): Promise<T> {
   const ttlMs = options.ttlMs ?? ttlForPath(path);
   const now = Date.now();
   if (ttlMs > 0) {
-    if (!options.bypassCache) {
+    if (!options.bypassCache && !options.signal) {
       const cached = cache.get(path);
       if (cached && cached.expiresAt > now) return cached.value as T;
     }
-    const pending = inFlight.get(path);
-    if (pending) return pending as Promise<T>;
+    // A caller-owned AbortSignal cannot safely share a promise: aborting one
+    // consumer would otherwise abort every consumer of the same cache key.
+    if (!options.signal) {
+      const pending = inFlight.get(path);
+      if (pending) return pending as Promise<T>;
+    }
   }
-  const promise = fetch(path, { headers: { Accept: "application/json" } })
+  const promise = fetch(path, {
+    headers: { Accept: "application/json" },
+    signal: options.signal,
+  })
     .then(async (response) => {
       if (!response.ok) throw new Error(`${path} returned ${response.status}`);
       return (await response.json()) as T;
     })
     .then((value) => {
-      if (ttlMs > 0) cache.set(path, { value, expiresAt: Date.now() + ttlMs });
+      // Signal-owned requests have an independent lifecycle and can race a
+      // shared request for the same key. Keep them out of the shared cache so
+      // an older response cannot overwrite a newer caller-owned result.
+      if (ttlMs > 0 && !options.signal) {
+        cache.set(path, { value, expiresAt: Date.now() + ttlMs });
+      }
       return value;
     })
     .finally(() => {
-      inFlight.delete(path);
+      if (inFlight.get(path) === promise) inFlight.delete(path);
     });
-  if (ttlMs > 0) inFlight.set(path, promise);
+  if (ttlMs > 0 && !options.signal) inFlight.set(path, promise);
   return promise;
 }
 

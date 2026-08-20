@@ -120,4 +120,83 @@ equal(model.summary.done, 1, "done tasks are summarized");
 equal(model.summary.running, 1, "running tasks are summarized");
 equal(model.summary.verified, 1, "current passed results are summarized");
 
+const boundedTrace = structuredClone(trace) as DeliveryTrace;
+boundedTrace.goal_coverage_graph!.nodes = boundedTrace.goal_coverage_graph!.nodes.filter((node) => (
+  node.task_id !== "TASK-B"
+));
+const boundedClaim = boundedTrace.goal_coverage_graph!.nodes.find((node) => (
+  node.goal_claim_id === "CLAIM-B"
+));
+if (boundedClaim) boundedClaim.task_ids = [];
+const boundedExecution = boundedTrace.execution_graph.nodes.find((node) => node.task_id === "TASK-B");
+if (boundedExecution) boundedExecution.goal_claim_ids = ["CLAIM-B"];
+boundedTrace.execution_graph.task_count = 4;
+boundedTrace.execution_graph.nodes_total = 4;
+boundedTrace.execution_graph.nodes_omitted = 1;
+boundedTrace.execution_graph.nodes_truncated = true;
+boundedTrace.task_lifecycle = {
+  schema_version: "task-lifecycle.v2",
+  tasks: {},
+  task_count: 1,
+  tasks_included: 0,
+  tasks_omitted: 1,
+  tasks_truncated: true,
+  task_statuses: { "TASK-B": "done" },
+};
+const boundedModel = buildDeliveryWorkModel(boundedTrace);
+const boundedTask = boundedModel.tasks.find((task) => task.taskId === "TASK-B")!;
+equal(boundedTask.primaryClaimId, "CLAIM-B", "execution claim identity prevents false unmapped work");
+equal(boundedTask.status, "done", "canonical task status wins over stale execution status");
+equal(boundedTask.lifecycleDetailsOmitted, true, "bounded lifecycle omission stays explicit");
+equal(boundedModel.summary.total, 4, "canonical execution total survives bounded nodes");
+equal(boundedModel.bounded.verificationPartial, true, "bounded verification is labeled partial");
+
+const omittedClaimTrace = structuredClone(trace) as DeliveryTrace;
+omittedClaimTrace.goal_coverage_graph!.nodes.push({
+  node_id: "task:TASK-OMITTED-CLAIM",
+  kind: "task",
+  task_id: "TASK-OMITTED-CLAIM",
+  title: "Mapped to an omitted claim",
+  status: "pending",
+  goal_claim_ids: ["CLAIM-NOT-IN-BOUNDED-GRAPH"],
+});
+omittedClaimTrace.goal_coverage_graph!.nodes.push({
+  node_id: "task:TASK-OVER-CAP",
+  kind: "task",
+  task_id: "TASK-OVER-CAP",
+  title: "True unclaimed task omitted by Work cap",
+  status: "pending",
+  goal_claim_ids: [],
+});
+const omittedClaimModel = buildDeliveryWorkModel(omittedClaimTrace);
+assert(
+  !omittedClaimModel.tasks.some((task) => task.taskId === "TASK-OMITTED-CLAIM"),
+  "a task mapped only to an omitted claim is not relabeled as unmapped",
+);
+assert(
+  !omittedClaimModel.tasks.some((task) => task.taskId === "TASK-OVER-CAP"),
+  "a Goal task omitted by the Work node cap does not bypass execution visibility",
+);
+deepEqual(
+  omittedClaimModel.unclaimedTasks.map((task) => task.taskId),
+  ["TASK-UNMAPPED"],
+  "truly unclaimed canonical work remains visible",
+);
+
+const claimTruncatedTrace = structuredClone(trace) as DeliveryTrace;
+const truncatedClaim = claimTruncatedTrace.goal_coverage_graph!.nodes.find((node) => (
+  node.goal_claim_id === "CLAIM-B"
+));
+if (truncatedClaim) truncatedClaim.task_details = {
+  total: 5,
+  included: 2,
+  missing_count: 3,
+};
+const claimTruncatedModel = buildDeliveryWorkModel(claimTruncatedTrace);
+const claimWithOmittedTasks = claimTruncatedModel.claims.find((claim) => (
+  claim.claim.goal_claim_id === "CLAIM-B"
+))!;
+equal(claimWithOmittedTasks.taskTotal, 5, "claim keeps authoritative covering task total");
+equal(claimWithOmittedTasks.taskDetailsOmitted, 3, "claim exposes bounded task detail omission");
+
 console.log("deliveryWorkModel tests passed");

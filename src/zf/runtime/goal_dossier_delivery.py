@@ -400,8 +400,8 @@ def _owner_request_payload(
 ) -> dict[str, Any]:
     blocked = terminal.type == "run.goal.blocked"
     deep_link = (
-        "/?page=observability&obs_tab=runs"
-        f"&obs_run_id={quote(run_id, safe='')}"
+        "/?page=runs"
+        f"&run_id={quote(run_id, safe='')}"
     )
     if project_id:
         deep_link += f"&project={quote(project_id, safe='')}"

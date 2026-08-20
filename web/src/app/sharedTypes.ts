@@ -16,7 +16,6 @@ export const NAV_PAGES = [
   "skills",
   "traces",
   "delivery",
-  "goal-coverage",
   "control-room",
   "delivery-trace",
   "delivery-graph",

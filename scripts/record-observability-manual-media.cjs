@@ -35,7 +35,7 @@ async function waitForObservability(page) {
     .then((response) => response.json())
     .then((payload) => String(payload.server_default_project_id || ""));
   if (!projectId) throw new Error("the Web server has no default project for manual media");
-  await page.goto(`${BASE_URL}/?project=${encodeURIComponent(projectId)}&page=observability`, {
+  await page.goto(`${BASE_URL}/?project=${encodeURIComponent(projectId)}&page=observability&obs_tab=operations`, {
     waitUntil: "domcontentloaded",
     timeout: 30_000,
   });
@@ -81,14 +81,6 @@ async function capture(browser, name, runScene) {
       await openTab(page, "Event Logs");
       await openTab(page, "Operations");
       await page.getByTestId("operations-observability").waitFor({ state: "visible", timeout: 10_000 });
-      await page.waitForTimeout(1_200);
-    });
-    await capture(browser, "observability-runtime-log-triage", async (page) => {
-      await waitForObservability(page);
-      await openTab(page, "Runtime Logs");
-      await page.getByLabel("Minimum runtime log level").selectOption("WARN");
-      await page.waitForTimeout(1_000);
-      await page.getByLabel("Minimum runtime log level").selectOption("ERROR");
       await page.waitForTimeout(1_200);
     });
     await capture(browser, "provider-telemetry-operations", async (page) => {

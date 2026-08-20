@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { DeliveryRunTraceSpan, DeliveryTrace } from "../../api/types";
+import type { DeliveryTrace } from "../../api/types";
 import type { PageId } from "../../app/sharedTypes";
 import { dtTone } from "./DeliveryTraceViewUtils";
 
@@ -23,7 +23,6 @@ interface AttentionItem {
 export function DeliveryOverview({ onOpenPage, trace, repairCount = 0 }: DeliveryOverviewProps) {
   const tasks = taskSummary(trace);
   const run = runSummary(trace);
-  const loop = loopSummary(trace);
   const attention = attentionItems(trace);
   // A5(racing 评审):feature 已终态且 ship 就绪时,运行期旧信号降为
   // historical 展示,不再以红/警色调冒充活告警(投影级 resolved 见 B1)。
@@ -90,7 +89,7 @@ export function DeliveryOverview({ onOpenPage, trace, repairCount = 0 }: Deliver
           </div>
         </OverviewCard>
 
-        <OverviewCard title="Latest Run" meta={`${run.spans} spans`} onOpen={onOpenPage ? () => onOpenPage("delivery-trace") : undefined}>
+        <OverviewCard title="Latest Run" meta={`${run.total} runs`} onOpen={onOpenPage ? () => onOpenPage("delivery-trace") : undefined}>
           <div className="delivery-overview-metrics">
             {historical ? (
               <Metric label="Interrupted" value={run.running} tone={run.running ? "warn" : "muted"} />
@@ -98,25 +97,12 @@ export function DeliveryOverview({ onOpenPage, trace, repairCount = 0 }: Deliver
               <Metric label="Running" value={run.running} tone={run.running ? "info" : "muted"} />
             )}
             <Metric label="Failed" value={run.failed} tone={run.failed ? "err" : "muted"} />
-            <Metric label="Passed" value={run.passed} tone={run.passed ? "ok" : "muted"} />
+            <Metric label="Completed" value={run.completed} tone={run.completed ? "ok" : "muted"} />
             {repairCount > 0 && <Metric label="RM Repairs" value={repairCount} tone="warn" />}
           </div>
           <p className="delivery-overview-note">{run.latestLabel}</p>
         </OverviewCard>
 
-        {/* 全 0 的 Latest Loop 是占位噪音(同 Contract health 2/2 的退役理由):
-            仅计数/replan 有值才渲染;related-only 场景走 Open Loop 按钮
-            (2026-07-11 Playwright 评审,related>0 但 0·0·0 仍是死卡)。 */}
-        {(loop.behaviors > 0 || loop.evals > 0 || loop.candidates > 0 || loop.replanActive) && (
-          <OverviewCard title="Latest Loop" meta={`${loop.related} related`} onOpen={onOpenPage ? () => onOpenPage("behavior-loop") : undefined}>
-            <div className="delivery-overview-metrics">
-              <Metric label="Behaviors" value={loop.behaviors} tone={loop.behaviors ? "warn" : "muted"} />
-              <Metric label="Evals" value={loop.evals} tone={loop.failedEvals ? "err" : "muted"} />
-              <Metric label="Candidates" value={loop.candidates} tone={loop.candidates ? "info" : "muted"} />
-            </div>
-            <p className="delivery-overview-note">{loop.replanLabel}</p>
-          </OverviewCard>
-        )}
       </div>
     </section>
   );
@@ -168,10 +154,11 @@ function Metric({
 }
 
 function taskSummary(trace: DeliveryTrace) {
-  const total = trace.execution_graph.task_count || trace.execution_graph.nodes.length || 0;
-  const done = trace.execution_graph.done_count || countTasks(trace, ["done", "passed"]);
-  const active = trace.execution_graph.in_progress_count || countTasks(trace, ["in_progress", "running"]);
-  const blocked = trace.execution_graph.blocked_count || countTasks(trace, ["blocked", "failed"]);
+  const graph = trace.execution_graph;
+  const total = graph?.task_count || graph?.nodes?.length || trace.task_map?.task_count || 0;
+  const done = graph?.done_count || countTasks(trace, ["done", "passed"]);
+  const active = graph?.in_progress_count || countTasks(trace, ["in_progress", "running"]);
+  const blocked = graph?.blocked_count || countTasks(trace, ["blocked", "failed"]);
   const waiting = Math.max(0, total - done - active - blocked);
   const denom = Math.max(1, total);
   return {
@@ -187,40 +174,27 @@ function taskSummary(trace: DeliveryTrace) {
 }
 
 function runSummary(trace: DeliveryTrace) {
-  const spans = ((trace.trace?.spans ?? trace.thick_trace?.spans ?? []) as DeliveryRunTraceSpan[]);
-  const latest = spans[spans.length - 1];
+  const compact = trace.run_summary;
+  const groups = trace.run_groups ?? [];
+  const running = compact?.running ?? groups.filter((run) => ["running", "in_progress"].includes(run.status)).length;
+  const failed = compact?.failed ?? groups.filter((run) => ["failed", "error", "blocked"].includes(run.status)).length;
+  const completed = compact?.completed ?? groups.filter((run) => ["passed", "done", "ok", "completed"].includes(run.status)).length;
   return {
-    failed: spans.filter((span) => ["failed", "error", "blocked"].includes(span.status)).length,
-    latestLabel: latest ? `${latest.name || latest.span_id} · ${latest.status || "observed"}` : "No runtime spans projected yet.",
-    passed: spans.filter((span) => ["passed", "done", "ok"].includes(span.status)).length,
-    running: spans.filter((span) => ["running", "in_progress"].includes(span.status)).length,
-    spans: spans.length,
-  };
-}
-
-function loopSummary(trace: DeliveryTrace) {
-  const thick = trace.thick_trace;
-  const failedEvals = (thick?.evals ?? []).filter((item) => ["failed", "error", "blocked"].includes(item.status)).length;
-  const replan = trace.deposition_summary?.replan_gate_status || "";
-  const replanActive = Boolean(replan && replan !== "none");
-  const candidateIds = new Set(
-    (thick?.improvement_candidates ?? []).map((item) => (
-      String(item.candidate_id ?? item.fingerprint ?? item.source_kind)
-    )),
-  );
-  return {
-    behaviors: thick?.behaviors.length ?? 0,
-    candidates: candidateIds.size,
-    evals: thick?.evals.length ?? 0,
-    failedEvals,
-    related: trace.related_loop_count ?? trace.related_loop_ids?.length ?? 0,
-    replanActive,
-    replanLabel: replanActive ? `Replan ${replan}` : "No active replan gate.",
+    failed,
+    latestLabel: compact?.latest_label ?? (groups[0] ? `${groups[0].label || groups[0].group_id} · ${groups[0].status}` : "No run projected yet."),
+    completed,
+    running,
+    total: compact?.total ?? groups.length,
   };
 }
 
 function attentionItems(trace: DeliveryTrace): AttentionItem[] {
-  const out: AttentionItem[] = [];
+  const out: AttentionItem[] = (trace.attention ?? []).map((item) => ({
+    label: item.label,
+    meta: item.meta ?? "delivery signal",
+    tone: item.tone ?? "warn",
+    count: item.count,
+  }));
   // Ship 状态 hero 已有红 badge;Attention 行仅在 readiness 文本带有增量
   // 信息时渲染("Ship blocked · blocked" 一屏三报,2026-07-11 评审)。
   const readiness = (trace.ship.readiness || "").trim();
@@ -232,19 +206,6 @@ function attentionItems(trace: DeliveryTrace): AttentionItem[] {
   }
   for (const item of trace.ship.missing_evidence ?? []) {
     out.push({ label: "Missing evidence", meta: `${item.task_id} · ${item.status}`, tone: "err" });
-  }
-  for (const item of trace.thick_trace?.behaviors ?? []) {
-    if (["failed", "open", "blocked"].includes(item.status)) {
-      // A1(racing 评审):summary 常常就是 kind 本身("worker_stuck ·
-      // worker_stuck"),label==meta 的候选跳过,取带增量信息的字段。
-      const meta = [item.summary, item.detector].find((v) => v && v !== item.kind) || "behavior signal";
-      out.push({ label: item.kind, meta, tone: item.status === "failed" ? "err" : "warn" });
-    }
-  }
-  for (const item of trace.thick_trace?.evals ?? []) {
-    if (["failed", "open", "blocked"].includes(item.status)) {
-      out.push({ label: item.kind, meta: item.evaluator || item.owner_event_type || "eval signal", tone: "err" });
-    }
   }
   if (trace.drift_report.items.length > 0) {
     out.push({ label: `Drift ${trace.drift_report.status}`, meta: `${trace.drift_report.items.length} drift items`, tone: "warn" });
@@ -265,7 +226,7 @@ function attentionItems(trace: DeliveryTrace): AttentionItem[] {
 }
 
 function countTasks(trace: DeliveryTrace, statuses: string[]) {
-  return trace.execution_graph.nodes.filter((node) => statuses.includes(node.actual.status)).length;
+  return (trace.execution_graph?.nodes ?? []).filter((node) => statuses.includes(node.actual.status)).length;
 }
 
 function pct(value: number, total: number) {

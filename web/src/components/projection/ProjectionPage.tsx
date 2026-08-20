@@ -1,17 +1,19 @@
 // ProjectionPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
-import type { ActionResponse, AgentSummary, ChannelSummary, DeliveryFeaturesPage, EventsPage, Feature, IntegrationQueueProjection, RecentEvent, RepairActionProjection, SearchResult, Snapshot, TaskPipelineProjection, TraceSummary } from "../../api/types";
-import { LoopPageV2 } from "../../components/delivery-trace/LoopPageV2";
+import type { ActionResponse, AgentSummary, ChannelSummary, DeliveryFeaturesPage, EventsPage, Feature, IntegrationQueueProjection, RecentEvent, RepairActionProjection, SearchResult, Snapshot, TaskPipelineProjection } from "../../api/types";
 import { DeliveryTracePage } from "../../components/delivery-trace/DeliveryTracePage";
 import { Settings } from "lucide-react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { LiveState, PageId, ProjectionKind, ThemeMode } from "../../app/sharedTypes";
 import { KeyValuePanel, ProjectionEmptyState, eventKey, isObservabilityPage } from "../../app/shared";
 import { AgentViewPage } from "../agent-view/AgentViewPage";
 import { ObservabilityPage } from "../observability/ObservabilityPage";
 import { AutomationsPage } from "../automations/AutomationsPage";
-import { getProjectAutomations, getProjectTraces } from "../../api/client";
-import { GoalCoveragePage } from "../goal-coverage/GoalCoveragePage";
+import { getProjectAutomations } from "../../api/client";
 import { WorkflowProposalPage } from "../workflow/WorkflowProposalPage";
+
+const LazyLoopPageV2 = lazy(() => import("../../components/delivery-trace/LoopPageV2").then((module) => ({
+  default: module.LoopPageV2,
+})));
 
 export function ProjectionPage({
   actionReady,
@@ -96,24 +98,6 @@ export function ProjectionPage({
     return () => { cancelled = true; };
   }, [activeProjectId, page]);
 
-  // traces: the page loads the light snapshot (traces ∉ isObservabilityPage) and
-  // fetches the scoped /traces roll-up instead of the slow full snapshot.
-  const [traceRows, setTraceRows] = useState<TraceSummary[] | null>(null);
-  useEffect(() => {
-    if (page !== "traces" || !activeProjectId) return undefined;
-    let cancelled = false;
-    void getProjectTraces(activeProjectId)
-      .then((data) => {
-        if (cancelled) return;
-        const rows = Array.isArray((data as { traces?: unknown }).traces)
-          ? ((data as { traces: TraceSummary[] }).traces)
-          : [];
-        setTraceRows(rows);
-      })
-      .catch(() => { if (!cancelled) setTraceRows(null); });
-    return () => { cancelled = true; };
-  }, [activeProjectId, page]);
-
   // 保留完整 Feature 对象(含 title/source):选择器要按 source 区分真
   // feature 与 fallback:trace-ref 升格的运维/子流 trace(racing 评审)。
   const deliveryFeatureById = new Map<string, Feature>();
@@ -139,17 +123,7 @@ export function ProjectionPage({
         actionReady={actionReady}
         actionState={actionState}
         onAction={onAction}
-        onOpenPage={onOpenPage}
-        projectId={activeProjectId}
-      />
-    );
-  }
-
-  if (page === "goal-coverage") {
-    return (
-      <GoalCoveragePage
-        features={deliveryFeatures}
-        onSelectTask={onSelectTask}
+        onOpenProjection={onOpenProjection}
         projectId={activeProjectId}
       />
     );
@@ -164,16 +138,21 @@ export function ProjectionPage({
           totalUsd={deliveryTotalUsd}
           features={deliveryFeatures}
           liveEvents={recentEvents}
+          liveState={liveState}
           mode={page === "delivery-trace" ? "trace" : page === "delivery-graph" ? "graph" : "overview"}
         />
     );
   }
 
   if (page === "behavior-loop") {
-    return <LoopPageV2 projectId={activeProjectId} />;
+    return (
+      <Suspense fallback={<div className="loop-v2-page loop-v2-state">Loading loop view…</div>}>
+        <LazyLoopPageV2 liveEvents={recentEvents} liveState={liveState} projectId={activeProjectId} />
+      </Suspense>
+    );
   }
 
-  if (isObservabilityPage(page) || page === "traces" || page === "diagnostics") {
+  if (isObservabilityPage(page) || page === "diagnostics") {
     return (
       <ObservabilityPage
         activePage={page}
@@ -195,7 +174,6 @@ export function ProjectionPage({
         selectedEventKey={selectedEvent ? eventKey(selectedEvent, eventItems.indexOf(selectedEvent)) : ""}
         setEventFilter={setEventFilter}
         snapshot={snapshot}
-        scopedTraceRows={page === "traces" ? traceRows : null}
       />
     );
   }

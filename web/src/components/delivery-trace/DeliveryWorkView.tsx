@@ -1,4 +1,5 @@
 import "@xyflow/react/dist/style.css";
+import "../../styles/19-delivery-work-tree.css";
 
 import {
   Background,
@@ -35,6 +36,7 @@ import {
   workGoalNodeId,
   type DeliveryWorkGraphNode,
 } from "./deliveryWorkGraphModel";
+import { workClosureStatusLabel } from "./deliveryWorkGoalModel";
 import {
   buildDeliveryWorkModel,
   type DeliveryWorkClaim,
@@ -242,7 +244,10 @@ export function DeliveryWorkView({
           <WorkMetric label="Done" value={model.summary.done} />
           <WorkMetric label="Running" value={model.summary.running} />
           <WorkMetric label="Blocked" value={model.summary.blocked} />
-          <WorkMetric label="Verified" value={model.summary.verified} />
+          <WorkMetric
+            label={model.bounded.verificationPartial ? "Verified (visible)" : "Verified"}
+            value={model.summary.verified}
+          />
         </div>
         <div className="delivery-work-tools">
           <label className="delivery-work-search">
@@ -299,6 +304,15 @@ export function DeliveryWorkView({
         </div>
       </header>
 
+      {model.bounded.tasksOmitted > 0 || model.bounded.lifecyclePartial || model.bounded.relationsPartial ? (
+        <div className="delivery-work-bounded-notice" data-testid="delivery-work-bounded-notice">
+          Bounded Work view
+          {model.bounded.tasksOmitted > 0 ? ` · ${model.bounded.tasksOmitted} tasks omitted` : ""}
+          {model.bounded.lifecyclePartial ? " · attempt details partial" : ""}
+          {model.bounded.relationsPartial ? " · relation or evidence refs partial" : ""}
+        </div>
+      ) : null}
+
       <div className={`delivery-work-graph-shell${selectedGraphNode ? " has-inspector" : ""}`}>
         <div className="delivery-work-canvas" data-testid="delivery-work-canvas">
           <ReactFlow<WorkFlowNode, WorkFlowEdge>
@@ -338,6 +352,7 @@ export function DeliveryWorkView({
 
 function WorkGraphNode({ data, selected }: NodeProps<WorkFlowNode>) {
   const expandable = data.childCount > 0 && data.kind !== "task";
+  const statusLabel = data.kind === "goal" ? workClosureStatusLabel(data.status) : data.status;
   return (
     <article
       className={`delivery-work-graph-node is-${data.kind}${selected ? " is-selected" : ""}${data.matched ? " is-match" : ""}${data.dimmed ? " is-dimmed" : ""}`}
@@ -348,7 +363,7 @@ function WorkGraphNode({ data, selected }: NodeProps<WorkFlowNode>) {
       {data.kind !== "goal" ? <Handle isConnectable={false} position={Position.Left} type="target" /> : null}
       <header>
         <span>{data.kind === "unmapped" ? "Unmapped" : data.kind}</span>
-        <GoalCoverageStatus label={data.status} status={data.status} />
+        {statusLabel ? <GoalCoverageStatus label={statusLabel} status={data.status} /> : null}
       </header>
       <strong title={data.title}>{data.title}</strong>
       <small className="mono" title={data.reference}>{data.reference}</small>
@@ -419,19 +434,30 @@ function WorkInspector({
 }
 
 function GoalInspector({ model }: { model: ReturnType<typeof buildDeliveryWorkModel> }) {
+  const statusLabel = workClosureStatusLabel(model.goal?.status);
   return (
     <>
       <InspectorGroup label="Delivery">
-        <InspectorRow label="Status"><GoalCoverageStatus label={model.goal?.status || "unknown"} status={model.goal?.status} /></InspectorRow>
+        {statusLabel ? (
+          <InspectorRow label="Status"><GoalCoverageStatus label={statusLabel} status={model.goal?.status} /></InspectorRow>
+        ) : null}
         <InspectorRow label="Tasks"><span>{model.summary.total}</span></InspectorRow>
         <InspectorRow label="Implementation"><span>{model.summary.done}/{model.summary.total} done</span></InspectorRow>
-        <InspectorRow label="Verification"><span>{model.summary.verified}/{model.summary.total} verified</span></InspectorRow>
+        <InspectorRow label="Verification">
+          <span>
+            {model.bounded.verificationPartial
+              ? `${model.summary.verified} verified in visible evidence`
+              : `${model.summary.verified}/${model.summary.total} verified`}
+          </span>
+        </InspectorRow>
       </InspectorGroup>
       <InspectorGroup label="Claims">
         {model.claims.map((claim) => (
           <span className="delivery-work-inspector-ref" key={claim.claim.goal_claim_id}>
             <span>{claim.claim.title}</span>
-            <GoalCoverageStatus label={claim.claim.closure || "unknown"} status={claim.claim.closure} />
+            {workClosureStatusLabel(claim.claim.closure) ? (
+              <GoalCoverageStatus label={workClosureStatusLabel(claim.claim.closure) ?? ""} status={claim.claim.closure} />
+            ) : null}
           </span>
         ))}
       </InspectorGroup>
@@ -440,26 +466,38 @@ function GoalInspector({ model }: { model: ReturnType<typeof buildDeliveryWorkMo
 }
 
 function ClaimInspector({ claim }: { claim: DeliveryWorkClaim }) {
-  const taskCount = claim.tasks.length + claim.linkedTasks.length;
+  const visibleTasks = [...claim.tasks, ...claim.linkedTasks];
+  const closureLabel = workClosureStatusLabel(claim.claim.closure);
   return (
     <>
       <InspectorGroup label="Coverage">
         <InspectorRow label="Plan"><GoalCoverageStatus label={claim.claim.plan_coverage || "uncovered"} status={claim.claim.plan_coverage} /></InspectorRow>
         <InspectorRow label="Implementation"><GoalCoverageStatus label={claim.claim.execution || "pending"} status={claim.claim.execution} /></InspectorRow>
         <InspectorRow label="Verification"><GoalCoverageStatus label={claim.claim.task_verification || "unverified"} status={claim.claim.task_verification} /></InspectorRow>
-        <InspectorRow label="Closure"><GoalCoverageStatus label={claim.claim.closure || "unknown"} status={claim.claim.closure} /></InspectorRow>
+        {closureLabel ? (
+          <InspectorRow label="Closure"><GoalCoverageStatus label={closureLabel} status={claim.claim.closure} /></InspectorRow>
+        ) : null}
       </InspectorGroup>
       <InspectorGroup label="Source">
         <span className="mono delivery-work-ref">{claim.claim.source_ref || "No source ref"}</span>
         <span>{claim.claim.mandatory === false ? "Optional" : "Mandatory"}</span>
       </InspectorGroup>
-      <InspectorGroup label={`Tasks · ${taskCount}`}>
-        {taskCount ? [...claim.tasks, ...claim.linkedTasks].map((task) => (
+      <InspectorGroup label={`Tasks · ${claim.taskTotal}`}>
+        {visibleTasks.length ? visibleTasks.map((task) => (
           <span className="delivery-work-inspector-ref" key={task.taskId}>
             <span>{task.title}</span>
             <GoalCoverageStatus label={task.status} status={task.status} />
           </span>
-        )) : <span className="delivery-work-missing">No covering task · needs plan</span>}
+        )) : claim.taskTotal > 0 ? (
+          <span className="delivery-work-missing" data-testid="delivery-work-claim-tasks-omitted">
+            Covering task details omitted by the bounded Work projection.
+          </span>
+        ) : <span className="delivery-work-missing">No covering task · needs plan</span>}
+        {visibleTasks.length && claim.taskDetailsOmitted > 0 ? (
+          <span className="muted" data-testid="delivery-work-claim-tasks-partial">
+            Showing {visibleTasks.length} of {claim.taskTotal} covering tasks.
+          </span>
+        ) : null}
       </InspectorGroup>
       {claim.claim.gap_refs?.length ? (
         <InspectorGroup label="Open gaps">
@@ -487,16 +525,25 @@ function TaskInspector({
         <InspectorRow label="Owner"><span>{task.owner}</span></InspectorRow>
         <InspectorRow label="Claims"><span>{task.claimIds.length ? task.claimIds.join(", ") : "unmapped"}</span></InspectorRow>
         {task.blockedBy.length ? <InspectorRow label="Blocked by"><span className="mono">{task.blockedBy.join(", ")}</span></InspectorRow> : null}
-        {onSelectTask ? (
+        {onSelectTask && !task.taskIdOpaque ? (
           <button className="delivery-work-open-task" onClick={() => onSelectTask(task.taskId)} type="button">
             <ExternalLink aria-hidden="true" size={14} />
             <span>Open canonical task</span>
           </button>
+        ) : task.taskIdOpaque ? (
+          <span className="muted" data-testid="delivery-work-task-id-opaque">
+            Canonical task ID was omitted from this bounded view; open the task from Tasks.
+          </span>
         ) : null}
       </InspectorGroup>
       {task.tries.length ? (
         <InspectorGroup label="Implementation">
           {task.tries.map((tryItem) => <TryRow key={`${task.taskId}:${tryItem.try}`} tryItem={tryItem} />)}
+          {task.triesTruncated ? (
+            <span className="muted" data-testid="delivery-work-tries-truncated">
+              Showing {task.tries.length} attempts; {task.triesOmitted} older attempt{task.triesOmitted === 1 ? "" : "s"} omitted.
+            </span>
+          ) : null}
         </InspectorGroup>
       ) : null}
       {task.results.length ? (
@@ -511,10 +558,16 @@ function TaskInspector({
       ) : null}
       {task.evidenceRefs.length ? (
         <InspectorGroup label="Evidence">
-          {task.evidenceRefs.slice(0, 6).map((ref) => <span className="mono delivery-work-ref" key={ref}>{ref}</span>)}
+          {task.evidenceRefs.map((ref) => <span className="mono delivery-work-ref" key={ref}>{ref}</span>)}
         </InspectorGroup>
       ) : null}
-      {!hasEvidence ? (
+      {task.lifecycleDetailsOmitted ? (
+        <InspectorGroup label="Activity">
+          <span className="muted" data-testid="delivery-work-lifecycle-omitted">
+            Attempt details were omitted by the bounded Work projection.
+          </span>
+        </InspectorGroup>
+      ) : !hasEvidence ? (
         <InspectorGroup label="Activity">
           <span className="muted">No implementation attempt or verification result recorded.</span>
         </InspectorGroup>
@@ -525,6 +578,11 @@ function TaskInspector({
 
 function TryRow({ tryItem }: { tryItem: DeliveryTaskTry }) {
   const gates = tryItem.gate_results ?? [];
+  const gatesOmitted = Math.max(
+    0,
+    tryItem.gate_results_omitted
+      ?? (tryItem.gate_results_total ?? gates.length) - gates.length,
+  );
   return (
     <div className="delivery-work-try" data-testid="delivery-work-try">
       <span>
@@ -535,7 +593,12 @@ function TryRow({ tryItem }: { tryItem: DeliveryTaskTry }) {
       <span className="delivery-work-gates">
         {gates.length ? gates.map((gate) => (
           <small key={`${gate.type}:${gate.event_id || ""}`}>{gate.type} {gate.passed ? "passed" : "failed"}</small>
-        )) : <small>no gate result</small>}
+        )) : tryItem.gate_results_truncated ? null : <small>no gate result</small>}
+        {tryItem.gate_results_truncated ? (
+          <small data-testid="delivery-work-gates-truncated">
+            {gatesOmitted} gate result{gatesOmitted === 1 ? "" : "s"} omitted
+          </small>
+        ) : null}
       </span>
     </div>
   );

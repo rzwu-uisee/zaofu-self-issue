@@ -23,7 +23,7 @@ from zf.core.events.model import ZfEvent
 from zf.core.security.redaction import redact_obj
 
 SCHEMA_VERSION = "loop-view.v1"
-LOOP_VIEW_CACHE_REVISION = "2"
+LOOP_VIEW_CACHE_REVISION = "3"
 
 PUMP_TYPES = frozenset({
     "orchestrator.round.complete",
@@ -31,7 +31,7 @@ PUMP_TYPES = frozenset({
     "run.manager.agent.observation",
     "hook.orphan_event", "runtime.snapshot.recorded",
     "provider.stop.check", "provider.permission.snapshot.recorded",
-    "worker.heartbeat",
+    "worker.heartbeat", "task.attempt.heartbeat", "run.heartbeat",
 })
 
 _TRANSPORT_COMPLETION = "fanout.child.completed"

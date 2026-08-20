@@ -14,9 +14,9 @@ and authority boundary:
 | Question | First place to look | Signal source | Can it change delivery truth? |
 |---|---|---|---|
 | Is a Task/Run complete, and why was it not accepted? | Delivery, Goal Dossier, Graph | Task, Event, Artifact, and Gate projections | No; read-only explanation |
-| When did an occurrence happen, who caused it, and why? | Observability -> Events / Event Logs | append-only `events.jsonl` | No |
-| Why is a process, transport, or sidecar unhealthy? | Observability -> Runtime Logs | redacted `logs/runtime.jsonl` | No |
-| Is a provider route, OTLP exporter, or SSE healthy? | Observability -> Operations | provider telemetry and operations projections | No |
+| When did a Trace/Event occur, who caused it, and why? | Traces; Events / Event Logs compatibility pages when needed | append-only `events.jsonl` and Trace projections | No |
+| Why is a process, transport, or sidecar unhealthy? | bounded Runtime Logs API / state file | redacted `logs/runtime.jsonl` | No |
+| Is a provider route, OTLP exporter, or SSE healthy? | Operations compatibility page | provider telemetry and operations projections | No |
 | What are the low-cardinality system trends and alerts? | `GET /metrics`, Operations | Prometheus-format operations metrics | No |
 
 `zf metrics snapshot` remains ZaoFu's business/evaluation snapshot. `/metrics` is a separate,
@@ -87,12 +87,12 @@ For Provider telemetry activation and rollback, see
 ### 3.1 Delivery did not progress
 
 1. Use Delivery/Goal Dossier first to establish the actual Task, Run, Gate, and evidence state.
-2. Use Observability -> Events with Task, actor, type, status, or time-window filters to locate
-   the causation chain.
-3. Use Event Logs for EventLog-derived semantic audit summaries; do not confuse them with raw
-   process logs.
-4. Only when the symptom is transport, sidecar, Provider launch, or repeated SSE gaps, inspect
-   Runtime Logs and Operations.
+2. Use Traces with Task, actor, status, duration, role, or backend filters, then select a row to read
+   Route/Event evidence. Use the Events / Event Logs compatibility pages for individual occurrences. Show
+   Spans only when a sourced Span contract exists; do not infer them from the Event timeline.
+3. Event Logs is the EventLog-derived semantic audit summary, not raw process logs.
+4. For transport, sidecar, Provider launch, or repeated SSE gaps, query the bounded Runtime Logs API
+   and open `?page=observability&obs_tab=operations`.
 5. Only evidence-backed recovery, replan, or a controlled action can change execution. The
    Operations panel has no write authority.
 
@@ -108,21 +108,17 @@ uv run zf task trace TASK-ID
 uv run zf metrics snapshot
 ```
 
-Correlate those results with Operations `Stream gaps`, `Last failure`, and Runtime Logs
+Correlate those results with Operations `Stream gaps`, `Last failure`, and the Runtime Logs API
 `failure_class`. Restore the actual cause first, then refresh the projection. Never delete or edit
 `events.jsonl` or Task JSON merely to make a page look healthy.
-
-[![Open the WebM recording of Event Logs and Runtime Logs triage](assets/observability-runtime-log-triage.png)](assets/observability-runtime-log-triage.webm)
-
-The image is the first frame of the WebM recording.
 
 ### 3.3 Cost, latency, or provider failures rise
 
 - `zf metrics snapshot`: inspect Task/Role business usage, quality, and economy first.
-- `Operations`: inspect provider capability, OTLP exporter backlog, sampling/drop/redaction
-  counters, SSE gaps, and attention.
-- `Runtime Logs`: filter by `WARN`/`ERROR`, Provider, or Task and read redacted
-  process/transport diagnostics.
+- `Operations` compatibility page: inspect provider capability, OTLP exporter backlog,
+  sampling/drop/redaction counters, SSE gaps, and attention.
+- bounded `Runtime Logs` API: filter by level, Provider, or Task and read redacted process/transport
+  diagnostics. Web no longer provides a standalone Runtime Logs panel.
 - `Events`: correlate the observations with Task, Run, attempt, dispatch, or controlled-action
   causation.
 
@@ -131,12 +127,12 @@ user strings as Prometheus labels. The registry accepts only low-cardinality `co
 `provider`, `operation`, `failure_class`, `role_type`, `stage`, `action_kind`, `integration`, and
 `route` labels.
 
-## 4. Runtime Logs and Event Logs
+## 4. Runtime Logs API and Event Logs
 
-| Panel | Content | Storage | Retention and safety boundary |
+| Surface | Content | Storage | Retention and safety boundary |
 |---|---|---|---|
 | Event Logs | semantic audit summaries derived from the event ledger | read projection of `events.jsonl` | does not replace source Events; never writes canonical state |
-| Runtime Logs | process, transport, sidecar, and exporter diagnostics | `<state_dir>/logs/runtime.jsonl` | redacted, bounded reads, 8 MiB rotation; `.1` is the prior segment |
+| Runtime Logs API | process, transport, sidecar, and exporter diagnostics | `<state_dir>/logs/runtime.jsonl` | no standalone Web panel; redacted bounded reads, 8 MiB rotation; `.1` is the prior segment |
 | Operations | capability, exporter, metric, alert, and SSE summary | rebuildable projection/sidecar | excludes endpoints, headers, prompts, transcripts, and secrets |
 
 The Runtime Logs read route is:
@@ -167,7 +163,7 @@ monitoring system may write them back as ZaoFu Task/Gate/Run truth.
 
 | Operation | Readback | Rollback |
 |---|---|---|
-| Enable Runtime Logs | page shows redacted/filterable rows; state contains `logs/runtime.jsonl` | set `runtime_logs.enabled: false`; retain prior rows for audit |
+| Enable Runtime Logs | bounded API returns redacted/filterable rows; state contains `logs/runtime.jsonl` | set `runtime_logs.enabled: false`; retain prior rows for audit |
 | Enable metrics | `/metrics` returns Prometheus text with a token; no token yields `403` | set `metrics.enabled: false` and restart Web/runtime |
 | Enable Provider telemetry | Operations reports route capability, join, and reason | set mode to `off` or remove the block; start a new runtime generation |
 | Enable OTLP exporter | Operations reports health, backlog, success/failure, and policy counters | set `otlp_exporter.enabled: false`; retain cursor/failure evidence and do not alter Task/Event |

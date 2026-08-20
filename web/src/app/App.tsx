@@ -75,7 +75,6 @@ import {
   getTaskDetail,
   getTaskDiff,
   getTaskTimeline,
-  getTraceDetail,
   getWebSession,
   getWorkspaceProjects,
   getOnboarding,
@@ -120,7 +119,14 @@ import {
   mergeChannelConversationRefresh,
 } from "./channelConversationState";
 import { useProjectRequestScope } from "./useProjectRequestScope";
-import { ChannelRoute, OrchestratorRoute, ProjectionRoute } from "./lazyRoutes";
+import { ChannelRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
+import {
+  canBootstrapScopedPageBeforeWorkspace,
+  projectionPageQuery,
+  projectionSelectionForPage,
+  resolvePageCompatibility,
+} from "./pageCompatibility";
+import { isRefreshNoiseEventType } from "./refreshEventPolicy";
 import { createChannelActionAdapter } from "./channelActionAdapter";
 import { shouldRefreshChannelsAfterAction } from "./kanbanAgentInteractionPolicy";
 import { useProjectObservabilityData } from "./useProjectObservabilityData";
@@ -208,7 +214,16 @@ const LOCAL_AGENT_STREAM_EVENTS = new Set([
   "channel.message.stream.delta",
 ]);
 const BEHAVIOR_LOOP_QUERY_KEYS = new Set(["layout", "lens", "loop_id", "stage", "node_id", "v"]);
-const TRACE_EXPLORER_QUERY_KEYS = new Set(["trace_id"]);
+const PAGE_QUERY_KEYS: Partial<Record<PageId, ReadonlySet<string>>> = {
+  delivery: new Set(["feature"]),
+  "delivery-trace": new Set(["feature"]),
+  "delivery-graph": new Set(["feature"]),
+  traces: new Set(["trace_id", "span_id", "obs_q", "obs_status", "obs_duration", "obs_role", "obs_backend"]),
+  events: new Set(["task"]),
+  runs: new Set(["run_id"]),
+  fanouts: new Set(["fanout_id"]),
+  candidates: new Set(["pdd_id"]),
+};
 const REFRESH_EVENT_PREFIXES = [
   "task.",
   "feature.",
@@ -277,19 +292,15 @@ interface HeadlessThreadItem {
 }
 
 function readInitialQuery() {
-  const params = new URLSearchParams(window.location.search);
-  const page = params.get("page");
-  const normalizedPage = page === "roles"
-    ? "agents"
-    : page === "workflow"
-      ? "workflows"
-      : page === "process" || page === "diagnostics"
-        ? "observability"
-        : page;
+  const resolved = resolvePageCompatibility(new URLSearchParams(window.location.search));
+  const params = resolved.params;
+  if (resolved.changed) {
+    window.history.replaceState(null, "", `?${params.toString()}`);
+  }
   const view = params.get("view");
   const mobileDefaultList = window.matchMedia?.("(max-width: 680px)").matches ?? false;
   return {
-    page: PAGES.includes(normalizedPage as PageId) ? (normalizedPage as PageId) : "board",
+    page: PAGES.includes(resolved.page as PageId) ? (resolved.page as PageId) : "board",
     view: view === "list" || (!view && mobileDefaultList) ? "list" as ViewMode : "board" as ViewMode,
     status: params.get("status") ?? "all",
     task: params.get("task"),
@@ -322,14 +333,8 @@ function prependEvent(events: RecentEvent[], event: RecentEvent): RecentEvent[] 
 // task.requeue.skipped at 1 Hz on r10). Each one matches a refresh prefix and
 // used to trigger a slice reload per event — a request storm that resonated
 // with the server-side rebuild storm. These carry no operator-visible state.
-const REFRESH_NOISE_EVENT_TYPES = new Set([
-  "task.requeue.skipped",
-  "worker.heartbeat",
-  "run.manager.tick.completed",
-]);
-
 function shouldRefreshForEvent(eventType: string): boolean {
-  if (REFRESH_NOISE_EVENT_TYPES.has(eventType)) return false;
+  if (isRefreshNoiseEventType(eventType)) return false;
   if (LOCAL_AGENT_STREAM_EVENTS.has(eventType)) return false;
   return (
     REFRESH_EVENT_TYPES.has(eventType)
@@ -645,11 +650,6 @@ export function App() {
   const [taskLoadError, setTaskLoadError] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("Summary");
   const [page, setPage] = useState<PageId>(initial.page);
-  // Retired page: deep links keep working via redirect (doc116 §7.5 / P0-C2).
-  useEffect(() => {
-    if (page === "runtime" || page === "control-room") setPage("observability");
-  }, [page]);
-
   const [viewMode, setViewMode] = useState<ViewMode>(initial.view);
   const [statusFilter, setStatusFilter] = useState(initial.status);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -661,6 +661,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [projectionDetail, setProjectionDetail] = useState<Record<string, unknown> | null>(null);
+  const projectionNavigationRef = useRef("");
   const [integrationQueue, setIntegrationQueue] = useState<IntegrationQueueProjection | null>(null);
   const [taskPipeline, setTaskPipeline] = useState<TaskPipelineProjection | null>(null);
   const [repairActions, setRepairActions] = useState<RepairActionProjection | null>(null);
@@ -1118,9 +1119,9 @@ export function App() {
     const params = new URLSearchParams();
     for (const [key, value] of current.entries()) {
       if (
-        key.startsWith("obs_")
+        (page === "observability" && key.startsWith("obs_"))
         || (page === "behavior-loop" && BEHAVIOR_LOOP_QUERY_KEYS.has(key))
-        || (page === "traces" && TRACE_EXPLORER_QUERY_KEYS.has(key))
+        || PAGE_QUERY_KEYS[page]?.has(key)
       ) {
         params.set(key, value);
       }
@@ -1148,7 +1149,19 @@ export function App() {
         const owns = (resource: BootstrapResource) => (
           pageOwnsBootstrapResource(page, resource)
         );
-        const projectsPage = await getWorkspaceProjects().catch(() => null);
+        const projectsRequest = getWorkspaceProjects().catch(() => null);
+        const bootstrapBeforeWorkspace = canBootstrapScopedPageBeforeWorkspace(
+          page,
+          initial.project === activeProjectId ? activeProjectId : "",
+        );
+        const projectsPage = bootstrapBeforeWorkspace ? null : await projectsRequest;
+        if (bootstrapBeforeWorkspace) {
+          void projectsRequest.then((workspacePage) => {
+            if (cancelled || !workspacePage) return;
+            setWorkspaceProjects(workspacePage.items ?? workspacePage.projects ?? []);
+            setServerDefaultProjectId(workspacePage.server_default_project_id ?? "");
+          });
+        }
         const projectId = activeProjectId || projectsPage?.active_project_id || "";
         if (cancelled) return;
         if (projectsPage) {
@@ -1373,6 +1386,34 @@ export function App() {
     selectedTaskId,
     snapshotSeq: snapshot?.seq,
   });
+
+  useEffect(() => {
+    const selection = projectionSelectionForPage(
+      page,
+      new URLSearchParams(window.location.search),
+    );
+    if (!selection || selection.kind === "trace" || !activeProjectId) return undefined;
+    const navigationKey = `${activeProjectId}:${selection.kind}:${selection.id}`;
+    if (projectionNavigationRef.current === navigationKey) {
+      projectionNavigationRef.current = "";
+      return undefined;
+    }
+    let cancelled = false;
+    const ticket = projectRequestScope.capture(activeProjectId);
+    setProjectionDetail(null);
+    const request = selection.kind === "candidate"
+      ? getCandidateDetail(selection.id, activeProjectId)
+      : selection.kind === "fanout"
+        ? getFanoutDetail(selection.id, activeProjectId)
+        : getRunDetail(selection.id, activeProjectId);
+    void request.then((result) => {
+      if (cancelled || !projectRequestScope.isCurrent(ticket)) return;
+      setProjectionDetail(result as unknown as Record<string, unknown>);
+    }).catch(() => {
+      if (!cancelled && projectRequestScope.isCurrent(ticket)) setProjectionDetail(null);
+    });
+    return () => { cancelled = true; };
+  }, [activeProjectId, page, projectRequestScope]);
 
   useEffect(() => {
     if (page !== "channels") return;
@@ -1953,32 +1994,22 @@ export function App() {
     setAddAgentOpen(false);
   }
 
-  function writeTraceExplorerDeepLink(traceId: string) {
-    const params = new URLSearchParams(window.location.search);
-    params.set("page", "traces");
-    params.set("trace_id", traceId);
-    window.history.replaceState(null, "", `?${params.toString()}`);
-  }
-
   async function openProjection(kind: ProjectionKind, id: string) {
     const requestedProjectId = activeProjectId || "";
     const ticket = projectRequestScope.capture(requestedProjectId);
-    const targetPage: Record<ProjectionKind, PageId> = {
-      trace: "traces",
-      candidate: "candidates",
-      fanout: "fanouts",
-      run: "runs",
-    };
-    if (kind === "trace") writeTraceExplorerDeepLink(id);
-    setPage(targetPage[kind]);
-    const result =
-      kind === "trace"
-        ? await getTraceDetail(id, requestedProjectId || undefined)
-        : kind === "candidate"
-          ? await getCandidateDetail(id, requestedProjectId || undefined)
-          : kind === "fanout"
-            ? await getFanoutDetail(id, requestedProjectId || undefined)
-            : await getRunDetail(id, requestedProjectId || undefined);
+    const target = projectionPageQuery(new URLSearchParams(window.location.search), kind, id);
+    window.history.replaceState(null, "", `?${target.params.toString()}`);
+    setPage(target.page as PageId);
+    if (kind === "trace") {
+      setProjectionDetail(null);
+      return;
+    }
+    projectionNavigationRef.current = `${requestedProjectId}:${kind}:${id}`;
+    const result = kind === "candidate"
+      ? await getCandidateDetail(id, requestedProjectId || undefined)
+      : kind === "fanout"
+        ? await getFanoutDetail(id, requestedProjectId || undefined)
+        : await getRunDetail(id, requestedProjectId || undefined);
     if (!projectRequestScope.isCurrent(ticket)) return;
     setProjectionDetail(result as unknown as Record<string, unknown>);
   }
@@ -2226,7 +2257,6 @@ export function App() {
             </section>
           ) : page === "board" ? (
             <BoardWorkbench
-              projectId={activeProjectId || undefined}
               actionReady={actionGate.actionReady}
               actionResult={actionResult}
               actionState={actionGate.actionState}
@@ -2281,6 +2311,10 @@ export function App() {
               timelineError={taskTimelineError}
               timelineLoading={taskTimelineLoading}
             />
+          ) : page === "traces" ? (
+            <section className="projection-scroll">
+              <TracesRoute projectId={activeProjectId} liveState={liveState} />
+            </section>
           ) : (
             <section className="projection-scroll">
                 <ProjectionRoute
@@ -2562,28 +2596,65 @@ function ProjectHomePage({
   onOpenProjection: (kind: ProjectionKind, id: string) => void;
   onOpenTask: (taskId: string) => void;
 }) {
-  // overview-pulse.v1 — derived projection; failure degrades to null bands.
-  // Workspace-only servers 409 on "default": wait until the snapshot names
-  // the active project before fetching instead of probing blindly.
-  const pulseProjectId = snapshot?.project.project_id || "";
-  const [pulse, setPulse] = useState<OverviewPulse | null>(null);
+  // overview-pulse.v1 is an independent project-scoped projection. A project
+  // already pinned by the URL can render its pulse while workspace discovery
+  // and the auxiliary light snapshot continue in parallel.
+  const pulseProjectId = projectId.trim();
+  const [pulseResource, setPulseResource] = useState<{
+    data: OverviewPulse | null;
+    projectId: string;
+  }>({ data: null, projectId: "" });
+  const pulse = pulseResource.projectId === pulseProjectId ? pulseResource.data : null;
+  const pulseSnapshotRef = useRef<{ projectId: string; seq: number | null }>({
+    projectId: "",
+    seq: null,
+  });
   useEffect(() => {
     if (!pulseProjectId) {
-      setPulse(null);
+      setPulseResource({ data: null, projectId: "" });
       return;
     }
     let cancelled = false;
     fetchOverviewPulse(pulseProjectId)
       .then((next) => {
-        if (!cancelled) setPulse(next);
+        if (!cancelled) setPulseResource({ data: next, projectId: pulseProjectId });
       })
       .catch(() => {
-        if (!cancelled) setPulse(null);
+        if (!cancelled) setPulseResource({ data: null, projectId: pulseProjectId });
       });
     return () => {
       cancelled = true;
     };
-  }, [pulseProjectId, snapshot?.seq]);
+  }, [pulseProjectId]);
+  const pulseSnapshotSeq = snapshot?.project.project_id === pulseProjectId
+    && typeof snapshot.seq === "number"
+    ? snapshot.seq
+    : null;
+  useEffect(() => {
+    const seen = pulseSnapshotRef.current;
+    if (seen.projectId !== pulseProjectId) {
+      pulseSnapshotRef.current = { projectId: pulseProjectId, seq: pulseSnapshotSeq };
+      return undefined;
+    }
+    if (pulseSnapshotSeq === null || seen.seq === null) {
+      seen.seq = pulseSnapshotSeq;
+      return undefined;
+    }
+    if (pulseSnapshotSeq === seen.seq) return undefined;
+    seen.seq = pulseSnapshotSeq;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchOverviewPulse(pulseProjectId)
+        .then((next) => {
+          if (!cancelled) setPulseResource({ data: next, projectId: pulseProjectId });
+        })
+        .catch(() => undefined);
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [pulseProjectId, pulseSnapshotSeq]);
   const tasks = snapshot ? allBoardTasks(snapshot) : [];
   const activeTasks = tasks.filter((task) => task.status !== "done" && task.status !== "cancelled");
   const taskCounts = BOARD_COLUMNS.map((column) => ({

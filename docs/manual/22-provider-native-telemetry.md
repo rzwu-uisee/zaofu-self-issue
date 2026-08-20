@@ -60,7 +60,7 @@ ZaoFu 的受管 profile 会为能够安全注入的 Claude turn 设置 `TRACEPAR
 ## 3. 读取一次真实状态
 
 1. 运行一个隔离的 headless/stream-json Claude turn，或启动已配置的 runtime。
-2. 在 Web 进入 `Observability -> Operations`。
+2. 在 Web 打开 Operations 兼容入口 `?page=observability&obs_tab=operations`。
 3. 在 `Provider Telemetry` 表中确认 Provider、Route、Effective、Join、Signals、Reason。
 4. 继续查看 `OTLP Exporter` 的 `Backlog`、`Last success`、`Last failure` 和 policy counters。
 5. 若要确认交付是否受影响，回到 Delivery、Task trace、Goal Dossier；不要用 telemetry 面板推断
@@ -107,6 +107,7 @@ observability:
 
 可选的 `observability.metrics` 暴露低基数 `/metrics`，仍要求
 `X-ZF-Metrics-Token`。Runtime Logs 记录脱敏的 process/transport/sidecar 诊断，默认轮转；
+独立 Web panel 已退役，store 与有界 HTTP API 继续保留。
 Alerts 只生成 operator attention 投影。三者都不能：
 
 - 写入或替代 Task、Feature、Session、RoleSession 的 canonical current state；
@@ -122,7 +123,7 @@ Alerts 只生成 operator attention 投影。三者都不能：
 
 1. `uv run zf validate --cold-start` 验证配置和环境变量名；
 2. 启动一条可控的 Claude headless/stream-json turn；
-3. 检查 Operations capability、Runtime Logs 脱敏和 `/metrics` token gate；
+3. 检查 Operations capability、Runtime Logs 有界 API 的脱敏结果和 `/metrics` token gate；
 4. 对可控 collector 观察一小批 synthetic spans，模拟连接失败并确认 backoff/fail-open；
 5. 确认 Delivery/Task/Graph 未因 telemetry 状态而变化；
 6. 结束时保留必要证据，写 simulation completion，停止 runtime/Web 并清理临时 state。

@@ -1,11 +1,10 @@
-// Delivery Trace page (doc 68 S3 frontend). Read-only view over the
-// delivery-trace.v1 API: feature spine status, ship readiness, execution
-// graph by wave, and drift report. Self-contained — fetches on feature
-// selection; no runtime mutation.
-import { useEffect, useMemo, useRef, useState } from "react";
+// Read-only Delivery workspace over the view-scoped delivery-trace.v2 API.
+// Overview, Runs, and Graph request bounded projections for one feature;
+// selection changes never mutate runtime state.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListTodo, PlayCircle, Radio, Route } from "lucide-react";
 
-import { getDeliveryTrace, getWorkflowGraph } from "../../api/client";
+import { getDeliveryTrace } from "../../api/client";
 import type {
   DeliveryFlowMetrics,
   DeliveryTrace,
@@ -13,12 +12,19 @@ import type {
   DeliveryTracePhase,
   Feature,
   RecentEvent,
-  WorkflowGraph,
 } from "../../api/types";
 import { LatestRequestGate } from "../../app/latestRequestGate";
-import type { PageId } from "../../app/sharedTypes";
+import type { LiveState, PageId } from "../../app/sharedTypes";
 import { DeliveryMapView } from "./DeliveryMapView";
 import { DeliveryOverview } from "./DeliveryOverview";
+import {
+  deliveryReconcileInterval,
+  DELIVERY_LIVE_COALESCE_MS,
+  deliveryRefreshScope,
+  isDeliveryRefreshEvent,
+  isCancelledDeliveryRequest,
+  shouldReconcileDelivery,
+} from "./deliveryRefreshPolicy";
 import { DeliveryTraceTabs } from "./DeliveryTraceTabs";
 
 interface DeliveryTracePageProps {
@@ -27,6 +33,7 @@ interface DeliveryTracePageProps {
   projectId: string;
   features: Feature[];
   liveEvents?: RecentEvent[];
+  liveState: LiveState;
   mode?: "overview" | "trace" | "graph";
   totalUsd?: number;
 }
@@ -65,6 +72,11 @@ const AUX_SOURCES = new Set(["fallback:trace-ref", "fallback:fanout-ref", "fallb
 // Overview 的 Latest Run 卡显示介入次数(operator 2026-07-11 决定)。
 function isRepairTrace(id: string): boolean {
   return id.startsWith("rmar-");
+}
+
+function deliveryFeatureDeepLink(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("feature") ?? "";
 }
 
 function auxTraceGroup(id: string): string {
@@ -143,7 +155,7 @@ function formatScoreDelta(delta: number | null | undefined): string {
 
 function cycleName(cycle: DeliveryTraceCycle): string {
   // A4(racing 评审):phase 可能携带原始事件 id("rework:evt-72813b16a831"),
-  // 操作员不可读 —— 去掉 :evt-* 尾缀,完整值在 Raw tab。
+  // 操作员不可读 —— 去掉 :evt-* 尾缀；完整值仍可从关联事件证据读取。
   const raw = String(cycle.phase || cycle.cycle_id || cycle.kind || "cycle");
   return raw.replace(/:evt-[0-9a-f]+$/i, "");
 }
@@ -187,6 +199,7 @@ export function DeliveryTracePage({
   projectId,
   features,
   liveEvents = [],
+  liveState,
   mode = "overview",
   totalUsd = 0,
 }: DeliveryTracePageProps) {
@@ -194,148 +207,236 @@ export function DeliveryTracePage({
   const auxAll = features.filter((f) => AUX_SOURCES.has(f.source || ""));
   const auxTraces = auxAll.filter((f) => !isRepairTrace(f.id));
   const repairCount = auxAll.length - auxTraces.length;
-  const [selected, setSelected] = useState<string>(primaryFeatures[0]?.id ?? features[0]?.id ?? "");
+  const [selected, setSelected] = useState<string>(() => {
+    const deepLink = deliveryFeatureDeepLink();
+    return features.some((feature) => feature.id === deepLink)
+      ? deepLink
+      : primaryFeatures[0]?.id ?? features[0]?.id ?? "";
+  });
+  const selectFeature = useCallback((featureId: string) => {
+    setSelected(featureId);
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    params.set("feature", featureId);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}?${params.toString()}${window.location.hash}`,
+    );
+  }, []);
   const selectedFeature = features.find((f) => f.id === selected) ?? null;
   const selectedIsAux = AUX_SOURCES.has(selectedFeature?.source || "");
   const [trace, setTrace] = useState<DeliveryTrace | null>(null);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [cursorStatus, setCursorStatus] = useState("snapshot");
-  // Runs reuses workflow_graph for Stage Heatmap; the same response provides
-  // the delivery-page cost fallback when the light snapshot has no agent_live.
-  const [workflowGraph, setWorkflowGraph] = useState<WorkflowGraph | null>(null);
-  const [fallbackUsd, setFallbackUsd] = useState(0);
-  useEffect(() => {
-    const needsWorkflowGraph = mode === "trace" || totalUsd <= 0;
-    if (!projectId || !needsWorkflowGraph) {
-      setWorkflowGraph(null);
-      setFallbackUsd(0);
-      return;
-    }
-    setWorkflowGraph(null);
-    if (totalUsd <= 0) setFallbackUsd(0);
-    let cancelled = false;
-    getWorkflowGraph(projectId)
-      .then((g) => {
-        if (cancelled) return;
-        setWorkflowGraph(g);
-        const sum = (g?.nodes ?? []).reduce((acc, node) => {
-          const cost = (node as { cost_usd?: number | null }).cost_usd;
-          return acc + (typeof cost === "number" ? cost : 0);
-        }, 0);
-        setFallbackUsd(sum);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setWorkflowGraph(null);
-        setFallbackUsd(0);
-      });
-    return () => { cancelled = true; };
-  }, [mode, projectId, totalUsd]);
-  const heroUsd = totalUsd > 0 ? totalUsd : fallbackUsd;
+  const heroUsd = totalUsd;
   const lastEventIdRef = useRef("");
   const lastLiveSeqRef = useRef(0);
+  const liveEventsRef = useRef(liveEvents);
+  liveEventsRef.current = liveEvents;
+  const dirtyWhileHiddenRef = useRef(false);
+  const liveRefreshTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const pendingRefreshRef = useRef<"poll" | "live" | null>(null);
+  const traceAbortRef = useRef<AbortController | null>(null);
+  const traceInFlightRef = useRef(false);
+  const traceRequestScopeRef = useRef("");
+  const refreshTraceRef = useRef<(mode: "initial" | "poll" | "live", resetCursor?: boolean) => void>(() => undefined);
   const traceRequestGateRef = useRef(new LatestRequestGate());
-  const traceTaskIds = useMemo(() => new Set((trace?.execution_graph?.nodes ?? []).map((node) => node.task_id).filter(Boolean)), [trace]);
+  const refreshScope = useMemo(() => deliveryRefreshScope(trace, selected), [selected, trace]);
 
-  const applyTrace = (t: DeliveryTrace, mode: "initial" | "poll" | "live") => {
+  const applyTrace = useCallback((t: DeliveryTrace, refreshMode: "initial" | "poll" | "live") => {
     setTrace(t);
     lastEventIdRef.current = t.cursor?.last_event_id || lastEventIdRef.current;
     const deltaCount = t.cursor?.new_event_count ?? t.deltas?.length ?? 0;
     const degraded = t.cursor?.degraded;
     if (degraded) {
       setCursorStatus("cursor degraded");
-    } else if (mode === "poll") {
+    } else if (refreshMode === "poll") {
       setCursorStatus(deltaCount ? `${deltaCount} updates` : "live");
-    } else if (mode === "live") {
+    } else if (refreshMode === "live") {
       setCursorStatus(deltaCount ? `${deltaCount} live updates` : "live");
     } else {
       setCursorStatus(t.cursor?.last_event_id ? "cursor ready" : "snapshot");
     }
-  };
+  }, []);
+
+  const refreshTrace = useCallback((refreshMode: "initial" | "poll" | "live", resetCursor = false) => {
+    if (!selected || !projectId) return;
+    const scope = `${projectId}::${selected}::${mode}`;
+    if (traceInFlightRef.current && traceRequestScopeRef.current === scope) {
+      pendingRefreshRef.current = refreshMode === "live"
+        ? "live"
+        : pendingRefreshRef.current ?? "poll";
+      return;
+    }
+    const controller = new AbortController();
+    traceAbortRef.current = controller;
+    traceInFlightRef.current = true;
+    traceRequestScopeRef.current = scope;
+    const ticket = traceRequestGateRef.current.issue();
+    const since = resetCursor ? undefined : lastEventIdRef.current || undefined;
+    void getDeliveryTrace(selected, projectId, since, {
+      bypassCache: true,
+      // StrictMode may subscribe twice to the initial resource. Let that read
+      // use query-client single-flight; later live/poll work remains owned and
+      // abortable when its scope changes.
+      signal: refreshMode === "initial" ? undefined : controller.signal,
+      view: mode === "trace" ? "runs" : mode,
+    })
+      .then((nextTrace) => {
+        if (!traceRequestGateRef.current.isCurrent(ticket)) return;
+        applyTrace(nextTrace, refreshMode);
+        setError("");
+        setLoading(false);
+      })
+      .catch((requestError: unknown) => {
+        if (isCancelledDeliveryRequest(requestError) || !traceRequestGateRef.current.isCurrent(ticket)) return;
+        const message = requestError instanceof Error ? requestError.message : String(requestError);
+        if (refreshMode === "initial") setError(message);
+        else setCursorStatus(`${refreshMode} error: ${message}`);
+        setLoading(false);
+      })
+      .finally(() => {
+        if (traceAbortRef.current !== controller) return;
+        traceAbortRef.current = null;
+        if (traceRequestScopeRef.current !== scope) return;
+        traceInFlightRef.current = false;
+        const pending = pendingRefreshRef.current;
+        pendingRefreshRef.current = null;
+        if (!pending) return;
+        if (document.visibilityState !== "visible") {
+          dirtyWhileHiddenRef.current = true;
+          return;
+        }
+        window.setTimeout(() => {
+          if (traceRequestScopeRef.current === scope) refreshTraceRef.current(pending);
+        }, 0);
+      });
+  }, [applyTrace, mode, projectId, selected]);
+  refreshTraceRef.current = refreshTrace;
 
   useEffect(() => {
     if (features.length && !features.some((f) => f.id === selected)) {
-      setSelected(primaryFeatures[0]?.id ?? features[0].id);
+      const deepLink = deliveryFeatureDeepLink();
+      selectFeature(
+        features.some((feature) => feature.id === deepLink)
+          ? deepLink
+          : primaryFeatures[0]?.id ?? features[0].id,
+      );
     }
-  }, [features, primaryFeatures, selected]);
+  }, [features, primaryFeatures, selectFeature, selected]);
 
   useEffect(() => {
-    if (!selected) {
+    if (!selected || !projectId) {
       setTrace(null);
+      setLoading(false);
       return;
     }
-    let cancelled = false;
-    let timer: ReturnType<typeof window.setInterval> | undefined;
     traceRequestGateRef.current.invalidate();
+    traceAbortRef.current?.abort();
+    traceAbortRef.current = null;
+    traceInFlightRef.current = false;
+    pendingRefreshRef.current = null;
+    const scope = `${projectId}::${selected}::${mode}`;
+    traceRequestScopeRef.current = scope;
+    if (liveRefreshTimerRef.current !== null) {
+      window.clearTimeout(liveRefreshTimerRef.current);
+      liveRefreshTimerRef.current = null;
+    }
+    dirtyWhileHiddenRef.current = false;
     lastEventIdRef.current = "";
+    lastLiveSeqRef.current = liveEventsRef.current.reduce(
+      (latest, event) => Math.max(latest, Number(event.seq ?? 0)),
+      0,
+    );
+    // Never render a previous feature/view projection under the newly selected
+    // route while its bounded v2 request is pending or has failed.
+    setTrace(null);
     setLoading(true);
     setError("");
-    const initialTicket = traceRequestGateRef.current.issue();
-    getDeliveryTrace(selected, projectId || undefined)
-      .then((t) => {
-        if (!cancelled && traceRequestGateRef.current.isCurrent(initialTicket)) {
-          applyTrace(t, "initial");
-          setLoading(false);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled && traceRequestGateRef.current.isCurrent(initialTicket)) {
-          setError(String(e?.message ?? e));
-          setLoading(false);
-        }
-      });
-    timer = window.setInterval(() => {
-      const since = lastEventIdRef.current;
-      if (!since) return;
-      const ticket = traceRequestGateRef.current.issue();
-      getDeliveryTrace(selected, projectId || undefined, since)
-        .then((t) => {
-          if (!cancelled && traceRequestGateRef.current.isCurrent(ticket)) {
-            applyTrace(t, "poll");
-            setLoading(false);
-          }
-        })
-        .catch((e) => {
-          if (!cancelled && traceRequestGateRef.current.isCurrent(ticket)) {
-            setCursorStatus(`poll error: ${String(e?.message ?? e)}`);
-            setLoading(false);
-          }
-        });
-    }, 5000);
+    // React StrictMode probes effects twice in development. Deferring one
+    // task lets the probe cleanup cancel before any duplicate request starts.
+    const initialRequestTimer = window.setTimeout(() => {
+      if (traceRequestScopeRef.current === scope) {
+        refreshTrace("initial", true);
+      }
+    }, 0);
     return () => {
-      cancelled = true;
+      window.clearTimeout(initialRequestTimer);
       traceRequestGateRef.current.invalidate();
-      if (timer) window.clearInterval(timer);
+      traceAbortRef.current?.abort();
+      traceAbortRef.current = null;
+      traceInFlightRef.current = false;
+      pendingRefreshRef.current = null;
+      if (traceRequestScopeRef.current === scope) {
+        traceRequestScopeRef.current = "";
+      }
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+        liveRefreshTimerRef.current = null;
+      }
     };
-  }, [selected, projectId]);
+  }, [mode, projectId, refreshTrace, selected]);
+
+  useEffect(() => {
+    if (!selected || !projectId) return undefined;
+    const reconcile = () => {
+      if (shouldReconcileDelivery(liveState, document.visibilityState, refreshScope)) {
+        refreshTrace("poll");
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        if (liveRefreshTimerRef.current !== null) {
+          window.clearTimeout(liveRefreshTimerRef.current);
+          liveRefreshTimerRef.current = null;
+          dirtyWhileHiddenRef.current = true;
+        }
+        return;
+      }
+      if (dirtyWhileHiddenRef.current) {
+        dirtyWhileHiddenRef.current = false;
+        refreshTrace("live");
+        return;
+      }
+      reconcile();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    const interval = deliveryReconcileInterval(liveState, refreshScope);
+    const timer = interval !== null
+      ? window.setInterval(reconcile, interval)
+      : undefined;
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [liveState, projectId, refreshScope.taskIdsTruncated, refreshTrace, selected]);
 
   useEffect(() => {
     if (!selected || !liveEvents.length) return;
-    const event = liveEvents.find((candidate) => isDeliveryLiveEvent(candidate, selected, traceTaskIds));
+    const event = liveEvents
+      .filter((candidate) => isDeliveryRefreshEvent(candidate, refreshScope))
+      .sort((left, right) => Number(right.seq ?? 0) - Number(left.seq ?? 0))[0];
     const seq = Number(event?.seq ?? 0);
     if (!event || !seq || seq <= lastLiveSeqRef.current) return;
     lastLiveSeqRef.current = seq;
-    const since = lastEventIdRef.current;
-    const ticket = traceRequestGateRef.current.issue();
-    getDeliveryTrace(selected, projectId || undefined, since || undefined)
-      .then((t) => {
-        if (!traceRequestGateRef.current.isCurrent(ticket)) return;
-        applyTrace(t, "live");
-        setLoading(false);
-      })
-      .catch((e) => {
-        if (!traceRequestGateRef.current.isCurrent(ticket)) return;
-        setCursorStatus(`live error: ${String(e?.message ?? e)}`);
-        setLoading(false);
-      });
-  }, [liveEvents, projectId, selected, traceTaskIds]);
+    if (document.visibilityState !== "visible") {
+      dirtyWhileHiddenRef.current = true;
+      return;
+    }
+    if (liveRefreshTimerRef.current !== null) window.clearTimeout(liveRefreshTimerRef.current);
+    liveRefreshTimerRef.current = window.setTimeout(() => {
+      liveRefreshTimerRef.current = null;
+      refreshTrace("live");
+    }, DELIVERY_LIVE_COALESCE_MS);
+  }, [liveEvents, projectId, refreshScope, refreshTrace, selected]);
 
   const pageTitle = mode === "trace" ? "Runs" : mode === "graph" ? "Graph" : "Delivery";
   const pageSubtitle = mode === "trace"
-    ? "run state, spans, and stage quality"
+    ? "run state, task lifecycle, and evidence"
     : mode === "graph"
-      ? "coverage, work, and diagnostics"
+      ? "goal-to-claim-to-task coverage"
       : "feature delivery cockpit";
 
   return (
@@ -359,7 +460,7 @@ export function DeliveryTracePage({
               type="button"
               className={`tab-button ${feature.id === selected ? "active" : ""}`}
               title={feature.id}
-              onClick={() => setSelected(feature.id)}
+              onClick={() => selectFeature(feature.id)}
             >
               {featureChipLabel(feature)}
             </button>
@@ -378,7 +479,7 @@ export function DeliveryTracePage({
                         key={f.id}
                         type="button"
                         className={`dt-trace-overflow-item ${f.id === selected ? "active" : ""}`}
-                        onClick={() => setSelected(f.id)}
+                        onClick={() => selectFeature(f.id)}
                       >
                         {auxTraceLabel(f.id)}
                       </button>
@@ -414,6 +515,7 @@ export function DeliveryTracePage({
         const driftLabel = driftParts.length ? driftParts.join(" · ") : "ok";
         const driftTone = driftErr ? "error" : driftWarn ? "warn" : dtTone(trace.drift_report.status);
         const flow = flowRollup(trace.flow_metrics);
+        const shipEvaluated = !["", "unknown", "summary_only", "not_evaluated"].includes(trace.ship.status);
         return (
         <div className="delivery-trace-body">
           <section className="delivery-cockpit-hero" data-testid="delivery-cockpit-hero">
@@ -433,14 +535,16 @@ export function DeliveryTracePage({
                     [{trace.workflow_archetype}]
                   </span>
                 )}
-                <button
-                  type="button"
-                  className="dt-trace-chip"
-                  title="copy trace id"
-                  onClick={() => { void navigator.clipboard?.writeText(trace.trace_id); }}
-                >
-                  {trace.trace_id} ⧉
-                </button>
+                {trace.trace_id ? (
+                  <button
+                    type="button"
+                    className="dt-trace-chip"
+                    title="copy legacy delivery trace id"
+                    onClick={() => { void navigator.clipboard?.writeText(trace.trace_id); }}
+                  >
+                    {trace.trace_id} ⧉
+                  </button>
+                ) : null}
               </div>
             </div>
             <div className="delivery-cockpit-metrics" aria-label="Delivery status summary">
@@ -463,10 +567,12 @@ export function DeliveryTracePage({
                   {metricValue(activeGate, dtTone(activeGate))}
                 </div>
               )}
-              <div className="delivery-cockpit-metric">
-                <span>Ship</span>
-                {metricValue(trace.ship.status, dtTone(trace.ship.status))}
-              </div>
+              {shipEvaluated ? (
+                <div className="delivery-cockpit-metric">
+                  <span>Ship</span>
+                  {metricValue(trace.ship.status, dtTone(trace.ship.status))}
+                </div>
+              ) : null}
               {heroDuration(trace) && (
                 <div className="delivery-cockpit-metric" data-testid="dt-duration">
                   <span>Duration</span>
@@ -545,8 +651,6 @@ export function DeliveryTracePage({
             <DeliveryOverview trace={trace} repairCount={repairCount} onOpenPage={onOpenPage} />
           ) : mode === "graph" ? (
             <DeliveryMapView
-              feature={selectedFeature ?? null}
-              onOpenPage={onOpenPage}
               onSelectTask={onSelectTask}
               projectId={projectId}
               trace={trace}
@@ -556,7 +660,6 @@ export function DeliveryTracePage({
               onOpenPage={onOpenPage}
               projectId={projectId}
               trace={trace}
-              workflowGraph={workflowGraph}
             />
           )}
 
@@ -572,17 +675,6 @@ export function DeliveryTracePage({
       })()}
     </div>
   );
-}
-
-function isDeliveryLiveEvent(event: RecentEvent, featureId: string, taskIds: Set<string>): boolean {
-  const type = event.type || "";
-  if (!/^(task|feature|fanout|workflow|run|ship|review|test|judge|candidate)\./.test(type)) return false;
-  const payload = event.payload ?? {};
-  const payloadFeature = String(payload.feature_id || payload.pdd_id || "");
-  if (payloadFeature && payloadFeature !== featureId) return false;
-  const taskId = String(event.task_id || payload.task_id || "");
-  if (taskIds.size && taskId && !taskIds.has(taskId)) return false;
-  return true;
 }
 
 function DeliveryEmptyCockpit({ onOpenPage }: { onOpenPage?: DeliveryTracePageProps["onOpenPage"] }) {
@@ -619,12 +711,10 @@ function DeliveryEmptyCockpit({ onOpenPage }: { onOpenPage?: DeliveryTracePagePr
         </div>
       </div>
       <div className="delivery-main-tabs delivery-empty-tabs" aria-hidden="true">
-        {["Run", "Spans"].map((label, index) => (
-          <span key={label} className={`delivery-main-tab ${index === 0 ? "active" : ""}`}>
-            <span>{label}</span>
-            <small>{index === 0 ? "pending" : "empty"}</small>
-          </span>
-        ))}
+        <span className="delivery-main-tab active">
+          <span>Run</span>
+          <small>pending</small>
+        </span>
       </div>
       <div className="delivery-flow-workbench delivery-flow-layout-empty" aria-hidden="true">
         <section className="delivery-stage-line-panel">

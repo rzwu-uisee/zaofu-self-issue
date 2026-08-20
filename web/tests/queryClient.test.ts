@@ -79,6 +79,70 @@ async function testBypassCacheStillSharesInFlightRequest(): Promise<void> {
   assert(calls === 2, "a later bypass request must not reuse the completed cached response");
 }
 
+async function testCallerAbortDoesNotCancelOrEvictSharedRequest(): Promise<void> {
+  clearGetCache();
+  let calls = 0;
+  let releaseShared: (() => void) | undefined;
+  const sharedGate = new Promise<void>((resolve) => {
+    releaseShared = resolve;
+  });
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    if (!init?.signal) {
+      await sharedGate;
+      return new Response(JSON.stringify({ kind: "shared" }), { status: 200 });
+    }
+    return await new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener("abort", () => {
+        reject(new DOMException("cancelled", "AbortError"));
+      }, { once: true });
+    });
+  }) as typeof fetch;
+
+  const shared = cachedGetJson<{ kind: string }>("/api/projects/p/delivery-traces/F-1", {
+    ttlMs: 2000,
+  });
+  const controller = new AbortController();
+  const owned = cachedGetJson<{ kind: string }>("/api/projects/p/delivery-traces/F-1", {
+    bypassCache: true,
+    signal: controller.signal,
+    ttlMs: 2000,
+  });
+  assert(calls === 2, "a caller-owned signal must not share another consumer's promise");
+  controller.abort();
+  await owned.catch((error: unknown) => {
+    assert(error instanceof DOMException && error.name === "AbortError", "aborted request should reject with AbortError");
+  });
+  assert(cacheStats().inFlight === 1, "aborting an owned request must keep the shared request registered");
+  releaseShared?.();
+  const result = await shared;
+  assert(result.kind === "shared", "the shared request should still complete");
+  assert(cacheStats().inFlight === 0, "completed shared request should clear its registration");
+}
+
+async function testCallerOwnedRequestDoesNotReadOrWriteSharedCache(): Promise<void> {
+  clearGetCache();
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ calls }), { status: 200 });
+  }) as typeof fetch;
+
+  const path = "/api/projects/p/delivery-traces/F-2";
+  const seeded = await cachedGetJson<{ calls: number }>(path, { ttlMs: 2000 });
+  assert(seeded.calls === 1, "shared request should seed the cache");
+  const owned = await cachedGetJson<{ calls: number }>(path, {
+    signal: new AbortController().signal,
+    ttlMs: 2000,
+  });
+  assert(owned.calls === 2, "caller-owned request must bypass a shared cached response");
+  const cached = await cachedGetJson<{ calls: number }>(path, { ttlMs: 2000 });
+  assert(cached.calls === 1, "caller-owned response must not overwrite the shared cache");
+  assert(calls === 2, `expected two network requests, got ${calls}`);
+}
+
 await testSingleFlightAndTtlCache();
 await testPrefixInvalidation();
 await testBypassCacheStillSharesInFlightRequest();
+await testCallerAbortDoesNotCancelOrEvictSharedRequest();
+await testCallerOwnedRequestDoesNotReadOrWriteSharedCache();

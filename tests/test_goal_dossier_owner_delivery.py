@@ -315,7 +315,7 @@ def test_completed_terminal_materializes_receipt_and_owner_request_once(
     assert composite["factual"]["dossier_ref"] == payload["dossier_ref"]
     assert composite["narrative_status"] == "degraded"
     assert payload["web_deep_link"].startswith(
-        "/?page=observability&obs_tab=runs"
+        "/?page=runs&run_id="
     )
     materialized = json.loads((
         projection_dir / "goal-dossier.v1.json"
@@ -1060,7 +1060,7 @@ def test_inbox_uses_same_dossier_owner_summary(tmp_path: Path) -> None:
     assert inbox["summary"]["noise_pending"] == 0
     assert inbox["summary"]["notification_pending"] == 1
     assert projected["summary"] == owner_summary["summary"]
-    assert projected["deep_link"].startswith("/?page=observability")
+    assert projected["deep_link"].startswith("/?page=runs&run_id=")
 
     transport = MockFeishuTransport()
     delivered = deliver_owner_visible_messages_once(

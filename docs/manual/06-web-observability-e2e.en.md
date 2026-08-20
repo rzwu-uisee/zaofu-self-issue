@@ -90,39 +90,55 @@ Monitoring **Delivery** is Feature-scoped and has three modes:
 
 | Mode | Question answered |
 |---|---|
-| Overview | current ship readiness, Task/Run/Loop summary, and primary blocker |
-| Runs | stage heatmap, Run graph, attempts, spans, and fanout/fan-in progress |
-| Graph | connections among Goal, Task, stage, dependency, and evidence |
+| Overview | current ship readiness, Task/Run summary, and primary blocker |
+| Runs | Run graph progress plus Task attempts, gates, events, evidence, and regression actions |
+| Graph | whether Goal -> Claim -> canonical Task is closed across Plan, Implementation, Verification, and Closure, including Gaps/currentness |
 
 Select the correct Feature, then inspect status/ship/drift/replan. In Runs, transport delivery, Worker
-result, gate verdict, and closure are separate lifecycle points. Graph reveals broken links; node count is
-not a quality measure.
+result, gate verdict, and closure are separate lifecycle points. Runs is one Run + Inspector workbench; it
+does not duplicate a Stage Heatmap or delivery-synthetic Span waterfall. Graph is one lightweight coverage
+surface, and node count is not a quality measure. Use `Traces` for a Span Tree/Waterfall; Runs exposes that
+handoff only for a verified canonical Trace reference.
+
+Overview evaluates ship readiness through the existing graph/drift/ship
+projection. Runs reports ship as `not_evaluated / summary_only` and never infers
+ready from all Tasks being done. Delivery v2 does not provide a Latest Loop
+summary; open the top-level `Loop` surface for behavior/evaluation/improvement.
 
 Goal Dossier summarizes Goal -> Claim -> Task -> Evidence -> Verdict. Before closure, inspect mandatory
 Claim coverage, terminal Tasks, missing evidence, current generation, and owner decisions.
 
-## 6. Loop and Observability
+## 6. Loop, Traces, and Operations
 
 **Loop** shows convergence through plan/execute/verify/rework, GAN/critic, recovery, autoresearch, or other
 profile-defined loops. Check whether each round reduces the gap, adds evidence, or crosses a no-progress,
 budget, or replan boundary.
 
-**Observability** is for low-level diagnosis:
+Loop owns only its scoped projection; opening it does not fetch the Delivery feature list. For a Task with
+many attempts, the drawer shows the first 100 and expands through **Load more**. Counts, Timeline, the
+Completion Promise, and Business Loops still use the complete projection rather than treating the visible
+window as complete history. Semantic events invalidate the view through a bounded refresh, while mechanical
+heartbeat/tick pump events do not issue page requests.
 
-| Tab | Use |
-|---|---|
-| Traces | find causation by Task/actor/type/status/duration |
-| Events | inspect append-only occurrences and sequence windows |
-| Event Logs | inspect EventLog-derived semantic audit logs |
-| Runtime Logs | inspect redacted process, transport, and sidecar diagnostics |
-| Operations | inspect provider capability, OTLP exporter, SSE, and runtime health |
-| Runs / Fanouts | inspect Run, child, barrier, and aggregation state |
-| Candidates / Repair | inspect diagnostic candidates and controlled repair proposals |
-| Integration | inspect Feishu/external projection queues and failures |
-| Raw | inspect source projection payload when needed |
+**Traces** is the canonical low-level causation surface. Filter the bounded list by Task, actor, status,
+duration, role, or backend; selecting a row then reads bounded detail and lifecycle spans in parallel. The
+wide viewer presents sourced Span Tree/Waterfall data and a selected-span Inspector before ZaoFu's
+Execution Route and Event evidence. Raw remains lazy inside selected evidence. Current spans come only
+from allowlisted kernel/runtime started-to-terminal lifecycle pairs and carry source, truth class, coverage,
+and degradation metadata. Events, stages, causation links, and Delivery synthetic spans are never relabeled
+as provider-native LLM/tool spans. A trace without a trustworthy pair explains its coverage and falls back
+to Execution/Events. A direct `?page=traces&project=...&trace_id=...&span_id=...` link stays project scoped
+and does not bootstrap the full dashboard snapshot first. A focused item resolves spans outside the initial
+bounded window in that same response; **Load earlier spans** expands history through the bound cursor.
 
-Use Tasks, Delivery, and Goal Dossier for normal acceptance. Use Observability to explain why execution did
-not continue or which attempt/projection failed.
+Events, Event Logs, Runs, Fanouts, Candidates, Integration, and Repair remain low-frequency compatibility
+diagnostics. Operations still shows provider capability, OTLP exporter, SSE, and runtime health and remains
+reachable through `?page=observability&obs_tab=operations`. Runtime Logs no longer has a standalone Web
+panel, while its redacted rotating store and bounded HTTP API remain. Raw is expanded only inside a selected
+object detail.
+
+Use Tasks, Delivery, and Goal Dossier for normal acceptance. Use Traces/Operations to explain why execution
+did not continue or which attempt/projection failed.
 
 ### Optional OTLP, Provider telemetry, and Operations
 
@@ -148,7 +164,7 @@ Provide endpoint/header values only through controlled runtime environment varia
 Bearer tokens, or header JSON to YAML, events, or screenshots. Operations shows health, backlog, last
 success/failure, sampling/drop/redaction counters, and the SSE-gap summary. The exporter emits redacted
 ZaoFu synthetic spans only; it does not query provider raw waterfalls in the Web UI and cannot change a
-Delivery Graph, Gate, or Task state. For the complete operations path, metrics token gate, Runtime Logs,
+Delivery Graph, Gate, or Task state. For the complete operations path, metrics token gate, Runtime Logs API,
 Provider support matrix, canary, and rollback, see
 [Metrics, Observability, and Operations](21-metrics-observability-operations.en.md) and
 [Provider Native Telemetry and OTLP](22-provider-native-telemetry.en.md).

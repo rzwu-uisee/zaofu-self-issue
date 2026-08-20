@@ -35,19 +35,146 @@
   color: var(--text);
 }
 
-.delivery-map-work,
-.delivery-map-diagnostics {
+.delivery-map-resource-state {
+  min-height: 180px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.delivery-map-resource-state.tone-error {
+  color: var(--err);
+}
+
+.delivery-map-loading-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid color-mix(in oklab, var(--brand) 22%, var(--line));
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: delivery-map-loading-spin 0.8s linear infinite;
+}
+
+@keyframes delivery-map-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .delivery-map-loading-spinner {
+    animation: none;
+  }
+}
+
+.delivery-work-progressive {
   min-width: 0;
   min-height: 0;
   flex: 1;
-  padding: 12px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
 
-.delivery-map-empty {
-  min-height: 240px;
+.delivery-work-goal-picker {
   display: grid;
-  place-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in oklab, var(--surface) 42%, var(--panel));
+}
+
+.delivery-work-goal-picker > header,
+.delivery-work-goal-picker label,
+.delivery-work-goal-picker label > span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.delivery-work-goal-picker > header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.delivery-work-goal-picker > header > div,
+.delivery-work-goal-picker label > span {
+  display: grid;
+  gap: 3px;
+}
+
+.delivery-work-goal-picker h3,
+.delivery-work-goal-picker p {
+  margin: 0;
+}
+
+.delivery-work-goal-picker h3 {
+  font-size: var(--text-14);
+}
+
+.delivery-work-goal-picker fieldset {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.delivery-work-goal-picker legend {
+  width: 1px;
+  height: 1px;
+  position: absolute;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.delivery-work-goal-picker label {
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.delivery-work-goal-picker label.is-selected {
+  border-color: color-mix(in oklab, var(--brand) 62%, var(--line));
+  background: color-mix(in oklab, var(--brand) 7%, var(--panel));
+}
+
+.delivery-work-goal-picker label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.delivery-work-goal-picker input {
+  accent-color: var(--brand);
+}
+
+.delivery-work-goal-picker label > span:first-of-type {
+  flex: 1;
+}
+
+.delivery-work-goal-picker label > span:last-of-type {
+  justify-items: end;
+  text-align: right;
+}
+
+.delivery-work-goal-picker label strong,
+.delivery-work-goal-picker label small {
+  overflow-wrap: anywhere;
+}
+
+.delivery-work-goal-empty {
   color: var(--text-tertiary);
   font-size: var(--text-12);
 }
@@ -431,19 +558,6 @@
   font-size: var(--text-10);
 }
 
-.goal-coverage-open-work {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--brand);
-  font-size: var(--text-10);
-  cursor: pointer;
-}
-
-.goal-coverage-open-work:hover {
-  text-decoration: underline;
-}
-
 .goal-coverage-status {
   max-width: 100%;
   display: inline-flex;
@@ -564,23 +678,6 @@
   margin: 0;
 }
 
-.goal-coverage-inspector-action {
-  width: calc(100% - 28px);
-  min-height: 30px;
-  margin: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: var(--text-11);
-  cursor: pointer;
-}
-
-.goal-coverage-inspector-action:hover {
-  border-color: color-mix(in oklab, var(--brand) 48%, var(--line));
-  color: var(--brand);
-}
-
 .goal-coverage-inspector-section {
   min-width: 0;
   padding: 11px 14px;
@@ -692,9 +789,13 @@ button.goal-coverage-inspector-row:not(:disabled):hover span:first-child {
     flex: 0 0 auto;
   }
 
-  .delivery-map-work,
-  .delivery-map-diagnostics {
-    padding: 8px;
+  .delivery-work-goal-picker > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .delivery-work-goal-picker fieldset {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .goal-coverage-page,

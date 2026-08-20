@@ -274,8 +274,8 @@ capabilities:
       - src/zf/runtime/operations_metrics.py
       - src/zf/runtime/otlp_exporter.py
       - src/zf/runtime/observability_alerts.py
+      - src/zf/web/observability.py
       - web/src/components/observability/OperationsPanel.tsx
-      - web/src/components/observability/RuntimeLogsPanel.tsx
     tests:
       - tests/test_provider_telemetry.py
       - tests/test_otlp_exporter.py
@@ -283,7 +283,7 @@ capabilities:
       - tests/test_web_operations_observability.py
     release:
       activation: Opt in through observability config using environment-variable names only; run the runtime tick for exporter/attention work and Web for readback.
-      readback: Inspect Operations capability/exporter health, redacted Runtime Logs, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
+      readback: Inspect Operations capability/exporter health, the bounded redacted Runtime Logs API, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
       rollback: Disable the relevant observability block in a new runtime generation and retain projections/logs/cursor for audit; never mutate Task/Event/Delivery truth.
       authority: Provider telemetry, logs, metrics, exporter, and alerts are diagnostic projections. They cannot write canonical stores, dispatch providers, or decide a gate/verdict.
 
@@ -324,7 +324,7 @@ capabilities:
       - tests/test_goal_coverage_graph.py
     release:
       activation: Bind mandatory Goal Claims to Task Map tasks, verification producers, and verdict evidence.
-      readback: Inspect missing/orphan Claims, producer coverage, closure status, and generation freshness.
+      readback: In Delivery Graph, inspect each Claim's covering canonical Tasks, Plan/Implementation/Verification/Closure axes, open Gaps, and generation freshness on the single lightweight coverage surface.
       rollback: Correct the source Task Map/Claim generation and rebuild the graph projection.
       authority: Coverage is derived from canonical contracts and evidence; a green visualization cannot waive missing mandatory proof.
 

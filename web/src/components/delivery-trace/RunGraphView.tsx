@@ -2,7 +2,7 @@
 // 纯 DOM + CSS grid(主链 ≤8 节点、组内 ≤6 children,不引第三方布局库):
 // 主链圆角节点、fanout TaskGroup 容器(⊞/⊟)、gate 加重边、backedge 虚线回边、
 // task_map_history ▒ ghost。颜色全走 styles.css token(与看板列 tone 同源)。
-// T-刀①/①.5/②: id 检索框、seq 锚、双时长、sched-delay、lane pool strip、
+// T-刀①/②: id 检索框、seq 锚、双时长、sched-delay、
 // ⛓ causation 回放(命中链高亮 rg-causal-path,其余降透明度,ESC 退出)。
 import { Fragment, useEffect, useMemo, useState } from "react";
 
@@ -13,16 +13,19 @@ import type {
   DeliveryTaskLifecycleEntry,
   DeliveryTrace,
   DeliveryTraceNode,
-  OverviewPulse,
   TaskMapHistoryEntry,
 } from "../../api/types";
 import { formatSeconds } from "../common/SegBar";
 import { seqRangeLabel } from "./DeliveryTraceViewUtils";
-import { RunGraphPoolStrip } from "./RunGraphPoolStrip";
+import {
+  lifecycleProjectionNotice,
+  runChainProjectionNotice,
+  runChainSearchMissLabel,
+  taskRgState,
+  type RunGraphState,
+} from "./runGraphState";
 
-type RgState =
-  | "none" | "ready" | "queued" | "running" | "done"
-  | "failed" | "blocked" | "retry" | "superseded";
+type RgState = RunGraphState;
 
 const RG_GLYPH: Record<RgState, string> = {
   none: "□", ready: "▦", queued: "▤", running: "◐", done: "■",
@@ -47,17 +50,6 @@ function humanizeStage(type: string): string {
   return rest.map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join(" ");
 }
 
-const LIFECYCLE_TO_RG: Record<string, RgState> = {
-  backlog: "none", ready: "ready", queued: "queued", running: "running",
-  verify: "running", done: "done", failed: "failed", blocked: "blocked",
-};
-
-const NODE_STATUS_TO_RG: Record<string, RgState> = {
-  done: "done", cancelled: "done",
-  in_progress: "running", review: "running", test: "running", judge: "running", dispatched: "running",
-  rework: "retry", blocked: "blocked", failed: "failed", ready: "ready",
-};
-
 function clock(ts?: string | null): string {
   if (!ts) return "—";
   const date = new Date(ts);
@@ -72,21 +64,6 @@ function durBetween(from?: string | null, to?: string | null): string | null {
   const end = new Date(to).getTime();
   if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
   return formatSeconds((end - start) / 1000);
-}
-
-// Display state of one task: lifecycle history first (retry = on try ≥2 and
-// not yet terminal), then execution-graph status as degraded fallback.
-function taskRgState(entry?: DeliveryTaskLifecycleEntry, node?: DeliveryTraceNode): RgState {
-  if (node?.superseded) return "superseded";
-  const history = entry?.state_history ?? [];
-  const tries = entry?.tries ?? [];
-  const last = history[history.length - 1]?.state ?? "";
-  if (tries.length >= 2 && tries[tries.length - 1]?.outcome === "in_flight"
-    && !["done", "failed", "blocked"].includes(last)) {
-    return "retry";
-  }
-  if (last && LIFECYCLE_TO_RG[last]) return LIFECYCLE_TO_RG[last];
-  return NODE_STATUS_TO_RG[node?.actual.status ?? ""] ?? "none";
 }
 
 function stageAggState(stage: DeliveryRunChainStage, states: RgState[]): RgState {
@@ -123,7 +100,6 @@ interface RunGraphViewProps {
   onCausalChange?: (value: CausalState | null) => void;
   onSelectTask?: (taskId: string) => void;
   projectId?: string;
-  pulse?: OverviewPulse | null;
   trace: DeliveryTrace;
 }
 
@@ -132,7 +108,6 @@ export function RunGraphView({
   onCausalChange,
   onSelectTask,
   projectId,
-  pulse,
   trace,
 }: RunGraphViewProps) {
   const chain = trace.run_chain;
@@ -151,6 +126,9 @@ export function RunGraphView({
     [trace],
   );
   const lifecycleTasks = trace.task_lifecycle?.tasks ?? {};
+  const taskStatuses = trace.task_lifecycle?.task_statuses ?? {};
+  const lifecycleNotice = lifecycleProjectionNotice(trace.task_lifecycle);
+  const runChainNotice = runChainProjectionNotice(chain);
   const metricsByTask = trace.flow_metrics?.tasks ?? {};
 
   // T-刀① item 5 — sched-delay: trigger.ts → earliest dispatched_at over tries.
@@ -271,7 +249,12 @@ export function RunGraphView({
   };
 
   const stageStates = stages.map((stage) =>
-    stage.task_ids.map((tid) => taskRgState(lifecycleTasks[tid], nodeByTask.get(tid))));
+    stage.task_ids.map((tid) => taskRgState(
+      lifecycleTasks[tid],
+      nodeByTask.get(tid),
+      taskStatuses[tid],
+      Boolean(trace.task_lifecycle?.task_statuses_truncated && !taskStatuses[tid]),
+    )));
   const stageAggs = stages.map((stage, idx) => stageAggState(stage, stageStates[idx]));
   // Rx5 — 图例按需:只列图中实际出现的状态(stage 聚合态 + 组内 task 态);
   // ≤1 项时整行不渲染(无可分辨信息)。
@@ -339,7 +322,11 @@ export function RunGraphView({
               if (event.key === "Enter") runSearch();
             }}
           />
-          {searchMiss && <span className="rg-search-miss" data-testid="rg-search-miss">not in this feature</span>}
+          {searchMiss && (
+            <span className="rg-search-miss" data-testid="rg-search-miss">
+              {runChainSearchMissLabel(chain)}
+            </span>
+          )}
         </span>
       </div>
       {presentStates.length > 1 && (
@@ -351,7 +338,16 @@ export function RunGraphView({
           ))}
         </div>
       )}
-      <RunGraphPoolStrip nodes={trace.execution_graph?.nodes ?? []} pulse={pulse} />
+      {lifecycleNotice ? (
+        <div className="muted" data-testid="run-lifecycle-truncation">
+          {lifecycleNotice}
+        </div>
+      ) : null}
+      {runChainNotice ? (
+        <div className="muted" data-testid="run-chain-truncation">
+          {runChainNotice}
+        </div>
+      ) : null}
       <div className="rg-scroll">
         <div
           className={`rg-grid${causal ? " rg-causal-mode" : ""}`}
@@ -570,9 +566,9 @@ function StageGroup({
             const state = states[taskIdx];
             const tries = lifecycleTasks[taskId]?.tries.length ?? 0;
             const metrics = metricsByTask[taskId];
-            const lane = node?.actual.assigned_to
-              || node?.actual.affinity?.actual_owner
-              || node?.planned.owner_role
+            const lane = node?.actual?.assigned_to
+              || node?.actual?.affinity?.actual_owner
+              || node?.planned?.owner_role
               || "";
             return (
               <button

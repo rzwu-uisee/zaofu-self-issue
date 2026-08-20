@@ -5,6 +5,7 @@
 import { Fragment, useMemo, useState } from "react";
 
 import type { DeliveryTrace } from "../../api/types";
+import type { PageId } from "../../app/sharedTypes";
 import { formatSeconds } from "../common/SegBar";
 import { copyText, dtTone, latestDispatchTry, shortDispatch } from "./DeliveryTraceViewUtils";
 import {
@@ -15,6 +16,8 @@ import {
   LdEventsTab,
   LdUsageTab,
 } from "./LifecycleDrawerTabs";
+import { RunRegressionActions } from "./RunRegressionActions";
+import { taskProjectionDetailsOmitted } from "./runGraphState";
 
 export type LifecycleDrawerTab =
   | "trajectory" | "events" | "artifacts" | "briefing" | "contract" | "usage";
@@ -27,6 +30,8 @@ interface LifecycleDrawerProps {
   initialTab?: LifecycleDrawerTab;
   initialTry?: number;
   onClose: () => void;
+  onOpenPage?: (page: PageId) => void;
+  projectId?: string;
   taskId: string;
   trace: DeliveryTrace;
 }
@@ -47,11 +52,22 @@ function numField(value: unknown, key: string): number | null {
   return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 
-export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace }: LifecycleDrawerProps) {
+export function LifecycleDrawer({
+  initialTab,
+  initialTry,
+  onClose,
+  onOpenPage,
+  projectId,
+  taskId,
+  trace,
+}: LifecycleDrawerProps) {
   const [tab, setTab] = useState<LifecycleDrawerTab>(initialTab ?? "trajectory");
   const [selectedTry, setSelectedTry] = useState<number | null>(initialTry ?? null);
   const [expandedGate, setExpandedGate] = useState("");
   const entry = trace.task_lifecycle?.tasks?.[taskId];
+  const canonicalTaskStatus = trace.task_lifecycle?.task_statuses?.[taskId];
+  const omission = taskProjectionDetailsOmitted(trace.task_lifecycle, taskId);
+  const lifecycleDetailsOmitted = omission.details;
   const node = trace.execution_graph?.nodes?.find((n) => n.task_id === taskId);
   const metrics = trace.flow_metrics?.tasks?.[taskId];
   const history = entry?.state_history ?? [];
@@ -60,26 +76,25 @@ export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace
     () => tries.flatMap((t) => t.gate_results.map((gate) => ({ ...gate, tryNumber: t.try }))),
     [tries],
   );
-  const taskSpans = useMemo(
-    () => (trace.trace?.spans ?? []).filter((span) => span.task_id === taskId),
-    [taskId, trace],
-  );
-  const spanTokens = useMemo(() => {
-    let input = 0;
-    let output = 0;
-    let found = false;
-    for (const span of taskSpans) {
-      input += span.tokens_input ?? 0;
-      output += span.tokens_output ?? 0;
-      found = true;
-    }
-    return found ? { input, output } : null;
-  }, [taskSpans]);
   const costUsd = numField(metrics, "cost_usd") ?? numField(metrics, "usd");
-  const tokensIn = numField(metrics, "tokens_input") ?? spanTokens?.input ?? null;
-  const tokensOut = numField(metrics, "tokens_output") ?? spanTokens?.output ?? null;
-  const status = node?.actual.status || history[history.length - 1]?.state || "unknown";
+  const tokensIn = numField(metrics, "tokens_input") ?? null;
+  const tokensOut = numField(metrics, "tokens_output") ?? null;
+  const status = omission.status
+    ? "unknown"
+    : canonicalTaskStatus || node?.actual.status || history[history.length - 1]?.state || "unknown";
   const dispatchTry = latestDispatchTry(tries);
+  const tabs = node ? LC_TABS : LC_TABS.filter((name) => name !== "contract");
+  const detailTruncation = [
+    entry?.state_history_truncated
+      ? `history showing ${entry.state_history_included ?? history.length} of ${entry.state_history_total ?? history.length}`
+      : "",
+    entry?.tries_truncated
+      ? `attempts showing ${entry.tries_included ?? tries.length} of ${entry.tries_total ?? tries.length}`
+      : "",
+    entry?.gate_results_truncated
+      ? `gate results showing ${entry.gate_results_included ?? gates.length} of ${entry.gate_results_total ?? gates.length}`
+      : "",
+  ].filter(Boolean);
 
   // item 10 — expanded gate chip resolves back to its gate_results entry.
   const expandedGateResult = useMemo(() => {
@@ -124,8 +139,21 @@ export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace
         )}
         <button type="button" className="ld-close" onClick={onClose} aria-label="close lifecycle drawer">✕</button>
       </div>
+      {lifecycleDetailsOmitted || omission.status ? (
+        <p className="ld-empty" data-testid="ld-details-omitted">
+          {lifecycleDetailsOmitted && omission.status
+            ? "Lifecycle attempts, evidence, and canonical status were omitted by this bounded projection; status is unavailable."
+            : omission.status
+              ? "Canonical task status was omitted by this bounded projection; lifecycle details below are not treated as current status."
+              : `Lifecycle attempts and evidence were omitted by this bounded projection; canonical status is ${status}.`}
+        </p>
+      ) : detailTruncation.length ? (
+        <p className="ld-empty" data-testid="ld-details-truncated">
+          {detailTruncation.join(" · ")}
+        </p>
+      ) : null}
       <div className="ld-tabs" role="tablist" aria-label="Task lifecycle views">
-        {LC_TABS.map((name) => (
+        {tabs.map((name) => (
           <button
             key={name}
             type="button"
@@ -142,7 +170,9 @@ export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace
       {tab === "trajectory" && (
         empty ? (
           <p className="ld-empty">
-            No lifecycle history for this task yet — task-lifecycle.v1 fills in once task events land.
+            {lifecycleDetailsOmitted
+              ? "Task lifecycle detail omitted by bounded projection."
+              : "No lifecycle history for this task yet — task-lifecycle.v2 fills in once task events land."}
           </p>
         ) : (
           <div className="ld-main">
@@ -212,9 +242,9 @@ export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace
       )}
       {tab === "events" && (
         <LdEventsTab
+          stateHistory={history}
           selectedTry={selectedTry}
           setSelectedTry={setSelectedTry}
-          spans={taskSpans}
           tries={tries}
         />
       )}
@@ -224,6 +254,13 @@ export function LifecycleDrawer({ initialTab, initialTry, onClose, taskId, trace
       {tab === "usage" && (
         <LdUsageTab costUsd={costUsd} tokensIn={tokensIn} tokensOut={tokensOut} tries={tries} />
       )}
+      <RunRegressionActions
+        featureId={trace.feature_id}
+        onOpenPage={onOpenPage}
+        projectId={projectId}
+        taskId={taskId}
+        trace={trace}
+      />
     </section>
   );
 }
