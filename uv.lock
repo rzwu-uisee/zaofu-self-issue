@@ -1452,7 +1452,7 @@ wheels = [
 
 [[package]]
 name = "zaofu"
-version = "0.0.2"
+version = "0.0.6"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },

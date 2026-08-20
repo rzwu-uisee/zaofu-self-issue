@@ -5,21 +5,127 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 ## Unreleased
 
-- v0.0.6 发布草案：[中文](docs/releases/v0.0.6.md) |
-  [English](docs/releases/v0.0.6.en.md)。本草案聚焦 Channel/Kanban Agent 的受控人工决策与
-  流式合同隔离、默认关闭的 Provider/OTLP/Operations 可观测性，以及由 Autoresearch 驱动、受
-  证据与环境准入约束的自我进化闭环。当前包元数据仍为 `0.0.2`，v0.0.3 至 v0.0.5 仍未打 tag。
-- v0.0.5 发布草案：[中文](docs/releases/v0.0.5.md) |
-  [English](docs/releases/v0.0.5.en.md)。本草案聚焦 Channel Group 与 Kanban Agent 的共享
-  Conversation Surface、人类可读结构化回复投影、轻量分页 API、诊断按需加载和长回复完整性。
-  当前包元数据仍为 `0.0.2`，v0.0.3 与 v0.0.4 仍未打 tag。
-- v0.0.4 发布草案：[中文](docs/releases/v0.0.4.md) |
-  [English](docs/releases/v0.0.4.en.md)。本草案聚焦 Task 权威、Product Acceptance、
-  Long-Horizon 恢复、Provider 成本与 Web 可观测性；Task Pipeline v4 和 Orchestrator Agent
-  仍是受控试点。当前包元数据仍为 `0.0.2`，且 v0.0.3 尚未打 tag。
-- v0.0.3 发布草案：[中文](docs/releases/v0.0.3.md) |
-  [English](docs/releases/v0.0.3.en.md)。当前包元数据仍为 `0.0.2`；完成版本升级、最终验证
-  和 tag 前，这不是已发布版本。
+- 暂无。
+
+## v0.0.6 - 2026-08-20
+
+Release notes: [中文](docs/releases/v0.0.6.md) |
+[English](docs/releases/v0.0.6.en.md)
+
+Developer Preview 受控运维与能力演进版本，进一步收口 Channel/Kanban Agent 的人工决策与
+流式合同边界，新增默认关闭的 Provider/OTLP/Operations 可观测面，并建立受证据和环境准入
+约束的自我进化闭环。
+
+### Added
+
+- Provider capability、脱敏 Runtime Logs、Operations、低基数 Prometheus metrics 和
+  OTLP/HTTP synthetic span exporter。
+- 基于 immutable attempt、冻结环境、sealed evaluator、独立 canary 和 receipt-bound
+  transition 的 Evolution 生命周期。
+- Operator Inbox Decisions、Channel discussion attention，以及受控的 Kanban Agent
+  plan/action interaction。
+- `zf-find-simplifications` 和 `zf-record-browser-demo` 开发辅助 Skills。
+
+### Changed
+
+- Channel 可见 Markdown、typed contribution 和 owner decision 分层投影，Provider 不完整输出
+  通过有界 continuation 收口。
+- Run Manager 仅能从预批准静态 catalog 选择一次有界 execution-route switch，不动态发明
+  Provider、模型、权限或工具范围。
+- 自我进化资产按风险区分自动保留与 proposal-only，且不直接修改 Task/Delivery truth。
+
+### Validation
+
+- Provider/OTLP、Channel interaction 和 Evolution 环境准入的 focused、Web、mock E2E 与
+  pre-merge 证据记录在双语 release notes 中。
+- 发布提交的版本/配置闭包为 167 passed；排除 22 个在 `dev` 同节点复现的公开投影/宿主基线项
+  后，deterministic 为 10,616 passed / 19 skipped，serial 为 10 passed。Web build、manual
+  docs、pre-merge sentinel 和 flow smoke 通过；外部 Provider/Collector/Feishu tier 仍需按
+  部署环境独立执行。
+
+## v0.0.5 - 2026-08-17
+
+Release notes: [中文](docs/releases/v0.0.5.md) |
+[English](docs/releases/v0.0.5.en.md)
+
+Developer Preview 对话体验版本，将 Channel Group 与 Kanban Agent 收敛到共享 Conversation
+Surface，并降低长历史、长回复和诊断详情的首屏成本。
+
+### Added
+
+- Channel conversation projection 和轻量 conversation API，支持 `before` 分页、`has_more`
+  和 `next_before`。
+- Channel Group / Kanban Agent 共用的 `AgentSessionTimeline` 展示层和 Kanban Agent
+  interaction policy。
+- 人类可读 Markdown、结构化 contribution card、tool/artifact/AskUserQuestion 状态和 lazy
+  diagnostics 的统一投影。
+
+### Changed
+
+- 主聊天时间线隐藏原始 `channel_contribution` JSON、重复 preview 和 sidecar truncated 提示。
+- 长历史滚动保留 anchor；active run 持续增长同一条回复，settled turn 降低布局成本。
+- v0.0.4 正式 release 元数据和 public export 边界在本轮 merge 后重新校准。
+
+### Validation
+
+- Conversation / export / prompt / Web server 回归：271 passed, 1 skipped。
+- Web conversation projection / state / Kanban session 单测通过。
+
+## v0.0.4 - 2026-08-14
+
+Release notes: [中文](docs/releases/v0.0.4.md) |
+[English](docs/releases/v0.0.4.en.md)
+
+Developer Preview 运行时权威与恢复版本，将 v0.0.3 后的 Task Pipeline、成本预算、
+Task Contract Authority 和 Kanban 可观测性改动收口为公开 release。
+
+### Added
+
+- Task Pipeline orchestration runtime、Task workspace、Stage Worker、Candidate integration
+  和 Orchestrator Agent 受控语义 checkpoint。
+- Provider usage / pricing catalog / hard budget enforcement、Long-Run Truth、Recovery Case
+  和 retention inventory。
+- Task Contract Authority、current execution target、stale result fail-closed 和对应 doctor。
+- Kanban Agent turn delta/timing observability、Web cost/resource projections 和 interaction policy。
+
+### Changed
+
+- Goal Closure、Reader/Writer fanout、workflow resume/rework 和 terminal convergence 统一绑定
+  current generation、artifact ref、digest 与 execution target。
+- Web Dashboard 更清晰地区分 current truth、历史 attempt、raw event 和需要关注的终态事实。
+
+### Validation
+
+- 分批 focused validation：268 passed、627 passed、261 passed、198 passed / 1 skipped。
+- Web unit validation 覆盖 Channel action、Kanban session、cost precision、task display、
+  page load policy 和 Kanban Agent interaction policy。
+
+## v0.0.3 - 2026-08-08
+
+Release notes: [中文](docs/releases/v0.0.3.md) |
+[English](docs/releases/v0.0.3.en.md)
+
+Developer Preview Feishu 协作版本，将 v0.0.2 的 Channel、PRD、Task 和受控 Workflow
+路径延伸到 Project 级 Feishu 协作群。
+
+### Added
+
+- Project-scoped Feishu collaboration group binding、成员回读、route index 和 workspace
+  bridge lease。
+- Kanban Agent / Run Manager 的群消息路由、项目状态回复、Plan 审批卡、进度卡和交付卡。
+- Feishu Project group、bridge lease、catch-up、stream convergence 和 controlled workflow
+  start 的回归测试。
+
+### Changed
+
+- Feishu 入站消息、卡片回调和流式回复统一回到 EventWriter、controlled action 和
+  auditable artifact 边界。
+- 文档补充 Feishu AI-native direct bridge、Automation / Kanban sync、CLI command index 和
+  capability coverage。
+
+### Validation
+
+- 目标 Feishu / Project group 回归：209 passed。
 
 ## v0.0.2 - 2026-08-05
 
