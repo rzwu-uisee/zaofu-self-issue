@@ -24,6 +24,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _DESIGN = _REPO / "docs" / "design"
+_PUBLIC_EXPORT_MANIFEST = _REPO / "PUBLIC_EXPORT_MANIFEST.md"
 _SRC = _REPO / "src" / "zf"
 _SOURCE_FILE_SOFT_LIMIT = 1000
 
@@ -35,7 +36,10 @@ def test_00_index_links_resolve_to_existing_files():
     inverse — a registered `NN-slug.md` whose file is missing (the doc-77
     failure shape: index row + cross-references + implemented task, but
     no file on disk)."""
-    index = (_DESIGN / "00-index.md").read_text(encoding="utf-8")
+    index_path = _DESIGN / "00-index.md"
+    if not index_path.exists() and _PUBLIC_EXPORT_MANIFEST.exists():
+        pytest.skip("public export excludes docs/design")
+    index = index_path.read_text(encoding="utf-8")
     links = re.findall(r"\]\(([0-9]{2}-[A-Za-z0-9._-]+\.md)\)", index)
     assert links, "00-index should register numbered design docs"
     missing = sorted({
