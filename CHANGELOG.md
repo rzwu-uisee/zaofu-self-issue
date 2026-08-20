@@ -5,6 +5,10 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 ## Unreleased
 
+- v0.0.6 发布草案：[中文](docs/releases/v0.0.6.md) |
+  [English](docs/releases/v0.0.6.en.md)。本草案聚焦 Channel/Kanban Agent 的受控人工决策与
+  流式合同隔离、默认关闭的 Provider/OTLP/Operations 可观测性，以及由 Autoresearch 驱动、受
+  证据与环境准入约束的自我进化闭环。当前包元数据仍为 `0.0.2`，v0.0.3 至 v0.0.5 仍未打 tag。
 - v0.0.5 发布草案：[中文](docs/releases/v0.0.5.md) |
   [English](docs/releases/v0.0.5.en.md)。本草案聚焦 Channel Group 与 Kanban Agent 的共享
   Conversation Surface、人类可读结构化回复投影、轻量分页 API、诊断按需加载和长回复完整性。
