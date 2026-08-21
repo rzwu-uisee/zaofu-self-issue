@@ -34,7 +34,7 @@ def test_no_args_prints_help(capsys):
 
 def test_version_importable():
     """Package version is importable."""
-    assert zf.__version__ == "0.0.6"
+    assert zf.__version__ == "0.0.7"
 
 
 def test_public_version_metadata_is_aligned():
