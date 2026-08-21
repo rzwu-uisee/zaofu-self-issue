@@ -1,0 +1,193 @@
+{
+  "schema_version": "browser-demo-provenance.v1",
+  "demo_id": "web-terminal-sharing-demo-20260820",
+  "recorded_at": "2026-08-20T23:54:46Z",
+  "source_commit": "d1c9b3cb0699452a3d623864d24b20005883d55f",
+  "worktree": "/home/user/worktrees/zaofu-web-pty-runtime-20260820",
+  "service_url": "http://127.0.0.1:8003",
+  "browser_origin": "http://127.0.0.1:8003",
+  "viewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "provider_mode": "real",
+  "provider_model": "gpt-5.6-sol",
+  "storyboard": [
+    {
+      "frame": "01.png",
+      "predicate": "The selected empty Project is visible and the authenticated Terminal toggle is available."
+    },
+    {
+      "frame": "03.png",
+      "predicate": "The New Session menu contains both Codex and Claude Code derived from the mixed Project."
+    },
+    {
+      "frame": "05.png",
+      "predicate": "The real Codex PTY contains the exact ZAOFU_WEB_READY provider response."
+    },
+    {
+      "frame": "07.png",
+      "predicate": "Two renamed tabs are visible and the attachment menu exposes Observe, Control, and Take over control."
+    },
+    {
+      "frame": "10.png",
+      "predicate": "Agents shows two independent terminal rows and non-zero transcript-backed usage for the prompted tab."
+    },
+    {
+      "frame": "13.png",
+      "predicate": "After stopping one CLI, the other named terminal remains active without a disconnect error banner."
+    }
+  ],
+  "playwright_evidence_refs": [
+    "web/scripts/record-web-terminal-demo.mjs",
+    "web/tests/web-terminal-real-codex.spec.ts",
+    "web/tests/web-terminal.spec.ts"
+  ],
+  "encoder_summary": {
+    "requested_format": "mp4",
+    "codec": "h264",
+    "profile": "High",
+    "pixel_format": "yuv420p",
+    "faststart": true,
+    "duration_seconds": 52.8,
+    "sha256": "268ffb4b7bbc695de0aeba486bb2e13852bf7b2bd245d5c47b2a312308651a9d"
+  },
+  "source": {
+    "branch": "wip/codex-20260820-web-pty-runtime",
+    "commit": "d1c9b3cb0699452a3d623864d24b20005883d55f",
+    "recording_script": "web/scripts/record-web-terminal-demo.mjs",
+    "base_url": "http://127.0.0.1:8003",
+    "working_tree_clean_before_recording": true
+  },
+  "fixture": {
+    "kind": "ephemeral_mixed_project",
+    "project_id": "project-f3541fc8",
+    "project_name": "web-terminal-demo",
+    "primary_backend": "codex",
+    "verify_backend": "claude-code",
+    "effective_terminal_providers": [
+      "codex",
+      "claude-code"
+    ],
+    "active_sessions_before": 0,
+    "historical_sessions_before": 0
+  },
+  "environment": {
+    "herdr": {
+      "version": "0.8.2"
+    },
+    "provider": {
+      "kind": "codex",
+      "cli_version": "0.148.0",
+      "interaction": "real_provider_tui",
+      "response_assertion": "ZAOFU_WEB_READY"
+    },
+    "browser": {
+      "image": "mcp/playwright:latest",
+      "image_digest": "sha256:8771dc4666e7c11440bfc6a0c6b00480e9a15b8891b45f29a52d7d995f8d1492",
+      "chromium": "Google Chrome for Testing 149.0.7827.22",
+      "viewport": {
+        "width": 1280,
+        "height": 720
+      },
+      "color_scheme": "dark"
+    },
+    "encoder": {
+      "image": "linuxserver/ffmpeg:8.1.2",
+      "image_digest": "sha256:ea8d6dc9ed6eae9b19bcb055e5ea44716a8cf24688887517dc2362cdf5767289"
+    }
+  },
+  "assertions": [
+    {
+      "id": "project-provider-menu",
+      "status": "passed",
+      "claim": "The mixed Project exposes Codex and Claude Code without a terminal-only allowlist."
+    },
+    {
+      "id": "real-codex-pty",
+      "status": "passed",
+      "claim": "Herdr starts the installed Codex TUI in the Project root and returns the asserted real response."
+    },
+    {
+      "id": "multi-tab-rename",
+      "status": "passed",
+      "claim": "Two independent PTY sessions remain mounted and can be renamed per tab."
+    },
+    {
+      "id": "attachment-modes",
+      "status": "passed",
+      "claim": "Observe, Control, and explicit Take over control complete through authenticated APIs."
+    },
+    {
+      "id": "layout-theme",
+      "status": "passed",
+      "claim": "Fullscreen, resizable Dock, and Dashboard-synchronized light/dark terminal themes work without restarting the CLI."
+    },
+    {
+      "id": "usage-attribution",
+      "status": "passed",
+      "claim": "Agents lists each terminal tab separately and the real Codex tab has non-zero transcript-backed token/cost evidence."
+    },
+    {
+      "id": "reload-reattach",
+      "status": "passed",
+      "claim": "A browser reload restores the open tab set and reattaches to the same server-side session."
+    },
+    {
+      "id": "explicit-stop",
+      "status": "passed",
+      "claim": "Stopping one CLI leaves the other session active and produces no expected-disconnect error banner."
+    }
+  ],
+  "media": {
+    "frame_count": 13,
+    "raw_webm": {
+      "committed": false,
+      "codec": "vp8",
+      "duration_seconds": 52.8,
+      "width": 1280,
+      "height": 720,
+      "sha256": "b1d0cada1168e50a2c994af6f019488c639c5b04c7e32745ad0cbf10ab5a5032"
+    },
+    "mp4": {
+      "path": "docs/manual/assets/web-terminal-demo.mp4",
+      "codec": "h264",
+      "profile": "High",
+      "pixel_format": "yuv420p",
+      "frame_rate": 25,
+      "duration_seconds": 52.8,
+      "width": 1280,
+      "height": 720,
+      "bytes": 1344491,
+      "faststart": true,
+      "audio": false,
+      "sha256": "268ffb4b7bbc695de0aeba486bb2e13852bf7b2bd245d5c47b2a312308651a9d"
+    },
+    "poster": {
+      "path": "docs/manual/assets/web-terminal-demo.png",
+      "bytes": 87106,
+      "sha256": "4dd42ec915e71fd34a18ae446405913cbf143b1371cb1eb235ba9823e2b20926"
+    }
+  },
+  "cleanup": {
+    "exact_created_session_ids_only": true,
+    "active_sessions_after": 0,
+    "simulation_done_event": "evt-5629f84c9aa1",
+    "web_tmux_session_stopped": true,
+    "herdr_named_session_stopped": true,
+    "reserved_ports_touched": []
+  },
+  "security": {
+    "action_token_recorded": false,
+    "provider_transcript_committed": false,
+    "terminal_ticket_in_url": false,
+    "fixed_low_cost_prompt": true
+  },
+  "limitations": [
+    "Claude Code is shown because it is derived from the mixed Project, but it is not launched in this recording because the host credential was not qualified.",
+    "OpenCode and Pi are architecture extension points and are not claimed as qualified by this recording.",
+    "The operator explicitly requested MP4, so this run encodes H.264 MP4 instead of the skill's default GIF presentation format.",
+    "The 13 source assertion frames and raw WebM were checked in the isolated evidence directory but are not committed; the poster, MP4, hashes, predicates, and recording script are retained.",
+    "The MP4 has Chinese captions and no audio track."
+  ]
+}

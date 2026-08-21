@@ -2,6 +2,7 @@
   width: 100%;
   min-width: 0;
   min-height: 100%;
+  overflow-x: clip;
   padding: 14px 16px 24px;
   background: var(--bg);
   color: var(--text);
@@ -29,8 +30,162 @@
   margin-bottom: 0 !important;
 }
 
+.loop-v2-stage-rail,
+.loop-v2-timeline-axis,
+.loop-v2-timeline-task,
+.loop-v2-timeline-track {
+  min-width: 0;
+}
+
+.loop-v2-timeline-axis {
+  overflow: hidden;
+}
+
+.loop-v2-timeline-task {
+  display: grid;
+  grid-template-columns: minmax(0, 230px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.loop-v2-timeline-label {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--type-label);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loop-v2-timeline-meta {
+  margin-left: 6px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: var(--type-meta);
+  font-weight: var(--font-weight-regular);
+}
+
+.loop-v2-attempt-drawer {
+  grid-column: 1 / -1;
+  max-width: 100%;
+  max-height: 260px;
+  margin: 2px 0 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  cursor: default;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: color-mix(in oklab, var(--muted-foreground) 3%, transparent);
+}
+
+.loop-v2-attempt-heading {
+  margin-bottom: 4px;
+  color: var(--muted-foreground);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.loop-v2-attempt-count {
+  margin-bottom: 4px;
+  color: var(--text-tertiary, #889);
+}
+
+.loop-v2-attempt-row {
+  display: grid;
+  grid-template-columns: 56px 110px minmax(0, 1fr);
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.loop-v2-attempt-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.loop-v2-attempt-load-more {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.loop-v2-attempt-load-more:hover {
+  border-color: var(--brand);
+}
+
+.loop-v2-subscriber-table {
+  table-layout: fixed;
+}
+
+.loop-v2-subscriber-table th,
+.loop-v2-subscriber-table td {
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 680px) {
   .loop-v2-page {
     padding: 8px;
+  }
+
+  .loop-v2-stage-rail {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 8px !important;
+  }
+
+  .loop-v2-stage-rail-line {
+    display: none;
+  }
+
+  .loopv2-stage,
+  .loop-v2-close-node {
+    min-width: 0 !important;
+  }
+
+  .loopv2-stagecard,
+  .loopv2-nodecard,
+  .loopv2-bcard {
+    display: none !important;
+  }
+
+  .loop-v2-backflows {
+    display: flex;
+    height: auto !important;
+    min-height: 0;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-top: 8px;
+  }
+
+  .loop-v2-backflows svg {
+    display: none;
+  }
+
+  .loop-v2-backflows > span {
+    position: static !important;
+    max-width: 100%;
+    transform: none !important;
+    white-space: normal !important;
+  }
+
+  .loop-v2-timeline-task {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .loop-v2-attempt-drawer {
+    grid-column: 1;
+    padding: 8px;
+  }
+
+  .loop-v2-attempt-row {
+    grid-template-columns: 40px 68px minmax(0, 1fr);
+    gap: 6px;
   }
 }

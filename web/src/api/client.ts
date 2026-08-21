@@ -12,7 +12,6 @@ import type {
   CostSummary,
   CandidateDetail,
   DeliveryTrace,
-  DeliveryThickTrace,
   DeliveryFeaturesPage,
   DiagnosticsDetail,
   DiagnosticsLogsPage,
@@ -37,7 +36,6 @@ import type {
   GoalDossier,
   RunDetail,
   RuntimeResourceProjection,
-  RuntimeLogsPage,
   RuntimeSummary,
   SearchResult,
   SkillsSummary,
@@ -46,6 +44,9 @@ import type {
   TaskDiff,
   TaskTimeline,
   TraceDetail,
+  TraceEventDetail,
+  TraceIndexPage,
+  TraceSpanPage,
   WorkflowGraph,
   WorkflowRequestDetail,
   WorkflowRequestsPage,
@@ -56,7 +57,7 @@ import { cachedGetJson, clearGetCache } from "./queryClient";
 
 async function requestJson<T>(
   path: string,
-  options: { bypassCache?: boolean } = {},
+  options: { bypassCache?: boolean; signal?: AbortSignal } = {},
 ): Promise<T> {
   return cachedGetJson<T>(path, options);
 }
@@ -405,17 +406,20 @@ export function getProjectAutomations(projectId?: string): Promise<Record<string
 
 // Scoped trace roll-up: the Event Traces page fetches this (fast read-model
 // slim) instead of pulling the full snapshot, which replays the whole log.
-export function getProjectTraces(projectId?: string): Promise<Record<string, unknown>> {
-  return requestJson<Record<string, unknown>>(`${projectPrefix(projectId)}/traces`);
+export function getProjectTraces(
+  projectId?: string,
+  params: { limit?: number; cursor?: string } = {},
+): Promise<TraceIndexPage> {
+  const search = new URLSearchParams({
+    contract: "v2",
+    limit: String(params.limit ?? 50),
+  });
+  if (params.cursor) search.set("cursor", params.cursor);
+  return requestJson<TraceIndexPage>(`${projectPrefix(projectId)}/traces?${search.toString()}`);
 }
 
 export function getRunContractProjection(projectId?: string): Promise<Record<string, unknown>> {
   return requestJson<Record<string, unknown>>(`${projectPrefix(projectId)}/run-contract`);
-}
-
-// 131-P0-5: shadow spine read-only explain (runs/stages/health/tasks).
-export function getWorkflowSpine(projectId?: string): Promise<Record<string, unknown>> {
-  return requestJson<Record<string, unknown>>(`${projectPrefix(projectId)}/workflow-spine`);
 }
 
 export function getFailureCandidatesProjection(projectId?: string): Promise<Record<string, unknown>> {
@@ -459,39 +463,55 @@ export function getDeliveryFeatures(projectId?: string): Promise<DeliveryFeature
   return requestJson<DeliveryFeaturesPage>(`${projectPrefix(projectId)}/delivery-features`);
 }
 
-// doc 68 S3 — delivery-trace.v1 (read-only feature delivery projection).
+// delivery-trace.v2 — read-only, view-scoped Delivery projection.
 export function getDeliveryTrace(
   featureId: string,
   projectId?: string,
   sinceEventId?: string,
+  options: {
+    bypassCache?: boolean;
+    goalId?: string;
+    signal?: AbortSignal;
+    view?: "overview" | "runs" | "graph" | "work";
+  } = {},
 ): Promise<DeliveryTrace> {
-  const params = new URLSearchParams();
+  const { goalId, view, ...requestOptions } = options;
+  const params = new URLSearchParams({ contract: "v2" });
+  if (view) params.set("view", view);
+  if (goalId) params.set("goal_id", goalId);
   if (sinceEventId) params.set("since_event_id", sinceEventId);
-  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const suffix = `?${params.toString()}`;
   return requestJson<DeliveryTrace>(
     `${projectPrefix(projectId)}/delivery-traces/${encodeURIComponent(featureId)}${suffix}`,
-  );
-}
-
-export function getDeliveryThickTrace(
-  featureId: string,
-  projectId?: string,
-  sinceEventId?: string,
-): Promise<DeliveryThickTrace> {
-  const params = new URLSearchParams();
-  if (sinceEventId) params.set("since_event_id", sinceEventId);
-  const suffix = params.toString() ? `?${params.toString()}` : "";
-  return requestJson<DeliveryThickTrace>(
-    `${projectPrefix(projectId)}/delivery-traces/${encodeURIComponent(featureId)}/thick${suffix}`,
-  );
+    requestOptions,
+  ).then((data) => ({
+    ...data,
+    trace_id: data.trace_id ?? "",
+    synthetic: data.synthetic ?? false,
+    diagnostics: data.diagnostics ?? [],
+    drift_report: data.drift_report ?? data.drift ?? { status: "unknown", summary: {}, items: [] },
+    execution_graph: data.execution_graph ?? {
+      task_count: data.task_map?.task_count ?? 0,
+      done_count: 0,
+      in_progress_count: 0,
+      blocked_count: 0,
+      waiting_count: data.task_map?.task_count ?? 0,
+      nodes: [],
+      edges: [],
+      waves: [],
+    },
+  }));
 }
 
 export function getLoops(projectId?: string): Promise<LoopProjection> {
   return requestJson<LoopProjection>(`${projectPrefix(projectId)}/loops`);
 }
 
-export function getLoopView(projectId?: string): Promise<LoopViewProjection> {
-  return requestJson<LoopViewProjection>(`${projectPrefix(projectId)}/loop-view`);
+export function getLoopView(
+  projectId?: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<LoopViewProjection> {
+  return requestJson<LoopViewProjection>(`${projectPrefix(projectId)}/loop-view`, options);
 }
 
 export function getMeasureLoops(
@@ -590,21 +610,6 @@ export function getDiagnosticsLogs(
   const suffix = search.toString() ? `?${search.toString()}` : "";
   return requestJson<DiagnosticsLogsPage>(
     `/api/projects/${encodeURIComponent(projectId || "default")}/diagnostics/logs${suffix}`,
-  );
-}
-
-export function getRuntimeLogs(
-  projectId?: string,
-  params?: { limit?: number; level?: string; provider?: string; taskId?: string },
-): Promise<RuntimeLogsPage> {
-  const search = new URLSearchParams();
-  if (params?.limit) search.set("limit", String(params.limit));
-  if (params?.level) search.set("level", params.level);
-  if (params?.provider) search.set("provider", params.provider);
-  if (params?.taskId) search.set("task_id", params.taskId);
-  const suffix = search.toString() ? `?${search.toString()}` : "";
-  return requestJson<RuntimeLogsPage>(
-    `/api/projects/${encodeURIComponent(projectId || "default")}/observability/runtime-logs${suffix}`,
   );
 }
 
@@ -745,8 +750,41 @@ export function getAgentSessionRawOutput(
   );
 }
 
-export function getTraceDetail(traceId: string, projectId?: string): Promise<TraceDetail> {
-  return requestJson<TraceDetail>(`${projectPrefix(projectId)}/traces/${encodeURIComponent(traceId)}`);
+export function getTraceDetail(
+  traceId: string,
+  projectId?: string,
+  params: { limit?: number; cursor?: string } = {},
+): Promise<TraceDetail> {
+  const search = new URLSearchParams({
+    contract: "v2",
+    limit: String(params.limit ?? 80),
+  });
+  if (params.cursor) search.set("cursor", params.cursor);
+  return requestJson<TraceDetail>(
+    `${projectPrefix(projectId)}/traces/${encodeURIComponent(traceId)}?${search.toString()}`,
+  );
+}
+
+export function getTraceSpans(
+  traceId: string,
+  projectId?: string,
+  params: { limit?: number; cursor?: string; spanId?: string } = {},
+): Promise<TraceSpanPage> {
+  const search = new URLSearchParams({
+    contract: "v1",
+    limit: String(params.limit ?? 100),
+  });
+  if (params.cursor) search.set("cursor", params.cursor);
+  if (params.spanId) search.set("focus_span_id", params.spanId);
+  return requestJson<TraceSpanPage>(
+    `${projectPrefix(projectId)}/traces/${encodeURIComponent(traceId)}/spans?${search.toString()}`,
+  );
+}
+
+export function getTraceEventRaw(eventId: string, projectId?: string): Promise<TraceEventDetail> {
+  return requestJson<TraceEventDetail>(
+    `${projectPrefix(projectId)}/events/${encodeURIComponent(eventId)}`,
+  );
 }
 
 export function getCandidateDetail(pddId: string, projectId?: string): Promise<CandidateDetail> {

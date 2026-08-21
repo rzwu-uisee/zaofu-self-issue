@@ -4,8 +4,11 @@
 // Canonical Loop product view. Legacy BehaviorLoopPage was retired by design 150.
 import { useEffect, useMemo, useState } from "react";
 
-import { getLoopView } from "../../api/client";
-import type { LoopViewLoop, LoopViewProjection, LoopViewTask } from "../../api/types";
+import type { LoopViewLoop, LoopViewTask, RecentEvent } from "../../api/types";
+import type { LiveState } from "../../app/sharedTypes";
+import "../../styles/20-loop-v2.css";
+import { LoopAttemptDrawer } from "./LoopAttemptDrawer";
+import { useLoopViewResource } from "./useLoopViewResource";
 
 const GAP_BREAK_MS = 30 * 60 * 1000;
 const BREAK_W = 4;
@@ -21,6 +24,8 @@ const TONE = {
 };
 
 interface Props {
+  liveEvents?: RecentEvent[];
+  liveState?: LiveState;
   projectId?: string;
   onOpenTrace?: (traceId: string) => void;
 }
@@ -246,25 +251,15 @@ const HEALTH_TONE: Record<string, string> = {
   idle: TONE.muted,
 };
 
-export function LoopPageV2({ projectId }: Props) {
-  const [view, setView] = useState<LoopViewProjection | null>(null);
-  const [error, setError] = useState<string>("");
+export function LoopPageV2({ liveEvents = [], liveState = "live", projectId }: Props) {
+  const { error, view } = useLoopViewResource({ liveEvents, liveState, projectId });
   const [openLoop, setOpenLoop] = useState<string>("");
   const [openTask, setOpenTask] = useState<string>("");
+
   const jumpToTask = (taskId: string) => {
     setOpenTask(taskId);
     document.getElementById(`loop-row-${taskId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   };
-
-  useEffect(() => {
-    let cancelled = false;
-    setView(null);
-    setError("");
-    getLoopView(projectId)
-      .then((v) => { if (!cancelled) setView(v); })
-      .catch((e) => { if (!cancelled) setError(String(e)); });
-    return () => { cancelled = true; };
-  }, [projectId]);
 
   const timeline = useMemo(() => {
     if (!view) return null;
@@ -318,7 +313,12 @@ export function LoopPageV2({ projectId }: Props) {
   };
 
   return (
-    <div className="loop-v2-page" data-testid="loop-page-v2">
+    <div
+      className="loop-v2-page"
+      data-live-event-count={liveEvents.length}
+      data-live-event-type={liveEvents[0]?.type ?? ""}
+      data-testid="loop-page-v2"
+    >
       <div className="section-heading loop-v2-page-heading">
         <div>
           <h2>Loop</h2>
@@ -357,14 +357,14 @@ export function LoopPageV2({ projectId }: Props) {
       </div>
 
       {/* main loop stepper with hover card */}
-      <div style={card}>
+      <div className="loop-v2-main-loop" style={card}>
         <div style={h3}>Main loop
           <span style={{ textTransform: "none", letterSpacing: 0, color: TONE.faint }}>
             {" "}· stage chain discovered from events · hover a node for its stage-loop card
           </span>
         </div>
-        <div style={{ display: "flex", gap: 0, marginTop: 12, position: "relative" }}>
-          <div style={{
+        <div className="loop-v2-stage-rail" style={{ display: "flex", gap: 0, marginTop: 12, position: "relative" }}>
+          <div className="loop-v2-stage-rail-line" style={{
             position: "absolute", left: `${50 / (stages.length + 1)}%`,
             right: `${50 / (stages.length + 1)}%`, top: 15, height: 2,
             background: `linear-gradient(90deg, var(--ok) 0%, var(--ok) ${(stages.length - 1) / stages.length * 100}%, ${TONE.line} ${(stages.length - 1) / stages.length * 100}%)`,
@@ -403,7 +403,7 @@ export function LoopPageV2({ projectId }: Props) {
               </div>
             </div>
           ))}
-          <div style={{ position: "relative", flex: 1, minWidth: 90, textAlign: "center", zIndex: 1 }} data-testid="loop-close-node">
+          <div className="loop-v2-close-node" style={{ position: "relative", flex: 1, minWidth: 90, textAlign: "center", zIndex: 1 }} data-testid="loop-close-node">
             <div style={{
               width: 30, height: 30, borderRadius: "50%", margin: "0 auto",
               display: "grid", placeItems: "center", fontSize: 12, background: "var(--panel)",
@@ -418,7 +418,7 @@ export function LoopPageV2({ projectId }: Props) {
         </div>
         <style>{`.loopv2-stage:hover .loopv2-stagecard{display:block !important}`}</style>
         {backflows.length ? (
-          <div style={{ position: "relative", height: 30 + backflows.length * 20 }} data-testid="loop-backflows">
+          <div className="loop-v2-backflows" style={{ position: "relative", height: 30 + backflows.length * 20 }} data-testid="loop-backflows">
             <svg viewBox="0 0 1000 100" preserveAspectRatio="none"
               style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} aria-hidden="true">
               {backflows.map((bf, bi) => {
@@ -577,7 +577,7 @@ export function LoopPageV2({ projectId }: Props) {
         </div>
         {timeline ? (
           <div style={{ marginTop: 10 }}>
-            <div style={{ position: "relative", height: 14, fontSize: 10, color: TONE.faint, fontFamily: "var(--font-mono, monospace)" }}>
+            <div className="loop-v2-timeline-axis" style={{ position: "relative", height: 14, fontSize: 10, color: TONE.faint, fontFamily: "var(--font-mono, monospace)" }}>
               {/* gap 压缩后刻度挤在右端、和右对齐的 now/end 标签叠成一坨
                   (2026-07-13 cangjie-r14 实测)。按最小间距去重 + 右端留白给
                   now 标签,只渲染读得清的一组。 */}
@@ -610,22 +610,21 @@ export function LoopPageV2({ projectId }: Props) {
                 const uncounted = task.attempts.length - task.counted;
                 const opened = openTask === task.id;
                 return (
-                  <div key={task.id} id={`loop-row-${task.id}`} data-testid="loop-task-row"
+                  <div className="loop-v2-timeline-task" key={task.id} id={`loop-row-${task.id}`} data-testid="loop-task-row"
                     onClick={() => setOpenTask(opened ? "" : task.id)}
                     style={{
-                      display: "grid", gridTemplateColumns: "230px 1fr", gap: 12, alignItems: "center",
                       padding: "4px 0", cursor: "pointer", borderRadius: 6,
                       background: opened ? "color-mix(in oklab, var(--brand) 5%, transparent)" : undefined,
                     }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <div className="loop-v2-timeline-label">
                         {task.id}
-                        <span style={{ fontFamily: "var(--font-mono, monospace)", fontSize: 10.5, color: TONE.muted, marginLeft: 6 }}>
+                        <span className="loop-v2-timeline-meta">
                           {task.counted} att · {task.fails}✗{uncounted ? ` · ${uncounted} uncounted` : ""}
                         </span>
                       </div>
                     </div>
-                    <div style={{ position: "relative", height: 22 }}>
+                    <div className="loop-v2-timeline-track" style={{ position: "relative", height: 22 }}>
                       {segs.map((seg, i) => (
                         <span key={i} title={seg.title} data-testid="loop-seg" style={{
                           position: "absolute", left: `${seg.l}%`, width: `${Math.max(seg.r - seg.l, 0.6)}%`,
@@ -638,38 +637,7 @@ export function LoopPageV2({ projectId }: Props) {
                         </span>
                       ))}
                     </div>
-                    {opened ? (
-                      <div data-testid="loop-attempt-drawer" onClick={(e) => e.stopPropagation()}
-                        style={{
-                          gridColumn: "1 / -1", cursor: "default", margin: "2px 0 6px",
-                          border: `1px solid ${TONE.line}`, borderRadius: 8, padding: "8px 12px",
-                          background: "color-mix(in oklab, var(--muted-foreground) 3%, transparent)",
-                          maxHeight: 260, overflowY: "auto",
-                        }}>
-                        <div style={{ fontSize: 10, letterSpacing: ".08em", textTransform: "uppercase", color: TONE.muted, marginBottom: 4 }}>
-                          attempt projection · {task.source} · verbatim, read-only
-                        </div>
-                        {task.attempts.map((a, ai) => {
-                          const fail = a.terminal?.type.endsWith(".failed");
-                          return (
-                            <div key={ai} style={{
-                              display: "grid", gridTemplateColumns: "56px 110px 1fr", gap: 10,
-                              padding: "3px 0", fontSize: 11.5,
-                              borderTop: ai ? `1px solid ${TONE.line}` : undefined,
-                              opacity: a.counted ? 1 : 0.55,
-                            }}>
-                              <span style={{ fontFamily: "var(--font-mono, monospace)", color: TONE.faint }}>
-                                #{ai + 1}{a.counted ? "" : " u"}{a.orphan ? " ?" : ""}</span>
-                              <span style={{ color: TONE.muted }}>{a.role || "—"}</span>
-                              <span style={{ color: fail ? TONE.err : a.open ? TONE.accent : "var(--text)" }}>
-                                {hhmm(a.started_ts)}{a.terminal ? `–${hhmm(a.terminal.ts)} · ${a.terminal.type}` : " · OPEN"}
-                                {a.terminal?.reason ? <span style={{ color: TONE.muted }}> · {a.terminal.reason}</span> : null}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : null}
+                    {opened ? <LoopAttemptDrawer task={task} /> : null}
                   </div>
                 );
               })}
@@ -695,7 +663,7 @@ export function LoopPageV2({ projectId }: Props) {
               {" "}· why the next stage woke up · derived from real sequences
             </span>
           </summary>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginTop: 8 }}>
+          <table className="loop-v2-subscriber-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginTop: 8 }}>
             <thead>
               <tr style={{ color: TONE.faint, textAlign: "left", fontSize: 10, letterSpacing: ".08em", textTransform: "uppercase" }}>
                 <th style={{ padding: "3px 8px" }}>event topic</th>

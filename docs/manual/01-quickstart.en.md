@@ -4,11 +4,12 @@
 > creating or opening a Project, and then using the Kanban Agent with Channels,
 > Research, and delivery Workflows.
 >
-> This route was verified against the CLI, Web UI, event ledger, and real
-> browser E2E on 2026-08-03. Each animation and key screenshot is assembled
-> from real Playwright interaction states; the acceptance checks also inspect
-> the API, Stores, and EventLog instead of treating screenshots as runtime
-> proof.
+> The core CLI, Web UI, event-ledger, and Workflow route was last verified as a
+> whole on 2026-08-03. The Web Terminal installation, authentication, multi-tab,
+> and cross-client recovery slice was verified on 2026-08-21. Each animation
+> and key screenshot is assembled from real Playwright interaction states; the
+> acceptance checks also inspect the API, Stores, and EventLog instead of
+> treating screenshots as runtime proof.
 > Channel currently defaults to the `conversation` product mode. Bounded
 > fanout/synthesis starts only after explicit `multi_lens` selection and Discuss.
 
@@ -70,6 +71,39 @@ Codex headless sandbox policy. Open `http://127.0.0.1:8001/`. Bind to
 
 Completion signal: the Dashboard opens at installation onboarding. This guide
 does not require creating a throwaway Project during installation.
+
+### Web Terminal (enabled by default, optional dependency)
+
+The Dashboard host enables Web Terminal by default. This only exposes the
+authenticated Terminal capability; it does not install or start a CLI.
+Actually running a Claude Code or Codex TUI inside the Dashboard also requires
+Herdr `>=0.8.0`. Herdr is a host binary, not a Python dependency installed by
+`uv sync`:
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+herdr --version
+herdr api schema --json >/dev/null
+herdr terminal session observe --help
+herdr terminal session control --help
+```
+
+Do not add `runtime.web_terminal` to v4 or other target Project `zf.yaml`
+files. To disallow Web Terminal on a Dashboard host, explicitly disable it in
+the ZaoFu config that starts that host:
+
+```yaml
+runtime:
+  web_terminal:
+    enabled: false
+```
+
+Do not configure a terminal-only provider list. New Session reads the selected
+Project's effective orchestrator and role backends: a single-provider Project
+shows one provider, while a Mixed team shows Claude Code and Codex. See
+[Web Terminal](24-web-terminal.en.md) for installation, authentication,
+attachment modes, and production checks, or start with the
+[cross-client and offline-recovery showcase](showcases/web-terminal.en.md).
 
 ## 2. Bootstrap (Required)
 

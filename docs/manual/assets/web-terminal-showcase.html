@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZaoFu Web Terminal · 跨终端与离线恢复</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #07151f;
+      color: #edf8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(51, 179, 255, .18), transparent 34rem),
+        radial-gradient(circle at 92% 12%, rgba(42, 210, 159, .12), transparent 32rem),
+        #07151f;
+    }
+    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 72px; }
+    .eyebrow { color: #71d7ff; font-size: 12px; font-weight: 800; letter-spacing: .2em; }
+    h1 { margin: 12px 0 12px; font-size: clamp(34px, 6vw, 66px); line-height: 1.03; letter-spacing: -.04em; }
+    .lead { max-width: 780px; color: #afc6d5; font-size: 18px; line-height: 1.7; }
+    .player {
+      margin-top: 32px;
+      overflow: hidden;
+      border: 1px solid rgba(151, 209, 235, .24);
+      border-radius: 22px;
+      background: #02090e;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, .38);
+    }
+    video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #02090e; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0 0; }
+    .actions a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border: 1px solid rgba(151, 209, 235, .24);
+      border-radius: 999px;
+      color: #eaf8ff;
+      text-decoration: none;
+      background: rgba(17, 47, 65, .72);
+    }
+    .actions a:first-child { border-color: #4cc9ff; background: #0f668a; }
+    .facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 24px; }
+    .fact, .scene {
+      border: 1px solid rgba(151, 209, 235, .16);
+      border-radius: 16px;
+      background: rgba(9, 30, 43, .72);
+    }
+    .fact { padding: 18px; }
+    .fact strong { display: block; font-size: 25px; color: #fff; }
+    .fact span { display: block; margin-top: 4px; color: #8ba8b9; font-size: 13px; }
+    h2 { margin: 44px 0 16px; font-size: 24px; }
+    .scenes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .scene { padding: 20px; }
+    .scene b { color: #71d7ff; font-size: 12px; letter-spacing: .08em; }
+    .scene h3 { margin: 8px 0 8px; font-size: 18px; }
+    .scene p, .boundary { margin: 0; color: #9fb7c6; line-height: 1.62; }
+    .boundary { margin-top: 28px; padding: 18px 20px; border-left: 3px solid #55dca9; background: rgba(18, 54, 54, .44); }
+    @media (max-width: 760px) {
+      main { padding-top: 32px; }
+      .facts { grid-template-columns: repeat(2, 1fr); }
+      .scenes { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="eyebrow">ZAOFU · WEB TERMINAL SHOWCASE</div>
+    <h1>同一个 Agent 会话，<br>跨终端继续。</h1>
+    <p class="lead">一段 116.96 秒的真实 Codex + Herdr 演示：多客户端 Observe、显式 Take over、控制端离线后服务端继续运行，以及全新客户端恢复同一 PTY 历史。</p>
+
+    <div class="player">
+      <video controls preload="metadata" poster="web-terminal-introduction-poster.png">
+        <source src="web-terminal-introduction-zh-1080p.mp4" type="video/mp4">
+        <track default kind="captions" srclang="zh" label="中文" src="web-terminal-introduction-zh.vtt">
+        当前浏览器不支持 MP4 播放，请使用下方下载链接。
+      </video>
+    </div>
+
+    <nav class="actions" aria-label="演示下载与证据">
+      <a href="web-terminal-introduction-zh-1080p.mp4" download>下载 1080p</a>
+      <a href="web-terminal-introduction-zh-4k.mp4" download>下载 4K</a>
+      <a href="web-terminal-introduction-zh.vtt">字幕</a>
+      <a href="web-terminal-introduction-narration-zh.txt">逐字稿</a>
+      <a href="web-terminal-showcase-metrics.v1.json">指标</a>
+      <a href="web-terminal-showcase-provenance.v1.json">Provenance</a>
+    </nav>
+
+    <section class="facts" aria-label="录制指标">
+      <div class="fact"><strong>3</strong><span>隔离浏览器客户端</span></div>
+      <div class="fact"><strong>1 PTY</strong><span>跨终端共享 Session</span></div>
+      <div class="fact"><strong>9.8s</strong><span>控制端离线后完成响应</span></div>
+      <div class="fact"><strong>8 / 8</strong><span>真实交互断言通过</span></div>
+    </section>
+
+    <h2>六个镜头，一条完整交接链路</h2>
+    <section class="scenes">
+      <article class="scene"><b>01 · PROJECT NATIVE</b><h3>项目自动派生 Provider</h3><p>任意已授权 Project 都可进入；mixed Project 自动给出 Codex 与 Claude Code。</p></article>
+      <article class="scene"><b>02 · REAL PTY</b><h3>真实 Codex TUI</h3><p>Herdr 在 Project root 启动 PTY，保留原生 ANSI、按键与滚动体验。</p></article>
+      <article class="scene"><b>03 · OBSERVE</b><h3>多人只读旁观</h3><p>终端 A 控制，终端 B 只读观察同一屏幕，不会误输入或 resize。</p></article>
+      <article class="scene"><b>04 · TAKEOVER</b><h3>显式控制权交接</h3><p>B 主动 Take over；A 立刻失去写权限，双方继续看到同一个响应。</p></article>
+      <article class="scene"><b>05 · OFFLINE</b><h3>客户端断网，Agent 继续</h3><p>控制端断网后，服务端 PTY 与 Codex 不退出，观察端收到延迟任务结果。</p></article>
+      <article class="scene"><b>06 · RECOVER</b><h3>新客户端恢复同一 Session</h3><p>全新 browser context 使用同一 Project 与权限重新连接，恢复完整历史与控制。</p></article>
+    </section>
+
+    <p class="boundary"><strong>证据边界：</strong> A/B/C 是一台录制主机上的三个隔离 Chromium browser context，等价建模独立浏览器或设备客户端；离线的是浏览器客户端，不是 Dashboard、Herdr、PTY 或宿主机宕机。完整断言、哈希与限制见 provenance。</p>
+  </main>
+</body>
+</html>

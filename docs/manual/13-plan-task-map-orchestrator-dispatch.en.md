@@ -287,7 +287,7 @@ uv run zf events --last 80
 uv run zf refs verify
 ```
 
-Use Web Task, Delivery, Runs, Coverage, Work, and Goal Dossier views to check:
+Use Web Task, Delivery Overview, Runs Inspector, Graph, and Goal Dossier views to check:
 
 - source, Goal Claims, wave/dependencies, and owner role;
 - current attempt, worker instance, dispatch ID, and wait reason;

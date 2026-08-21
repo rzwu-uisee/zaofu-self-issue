@@ -9,6 +9,9 @@ const LazyOrchestratorPanel = lazy(() => import("../components/orchestrator/Orch
 const LazyProjectionPage = lazy(() => import("../components/projection/ProjectionPage").then((module) => ({
   default: module.ProjectionPage,
 })));
+const LazyTracesPage = lazy(() => import("../components/traces/TracesPage").then((module) => ({
+  default: module.TracesPage,
+})));
 
 function RouteLoading({ label }: { label: string }) {
   return (
@@ -28,4 +31,8 @@ export function OrchestratorRoute(props: ComponentProps<typeof LazyOrchestratorP
 
 export function ProjectionRoute(props: ComponentProps<typeof LazyProjectionPage>) {
   return <Suspense fallback={<RouteLoading label="workspace view" />}><LazyProjectionPage {...props} /></Suspense>;
+}
+
+export function TracesRoute(props: ComponentProps<typeof LazyTracesPage>) {
+  return <Suspense fallback={<RouteLoading label="traces" />}><LazyTracesPage {...props} /></Suspense>;
 }

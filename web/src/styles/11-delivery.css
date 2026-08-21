@@ -638,6 +638,10 @@
   color: var(--muted-foreground);
   font-size: var(--text-12);
 }
+
+.delivery-flow-task-row strong {
+  font-weight: var(--font-weight-medium);
+}
 .delivery-raw-block {
   min-width: 0;
   overflow: hidden;
@@ -689,7 +693,6 @@
   color: var(--text);
   font-size: var(--text-12);
 }
-.delivery-raw-tab { min-height: 360px; }
 .plan-approval-panel {
   display: grid;
   gap: 10px;

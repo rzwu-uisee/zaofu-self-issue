@@ -11,10 +11,12 @@ module never imports back from server.py.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, cast
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from zf.core.events.factory import event_log_from_project
@@ -30,12 +32,51 @@ from zf.runtime.loop_projection import (
 )
 from zf.runtime.run_chain import build_run_chain
 from zf.runtime.workflow_run import build_workflow_run
+from zf.web.projections.delivery_views import DeliveryView, build_delivery_view
+from zf.web.projections.delivery_view_wire import MAX_WIRE_ID_CHARS
 
 _DELIVERY_TRACE_CACHE_VERSION = "v3"
+_DELIVERY_VIEW_CACHE_VERSION = "v3"
+_DELIVERY_VIEW_TASK_FRESHNESS_FIELD = "_delivery_view_task_freshness"
+_DELIVERY_VIEWS = {"overview", "runs", "graph", "work"}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _task_store_freshness_digest(state_dir: Path) -> str:
+    """Fingerprint TaskStore inputs without reading active/archive bodies.
+
+    TaskStore writes use atomic replacement, so inode/size/time metadata changes
+    for active-board mutations.  Archive writes also replace a child entry and
+    therefore change the archive directory metadata.  This keeps cache hits
+    O(1), while a cache miss still reads the complete TaskStore exactly once in
+    the Delivery view builder.
+    """
+
+    digest = hashlib.sha256()
+    paths = (
+        ("active", state_dir / "kanban.json"),
+        ("archive", state_dir / "kanban"),
+    )
+    for label, path in paths:
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+            continue
+        except OSError:
+            return ""
+        digest.update(
+            (
+                f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:"
+                f"{stat.st_mtime_ns}:{stat.st_ctime_ns}\0"
+            ).encode("ascii")
+        )
+    return digest.hexdigest()
 
 
 def build_delivery_trace_router(*, resolve_ctx: Callable[[str], Any]) -> APIRouter:
@@ -106,9 +147,116 @@ def build_delivery_trace_router(*, resolve_ctx: Callable[[str], Any]) -> APIRout
                 pass
         return trace
 
+    def _view(
+        project_id: str,
+        feature_id: str,
+        *,
+        view: DeliveryView,
+        goal_id: str = "",
+    ) -> dict[str, Any]:
+        """Resolve one v2 base view, independently cached by source watermark."""
+
+        ctx = resolve_ctx(project_id)
+        cache_key = (
+            f"delivery-view:{_DELIVERY_VIEW_CACHE_VERSION}:"
+            f"{project_id}:{feature_id}:{view}"
+        )
+        if goal_id:
+            scope_key = hashlib.sha256(goal_id.encode("utf-8")).hexdigest()
+            cache_key = f"{cache_key}:goal:{scope_key}"
+        task_freshness = _task_store_freshness_digest(ctx.state_dir)
+        source_seq = 0
+        try:
+            from zf.web.projections import read_model
+
+            source_seq = read_model.current_projected_seq(ctx.state_dir, config=ctx.config)
+            cached = read_model.get_cached_projection(
+                ctx.state_dir,
+                cache_key,
+                source_seq=source_seq,
+            )
+            if cached is not None:
+                cached_task_freshness = str(
+                    cached.pop(_DELIVERY_VIEW_TASK_FRESHNESS_FIELD, "")
+                )
+                if task_freshness and cached_task_freshness == task_freshness:
+                    return cached
+        except Exception:
+            source_seq = 0
+        result = build_delivery_view(
+            state_dir=ctx.state_dir,
+            config=ctx.config,
+            generated_at=_now(),
+            project_id=project_id,
+            feature_id=feature_id,
+            view=view,
+            as_of_seq=source_seq,
+            goal_id=goal_id,
+        )
+        if source_seq and task_freshness:
+            try:
+                from zf.web.projections import read_model
+
+                read_model.set_cached_projection(
+                    ctx.state_dir,
+                    cache_key,
+                    kind="delivery-view",
+                    source_seq=source_seq,
+                    payload={
+                        **result,
+                        _DELIVERY_VIEW_TASK_FRESHNESS_FIELD: task_freshness,
+                    },
+                )
+            except Exception:
+                pass
+        return result
+
     @router.get("/api/projects/{project_id}/delivery-traces/{feature_id}")
-    def delivery_trace(project_id: str, feature_id: str, since_event_id: str = "") -> JSONResponse:
-        return JSONResponse(_trace(project_id, feature_id, since_event_id=since_event_id))
+    def delivery_trace(
+        project_id: str,
+        feature_id: str,
+        since_event_id: str = "",
+        contract: str = "",
+        view: str = "",
+        goal_id: str = "",
+    ) -> JSONResponse:
+        # No-query behavior is the byte/semantic-compatible legacy contract.
+        if not contract and not view:
+            return JSONResponse(_trace(project_id, feature_id, since_event_id=since_event_id))
+        if contract != "v2":
+            raise HTTPException(status_code=400, detail="contract must be v2")
+        if view not in _DELIVERY_VIEWS:
+            raise HTTPException(
+                status_code=400,
+                detail="view must be overview, runs, graph, or work",
+            )
+        goal_id = goal_id.strip()
+        if goal_id and (
+            len(goal_id) > MAX_WIRE_ID_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in goal_id)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"goal_id must be an exact ID of at most {MAX_WIRE_ID_CHARS} characters",
+            )
+        if goal_id and view != "work":
+            raise HTTPException(
+                status_code=400,
+                detail="goal_id is only supported with view=work",
+            )
+        ctx = resolve_ctx(project_id)
+        base = _view(
+            project_id,
+            feature_id,
+            view=cast(DeliveryView, view),
+            goal_id=goal_id,
+        )
+        return JSONResponse(_delivery_view_cursor_projection(
+            base,
+            state_dir=ctx.state_dir,
+            config=ctx.config,
+            since_event_id=since_event_id,
+        ))
 
     @router.get("/api/projects/{project_id}/delivery-traces/{feature_id}/thick")
     def delivery_thick_trace(project_id: str, feature_id: str, since_event_id: str = "") -> JSONResponse:
@@ -204,6 +352,68 @@ def _delivery_cursor_projection(
             "reason": reason,
         })
     return {"cursor": cursor, "deltas": deltas}
+
+
+def _delivery_view_cursor_projection(
+    base: dict[str, Any],
+    *,
+    state_dir: Any,
+    config: Any,
+    since_event_id: str,
+) -> dict[str, Any]:
+    """Attach cursor compatibility without making it part of the v2 cache.
+
+    V2 always returns the complete slim view.  A live caller may still send its
+    previous event id, but no event/timeline bodies are repeated as deltas.
+    """
+
+    from zf.web.projections import read_model
+
+    last_seq = int(base.get("as_of_seq") or 0)
+    last_event_id = str(base.get("as_of_event_id") or "")
+    requested = str(since_event_id or "").strip()
+    since_seq: int | None = None
+    degraded = False
+    reason = ""
+    if requested:
+        try:
+            hydrated = read_model.hydrate_event_by_id(
+                state_dir,
+                requested,
+                config=config,
+            )
+        except Exception:
+            hydrated = None
+        if hydrated is None:
+            degraded = True
+            reason = f"since_event_id {requested} not found in active event log"
+        else:
+            since_seq = int(hydrated[0])
+            if since_seq > last_seq:
+                degraded = True
+                reason = f"since_event_id {requested} is newer than view watermark"
+    new_event_count = (
+        max(0, last_seq - since_seq)
+        if since_seq is not None and not degraded
+        else 0
+    )
+    result = dict(base)
+    result.update({
+        "cursor": {
+            "schema_version": "delivery-view-cursor.v2",
+            "last_event_id": last_event_id,
+            "last_seq": last_seq,
+            "since_event_id": requested,
+            "since_seq": since_seq,
+            "new_event_count": new_event_count,
+            "has_more": False,
+            "degraded": degraded,
+            "reason": reason,
+            "delta_bodies_included": False,
+        },
+        "deltas": [],
+    })
+    return result
 
 
 def _delivery_deltas(events: list[tuple[int, ZfEvent]]) -> list[dict[str, Any]]:

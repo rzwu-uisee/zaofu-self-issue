@@ -329,8 +329,8 @@ def _add_task_nodes(
             "artifact_refs": [str(item) for item in actual.get("changed_files") or [] if str(item).strip()][-20:],
             "fanout_ids": fanouts,
             "deep_links": {
-                "events": f"page=observability&obs_tab=events&obs_task={task_id}",
-                "trace": f"page=observability&obs_tab=traces&obs_trace={trace_id}",
+                "events": f"page=events&task={task_id}",
+                "trace": f"page=traces&trace_id={trace_id}",
             },
         })
         _add_edge(edges, seen_edges, root_id, node_id, "delivers_task")

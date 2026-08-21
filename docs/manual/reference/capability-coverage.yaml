@@ -1,5 +1,5 @@
 schema_version: zf-manual-capability-coverage.v1
-last_verified: 2026-08-18
+last_verified: 2026-08-21
 capabilities:
   - id: project-bootstrap
     name: Project 初始化与 Bootstrap
@@ -134,6 +134,34 @@ capabilities:
       readback: Verify normalized Provider options, immutable session digest, RoleSession identity, activation, idle retirement, and preserved workdir/affinity.
       rollback: Restore the prior role config in a new runtime generation; retire only idle processes whose workdir and session evidence remain preserved.
       authority: Lifecycle owns process and pane placement only; it cannot mutate Task truth, transfer one Task's conversation to another, or make the orchestrator role on-demand.
+
+  - id: web-terminal-pty
+    name: Web Terminal 真实 Coding Agent PTY
+    name_en: Web Terminal real Coding Agent PTY
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/24-web-terminal.md
+      en:
+        - docs/manual/24-web-terminal.en.md
+    code:
+      - src/zf/web/terminal_routes.py
+      - src/zf/web/terminal_service.py
+      - src/zf/web/terminal_usage.py
+      - web/src/components/terminal/TerminalDrawer.tsx
+      - web/src/components/agent-view/terminalUsageRows.ts
+    tests:
+      - tests/test_web_terminal_runtime.py
+      - tests/test_web_terminal_routes.py
+      - tests/test_web_terminal_usage.py
+      - web/tests/web-terminal.spec.ts
+      - web/tests/terminalUsageRows.test.ts
+      - web/tests/web-terminal-real-usage.spec.ts
+    release:
+      activation: Install and qualify Herdr and the target Provider CLI. The Dashboard host capability is enabled by default and can be explicitly disabled; select a registered Project, then create a session from its derived provider menu.
+      readback: Verify capability availability, Project-scoped provider projection, PTY interaction, reconnect, multi-tab behavior, and per-tab usage rows.
+      rollback: While the capability remains enabled, explicitly stop only the affected terminal sessions; then disable the host capability and restart Web. Directly disabling the capability does not terminate an already-running CLI; preserve registry and usage receipts for diagnosis.
+      authority: Terminal bytes are an ephemeral interaction plane; create, rename, takeover, and stop remain token-gated side effects and never mutate Task or Workflow truth.
 
   - id: orchestrator-semantic-control
     name: Orchestrator Agent 语义 Checkpoint
@@ -274,8 +302,8 @@ capabilities:
       - src/zf/runtime/operations_metrics.py
       - src/zf/runtime/otlp_exporter.py
       - src/zf/runtime/observability_alerts.py
+      - src/zf/web/observability.py
       - web/src/components/observability/OperationsPanel.tsx
-      - web/src/components/observability/RuntimeLogsPanel.tsx
     tests:
       - tests/test_provider_telemetry.py
       - tests/test_otlp_exporter.py
@@ -283,7 +311,7 @@ capabilities:
       - tests/test_web_operations_observability.py
     release:
       activation: Opt in through observability config using environment-variable names only; run the runtime tick for exporter/attention work and Web for readback.
-      readback: Inspect Operations capability/exporter health, redacted Runtime Logs, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
+      readback: Inspect Operations capability/exporter health, the bounded redacted Runtime Logs API, and token-gated low-cardinality `/metrics`; confirm Delivery facts separately.
       rollback: Disable the relevant observability block in a new runtime generation and retain projections/logs/cursor for audit; never mutate Task/Event/Delivery truth.
       authority: Provider telemetry, logs, metrics, exporter, and alerts are diagnostic projections. They cannot write canonical stores, dispatch providers, or decide a gate/verdict.
 
@@ -324,7 +352,7 @@ capabilities:
       - tests/test_goal_coverage_graph.py
     release:
       activation: Bind mandatory Goal Claims to Task Map tasks, verification producers, and verdict evidence.
-      readback: Inspect missing/orphan Claims, producer coverage, closure status, and generation freshness.
+      readback: In Delivery Graph, inspect each Claim's covering canonical Tasks, Plan/Implementation/Verification/Closure axes, open Gaps, and generation freshness on the single lightweight coverage surface.
       rollback: Correct the source Task Map/Claim generation and rebuild the graph projection.
       authority: Coverage is derived from canonical contracts and evidence; a green visualization cannot waive missing mandatory proof.
 

@@ -128,17 +128,30 @@ Receipt 是 `events.jsonl` 的只读脱敏投影，不是新的 canonical truth�
 
 Web/API 当前常用路由:
 
+Delivery Web 的 Overview、Runs、Graph 显式请求
+`?contract=v2&view=overview|runs|graph`，只构建当前视图所需的读投影；Graph 内 Work tree
+先复用 Goal summary，选择 Goal 后立即请求
+`?contract=v2&view=work&goal_id={exact_goal_id}`。未带 `goal_id` 的 v2 Work 仍保持兼容；旧客户端不带
+query 时仍读取 legacy delivery-trace contract；`/thick`、causation、execution-graph 等兼容路由
+不因 Web 页面减法而删除。
+v2 Overview 的 ship 复用现有 graph/drift/ship builder；v2 Runs 的 ship 固定为
+`status=not_evaluated, summary_only=true`，不从 Task done 猜测 ready。v2 不返回
+`loop_summary`；Loop 顶层入口与合同保持不变。
+
 | 路由 | 用途 |
 |---|---|
-| `/api/projects/{project_id}/delivery-traces/{feature_id}` | 基础 delivery trace |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}?contract=v2&view={overview,runs,graph}` | Web 按顶层视图最小 delivery projection |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}?contract=v2&view=work&goal_id={goal_id}` | 选择一个 exact Goal 后加载的 bounded Work projection |
+| `/api/projects/{project_id}/delivery-traces/{feature_id}` | 无 query 的 legacy delivery trace 兼容合同 |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/thick` | thick trace / cursor / deltas |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/causation/{event_id}` | event causation |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/execution-graph` | execution graph |
 | `/api/projects/{project_id}/delivery-traces/{feature_id}/drift-report` | drift report |
 | `/api/projects/{project_id}/workflow-runs/{fanout_id}` | fanout/workflow run |
 
-Loop 页面会消费 related loop / autoresearch trace 信息,用于把 bug-fix、reflection、
-replan、A/B 对比等循环和 delivery trace 连起来。
+Loop 页面会消费 related loop / autoresearch trace 信息，用于把 bug-fix、reflection、
+replan、A/B 对比等循环和 delivery trace 连起来。它只请求 scoped `/loop-view`；大量 attempt
+先显示 100 条再继续展开，完整计数与 Timeline 不受可见窗口影响。
 
 ## 7. 一句话原则
 

@@ -91,7 +91,7 @@ export function buildDeliveryWorkGraph(
       collapsed,
       claimId: "",
       taskId: "",
-      searchText: `unmapped work ${model.unclaimedTasks.map((task) => `${task.taskId} ${task.title}`).join(" ")}`.toLowerCase(),
+      searchText: "unmapped work",
     });
     const taskIds = model.unclaimedTasks.map((task) => {
       const taskNode = taskGraphNode(task);
@@ -108,7 +108,7 @@ export function buildDeliveryWorkGraph(
     kind: "goal",
     title: model.goal?.title || "Delivery goal",
     reference: model.goal?.goal_id || model.goal?.node_id || "goal",
-    status: model.goal?.status || "unknown",
+    status: model.goal?.status || "",
     owner: "delivery",
     implementation: `${model.summary.done}/${model.summary.total} done`,
     verification: `${model.summary.verified}/${model.summary.total} verified`,
@@ -191,14 +191,19 @@ function claimGraphNode(
 ): Omit<DeliveryWorkGraphNode, "position"> {
   const { claim } = workClaim;
   const id = workClaimNodeId(claim.goal_claim_id);
-  const taskCount = workClaim.tasks.length + workClaim.linkedTasks.length;
+  const visibleTaskCount = workClaim.tasks.length + workClaim.linkedTasks.length;
+  const taskCount = workClaim.taskTotal;
   return {
     id,
     kind: "claim",
     title: claim.title,
     reference: claim.goal_claim_id,
     status: claim.plan_coverage || "uncovered",
-    owner: taskCount ? `${taskCount} task${taskCount === 1 ? "" : "s"}` : "no owner",
+    owner: taskCount
+      ? workClaim.taskDetailsOmitted
+        ? `${visibleTaskCount}/${taskCount} tasks visible`
+        : `${taskCount} task${taskCount === 1 ? "" : "s"}`
+      : "no owner",
     implementation: claim.execution || "pending",
     verification: claim.task_verification || "unverified",
     childCount: workClaim.tasks.length,
@@ -212,8 +217,8 @@ function claimGraphNode(
 function taskGraphNode(task: DeliveryWorkTask): Omit<DeliveryWorkGraphNode, "position"> {
   const latest = task.tries[task.tries.length - 1];
   const implementation = task.tries.length
-    ? `${task.tries.length} ${task.tries.length === 1 ? "try" : "tries"} · ${latest?.outcome || task.status}`
-    : "no tries";
+    ? `${task.tries.length}${task.triesTruncated ? "+" : ""} ${task.tries.length === 1 ? "try" : "tries"} · ${latest?.outcome || task.status}`
+    : task.lifecycleDetailsOmitted ? "attempts omitted" : "no tries";
   return {
     id: workTaskNodeId(task.taskId),
     kind: "task",

@@ -7,6 +7,40 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 - 暂无。
 
+## v0.0.7 - 2026-08-21
+
+Release notes: [中文](docs/releases/v0.0.7.md) |
+[English](docs/releases/v0.0.7.en.md)
+
+Developer Preview Web Terminal 版本，在保留 Kernel 权威边界的前提下，将真实 Coding Agent
+PTY、多客户端控制、断线重连和逐 Terminal 用量证据带入 Dashboard，并简化 Delivery、Trace
+和 Loop 的日常诊断界面。
+
+### Added
+
+- 基于 Herdr 的 Project-scoped Web Terminal，支持多 Session、一次性 attachment ticket、
+  Observe/Control/Take over、Rename、Stop 和 full/delta 恢复。
+- Project effective Provider 派生、独立 Terminal usage ledger，以及 Agents 页逐 Tab
+  provider/model/context/token/cost 投影。
+- 新的 Delivery/Trace 服务端投影和独立 Traces 页面，补齐 work、lifecycle、run、span 与
+  regression action 的回读路径。
+
+### Changed
+
+- Web Terminal 在 Dashboard host 默认开启但可显式关闭；依赖不合格时 fail closed 为 typed
+  unavailable，且不会自动安装 Herdr、启动 Provider 或扩大 Project 权限。
+- Delivery、Trace、Loop 与 Observability 页面收敛重复视图和样式，保留 Event/Store/Artifact
+  作为 canonical truth。
+- Terminal 字节与 Workflow budget 隔离；交互内容不写入 EventLog，也不能推进 Task/Gate。
+
+### Validation
+
+- fake-Herdr focused、Web unit/typecheck/build、Docker Playwright 和真实 Herdr/Codex 资格证据
+  记录在双语 release notes 中。
+- 最终 deterministic run 为 10,750 passed / 20 skipped / 19 deselected，另有 21 个节点全部在
+  detached `v0.0.6` 原样复现；serial、Web、workflow release gate、pre-merge sentinel 和 flow
+  smoke 通过。外部 Provider 和目标宿主仍需独立 qualification。
+
 ## v0.0.6 - 2026-08-20
 
 Release notes: [中文](docs/releases/v0.0.6.md) |

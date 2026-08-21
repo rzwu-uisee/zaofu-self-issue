@@ -18,6 +18,7 @@
 | 将已验证的经验变成可撤销的复用能力 | [自我进化与能力积累](23-self-evolution-learning.md) | 能从来源 Archive、trial、evaluator、canary 与 asset lifecycle 解释结论 |
 | 理解跨 Agent 的上下文和证据如何继承 | [上下文、Artifact 与 Handoff](operations/context-handoff-artifacts.md) | 能定位 current contract、required reads、result 和 lineage |
 | 排查 Provider、SSE、Runtime Log、OTLP 或系统运维信号 | [Metrics、Observability 与 Operations](21-metrics-observability-operations.md) | 能区分交付事实、事件、运行日志、低基数 metrics 与 exporter health |
+| 在浏览器中运行真实 Claude Code/Codex TUI | [Web Terminal](24-web-terminal.md) | Herdr capability 可用，Project Provider 菜单正确，CLI 可重连、旁观和控制 |
 | 接入飞书、Automation 或 Provider | [集成](integrations/README.md) | 外部入口通过 projection/controlled action 工作，不产生第二真相 |
 | 查命令、配置或稳定合同 | [参考](reference/README.md) | 从生成的当前命令目录或专题参考定位准确入口 |
 | 开发、评审或验证 ZaoFu 本身 | [架构总览](architecture.md) | 能区分 Kernel、Agent、Store、Artifact、Projection 和两种编排模式 |
@@ -85,6 +86,7 @@ Recovery Coordinator 收敛和 OpenCode Provider SPI 仍是候选设计。配置
 - [21 Metrics、Observability 与 Operations](21-metrics-observability-operations.md)
 - [22 Provider Native Telemetry 与 OTLP](22-provider-native-telemetry.md)
 - [23 自我进化与能力积累](23-self-evolution-learning.md)
+- [24 Web Terminal：真实 Coding Agent CLI](24-web-terminal.md)
 
 ## 文档状态
 

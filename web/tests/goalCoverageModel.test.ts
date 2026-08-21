@@ -1,6 +1,8 @@
 import type { GoalCoverageGraph } from "../src/api/types";
 import {
   filterClaims,
+  hasUnavailableTaskDetails,
+  missingTaskDetailCount,
   preferredClaimId,
   statusTone,
   taskNodesById,
@@ -53,6 +55,33 @@ equal(preferredClaimId(graph, "CLAIM-A"), "CLAIM-A", "current selection is stabl
 deepEqual(filterClaims(graph, "implement auth").map((claim) => claim.goal_claim_id), ["CLAIM-A"], "task search");
 deepEqual(filterClaims(graph, "replay").map((claim) => claim.goal_claim_id), ["CLAIM-B"], "claim search");
 equal(taskNodesById(graph).get("TASK-A")?.title, "Implement auth", "task lookup");
+const truncatedGraph: GoalCoverageGraph = {
+  ...graph,
+  nodes_truncated: true,
+  nodes: graph.nodes.filter((node) => node.task_id !== "TASK-A"),
+};
+const truncatedClaim = truncatedGraph.nodes.find((node) => node.goal_claim_id === "CLAIM-A")!;
+assert(
+  hasUnavailableTaskDetails(truncatedGraph, truncatedClaim as never, taskNodesById(truncatedGraph)),
+  "a retained claim with an omitted task node must report unavailable details",
+);
+assert(
+  !hasUnavailableTaskDetails(graph, truncatedClaim as never, taskNodesById(graph)),
+  "a complete graph must not report unavailable details",
+);
+const largeClaim = {
+  ...truncatedClaim,
+  task_ids: Array.from({ length: 16 }, (_, index) => `TASK-${index}`),
+  task_details: { total: 50, included: 40, missing_count: 10 },
+};
+const retainedLargeTasks = new Map(
+  largeClaim.task_ids.map((taskId) => [taskId, { node_id: `task:${taskId}`, kind: "task", task_id: taskId, title: taskId }]),
+);
+equal(
+  missingTaskDetailCount({ ...graph, nodes_truncated: true }, largeClaim as never, retainedLargeTasks as never),
+  34,
+  "resolved task nodes, not the separately capped included count, determine omitted owner details",
+);
 equal(statusTone("closed"), "ok", "closed tone");
 equal(statusTone("uncovered"), "err", "uncovered tone");
 equal(statusTone("stale"), "warn", "stale tone");

@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Deterministic Herdr 0.8 CLI double for ZaoFu Web terminal tests.
+
+It implements only the public commands ZaoFu consumes.  PTY/provider behavior
+is represented by an NDJSON terminal stream; production never imports this
+module and tests still exercise the real subprocess/WebSocket bridge.
+"""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Callable
+
+
+def state_root() -> Path:
+    root = Path(os.environ.get("ZF_FAKE_HERDR_STATE_DIR", "/tmp/zf-fake-herdr"))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def state_path(session: str) -> Path:
+    safe = "".join(char if char.isalnum() or char in "-_" else "-" for char in session)
+    return state_root() / f"{safe}.json"
+
+
+def with_state(session: str, fn: Callable[[dict], object]) -> object:
+    path = state_path(session)
+    lock = path.with_suffix(".lock")
+    with lock.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            value = {"next": 1, "workspace_id": "", "tabs": {}, "screens": {}}
+        result = fn(value)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return result
+
+
+def response(result: object) -> int:
+    print(json.dumps({"result": result}, separators=(",", ":")), flush=True)
+    return 0
+
+
+def error(code: str, message: str) -> int:
+    print(json.dumps({"error": {"code": code, "message": message}}), flush=True)
+    return 1
+
+
+def option(args: list[str], flag: str, default: str = "") -> str:
+    try:
+        return args[args.index(flag) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def workspace_create(session: str, args: list[str]) -> int:
+    label = option(args, "--label")
+
+    def create(value: dict) -> dict:
+        index = int(value["next"])
+        value["next"] = index + 1
+        workspace_id = f"w{index}"
+        tab_id = f"t{index}"
+        pane_id = f"p{index}"
+        value["workspace_id"] = workspace_id
+        value["tabs"][tab_id] = {"pane_id": pane_id, "active": True, "label": label}
+        return {
+            "workspace": {"workspace_id": workspace_id},
+            "tab": {"tab_id": tab_id},
+            "root_pane": {"pane_id": pane_id},
+        }
+
+    return response(with_state(session, create))
+
+
+def tab_create(session: str, args: list[str]) -> int:
+    label = option(args, "--label")
+
+    def create(value: dict) -> dict:
+        index = int(value["next"])
+        value["next"] = index + 1
+        tab_id = f"t{index}"
+        pane_id = f"p{index}"
+        value["tabs"][tab_id] = {"pane_id": pane_id, "active": True, "label": label}
+        return {"tab": {"tab_id": tab_id}, "root_pane": {"pane_id": pane_id}}
+
+    return response(with_state(session, create))
+
+
+def tab_get(session: str, tab_id: str) -> int:
+    def get(value: dict) -> dict | None:
+        tab = value["tabs"].get(tab_id)
+        return {"tab": {"tab_id": tab_id, **tab}} if tab and tab["active"] else None
+
+    value = with_state(session, get)
+    return response(value) if value is not None else error("tab_not_found", tab_id)
+
+
+def tab_close(session: str, tab_id: str) -> int:
+    def close(value: dict) -> bool:
+        tab = value["tabs"].get(tab_id)
+        if not tab or not tab["active"]:
+            return False
+        tab["active"] = False
+        return True
+
+    return response({"closed": tab_id}) if with_state(session, close) else error("tab_not_found", tab_id)
+
+
+def tab_rename(session: str, tab_id: str, title: str) -> int:
+    def rename(value: dict) -> dict | None:
+        tab = value["tabs"].get(tab_id)
+        if not tab or not tab["active"]:
+            return None
+        tab["label"] = title
+        return {"tab": {"tab_id": tab_id, **tab}}
+
+    value = with_state(session, rename)
+    return response(value) if value is not None else error("tab_not_found", tab_id)
+
+
+def agent_start(session: str, args: list[str]) -> int:
+    name = args[2] if len(args) > 2 else ""
+    pane_id = option(args, "--pane")
+    kind = option(args, "--kind")
+    if not name or not pane_id or not kind:
+        return error("invalid_agent", "name, pane and kind are required")
+    return response(
+        {
+            "agent": {
+                "name": name,
+                "kind": kind,
+                "pane_id": pane_id,
+                "terminal_id": f"term-{pane_id}",
+                "state": "idle",
+            }
+        }
+    )
+
+
+def terminal_frame(seq: int, text: str, *, full: bool) -> None:
+    payload = {
+        "type": "terminal.frame",
+        "seq": seq,
+        "encoding": "ansi",
+        "width": 120,
+        "height": 40,
+        "full": full,
+        "bytes": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+    }
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def terminal_session(session: str, mode: str, target: str) -> int:
+    def snapshot(value: dict) -> str:
+        screens = value.setdefault("screens", {})
+        return screens.setdefault(
+            target,
+            f"\x1b[2J\x1b[H[Fake Herdr] {target}\r\nCoding agent ready\r\n$ ",
+        )
+
+    terminal_frame(
+        1,
+        with_state(session, snapshot),
+        full=True,
+    )
+    if mode == "observe":
+        for _ in sys.stdin:
+            pass
+        return 0
+    seq = 1
+    for raw in sys.stdin:
+        try:
+            command = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        kind = command.get("type")
+        if kind == "terminal.release":
+            print(json.dumps({"type": "terminal.closed", "reason": "released"}), flush=True)
+            return 0
+        if kind == "terminal.input":
+            if isinstance(command.get("text"), str):
+                data = command["text"]
+            else:
+                try:
+                    data = base64.b64decode(command.get("bytes", "")).decode("utf-8", "replace")
+                except (ValueError, TypeError):
+                    data = ""
+            def append(value: dict) -> None:
+                screens = value.setdefault("screens", {})
+                screens[target] = (str(screens.get(target) or "") + data)[-100_000:]
+
+            with_state(session, append)
+            seq += 1
+            terminal_frame(seq, data, full=False)
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print("herdr 0.8.0")
+        return 0
+    if args[:3] == ["api", "schema", "--json"]:
+        print(json.dumps({"title": "fake-herdr-api", "version": "0.8.0"}))
+        return 0
+    if args[-1:] == ["--help"] and args[:3] == ["terminal", "session", "observe"]:
+        print("usage: herdr terminal session observe <target>")
+        return 0
+    if args[-1:] == ["--help"] and args[:3] == ["terminal", "session", "control"]:
+        print("usage: herdr terminal session control <target>")
+        return 0
+    if args == ["tab", "rename", "--help"]:
+        print("usage: herdr tab rename <tab-id> <label>")
+        return 0
+    if len(args) < 3 or args[0] != "--session":
+        return error("invalid_command", "named session is required")
+    session, command = args[1], args[2:]
+    if command[:2] == ["workspace", "list"]:
+        return response({"workspaces": []})
+    if command[:2] == ["workspace", "create"]:
+        return workspace_create(session, command)
+    if command[:2] == ["tab", "create"]:
+        return tab_create(session, command)
+    if command[:2] == ["tab", "get"] and len(command) >= 3:
+        return tab_get(session, command[2])
+    if command[:2] == ["tab", "close"] and len(command) >= 3:
+        return tab_close(session, command[2])
+    if command[:2] == ["tab", "rename"] and len(command) >= 4:
+        return tab_rename(session, command[2], " ".join(command[3:]))
+    if command[:2] == ["agent", "start"]:
+        return agent_start(session, command)
+    if command[:3] == ["terminal", "session", "observe"] and len(command) >= 4:
+        return terminal_session(session, "observe", command[3])
+    if command[:3] == ["terminal", "session", "control"] and len(command) >= 4:
+        return terminal_session(session, "control", command[3])
+    return error("unsupported_command", " ".join(command))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

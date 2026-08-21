@@ -7,6 +7,9 @@ import { buildProjectCostPresentation } from "../../app/costPrecision";
 import { useProjectCost } from "../../app/useProjectCost";
 import { useEffect, useMemo, useState } from "react";
 import { KeyValuePanel, RuntimeDetailSection, RuntimeSummaryCard, TablePage, asRecord, formatUsd, needsOperatorAttention, textValue } from "../../app/shared";
+import { fetchTerminalSessions } from "../terminal/api";
+import type { TerminalSessionsPage } from "../terminal/types";
+import { buildTerminalUsageRows } from "./terminalUsageRows";
 
 export function AgentViewPage({
   actionReady,
@@ -49,6 +52,11 @@ export function AgentViewPage({
     agents: AgentSummary[];
     status: "idle" | "loading" | "active" | "failed";
   }>({ agentCockpit: null, agentLive: null, agents: [], status: "idle" });
+  const [terminalProjection, setTerminalProjection] = useState<{
+    page: TerminalSessionsPage | null;
+    projectId: string;
+    status: "idle" | "loading" | "active" | "failed";
+  }>({ page: null, projectId: "", status: "idle" });
 
   useEffect(() => {
     if (!projectId) {
@@ -97,6 +105,48 @@ export function AgentViewPage({
     };
   }, [agentCockpit, agentLive, agents.length, projectId]);
 
+  useEffect(() => {
+    if (!projectId) {
+      setTerminalProjection({ page: null, projectId: "", status: "idle" });
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const page = await fetchTerminalSessions(projectId);
+        if (!cancelled) {
+          setTerminalProjection({ page, projectId, status: "active" });
+        }
+      } catch {
+        if (!cancelled) {
+          setTerminalProjection((current) => ({
+            page: current.projectId === projectId ? current.page : null,
+            projectId,
+            status: "failed",
+          }));
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+    setTerminalProjection((current) => ({
+      page: current.projectId === projectId ? current.page : null,
+      projectId,
+      status: "loading",
+    }));
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [projectId]);
+
   const effectiveAgents = agents.length ? agents : fallback.agents;
   const effectiveAgentCockpit = agentCockpit ?? fallback.agentCockpit;
   const effectiveAgentLive = agentLive ?? fallback.agentLive;
@@ -119,6 +169,14 @@ export function AgentViewPage({
   const displayedCost = projectCost.hasUsage ? projectCost.totalUsd : fleetMetrics.totalCostUsd;
   const agentAttentionRows = buildAgentAttentionRows(effectiveAgents, effectiveAgentCockpit, recovery);
   const roleFleetRows = buildRoleFleetRows(effectiveAgents, effectiveCost);
+  const terminalPage = terminalProjection.projectId === projectId
+    ? terminalProjection.page
+    : null;
+  const terminalUsageRows = useMemo(
+    () => buildTerminalUsageRows(terminalPage?.sessions ?? []),
+    [terminalPage?.sessions],
+  );
+  const activeTerminalCount = terminalUsageRows.filter((row) => row.state === "active").length;
 
   useEffect(() => {
     // Drawer semantics: nothing selected by default; only clear a selection
@@ -393,7 +451,11 @@ export function AgentViewPage({
       <div className="section-heading">
         <div>
           <h2>Agents</h2>
-          <span className="muted">{workers.length} backend workers · {projectionSource}</span>
+          <span className="muted">
+            {workers.length} backend workers
+            {terminalPage?.enabled ? ` · ${activeTerminalCount} terminal tabs` : ""}
+            {` · ${projectionSource}`}
+          </span>
         </div>
         <span className="metric-chip">Autopilot cockpit</span>
       </div>
@@ -467,6 +529,27 @@ export function AgentViewPage({
           </p>
         )}
       </section>
+
+      {terminalPage?.enabled || terminalUsageRows.length ? (
+        <section data-testid="interactive-terminals">
+          <TablePage
+            title="Interactive Terminals"
+            rows={terminalUsageRows.map((row) => ({
+              tab: row.tab,
+              provider: row.provider,
+              state: row.state,
+              model: row.model,
+              context: row.contextUsageRatio == null
+                ? "—"
+                : `${Math.round(row.contextUsageRatio * 100)}%`,
+              tokens: row.totalTokens == null ? "—" : formatTokens(row.totalTokens),
+              cost: row.costUsd == null ? "—" : formatUsd(row.costUsd),
+              precision: row.precision,
+            }))}
+            embedded
+          />
+        </section>
+      ) : null}
 
       {workers.length ? (
         <TablePage

@@ -19,6 +19,7 @@
 | Turn verified experience into a revocable reusable capability | [Self-evolution and capability accumulation](23-self-evolution-learning.en.md) | Source Archive, trials, evaluator, canary, and asset lifecycle explain the result |
 | Understand context and evidence inheritance across agents | [Context, Artifacts, and Handoff](operations/context-handoff-artifacts.en.md) | You can locate the current contract, required reads, result, and lineage |
 | Diagnose Provider, SSE, Runtime Log, OTLP, or system operations signals | [Metrics, Observability, and Operations](21-metrics-observability-operations.en.md) | You can distinguish delivery facts, events, runtime logs, low-cardinality metrics, and exporter health |
+| Run a real Claude Code/Codex TUI in the browser | [Web Terminal](24-web-terminal.en.md) | Herdr is available, the Project provider menu is correct, and the CLI can reconnect, observe, and control |
 | Connect Feishu, Automations, or a provider | [Integrations](integrations/README.en.md) | External surfaces use projections and controlled actions without creating another truth |
 | Look up commands, configuration, or stable contracts | [Reference](reference/README.en.md) | The generated command inventory or a focused reference gives the current entrypoint |
 | Develop, review, or validate ZaoFu itself | [Architecture overview](architecture.en.md) | You can separate Kernel, Agent, Store, Artifact, Projection, and orchestration modes |
@@ -90,6 +91,7 @@ the outcome routes above first.
 - [21 Metrics, Observability, and Operations](21-metrics-observability-operations.en.md)
 - [22 Provider Native Telemetry and OTLP](22-provider-native-telemetry.en.md)
 - [23 Self-evolution and capability accumulation](23-self-evolution-learning.en.md)
+- [24 Web Terminal: real Coding Agent CLI](24-web-terminal.en.md)
 
 ## Documentation Status
 

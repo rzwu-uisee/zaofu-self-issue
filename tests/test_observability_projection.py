@@ -125,4 +125,9 @@ def test_delivery_closed_loop_projects_tasks_fanout_replan_and_ship_edges():
     assert ("task:T1", "task:T2", "blocked_by") in edge_keys
     assert ("fanout:fan-1", "task:T1", "executes_task") in edge_keys
     assert ("gate:replan:trace-F-1", "delivery:trace-F-1", "guards_replan") in edge_keys
+    task_node = next(node for node in graph["nodes"] if node["node_id"] == "task:T1")
+    assert task_node["deep_links"] == {
+        "events": "page=events&task=T1",
+        "trace": "page=traces&trace_id=trace-F-1",
+    }
     assert graph["node_count"] == len(graph["nodes"])

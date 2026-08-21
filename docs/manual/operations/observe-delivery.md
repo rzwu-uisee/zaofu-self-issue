@@ -13,15 +13,15 @@
 | 当前有哪些工作，谁负责 | `Tasks` |
 | 一次目标整体是否可交付 | `Delivery` |
 | 某轮 stage/attempt/retry 如何推进 | `Delivery -> Runs` |
-| Goal 的每个 Claim 是否被覆盖 | `Delivery -> Delivery Map -> Coverage` |
-| Goal、Claim 和 canonical Task 如何关联 | `Delivery -> Delivery Map -> Work` |
-| runtime/gate/artifact 技术诊断 | `Delivery -> Delivery Map -> Diagnostics` |
-| 事件因果和精确发生顺序 | `Monitoring -> Observability -> Traces/Events` |
+| Goal 的 Claim 是否被 Task 覆盖并有当前证据 | `Delivery -> Graph` |
+| 某个 Task 的 try、gate、result 和 evidence | `Delivery -> Runs -> Inspector` 或 canonical Task |
+| 事件因果和精确发生顺序 | `Traces` |
+| behavior、eval 和 improvement 如何收敛 | `Loop` |
 | 一个 Run 的人类可读过程包 | `Monitoring -> Observability -> Runs -> Goal Dossier` |
 | 等待人工决定或需要关注什么 | `Inbox` |
 
-下面的 `playgroud` 动画按一次交付的排查顺序，依次展示 Overview、Runs、Coverage、Work、
-Diagnostics、Loop 和 Observability；所有页面读取同一 Feature/Run/Event 链。
+下面的 `playgroud` 动画是历史界面示例；当前操作路线以本文的
+`Overview -> Runs/Graph -> Task/Traces/Loop` 为准。所有页面仍读取同一 Feature/Run/Event 链。
 
 ![playgroud 交付观测：Overview、Runs、Graph、Loop 与 Observability](../assets/observe-delivery.webp)
 
@@ -37,7 +37,7 @@ Overview 先回答：
 
 它是进入深层视图的摘要，不应重判 Task、Run 或 Closure。
 
-## Runs 与 Spans
+## Runs 与 Inspector
 
 `Runs` 以本轮执行为单位展示：
 
@@ -47,28 +47,32 @@ Overview 先回答：
 - fanout/fanin 和 dependency barrier；
 - gate、result、duration 和 causation。
 
-`Spans` 用于定位事件顺序和调用因果。运行慢或看似跳步时先看 Runs，再用 Spans/Trace
-定位具体 event，不要从一个状态 badge 猜原因。
+Runs 只保留一个 Run workbench。点击 Task 在 Inspector 中查看 try、gate、event、evidence
+与 regression capture/replay。需要时间顺序或 Span Tree/Waterfall 时进入 `Traces`；只有
+服务端返回已验证 canonical Trace ref 时，Runs 才显示该跳转。
 
-## Coverage、Work、Diagnostics
+## Graph
 
-三种 Graph 视角回答不同问题：
+Graph 默认打开轻量 Goal -> Claim -> canonical Task Coverage。需要从任务执行角度查看时，切换
+到 Work：页面先显示已加载的 Goal 摘要；选择 Goal 后立即加载该
+Goal 的 Work tree，展示 Goal -> Claim -> Task ownership、当前状态、尝试、gate 和 evidence。
+Diagnostics lens 已移除。Coverage 中每个 Claim 同时显示：
 
-| 视角 | 主要受众 | 解释什么 |
-|---|---|---|
-| Coverage | PM、Owner、Reviewer | Claim 的 Plan、Implementation、Verification、Closure 和 Gap |
-| Work | 工程师、交付 Owner | Goal -> Claim -> Task，及 Task 的 Try、Result、Evidence |
-| Diagnostics | Operator、Harness 维护者 | runtime、gate、behavior、eval 和 artifact 技术关系 |
+- Plan 是否有 covering Task；
+- Implementation 和 Verification 结果；
+- Closure 、open Gap 和 generation/currentness；
+- 进入 covering canonical Task 的链接。
 
-Coverage 中 `Task done` 但 Claim 未闭合通常表示：
+Graph 中 `Task done` 但 Claim 未闭合通常表示：
 
 - Task 没有声明覆盖该 Claim；
 - verification 结果缺失、失败或属于旧 generation；
 - evidence 与 target/contract identity 不一致；
 - Goal Closure 仍有 open gap。
 
-Work 中同一个 canonical Task 只应有一个主节点；它覆盖其他 Claim 时显示 secondary
-relation，避免多个节点形成多份状态真相。
+这时从 covering Task 进入 Task/Runs 查看详细证据；从 verified Trace ref 进入 Traces；
+behavior/eval/improvement 问题进入 Loop。未选择 Goal 时 Work 不请求 detail 或图形 chunk；Graph 不复制 Thick
+Graph、Trace/Span 或 Loop 的重型诊断 UI。
 
 ## Goal Dossier
 

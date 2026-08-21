@@ -43,11 +43,34 @@ const CHANNEL_CONVERSATION_ONLY_PREFIXES = [
 export const BOARD_REFRESH_PAGES = new Set<PageId>(["board", "project", "task", "triage"]);
 export const MEASURE_REFRESH_PAGES = new Set<PageId>([
   "delivery",
-  "goal-coverage",
   "delivery-trace",
   "delivery-graph",
-  "behavior-loop",
 ]);
+
+const LOOP_VIEW_REFRESH_NOISE = new Set([
+  "agent.session.part.delta",
+  "hook.orphan_event",
+  "kanban.agent.message.delta",
+  "kanban.agent.turn.delta",
+  "orchestrator.round.complete",
+  "provider.permission.snapshot.recorded",
+  "provider.stop.check",
+  "run.manager.agent.observation",
+  "run.manager.tick.completed",
+  "run.manager.tick.started",
+  "runtime.snapshot.recorded",
+  "run.heartbeat",
+  "task.attempt.heartbeat",
+  "task.requeue.skipped",
+  "worker.heartbeat",
+]);
+
+const LOOP_VIEW_REFRESH_NOISE_PREFIXES = [
+  "channel.context_pack.",
+  "channel.message.stream.",
+  "channel.relay.",
+  "channel.typing.",
+] as const;
 
 const OBSERVABILITY_SNAPSHOT_PAGES = new Set<PageId>([
   "observability",
@@ -65,7 +88,6 @@ const LIGHT_SNAPSHOT_PAGES = new Set<PageId>([
   "board",
   "task",
   "triage",
-  "traces",
   "runtime",
   "settings",
   "diagnostics",
@@ -87,6 +109,15 @@ export function pageLoadsSnapshot(page: PageId): boolean {
 
 export function pageLoadsDeliveryFeatures(page: PageId): boolean {
   return MEASURE_REFRESH_PAGES.has(page);
+}
+
+// Loop owns /loop-view directly. Keep its SSE invalidation policy separate
+// from Delivery so a Loop event never revives the unused /delivery-features
+// request. Mechanical pump events intentionally wait for the next semantic
+// event; they do not change the operator-facing loop census.
+export function eventInvalidatesLoopView(eventType: string): boolean {
+  if (!eventType || LOOP_VIEW_REFRESH_NOISE.has(eventType)) return false;
+  return !LOOP_VIEW_REFRESH_NOISE_PREFIXES.some((prefix) => eventType.startsWith(prefix));
 }
 
 export function pagePollsOperatorInbox(page: PageId): boolean {

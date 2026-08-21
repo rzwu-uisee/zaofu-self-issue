@@ -12,9 +12,9 @@
 | 你要回答的问题 | 首选入口 | 信号来源 | 是否能改变交付真相 |
 |---|---|---|---|
 | 这个 Task/Run 是否完成、为何未签收 | Delivery、Goal Dossier、Graph | Task、Event、Artifact、Gate 投影 | 否；只读解释 |
-| 某个事件何时发生、由谁因何触发 | Observability -> Events / Event Logs | append-only `events.jsonl` | 否 |
-| 进程、transport 或 sidecar 为什么异常 | Observability -> Runtime Logs | 已脱敏 `logs/runtime.jsonl` | 否 |
-| Provider 路由、OTLP exporter、SSE 是否健康 | Observability -> Operations | provider telemetry 与运维投影 | 否 |
+| 某个 Trace/Event 何时发生、由谁因何触发 | Traces；必要时 Events / Event Logs 兼容页 | append-only `events.jsonl` 与 Trace 投影 | 否 |
+| 进程、transport 或 sidecar 为什么异常 | Runtime Logs 有界 API / state 文件 | 已脱敏 `logs/runtime.jsonl` | 否 |
+| Provider 路由、OTLP exporter、SSE 是否健康 | Operations 兼容页 | provider telemetry 与运维投影 | 否 |
 | 系统层的低基数趋势和告警 | `GET /metrics`、Operations | Prometheus 格式运维指标 | 否 |
 
 `zf metrics snapshot` 仍是 ZaoFu 的业务/评估快照；`/metrics` 是另一个 opt-in 的
@@ -81,10 +81,12 @@ observability:
 ### 3.1 交付没有推进
 
 1. 先在 Delivery/Goal Dossier 确认 Task、Run、Gate 和 evidence 的实际状态。
-2. 在 Observability -> Events 以 Task、actor、type、status 或时间窗口定位因果链。
-3. 在 Event Logs 查看 EventLog 派生的语义审计摘要，而不是把它当作原始进程日志。
-4. 若表现为 transport、sidecar、Provider 启动或连续 SSE 间隙，再查看 Runtime Logs 和
-   Operations。
+2. 在 Traces 以 Task、actor、status、duration、role 或 backend 定位因果链，选择一行后再读
+   Route/Event evidence；需要逐条 occurrence 时进入 Events / Event Logs 兼容页。只有真实 Span
+   contract 存在时才显示 Span，不从 Event timeline 推断。
+3. Event Logs 是 EventLog 派生的语义审计摘要，不是原始进程日志。
+4. 若表现为 transport、sidecar、Provider 启动或连续 SSE 间隙，再读取 Runtime Logs 有界 API，
+   并打开 `?page=observability&obs_tab=operations`。
 5. 只有有证据的恢复、replan 或 controlled action 才能改变运行；Operations 面板本身无写权。
 
 ### 3.2 页面显示 `degraded` 或 stream gap
@@ -98,33 +100,29 @@ uv run zf task trace TASK-ID
 uv run zf metrics snapshot
 ```
 
-将上述结果与 Operations 的 `Stream gaps`、`Last failure` 和 Runtime Logs 的
+将上述结果与 Operations 的 `Stream gaps`、`Last failure` 和 Runtime Logs API 的
 `failure_class` 对齐。先恢复真实原因，再刷新投影；禁止删改 `events.jsonl` 或 Task JSON
 让页面看起来健康。
-
-[![点击打开 Event Logs 与 Runtime Logs 的 WebM 动态演示](assets/observability-runtime-log-triage.png)](assets/observability-runtime-log-triage.webm)
-
-上图是 WebM 动态演示的首帧；点击打开原始录像。
 
 ### 3.3 成本、延迟或 Provider 失败上升
 
 - `zf metrics snapshot`：先看 Task/Role 的业务用量、质量和经济性快照。
-- `Operations`：看 Provider capability、OTLP exporter backlog、sampling/drop/redaction
+- `Operations` 兼容页：看 Provider capability、OTLP exporter backlog、sampling/drop/redaction
   counters、SSE gap 与 attention。
-- `Runtime Logs`：按 `WARN`/`ERROR`、Provider 或 Task 过滤，读取已脱敏的进程/transport
-  诊断。
+- `Runtime Logs` 有界 API：按 `level`、Provider 或 Task 过滤，读取已脱敏的进程/transport
+  诊断；Web 不再提供独立 Runtime Logs panel。
 - `Events`：把上述观测关联到 Task、Run、attempt、dispatch 或受控动作的事件因果链。
 
 不要把 Task ID、Run ID、session ID、绝对路径、Prompt、原始错误体或任意用户字符串作为
 Prometheus label。内置 registry 只接受低基数的 `component`、`result`、`provider`、
 `operation`、`failure_class`、`role_type`、`stage`、`action_kind`、`integration`、`route`。
 
-## 4. Runtime Logs 与 Event Logs
+## 4. Runtime Logs API 与 Event Logs
 
-| 面板 | 内容 | 存储 | 保留与安全边界 |
+| Surface | 内容 | 存储 | 保留与安全边界 |
 |---|---|---|---|
 | Event Logs | 事件账本派生的语义审计摘要 | `events.jsonl` 的读投影 | 不能替代原始 Event；不写 canonical state |
-| Runtime Logs | process、transport、sidecar、exporter 的运行诊断 | `<state_dir>/logs/runtime.jsonl` | 脱敏、有界读取、8 MiB 轮转；`.1` 为上一段轮转文件 |
+| Runtime Logs API | process、transport、sidecar、exporter 的运行诊断 | `<state_dir>/logs/runtime.jsonl` | 无独立 Web panel；脱敏、有界读取、8 MiB 轮转；`.1` 为上一段轮转文件 |
 | Operations | capability、exporter、metric、alert、SSE 汇总 | 可重建 projection/sidecar | 不含 endpoint、header、Prompt、转录或 secret |
 
 Runtime Logs 的 HTTP 读取入口是：
@@ -154,7 +152,7 @@ curl -H "X-ZF-Metrics-Token: $ZF_METRICS_TOKEN" \
 
 | 操作 | 回读 | 回退 |
 |---|---|---|
-| 启用 Runtime Logs | 页面有脱敏、可筛选记录；state 有 `logs/runtime.jsonl` | `runtime_logs.enabled: false`；保留既有记录做审计 |
+| 启用 Runtime Logs | 有界 API 返回脱敏、可筛选记录；state 有 `logs/runtime.jsonl` | `runtime_logs.enabled: false`；保留既有记录做审计 |
 | 启用 metrics | 有 token 的 `/metrics` 返回 Prometheus 文本；无 token 为 `403` | `metrics.enabled: false`，重启 Web/runtime |
 | 启用 Provider telemetry | Operations 显示 route capability、join 和 reason | 设为 `off` 或移除块，重新启动新的 runtime generation |
 | 启用 OTLP exporter | Operations 显示 health、backlog、success/failure 和 policy counters | `otlp_exporter.enabled: false`，保留 cursor/失败证据，不改 Task/Event |

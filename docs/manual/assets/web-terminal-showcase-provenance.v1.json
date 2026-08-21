@@ -1,0 +1,199 @@
+{
+  "schema_version": "browser-demo-provenance.v1",
+  "demo_id": "web-terminal-cross-terminal-recovery-showcase-20260821",
+  "recorded_at": "2026-08-21T00:48:47.334Z",
+  "source_commit": "55e6780cb594b15feaaa22eb4586fd15d8a18681",
+  "renderer_commit": "83574d4e26c5810cfadd0e323d9bd36697aca362",
+  "branch": "wip/codex-20260820-web-pty-runtime",
+  "presentation_kind": "narrated_storyboard_from_one_real_run",
+  "capture": {
+    "service_url": "http://127.0.0.1:8014",
+    "browser_origin": "http://127.0.0.1:8014",
+    "viewport_css_pixels": {
+      "width": 1920,
+      "height": 1080
+    },
+    "device_scale_factor": 2,
+    "captured_frame_pixels": {
+      "width": 3840,
+      "height": 2160
+    },
+    "isolated_browser_contexts": 3,
+    "started_at": "2026-08-21T00:48:47.334Z",
+    "finished_at": "2026-08-21T00:49:52.273Z",
+    "offline_started_at": "2026-08-21T00:49:32.394Z",
+    "offline_response_observed_at": "2026-08-21T00:49:42.178Z",
+    "recovery_attached_at": "2026-08-21T00:49:43.533Z",
+    "capture_summary_sha256": "922eb1cb6a682714c6ab0146fbf03025c7e59b5d96a8af142c7ba40f5e2cdbe2",
+    "assertion_frame_set_sha256": "035706f462779a396101915391318550d76b04f400415c14254fe99eb9922baf"
+  },
+  "fixture": {
+    "kind": "ephemeral_mixed_project",
+    "project_id": "project-bfe2c954",
+    "project_name": "web-terminal-showcase",
+    "orchestrator_backend": "codex",
+    "development_backend": "claude-code",
+    "effective_terminal_providers": [
+      "codex",
+      "claude-code"
+    ],
+    "primary_session_id": "term-b40a8725ac2a4f89",
+    "secondary_session_id": "term-6d407d5d65bd4a5b"
+  },
+  "storyboard": [
+    {
+      "id": "entry-provider",
+      "frames": ["00-project-entry.png", "01-provider-menu.png"],
+      "predicate": "An authorized mixed Project exposes the Web Terminal entry and derives Codex plus Claude Code without a terminal-only allowlist."
+    },
+    {
+      "id": "real-codex",
+      "frames": ["02-real-codex-terminal-a.png"],
+      "predicate": "Terminal A controls a real Herdr PTY and the installed Codex TUI returns ZAOFU_WEB_READY."
+    },
+    {
+      "id": "cross-terminal-observe",
+      "frames": ["03-observe-terminal-a.png", "03-observe-terminal-b.png"],
+      "predicate": "Two isolated clients attach to the same server Session; A controls while B observes the same screen read-only."
+    },
+    {
+      "id": "cross-terminal-takeover",
+      "frames": ["04-takeover-terminal-a.png", "04-takeover-terminal-b.png"],
+      "predicate": "B explicitly takes over the unique controller role, A loses write control, and both receive CROSS_TERMINAL_TAKEOVER_OK."
+    },
+    {
+      "id": "offline-recovery",
+      "frames": ["05-controller-offline-terminal-b.png", "05-offline-response-terminal-a.png"],
+      "predicate": "B is offline after submitting delayed work while A observes OFFLINE_RECOVERY_OK from the still-running provider 9.784 seconds later."
+    },
+    {
+      "id": "fresh-context-recovery",
+      "frames": ["06-recovered-terminal-c.png", "07-multi-tab-dock-light.png", "08-recovered-usage.png"],
+      "predicate": "Fresh context C attaches to the same Session, restores pre-offline history, controls it, and exposes multi-tab/theme/usage projections."
+    }
+  ],
+  "assertions": [
+    {"id": "project-provider-menu", "status": "passed"},
+    {"id": "real-codex-pty", "status": "passed"},
+    {"id": "cross-terminal-observe", "status": "passed"},
+    {"id": "cross-terminal-takeover", "status": "passed"},
+    {"id": "offline-provider-continuation", "status": "passed"},
+    {"id": "fresh-context-reattach", "status": "passed"},
+    {"id": "multi-tab-layout-theme", "status": "passed"},
+    {"id": "usage-attribution", "status": "passed"}
+  ],
+  "provider_evidence": {
+    "kind": "codex",
+    "interaction": "real_provider_tui",
+    "model": "gpt-5.6-sol",
+    "cli_version": "0.148.0",
+    "response_assertions": [
+      "ZAOFU_WEB_READY",
+      "CROSS_TERMINAL_TAKEOVER_OK",
+      "OFFLINE_RECOVERY_OK"
+    ],
+    "usage_source": "provider_transcript",
+    "total_tokens": 79991,
+    "cost_usd": 0.140418,
+    "cost_kind": "partial_estimate"
+  },
+  "environment": {
+    "herdr": {
+      "version": "0.8.2"
+    },
+    "browser": {
+      "image": "mcp/playwright:latest",
+      "image_id": "sha256:8342e03ef3571d09afffcd00558b8067e66489a54e7f3f0d96a71a327fd45fe2",
+      "chromium": "Google Chrome for Testing 149.0.7827.22"
+    },
+    "encoder": {
+      "image": "linuxserver/ffmpeg:8.1.2",
+      "image_id": "sha256:9872c5f1f36d4dc62906f6bbb1cfa5965e675fb46bf514ef8eccc650320a297e"
+    },
+    "voice": {
+      "engine": "edge-tts 7.2.8",
+      "voice": "zh-CN-YunyangNeural",
+      "rate": "-4%"
+    }
+  },
+  "media": {
+    "scene_count": 6,
+    "assertion_frame_count": 12,
+    "scene_manifest_sha256": "9354f9e77fa29dce5201261064349eb7a941c9be766335c1bf00dd8abdb90e54",
+    "playback_report_sha256": "b641d2e525b4c1bb447180d5a172206caac4a80af398d1486d8a7bda0a92f20a",
+    "duration_seconds": 116.96,
+    "video_codec": "h264",
+    "video_profile": "High",
+    "frame_rate": 25,
+    "pixel_format": "yuv420p",
+    "audio_codec": "aac-lc",
+    "audio_sample_rate_hz": 48000,
+    "faststart": true,
+    "loudness": {
+      "integrated_lufs": -16.06,
+      "true_peak_dbtp": -1.7,
+      "range_lu": 4.0
+    },
+    "files": [
+      {
+        "path": "docs/manual/assets/web-terminal-introduction-zh-4k.mp4",
+        "width": 3840,
+        "height": 2160,
+        "bytes": 7922016,
+        "sha256": "ca4a99ea405acf4d3927850dc01251098347b476b2ba9e9eba3e44ebb02db572"
+      },
+      {
+        "path": "docs/manual/assets/web-terminal-introduction-zh-1080p.mp4",
+        "width": 1920,
+        "height": 1080,
+        "bytes": 4478285,
+        "sha256": "23482ebeaebf8f0e0e51624ec6f1b17f7822a042b9f57fbd28405f6e5089de30"
+      },
+      {
+        "path": "docs/manual/assets/web-terminal-introduction-poster.png",
+        "width": 3840,
+        "height": 2160,
+        "bytes": 1341846,
+        "sha256": "a26eee230a1f1ae05334a399349ade4446c7dc4983a98864c660e8932dba3101"
+      }
+    ],
+    "validation": {
+      "full_audio_video_decode": "passed",
+      "chromium_ready_state": 4,
+      "chromium_audio_tracks": 1,
+      "timeline_probe_count_per_file": 7,
+      "timeline_unique_frame_count_per_file": 7,
+      "actual_playback_advanced": true
+    }
+  },
+  "source": {
+    "recording_script": "web/scripts/record-web-terminal-demo.mjs",
+    "rendering_script": "web/scripts/render-web-terminal-showcase.mjs",
+    "playback_validation_script": "web/scripts/validate-web-terminal-showcase.mjs",
+    "working_tree_clean_before_capture": true
+  },
+  "cleanup": {
+    "exact_created_session_ids_only": true,
+    "created_session_count": 2,
+    "active_sessions_after": 0,
+    "simulation_done_event": "evt-af05688b4b15",
+    "web_tmux_session_stopped": true,
+    "herdr_named_session_stopped": true,
+    "reserved_ports_touched": []
+  },
+  "security": {
+    "action_token_recorded": false,
+    "provider_transcript_committed": false,
+    "terminal_ticket_in_url": false,
+    "raw_terminal_stream_committed": false,
+    "fixed_low_cost_prompts": true
+  },
+  "limitations": [
+    "Terminal A, B, and C are three isolated Chromium browser contexts on one recording host, not three physical devices; they independently model browser or device client state.",
+    "The offline assertion disables the controlling browser client's network. Dashboard, Herdr, the PTY, provider process, and host remain online; server or host crash recovery is not claimed.",
+    "Claude Code is genuinely derived into the mixed-Project menu but is not launched because that host credential was not qualified.",
+    "OpenCode and Pi remain architecture extension points and are not claimed as qualified by this recording.",
+    "The MP4 is a narrated six-scene composition of 12 assertion screenshots from one real run, not a continuous unedited screen capture.",
+    "Provider cost is a partial estimate under subscription accounting, not a provider invoice."
+  ]
+}

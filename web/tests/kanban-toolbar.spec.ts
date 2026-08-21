@@ -4,10 +4,17 @@ test.describe.configure({ timeout: 90_000 });
 
 test("Task Board toolbar has exclusive, reversible mouse selection", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 });
+  const workflowSpineRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/workflow-spine")) workflowSpineRequests.push(request.url());
+  });
   await page.goto("/?page=board", { waitUntil: "domcontentloaded" });
 
   const toolbar = page.locator(".task-toolbar");
   await expect(toolbar).toBeVisible({ timeout: 60_000 });
+  await page.waitForTimeout(250);
+  await expect(page.getByRole("button", { name: /attempts \(\d+\)/ })).toHaveCount(0);
+  expect(workflowSpineRequests).toHaveLength(0);
   const view = toolbar.getByRole("group", { name: "Task view" });
   const focus = toolbar.getByRole("group", { name: "Task focus" });
   const board = view.getByRole("button", { name: "Board", exact: true });

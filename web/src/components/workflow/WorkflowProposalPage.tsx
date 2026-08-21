@@ -27,7 +27,7 @@ import type {
   ActionResponse,
   WorkflowRequestDetail,
 } from "../../api/types";
-import type { PageId } from "../../app/sharedTypes";
+import type { ProjectionKind } from "../../app/sharedTypes";
 import {
   asRecord,
   asRecordArray,
@@ -64,7 +64,7 @@ export function WorkflowProposalPage({
   actionReady,
   actionState,
   onAction,
-  onOpenPage,
+  onOpenProjection,
   projectId,
 }: {
   actionReady: boolean;
@@ -73,7 +73,7 @@ export function WorkflowProposalPage({
     action: string,
     payload: Record<string, unknown>,
   ) => Promise<ActionResponse>;
-  onOpenPage: (page: PageId) => void;
+  onOpenProjection: (kind: ProjectionKind, id: string) => void;
   projectId: string;
 }) {
   const [requests, setRequests] = useState<WorkflowRequest[]>([]);
@@ -349,7 +349,7 @@ export function WorkflowProposalPage({
                 onApprove={(payload) => void execute("workflow-submit", payload)}
                 onCancel={(payload) => void execute("workflow-cancel", payload)}
                 onClarify={(payload) => void executeRequestTransition("workflow-clarify", payload)}
-                onOpenRuns={() => onOpenPage("runs")}
+                onOpenRuns={(runId) => onOpenProjection("run", runId)}
                 onPrepare={(payload) => void executeRequestTransition("workflow-prepare", payload)}
                 onReject={(payload) => void execute("workflow-reject", payload)}
                 onRunCancel={(payload) => void execute("run-cancel", payload)}
@@ -390,7 +390,7 @@ function WorkflowProposalDetail({
   onApprove: (payload: Record<string, unknown>) => void;
   onCancel: (payload: Record<string, unknown>) => void;
   onClarify: (payload: Record<string, unknown>) => void;
-  onOpenRuns: () => void;
+  onOpenRuns: (runId: string) => void;
   onPrepare: (payload: Record<string, unknown>) => void;
   onReject: (payload: Record<string, unknown>) => void;
   onRunCancel: (payload: Record<string, unknown>) => void;
@@ -569,7 +569,7 @@ function WorkflowProposalDetail({
               className="icon-button primary"
               data-testid="workflow-open-run"
               type="button"
-              onClick={onOpenRuns}
+              onClick={() => onOpenRuns(runId)}
             >
               <ExternalLink aria-hidden="true" size={16} />
               Open Run

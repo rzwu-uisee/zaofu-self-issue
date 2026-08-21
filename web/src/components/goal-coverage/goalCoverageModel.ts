@@ -20,6 +20,27 @@ export function taskNodesById(graph: GoalCoverageGraph | null): Map<string, Goal
   return tasks;
 }
 
+export function missingTaskDetailCount(
+  graph: GoalCoverageGraph | null,
+  claim: GoalCoverageClaimNode,
+  tasks: ReadonlyMap<string, GoalCoverageNode>,
+): number {
+  const declaredMissing = Math.max(0, Number(claim.task_details?.missing_count ?? 0));
+  const declaredTotal = Math.max(0, Number(claim.task_details?.total ?? 0));
+  const unresolvedTotal = Math.max(0, declaredTotal - (claim.task_ids ?? []).filter((taskId) => tasks.has(taskId)).length);
+  if (!graph?.nodes_truncated) return Math.max(declaredMissing, unresolvedTotal);
+  const missingRetainedRefs = (claim.task_ids ?? []).filter((taskId) => !tasks.has(taskId)).length;
+  return Math.max(declaredMissing, unresolvedTotal, missingRetainedRefs);
+}
+
+export function hasUnavailableTaskDetails(
+  graph: GoalCoverageGraph | null,
+  claim: GoalCoverageClaimNode,
+  tasks: ReadonlyMap<string, GoalCoverageNode>,
+): boolean {
+  return missingTaskDetailCount(graph, claim, tasks) > 0;
+}
+
 export function resultNodesByTask(graph: GoalCoverageGraph | null): Map<string, GoalCoverageNode[]> {
   const results = new Map<string, GoalCoverageNode[]>();
   for (const node of graph?.nodes ?? []) {

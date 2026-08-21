@@ -1,0 +1,64 @@
+{
+  "schema_version": "web-terminal-showcase-metrics.v1",
+  "recorded_at": "2026-08-21T00:48:47.334Z",
+  "capture": {
+    "duration_seconds": 64.939,
+    "isolated_browser_contexts": 3,
+    "assertions_passed": 8,
+    "assertions_failed": 0,
+    "assertion_frames": 12,
+    "created_sessions": 2,
+    "active_sessions_after_cleanup": 0
+  },
+  "cross_terminal_recovery": {
+    "shared_session_id": "term-b40a8725ac2a4f89",
+    "observe_verified": true,
+    "explicit_takeover_verified": true,
+    "previous_controller_lost_write_access": true,
+    "offline_client_seconds_before_response": 9.784,
+    "provider_completed_while_controller_offline": true,
+    "fresh_context_reattached_same_session": true,
+    "full_history_restored": true
+  },
+  "provider_usage": {
+    "provider": "openai",
+    "model": "gpt-5.6-sol",
+    "source": "provider_transcript",
+    "accounting_mode": "subscription",
+    "fresh_input_tokens": 20592,
+    "cached_input_tokens": 59136,
+    "input_tokens": 79728,
+    "output_tokens": 263,
+    "reasoning_output_tokens": 77,
+    "total_tokens": 79991,
+    "cost_usd": 0.140418,
+    "cost_kind": "partial_estimate",
+    "context_usage_ratio": 0.06277476780185759
+  },
+  "implementation_inventory": {
+    "terminal_source_files": 15,
+    "terminal_source_lines": 5159,
+    "terminal_test_files": 6,
+    "terminal_test_lines": 2658,
+    "note": "Mechanical inventory of the Web Terminal backend/frontend files and dedicated tests; not a coverage metric."
+  },
+  "media": {
+    "duration_seconds": 116.96,
+    "frame_rate": 25,
+    "audio_sample_rate_hz": 48000,
+    "integrated_loudness_lufs": -16.06,
+    "true_peak_dbtp": -1.7,
+    "loudness_range_lu": 4.0,
+    "chromium_timeline_probes_per_file": 7,
+    "chromium_playback_verdict": "passed",
+    "full_decode_verdict": "passed"
+  },
+  "claim_boundary": {
+    "physical_devices_used": false,
+    "isolated_browser_contexts_model_independent_clients": true,
+    "browser_client_disconnect_verified": true,
+    "dashboard_or_host_crash_recovery_verified": false,
+    "claude_code_menu_derived": true,
+    "claude_code_started": false
+  }
+}

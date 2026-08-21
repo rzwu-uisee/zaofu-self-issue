@@ -278,7 +278,7 @@ uv run zf events --last 80
 uv run zf refs verify
 ```
 
-在 Web 的 Task、Delivery、Runs、Coverage、Work 和 Goal Dossier 中核对：
+在 Web 的 Task、Delivery Overview、Runs Inspector、Graph 和 Goal Dossier 中核对：
 
 - Task 来源、Goal Claim、wave/依赖和 owner role；
 - 当前 attempt、worker instance、dispatch id 与等待原因；

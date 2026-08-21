@@ -88,9 +88,11 @@ starts the Run.
 Inspect the Web surfaces in this order:
 
 1. `Tasks`: Task status, owner, contract, and current stage.
-2. `Delivery -> Runs`: stage, attempt, retry, and causation for this Run.
-3. `Delivery -> Delivery Map -> Coverage`: Task and evidence coverage for each mandatory Claim.
-4. `Delivery -> Delivery Map -> Work`: Goal, Claim, Task, Try, and Result relationships.
+2. `Delivery -> Graph`: whether each mandatory Claim has a covering Task and closes across Plan,
+   Implementation, Verification, and Closure, including Gaps and generation/currentness.
+3. `Delivery -> Runs`: the Run graph plus Task attempts, gates, events, evidence, and regression actions
+   in the Inspector.
+4. `Traces`: drill down from a verified canonical Trace reference only when temporal or Span causation is needed.
 5. `Monitoring -> Runs`: the terminal Goal Dossier.
 6. `Inbox`: approvals, blockers, and owner-visible delivery.
 

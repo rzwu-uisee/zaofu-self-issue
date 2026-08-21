@@ -1,6 +1,7 @@
 import {
   bootstrapEventCursor,
   channelEventRefreshPlan,
+  eventInvalidatesLoopView,
   pageLoadsChannels,
   pageLoadsDeliveryFeatures,
   pageLoadsRecentEvents,
@@ -36,17 +37,32 @@ function testWorkflowProposalsUseScopedProjection(): void {
 function testMeasureUsesDeliverySlice(): void {
   assert(snapshotLoadKindForPage("delivery") === "none", "delivery overview should not wait for snapshot");
   assert(snapshotLoadKindForPage("delivery-trace") === "none", "delivery trace should not wait for snapshot");
-  assert(snapshotLoadKindForPage("goal-coverage") === "none", "goal coverage should not wait for snapshot");
+  assert(snapshotLoadKindForPage("delivery-graph") === "none", "delivery graph should not wait for snapshot");
   assert(snapshotLoadKindForPage("behavior-loop") === "none", "loop page should not wait for snapshot");
   assert(pageLoadsDeliveryFeatures("delivery"), "delivery overview should load delivery features");
-  assert(pageLoadsDeliveryFeatures("goal-coverage"), "goal coverage should load delivery features");
-  assert(pageLoadsDeliveryFeatures("behavior-loop"), "loop page should load delivery features");
+  assert(pageLoadsDeliveryFeatures("delivery-graph"), "delivery graph should load delivery features");
+  assert(!pageLoadsDeliveryFeatures("behavior-loop"), "loop page should own only its scoped loop-view request");
+  const loopPlan = pageResourcePlanForPage("behavior-loop").foreground;
+  assert(loopPlan.length === 1 && loopPlan[0] === "project.health", "loop should not bootstrap Delivery resources");
+}
+
+function testLoopRefreshPolicyStaysScoped(): void {
+  assert(eventInvalidatesLoopView("task.dispatched"), "task attempts should invalidate loop-view");
+  assert(eventInvalidatesLoopView("verify.failed"), "verification backflow should invalidate loop-view");
+  assert(eventInvalidatesLoopView("run.goal.completed"), "completion promise should invalidate loop-view");
+  assert(eventInvalidatesLoopView("human.escalate"), "human-loop signals should invalidate loop-view");
+  assert(eventInvalidatesLoopView("custom.profile.check.completed"), "custom terminal events must not be lost to a narrow allowlist");
+  assert(!eventInvalidatesLoopView("worker.heartbeat"), "heartbeats must not cause Loop request storms");
+  assert(!eventInvalidatesLoopView("task.attempt.heartbeat"), "derived attempt heartbeats must remain pump noise");
+  assert(!eventInvalidatesLoopView("run.heartbeat"), "run heartbeats must remain pump noise");
+  assert(!eventInvalidatesLoopView("run.manager.tick.completed"), "mechanical pump ticks should remain collapsed");
+  assert(!eventInvalidatesLoopView("channel.message.stream.delta"), "unrelated stream deltas should not reload Loop");
 }
 
 function testSnapshotPagesStayExplicit(): void {
   assert(snapshotLoadKindForPage("board") === "light", "board should use light snapshot");
   assert(snapshotLoadKindForPage("task") === "light", "task detail shell should use light snapshot");
-  assert(snapshotLoadKindForPage("traces") === "light", "trace compatibility route should keep the scoped light path");
+  assert(snapshotLoadKindForPage("traces") === "none", "traces must load only its scoped index and detail resources");
   assert(snapshotLoadKindForPage("events") === "full", "events should use full observability snapshot");
   assert(snapshotLoadKindForPage("runs") === "full", "runs should use full observability snapshot");
 }
@@ -74,6 +90,10 @@ function testBootstrapManifestIsPageOwned(): void {
   const inboxPlan = pageResourcePlanForPage("inbox").foreground;
   assert(inboxPlan.includes("operator.inbox"), "inbox should own its projection");
   assert(!inboxPlan.includes("channels.summary"), "inbox should not bootstrap channels");
+
+  const tracePlan = pageResourcePlanForPage("traces").foreground;
+  assert(tracePlan.length === 1, "traces should have one shared bootstrap dependency");
+  assert(tracePlan[0] === "project.health", "traces should bootstrap only project health for the SSE cursor");
 }
 
 function testRecentWindowOwnsItsSseCursor(): void {
@@ -119,6 +139,7 @@ function testChannelEventRefreshPlanSeparatesSummaryFromConversation(): void {
 testChannelsUseSlimPath();
 testWorkflowProposalsUseScopedProjection();
 testMeasureUsesDeliverySlice();
+testLoopRefreshPolicyStaysScoped();
 testSnapshotPagesStayExplicit();
 testInboxPollIsPageScoped();
 testBootstrapManifestIsPageOwned();

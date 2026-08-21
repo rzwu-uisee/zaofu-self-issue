@@ -94,38 +94,52 @@ Monitoring 下的 **Delivery** 以 Feature/交付为作用域，页内有三个 
 
 | Mode | 回答的问题 |
 |---|---|
-| Overview | 当前 ship readiness、Task/Run/Loop 总览和主要 blocker 是什么 |
-| Runs | stage heatmap、Run graph、attempt、span 和 fanout/fan-in 如何推进 |
-| Graph | Goal、Task、stage、依赖和证据之间如何连接 |
+| Overview | 当前 ship readiness、Task/Run 总览和主要 blocker 是什么 |
+| Runs | Run graph 如何推进，Task 的 attempt、gate、event、evidence 和 regression 是什么 |
+| Graph | Goal -> Claim -> canonical Task 是否在 Plan、Implementation、Verification、Closure 四轴闭合，还有哪些 Gap/currentness 问题 |
 
 先选择正确 Feature，再看状态/ship/drift/replan 指标。Runs 中区分 transport delivery、Worker result、
-gate verdict 和 closure；它们不是同一件事。Graph 用来找断链，不用节点数量代替完成质量。
+gate verdict 和 closure；它们不是同一件事。Runs 只有单 Run + Inspector，不再复制
+Stage Heatmap 或 delivery synthetic Span waterfall。Graph 只有单一轻量 coverage surface，
+不以节点数量代替完成质量。需要 Span Tree/Waterfall 时进入 `Traces`；只有 verified
+canonical Trace ref 才会从 Runs 显示深链。
+
+Overview 的 ship readiness 由现有 graph/drift/ship 投影计算。Runs 中的 ship 是
+`not_evaluated / summary_only`，即使 Task 全部 done 也不猜测 ready。Delivery v2 不提供
+Latest Loop 摘要；查看 behavior/eval/improvement 时直接进入顶层 `Loop`。
 
 Goal Dossier 把 Goal -> Claim -> Task -> Evidence -> Verdict 汇总为 owner 可验收结论。关闭交付前，
 重点查看 mandatory Claim 覆盖、terminal Task、缺失 evidence、最新 generation 和 owner decision。
 
-## 6. Loop 与 Observability
+## 6. Loop、Traces 与 Operations
 
 **Loop** 展示系统如何围绕反馈收敛，而不只是事件列表。它可包括 plan/execute/verify/rework、
 GAN/critic、recovery、autoresearch 或 profile 定义的其他 loop。判断重点是每轮 gap 是否缩小、
 证据是否增加，以及是否命中 no-progress/budget/replan 边界。
 
-**Observability** 用于低层诊断：
+Loop 只加载自身的 scoped projection，不会为了这个页面额外读取 Delivery feature 列表。Task 有大量
+attempt 时，drawer 首批展示 100 条并通过 **Load more** 继续展开；计数、Timeline、Completion
+Promise 和 Business Loops 仍基于完整投影，不会把首窗误报成完整历史。semantic event 会有界刷新，
+heartbeat/tick 等机械 pump 不触发页面请求。
 
-| Tab | 用途 |
-|---|---|
-| Traces | 按 Task/actor/type/status/duration 找因果链 |
-| Events | 查看 append-only occurrence 与 seq 窗口 |
-| Event Logs | 查看 EventLog 派生的语义审计日志 |
-| Runtime Logs | 查看脱敏后的进程、transport、sidecar 诊断 |
-| Operations | 查看 provider capability、OTLP exporter、SSE 与运行健康摘要 |
-| Runs / Fanouts | 检查 Run、child、barrier 和聚合状态 |
-| Candidates / Repair | 查看诊断候选与受控修复建议 |
-| Integration | 查看 Feishu/外部投影队列与失败 |
-| Raw | 必要时核对原始 projection payload |
+**Traces** 是低层因果诊断的 canonical 入口。列表按 Task、actor、status、duration、role 或
+backend 筛选；选择一行后才并行读取 bounded detail 与 lifecycle spans。宽幅详情先显示可证明
+的 Span Tree/Waterfall 和选中 Span Inspector，再保留 ZaoFu 的 Execution Route 与 Event
+evidence；Raw 只在选中 evidence 后按需读取。当前 Span 仅来自 allowlisted kernel/runtime
+started/terminal lifecycle pair，并明确 source、truth class、coverage 与 degraded 原因；它不把
+Event、stage、causation 或 Delivery synthetic span 伪装成 provider-native LLM/tool Span。没有
+可信 pair 时页面会说明 coverage 并回退到 Execution/Events。直接打开
+`?page=traces&project=...&trace_id=...&span_id=...` 时，请求保持 project scoped，不会先加载
+完整 dashboard snapshot；首窗外 Span 由同一 bounded response 定位，列表中的 `Load earlier
+spans` 再按 cursor 展开历史。
 
-正常验收优先使用 Tasks、Delivery 和 Goal Dossier；Observability 用于解释“为什么没继续”或
-“哪个 projection/attempt 出了问题”。
+Events、Event Logs、Runs、Fanouts、Candidates、Integration 和 Repair 是低频兼容诊断页。
+Operations 继续提供 provider capability、OTLP exporter、SSE 与运行健康摘要，旧链接可用
+`?page=observability&obs_tab=operations` 打开。Runtime Logs 不再有独立 Web panel，但已脱敏、
+轮转的 store 和有界 HTTP API 保留；Raw 只在具体对象详情中按需展开。
+
+正常验收优先使用 Tasks、Delivery 和 Goal Dossier；Traces/Operations 用于解释“为什么没继续”
+或“哪个 projection/attempt 出了问题”。
 
 ### 可选的 OTLP、Provider telemetry 与 Operations
 
@@ -150,7 +164,7 @@ endpoint/header 值只由受控 runtime 环境提供，例如 `ZF_OTLP_ENDPOINT`
 `ZF_OTLP_HEADERS`；不要把 URL、Bearer token 或 header JSON 提交到 YAML、事件或截图。Operations
 显示 health、backlog、上次成功/失败、采样/丢弃/脱敏计数和 SSE gap 摘要。它导出的是 ZaoFu
 synthetic、脱敏 span，不在 Web 中回读 provider 原文 waterfall，也不改变 Delivery Graph、Gate 或
-Task 状态。完整的操作、metrics token gate、Runtime Logs、Provider 支持矩阵、canary 与回退见
+Task 状态。完整的操作、metrics token gate、Runtime Logs API、Provider 支持矩阵、canary 与回退见
 [Metrics、Observability 与 Operations](21-metrics-observability-operations.md) 和
 [Provider Native Telemetry 与 OTLP](22-provider-native-telemetry.md)。
 

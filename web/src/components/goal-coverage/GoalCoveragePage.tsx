@@ -1,18 +1,17 @@
 import { Maximize2, Minimize2, Search } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { getDeliveryTrace } from "../../api/client";
 import type {
   DeliveryTrace,
-  Feature,
   GoalCoverageGraph,
   GoalCoverageNode,
 } from "../../api/types";
-import { LatestRequestGate } from "../../app/latestRequestGate";
 import { GoalCoverageStatus } from "./GoalCoverageStatus";
 import {
   claimNodes,
   filterClaims,
+  hasUnavailableTaskDetails,
+  missingTaskDetailCount,
   preferredClaimId,
   resultNodesByTask,
   taskNodesById,
@@ -21,75 +20,14 @@ import {
 
 export function GoalCoveragePage({
   deliveryTrace,
-  embedded = false,
-  features,
-  onOpenWork,
   onSelectTask,
-  projectId,
 }: {
-  deliveryTrace?: DeliveryTrace;
-  embedded?: boolean;
-  features: Feature[];
-  onOpenWork?: (claimId: string) => void;
+  deliveryTrace: DeliveryTrace;
   onSelectTask?: (taskId: string) => void;
-  projectId: string;
 }) {
-  const [selectedFeatureId, setSelectedFeatureId] = useState(deliveryTrace?.feature_id ?? features[0]?.id ?? "");
-  const [loadedTrace, setLoadedTrace] = useState<DeliveryTrace | null>(null);
   const [selectedClaimId, setSelectedClaimId] = useState("");
   const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
   const [focusMode, setFocusMode] = useState(false);
-  const requestGateRef = useRef(new LatestRequestGate());
-
-  useEffect(() => {
-    if (features.some((feature) => feature.id === selectedFeatureId)) return;
-    setSelectedFeatureId(features[0]?.id ?? "");
-  }, [features, selectedFeatureId]);
-
-  useEffect(() => {
-    if (deliveryTrace) {
-      requestGateRef.current.invalidate();
-      setSelectedFeatureId(deliveryTrace.feature_id);
-      setLoading(false);
-      setError("");
-      return undefined;
-    }
-    if (!selectedFeatureId) {
-      setLoadedTrace(null);
-      return undefined;
-    }
-    setLoadedTrace(null);
-    setError("");
-    let cancelled = false;
-    let timer: ReturnType<typeof window.setInterval> | undefined;
-    const load = (initial: boolean) => {
-      if (initial) setLoading(true);
-      const ticket = requestGateRef.current.issue();
-      getDeliveryTrace(selectedFeatureId, projectId)
-        .then((nextTrace) => {
-          if (!cancelled && requestGateRef.current.isCurrent(ticket)) {
-            setLoadedTrace(nextTrace);
-            setError("");
-            setLoading(false);
-          }
-        })
-        .catch((reason) => {
-          if (!cancelled && requestGateRef.current.isCurrent(ticket)) {
-            setError(String(reason?.message ?? reason));
-            setLoading(false);
-          }
-        });
-    };
-    load(true);
-    timer = window.setInterval(() => load(false), 8000);
-    return () => {
-      cancelled = true;
-      requestGateRef.current.invalidate();
-      if (timer) window.clearInterval(timer);
-    };
-  }, [deliveryTrace, projectId, selectedFeatureId]);
 
   useEffect(() => {
     if (!focusMode) return undefined;
@@ -100,8 +38,8 @@ export function GoalCoveragePage({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [focusMode]);
 
-  const trace = deliveryTrace ?? loadedTrace;
-  const graph = trace?.goal_coverage_graph ?? null;
+  const trace = deliveryTrace;
+  const graph = trace.goal_coverage_graph ?? null;
   const claims = useMemo(() => claimNodes(graph), [graph]);
   const filteredClaims = useMemo(() => filterClaims(graph, query), [graph, query]);
   const tasks = useMemo(() => taskNodesById(graph), [graph]);
@@ -123,42 +61,25 @@ export function GoalCoveragePage({
     ?? claims[0]
     ?? null;
   const goal = graph?.nodes.find((node) => node.kind === "goal") ?? null;
-  const selectedFeature = features.find((feature) => feature.id === selectedFeatureId) ?? null;
   const projectionError = graph?.diagnostics.find((item) => item.code === "projection_error");
+  const relationDetailsTruncated = Boolean(graph?.nodes.some((node) => (
+    node.task_ids_truncated
+      || node.task_details?.task_ids_truncated
+      || node.task_details?.missing_task_ids_truncated
+      || node.goal_claim_ids_truncated
+      || node.supporting_result_refs_truncated
+      || node.evidence_refs_truncated
+      || node.gap_refs_truncated
+      || node.stale_reasons_truncated
+  )));
 
   return (
     <div
-      className={`goal-coverage-page ${embedded ? "is-embedded" : ""} ${focusMode ? "is-focus" : ""}`}
+      className={`goal-coverage-page is-embedded ${focusMode ? "is-focus" : ""}`}
       data-testid="goal-coverage-page"
     >
       <header className="goal-coverage-toolbar">
-        {!embedded ? (
-          <div className="goal-coverage-title">
-            <h2>Goal Coverage</h2>
-            <span className="muted">Plan · Execution · Verification · Closure</span>
-          </div>
-        ) : null}
         <div className="goal-coverage-controls">
-          {!embedded ? (
-            <label>
-              <span>Delivery</span>
-              <select
-                aria-label="Delivery"
-                value={selectedFeatureId}
-                onChange={(event) => {
-                  setSelectedFeatureId(event.target.value);
-                  setSelectedClaimId("");
-                  setQuery("");
-                }}
-              >
-                {features.map((feature) => (
-                  <option key={feature.id} value={feature.id}>
-                    {feature.title || feature.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
           <div className="goal-coverage-generation" aria-label="Current generation">
             <span>Generation</span>
             <strong className="mono">{shortGeneration(graph?.identity.task_map_generation)}</strong>
@@ -187,13 +108,7 @@ export function GoalCoveragePage({
         </div>
       </header>
 
-      {features.length === 0 ? (
-        <GoalCoverageEmpty title="No delivery goals" detail="Goal coverage appears with an accepted task map." />
-      ) : loading && !graph ? (
-        <GoalCoverageEmpty title="Loading goal coverage" detail={selectedFeature?.title || selectedFeatureId} />
-      ) : error && !graph ? (
-        <GoalCoverageEmpty title="Goal coverage unavailable" detail={error} tone="err" />
-      ) : graph ? (
+      {graph ? (
         <>
           <CoverageSummary graph={graph} />
           {projectionError ? (
@@ -208,6 +123,16 @@ export function GoalCoveragePage({
                 {graph.coverage_mode === "legacy_derived"
                   ? "Claim links are derived from task acceptance."
                   : "No Goal Claim mapping is available for this delivery."}
+              </span>
+            </div>
+          ) : null}
+          {graph.nodes_truncated || graph.edges_truncated || graph.diagnostics_truncated || relationDetailsTruncated ? (
+            <div className="goal-coverage-notice" data-testid="goal-coverage-truncation-notice">
+              <GoalCoverageStatus label="bounded view" status="stale" />
+              <span>
+                Some coverage details were omitted by projection limits
+                {graph.nodes_truncated ? "; task owner details may be unavailable" : ""}
+                {relationDetailsTruncated ? "; some relation refs are shown partially" : ""}.
               </span>
             </div>
           ) : null}
@@ -226,10 +151,11 @@ export function GoalCoveragePage({
                   <ClaimRow
                     claim={claim}
                     key={claim.goal_claim_id}
-                    onOpenWork={onOpenWork}
                     onSelect={() => setSelectedClaimId(claim.goal_claim_id)}
                     selected={claim.goal_claim_id === selectedClaim?.goal_claim_id}
                     taskNodes={tasks}
+                    taskDetailsUnavailable={hasUnavailableTaskDetails(graph, claim, tasks)}
+                    taskDetailsMissingCount={missingTaskDetailCount(graph, claim, tasks)}
                   />
                 ))}
                 {filteredClaims.length === 0 ? (
@@ -239,14 +165,17 @@ export function GoalCoveragePage({
             </section>
             <ClaimInspector
               claim={selectedClaim}
-              onOpenWork={onOpenWork}
               onSelectTask={onSelectTask}
               resultNodes={results}
               taskNodes={tasks}
+              taskDetailsUnavailable={selectedClaim ? hasUnavailableTaskDetails(graph, selectedClaim, tasks) : false}
+              taskDetailsMissingCount={selectedClaim ? missingTaskDetailCount(graph, selectedClaim, tasks) : 0}
             />
           </div>
         </>
-      ) : null}
+      ) : (
+        <GoalCoverageEmpty title="Goal coverage unavailable" detail="No Goal → Claim → Task projection is available for this delivery." />
+      )}
     </div>
   );
 }
@@ -290,20 +219,25 @@ function GoalNode({ graph, goal }: { graph: GoalCoverageGraph; goal: GoalCoverag
 
 function ClaimRow({
   claim,
-  onOpenWork,
   onSelect,
   selected,
+  taskDetailsUnavailable,
+  taskDetailsMissingCount,
   taskNodes,
 }: {
   claim: GoalCoverageClaimNode;
-  onOpenWork?: (claimId: string) => void;
   onSelect: () => void;
   selected: boolean;
+  taskDetailsUnavailable: boolean;
+  taskDetailsMissingCount: number;
   taskNodes: Map<string, GoalCoverageNode>;
 }) {
   const claimTasks = (claim.task_ids ?? []).map((taskId) => taskNodes.get(taskId)).filter(Boolean) as GoalCoverageNode[];
   const doneTasks = claimTasks.filter((task) => isDoneStatus(task.status)).length;
-  const taskLabel = claimTasks.length === 1 ? "1 task" : `${claimTasks.length} tasks`;
+  const taskTotal = Math.max(claimTasks.length, claim.task_details?.total ?? claim.task_ids?.length ?? 0);
+  const taskLabel = taskTotal === 1 ? "1 task" : `${taskTotal} tasks`;
+  const gapTotal = Math.max(claim.gap_refs?.length ?? 0, claim.gap_refs_total ?? 0);
+  const gapsShown = claim.gap_refs?.length ?? 0;
   return (
     <article
       className={`goal-coverage-row ${selected ? "selected" : ""}`}
@@ -321,24 +255,19 @@ function ClaimRow({
       <div className="goal-coverage-cell goal-coverage-matrix-cell goal-coverage-plan-cell">
         <span className="goal-coverage-mobile-label">Plan</span>
         <GoalCoverageStatus label={claim.plan_coverage ?? "uncovered"} status={claim.plan_coverage} />
-        <span className={claimTasks.length ? "muted" : "goal-coverage-missing"}>
-          {claimTasks.length ? taskLabel : "No owner"}
+        <span className={claimTasks.length || taskDetailsUnavailable ? "muted" : "goal-coverage-missing"}>
+          {taskDetailsUnavailable
+            ? `Owner details unavailable (${taskDetailsMissingCount} omitted)`
+            : taskTotal ? taskLabel : "No owner"}
         </span>
-        {onOpenWork ? (
-          <button
-            className="goal-coverage-open-work"
-            onClick={() => onOpenWork(claim.goal_claim_id)}
-            type="button"
-          >
-            Open in Work
-          </button>
-        ) : null}
       </div>
       <div className="goal-coverage-cell goal-coverage-matrix-cell goal-coverage-implementation-cell">
         <span className="goal-coverage-mobile-label">Implementation</span>
         <GoalCoverageStatus label={claim.execution ?? "pending"} status={claim.execution} />
         <span className="muted">
-          {claimTasks.length ? `${doneTasks}/${claimTasks.length} done` : "Not planned"}
+          {taskDetailsUnavailable
+            ? `${doneTasks}/${taskTotal} done · details partial`
+            : taskTotal ? `${doneTasks}/${taskTotal} done` : "Not planned"}
         </span>
       </div>
       <div className="goal-coverage-cell goal-coverage-matrix-cell goal-coverage-verification-cell">
@@ -348,8 +277,11 @@ function ClaimRow({
       <div className="goal-coverage-cell goal-coverage-matrix-cell goal-coverage-closure-cell">
         <span className="goal-coverage-mobile-label">Closure</span>
         <GoalCoverageStatus label={claim.closure ?? "unknown"} status={claim.closure} />
-        {(claim.gap_refs?.length ?? 0) > 0 ? (
-          <span className="goal-coverage-gap-count">{claim.gap_refs!.length} gap</span>
+        {gapTotal > 0 ? (
+          <span className="goal-coverage-gap-count">
+            {gapTotal} gap{gapTotal === 1 ? "" : "s"}
+            {claim.gap_refs_truncated ? ` · ${gapsShown} shown` : ""}
+          </span>
         ) : null}
       </div>
     </article>
@@ -358,15 +290,17 @@ function ClaimRow({
 
 function ClaimInspector({
   claim,
-  onOpenWork,
   onSelectTask,
   resultNodes,
+  taskDetailsUnavailable,
+  taskDetailsMissingCount,
   taskNodes,
 }: {
   claim: GoalCoverageClaimNode | null;
-  onOpenWork?: (claimId: string) => void;
   onSelectTask?: (taskId: string) => void;
   resultNodes: Map<string, GoalCoverageNode[]>;
+  taskDetailsUnavailable: boolean;
+  taskDetailsMissingCount: number;
   taskNodes: Map<string, GoalCoverageNode>;
 }) {
   if (!claim) {
@@ -378,6 +312,18 @@ function ClaimInspector({
     ...results.map((result) => result.result_ref).filter(Boolean) as string[],
     ...(claim.supporting_result_refs ?? []),
   ]));
+  const gapRefs = claim.gap_refs ?? [];
+  const gapRefsOmitted = Math.max(
+    0,
+    claim.gap_refs_omitted
+      ?? (claim.gap_refs_total ?? gapRefs.length) - gapRefs.length,
+  );
+  const resultRefsOmitted = Math.max(
+    0,
+    claim.supporting_result_refs_omitted
+      ?? (claim.supporting_result_refs_total ?? claim.supporting_result_refs?.length ?? 0)
+        - (claim.supporting_result_refs?.length ?? 0),
+  );
   return (
     <aside className="goal-coverage-inspector" aria-label="Claim inspector" data-testid="goal-coverage-inspector">
       <div className="goal-coverage-inspector-head">
@@ -391,32 +337,35 @@ function ClaimInspector({
         <Axis label="Task verification" value={claim.task_verification ?? "unverified"} />
         <Axis label="Goal closure" value={claim.closure ?? "unknown"} />
       </dl>
-      {onOpenWork ? (
-        <button
-          className="goal-coverage-inspector-action"
-          onClick={() => onOpenWork(claim.goal_claim_id)}
-          type="button"
-        >
-          Open in Work
-        </button>
-      ) : null}
       <InspectorSection title="Source">
         <span className="mono goal-coverage-long-value">{claim.source_ref || "not recorded"}</span>
         <span>{claim.mandatory === false ? "Optional" : "Mandatory"}</span>
       </InspectorSection>
       <InspectorSection title="Tasks">
-        {tasks.length ? tasks.map((task) => (
+        {tasks.map((task) => (
           <button
             className="goal-coverage-inspector-row"
-            disabled={!task.task_id || !onSelectTask}
+            disabled={!task.task_id || task.task_id_opaque || !onSelectTask}
             key={task.node_id}
-            onClick={() => task.task_id && onSelectTask?.(task.task_id)}
+            onClick={() => {
+              if (task.task_id && !task.task_id_opaque) onSelectTask?.(task.task_id);
+            }}
             type="button"
           >
             <span>{task.title}</span>
             <span className="mono">{task.task_id}</span>
           </button>
-        )) : <span className="goal-coverage-missing">No covering task</span>}
+        ))}
+        {tasks.some((task) => task.task_id_opaque) ? (
+          <span className="muted" data-testid="goal-coverage-task-id-opaque">
+            A canonical task ID was omitted from this bounded view; open the task from Tasks.
+          </span>
+        ) : null}
+        {taskDetailsUnavailable ? (
+          <span className="muted" data-testid="goal-coverage-task-details-truncated">
+            {taskDetailsMissingCount} task owner detail{taskDetailsMissingCount === 1 ? "" : "s"} omitted by the bounded projection.
+          </span>
+        ) : tasks.length === 0 ? <span className="goal-coverage-missing">No covering task</span> : null}
       </InspectorSection>
       <InspectorSection title="Result refs">
         {resultRefs.length ? resultRefs.map((resultRef) => (
@@ -424,12 +373,22 @@ function ClaimInspector({
             {resultRef}
           </span>
         )) : <span className="muted">No current result</span>}
+        {claim.supporting_result_refs_truncated ? (
+          <span className="muted" data-testid="goal-coverage-result-refs-truncated">
+            {resultRefsOmitted} supporting result ref{resultRefsOmitted === 1 ? "" : "s"} omitted by the bounded projection.
+          </span>
+        ) : null}
       </InspectorSection>
-      {(claim.gap_refs?.length ?? 0) > 0 ? (
+      {gapRefs.length > 0 || (claim.gap_refs_total ?? 0) > 0 ? (
         <InspectorSection title="Open gaps">
-          {claim.gap_refs!.map((ref) => (
+          {gapRefs.map((ref) => (
             <span className="mono goal-coverage-long-value" key={ref}>{ref}</span>
           ))}
+          {claim.gap_refs_truncated ? (
+            <span className="muted" data-testid="goal-coverage-gap-refs-truncated">
+              {gapRefsOmitted} gap ref{gapRefsOmitted === 1 ? "" : "s"} omitted by the bounded projection.
+            </span>
+          ) : null}
         </InspectorSection>
       ) : null}
     </aside>

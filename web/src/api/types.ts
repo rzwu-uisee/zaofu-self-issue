@@ -223,18 +223,32 @@ export interface DeliveryFeaturesPage {
 // doc 68 S3 / doc 65 — delivery-trace.v1 (read-only projection).
 export interface DeliveryTraceNode {
   task_id: string;
+  task_id_opaque?: boolean;
+  goal_claim_ids?: string[];
+  goal_claim_ids_total?: number;
+  goal_claim_ids_included?: number;
+  goal_claim_ids_omitted?: number;
+  goal_claim_ids_truncated?: boolean;
   title: string;
   planned: {
     owner_role?: string;
     owner_instance?: string;
     wave?: number;
     blocked_by?: string[];
+    blocked_by_total?: number;
+    blocked_by_included?: number;
+    blocked_by_omitted?: number;
+    blocked_by_truncated?: boolean;
     scope?: string[];
   };
   actual: {
     status: string;
     assigned_to: string;
     evidence_events: string[];
+    evidence_events_total?: number;
+    evidence_events_included?: number;
+    evidence_events_omitted?: number;
+    evidence_events_truncated?: boolean;
     fanout_ids?: string[];
     affinity?: {
       planned_owner: string; planned_role: string; actual_owner: string;
@@ -267,8 +281,10 @@ export interface GoalCoverageNode {
   title: string;
   status?: string;
   goal_id?: string;
+  goal_id_opaque?: boolean;
   goal_claim_id?: string;
   task_id?: string;
+  task_id_opaque?: boolean;
   owner?: string;
   mandatory?: boolean;
   source_ref?: string;
@@ -279,12 +295,51 @@ export interface GoalCoverageNode {
   task_verification?: "unverified" | "passed" | "rejected" | "blocked" | "stale";
   closure?: "unknown" | "open" | "closed" | "waived" | "blocked";
   task_ids?: string[];
+  task_ids_total?: number;
+  task_ids_included?: number;
+  task_ids_omitted?: number;
+  task_ids_truncated?: boolean;
+  task_details?: {
+    total: number;
+    included: number;
+    missing_count: number;
+    task_ids_returned?: number;
+    task_ids_total?: number;
+    task_ids_included?: number;
+    task_ids_omitted?: number;
+    task_ids_truncated?: boolean;
+    missing_task_ids?: string[];
+    missing_task_ids_total?: number;
+    missing_task_ids_included?: number;
+    missing_task_ids_omitted?: number;
+    missing_task_ids_truncated?: boolean;
+  };
   goal_claim_ids?: string[];
+  goal_claim_ids_total?: number;
+  goal_claim_ids_included?: number;
+  goal_claim_ids_omitted?: number;
+  goal_claim_ids_truncated?: boolean;
   supporting_result_refs?: string[];
+  supporting_result_refs_total?: number;
+  supporting_result_refs_included?: number;
+  supporting_result_refs_omitted?: number;
+  supporting_result_refs_truncated?: boolean;
   evidence_refs?: string[];
+  evidence_refs_total?: number;
+  evidence_refs_included?: number;
+  evidence_refs_omitted?: number;
+  evidence_refs_truncated?: boolean;
   gap_refs?: string[];
+  gap_refs_total?: number;
+  gap_refs_included?: number;
+  gap_refs_omitted?: number;
+  gap_refs_truncated?: boolean;
   current?: boolean;
   stale_reasons?: string[];
+  stale_reasons_total?: number;
+  stale_reasons_included?: number;
+  stale_reasons_omitted?: number;
+  stale_reasons_truncated?: boolean;
   contract_revision?: string;
 }
 
@@ -316,6 +371,9 @@ export interface GoalCoverageGraph {
   };
   nodes: GoalCoverageNode[];
   edges: Array<{ from: string; to: string; kind: string }>;
+  nodes_truncated?: boolean;
+  edges_truncated?: boolean;
+  diagnostics_truncated?: boolean;
   diagnostics: Array<{
     code?: string;
     kind?: string;
@@ -579,6 +637,31 @@ export interface DeliveryRunGroup {
   verdict?: Record<string, unknown>;
   artifact_refs?: string[];
   source_event_ids?: string[];
+}
+
+// delivery-view.v2 only exposes refs that the server resolved to a real Trace
+// projection. Delivery must never derive these from its synthetic trace_id.
+export interface DeliveryCanonicalTraceRef {
+  trace_id: string;
+  task_id?: string;
+  task_ids?: string[];
+  run_group_id?: string;
+  span_id?: string;
+  source_event_ids?: string[];
+  source_event_ids_truncated?: boolean;
+  event_count?: number;
+  trace_id_opaque?: boolean;
+  membership?: "trace-v2-source-event" | string;
+  task_ids_truncated?: boolean;
+  last_seq?: number;
+}
+
+export interface DeliveryRefreshScopeProjection {
+  task_ids: string[];
+  task_ids_total: number;
+  task_ids_included: number;
+  task_ids_omitted: number;
+  task_ids_truncated: boolean;
 }
 
 export interface DeliveryRunTraceSpan {
@@ -1032,38 +1115,6 @@ export interface DiagnosticsLogsPage {
   count: number;
 }
 
-export interface RuntimeLogRow {
-  timestamp: string;
-  level: string;
-  component: string;
-  message: string;
-  failure_class?: string;
-  zaofu_correlation_id?: string;
-  task_id?: string;
-  workflow_run_id?: string;
-  dispatch_id?: string;
-  attempt_id?: string;
-  role_instance_id?: string;
-  provider?: string;
-  provider_session_id?: string;
-  route?: string;
-  operation_kind?: string;
-  status?: string;
-}
-
-export interface RuntimeLogsPage {
-  schema_version: string;
-  project_id: string;
-  scope: string;
-  summary: {
-    count: number;
-    levels: Record<string, number>;
-    latest_at: string;
-  };
-  rows: RuntimeLogRow[];
-  count: number;
-}
-
 export interface ProviderTelemetryCapability {
   provider: string;
   route: string;
@@ -1156,11 +1207,18 @@ export interface DeliveryRunChainStage {
   entered_at?: string | null;
   completed_at?: string | null;
   via_event_id?: string | null;
+  via_event_id_omitted?: boolean;
   causation_id?: string | null;
+  causation_id_omitted?: boolean;
   seq_first?: number | null;
   seq_last?: number | null;
   occurrences: number;
   task_ids: string[];
+  task_ids_opaque?: number;
+  task_ids_total?: number;
+  task_ids_included?: number;
+  task_ids_omitted?: number;
+  task_ids_truncated?: boolean;
 }
 
 export interface DeliveryRunChain {
@@ -1168,6 +1226,15 @@ export interface DeliveryRunChain {
   status: "completed" | "in_progress" | "not_started" | "no_stage_order" | string;
   trigger?: { event_id: string; type: string; ts?: string | null; actor?: string | null } | null;
   stages: DeliveryRunChainStage[];
+  stage_count?: number;
+  stages_total?: number;
+  stages_included?: number;
+  stages_omitted?: number;
+  stages_truncated?: boolean;
+  task_ids_total?: number;
+  task_ids_included?: number;
+  task_ids_omitted?: number;
+  task_ids_truncated?: boolean;
 }
 
 // 2026-06-11 S-A — task-lifecycle.v1 (Airflow task-instance state history).
@@ -1192,6 +1259,10 @@ export interface DeliveryTaskTry {
   first_response_seconds?: number | null;
   outcome: "in_flight" | "done" | "blocked" | "failed" | string;
   gate_results: DeliveryTaskGateResult[];
+  gate_results_total?: number;
+  gate_results_included?: number;
+  gate_results_omitted?: number;
+  gate_results_truncated?: boolean;
   rework_kind?: string | null;
   dispatch_id?: string | null;
   briefing_ref?: string | null;
@@ -1206,11 +1277,41 @@ export interface DeliveryTaskTry {
 export interface DeliveryTaskLifecycleEntry {
   state_history: DeliveryTaskLifecycleState[];
   tries: DeliveryTaskTry[];
+  state_history_total?: number;
+  state_history_included?: number;
+  state_history_omitted?: number;
+  state_history_truncated?: boolean;
+  tries_total?: number;
+  tries_included?: number;
+  tries_omitted?: number;
+  tries_truncated?: boolean;
+  gate_results_total?: number;
+  gate_results_included?: number;
+  gate_results_omitted?: number;
+  gate_results_truncated?: boolean;
 }
 
 export interface DeliveryTaskLifecycle {
   schema_version: string;
   tasks: Record<string, DeliveryTaskLifecycleEntry>;
+  task_count?: number;
+  tasks_included?: number;
+  tasks_omitted?: number;
+  tasks_truncated?: boolean;
+  task_statuses?: Record<string, string>;
+  task_status_count?: number;
+  task_statuses_included?: number;
+  task_statuses_omitted?: number;
+  task_statuses_truncated?: boolean;
+  state_history_total?: number;
+  state_history_included?: number;
+  state_history_truncated?: boolean;
+  tries_total?: number;
+  tries_included?: number;
+  tries_truncated?: boolean;
+  gate_results_total?: number;
+  gate_results_included?: number;
+  gate_results_truncated?: boolean;
 }
 
 // causation-chain.v1 — event ancestry from a target event back to its source
@@ -1229,8 +1330,39 @@ export interface CausationChain {
 
 export interface DeliveryTrace {
   schema_version: string;
+  generated_at?: string;
   feature_id: string;
   trace_id: string;
+  view?: "overview" | "runs" | "graph" | "work";
+  work_scope?: {
+    goal_id: string;
+    goal_id_opaque?: boolean;
+    matched: boolean;
+    claim_count: number;
+    task_count: number;
+  };
+  refresh_scope?: DeliveryRefreshScopeProjection;
+  canonical_trace_refs?: Array<string | DeliveryCanonicalTraceRef>;
+  canonical_trace_refs_truncated?: boolean;
+  run_summary?: {
+    total?: number;
+    completed?: number;
+    running?: number;
+    failed?: number;
+    latest_label?: string;
+  };
+  attention_summary?: {
+    total_count: number;
+    truncated: boolean;
+    by_kind: Array<{ kind: string; count: number }>;
+    by_kind_truncated: boolean;
+  };
+  attention?: Array<{
+    label: string;
+    meta?: string;
+    tone?: "ok" | "warn" | "err" | "info" | "muted";
+    count?: number;
+  }>;
   status: string;
   synthetic: boolean;
   workflow_archetype?: DeliveryWorkflowArchetype | string;
@@ -1258,8 +1390,19 @@ export interface DeliveryTrace {
     nodes: DeliveryTraceNode[];
     edges: { from: string; to: string; kind: string; status: string }[];
     waves: { wave: number; task_ids: string[]; status: string }[];
+    summary_only?: boolean;
+    nodes_only?: boolean;
+    nodes_total?: number;
+    nodes_included?: number;
+    nodes_omitted?: number;
+    nodes_truncated?: boolean;
+    edges_total?: number;
+    edges_included?: number;
+    edges_omitted?: number;
+    edges_truncated?: boolean;
   };
   drift_report: { status: string; summary: Record<string, number>; items: DeliveryTraceDriftItem[] };
+  drift?: { status: string; summary: Record<string, number>; items: DeliveryTraceDriftItem[] };
   ship: { status: string; readiness?: string; shipped?: boolean; ship_status?: string; merge_ref?: string; candidate_status?: string; required_tasks: number; done_tasks: number; missing_evidence: { task_id: string; status: string }[]; release_blockers?: { kind: string; severity: string }[] };
   closed_loop?: DeliveryClosedLoop;
   workflow_trace?: DeliveryWorkflowTrace;
@@ -1447,6 +1590,7 @@ export interface KanbanAgentSkillsSummary {
 
 export interface TraceSummary {
   trace_id: string;
+  trace_id_opaque?: boolean;
   first_seq: number;
   last_seq: number;
   first_ts: string;
@@ -1454,12 +1598,26 @@ export interface TraceSummary {
   duration_seconds?: number | null;
   event_count: number;
   task_ids: string[];
+  task_ids_truncated?: boolean;
   actors: string[];
+  actors_truncated?: boolean;
   backends?: string[];
+  backends_truncated?: boolean;
   status?: string;
+  source?: "event_trace" | "task_event_fallback" | string;
   source_event_ids?: string[];
   inferred_ids?: string[];
   last_type: string;
+}
+
+export interface TraceIndexPage {
+  schema_version: "trace-list.v2" | string;
+  items: TraceSummary[];
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  as_of_seq: number;
+  is_derived_projection: boolean;
 }
 
 export interface CandidateSummary {
@@ -2185,15 +2343,130 @@ export interface TaskDiff {
 }
 
 export interface TraceDetail {
+  schema_version: "trace-detail.v2" | string;
   trace_id: string;
+  trace_id_opaque?: boolean;
   event_count: number;
-  timeline: EventRecord[];
+  first_seq: number | null;
+  last_seq: number | null;
+  first_ts: string | null;
+  last_ts: string | null;
+  duration_seconds: number | null;
+  status: string;
+  timeline: TraceTimelineEvent[];
   tasks: string[];
+  tasks_truncated?: boolean;
   actors: string[];
-  git_refs: Record<string, unknown>;
-  diagnostics: DiagnosticsDetail;
-  execution_route?: ExecutionRouteProjection;
+  actors_truncated?: boolean;
+  execution_route?: TraceExecutionRouteSummary;
+  truncated: boolean;
+  has_more: boolean;
+  next_cursor: string | null;
+  as_of_seq: number;
   empty: boolean;
+}
+
+export interface TraceLifecycleSpan {
+  trace_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  name: string;
+  kind: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  source: string;
+  truth_class: string;
+  degraded: boolean;
+  degradation_reason: string | null;
+  source_event_ids: string[];
+  task_id?: string | null;
+  actor?: string | null;
+  backend?: string | null;
+  provenance?: Record<string, unknown>;
+}
+
+export interface TraceSpanCoverage {
+  status: "available" | "partial" | "empty" | "degraded" | string;
+  reason: string;
+  collector: string;
+  projection: string;
+  ledger: string;
+  source: string;
+  observed_allowlisted_event_count: number;
+  eligible_event_count: number;
+  paired_span_count: number;
+  degraded_span_count: number;
+  unpaired_start_count: number;
+  unpaired_terminal_count: number;
+  malformed_event_count: number;
+  untrusted_event_count: number;
+}
+
+export interface TraceSpanPage {
+  schema_version: "trace-spans.v1" | string;
+  trace_id: string;
+  items: TraceLifecycleSpan[];
+  focused_item?: TraceLifecycleSpan | null;
+  span_count: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  as_of_seq: number;
+  coverage: TraceSpanCoverage;
+  diagnostics: Array<{
+    kind: string;
+    message: string;
+    code?: string;
+    event_type?: string;
+    event_id?: string;
+  }>;
+  diagnostics_truncated: boolean;
+  empty: boolean;
+}
+
+export interface TraceExecutionRouteStage {
+  stage: string;
+  label: string;
+  status: string;
+  parallel: boolean;
+  actors: string[];
+  first_seq: number;
+  last_seq: number;
+  first_ts: string;
+  last_ts: string;
+  event_count: number;
+  event_types: string[];
+  task_ids: string[];
+  failed_count: number;
+  values_truncated: boolean;
+}
+
+export interface TraceExecutionRouteSummary extends ExecutionRouteSummary {
+  scope: { task_id: string; trace_id: string };
+  linear: TraceExecutionRouteStage[];
+  trace_event_count: number;
+  source_event_count: number;
+  metadata_truncated: boolean;
+}
+
+export interface TraceTimelineEvent extends EventRecord {
+  status?: string | null;
+  summary?: string;
+  span_id?: string | null;
+  parent_span_id?: string | null;
+  has_raw?: boolean;
+  metadata_truncated?: boolean;
+  truncated_fields?: string[];
+  payload_slim?: boolean;
+}
+
+export interface TraceEventDetail {
+  schema_version: "event-detail.v1" | string;
+  event_id: string;
+  event: EventRecord;
+  source: string | Record<string, unknown>;
 }
 
 export interface CandidateDetail {

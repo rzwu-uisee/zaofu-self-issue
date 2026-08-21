@@ -3,7 +3,8 @@
 > 适用对象：第一次安装 ZaoFu，并希望从 Web 完成 Bootstrap、创建或打开
 > Project，再通过 Kanban Agent 使用 Channel、Research 和交付 Workflow 的操作者。
 >
-> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-08-03。
+> 核心 CLI、Web、事件账本和 Workflow 路线最后整体核实于 2026-08-03；Web Terminal 的安装、
+> 鉴权、多 Tab 与跨客户端恢复切片核实于 2026-08-21。
 > 本页动态图和关键截图由 Playwright 的真实交互状态组成；闭环结论同时检查对应 API、
 > Store 和 EventLog，不以截图代替运行态证据。
 > Channel 当前以 `conversation` 为默认产品模式；只有显式选择 `multi_lens` 并执行
@@ -63,6 +64,34 @@ export ZAOFU_ROOT=/path/to/zaofu
 
 完成标志：Dashboard 打开并进入安装 Onboarding。安装步骤只需要按本教程执行，
 本页不要求先创建示例 Project。
+
+### Web Terminal（默认启用，可选安装）
+
+Dashboard host 默认启用 Web Terminal；这只开放受鉴权的 Terminal 能力，不会自动安装或
+启动 CLI。若要在 Dashboard 内实际运行 Claude Code/Codex TUI，还需安装 Herdr `>=0.8.0`；
+它是宿主二进制，不属于 `uv sync` 的 Python 依赖：
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+herdr --version
+herdr api schema --json >/dev/null
+herdr terminal session observe --help
+herdr terminal session control --help
+```
+
+不需要给 v4 或其他目标 Project 的 `zf.yaml` 增加 `runtime.web_terminal`。若这个 Dashboard
+host 不允许 Web Terminal，可在启动它的 ZaoFu 配置中显式关闭：
+
+```yaml
+runtime:
+  web_terminal:
+    enabled: false
+```
+
+不要配置 terminal-only Provider 名单。New Session 会读取所选 Project 初始化后生效的
+orchestrator/roles backend：single Project 只显示一个 Provider，Mixed team 显示 Claude Code
+与 Codex。安装、鉴权、三种连接模式和生产检查见 [Web Terminal 专题](24-web-terminal.md)；
+可先观看[跨终端与离线恢复中文演示](showcases/web-terminal.md)。
 
 ## 2. Bootstrap（必需）
 

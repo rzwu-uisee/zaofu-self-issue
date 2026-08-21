@@ -83,9 +83,11 @@ Plan 只固定选择，不代表授权。只有最后的 `Start workflow` 才启
 在 Web 中按以下顺序检查：
 
 1. `Tasks`：Task 状态、owner、contract 和当前 stage。
-2. `Delivery -> Runs`：本轮 stage、attempt、重试和 causation。
-3. `Delivery -> Delivery Map -> Coverage`：每个 mandatory Claim 是否有 Task 和证据覆盖。
-4. `Delivery -> Delivery Map -> Work`：Goal 到 Claim、Task、Try 和 Result 的关系。
+2. `Delivery -> Graph`：每个 mandatory Claim 是否有 covering Task，Plan / Implementation /
+   Verification / Closure、Gap 和 generation/currentness 是否闭合。
+3. `Delivery -> Runs`：本轮 Run graph，以及 Task Inspector 中的 attempt、gate、event、evidence
+   和 regression。
+4. `Traces`：只在需要时间顺序或 Span 因果时从 verified canonical Trace ref 下钻。
 5. `Monitoring -> Runs`：Run 终态后的 Goal Dossier。
 6. `Inbox`：需要批准、处理的 blocker 和 owner-visible delivery。
 
