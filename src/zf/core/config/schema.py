@@ -1527,6 +1527,28 @@ class RuntimeFeishuProjectionConfig:
 
 
 @dataclass
+class RuntimeWebTerminalConfig:
+    """Opt-in Web PTY surface backed by an operator-installed Herdr binary."""
+
+    enabled: bool = False
+    backend: str = "herdr"
+    herdr_binary: str = "herdr"
+    minimum_herdr_version: str = "0.8.0"
+    allowed_origins: list[str] = field(default_factory=list)
+    max_sessions: int = 8
+    max_attachments_per_session: int = 8
+    max_cols: int = 400
+    max_rows: int = 200
+    max_input_bytes: int = 64 * 1024
+    max_frame_bytes: int = 4 * 1024 * 1024
+    bridge_queue_frames: int = 64
+    bridge_queue_bytes: int = 8 * 1024 * 1024
+    ticket_ttl_seconds: int = 30
+    provider_start_timeout_seconds: int = 60
+    allow_takeover: bool = True
+
+
+@dataclass
 class RuntimeConfig:
     workdirs: WorkdirConfig = field(default_factory=WorkdirConfig)
     git: GitIsolationConfig = field(default_factory=GitIsolationConfig)
@@ -1548,6 +1570,9 @@ class RuntimeConfig:
     )
     feishu_projection: RuntimeFeishuProjectionConfig = field(
         default_factory=RuntimeFeishuProjectionConfig,
+    )
+    web_terminal: RuntimeWebTerminalConfig = field(
+        default_factory=RuntimeWebTerminalConfig,
     )
 
 

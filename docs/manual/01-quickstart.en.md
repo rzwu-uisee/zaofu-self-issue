@@ -71,6 +71,36 @@ Codex headless sandbox policy. Open `http://127.0.0.1:8001/`. Bind to
 Completion signal: the Dashboard opens at installation onboarding. This guide
 does not require creating a throwaway Project during installation.
 
+### Optional: enable Web Terminal
+
+Running a real Claude Code or Codex TUI inside the Dashboard also requires
+Herdr `>=0.8.0`. Herdr is a host binary, not a Python dependency installed by
+`uv sync`:
+
+```bash
+curl -fsSL https://herdr.dev/install.sh | sh
+herdr --version
+herdr api schema --json >/dev/null
+herdr terminal session observe --help
+herdr terminal session control --help
+```
+
+Enable the capability in the ZaoFu config that starts the Dashboard:
+
+```yaml
+runtime:
+  web_terminal:
+    enabled: true
+    minimum_herdr_version: 0.8.0
+```
+
+Do not configure a terminal-only provider list. New Session reads the selected
+Project's effective orchestrator and role backends: a single-provider Project
+shows one provider, while a Mixed team shows Claude Code and Codex. See
+[Web Terminal](24-web-terminal.en.md) for installation, authentication,
+attachment modes, and production checks, or start with the
+[cross-client and offline-recovery showcase](showcases/web-terminal.en.md).
+
 ## 2. Bootstrap (Required)
 
 The first-run flow has four installation-level steps:

@@ -3,7 +3,7 @@
 > Generated from `capability-coverage.yaml`; do not edit by hand.
 > This maps release-facing capabilities to manual/code/test evidence; it is not a module inventory.
 
-Last manually verified: `2026-08-18`.
+Last manually verified: `2026-08-20`.
 
 | Capability | Status | Manual | Implementation | Tests |
 |---|---|---|---|---|
@@ -13,6 +13,7 @@ Last manually verified: `2026-08-18`.
 | `task-map-kernel-dispatch`<br>Task Map compilation and Kernel dispatch | `implemented` | [`13-plan-task-map-orchestrator-dispatch.md`](../13-plan-task-map-orchestrator-dispatch.md)<br>[`13-plan-task-map-orchestrator-dispatch.en.md`](../13-plan-task-map-orchestrator-dispatch.en.md) | `src/zf/runtime/task_map.py`<br>`src/zf/runtime/product_delivery.py`<br>`src/zf/runtime/orchestrator_dispatch.py` | `tests/test_task_map.py`<br>`tests/test_product_delivery.py` |
 | `controlled-workflow-synthesis`<br>Controlled Workflow synthesis and freeze | `partial` | [`04-harness-runtime.md`](../04-harness-runtime.md)<br>[`13-plan-task-map-orchestrator-dispatch.md`](../13-plan-task-map-orchestrator-dispatch.md)<br>[`controlled-workflow-start.md`](../workflows/controlled-workflow-start.md)<br>[`04-harness-runtime.en.md`](../04-harness-runtime.en.md)<br>[`13-plan-task-map-orchestrator-dispatch.en.md`](../13-plan-task-map-orchestrator-dispatch.en.md)<br>[`controlled-workflow-start.en.md`](../workflows/controlled-workflow-start.en.md) | `src/zf/runtime/workflow_synthesis_generic.py`<br>`src/zf/runtime/workflow_start.py` | `tests/test_generic_workflow.py`<br>`tests/test_workflow_synthesis.py` |
 | `role-provider-session-lifecycle`<br>Role-scoped Provider session and on-demand lifecycle | `partial` | [`02-zf-yaml-control-plane.md`](../02-zf-yaml-control-plane.md)<br>[`architecture.md`](../architecture.md)<br>[`02-zf-yaml-control-plane.en.md`](../02-zf-yaml-control-plane.en.md)<br>[`architecture.en.md`](../architecture.en.md) | `src/zf/runtime/provider_session_config.py`<br>`src/zf/runtime/role_lifecycle_runtime.py` | `tests/test_provider_session_config.py`<br>`tests/test_role_lifecycle_runtime.py` |
+| `web-terminal-pty`<br>Web Terminal real Coding Agent PTY | `partial` | [`24-web-terminal.md`](../24-web-terminal.md)<br>[`24-web-terminal.en.md`](../24-web-terminal.en.md) | `src/zf/web/terminal_routes.py`<br>`src/zf/web/terminal_service.py`<br>`web/src/components/terminal/TerminalDrawer.tsx` | `tests/test_web_terminal_runtime.py`<br>`tests/test_web_terminal_routes.py`<br>`web/tests/web-terminal.spec.ts` |
 | `orchestrator-semantic-control`<br>Orchestrator Agent semantic checkpoints | `partial` | [`architecture.md`](../architecture.md)<br>[`04-harness-runtime.md`](../04-harness-runtime.md)<br>[`13-plan-task-map-orchestrator-dispatch.md`](../13-plan-task-map-orchestrator-dispatch.md)<br>[`architecture.en.md`](../architecture.en.md)<br>[`04-harness-runtime.en.md`](../04-harness-runtime.en.md)<br>[`13-plan-task-map-orchestrator-dispatch.en.md`](../13-plan-task-map-orchestrator-dispatch.en.md) | `src/zf/runtime/orchestrator_agent_policy.py`<br>`src/zf/runtime/orchestrator_agent_reactor.py` | `tests/test_orchestrator_agent_policy.py`<br>`tests/e2e/test_orchestrator_agent_semantic_control_mock_e2e.py` |
 | `task-pipeline-v4`<br>Task Pipeline v4 and elastic Stage Workers | `partial` | [`02-zf-yaml-control-plane.md`](../02-zf-yaml-control-plane.md)<br>[`13-plan-task-map-orchestrator-dispatch.md`](../13-plan-task-map-orchestrator-dispatch.md)<br>[`18-product-fanout-real-e2e.md`](../18-product-fanout-real-e2e.md)<br>[`02-zf-yaml-control-plane.en.md`](../02-zf-yaml-control-plane.en.md)<br>[`13-plan-task-map-orchestrator-dispatch.en.md`](../13-plan-task-map-orchestrator-dispatch.en.md)<br>[`18-product-fanout-real-e2e.en.md`](../18-product-fanout-real-e2e.en.md) | `src/zf/runtime/task_pipeline_runtime.py`<br>`src/zf/runtime/task_pipeline_reconciler.py` | `tests/test_task_pipeline_profile.py`<br>`tests/test_task_pipeline_rollout.py`<br>`tests/test_task_pipeline_fault_matrix.py` |
 | `research-generation-five-workflow-terminal`<br>Research generation and five-Workflow terminal acceptance | `partial` | [`18-product-fanout-real-e2e.md`](../18-product-fanout-real-e2e.md)<br>[`18-product-fanout-real-e2e.en.md`](../18-product-fanout-real-e2e.en.md) | `src/zf/runtime/research_generation.py`<br>`src/zf/runtime/control_actions_product.py` | `tests/test_control_actions_research.py`<br>`tests/e2e/test_five_workflow_terminal_runner.py` |
@@ -72,6 +73,13 @@ Last manually verified: `2026-08-18`.
 - **Readback**: Verify normalized Provider options, immutable session digest, RoleSession identity, activation, idle retirement, and preserved workdir/affinity.
 - **Rollback**: Restore the prior role config in a new runtime generation; retire only idle processes whose workdir and session evidence remain preserved.
 - **Authority**: Lifecycle owns process and pane placement only; it cannot mutate Task truth, transfer one Task's conversation to another, or make the orchestrator role on-demand.
+
+### `web-terminal-pty` - Web Terminal real Coding Agent PTY
+
+- **Activation**: Install and qualify Herdr, enable the Dashboard host capability, then create a session from the selected Project's derived provider menu.
+- **Readback**: Verify capability availability, Project-scoped provider projection, PTY interaction, reconnect, multi-tab behavior, and per-tab usage rows.
+- **Rollback**: Disable the host capability and explicitly stop only the affected terminal sessions; preserve registry and usage receipts for diagnosis.
+- **Authority**: Terminal bytes are an ephemeral interaction plane; create, rename, takeover, and stop remain token-gated side effects and never mutate Task or Workflow truth.
 
 ### `orchestrator-semantic-control` - Orchestrator Agent semantic checkpoints
 

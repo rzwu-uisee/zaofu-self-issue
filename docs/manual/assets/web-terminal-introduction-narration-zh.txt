@@ -1,0 +1,15 @@
+ZaoFu Web Terminal 中文介绍视频逐字稿
+
+1. 这是造父 Web Terminal。用户打开任意已授权项目，就能从右上角进入真实 Coding Agent 终端。可用的 Codex 和 Claude Code 不写死在终端配置里，而是由项目初始化后的后端策略自动派生。
+
+2. 点击新建，造父通过 Herdr 在项目根目录启动真实 PTY 和 Codex TUI。它保留 ANSI、滚动、复制、快捷键和原生交互；多个标签页还能独立命名，并分别关联 Session、Provider 与用量。
+
+3. 同一个项目可以从另一台电脑或浏览器登录。终端 A 保持 Control，终端 B 选择 Observe 后，只读看到完全相同的屏幕；多人可以同时旁观，却不会误输入或改变终端尺寸。
+
+4. 需要交接时，终端 B 显式选择 Take over control。系统替换唯一控制者，终端 A 自动失去写权限并转为观察；新的控制端继续输入，两个窗口都收到同一个真实 Codex 响应。
+
+5. 更酷的是离线恢复。终端 B 提交一个延迟任务后断网，浏览器连接已经消失，但 Herdr、PTY 和 Coding Agent 仍在服务端继续运行。9.8 秒后，观察端收到了离线期间生成的 OFFLINE_RECOVERY_OK。
+
+6. 网络恢复，或者换一台全新的设备重新登录，只要项目和访问令牌相同，就能重新连接同一个 Session，恢复完整历史并继续控制。全屏、可调 Dock、主题、多标签，以及按标签统计的 Token 和 Cost，一起构成稳定、可追踪的 Web Terminal 体验。
+
+证据边界：视频中的“终端 A/B/C”是同一录制主机上的三个隔离 Chromium browser context，用于等价验证不同浏览器或设备的独立客户端状态；离线场景断开的是控制端浏览器网络，不是 Dashboard、Herdr、PTY 或宿主机宕机。

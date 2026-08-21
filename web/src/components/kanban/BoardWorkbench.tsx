@@ -88,6 +88,8 @@ export function BoardWorkbench({
   onOpenFanout,
   onOpenTask,
   onSaveToken,
+  onUnlockSession,
+  passcodeRequired,
   priorityFilter,
   quickFilter,
   selectedTaskId,
@@ -120,6 +122,8 @@ export function BoardWorkbench({
   onOpenFanout: (fanoutId: string) => void;
   onOpenTask: (taskId: string) => void;
   onSaveToken: (token: string) => void;
+  onUnlockSession: (passcode: string) => Promise<{ ok: boolean; reason?: string }>;
+  passcodeRequired: boolean;
   priorityFilter: string;
   quickFilter: string;
   selectedTaskId: string | null;
@@ -141,7 +145,9 @@ export function BoardWorkbench({
 }) {
   const [dragTaskId, setDragTaskId] = useState("");
   const [boardNotice, setBoardNotice] = useState("");
+  const [passcodeInput, setPasscodeInput] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
   const telemetryByTaskId = useMemo(() => buildTaskTelemetry(agents), [agents]);
   const activeTaskFocus = taskFocusForFilters(statusFilter, quickFilter);
   const pointerDragRef = useRef<PointerDragState | null>(null);
@@ -233,6 +239,28 @@ export function BoardWorkbench({
     onSaveToken(tokenInput);
     setTokenInput("");
     setBoardNotice("");
+  }
+
+  async function unlockBoardSession() {
+    const passcode = passcodeInput.trim();
+    if (!passcode) {
+      setBoardNotice("Enter the web passcode to unlock board actions.");
+      return;
+    }
+    setUnlocking(true);
+    setBoardNotice("");
+    try {
+      const result = await onUnlockSession(passcode);
+      if (result.ok) {
+        setPasscodeInput("");
+        return;
+      }
+      setBoardNotice(result.reason || "Unable to unlock board actions.");
+    } catch (error) {
+      setBoardNotice(error instanceof Error ? error.message : "Unable to unlock board actions.");
+    } finally {
+      setUnlocking(false);
+    }
   }
 
   function handleTaskFocus(requested: TaskFocus) {
@@ -347,6 +375,29 @@ export function BoardWorkbench({
         <div className="notice board-action-notice">
           <div className="token-row">
             <span className="mono">board actions: {actionState}</span>
+            {passcodeRequired ? (
+              <form
+                className="token-row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void unlockBoardSession();
+                }}
+              >
+                <input
+                  aria-label="Web passcode"
+                  autoComplete="current-password"
+                  className="filter-input"
+                  disabled={unlocking}
+                  placeholder="web passcode"
+                  type="password"
+                  value={passcodeInput}
+                  onChange={(event) => setPasscodeInput(event.target.value)}
+                />
+                <button className="icon-button" disabled={unlocking} type="submit">
+                  {unlocking ? "Unlocking…" : "Unlock"}
+                </button>
+              </form>
+            ) : null}
             {showTokenRow ? (
               <>
                 <input

@@ -1,5 +1,5 @@
 schema_version: zf-manual-capability-coverage.v1
-last_verified: 2026-08-18
+last_verified: 2026-08-20
 capabilities:
   - id: project-bootstrap
     name: Project 初始化与 Bootstrap
@@ -134,6 +134,29 @@ capabilities:
       readback: Verify normalized Provider options, immutable session digest, RoleSession identity, activation, idle retirement, and preserved workdir/affinity.
       rollback: Restore the prior role config in a new runtime generation; retire only idle processes whose workdir and session evidence remain preserved.
       authority: Lifecycle owns process and pane placement only; it cannot mutate Task truth, transfer one Task's conversation to another, or make the orchestrator role on-demand.
+
+  - id: web-terminal-pty
+    name: Web Terminal 真实 Coding Agent PTY
+    name_en: Web Terminal real Coding Agent PTY
+    status: partial
+    manuals:
+      zh:
+        - docs/manual/24-web-terminal.md
+      en:
+        - docs/manual/24-web-terminal.en.md
+    code:
+      - src/zf/web/terminal_routes.py
+      - src/zf/web/terminal_service.py
+      - web/src/components/terminal/TerminalDrawer.tsx
+    tests:
+      - tests/test_web_terminal_runtime.py
+      - tests/test_web_terminal_routes.py
+      - web/tests/web-terminal.spec.ts
+    release:
+      activation: Install and qualify Herdr, enable the Dashboard host capability, then create a session from the selected Project's derived provider menu.
+      readback: Verify capability availability, Project-scoped provider projection, PTY interaction, reconnect, multi-tab behavior, and per-tab usage rows.
+      rollback: Disable the host capability and explicitly stop only the affected terminal sessions; preserve registry and usage receipts for diagnosis.
+      authority: Terminal bytes are an ephemeral interaction plane; create, rename, takeover, and stop remain token-gated side effects and never mutate Task or Workflow truth.
 
   - id: orchestrator-semantic-control
     name: Orchestrator Agent 语义 Checkpoint

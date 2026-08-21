@@ -1,0 +1,171 @@
+/* Dashboard topbar controls. Imported after tokens/base and before route styles. */
+
+.status-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.topbar-search-control {
+  width: min(294px, 30vw);
+  min-width: 190px;
+  min-height: 30px;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.topbar-search-control:focus-within {
+  border-color: color-mix(in oklab, var(--brand) 52%, var(--line));
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--brand) 12%, transparent);
+}
+
+.topbar-search-control .search-input {
+  min-width: 0;
+  min-height: 28px;
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  outline: 0;
+}
+
+.topbar-search-button {
+  width: 32px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--muted-foreground);
+  border: 0;
+  border-left: 1px solid var(--line-soft);
+  background: transparent;
+  cursor: pointer;
+}
+
+.topbar-search-button:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.topbar-runtime-summary,
+.topbar-runtime-cluster {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.topbar-runtime-summary {
+  gap: 8px;
+}
+
+.topbar-runtime-cluster {
+  gap: 3px;
+}
+
+.topbar-activity {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-tool-button {
+  width: 28px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--muted-foreground);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 80ms ease;
+}
+
+.topbar-refresh-button {
+  height: 28px;
+}
+
+.topbar-tool-separator {
+  width: 1px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin-inline: 1px;
+  background: var(--line);
+}
+
+.topbar-terminal-launch {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.topbar-tool-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.topbar-tool-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.topbar-tool-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.topbar-tool-button:focus-visible,
+.topbar-search-button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.topbar-terminal-button {
+  position: relative;
+}
+
+.topbar-terminal-button svg {
+  flex: 0 0 auto;
+}
+
+.topbar-terminal-button[aria-pressed="true"] {
+  color: var(--brand);
+  background: var(--brand-subtle);
+}
+
+.topbar-terminal-button[aria-pressed="true"]::after {
+  position: absolute;
+  right: 5px;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--brand);
+  content: "";
+}
+
+@media (max-width: 1180px) {
+  .topbar-activity {
+    display: none;
+  }
+
+  .topbar-search-control {
+    width: min(240px, 26vw);
+  }
+}

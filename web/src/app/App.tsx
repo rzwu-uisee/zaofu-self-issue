@@ -1,5 +1,5 @@
 import type { CSSProperties, PointerEvent, ReactNode, UIEvent as ReactUIEvent } from "react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Archive,
@@ -37,6 +37,7 @@ import {
   Plus,
   Quote,
   Radio,
+  RefreshCw,
   Search,
   Send,
   Smile,
@@ -45,6 +46,7 @@ import {
   SkipForward,
   SquareCode,
   Strikethrough,
+  Terminal,
   Trash2,
   Route,
   Type,
@@ -119,6 +121,7 @@ import {
   mergeChannelConversationRefresh,
 } from "./channelConversationState";
 import { useProjectRequestScope } from "./useProjectRequestScope";
+import { resolveWorkspaceProjectId } from "./workspaceProjectSelection";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
 import {
   canBootstrapScopedPageBeforeWorkspace,
@@ -259,6 +262,8 @@ interface NewChannelDraft {
   channelId: string;
 }
 
+const TerminalDrawer = lazy(() => import("../components/terminal/TerminalDrawer"));
+
 interface RuntimeActionState {
   actionReady: boolean;
   actionState: string;
@@ -364,7 +369,7 @@ function connectionStatusView({
   if (!snapshot) {
     if (!snapshotRequired) {
       if (liveState === "live") {
-        return { className: "status-live", label: "live", title: "Project slice and event stream are connected." };
+        return { className: "status-live", label: "synced", title: "Project slice and event stream are connected." };
       }
       if (liveState === "reconnecting") {
         return { className: "status-reconnecting", label: "stream reconnecting", title: "Project slice is loaded; event stream is reconnecting." };
@@ -379,11 +384,8 @@ function connectionStatusView({
   if ((snapshot.runtime as { runtime_state?: string }).runtime_state === "archived") {
     return { className: "status-idle", label: "archived", title: "Archived project: data is a historical record, no live runtime." };
   }
-  if (snapshot.runtime.live === false) {
-    return { className: "status-idle", label: "runtime stopped", title: "Project snapshot loaded; runtime is not live." };
-  }
   if (liveState === "live") {
-    return { className: "status-live", label: "live", title: "Snapshot and project event stream are connected." };
+    return { className: "status-live", label: "synced", title: "Snapshot and project event stream are connected." };
   }
   if (liveState === "reconnecting") {
     return { className: "status-reconnecting", label: "stream reconnecting", title: "Snapshot is loaded; event stream is reconnecting." };
@@ -676,6 +678,7 @@ export function App() {
   );
   const [agentPanelHasOpened, setAgentPanelHasOpened] = useState(initial.openAgent);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [newChannelOpen, setNewChannelOpen] = useState(false);
   const [newChannelDraft, setNewChannelDraft] = useState<NewChannelDraft>(() => emptyNewChannelDraft());
   const [addAgentOpen, setAddAgentOpen] = useState(false);
@@ -1162,18 +1165,20 @@ export function App() {
             setServerDefaultProjectId(workspacePage.server_default_project_id ?? "");
           });
         }
-        const projectId = activeProjectId || projectsPage?.active_project_id || "";
+        const projectItems = projectsPage?.items ?? projectsPage?.projects ?? [];
+        const projectId = projectsPage
+          ? resolveWorkspaceProjectId(activeProjectId, projectsPage.active_project_id, projectItems)
+          : activeProjectId;
         if (cancelled) return;
         if (projectsPage) {
-          setWorkspaceProjects(projectsPage.items ?? projectsPage.projects ?? []);
+          setWorkspaceProjects(projectItems);
           setServerDefaultProjectId(projectsPage.server_default_project_id ?? "");
         }
-        if (!activeProjectId && projectId) {
+        if (projectId !== activeProjectId) {
           projectRequestScope.activate(projectId);
           setActiveProjectId(projectId);
           return;
         }
-        const projectItems = projectsPage?.items ?? projectsPage?.projects ?? [];
         const selectedProject = projectItems.find((project) => project.project_id === projectId) ?? null;
         if (!projectId || (selectedProject && !projectCanOpenBoard(selectedProject))) {
           setSnapshot(null);
@@ -2088,10 +2093,6 @@ export function App() {
     topbarStatus.className = "status-idle";
     topbarStatus.label = "archived";
     topbarStatus.title = "Archived project: historical record, no live runtime.";
-  } else if (projectHealth && !projectHealth.live && projectHealth.runtime_state === "stopped") {
-    topbarStatus.className = "status-idle";
-    topbarStatus.label = "runtime stopped";
-    topbarStatus.title = `Runtime stopped · stream ${liveState}.`;
   }
   const topbarProjectName = snapshot?.project.name || activeProject?.name || projectLabelFromId(activeProjectId) || "ZaoFu Project";
   const sliceContextLabel = page === "channels" && channelsPage
@@ -2136,33 +2137,64 @@ export function App() {
           <span className="muted">{topbarContextLabel}</span>
         </div>
         <div className="status-row">
-          <input
-            className="search-input"
-            placeholder="task:TASK-123 actor:dev-1"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void runSearch();
-            }}
-          />
-          <button className="icon-button" type="button" onClick={() => void runSearch()}>
-            Search
-          </button>
-          <span className={`status-pill ${topbarStatus.className}`} title={topbarStatus.title}>{topbarStatus.label}</span>
-          {projectHealth ? (
-            <span className="muted mono" title={`snap #${projectHealth.seq} · projection ${projectHealth.projection?.state ?? "-"}`}>
-              {projectHealth.active} active{projectHealth.queued > 0 ? ` · ${projectHealth.queued} queued` : ""} · {projectHealth.blocked} blocked
-            </span>
-          ) : null}
-          <button className="icon-button" type="button" onClick={() => void refresh()}>
-            Refresh
+          <div className="topbar-search-control">
+            <input
+              className="search-input"
+              aria-label="Search workspace"
+              placeholder="task:TASK-123 actor:dev-1"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void runSearch();
+              }}
+            />
+            <button
+              className="topbar-search-button"
+              type="button"
+              aria-label="Search"
+              title="Search workspace"
+              onClick={() => void runSearch()}
+            >
+              <Search size={15} strokeWidth={1.9} aria-hidden="true" />
+            </button>
+          </div>
+          <div className="topbar-runtime-cluster">
+            <div className="topbar-runtime-summary" aria-label="Dashboard data status">
+              <span className={`status-pill ${topbarStatus.className}`} title={topbarStatus.title}>{topbarStatus.label}</span>
+              {projectHealth ? (
+                <span className="topbar-activity mono" title={`snap #${projectHealth.seq} · projection ${projectHealth.projection?.state ?? "-"}`}>
+                  {projectHealth.active} active{projectHealth.queued > 0 ? ` · ${projectHealth.queued} queued` : ""} · {projectHealth.blocked} blocked
+                </span>
+              ) : null}
+            </div>
+            <button
+              className="topbar-tool-button topbar-refresh-button"
+              type="button"
+              aria-label="Refresh"
+              title="Refresh dashboard"
+              onClick={() => void refresh()}
+            >
+              <RefreshCw size={16} strokeWidth={1.9} aria-hidden="true" />
+            </button>
+          </div>
+          <span className="topbar-tool-separator" aria-hidden="true" />
+          <button
+            className="topbar-tool-button topbar-terminal-button topbar-terminal-launch"
+            disabled={!activeProjectId}
+            type="button"
+            aria-label="Toggle Terminal"
+            aria-pressed={terminalOpen}
+            title={terminalOpen ? "Close terminal" : "Open terminal"}
+            onClick={() => setTerminalOpen((value) => !value)}
+          >
+            <Terminal size={16} strokeWidth={1.9} aria-hidden="true" />
           </button>
         </div>
       </header>
 
       {error ? <div className="error-strip">{error}</div> : null}
 
-      <main className="workspace">
+      <main className={`workspace ${terminalOpen && activeProjectId ? "has-web-terminal" : ""}`.trim()}>
         <WorkspaceRail
           actionResult={actionResult}
           activePage={page}
@@ -2278,6 +2310,8 @@ export function App() {
               showTokenRow={actionGate.showTokenRow}
               onOpenTask={openTask}
               onSaveToken={saveWebActionToken}
+              onUnlockSession={unlockSession}
+              passcodeRequired={actionGate.passcodeRequired}
               setStatusFilter={setStatusFilter}
               setTextFilter={setTextFilter}
               setViewMode={setViewMode}
@@ -2368,6 +2402,16 @@ export function App() {
             </section>
           )}
         </section>
+        {terminalOpen && activeProjectId ? (
+          <Suspense fallback={<div className="web-terminal-loading">Loading terminal UI…</div>}>
+            <TerminalDrawer
+              key={activeProjectId}
+              projectId={activeProjectId}
+              themeMode={themeMode}
+              onClose={() => setTerminalOpen(false)}
+            />
+          </Suspense>
+        ) : null}
       </main>
       {agentPanelMode === "collapsed" ? (
         <button

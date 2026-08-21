@@ -2,6 +2,7 @@
    Cascade order = @import order = original byte order. Do not reorder. */
 
 @import "./styles/00-tokens-base.css";
+@import "./styles/00-topbar.css";
 @import "./styles/01-task.css";
 @import "./styles/02-channel.css";
 @import "./styles/03-channel.css";

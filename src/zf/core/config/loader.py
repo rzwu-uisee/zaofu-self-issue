@@ -9,6 +9,7 @@ import re
 import string
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -159,6 +160,7 @@ from zf.core.config.schema import (  # noqa: E402
     RuntimeRunManagerSourceRepairConfig,
     RuntimeFeishuInboundConfig,
     RuntimeFeishuProjectionConfig,
+    RuntimeWebTerminalConfig,
     ProvidersConfig,
     OpenClawProviderConfig,
     OpenClawRemoteBindingConfig,
@@ -3524,6 +3526,7 @@ def _build_runtime(
     execution_routing_raw = data.get("execution_routing") or {}
     feishu_inbound_raw = data.get("feishu_inbound") or {}
     feishu_projection_raw = data.get("feishu_projection") or {}
+    web_terminal_raw = data.get("web_terminal") or {}
     if not isinstance(workdirs_raw, dict):
         raise ConfigError("runtime.workdirs must be a mapping")
     if not isinstance(git_raw, dict):
@@ -3552,6 +3555,154 @@ def _build_runtime(
         raise ConfigError("runtime.feishu_inbound must be a mapping")
     if not isinstance(feishu_projection_raw, dict):
         raise ConfigError("runtime.feishu_projection must be a mapping")
+    if not isinstance(web_terminal_raw, dict):
+        raise ConfigError("runtime.web_terminal must be a mapping")
+    _reject_unknown_keys(
+        web_terminal_raw,
+        {
+            "enabled",
+            "backend",
+            "herdr_binary",
+            "minimum_herdr_version",
+            "allowed_origins",
+            "max_sessions",
+            "max_attachments_per_session",
+            "max_cols",
+            "max_rows",
+            "max_input_bytes",
+            "max_frame_bytes",
+            "bridge_queue_frames",
+            "bridge_queue_bytes",
+            "ticket_ttl_seconds",
+            "provider_start_timeout_seconds",
+            "allow_takeover",
+        },
+        "runtime.web_terminal",
+    )
+    web_terminal_backend = str(
+        web_terminal_raw.get("backend", "herdr") or "herdr"
+    ).strip()
+    if web_terminal_backend != "herdr":
+        raise ConfigError("runtime.web_terminal.backend must be 'herdr'")
+    herdr_binary = str(
+        web_terminal_raw.get("herdr_binary", "herdr") or "herdr"
+    ).strip()
+    if (
+        not herdr_binary
+        or "\x00" in herdr_binary
+        or any(char.isspace() for char in herdr_binary)
+        or ("/" in herdr_binary and not Path(herdr_binary).is_absolute())
+    ):
+        raise ConfigError(
+            "runtime.web_terminal.herdr_binary must be a bare command or absolute path"
+        )
+    minimum_herdr_version = str(
+        web_terminal_raw.get("minimum_herdr_version", "0.8.0") or "0.8.0"
+    ).strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", minimum_herdr_version):
+        raise ConfigError(
+            "runtime.web_terminal.minimum_herdr_version must be semver X.Y.Z"
+        )
+    allowed_terminal_origins = _string_list(
+        web_terminal_raw.get("allowed_origins"),
+        default=[],
+    )
+    invalid_terminal_origins: list[str] = []
+    for origin in allowed_terminal_origins:
+        try:
+            parsed_origin = urlsplit(origin)
+            _ = parsed_origin.port
+            valid_origin = (
+                parsed_origin.scheme in {"http", "https"}
+                and bool(parsed_origin.hostname)
+                and parsed_origin.username is None
+                and parsed_origin.password is None
+                and not parsed_origin.path
+                and not parsed_origin.query
+                and not parsed_origin.fragment
+                and origin == f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+            )
+        except ValueError:
+            valid_origin = False
+        if not valid_origin:
+            invalid_terminal_origins.append(origin)
+    if invalid_terminal_origins:
+        raise ConfigError(
+            "runtime.web_terminal.allowed_origins entries must be HTTP(S) origins"
+        )
+    terminal_numeric_defaults = {
+        "max_sessions": 8,
+        "max_attachments_per_session": 8,
+        "max_cols": 400,
+        "max_rows": 200,
+        "max_input_bytes": 64 * 1024,
+        "max_frame_bytes": 4 * 1024 * 1024,
+        "bridge_queue_frames": 64,
+        "bridge_queue_bytes": 8 * 1024 * 1024,
+        "ticket_ttl_seconds": 30,
+        "provider_start_timeout_seconds": 60,
+    }
+    terminal_numeric_raw = {
+        key: web_terminal_raw.get(key, default)
+        for key, default in terminal_numeric_defaults.items()
+    }
+    if any(
+        isinstance(value, (bool, float)) for value in terminal_numeric_raw.values()
+    ):
+        raise ConfigError("runtime.web_terminal limits must be integers")
+    try:
+        terminal_numeric = {
+            key: int(value) for key, value in terminal_numeric_raw.items()
+        }
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("runtime.web_terminal limits must be integers") from exc
+    if not 1 <= terminal_numeric["max_sessions"] <= 64:
+        raise ConfigError("runtime.web_terminal.max_sessions must be between 1 and 64")
+    if not 1 <= terminal_numeric["max_attachments_per_session"] <= 64:
+        raise ConfigError(
+            "runtime.web_terminal.max_attachments_per_session must be between 1 and 64"
+        )
+    if not 20 <= terminal_numeric["max_cols"] <= 1000:
+        raise ConfigError("runtime.web_terminal.max_cols must be between 20 and 1000")
+    if not 5 <= terminal_numeric["max_rows"] <= 500:
+        raise ConfigError("runtime.web_terminal.max_rows must be between 5 and 500")
+    if not 1024 <= terminal_numeric["max_input_bytes"] <= 1024 * 1024:
+        raise ConfigError(
+            "runtime.web_terminal.max_input_bytes must be between 1024 and 1048576"
+        )
+    if not 64 * 1024 <= terminal_numeric["max_frame_bytes"] <= 32 * 1024 * 1024:
+        raise ConfigError(
+            "runtime.web_terminal.max_frame_bytes must be between 65536 and 33554432"
+        )
+    if not 4 <= terminal_numeric["bridge_queue_frames"] <= 1024:
+        raise ConfigError(
+            "runtime.web_terminal.bridge_queue_frames must be between 4 and 1024"
+        )
+    if terminal_numeric["bridge_queue_bytes"] < terminal_numeric["max_frame_bytes"]:
+        raise ConfigError(
+            "runtime.web_terminal.bridge_queue_bytes must be >= max_frame_bytes"
+        )
+    if terminal_numeric["bridge_queue_bytes"] > 256 * 1024 * 1024:
+        raise ConfigError(
+            "runtime.web_terminal.bridge_queue_bytes must be <= 268435456"
+        )
+    aggregate_terminal_queue_budget = (
+        terminal_numeric["max_sessions"]
+        * terminal_numeric["max_attachments_per_session"]
+        * terminal_numeric["bridge_queue_bytes"]
+    )
+    if aggregate_terminal_queue_budget > 512 * 1024 * 1024:
+        raise ConfigError(
+            "runtime.web_terminal aggregate bridge queue budget must be <= 536870912"
+        )
+    if not 5 <= terminal_numeric["ticket_ttl_seconds"] <= 300:
+        raise ConfigError(
+            "runtime.web_terminal.ticket_ttl_seconds must be between 5 and 300"
+        )
+    if not 4 <= terminal_numeric["provider_start_timeout_seconds"] <= 300:
+        raise ConfigError(
+            "runtime.web_terminal.provider_start_timeout_seconds must be between 4 and 300"
+        )
     execution_routes = _build_execution_routes(
         execution_routing_raw,
         roles=roles or [],
@@ -4103,6 +4254,30 @@ def _build_runtime(
             reconcile_interval_seconds=feishu_projection_reconcile_interval,
             include_archive_days=feishu_projection_archive_days,
             max_actions_per_tick=feishu_projection_max_actions,
+        ),
+        web_terminal=RuntimeWebTerminalConfig(
+            enabled=_bool_value(web_terminal_raw.get("enabled"), default=False),
+            backend=web_terminal_backend,
+            herdr_binary=herdr_binary,
+            minimum_herdr_version=minimum_herdr_version,
+            allowed_origins=allowed_terminal_origins,
+            max_sessions=terminal_numeric["max_sessions"],
+            max_attachments_per_session=terminal_numeric[
+                "max_attachments_per_session"
+            ],
+            max_cols=terminal_numeric["max_cols"],
+            max_rows=terminal_numeric["max_rows"],
+            max_input_bytes=terminal_numeric["max_input_bytes"],
+            max_frame_bytes=terminal_numeric["max_frame_bytes"],
+            bridge_queue_frames=terminal_numeric["bridge_queue_frames"],
+            bridge_queue_bytes=terminal_numeric["bridge_queue_bytes"],
+            ticket_ttl_seconds=terminal_numeric["ticket_ttl_seconds"],
+            provider_start_timeout_seconds=terminal_numeric[
+                "provider_start_timeout_seconds"
+            ],
+            allow_takeover=_bool_value(
+                web_terminal_raw.get("allow_takeover"), default=True
+            ),
         ),
     )
 

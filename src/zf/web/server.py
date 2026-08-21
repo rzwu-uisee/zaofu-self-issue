@@ -173,7 +173,7 @@ from zf.web.proposal_extraction import (
     default_validate_payload,
     extract_action_proposal,
 )
-from zf.web import plan_runtime
+from zf.web import plan_runtime, terminal_routes
 from zf.web.agent_session_runtime import (
     begin_agent_session_run,
     run_key,
@@ -3678,6 +3678,8 @@ def create_app(
     app.include_router(
         build_runtime_resource_router(resolve_ctx=_delivery_trace_ctx),
     )
+
+    app.include_router(terminal_routes.build_terminal_router(resolve_ctx=_delivery_trace_ctx, authorize_mutation=_web_mutation_auth_error, host_config=terminal_routes.terminal_host_config(config)))
 
     # Overview pulse bands (overview-pulse.v1) — same sibling-router pattern.
     from zf.web.overview_pulse import build_overview_pulse_router
