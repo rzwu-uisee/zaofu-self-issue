@@ -5,7 +5,11 @@ Release 页面为准；内部研发标签与运行记录不构成公开兼容承
 
 ## Unreleased
 
-- 暂无。
+- v0.0.7 发布草案：[中文](docs/releases/v0.0.7.md) |
+  [English](docs/releases/v0.0.7.en.md)。本草案聚焦默认开启但可显式关闭的 Web PTY Terminal、
+  Project 派生 Provider、多 Session/多客户端 Observe-Control-Take over、断线重连，以及与
+  Workflow budget 隔离的逐 Tab usage/cost。当前真实资格证据仅覆盖一台 Linux x86_64 host
+  上的 Herdr 0.8.2 与 Codex；Claude usage 仍受登录态阻断，OpenCode/Pi 尚未签收。
 
 ## v0.0.6 - 2026-08-20
 
