@@ -1225,8 +1225,8 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
     assert cfg.runtime.autoresearch_resident.enabled is True
     assert cfg.runtime.workdirs.enabled is True
     assert cfg.runtime.workdirs.mode == "worktree"
-    assert cfg.runtime.git.candidate_base_ref == "dev"
-    assert cfg.runtime.git.ship_target_branch == "dev"
+    assert cfg.runtime.git.candidate_base_ref == "main"
+    assert cfg.runtime.git.ship_target_branch == "main"
     assert {role.name for role in cfg.roles} == {
         "product-scan",
         "tech-scan",

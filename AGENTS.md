@@ -206,8 +206,11 @@ code and tests.
 - Sprint plans use `docs:`.
 - When the user explicitly approves executing a backlog/task batch, run focused
   verification and commit the implementation + task status before final.
-- Do not auto-commit analysis-only or unapproved backlog candidates; `push`
-  still requires explicit user request.
+- **绝对禁止远端推送**：任何代理在任何情况下都不得从本仓库执行
+  `git push` 或等价的远端引用更新，即使用户之后明确要求也不例外；
+  禁止范围包括分支/标签推送、强制推送、远端分支或标签删除，以及通过
+  托管平台 API 更新远端引用。所有提交只能保留在本地；需要发布时，
+  必须停止并交由人工操作。
 - Before marking a new orchestration component done, prove it is wired into an
   actual runtime/CLI/Web entrypoint or registered service and cover that caller
   with a test; library-without-callers is not done.

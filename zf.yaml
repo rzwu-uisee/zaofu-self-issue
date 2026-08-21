@@ -60,8 +60,8 @@ spec:
     run_manager:
       backend: claude-code
     git:
-      candidate_base_ref: dev
-      ship_target_branch: dev
+      candidate_base_ref: main
+      ship_target_branch: main
   workflow:
     harness_profile: strict
     plan_approval: false
