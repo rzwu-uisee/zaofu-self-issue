@@ -3,7 +3,8 @@
 > 适用对象：第一次安装 ZaoFu，并希望从 Web 完成 Bootstrap、创建或打开
 > Project，再通过 Kanban Agent 使用 Channel、Research 和交付 Workflow 的操作者。
 >
-> 当前路线按 CLI、Web、事件账本和真实浏览器 E2E 核实于 2026-08-03。
+> 核心 CLI、Web、事件账本和 Workflow 路线最后整体核实于 2026-08-03；Web Terminal 的安装、
+> 鉴权、多 Tab 与跨客户端恢复切片核实于 2026-08-21。
 > 本页动态图和关键截图由 Playwright 的真实交互状态组成；闭环结论同时检查对应 API、
 > Store 和 EventLog，不以截图代替运行态证据。
 > Channel 当前以 `conversation` 为默认产品模式；只有显式选择 `multi_lens` 并执行

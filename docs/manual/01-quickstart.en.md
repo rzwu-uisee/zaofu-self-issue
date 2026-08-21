@@ -4,11 +4,12 @@
 > creating or opening a Project, and then using the Kanban Agent with Channels,
 > Research, and delivery Workflows.
 >
-> This route was verified against the CLI, Web UI, event ledger, and real
-> browser E2E on 2026-08-03. Each animation and key screenshot is assembled
-> from real Playwright interaction states; the acceptance checks also inspect
-> the API, Stores, and EventLog instead of treating screenshots as runtime
-> proof.
+> The core CLI, Web UI, event-ledger, and Workflow route was last verified as a
+> whole on 2026-08-03. The Web Terminal installation, authentication, multi-tab,
+> and cross-client recovery slice was verified on 2026-08-21. Each animation
+> and key screenshot is assembled from real Playwright interaction states; the
+> acceptance checks also inspect the API, Stores, and EventLog instead of
+> treating screenshots as runtime proof.
 > Channel currently defaults to the `conversation` product mode. Bounded
 > fanout/synthesis starts only after explicit `multi_lens` selection and Discuss.
 
