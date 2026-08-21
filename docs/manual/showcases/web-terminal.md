@@ -68,6 +68,5 @@ cookie、sessionStorage、WebSocket 与网络状态，因此覆盖的是 Web Ter
 | 01:34–01:57 | 新客户端恢复 | C 恢复同一历史；多 Tab、主题与用量 |
 
 需要自行复录时，使用 `web/scripts/record-web-terminal-demo.mjs`、
-`render-web-terminal-showcase.mjs` 和 `validate-web-terminal-showcase.mjs`，并遵循
-[Web PTY 运维手册](../../runbooks/web-pty-coding-agent-terminal.md#8-分享演示资产)的隔离、
-清理与证据规则。
+`render-web-terminal-showcase.mjs` 和 `validate-web-terminal-showcase.mjs`，并遵循公开
+[Web Terminal 手册](../24-web-terminal.md#分享演示)中的隔离、清理与证据说明。

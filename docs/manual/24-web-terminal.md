@@ -2,8 +2,7 @@
 
 [English](24-web-terminal.en.md)
 
-> 本页面向使用者与安装者。生产资格矩阵、协议和故障细节见
-> [Web PTY 运维手册](../runbooks/web-pty-coding-agent-terminal.md)。
+> 本页面面向使用者与安装者，覆盖安装、协议边界和常见恢复路径；生产资格仍由具体部署环境验证。
 
 Web Terminal 把真实 Claude Code、Codex（以及完成宿主资格后可扩展的 OpenCode/Pi）运行在
 服务端 Herdr PTY 中，并用 xterm.js 显示在 Dashboard。它不是 headless Kanban Agent，关闭
@@ -133,4 +132,4 @@ cost 与精度。Rename 不重置用量；这些数字来自每个 CLI 的结构
 
 浏览器不能指定任意 executable、cwd、argv 或环境变量。终端字符流不进入 EventLog、Task、
 Workflow 或 Artifact，也不能靠 screen scraping 推进 Kernel 状态。遇到 unavailable、controller
-冲突或恢复问题，使用[运维故障表](../runbooks/web-pty-coding-agent-terminal.md#6-故障诊断)。
+冲突或恢复问题，先核对[宿主配置](#2-默认启用与宿主配置)和[会话恢复](#3-创建tab-与恢复)。

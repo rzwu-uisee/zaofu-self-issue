@@ -70,5 +70,5 @@ Playwright assertions.
 To reproduce it, use `web/scripts/record-web-terminal-demo.mjs`,
 `render-web-terminal-showcase.mjs`, and
 `validate-web-terminal-showcase.mjs`, following the isolation, cleanup, and
-evidence rules in the
-[Web PTY runbook](../../runbooks/web-pty-coding-agent-terminal.md#8-分享演示资产).
+evidence guidance in the public
+[Web Terminal manual](../24-web-terminal.en.md#shareable-demo).

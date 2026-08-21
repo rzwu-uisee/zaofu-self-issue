@@ -2,9 +2,8 @@
 
 [中文](24-web-terminal.md)
 
-> This page is for users and installers. See the
-> [Web PTY runbook](../runbooks/web-pty-coding-agent-terminal.md) for the
-> production qualification matrix, protocol, and failure details.
+> This public page covers installation, protocol boundaries, and common
+> recovery paths. Production qualification remains deployment-specific.
 
 Web Terminal runs a real Claude Code or Codex CLI (and, after host
 qualification, OpenCode or Pi) inside a server-side Herdr PTY and renders it
@@ -157,6 +156,7 @@ usage`, `unsupported`, or `—` means insufficient evidence, not zero usage.
 
 The browser cannot choose an arbitrary executable, cwd, argv, or environment.
 Terminal bytes do not enter EventLog, Tasks, Workflows, or Artifacts and cannot
-advance Kernel state through screen scraping. Use the
-[runbook troubleshooting table](../runbooks/web-pty-coding-agent-terminal.md)
-for unavailable runtimes, controller conflicts, and recovery failures.
+advance Kernel state through screen scraping. For unavailable runtimes,
+controller conflicts, and recovery failures, verify
+[host configuration](#2-default-enablement-and-host-configuration) and
+[session recovery](#3-sessions-tabs-and-recovery).
