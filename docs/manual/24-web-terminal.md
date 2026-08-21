@@ -63,13 +63,18 @@ herdr integration status
 
 hook 增强 native session identity 与恢复信息；它不会替代 Codex/Claude 自己的登录。
 
-## 2. 启用宿主能力
+## 2. 默认启用与宿主配置
 
-在启动 Dashboard 的 ZaoFu `zf.yaml` 中配置：
+Web Terminal 在 Dashboard host 上默认启用。默认开启只表示路由和能力探测可用，不会自动
+安装 Herdr、启动 Provider CLI 或绕过 mutation auth；Herdr 不可用时返回 typed unavailable，
+Board/Kanban Agent 等其他产品面不受影响。无需修改 v4 或其他目标 Project YAML。
+
+只有需要覆盖宿主路径、安全或资源策略时，才在启动 Dashboard 的 ZaoFu `zf.yaml` 中配置：
 
 ```yaml
 runtime:
   web_terminal:
+    # 默认 true；可显式设为 false 关闭整个 Dashboard host 的 Web Terminal。
     enabled: true
     backend: herdr
     herdr_binary: herdr

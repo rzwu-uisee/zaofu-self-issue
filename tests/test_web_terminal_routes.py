@@ -359,7 +359,26 @@ def test_terminal_routes_reject_query_capabilities(tmp_path: Path) -> None:
             pass
 
 
-def test_create_app_registers_disabled_terminal_route_without_touching_registry(
+def test_create_app_registers_default_enabled_terminal_route_without_touching_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (state_dir / "feature_list.json").write_text("[]\n", encoding="utf-8")
+    client = TestClient(create_app(state_dir, project_root=tmp_path))
+
+    response = client.get("/api/projects/default/terminal-sessions")
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert response.json()["capability"]["available"] is False
+    assert not (state_dir / REGISTRY_FILENAME).exists()
+
+
+def test_create_app_honors_explicitly_disabled_terminal_host_policy(
     tmp_path: Path,
 ) -> None:
     state_dir = tmp_path / "state"
@@ -367,7 +386,12 @@ def test_create_app_registers_disabled_terminal_route_without_touching_registry(
     (state_dir / "events.jsonl").write_text("", encoding="utf-8")
     (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
     (state_dir / "feature_list.json").write_text("[]\n", encoding="utf-8")
-    client = TestClient(create_app(state_dir, project_root=tmp_path))
+    config = ZfConfig(
+        runtime=RuntimeConfig(
+            web_terminal=RuntimeWebTerminalConfig(enabled=False),
+        ),
+    )
+    client = TestClient(create_app(state_dir, config=config, project_root=tmp_path))
 
     response = client.get("/api/projects/default/terminal-sessions")
 

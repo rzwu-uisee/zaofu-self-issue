@@ -64,10 +64,11 @@ export ZAOFU_ROOT=/path/to/zaofu
 完成标志：Dashboard 打开并进入安装 Onboarding。安装步骤只需要按本教程执行，
 本页不要求先创建示例 Project。
 
-### 可选：启用 Web Terminal
+### Web Terminal（默认启用，可选安装）
 
-若要在 Dashboard 内直接运行真实 Claude Code/Codex TUI，还需安装 Herdr `>=0.8.0`；它是
-宿主二进制，不属于 `uv sync` 的 Python 依赖：
+Dashboard host 默认启用 Web Terminal；这只开放受鉴权的 Terminal 能力，不会自动安装或
+启动 CLI。若要在 Dashboard 内实际运行 Claude Code/Codex TUI，还需安装 Herdr `>=0.8.0`；
+它是宿主二进制，不属于 `uv sync` 的 Python 依赖：
 
 ```bash
 curl -fsSL https://herdr.dev/install.sh | sh
@@ -77,13 +78,13 @@ herdr terminal session observe --help
 herdr terminal session control --help
 ```
 
-在启动 Dashboard 的 ZaoFu 配置启用 host capability：
+不需要给 v4 或其他目标 Project 的 `zf.yaml` 增加 `runtime.web_terminal`。若这个 Dashboard
+host 不允许 Web Terminal，可在启动它的 ZaoFu 配置中显式关闭：
 
 ```yaml
 runtime:
   web_terminal:
-    enabled: true
-    minimum_herdr_version: 0.8.0
+    enabled: false
 ```
 
 不要配置 terminal-only Provider 名单。New Session 会读取所选 Project 初始化后生效的

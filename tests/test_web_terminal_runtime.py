@@ -231,14 +231,26 @@ def _service(tmp_path: Path, backend: FakeBackend | None = None) -> TerminalServ
     )
 
 
-def test_web_terminal_config_defaults_are_off(tmp_path: Path) -> None:
+def test_web_terminal_config_defaults_are_on(tmp_path: Path) -> None:
     path = tmp_path / "zf.yaml"
     path.write_text('version: "1.0"\nproject:\n  name: demo\n', encoding="utf-8")
 
     config = load_config(path).runtime.web_terminal
 
-    assert config.enabled is False
+    assert config.enabled is True
     assert config.backend == "herdr"
+
+
+def test_web_terminal_config_accepts_explicit_opt_out(tmp_path: Path) -> None:
+    path = tmp_path / "zf.yaml"
+    path.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: demo\n"
+        "runtime:\n  web_terminal:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    assert load_config(path).runtime.web_terminal.enabled is False
 
 
 def test_web_terminal_config_loads_typed_limits(tmp_path: Path) -> None:

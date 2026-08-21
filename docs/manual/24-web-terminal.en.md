@@ -72,13 +72,22 @@ herdr integration status
 Hooks improve native session identity and recovery metadata. They do not
 replace provider authentication.
 
-## 2. Enable the host capability
+## 2. Default enablement and host configuration
 
-Configure the ZaoFu `zf.yaml` that starts the Dashboard:
+Web Terminal is enabled on the Dashboard host by default. Default enablement
+only makes the route and capability probe available; it does not install
+Herdr, start a provider CLI, or bypass mutation authentication. When Herdr is
+unavailable, the API returns a typed unavailable result and other surfaces such
+as Board and Kanban Agent remain unaffected. No v4 or other target Project YAML
+change is required.
+
+Only configure the ZaoFu `zf.yaml` that starts the Dashboard when overriding
+host paths, security, or resource policy:
 
 ```yaml
 runtime:
   web_terminal:
+    # Defaults to true; set false to disable Web Terminal for this host.
     enabled: true
     backend: herdr
     herdr_binary: herdr

@@ -1528,9 +1528,9 @@ class RuntimeFeishuProjectionConfig:
 
 @dataclass
 class RuntimeWebTerminalConfig:
-    """Opt-in Web PTY surface backed by an operator-installed Herdr binary."""
+    """Default-on Web PTY surface backed by an operator-installed Herdr binary."""
 
-    enabled: bool = False
+    enabled: bool = True
     backend: str = "herdr"
     herdr_binary: str = "herdr"
     minimum_herdr_version: str = "0.8.0"

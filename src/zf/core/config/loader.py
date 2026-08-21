@@ -4256,7 +4256,7 @@ def _build_runtime(
             max_actions_per_tick=feishu_projection_max_actions,
         ),
         web_terminal=RuntimeWebTerminalConfig(
-            enabled=_bool_value(web_terminal_raw.get("enabled"), default=False),
+            enabled=_bool_value(web_terminal_raw.get("enabled"), default=True),
             backend=web_terminal_backend,
             herdr_binary=herdr_binary,
             minimum_herdr_version=minimum_herdr_version,

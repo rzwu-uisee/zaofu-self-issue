@@ -71,9 +71,11 @@ Codex headless sandbox policy. Open `http://127.0.0.1:8001/`. Bind to
 Completion signal: the Dashboard opens at installation onboarding. This guide
 does not require creating a throwaway Project during installation.
 
-### Optional: enable Web Terminal
+### Web Terminal (enabled by default, optional dependency)
 
-Running a real Claude Code or Codex TUI inside the Dashboard also requires
+The Dashboard host enables Web Terminal by default. This only exposes the
+authenticated Terminal capability; it does not install or start a CLI.
+Actually running a Claude Code or Codex TUI inside the Dashboard also requires
 Herdr `>=0.8.0`. Herdr is a host binary, not a Python dependency installed by
 `uv sync`:
 
@@ -85,13 +87,14 @@ herdr terminal session observe --help
 herdr terminal session control --help
 ```
 
-Enable the capability in the ZaoFu config that starts the Dashboard:
+Do not add `runtime.web_terminal` to v4 or other target Project `zf.yaml`
+files. To disallow Web Terminal on a Dashboard host, explicitly disable it in
+the ZaoFu config that starts that host:
 
 ```yaml
 runtime:
   web_terminal:
-    enabled: true
-    minimum_herdr_version: 0.8.0
+    enabled: false
 ```
 
 Do not configure a terminal-only provider list. New Session reads the selected
