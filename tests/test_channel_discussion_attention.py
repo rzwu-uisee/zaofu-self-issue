@@ -112,6 +112,7 @@ def test_active_conversation_becomes_quiet_after_reply_cycle_settles() -> None:
     assert settled["next_action"] == "none"
     assert settled["active_reply_count"] == 0
     assert settled["completed_reply_count"] == 1
+    assert settled["can_synthesize"] is True
 
     resumed = project_discussion_attention(
         channel,
@@ -130,3 +131,4 @@ def test_active_conversation_becomes_quiet_after_reply_cycle_settles() -> None:
     assert resumed["state"] == "running"
     assert resumed["reason"] == "replies_active"
     assert resumed["active_agent_count"] == 1
+    assert resumed["can_synthesize"] is False
