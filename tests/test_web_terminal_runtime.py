@@ -837,10 +837,24 @@ async def test_real_subprocess_bridge_against_repo_fake_herdr(
     full = await bridge.read_record()
     await bridge.send_command({"type": "terminal.input", "text": "hello"})
     delta = await bridge.read_record()
+    await bridge.send_command(
+        {
+            "type": "terminal.scroll",
+            "direction": "up",
+            "lines": 3,
+            "source": "wheel",
+            "column": 12,
+            "row": 4,
+            "modifiers": 0,
+        }
+    )
+    scroll_delta = await bridge.read_record()
     await bridge.close()
 
     assert full is not None and full["full"] is True
     assert delta is not None and delta["seq"] > full["seq"]
+    assert scroll_delta is not None and scroll_delta["seq"] > delta["seq"]
+    assert b"Fake Herdr scroll wheel up 3" in scroll_delta["_decoded_bytes"]
     assert service.stop_session(record.session_id).state == "stopped"
 
 
@@ -920,6 +934,69 @@ async def test_bridge_requires_full_frame_and_validates_control_input() -> None:
         bridge._validate_command(
             {"type": "terminal.input", "text": "a", "bytes": "YQ=="}
         )
+
+
+def test_bridge_preserves_bounded_herdr_scroll_semantics() -> None:
+    bridge = HerdrNDJSONBridge(
+        TerminalBridgeSpec(("/bin/true",), "control", 120, 40),
+        _config(max_cols=240, max_rows=80),
+    )
+
+    assert bridge._validate_command(
+        {
+            "type": "terminal.scroll",
+            "direction": "up",
+            "lines": 3,
+            "source": "wheel",
+            "column": 17,
+            "row": 9,
+            "modifiers": 15,
+        }
+    ) == {
+        "type": "terminal.scroll",
+        "direction": "up",
+        "lines": 3,
+        "source": "wheel",
+        "column": 17,
+        "row": 9,
+        "modifiers": 15,
+    }
+    assert bridge._validate_command(
+        {
+            "type": "terminal.scroll",
+            "direction": "down",
+            "lines": 39,
+            "source": "page_key",
+        }
+    ) == {
+        "type": "terminal.scroll",
+        "direction": "down",
+        "lines": 39,
+        "source": "page_key",
+        "modifiers": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"type": "terminal.scroll", "direction": "left", "lines": 1},
+        {"type": "terminal.scroll", "direction": "up", "lines": 0},
+        {"type": "terminal.scroll", "direction": "up", "lines": 1, "source": "touch"},
+        {"type": "terminal.scroll", "direction": "up", "lines": 1, "column": True},
+        {"type": "terminal.scroll", "direction": "up", "lines": 1, "column": 240},
+        {"type": "terminal.scroll", "direction": "up", "lines": 1, "row": 80},
+        {"type": "terminal.scroll", "direction": "up", "lines": 1, "modifiers": 256},
+    ],
+)
+def test_bridge_rejects_invalid_herdr_scroll_semantics(command: dict[str, object]) -> None:
+    bridge = HerdrNDJSONBridge(
+        TerminalBridgeSpec(("/bin/true",), "control", 120, 40),
+        _config(max_cols=240, max_rows=80),
+    )
+
+    with pytest.raises(BridgeProtocolError, match="terminal.scroll"):
+        bridge._validate_command(command)
 
 
 @pytest.mark.asyncio

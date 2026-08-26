@@ -146,7 +146,32 @@ Use Observe to watch, Control to work, and Take over only when deliberately
 replacing another controller. Takeover is constrained by `allow_takeover`,
 mutation authorization, and a takeover receipt.
 
-## 5. Usage, cost, and safety boundaries
+## 5. Input and scrollback
+
+In Control mode, xterm.js continues to send ordinary ASCII, Chinese/Unicode,
+paste, and control sequences as terminal input. The wheel and unmodified
+`PageUp` / `PageDown` become Herdr `terminal.scroll` commands, so Herdr's
+Ghostty scrollback and the active TUI mode decide whether to traverse retained
+history or apply terminal semantics. The browser does not maintain a second
+provider-screen state, and Page keys are not also duplicated as raw input.
+
+While a Chinese, Japanese, or other IME composition is active, Space, numeric
+candidate keys, and candidate paging remain owned by the browser IME. xterm
+does not encode them as CLI keys or turn them into `terminal.scroll`. If xterm
+6 emits no `onData` after an IME replaces its hidden textarea, Web Terminal
+sends the committed `compositionend` text exactly once as a fallback. Healthy
+xterm commits stay on the normal path and are not duplicated. Browser
+automation covers the composition event lifecycle, but each supported host OS
+and IME still needs manual qualification.
+
+The Herdr viewport is terminal state shared by the controller, so subsequent
+frames expose controller scrolling to other attachments. Observe never sends
+scroll, resize, or input and can only inspect content retained locally by
+xterm. Acquire Control before changing the shared viewport. Browser-reserved
+shortcuts such as `Ctrl+W`, `Ctrl+T`, and `Ctrl+L` are not guaranteed to reach
+the CLI.
+
+## 6. Usage, cost, and safety boundaries
 
 The Agents page lists each tab under `Interactive Terminals`, including
 provider, model, context, tokens, cost, and precision. Rename does not reset

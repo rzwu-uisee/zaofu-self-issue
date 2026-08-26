@@ -1,5 +1,17 @@
 import { expect, test } from "@playwright/test";
 
+interface TerminalClientCommand {
+  type: string;
+  bytes?: string;
+  column?: number;
+  direction?: string;
+  lines?: number;
+  modifiers?: number;
+  row?: number;
+  source?: string;
+  text?: string;
+}
+
 async function dismissWelcomeIfNeeded(page: import("@playwright/test").Page) {
   const wizard = page.getByTestId("welcome-wizard");
   const visible = await wizard.waitFor({ state: "visible", timeout: 3_000 })
@@ -26,13 +38,104 @@ async function selectTerminalAction(
   await drawer.getByRole("menu").getByText(name, { exact: true }).click();
 }
 
+async function commitSyntheticImeCandidate(
+  input: import("@playwright/test").Locator,
+  options: {
+    candidateCode: string;
+    candidateKey: string;
+    candidateKeyCode: number;
+    committed: string;
+    leadingValue: string;
+    preedit: string;
+    probePageUp?: boolean;
+  },
+) {
+  return input.evaluate(async (element, values) => {
+    const textarea = element as HTMLTextAreaElement;
+    const dispatchKey = (key: string, code: string, keyCode: number) => {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code,
+        isComposing: true,
+        key,
+      });
+      Object.defineProperty(event, "keyCode", { configurable: true, value: keyCode });
+      textarea.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    textarea.value = values.leadingValue;
+    textarea.setSelectionRange(values.leadingValue.length, values.leadingValue.length);
+    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    textarea.value = `${values.leadingValue}${values.preedit.slice(0, 1)}`;
+    textarea.dispatchEvent(new CompositionEvent("compositionupdate", {
+      bubbles: true,
+      data: values.preedit.slice(0, 1),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Windows TSF IMEs can replace the whole helper-textarea value here. In
+    // xterm 6 this leaves the saved composition start beyond the new value,
+    // which reproduces the otherwise host-IME-only dropped-commit defect.
+    textarea.value = values.preedit;
+    textarea.setSelectionRange(values.preedit.length, values.preedit.length);
+    textarea.dispatchEvent(new CompositionEvent("compositionupdate", {
+      bubbles: true,
+      data: values.preedit,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const pageUpDefaultPrevented = values.probePageUp
+      ? dispatchKey("PageUp", "PageUp", 33)
+      : false;
+    const candidateDefaultPrevented = dispatchKey(
+      values.candidateKey,
+      values.candidateCode,
+      values.candidateKeyCode,
+    );
+    textarea.dispatchEvent(new CompositionEvent("compositionend", {
+      bubbles: true,
+      data: values.committed,
+    }));
+    textarea.value = values.committed;
+    textarea.setSelectionRange(values.committed.length, values.committed.length);
+    textarea.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      composed: true,
+      data: values.committed,
+      inputType: "insertFromComposition",
+      isComposing: false,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { candidateDefaultPrevented, pageUpDefaultPrevented };
+  }, options);
+}
+
 test("Web Terminal keeps native dock tabs mounted, maximizes, reconnects, and stops explicitly", async ({ page }) => {
+  test.setTimeout(60_000);
   page.on("pageerror", (error) => console.error(`[pageerror] ${error.stack ?? error.message}`));
   page.on("console", (message) => {
     if (message.type() === "error") console.error(`[console] ${message.text()}`);
   });
   const attachmentRequests: string[] = [];
   const renameRequests: string[] = [];
+  const terminalCommands: TerminalClientCommand[] = [];
+  page.on("websocket", (socket) => {
+    if (!/\/terminal-sessions\/[^/]+\/control$/.test(decodeURIComponent(new URL(socket.url()).pathname))) {
+      return;
+    }
+    socket.on("framesent", ({ payload }) => {
+      try {
+        const command = JSON.parse(
+          typeof payload === "string" ? payload : payload.toString("utf8"),
+        ) as TerminalClientCommand;
+        terminalCommands.push(command);
+      } catch {
+        // Browser-to-Gateway terminal commands are JSON text; ignore non-command frames.
+      }
+    });
+  });
   page.on("request", (request) => {
     if (request.method() === "POST" && /\/(attachments|takeover)$/.test(request.url())) {
       attachmentRequests.push(request.url());
@@ -130,6 +233,12 @@ test("Web Terminal keeps native dock tabs mounted, maximizes, reconnects, and st
 
   await selectTerminalAction(drawer, "Observe");
   await expect(drawer.locator(".web-terminal-view")).toHaveAttribute("data-terminal-status", "observing");
+  const observedScrollCount = terminalCommands.filter((command) => command.type === "terminal.scroll").length;
+  await drawer.locator(".web-terminal-session-panel.is-active .xterm-screen").hover();
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(100);
+  expect(terminalCommands.filter((command) => command.type === "terminal.scroll"))
+    .toHaveLength(observedScrollCount);
   await selectTerminalAction(drawer, "Control");
   await expect(drawer.locator(".web-terminal-view")).toHaveAttribute("data-terminal-status", "controlling");
   await selectTerminalAction(drawer, "Take over control");
@@ -138,8 +247,76 @@ test("Web Terminal keeps native dock tabs mounted, maximizes, reconnects, and st
   const firstInput = drawer.locator(".web-terminal-session-panel.is-active .xterm-helper-textarea");
   await firstInput.focus();
   await firstInput.pressSequentially("first-session");
+  await page.keyboard.insertText(" 中文输入");
   await expect(drawer.locator(".web-terminal-session-panel.is-active .xterm-rows"))
-    .toContainText("first-session");
+    .toContainText("first-session 中文输入");
+
+  const imeStart = terminalCommands.length;
+  const spaceCommit = await commitSyntheticImeCandidate(firstInput, {
+    candidateCode: "Space",
+    candidateKey: " ",
+    candidateKeyCode: 32,
+    committed: "你",
+    leadingValue: "   ",
+    preedit: "ni",
+    probePageUp: true,
+  });
+  const numberCommit = await commitSyntheticImeCandidate(firstInput, {
+    candidateCode: "Digit1",
+    candidateKey: "1",
+    candidateKeyCode: 49,
+    committed: "好",
+    leadingValue: "  ",
+    preedit: "hao",
+  });
+  expect(spaceCommit).toEqual({ candidateDefaultPrevented: false, pageUpDefaultPrevented: false });
+  expect(numberCommit.candidateDefaultPrevented).toBe(false);
+  await expect.poll(() => terminalCommands.slice(imeStart)
+    .filter((command) => command.type === "terminal.input" && command.text)
+    .map((command) => command.text)).toEqual(["你", "好"]);
+  expect(terminalCommands.slice(imeStart)
+    .filter((command) => command.type === "terminal.scroll")).toHaveLength(0);
+  await expect(drawer.locator(".web-terminal-session-panel.is-active .xterm-rows"))
+    .toContainText("你好");
+
+  const pageKeyStart = terminalCommands.length;
+  await firstInput.press("PageUp");
+  await expect.poll(() => terminalCommands.slice(pageKeyStart)
+    .filter((command) => command.type === "terminal.scroll").length).toBe(1);
+  const pageUpCommands = terminalCommands.slice(pageKeyStart);
+  expect(pageUpCommands.filter((command) => command.type === "terminal.input")).toHaveLength(0);
+  expect(pageUpCommands.find((command) => command.type === "terminal.scroll"))
+    .toMatchObject({ direction: "up", source: "page_key" });
+  await expect(drawer.locator(".web-terminal-session-panel.is-active .xterm-rows"))
+    .toContainText("Fake Herdr scroll page_key up");
+
+  const pageDownStart = terminalCommands.length;
+  await firstInput.press("PageDown");
+  await expect.poll(() => terminalCommands.slice(pageDownStart)
+    .filter((command) => command.type === "terminal.scroll").length).toBe(1);
+  expect(terminalCommands.slice(pageDownStart).find((command) => command.type === "terminal.scroll"))
+    .toMatchObject({ direction: "down", source: "page_key" });
+
+  const wheelStart = terminalCommands.length;
+  await drawer.locator(".web-terminal-session-panel.is-active .xterm-screen").hover();
+  await page.mouse.wheel(0, -120);
+  await expect.poll(() => terminalCommands.slice(wheelStart)
+    .filter((command) => command.type === "terminal.scroll").length).toBe(1);
+  expect(terminalCommands.slice(wheelStart).find((command) => command.type === "terminal.scroll"))
+    .toMatchObject({ direction: "up", lines: 3, source: "wheel", modifiers: 0 });
+  const wheelCommand = terminalCommands.slice(wheelStart)
+    .find((command) => command.type === "terminal.scroll");
+  expect(wheelCommand?.column).toBeGreaterThanOrEqual(0);
+  expect(wheelCommand?.row).toBeGreaterThanOrEqual(0);
+  await expect(drawer.locator(".web-terminal-session-panel.is-active .xterm-rows"))
+    .toContainText("Fake Herdr scroll wheel up 3");
+
+  const wheelDownStart = terminalCommands.length;
+  await page.mouse.wheel(0, 120);
+  await expect.poll(() => terminalCommands.slice(wheelDownStart)
+    .filter((command) => command.type === "terminal.scroll").length).toBe(1);
+  expect(terminalCommands.slice(wheelDownStart).find((command) => command.type === "terminal.scroll"))
+    .toMatchObject({ direction: "down", lines: 3, source: "wheel" });
   const firstSessionId = await tabs.nth(0).getAttribute("data-session-id");
   expect(firstSessionId).toBeTruthy();
 

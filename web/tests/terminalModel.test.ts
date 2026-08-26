@@ -6,9 +6,13 @@ import {
   parseTerminalTabSnapshot,
   reconcileOpenTerminalTabs,
   serializeTerminalTabSnapshot,
+  terminalModifierBits,
   terminalReconnectDelay,
+  terminalScrollFromRows,
+  terminalWheelDeltaRows,
 } from "../src/components/terminal/terminalModel.js";
 import type { TerminalSession } from "../src/components/terminal/types.js";
+import { isTerminalImeKeyEvent } from "../src/components/terminal/terminalIme.js";
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -73,9 +77,67 @@ function testFramesRequireFullBaselineAndMonotonicSequence(): void {
   assert(acceptsTerminalFrame(2, true, { seq: 3, full: false }), "new delta should be accepted");
 }
 
+function testWheelDeltasNormalizeToTerminalRows(): void {
+  assert(terminalWheelDeltaRows(-120, 0, 40) === -3, "120px wheel up should match Herdr's three-line default");
+  assert(terminalWheelDeltaRows(3, 1, 40) === 3, "line-mode wheel deltas should remain terminal rows");
+  assert(terminalWheelDeltaRows(-1, 2, 40) === -39, "page-mode wheel should use one visible page");
+  assert(terminalWheelDeltaRows(Number.NaN, 0, 40) === 0, "invalid wheel deltas must be ignored");
+}
+
+function testAccumulatedRowsBecomeBoundedHerdrScrollCommands(): void {
+  const up = terminalScrollFromRows(-2.6, "wheel");
+  const down = terminalScrollFromRows(1_500, "page_key");
+
+  assert(up?.direction === "up" && up.lines === 3 && up.source === "wheel", "negative rows should scroll up");
+  assert(
+    down?.direction === "down" && down.lines === 1_000 && down.source === "page_key",
+    "scroll commands must stay within the Gateway limit",
+  );
+  assert(terminalScrollFromRows(0.49, "wheel") === null, "sub-row trackpad movement should remain buffered");
+}
+
+function testBrowserModifiersMapToCrosstermBits(): void {
+  assert(
+    terminalModifierBits({ shiftKey: true, ctrlKey: true, altKey: true, metaKey: true }) === 15,
+    "browser modifiers should preserve Herdr/crossterm bit positions",
+  );
+}
+
+function testImeCandidateKeysRemainOwnedByTheBrowser(): void {
+  const key = (overrides: Partial<{
+    isComposing: boolean;
+    key: string;
+    keyCode: number;
+  }> = {}) => ({
+    isComposing: false,
+    key: " ",
+    keyCode: 32,
+    ...overrides,
+  });
+
+  assert(isTerminalImeKeyEvent(key(), true), "active composition should bypass xterm key encoding");
+  assert(
+    isTerminalImeKeyEvent(key({ isComposing: true, key: "1", keyCode: 49 }), false),
+    "native composing candidate numbers should remain browser-owned",
+  );
+  assert(
+    isTerminalImeKeyEvent(key({ key: "Process", keyCode: 0 }), false),
+    "Process keys should remain browser-owned",
+  );
+  assert(
+    isTerminalImeKeyEvent(key({ key: "Unidentified", keyCode: 229 }), false),
+    "keyCode 229 should remain browser-owned",
+  );
+  assert(!isTerminalImeKeyEvent(key(), false), "ordinary spaces should still reach xterm");
+}
+
 testTabCloseOnlyDetaches();
 testTabsReconcileAgainstProjectSessions();
 testActiveTabMovesToItsNearestNeighbor();
 testTabSnapshotIsVersionedAndRejectsInvalidStorage();
 testReconnectIsBounded();
 testFramesRequireFullBaselineAndMonotonicSequence();
+testWheelDeltasNormalizeToTerminalRows();
+testAccumulatedRowsBecomeBoundedHerdrScrollCommands();
+testBrowserModifiersMapToCrosstermBits();
+testImeCandidateKeysRemainOwnedByTheBrowser();

@@ -123,7 +123,25 @@ Dock 模式可拖动顶部调整高度；全屏、Dock、主题切换、Tab 名�
 建议顺序是：查看用 Observe，输入用 Control，只有确认要替换现有操作者时才 Take over。该选项
 受 `allow_takeover`、mutation auth 和 takeover receipt 约束。
 
-## 5. 用量、成本与安全边界
+## 5. 输入与上下翻屏
+
+Control 模式下，普通 ASCII、中文/Unicode、粘贴和控制序列仍由 xterm.js 作为终端输入发送；
+滚轮与不带修饰键的 `PageUp` / `PageDown` 则转换成 Herdr `terminal.scroll`，由 Herdr 的
+Ghostty scrollback 和当前 TUI 模式决定是翻看历史还是执行终端语义。浏览器不会维护第二套
+Provider 屏幕状态，也不会把 Page Key 再重复发送为 raw input。
+
+中文、日文等 IME 正在组合文字时，空格、数字候选键和候选翻页键保留给浏览器输入法，不会
+被 xterm 编码成 CLI 按键或误转成 `terminal.scroll`。针对 xterm 6 在隐藏 textarea 被输入法
+整体替换后可能不产生 `onData` 的问题，Web Terminal 只在 xterm 没有提交任何数据时使用
+`compositionend` 的已提交文本补发一次；正常输入路径不会重复发送。自动化覆盖真实浏览器的
+composition 事件链，但不同 OS/输入法仍应进行宿主机人工资格验证。
+
+Herdr viewport 是 controller 共享的终端状态，因此 controller 翻屏会通过后续 frame 反映到
+其他 attachment。Observe 不发送 scroll/resize/input，只能在本地查看 xterm 已保留的内容；
+若需要改变共享 viewport，必须先取得 Control。浏览器保留的系统快捷键（例如 `Ctrl+W`、
+`Ctrl+T`、`Ctrl+L`）不保证能送入 CLI。
+
+## 6. 用量、成本与安全边界
 
 Agents 页的 `Interactive Terminals` 以 Tab title 分行显示 Provider、model、context、tokens、
 cost 与精度。Rename 不重置用量；这些数字来自每个 CLI 的结构化 transcript 并写入独立
