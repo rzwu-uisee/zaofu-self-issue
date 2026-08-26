@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **69** top-level families and **282** addressable command paths.
+The parser currently exposes **69** top-level families and **285** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -253,6 +253,9 @@ Manage evidence-bound self-evolution attempts and capabilities
 | `zf evolution evaluator-register` | Register public evaluator metadata and sealed cases |
 | `zf evolution opportunity-propose` | Materialize a proposal-only evolution opportunity |
 | `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
+| `zf evolution skill-treatment-compare` | Check that Skill treatment arms differ only by the target Skill |
+| `zf evolution skill-trial-materialize` | Materialize one frozen Skill trial arm through the normal resolver |
+| `zf evolution skill-trial-spec` | Build a frozen raw/current/candidate Skill trial specification |
 | `zf evolution status` | Show the read-only evolution projection |
 | `zf evolution trial-ensure` | Ensure a stable A/B trial row |
 | `zf evolution trial-execute` | Execute one resident-owned evolution trial/canary request |

@@ -22,6 +22,12 @@ from zf.runtime.evolution_contracts import (
     stable_digest,
     validate_evaluator_generation,
 )
+from zf.runtime.evolution_skill_claim import paired_skill_lifts, skill_comparison_claim
+from zf.runtime.evolution_skill_eval import (
+    compare_skill_treatment_identities,
+    validate_case_results,
+    validate_skill_treatment_observation,
+)
 
 
 MEASUREMENT_SCHEMA = "evolution-measurement.v1"
@@ -146,8 +152,10 @@ def validate_measurement(
     for key in ("trial_id", "arm"):
         if not str(body.get(key) or "").strip():
             raise EvolutionContractError(f"measurement {key} is required")
-    if str(body.get("arm")) not in {"baseline", "candidate"}:
-        raise EvolutionContractError("measurement arm must be baseline or candidate")
+    if str(body.get("arm")) not in {"control", "baseline", "candidate"}:
+        raise EvolutionContractError(
+            "measurement arm must be control, baseline, or candidate"
+        )
     if str(body.get("evaluator_generation_digest") or "") != str(
         evaluator["generation_digest"]
     ):
@@ -213,6 +221,29 @@ def validate_measurement(
         weight_sum += float(spec["weight"])
     body["scores"] = normalized_scores
     body["total_score"] = round(weighted / weight_sum, 6)
+    treatment = body.get("treatment")
+    if treatment is not None:
+        if not isinstance(treatment, Mapping):
+            raise EvolutionContractError("measurement treatment must be an object")
+        body["treatment"] = validate_skill_treatment_observation(treatment)
+    body["case_results"] = validate_case_results(body.get("case_results"))
+    pairing = body.get("pairing")
+    if body["case_results"]:
+        if not isinstance(pairing, Mapping):
+            raise EvolutionContractError(
+                "measurement pairing is required with case_results"
+            )
+        try:
+            replicate = int(pairing.get("replicate"))
+        except (TypeError, ValueError) as exc:
+            raise EvolutionContractError(
+                "measurement pairing.replicate must be an integer"
+            ) from exc
+        if replicate < 1:
+            raise EvolutionContractError(
+                "measurement pairing.replicate must be positive"
+            )
+        body["pairing"] = {"replicate": replicate}
     return body
 
 
@@ -222,11 +253,14 @@ def compare_repeated_trials(
     attempt_id: str,
     baseline: Sequence[Mapping[str, Any]],
     candidate: Sequence[Mapping[str, Any]],
+    control: Sequence[Mapping[str, Any]] = (),
+    attempt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     evaluator = validate_evaluator_generation(generation)
     try:
         baseline_rows = [validate_measurement(evaluator, row) for row in baseline]
         candidate_rows = [validate_measurement(evaluator, row) for row in candidate]
+        control_rows = [validate_measurement(evaluator, row) for row in control]
     except EvolutionContractError as exc:
         return _comparison(
             attempt_id,
@@ -235,11 +269,13 @@ def compare_repeated_trials(
             reason=str(exc),
             baseline=[],
             candidate=[],
+            control=[],
+            attempt=attempt,
         )
 
     all_fingerprints = {
         str(row["comparison_fingerprint"])
-        for row in [*baseline_rows, *candidate_rows]
+        for row in [*control_rows, *baseline_rows, *candidate_rows]
     }
     if len(all_fingerprints) != 1:
         return _comparison(
@@ -249,7 +285,74 @@ def compare_repeated_trials(
             reason="baseline and candidate comparison identity differs",
             baseline=baseline_rows,
             candidate=candidate_rows,
+            control=control_rows,
+            attempt=attempt,
         )
+    treatment_rows = [*control_rows, *baseline_rows, *candidate_rows]
+    skill_identity_error = _skill_attempt_identity_error(
+        evaluator,
+        attempt=attempt,
+        rows=treatment_rows,
+    )
+    if skill_identity_error:
+        return _comparison(
+            attempt_id,
+            evaluator,
+            status="incomparable",
+            reason=skill_identity_error,
+            baseline=baseline_rows,
+            candidate=candidate_rows,
+            control=control_rows,
+            attempt=attempt,
+        )
+    treatment_count = sum(isinstance(row.get("treatment"), Mapping) for row in treatment_rows)
+    if treatment_count and treatment_count != len(treatment_rows):
+        return _comparison(
+            attempt_id,
+            evaluator,
+            status="incomparable",
+            reason="Skill treatment evidence is missing from one or more arms",
+            baseline=baseline_rows,
+            candidate=candidate_rows,
+            control=control_rows,
+            attempt=attempt,
+        )
+    if treatment_count:
+        identities = [
+            row["treatment"]["identity"]
+            for row in treatment_rows
+        ]
+        treatment_comparison = compare_skill_treatment_identities(identities)
+        if not bool(treatment_comparison["comparable"]):
+            return _comparison(
+                attempt_id,
+                evaluator,
+                status="incomparable",
+                reason=str(treatment_comparison["reason"]),
+                baseline=baseline_rows,
+                candidate=candidate_rows,
+                control=control_rows,
+                attempt=attempt,
+            )
+        invalid_forced = [
+            str(row["trial_id"])
+            for row in treatment_rows
+            if not bool(row["treatment"].get("admission_valid", True))
+        ]
+        if invalid_forced:
+            return _comparison(
+                attempt_id,
+                evaluator,
+                status="incomparable",
+                reason=(
+                    "required Skill treatment was not applied: "
+                    + ", ".join(invalid_forced)
+                ),
+                baseline=baseline_rows,
+                candidate=candidate_rows,
+                control=control_rows,
+                attempt=attempt,
+            )
     minimum = int(evaluator["min_trials"])
     if len(baseline_rows) < minimum or len(candidate_rows) < minimum:
         return _comparison(
@@ -259,6 +362,8 @@ def compare_repeated_trials(
             reason=f"minimum repeated trials not met ({minimum})",
             baseline=baseline_rows,
             candidate=candidate_rows,
+            control=control_rows,
+            attempt=attempt,
         )
 
     baseline_gate = all(bool(row["gate_passed"]) for row in baseline_rows)
@@ -307,6 +412,8 @@ def compare_repeated_trials(
         reason=reason,
         baseline=baseline_rows,
         candidate=candidate_rows,
+        control=control_rows,
+        attempt=attempt,
     )
 
 
@@ -315,6 +422,7 @@ def incomparable_comparison(
     *,
     attempt_id: str,
     reason: str,
+    attempt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a typed non-adoptable verdict before any candidate is scored."""
 
@@ -326,6 +434,8 @@ def incomparable_comparison(
         reason=str(reason or "comparison identity is not admissible"),
         baseline=[],
         candidate=[],
+        control=[],
+        attempt=attempt,
     )
 
 
@@ -368,6 +478,8 @@ def _comparison(
     reason: str,
     baseline: list[dict[str, Any]],
     candidate: list[dict[str, Any]],
+    control: list[dict[str, Any]],
+    attempt: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     if status not in COMPARISON_STATUSES:
         raise EvolutionContractError(f"unsupported comparison status {status}")
@@ -375,11 +487,18 @@ def _comparison(
         "baseline": _arm_summary(evaluator, baseline),
         "candidate": _arm_summary(evaluator, candidate),
     }
+    if control:
+        summaries["control"] = _arm_summary(evaluator, control)
     baseline_score = summaries["baseline"].get("median_total")
     candidate_score = summaries["candidate"].get("median_total")
     delta = None
     if isinstance(baseline_score, float) and isinstance(candidate_score, float):
         delta = round(candidate_score - baseline_score, 6)
+    claim = skill_comparison_claim(
+        [*control, *baseline, *candidate],
+        status=status,
+        attempt=attempt,
+    )
     body = {
         "schema_version": EVOLUTION_COMPARISON_SCHEMA,
         "comparison_id": "evocmp-" + stable_digest({
@@ -387,11 +506,16 @@ def _comparison(
             "generation": evaluator.get("generation_digest"),
             "baseline": [row.get("trial_id") for row in baseline],
             "candidate": [row.get("trial_id") for row in candidate],
+            "control": [row.get("trial_id") for row in control],
         })[:20],
         "attempt_id": attempt_id,
         "status": status,
         "reason": reason,
-        "adoption_eligible": status == "candidate_better",
+        "adoption_eligible": bool(claim["adoption_eligible"]),
+        "blocking_reasons": list(claim["blocking_reasons"]),
+        "object_kind": claim["object_kind"],
+        "evaluation_purpose": claim["evaluation_purpose"],
+        "claim_scope": claim["claim_scope"],
         "evaluator_generation_id": evaluator.get("generation_id"),
         "evaluator_generation_digest": evaluator.get("generation_digest"),
         "comparison_fingerprint": (
@@ -400,7 +524,14 @@ def _comparison(
         ),
         "arms": summaries,
         "score_delta": delta,
+        "paired_lifts": paired_skill_lifts(
+            baseline=baseline,
+            candidate=candidate,
+            control=control,
+        ),
     }
+    if claim.get("evidence_summary"):
+        body["skill_evidence_summary"] = deepcopy(claim["evidence_summary"])
     body["comparison_digest"] = stable_digest(body)
     return body
 
@@ -429,6 +560,37 @@ def _arm_summary(
         "spread_total": _spread(totals),
         "dimensions": dimensions,
     }
+
+
+def _skill_attempt_identity_error(
+    evaluator: Mapping[str, Any],
+    *,
+    attempt: Mapping[str, Any] | None,
+    rows: Sequence[Mapping[str, Any]],
+) -> str:
+    attempt_body = attempt if isinstance(attempt, Mapping) else {}
+    mutation = attempt_body.get("mutation")
+    if not isinstance(mutation, Mapping) or mutation.get("object_kind") != "skill_prompt":
+        return ""
+    field = "skill_treatment_spec_digest"
+    if field not in set(evaluator.get("comparison_identity_fields") or []):
+        return "Skill evaluator comparison identity lacks treatment spec digest"
+    frozen = attempt_body.get("frozen_inputs")
+    expected = str(
+        (frozen or {}).get(field) if isinstance(frozen, Mapping) else ""
+    ).removeprefix("sha256:")
+    if not expected:
+        return "Skill attempt has no frozen treatment spec digest"
+    observed = {
+        str((row.get("comparison_identity") or {}).get(field) or "").removeprefix(
+            "sha256:"
+        )
+        for row in rows
+        if isinstance(row.get("comparison_identity"), Mapping)
+    }
+    if observed != {expected}:
+        return "Skill measurement treatment spec digest differs from attempt"
+    return ""
 
 
 def _blocking_dimension_regression(

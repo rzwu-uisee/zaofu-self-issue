@@ -302,6 +302,9 @@ class EvolutionCoordinator:
         evaluator = validate_evaluator_generation(evaluator_generation)
         attempt = self._attempt_body(attempt_id)
         mutation = attempt.get("mutation") or {}
+        baseline: list[dict[str, Any]] = []
+        candidate: list[dict[str, Any]] = []
+        control: list[dict[str, Any]] = []
         if bool(mutation.get("tcb_affected")):
             comparison = incomparable_comparison(
                 evaluator,
@@ -310,12 +313,11 @@ class EvolutionCoordinator:
                     "evaluator/TCB mutation requires an independently admitted "
                     "evaluator generation N+1"
                 ),
+                attempt=attempt,
             )
         else:
             self._assert_evaluator_bound(attempt_id, evaluator)
             rows = self.trials.trials_for_attempt(attempt_id)
-            baseline: list[dict[str, Any]] = []
-            candidate: list[dict[str, Any]] = []
             for row in rows:
                 if row.get("status") != "settled" or row.get("outcome") == "semantic_failed":
                     continue
@@ -330,13 +332,21 @@ class EvolutionCoordinator:
                 )
                 if not isinstance(hydrated.payload, dict):
                     raise EvolutionContractError("trial measurement is not an object")
-                target = baseline if row.get("arm") == "baseline" else candidate
+                target = {
+                    "control": control,
+                    "baseline": baseline,
+                    "candidate": candidate,
+                }.get(str(row.get("arm") or ""))
+                if target is None:
+                    raise EvolutionContractError("trial has an unsupported arm")
                 target.append(dict(hydrated.payload))
             comparison = compare_repeated_trials(
                 evaluator,
                 attempt_id=attempt_id,
                 baseline=baseline,
                 candidate=candidate,
+                control=control,
+                attempt=attempt,
             )
         descriptor = write_immutable_json_sidecar(
             self.state_dir,
@@ -361,6 +371,9 @@ class EvolutionCoordinator:
                     "comparison_id": comparison["comparison_id"],
                     "status": comparison["status"],
                     "adoption_eligible": comparison["adoption_eligible"],
+                    "blocking_reasons": comparison.get("blocking_reasons", []),
+                    "claim_scope": comparison.get("claim_scope", ""),
+                    "object_kind": comparison.get("object_kind", ""),
                     "evaluator_generation_id": comparison[
                         "evaluator_generation_id"
                     ],
@@ -847,6 +860,15 @@ def _validate_learning_asset(
         raise EvolutionContractError(f"schema_version must be {LEARNING_ASSET_SCHEMA}")
     if str(body.get("asset_kind") or "") not in _ASSET_KINDS:
         raise EvolutionContractError("unsupported learning asset kind")
+    comparison_kind = str(comparison.get("object_kind") or "")
+    if body.get("asset_kind") == "skill_prompt" and comparison_kind != "skill_prompt":
+        raise EvolutionContractError(
+            "skill_prompt asset requires a Skill-scoped comparison"
+        )
+    if comparison_kind == "skill_prompt" and body.get("asset_kind") != "skill_prompt":
+        raise EvolutionContractError(
+            "Skill-scoped comparison can only propose a skill_prompt asset"
+        )
     if not str(body.get("asset_id") or "").strip() or int(body.get("version") or 0) < 1:
         raise EvolutionContractError("learning asset requires asset_id and version")
     body["digest"] = normalize_digest(body.get("digest"), field="learning asset digest")

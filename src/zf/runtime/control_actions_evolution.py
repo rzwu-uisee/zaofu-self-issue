@@ -227,6 +227,11 @@ class EvolutionActionsMixin:
         asset = registry["assets"].get(key)
         if not isinstance(asset, dict):
             return "learning asset is unavailable"
+        if str(asset.get("asset_kind") or "") == "skill_prompt":
+            return (
+                "skill_prompt source adoption requires an owner-approved source "
+                "patch and cannot use unattended auto_low_risk transitions"
+            )
         if str(asset.get("asset_kind") or "") not in set(
             getattr(policy, "auto_asset_kinds", []) or []
         ):

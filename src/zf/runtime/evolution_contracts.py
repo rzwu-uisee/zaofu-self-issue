@@ -37,6 +37,13 @@ DEFAULT_COMPARISON_IDENTITY_FIELDS = (
 EVOLUTION_TIMES = frozenset({"task_time", "post_task", "stage_wise"})
 PERSISTENCE_SCOPES = frozenset({"run", "project", "workspace", "portable"})
 ADOPTION_CLAIMS = frozenset({"experiment_only", "canary", "persistent_capability"})
+SKILL_EVALUATION_PURPOSES = frozenset({
+    "treatment_smoke",
+    "content_lift",
+    "natural_lift",
+    "routing_stress",
+    "adoption_lift",
+})
 MUTATION_OBJECT_KINDS = frozenset({
     "framework_code",
     "memory_entry",
@@ -198,6 +205,13 @@ def validate_evolution_attempt(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise EvolutionContractError("evaluation_policy.numeric_policy must be finite_bounded")
     _positive_int(evaluation, "min_trials", prefix="evaluation_policy")
     _finite_number(evaluation, "min_delta", prefix="evaluation_policy", minimum=0.0)
+    if object_kind == "skill_prompt":
+        _validate_skill_attempt_policy(
+            body,
+            mutation=mutation,
+            frozen=frozen,
+            evaluation=evaluation,
+        )
 
     execution = _mapping(body, "execution_policy")
     execution["attempt_idempotency_key"] = normalize_digest(
@@ -223,6 +237,74 @@ def validate_evolution_attempt(raw: Mapping[str, Any]) -> dict[str, Any]:
     if not bool(policy.get("canary_required")):
         raise EvolutionContractError("canary_required must be true")
     return body
+
+
+def _validate_skill_attempt_policy(
+    body: Mapping[str, Any],
+    *,
+    mutation: Mapping[str, Any],
+    frozen: Mapping[str, Any],
+    evaluation: Mapping[str, Any],
+) -> None:
+    skill_name = _required_text(mutation, "skill_name", prefix="mutation")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,127}", skill_name):
+        raise EvolutionContractError("mutation.skill_name must be lowercase kebab-case")
+    _ref_digest_pair(
+        frozen,
+        "skill_treatment_spec_ref",
+        "skill_treatment_spec_digest",
+        prefix="frozen_inputs",
+    )
+    purpose = str(evaluation.get("evaluation_purpose") or "").strip()
+    if purpose not in SKILL_EVALUATION_PURPOSES:
+        raise EvolutionContractError(
+            "evaluation_policy.evaluation_purpose is required for skill_prompt"
+        )
+    if isinstance(evaluation, dict):
+        evaluation["evaluation_purpose"] = purpose
+    if str(body.get("adoption_claim") or "") != "persistent_capability":
+        return
+    if purpose != "adoption_lift":
+        raise EvolutionContractError(
+            "persistent skill_prompt adoption requires adoption_lift"
+        )
+    if int(evaluation.get("min_trials") or 0) < 2:
+        raise EvolutionContractError(
+            "persistent skill_prompt adoption requires min_trials >= 2"
+        )
+    policy = _mapping(evaluation, "skill_adoption")
+    _positive_int(policy, "min_distinct_cases", prefix="skill_adoption")
+    _positive_int(policy, "min_replicates_per_case", prefix="skill_adoption")
+    if int(policy["min_distinct_cases"]) < 3:
+        raise EvolutionContractError(
+            "skill_adoption.min_distinct_cases must be >= 3"
+        )
+    if int(policy["min_replicates_per_case"]) < 2:
+        raise EvolutionContractError(
+            "skill_adoption.min_replicates_per_case must be >= 2"
+        )
+    required_arms = set(_unique_strings(
+        policy.get("required_arms"), "skill_adoption.required_arms"
+    ))
+    if required_arms not in (
+        {"raw", "candidate"},
+        {"raw", "current", "candidate"},
+    ):
+        raise EvolutionContractError(
+            "skill_adoption.required_arms must be raw/candidate or "
+            "raw/current/candidate"
+        )
+    policy["required_arms"] = sorted(required_arms)
+    _ref_digest_pair(
+        policy,
+        "routing_stress_ref",
+        "routing_stress_digest",
+        prefix="skill_adoption",
+    )
+    if str(policy.get("routing_stress_status") or "") != "passed":
+        raise EvolutionContractError(
+            "skill_adoption.routing_stress_status must be passed"
+        )
 
 
 def validate_evaluator_generation(raw: Mapping[str, Any]) -> dict[str, Any]:

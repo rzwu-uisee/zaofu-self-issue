@@ -45,7 +45,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     ensure = commands.add_parser("trial-ensure", help="Ensure a stable A/B trial row")
     _state_arg(ensure)
     ensure.add_argument("--attempt-id", required=True)
-    ensure.add_argument("--arm", choices=("baseline", "candidate"), required=True)
+    ensure.add_argument(
+        "--arm", choices=("control", "baseline", "candidate"), required=True
+    )
     ensure.add_argument("--replicate", type=int, required=True)
     ensure.set_defaults(func=_trial_ensure)
 
@@ -244,6 +246,38 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     workflow.add_argument("--candidate-config", required=True)
     workflow.add_argument("--preflight-file", required=True)
     workflow.set_defaults(func=_workflow_learning_propose)
+
+    skill_spec = commands.add_parser(
+        "skill-trial-spec",
+        help="Build a frozen raw/current/candidate Skill trial specification",
+    )
+    skill_spec.add_argument("--candidate-file", required=True)
+    skill_spec.add_argument("--current-file")
+    skill_spec.add_argument("--common-identity-file", required=True)
+    skill_spec.add_argument("--eval-suite-file", required=True)
+    skill_spec.add_argument("--support-skills-file")
+    skill_spec.set_defaults(func=_skill_trial_spec)
+
+    skill_materialize = commands.add_parser(
+        "skill-trial-materialize",
+        help="Materialize one frozen Skill trial arm through the normal resolver",
+    )
+    skill_materialize.add_argument("--spec-file", required=True)
+    skill_materialize.add_argument(
+        "--arm", choices=("control", "baseline", "candidate"), required=True
+    )
+    skill_materialize.add_argument(
+        "--backend", choices=("codex", "claude-code"), required=True
+    )
+    skill_materialize.add_argument("--workdir", required=True)
+    skill_materialize.set_defaults(func=_skill_trial_materialize)
+
+    treatment_compare = commands.add_parser(
+        "skill-treatment-compare",
+        help="Check that Skill treatment arms differ only by the target Skill",
+    )
+    treatment_compare.add_argument("--identities-file", required=True)
+    treatment_compare.set_defaults(func=_skill_treatment_compare)
 
 
 def _state_arg(parser: argparse.ArgumentParser) -> None:
@@ -527,6 +561,45 @@ def _workflow_learning_propose(args: argparse.Namespace) -> int:
     )
     _print({"proposal": proposal, "artifact_ref": descriptor})
     return 0
+
+
+def _skill_trial_spec(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill import build_skill_trial_spec
+
+    support = _load_json(args.support_skills_file) if args.support_skills_file else []
+    if not isinstance(support, list):
+        raise ValueError("support Skills file must contain a JSON list")
+    _print(build_skill_trial_spec(
+        _load_json(args.candidate_file),
+        common_identity=_load_json(args.common_identity_file),
+        eval_suite=_load_json(args.eval_suite_file),
+        current=_load_json(args.current_file) if args.current_file else None,
+        support_skills=support,
+    ))
+    return 0
+
+
+def _skill_trial_materialize(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill import materialize_skill_trial_arm
+
+    _print(materialize_skill_trial_arm(
+        workdir=Path(args.workdir),
+        backend=args.backend,
+        spec=_load_json(args.spec_file),
+        arm=args.arm,
+    ))
+    return 0
+
+
+def _skill_treatment_compare(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_eval import compare_skill_treatment_identities
+
+    identities = _load_json(args.identities_file)
+    if not isinstance(identities, list):
+        raise ValueError("Skill treatment identities file must contain a JSON list")
+    result = compare_skill_treatment_identities(identities)
+    _print(result)
+    return 0 if bool(result.get("comparable")) else 1
 
 
 def _load_json(path: str | Path) -> Any:
