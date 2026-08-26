@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 import yaml
 
@@ -262,21 +263,33 @@ def build_skill_lock_entries(
     task_id: str | None = None,
     run_id: str | None = None,
     materialized_paths: dict[str, Path] | None = None,
+    skill_overrides: Mapping[str, Path] | None = None,
 ) -> list[SkillLockEntry]:
+    overrides = {
+        str(name): Path(path)
+        for name, path in (skill_overrides or {}).items()
+        if str(name).strip()
+    }
     entries: list[SkillLockEntry] = []
     for skill, dependency_of in _expanded_role_skill_requests(
         project_root=project_root,
         state_dir=state_dir,
         role=role,
         config=config,
+        skill_overrides=overrides,
     ):
-        resolution = resolve_skill(
-            project_root=project_root,
-            state_dir=state_dir,
-            name=skill,
-            config=config,
+        override_path = overrides.get(skill)
+        resolution = (
+            None
+            if override_path is not None
+            else resolve_skill(
+                project_root=project_root,
+                state_dir=state_dir,
+                name=skill,
+                config=config,
+            )
         )
-        source = resolution.path
+        source = override_path or (resolution.path if resolution else None)
         if source is None:
             entries.append(SkillLockEntry(
                 role=role.name,
@@ -294,9 +307,13 @@ def build_skill_lock_entries(
             continue
         metadata = read_skill_metadata(source, expected_name=skill)
         status = "invalid" if metadata.warnings else "resolved"
-        collision_candidates = _format_collision_candidates(
-            resolution=resolution,
-            project_root=project_root,
+        collision_candidates = (
+            ()
+            if override_path is not None
+            else _format_collision_candidates(
+                resolution=resolution,
+                project_root=project_root,
+            )
         )
         materialized_to = None
         if materialized_paths and skill in materialized_paths:
@@ -308,9 +325,17 @@ def build_skill_lock_entries(
             task_id=task_id,
             run_id=run_id,
             name=skill,
-            source=_display_path(source, project_root),
+            source=(
+                f"evolution-overlay://{skill}"
+                if override_path is not None
+                else _display_path(source, project_root)
+            ),
             sha256=_sha256(source),
-            source_name=resolution.source_name,
+            source_name=(
+                "evolution-overlay"
+                if override_path is not None
+                else resolution.source_name
+            ),
             description=metadata.description or None,
             materialized_to=materialized_to,
             collision_candidates=collision_candidates,
@@ -456,6 +481,7 @@ def _expanded_role_skill_requests(
     state_dir: Path,
     role: RoleConfig,
     config: ZfConfig | None,
+    skill_overrides: Mapping[str, Path] | None = None,
 ) -> list[tuple[str, tuple[str, ...]]]:
     """Return explicit role skills plus declared companion dependencies.
 
@@ -470,6 +496,11 @@ def _expanded_role_skill_requests(
         for skill in role.skills
         if str(skill).strip()
     ]
+    queue.extend(
+        (_normalize_dependency_name(skill), ())
+        for skill in (skill_overrides or {})
+        if str(skill).strip()
+    )
     seen: set[str] = set()
     while queue:
         skill, dependency_of = queue.pop(0)
@@ -477,15 +508,23 @@ def _expanded_role_skill_requests(
             continue
         seen.add(skill)
         requests.append((skill, dependency_of))
-        resolution = resolve_skill(
-            project_root=project_root,
-            state_dir=state_dir,
-            name=skill,
-            config=config,
+        override_path = (skill_overrides or {}).get(skill)
+        resolution = (
+            None
+            if override_path is not None
+            else resolve_skill(
+                project_root=project_root,
+                state_dir=state_dir,
+                name=skill,
+                config=config,
+            )
         )
-        if resolution.path is None:
+        source_path = Path(override_path) if override_path is not None else (
+            resolution.path if resolution is not None else None
+        )
+        if source_path is None:
             continue
-        metadata = read_skill_metadata(resolution.path, expected_name=skill)
+        metadata = read_skill_metadata(source_path, expected_name=skill)
         for dependency in metadata.dependencies:
             queue.append((
                 _normalize_dependency_name(dependency),

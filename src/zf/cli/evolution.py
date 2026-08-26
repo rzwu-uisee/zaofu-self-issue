@@ -150,6 +150,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         required=True,
     )
     skill_outcome.add_argument("--cost-file")
+    skill_outcome.add_argument("--feedback-file")
     skill_outcome.set_defaults(func=_skill_outcome)
 
     export = commands.add_parser("asset-export", help="Export a retained asset")
@@ -278,6 +279,100 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     )
     treatment_compare.add_argument("--identities-file", required=True)
     treatment_compare.set_defaults(func=_skill_treatment_compare)
+
+    overlay = commands.add_parser(
+        "skill-overlay-resolve",
+        help="Resolve scoped Skill canary overlays for a future dispatch",
+    )
+    _state_arg(overlay)
+    overlay.add_argument("--role", required=True)
+    overlay.add_argument("--task-family", required=True)
+    overlay.add_argument("--cohort", default="")
+    overlay.set_defaults(func=_skill_overlay_resolve)
+
+    source_propose = commands.add_parser(
+        "skill-source-propose",
+        help="Build an owner-approved source-retain proposal from a passed canary",
+    )
+    _state_arg(source_propose)
+    source_propose.add_argument("--asset-id", required=True)
+    source_propose.add_argument("--version", type=int, required=True)
+    source_propose.set_defaults(func=_skill_source_propose)
+
+    source_apply = commands.add_parser(
+        "skill-source-apply",
+        help="Apply an exact Skill retain proposal and sync provider copies",
+    )
+    _state_arg(source_apply)
+    source_apply.add_argument("--proposal-ref-file", required=True)
+    source_apply.add_argument("--owner-token-file", required=True)
+    source_apply.add_argument(
+        "--owner-token-env", default="ZF_EVOLUTION_OWNER_TOKEN"
+    )
+    source_apply.set_defaults(func=_skill_source_apply)
+
+    maintenance = commands.add_parser(
+        "skill-maintenance-propose",
+        help="Record an optimize/replace/merge/deactivate Skill proposal",
+    )
+    _state_arg(maintenance)
+    maintenance.add_argument("--skill", required=True)
+    maintenance.add_argument(
+        "--action", choices=("optimize", "replace", "merge", "deactivate"), required=True
+    )
+    maintenance.add_argument("--evidence-refs-file", required=True)
+    maintenance.add_argument("--rationale", required=True)
+    maintenance.set_defaults(func=_skill_maintenance_propose)
+
+    routing_report = commands.add_parser(
+        "skill-routing-report",
+        help="Build a routing-stress report from typed observation sidecars",
+    )
+    _state_arg(routing_report)
+    routing_report.add_argument("--skill", required=True)
+    routing_report.add_argument("--candidate-digest", required=True)
+    routing_report.add_argument("--eval-suite-digest", required=True)
+    routing_report.add_argument(
+        "--required-pool-size", action="append", type=int, required=True
+    )
+    routing_report.add_argument("--observation-refs-file", required=True)
+    routing_report.set_defaults(func=_skill_routing_report)
+
+    optimizer_init = commands.add_parser(
+        "skill-opt-init",
+        help="Initialize one bounded, frozen single-Skill optimization campaign",
+    )
+    _state_arg(optimizer_init)
+    optimizer_init.add_argument("--campaign-file", required=True)
+    optimizer_init.add_argument("--baseline-evaluation-file", required=True)
+    optimizer_init.set_defaults(func=_skill_opt_init)
+
+    optimizer_prepare = commands.add_parser(
+        "skill-opt-prepare",
+        help="Apply one bounded Agent-proposed Skill edit packet",
+    )
+    _state_arg(optimizer_prepare)
+    optimizer_prepare.add_argument("--state-ref-file", required=True)
+    optimizer_prepare.add_argument("--proposal-file", required=True)
+    optimizer_prepare.set_defaults(func=_skill_opt_prepare)
+
+    optimizer_settle = commands.add_parser(
+        "skill-opt-settle",
+        help="Select one prepared Skill candidate against held-out evidence",
+    )
+    _state_arg(optimizer_settle)
+    optimizer_settle.add_argument("--state-ref-file", required=True)
+    optimizer_settle.add_argument("--step-ref-file", required=True)
+    optimizer_settle.add_argument("--evaluation-file", required=True)
+    optimizer_settle.set_defaults(func=_skill_opt_settle)
+
+    optimizer_export = commands.add_parser(
+        "skill-opt-export",
+        help="Export the completed optimizer best as a design-179 Skill candidate",
+    )
+    _state_arg(optimizer_export)
+    optimizer_export.add_argument("--state-ref-file", required=True)
+    optimizer_export.set_defaults(func=_skill_opt_export)
 
 
 def _state_arg(parser: argparse.ArgumentParser) -> None:
@@ -444,6 +539,7 @@ def _skill_outcome(args: argparse.Namespace) -> int:
         role_instance=args.role,
         outcome=args.outcome,
         cost=_load_json(args.cost_file) if args.cost_file else {},
+        feedback=_load_json(args.feedback_file) if args.feedback_file else {},
         config=context.config,
         project_root=context.project_root,
     ))
@@ -600,6 +696,143 @@ def _skill_treatment_compare(args: argparse.Namespace) -> int:
     result = compare_skill_treatment_identities(identities)
     _print(result)
     return 0 if bool(result.get("comparable")) else 1
+
+
+def _skill_overlay_resolve(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_overlay import resolve_skill_overlays
+
+    context = _context(args)
+    result = resolve_skill_overlays(
+        context.state_dir,
+        role_instance=args.role,
+        task_family=args.task_family,
+        cohort=args.cohort,
+        project_root=context.project_root,
+    )
+    _print({
+        "selected": list(result.selected),
+        "excluded": list(result.excluded),
+    })
+    return 0
+
+
+def _skill_source_propose(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_source import build_skill_retain_proposal
+
+    context = _context(args)
+    _print(build_skill_retain_proposal(
+        context.state_dir,
+        project_root=context.project_root,
+        asset_id=args.asset_id,
+        version=args.version,
+        writer=EventWriter(
+            event_log_from_project(context.state_dir, config=context.config)
+        ),
+    ))
+    return 0
+
+
+def _skill_source_apply(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_source import apply_skill_retain_proposal
+
+    context = _context(args)
+    expected_token = os.environ.get(args.owner_token_env, "")
+    supplied_token = Path(args.owner_token_file).read_text(encoding="utf-8").strip()
+    _print(apply_skill_retain_proposal(
+        context.state_dir,
+        project_root=context.project_root,
+        proposal_ref=_load_json(args.proposal_ref_file),
+        supplied_token=supplied_token,
+        expected_token=expected_token,
+        writer=EventWriter(
+            event_log_from_project(context.state_dir, config=context.config)
+        ),
+    ))
+    return 0
+
+
+def _skill_maintenance_propose(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_source import build_skill_maintenance_proposal
+
+    context = _context(args)
+    refs = _load_json(args.evidence_refs_file)
+    if not isinstance(refs, list):
+        raise ValueError("Skill maintenance evidence file must contain a JSON list")
+    _print(build_skill_maintenance_proposal(
+        context.state_dir,
+        skill_name=args.skill,
+        action=args.action,
+        evidence_refs=refs,
+        rationale=args.rationale,
+        writer=EventWriter(
+            event_log_from_project(context.state_dir, config=context.config)
+        ),
+    ))
+    return 0
+
+
+def _skill_routing_report(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_campaign import (
+        build_skill_routing_stress_report,
+    )
+
+    refs = _load_json(args.observation_refs_file)
+    if not isinstance(refs, list):
+        raise ValueError("routing observation refs file must contain a JSON list")
+    _print(build_skill_routing_stress_report(
+        _context(args).state_dir,
+        skill_name=args.skill,
+        candidate_digest=args.candidate_digest,
+        eval_suite_digest=args.eval_suite_digest,
+        required_pool_sizes=list(args.required_pool_size),
+        observation_refs=refs,
+        created_by="zf-cli",
+    ))
+    return 0
+
+
+def _skill_optimizer(args: argparse.Namespace):
+    from zf.runtime.evolution_skill_optimizer import SkillOptimizationService
+
+    context = _context(args)
+    log = event_log_from_project(context.state_dir, config=context.config)
+    return SkillOptimizationService(
+        context.state_dir,
+        event_log=log,
+        event_writer=EventWriter(log),
+    )
+
+
+def _skill_opt_init(args: argparse.Namespace) -> int:
+    _print(_skill_optimizer(args).initialize(
+        _load_json(args.campaign_file),
+        baseline_evaluation=_load_json(args.baseline_evaluation_file),
+    ))
+    return 0
+
+
+def _skill_opt_prepare(args: argparse.Namespace) -> int:
+    _print(_skill_optimizer(args).prepare_step(
+        _load_json(args.state_ref_file),
+        proposal=_load_json(args.proposal_file),
+    ))
+    return 0
+
+
+def _skill_opt_settle(args: argparse.Namespace) -> int:
+    _print(_skill_optimizer(args).settle_step(
+        _load_json(args.state_ref_file),
+        _load_json(args.step_ref_file),
+        evaluation=_load_json(args.evaluation_file),
+    ))
+    return 0
+
+
+def _skill_opt_export(args: argparse.Namespace) -> int:
+    _print(_skill_optimizer(args).export_best(
+        _load_json(args.state_ref_file),
+    ))
+    return 0
 
 
 def _load_json(path: str | Path) -> Any:

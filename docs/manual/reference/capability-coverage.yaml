@@ -430,19 +430,30 @@ capabilities:
         - docs/manual/23-self-evolution-learning.en.md
     code:
       - src/zf/runtime/evolution_automation.py
+      - src/zf/runtime/evolution_automation_support.py
       - src/zf/runtime/evolution_coordinator.py
       - src/zf/runtime/evolution_learning.py
+      - src/zf/runtime/evolution_skill.py
+      - src/zf/runtime/evolution_skill_automation.py
+      - src/zf/runtime/evolution_skill_campaign.py
+      - src/zf/runtime/evolution_skill_feedback.py
+      - src/zf/runtime/evolution_skill_overlay.py
+      - src/zf/runtime/evolution_skill_provider.py
+      - src/zf/runtime/evolution_skill_source.py
       - src/zf/runtime/evolution_trial_runner.py
     tests:
       - tests/test_evolution_runtime.py
       - tests/test_evolution_learning.py
       - tests/test_evolution_environment.py
+      - tests/test_evolution_skill_overlay.py
+      - tests/test_evolution_skill_trust.py
+      - tests/e2e/test_skill_evolution_production_e2e.py
       - tests/e2e/test_self_evolution_unattended_e2e.py
     release:
       activation: Enable Autoresearch resident and the explicit runtime.evolution policy, then validate the configured sealed evaluator root and credential environment variable name.
       readback: Inspect evolution status, EventLog lineage, attempt/trial/canary artifacts, capability state, and post-reuse usage outcomes.
       rollback: Disable evolution or return it to evaluate_only, then revoke assets through receipt-bound controlled transitions while preserving all evidence.
-      authority: Evolution is an evidence and capability lifecycle. It cannot rewrite product Task/Delivery truth; Coordinator never directly edits source, config, Skills, or Memory.
+      authority: Evolution is an evidence and capability lifecycle. It cannot rewrite product Task/Delivery truth; scoped Skill overlays may be auto-revoked, while canonical Skill optimization, replacement, deactivation, or deletion requires an owner-approved source action and parity receipt.
 
   - id: feishu-ai-native
     name: Feishu AI Native 协作闭环

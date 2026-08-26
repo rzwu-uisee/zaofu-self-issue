@@ -28,6 +28,7 @@ from zf.runtime.evolution_skill_eval import (
     compare_skill_treatment_identities,
     validate_skill_eval_suite,
 )
+from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.run_archive import archive_run
 
 
@@ -698,10 +699,48 @@ def test_skill_attempt_contract_enforces_persistent_evidence_floor() -> None:
         validate_evolution_attempt(too_small)
 
 
-def _archive_trial(state_dir: Path, trial_id: str) -> tuple[str, str]:
+def _archive_trial(
+    state_dir: Path,
+    trial_id: str,
+    *,
+    spec: dict,
+    measurement: dict,
+) -> tuple[str, str]:
     live = state_dir / "evolution" / "test-live" / trial_id
     live.mkdir(parents=True)
     (live / "events.jsonl").write_text("", encoding="utf-8")
+    treatment = measurement["treatment"]
+    target = treatment["identity"]["target_skill"]
+    outputs = []
+    materializations = []
+    for case in treatment["cases"]:
+        loaded = bool(case["loaded"])
+        outputs.append({
+            "case_id": case["case_id"],
+            "target_skill_loaded": loaded,
+            "skill_load_evidence": (
+                [{"kind": "provider_skill_read", "digest": SHA["f"]}]
+                if loaded else []
+            ),
+        })
+        skills = []
+        if target["available"]:
+            skills.append({
+                "name": spec["skill_name"],
+                "sha256": target["digest"],
+                "status": "resolved",
+            })
+        materializations.append({
+            "treatment_identity": treatment["identity"],
+            "manifest": {"skills": skills},
+        })
+    provider_outputs = live / "provider-outputs.json"
+    provider_outputs.write_text(json.dumps({
+        "outputs": outputs,
+        "materializations": materializations,
+        "treatment": treatment,
+        "evaluation": {"case_results": measurement["case_results"]},
+    }, indent=2) + "\n", encoding="utf-8")
     result = archive_run(
         project_root=state_dir.parent,
         state_dir=state_dir,
@@ -711,6 +750,7 @@ def _archive_trial(state_dir: Path, trial_id: str) -> tuple[str, str]:
         command="mock-skill-evaluation",
         provider={"provider": "mock", "model": "deterministic"},
         summary={"trial_id": trial_id},
+        supplemental_files={"provider-outputs.json": provider_outputs},
     )
     return str(result.manifest_path), result.manifest_digest
 
@@ -763,7 +803,65 @@ def test_skill_coordinator_mock_e2e_settles_three_arms_before_proposal(
     evaluator = _evaluator(min_trials=2)
     attempt = _full_attempt(evaluator)
     attempt_id = attempt["attempt_id"]
-    identities = _trial_spec()["treatment_identities"]
+    spec = _trial_spec()
+    identities = spec["treatment_identities"]
+    spec_ref = write_immutable_json_sidecar(
+        state_dir,
+        spec,
+        root="evolution/skill-trial-specs",
+        kind="evolution_skill_trial_spec",
+        schema_version="evolution-skill-trial-spec.v1",
+        created_by="test",
+    )
+    observation_ref = write_immutable_json_sidecar(
+        state_dir,
+        {
+            "schema_version": "skill-routing-observation.v1",
+            "skill_name": spec["skill_name"],
+            "candidate_digest": spec["candidate_digest"],
+            "eval_suite_digest": spec["eval_suite_digest"],
+            "pool_size": 1,
+            "treatment": classify_skill_treatment(
+                identity=identities["candidate"],
+                cases=spec["eval_suite"]["cases"],
+                loaded_case_ids=["explicit-1", "implicit-1"],
+            ),
+        },
+        root="evolution/routing-observations",
+        kind="skill_routing_observation",
+        schema_version="skill-routing-observation.v1",
+        created_by="test",
+    )
+    routing = {
+        "schema_version": "skill-routing-stress-report.v1",
+        "skill_name": spec["skill_name"],
+        "candidate_digest": spec["candidate_digest"],
+        "eval_suite_digest": spec["eval_suite_digest"],
+        "required_pool_sizes": [1],
+        "executed_pool_sizes": [1],
+        "negative_case_ids": ["negative-1"],
+        "confusable_case_ids": [],
+        "observation_refs": [observation_ref],
+        "overtrigger_count": 0,
+        "status": "passed",
+    }
+    routing_ref = write_immutable_json_sidecar(
+        state_dir,
+        routing,
+        root="evolution/routing-stress",
+        kind="skill_routing_stress_report",
+        schema_version="skill-routing-stress-report.v1",
+        created_by="test",
+    )
+    attempt["mutation"]["candidate_version"] = spec["candidate_digest"]
+    attempt["frozen_inputs"].update({
+        "skill_treatment_spec_ref": spec_ref["ref"],
+        "skill_treatment_spec_digest": spec_ref["sha256"],
+    })
+    attempt["evaluation_policy"]["skill_adoption"].update({
+        "routing_stress_ref": routing_ref["ref"],
+        "routing_stress_digest": routing_ref["sha256"],
+    })
     coordinator = EvolutionCoordinator(state_dir)
     materialized = coordinator.materialize_attempt(attempt)
     assert materialized["created"] is True
@@ -786,24 +884,32 @@ def test_skill_coordinator_mock_e2e_settles_three_arms_before_proposal(
                 lease_owner="skill-mock-evaluator",
                 lease_expires_at=future,
             )["trial"]
-            archive_ref, archive_digest = _archive_trial(
-                state_dir, trial["trial_id"]
+            measurement = _measurement(
+                evaluator,
+                generic_arm=generic_arm,
+                identity=identities[treatment_arm],
+                replicate=replicate,
+                score=score,
+                trial_id=trial["trial_id"],
+                treatment_spec_digest=spec_ref["sha256"],
             )
+            archive_ref, archive_digest = _archive_trial(
+                state_dir,
+                trial["trial_id"],
+                spec=spec,
+                measurement=measurement,
+            )
+            measurement.update({
+                "evidence_archive_ref": archive_ref,
+                "evidence_archive_digest": archive_digest,
+            })
             settlement = coordinator.settle_trial(
                 trial["trial_id"],
                 lease_owner="skill-mock-evaluator",
                 attempt_number=running["attempt_number"],
                 outcome="passed",
                 evaluator_generation=evaluator,
-                measurement=_measurement(
-                    evaluator,
-                    generic_arm=generic_arm,
-                    identity=identities[treatment_arm],
-                    replicate=replicate,
-                    score=score,
-                    trial_id=trial["trial_id"],
-                    treatment_spec_digest=SHA["1"],
-                ),
+                measurement=measurement,
                 archive_ref=archive_ref,
                 archive_digest=archive_digest,
                 cost_receipt_refs=[f"cost://{trial['trial_id']}"],
@@ -860,7 +966,7 @@ def test_skill_coordinator_mock_e2e_settles_three_arms_before_proposal(
         {
             "asset_id": asset["asset_id"],
             "version": asset["version"],
-            "target_state": "validated",
+            "target_state": "active_retained",
             "policy_digest": "even-an-explicit-whitelist-cannot-bypass-source-approval",
         },
         transition=True,

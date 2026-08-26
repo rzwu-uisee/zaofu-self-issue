@@ -517,6 +517,29 @@ def test_load_runtime_evolution_auto_low_risk_policy(tmp_path: Path) -> None:
     assert evolution.auto_asset_kinds == ["runbook", "regression_fixture"]
 
 
+def test_load_runtime_evolution_allows_explicit_scoped_skill_overlay(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "zf.yaml"
+    p.write_text(
+        'version: "1.0"\n'
+        "project:\n  name: test\n"
+        "runtime:\n"
+        "  autoresearch_resident:\n    enabled: true\n"
+        "  evolution:\n"
+        "    enabled: true\n"
+        "    mode: auto_low_risk\n"
+        "    backend: codex\n"
+        "    sealed_root: .zf/evolution/sealed\n"
+        "    auto_asset_kinds: [skill_prompt]\n",
+        encoding="utf-8",
+    )
+
+    evolution = load_config(p).runtime.evolution
+
+    assert evolution.auto_asset_kinds == ["skill_prompt"]
+
+
 def test_load_runtime_evolution_rejects_high_risk_auto_asset(tmp_path: Path) -> None:
     p = tmp_path / "zf.yaml"
     p.write_text(
@@ -532,7 +555,7 @@ def test_load_runtime_evolution_rejects_high_risk_auto_asset(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigError, match="only contain low-risk kinds"):
+    with pytest.raises(ConfigError, match="only contain policy-authorized kinds"):
         load_config(p)
 
 

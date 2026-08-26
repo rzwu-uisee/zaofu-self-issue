@@ -103,6 +103,26 @@ def admit_synthesized_plan_package(
         "refactor.plan.ready",
     }:
         return final_status, recommendation, artifact_payload
+    event_payload = event.payload if isinstance(event.payload, dict) else {}
+    contract_digest = str(
+        event_payload.get("plan_synth_contract_digest") or ""
+    ).strip()
+    reviewed_digest = str(
+        event_payload.get("reviewed_plan_candidate_digest") or ""
+    ).strip()
+    if contract_digest and reviewed_digest != contract_digest:
+        failure = runtime._contract_failure_payload(
+            artifact_payload,
+            "Plan Critic verdict is not bound to the exact Plan candidate digest",
+        )
+        failure.update({
+            "failure_class": "plan_candidate_review_identity",
+            "attempt_domain": "protocol_repair",
+            "semantic_rework_cost": 0,
+            "plan_synth_contract_digest": contract_digest,
+            "reviewed_plan_candidate_digest": reviewed_digest,
+        })
+        return "failed", "reject", failure
     trigger_payload = (
         manifest.get("trigger_payload")
         if isinstance(manifest.get("trigger_payload"), dict)
@@ -136,13 +156,19 @@ def admit_synthesized_plan_package(
         )
         return final_status, recommendation, {**artifact_payload, **identity}
     except Exception as exc:
+        failure = runtime._contract_failure_payload(
+            artifact_payload,
+            f"plan artifact package admission failed: {exc}",
+        )
+        failure.update({
+            "failure_class": "plan_artifact_package_protocol",
+            "attempt_domain": "protocol_repair",
+            "semantic_rework_cost": 0,
+        })
         return (
             "failed",
             "reject",
-            runtime._contract_failure_payload(
-                artifact_payload,
-                f"plan artifact package admission failed: {exc}",
-            ),
+            failure,
         )
 
 

@@ -652,6 +652,10 @@ def _normalize_plan_synth(
         "plan_revision": _text(source, "plan_revision"),
         "plan_synth_contract_ref": _text(source, "plan_synth_contract_ref"),
         "plan_synth_contract_digest": _text(source, "plan_synth_contract_digest"),
+        "reviewed_plan_candidate_digest": _text(
+            source,
+            "reviewed_plan_candidate_digest",
+        ),
         "summary": str(source.get("summary") or report.get("summary") or ""),
         "artifact_refs": _strings(source.get("artifact_refs") or report.get("artifact_refs")),
         "evidence_refs": _strings(source.get("evidence_refs") or report.get("evidence_refs")),
@@ -716,6 +720,7 @@ def _normalize_plan_synth(
             "plan_revision",
             "plan_synth_contract_ref",
             "plan_synth_contract_digest",
+            "reviewed_plan_candidate_digest",
         )
         if not str(result.get(field) or "").strip()
     ]

@@ -216,6 +216,34 @@ class WriterFanoutDataMixin:
             "artifact_refs": artifact_refs,
             "evidence_refs": evidence_refs,
         }
+        if success_event in {
+            "candidate.quality.passed",
+            "judge.passed",
+            "test.passed",
+            "verify.passed",
+        }:
+            for key in (
+                "candidate_ref",
+                "candidate_head_commit",
+                "candidate_snapshot_event_id",
+                "target_commit",
+                "verification_owner",
+            ):
+                value = self._first_child_value(manifest, payloads, key)
+                if value not in (None, ""):
+                    payload[key] = value
+            anchor_task_id = self._first_child_value(
+                manifest,
+                payloads,
+                "task_id",
+            )
+            if anchor_task_id:
+                payload["candidate_anchor_task_id"] = anchor_task_id
+            if (
+                payload.get("candidate_snapshot_event_id")
+                or payload.get("verification_owner") == "candidate_verify"
+            ):
+                payload["candidate_currentness_required"] = True
         if str(payload.get("flow_kind") or "") == "workflow":
             admitted_input_refs: list[str] = []
             for child in manifest.get("children", []) or []:

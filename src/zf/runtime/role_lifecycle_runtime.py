@@ -55,9 +55,18 @@ class RoleLifecycleRuntimeMixin:
         role: RoleConfig,
         task_id: str | None = None,
     ) -> list:
-        if not role.skills:
-            return []
+        from zf.runtime.skill_dispatch_treatment import (
+            SkillDispatchTreatmentError,
+        )
+
         if self._role_is_on_demand(role):
+            active_tasks = getattr(self, "_active_skill_treatment_tasks", {})
+            active_task = str(active_tasks.get(role.instance_id) or "")
+            if not task_id and active_task:
+                raise SkillDispatchTreatmentError(
+                    "task_id is required while the on-demand role has a "
+                    f"task-scoped Skill treatment for {active_task}"
+                )
             self._ensure_role_active(role, task_id=task_id)
             cache = getattr(self, "_activation_skill_provenance", {})
             cached = cache.pop(
@@ -71,6 +80,8 @@ class RoleLifecycleRuntimeMixin:
                 role=role,
                 task_id=task_id,
             )
+        except SkillDispatchTreatmentError:
+            raise
         except Exception:
             return []
 
@@ -83,13 +94,35 @@ class RoleLifecycleRuntimeMixin:
         execution_runtime_root: Path | None = None,
     ) -> list:
         """Materialize skills after the role workdir exists."""
-        if not role.skills:
-            return []
         from zf.core.skills import (
             build_skill_lock_entries,
             materialize_role_skills,
             upsert_skills_lockfile,
         )
+        from zf.runtime.evolution_skill_overlay import resolve_skill_overlays
+        from zf.runtime.skill_dispatch_treatment import (
+            freeze_skill_dispatch_treatment,
+        )
+
+        task_family = ""
+        if task_id:
+            from zf.core.task.store import TaskStore
+
+            task = TaskStore(self.state_dir / "kanban.json").get(task_id)
+            if task is not None:
+                task_family = str(
+                    task.contract.campaign or task.contract.phase or ""
+                )
+        overlays = resolve_skill_overlays(
+            self.state_dir,
+            role_instance=role.instance_id,
+            task_family=task_family,
+            cohort=task_id or "",
+            project_root=self.project_root,
+        ) if task_id else None
+        overlay_paths = overlays.paths if overlays is not None else {}
+        if not role.skills and not overlay_paths:
+            return []
 
         materialized = materialize_role_skills(
             config=self.config,
@@ -99,6 +132,7 @@ class RoleLifecycleRuntimeMixin:
             task_id=task_id,
             execution_project_root=execution_project_root,
             execution_runtime_root=execution_runtime_root,
+            skill_overrides=overlay_paths,
         )
         materialized_paths = (
             materialized.materialized_paths_under(self.project_root)
@@ -112,14 +146,47 @@ class RoleLifecycleRuntimeMixin:
             task_id=task_id,
             run_id=self._current_run_id(),
             materialized_paths=materialized_paths,
+            skill_overrides=overlay_paths,
         )
         upsert_skills_lockfile(state_dir=self.state_dir, entries=entries)
         if materialized is not None:
+            manifest_payload = materialized.to_payload()
+            treatment = freeze_skill_dispatch_treatment(
+                state_dir=self.state_dir,
+                role_instance=role.instance_id,
+                task_id=str(task_id or ""),
+                run_id=str(self._current_run_id() or ""),
+                selected_overlays=overlays.selected if overlays else (),
+                lock_entries=entries,
+                manifest_payload=manifest_payload,
+            )
+            if task_id:
+                active_tasks = getattr(
+                    self,
+                    "_active_skill_treatment_tasks",
+                    None,
+                )
+                if active_tasks is None:
+                    active_tasks = {}
+                    self._active_skill_treatment_tasks = active_tasks
+                active_tasks[role.instance_id] = str(task_id)
             self.event_writer.append(ZfEvent(
                 type="skills.materialized",
                 actor="zf-cli",
                 task_id=task_id,
-                payload=materialized.to_payload(),
+                payload={
+                    **manifest_payload,
+                    "skill_dispatch_treatment_ref": str(
+                        treatment.get("ref") or ""
+                    ),
+                    "skill_dispatch_treatment_digest": str(
+                        treatment.get("sha256") or ""
+                    ),
+                    "overlay": {
+                        "selected": list(overlays.selected) if overlays else [],
+                        "excluded_count": len(overlays.excluded) if overlays else 0,
+                    },
+                },
             ))
         return entries
 
@@ -643,6 +710,14 @@ class RoleLifecycleRuntimeMixin:
                 now=self._now(),
             )
             return
+
+        getattr(self, "_active_skill_treatment_tasks", {}).pop(
+            role.instance_id,
+            None,
+        )
+        cache = getattr(self, "_activation_skill_provenance", {})
+        for key in [key for key in cache if key[0] == role.instance_id]:
+            cache.pop(key, None)
 
         completed = self._now()
         registry.update_instance_meta(

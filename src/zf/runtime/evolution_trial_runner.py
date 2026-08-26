@@ -22,6 +22,15 @@ from zf.runtime.evolution_environment import (
     evaluate_evolution_environment,
 )
 from zf.runtime.evolution_evaluator import SealedEvaluatorAuthority
+from zf.runtime.evolution_skill import materialize_skill_trial_arm
+from zf.runtime.evolution_skill_campaign import verify_skill_attempt_evidence
+from zf.runtime.evolution_skill_eval import classify_skill_treatment
+from zf.runtime.evolution_skill_provider import (
+    assert_skill_case_identity,
+    codex_skill_isolation_args,
+    skill_load_evidence,
+    skill_trial_prompt,
+)
 from zf.runtime.run_archive import archive_run
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
@@ -188,7 +197,11 @@ def _execute_trial(
             evaluator=campaign["evaluator"],
             trial_id=trial_id,
             arm=arm,
+            replicate=int(row["replicate"]),
             evaluation=evidence["evaluation"],
+            treatment=evidence.get("treatment"),
+            archive_ref=str(archive["manifest"]),
+            archive_digest=str(archive["digest"]),
         )
         cost_ref = write_immutable_json_sidecar(
             state_dir,
@@ -414,8 +427,14 @@ def _run_evaluator_cases(
 ) -> dict[str, Any]:
     outputs: list[dict[str, Any]] = []
     usage: dict[str, float] = {"input_tokens": 0.0, "output_tokens": 0.0}
+    attempt = campaign.get("attempt")
+    if not isinstance(attempt, Mapping):
+        raise EvolutionContractError("evolution campaign has no attempt")
+    skill_spec = verify_skill_attempt_evidence(state_dir, attempt)
 
     def trusted(cases: list[dict[str, Any]]) -> Mapping[str, Any]:
+        if skill_spec:
+            assert_skill_case_identity(skill_spec, cases)
         for index, case in enumerate(cases, start=1):
             result = _invoke_provider(
                 request=request,
@@ -425,6 +444,7 @@ def _run_evaluator_cases(
                 arm=arm,
                 index=index,
                 runner=runner,
+                skill_spec=skill_spec,
             )
             outputs.append(result)
             for key in ("input_tokens", "output_tokens"):
@@ -437,11 +457,34 @@ def _run_evaluator_cases(
         access_token=token,
         trusted_runner=trusted,
     )
-    return {
+    result: dict[str, Any] = {
         "outputs": outputs,
         "usage": {key: int(value) for key, value in usage.items()},
         "evaluation": evaluation,
     }
+    if skill_spec:
+        semantic_arm = str(skill_spec["arm_map"][arm])
+        identity = skill_spec["treatment_identities"][semantic_arm]
+        loaded_case_ids = [
+            str(item["case_id"])
+            for item in outputs
+            if bool(item.get("target_skill_loaded"))
+        ]
+        behavior_by_case = {
+            str(item["case_id"]): bool(item["behavior_followed"])
+            for item in evaluation.get("case_results") or []
+        }
+        treatment = classify_skill_treatment(
+            identity=identity,
+            cases=skill_spec["eval_suite"]["cases"],
+            loaded_case_ids=loaded_case_ids,
+            behavior_by_case=behavior_by_case,
+        )
+        result["treatment"] = treatment
+        result["materializations"] = [
+            dict(item.get("skill_materialization") or {}) for item in outputs
+        ]
+    return result
 
 
 def _invoke_provider(
@@ -453,28 +496,41 @@ def _invoke_provider(
     arm: str,
     index: int,
     runner: ProviderRunner,
+    skill_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(prefix="zf-evolution-provider-"))
     try:
         output = work / "final.txt"
-        candidate_method = (
-            str(campaign["asset"]["content"])
-            if arm == "candidate" else "No candidate method is available."
-        )
-        prompt = (
-            "Solve the evaluation task without reading files or using tools. "
-            "Return only the requested answer; do not mention this evaluation.\n\n"
-            f"Method available:\n{candidate_method}\n\n"
-            f"Task:\n{str(case.get('prompt') or '')}"
-        )
+        skill_materialization: dict[str, Any] = {}
+        if skill_spec:
+            skill_materialization = materialize_skill_trial_arm(
+                workdir=work,
+                backend=backend,
+                spec=skill_spec,
+                arm=arm,
+            )
+            prompt = skill_trial_prompt(skill_spec, case)
+        else:
+            candidate_method = (
+                str(campaign["asset"]["content"])
+                if arm == "candidate" else "No candidate method is available."
+            )
+            prompt = (
+                "Solve the evaluation task without reading files or using tools. "
+                "Return only the requested answer; do not mention this evaluation.\n\n"
+                f"Method available:\n{candidate_method}\n\n"
+                f"Task:\n{str(case.get('prompt') or '')}"
+            )
         model = str(_payload(request).get("model") or "")
         effort = str(_payload(request).get("model_reasoning_effort") or "")
         timeout = int(_payload(request).get("timeout_seconds") or 300)
+        environment = os.environ.copy()
         if backend == "codex":
             command = [
                 "codex", "exec", "--json", "--ephemeral", "--ignore-user-config",
                 "--sandbox", "read-only", "--skip-git-repo-check",
                 "--output-last-message", str(output),
+                *codex_skill_isolation_args(environment=environment),
                 *( ["--model", model] if model else [] ),
                 *( ["--config", f'model_reasoning_effort="{effort}"'] if effort else [] ),
                 "-C", str(work), prompt,
@@ -488,6 +544,7 @@ def _invoke_provider(
         proc = runner(
             command,
             cwd=work,
+            env=environment,
             capture_output=True,
             text=True,
             check=False,
@@ -504,13 +561,38 @@ def _invoke_provider(
             final, audit = _claude_result(proc.stdout or "")
         if not final.strip():
             raise RuntimeError("provider returned no final answer")
+        target_path_raw = str(skill_materialization.get("target_path") or "").strip()
+        target_path = Path(target_path_raw) if target_path_raw else None
+        if target_path is not None and not target_path.is_absolute():
+            target_path = work / target_path
+        load_evidence = skill_load_evidence(
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            skill_name=str(skill_spec.get("skill_name") or "") if skill_spec else "",
+            target_path=str(target_path) if target_path is not None else "",
+        )
+        manifest_payload: dict[str, Any] = {}
+        manifest_path = Path(str(skill_materialization.get("manifest_path") or ""))
+        if manifest_path and not manifest_path.is_absolute():
+            manifest_path = work / manifest_path
+        if skill_spec and manifest_path.is_file():
+            loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_manifest, dict):
+                manifest_payload = loaded_manifest
         return {
             "case_index": index,
+            "case_id": str(case.get("case_id") or f"case-{index}"),
             "final": final.strip(),
             "provider_session_id": audit["provider_session_id"],
             "usage": audit["usage"],
             "stdout": proc.stdout or "",
             "stderr": proc.stderr or "",
+            "target_skill_loaded": bool(load_evidence),
+            "skill_load_evidence": load_evidence,
+            "skill_materialization": {
+                **skill_materialization,
+                "manifest": manifest_payload,
+            } if skill_spec else {},
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -523,7 +605,8 @@ def _score_outputs(
 ) -> dict[str, Any]:
     scores: list[float] = []
     secrets_clear = True
-    for output, case in zip(outputs, cases, strict=True):
+    case_results: list[dict[str, Any]] = []
+    for index, (output, case) in enumerate(zip(outputs, cases, strict=True), start=1):
         text = str(output.get("final") or "").lower()
         required = case.get("required_concepts") or []
         matched = sum(
@@ -536,10 +619,19 @@ def _score_outputs(
             expected = str(case.get("expected_text") or "").strip().lower()
             score = 100.0 if expected and expected in text else 0.0
         scores.append(score)
-        secrets_clear = secrets_clear and not any(
+        case_secrets_clear = not any(
             str(term).lower() in text
             for term in case.get("forbidden_terms") or []
         )
+        secrets_clear = secrets_clear and case_secrets_clear
+        minimum_score = float(case.get("minimum_score") or 60.0)
+        case_results.append({
+            "case_id": str(case.get("case_id") or f"case-{index}"),
+            "case_kind": str(case.get("case_kind") or "explicit"),
+            "score": score,
+            "gate_passed": score >= minimum_score and case_secrets_clear,
+            "behavior_followed": score >= minimum_score and case_secrets_clear,
+        })
     correctness = sum(scores) / len(scores) if scores else 0.0
     minimum = min(
         [float(case.get("minimum_score") or 60.0) for case in cases],
@@ -567,6 +659,7 @@ def _score_outputs(
         "scores": dimensions,
         "gate_passed": gate_passed,
         "total_score": total_score,
+        "case_results": case_results,
     }
 
 
@@ -576,9 +669,13 @@ def _measurement(
     evaluator: Mapping[str, Any],
     trial_id: str,
     arm: str,
+    replicate: int,
     evaluation: Mapping[str, Any],
+    treatment: object = None,
+    archive_ref: str = "",
+    archive_digest: str = "",
 ) -> dict[str, Any]:
-    return {
+    body: dict[str, Any] = {
         "schema_version": "evolution-measurement.v1",
         "trial_id": trial_id,
         "arm": arm,
@@ -587,6 +684,15 @@ def _measurement(
         "gates": dict(evaluation["gates"]),
         "scores": dict(evaluation["scores"]),
     }
+    if isinstance(treatment, Mapping):
+        body.update({
+            "treatment": dict(treatment),
+            "case_results": list(evaluation.get("case_results") or []),
+            "pairing": {"replicate": int(replicate)},
+            "evidence_archive_ref": archive_ref,
+            "evidence_archive_digest": archive_digest,
+        })
+    return body
 
 
 def _record_environment_preflight(

@@ -24,6 +24,7 @@ from zf.core.state.git_state import GitState
 from zf.runtime.call_result_admission import CallResultAdmissionService
 from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.session_tailer import claude_session_path
+from zf.runtime.skill_dispatch_treatment import SkillDispatchTreatmentError
 from zf.runtime.spawn_coordinator import SpawnCoordinator
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
@@ -153,6 +154,18 @@ def test_start_registration_keeps_on_demand_role_dormant(
         active_task="",
         signal={},
     ) == "dormant"
+
+
+def test_taskless_skill_materialization_cannot_overwrite_active_treatment(
+    tmp_path: Path,
+) -> None:
+    orchestrator, role, _transport = _runtime(tmp_path)
+    orchestrator._active_skill_treatment_tasks = {  # type: ignore[attr-defined]
+        role.instance_id: "TASK-CANDIDATE",
+    }
+
+    with pytest.raises(SkillDispatchTreatmentError, match="TASK-CANDIDATE"):
+        orchestrator._record_skill_provenance(role=role)  # type: ignore[attr-defined]
 
 
 def test_dispatch_primitive_activates_on_demand_role_before_send(

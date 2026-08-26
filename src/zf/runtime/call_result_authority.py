@@ -621,11 +621,8 @@ class CallResultAuthorityMixin:
                 "plan_synth_contract_ref",
                 "stale_plan_revision",
             ),
-            (
-                "plan_synth_contract_digest",
-                "plan_synth_contract_digest",
-                "stale_plan_revision",
-            ),
+            ("plan_synth_contract_digest", "plan_synth_contract_digest", "stale_plan_revision"),
+            ("reviewed_plan_candidate_digest", "reviewed_plan_candidate_digest", "stale_plan_revision"),
             (
                 "contract_authority_revision",
                 "contract_authority_revision",

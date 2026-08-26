@@ -9,8 +9,12 @@ from typing import Any, Mapping
 from zf.core.events.model import ZfEvent
 from zf.runtime.evolution_contracts import (
     EvolutionContractError,
+    stable_digest,
     validate_evaluator_generation,
 )
+from zf.runtime.evolution_skill import validate_skill_candidate
+from zf.runtime.evolution_skill_campaign import verify_skill_routing_stress_ref
+from zf.runtime.evolution_skill_eval import validate_skill_eval_suite
 from zf.runtime.run_archive import verify_run_archive
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
@@ -19,6 +23,8 @@ _LOW_RISK_ASSET_KINDS = frozenset({
     "memory_entry",
     "runbook",
     "regression_fixture",
+    # Evaluation is unattended; source mutation remains owner-only.
+    "skill_prompt",
 })
 _HIGH_RISK_MUTATION_KINDS = frozenset({
     "framework_code",
@@ -129,6 +135,13 @@ def validate_candidate(
     evaluator = validate_evaluator_generation(hydrated.payload)
     body["evaluator_ref"] = dict(evaluator_ref)
     body["evaluator"] = evaluator
+    if kind == "skill_prompt":
+        _normalize_skill_candidate(
+            body,
+            deposition=deposition,
+            state_dir=state_dir,
+            evaluator=evaluator,
+        )
     canary_ref = body.get("canary_evaluator_ref")
     if str(getattr(policy, "mode", "evaluate_only")) == "auto_low_risk":
         if not isinstance(canary_ref, Mapping):
@@ -149,3 +162,101 @@ def validate_candidate(
         body["canary_evaluator"] = canary
         body["canary_evaluator_ref"] = dict(canary_ref)
     return body
+
+
+def _normalize_skill_candidate(
+    body: dict[str, Any],
+    *,
+    deposition: Mapping[str, Any],
+    state_dir: Path,
+    evaluator: Mapping[str, Any],
+) -> None:
+    skill_name = str(body.get("skill_name") or "").strip()
+    role_instance = str(body.get("role_instance") or "").strip()
+    if not skill_name or not role_instance:
+        raise EvolutionContractError(
+            "skill_prompt candidate requires skill_name and role_instance"
+        )
+    suite_ref = body.get("skill_eval_suite_ref")
+    if not isinstance(suite_ref, Mapping):
+        raise EvolutionContractError(
+            "skill_prompt candidate requires skill_eval_suite_ref"
+        )
+    hydrated = hydrate_sidecar_ref(
+        state_dir,
+        dict(suite_ref),
+        purpose="skill-evolution-suite-intake",
+        actor="run-manager",
+    )
+    if not isinstance(hydrated.payload, Mapping):
+        raise EvolutionContractError("Skill eval suite payload is invalid")
+    suite = validate_skill_eval_suite(hydrated.payload)
+    task_family = str(body["task_family"])
+    source_rows = body.get("source_trajectories")
+    if not isinstance(source_rows, list) or not source_rows:
+        deposition_id = str(deposition.get("artifact_id") or body["asset_id"])
+        source_rows = [{
+            "ref": f"capability-deposition://{deposition_id}",
+            "digest": stable_digest(deposition),
+            "outcome": "passed",
+        }]
+    applicability = (
+        dict(body.get("applicability") or {})
+        if isinstance(body.get("applicability"), Mapping)
+        else {}
+    )
+    applicability_identity = {
+        "task_family": task_family,
+        "role_instance": role_instance,
+        "applicability": applicability,
+    }
+    candidate = validate_skill_candidate({
+        "schema_version": "skill-candidate.v1",
+        "skill_name": skill_name,
+        "candidate_version": str(body.get("candidate_version") or ""),
+        "task_families": [task_family],
+        "applicability_ref": (
+            f"capability-deposition://"
+            f"{str(deposition.get('artifact_id') or body['asset_id'])}"
+        ),
+        "applicability_digest": stable_digest(applicability_identity),
+        "source_trajectories": source_rows,
+        "content": str(body["content"]),
+        "public_eval_suite_ref": str(suite_ref.get("ref") or ""),
+        "public_eval_suite_digest": str(suite["suite_digest"]),
+        "sealed_eval_generation_ref": str(
+            evaluator.get("holdout_authority_ref") or ""
+        ),
+        "evaluation_purpose": str(suite["evaluation_purpose"]),
+        "routing_mode": str(suite["routing_mode"]),
+    })
+    body["skill_name"] = skill_name
+    body["role_instance"] = role_instance
+    body["skill_candidate"] = candidate
+    body["skill_eval_suite"] = suite
+    body["skill_eval_suite_ref"] = dict(suite_ref)
+    body["support_skill_names"] = _string_list(body.get("support_skill_names"))
+    if suite["evaluation_purpose"] == "adoption_lift":
+        routing_ref = body.get("routing_stress_ref")
+        if not isinstance(routing_ref, Mapping):
+            raise EvolutionContractError(
+                "adoption_lift skill candidate requires routing_stress_ref"
+            )
+        verify_skill_routing_stress_ref(
+            state_dir,
+            routing_ref,
+            expected_skill=skill_name,
+            expected_candidate_digest=str(candidate["content_digest"]),
+            expected_eval_suite_digest=str(suite["suite_digest"]),
+        )
+        body["routing_stress_ref"] = dict(routing_ref)
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(
+        str(item).strip() for item in value if str(item).strip()
+    ))

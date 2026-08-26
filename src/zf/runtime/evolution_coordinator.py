@@ -25,6 +25,10 @@ from zf.runtime.evolution_evaluator import (
 )
 from zf.runtime.evolution_store import CapabilityRegistry, EvolutionTrialStore
 from zf.runtime.evolution_projection import build_evolution_projection
+from zf.runtime.evolution_skill_campaign import (
+    verify_skill_attempt_evidence,
+    verify_skill_trial_settlement,
+)
 from zf.runtime.run_archive import RunArchiveError, verify_run_archive
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref, verify_sidecar_ref
 
@@ -71,6 +75,7 @@ class EvolutionCoordinator:
         actor: str = "evolution-coordinator",
     ) -> dict[str, Any]:
         attempt = validate_evolution_attempt(raw)
+        verify_skill_attempt_evidence(self.state_dir, attempt)
         descriptor = write_immutable_json_sidecar(
             self.state_dir,
             attempt,
@@ -216,6 +221,15 @@ class EvolutionCoordinator:
             normalized = validate_measurement(evaluator_generation, measurement)
             if str(normalized["trial_id"]) != trial_id:
                 raise EvolutionContractError("measurement trial_id mismatch")
+            attempt = self._attempt_body(str(trial_row["attempt_id"]))
+            verify_skill_trial_settlement(
+                self.state_dir,
+                attempt=attempt,
+                trial=trial_row,
+                measurement=normalized,
+                archive_path=archive_path,
+                archive_digest=normalized_archive_digest,
+            )
             descriptor = write_immutable_json_sidecar(
                 self.state_dir,
                 normalized,
@@ -301,6 +315,7 @@ class EvolutionCoordinator:
     ) -> dict[str, Any]:
         evaluator = validate_evaluator_generation(evaluator_generation)
         attempt = self._attempt_body(attempt_id)
+        verify_skill_attempt_evidence(self.state_dir, attempt)
         mutation = attempt.get("mutation") or {}
         baseline: list[dict[str, Any]] = []
         candidate: list[dict[str, Any]] = []
@@ -535,73 +550,25 @@ class EvolutionCoordinator:
         role_instance: str,
         outcome: str,
         cost: Mapping[str, Any],
+        feedback: Mapping[str, Any] | None = None,
         config: Any | None = None,
         project_root: Path | None = None,
     ) -> dict[str, Any]:
-        """Credit a skill asset only when invocation evidence is observable."""
+        from zf.runtime.evolution_skill_feedback import record_skill_outcome
 
-        from zf.runtime.skill_invocation_projection import project_skill_invocations
-
-        key = f"{asset_id}@{int(version)}"
-        asset = self.capabilities.load()["assets"].get(key)
-        if not isinstance(asset, dict) or asset.get("asset_kind") != "skill_prompt":
-            raise EvolutionContractError("skill outcome requires a skill_prompt asset")
-        hydrated = hydrate_sidecar_ref(
-            self.state_dir,
-            dict(asset["artifact_ref"]),
-            purpose="skill-evolution-outcome",
-            actor="evolution-observer",
-        )
-        body = hydrated.payload if isinstance(hydrated.payload, Mapping) else {}
-        declared = str(body.get("skill_name") or body.get("name") or "").strip()
-        if declared and declared != skill_name:
-            raise EvolutionContractError("skill asset name does not match invocation")
-        projection = project_skill_invocations(
-            self.state_dir,
-            config=config,
-            project_root=project_root or self.state_dir.parent,
-            task_id=task_id,
-            role_instance=role_instance,
-        )
-        invoked = [
-            row
-            for row in projection.get("skills") or []
-            if row.get("skill") == skill_name and bool(row.get("invoked"))
-        ]
-        if not invoked:
-            raise EvolutionContractError(
-                "skill outcome has no observed invocation evidence"
-            )
-        evidence_ids = sorted({
-            str(item.get("event_id") or "")
-            for row in invoked
-            for item in row.get("evidence") or []
-            if str(item.get("event_id") or "")
-        })
-        usage_ref = "skill-invocation://" + stable_digest({
-            "asset": key,
-            "skill": skill_name,
-            "task_id": task_id,
-            "role_instance": role_instance,
-            "evidence_ids": evidence_ids,
-        })
-        result = self.record_asset_outcome(
+        return record_skill_outcome(
+            self,
             asset_id=asset_id,
             version=version,
-            usage_ref=usage_ref,
-            matched=True,
+            skill_name=skill_name,
+            task_id=task_id,
+            role_instance=role_instance,
             outcome=outcome,
             cost=cost,
-            actor="skill-invocation-projector",
+            feedback=feedback,
+            config=config,
+            project_root=project_root,
         )
-        result["invocation"] = {
-            "skill": skill_name,
-            "task_id": task_id,
-            "role_instance": role_instance,
-            "evidence_event_ids": evidence_ids,
-            "usage_ref": usage_ref,
-        }
-        return result
 
     def materialize_challenge(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         from zf.runtime.evolution_learning import ChallengeBank

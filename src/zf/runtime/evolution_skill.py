@@ -221,6 +221,9 @@ def materialize_skill_trial_arm(
         role=role,
         task_id="evolution-skill-trial",
         execution_project_root=root,
+        provider_skill_root=(
+            root / ".codex" / "skills" if backend == "codex" else None
+        ),
     )
     entries = list(result.skills) if result is not None else []
     observed_support = sorted(

@@ -32,6 +32,7 @@ PLAN_SYNTH_HANDOFF_KEYS = (
     "plan_revision",
     "plan_synth_contract_ref",
     "plan_synth_contract_digest",
+    "reviewed_plan_candidate_digest",
 )
 PLAN_SYNTH_SEMANTIC_FIELDS = (
     "artifact_refs",
@@ -513,6 +514,8 @@ class PlanSynthRuntimeMixin:
                             "recommendation": "reject",
                             "summary": "plan candidate failed mechanical preflight",
                             "failure_class": "plan_candidate_preflight",
+                            "attempt_domain": "protocol_repair",
+                            "semantic_rework_cost": 0,
                             "plan_candidate_preflight_ref": descriptor,
                             "previous_plan_candidate_refs": [
                                 *candidate_refs,
@@ -548,7 +551,6 @@ class PlanSynthRuntimeMixin:
             ):
                 return
             self._checkout_fanout_reader(role, str(manifest.get("target_ref") or ""))
-            skill_entries = self._record_skill_provenance(role=role)
             call_payload: dict[str, Any] = {}
             prepared_call = None
             if is_plan_synth:
@@ -589,6 +591,21 @@ class PlanSynthRuntimeMixin:
                 )
                 if not prepared_call.should_dispatch:
                     return
+            trigger_payload = (
+                manifest.get("trigger_payload")
+                if isinstance(manifest.get("trigger_payload"), dict)
+                else {}
+            )
+            skill_entries = self._record_skill_provenance(
+                role=role,
+                task_id=str(
+                    call_payload.get("task_id")
+                    or trigger_payload.get("task_id")
+                    or manifest.get("task_id")
+                    or ""
+                )
+                or None,
+            )
             briefing_path = self._write_fanout_synth_briefing(
                 role=role,
                 manifest=manifest,

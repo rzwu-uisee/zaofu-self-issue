@@ -298,6 +298,7 @@ def _running_plan_synth_operation(tmp_path: Path):
         "plan_revision": "plan-r1",
         "plan_synth_contract_ref": "artifacts/contracts/plan-r1.json",
         "plan_synth_contract_digest": "a" * 64,
+        "reviewed_plan_candidate_digest": "a" * 64,
     }
     prepared = prepare_call_operation(
         runtime,
@@ -600,6 +601,41 @@ def test_plan_candidate_validate_can_fail_fix_and_submit_same_operation(
     assert submitted.canonical_event_type == "issue.triage.child.completed"
 
 
+def test_plan_candidate_submit_cannot_bypass_same_attempt_preflight(
+    tmp_path: Path,
+) -> None:
+    runtime, prepared, service, token = _running_plan_candidate_operation(
+        tmp_path
+    )
+    invalid = _plan_candidate()
+    invalid["task_map"]["tasks"][0]["acceptance_criteria"][0].pop(
+        "verification_command_ids"
+    )
+
+    with pytest.raises(ResultSubmitError) as rejected:
+        service.submit(
+            operation_id=prepared.operation_id,
+            semantic_result=invalid,
+            role_instance="planner",
+            credential=token,
+        )
+
+    assert rejected.value.code == "plan_candidate_not_admitted"
+    assert rejected.value.details["attempt_domain"] == "protocol_repair"
+    assert rejected.value.details["semantic_rework_cost"] == 0
+    assert not any(
+        event.type == "workflow.call.result.admitted"
+        for event in runtime.event_log.read_all()
+    )
+    submitted = service.submit(
+        operation_id=prepared.operation_id,
+        semantic_result=_plan_candidate(),
+        role_instance="planner",
+        credential=token,
+    )
+    assert submitted.canonical_event_type == "issue.triage.child.completed"
+
+
 def test_plan_synth_validate_uses_typed_profile_without_candidate_context(
     tmp_path: Path,
 ) -> None:
@@ -613,6 +649,7 @@ def test_plan_synth_validate_uses_typed_profile_without_candidate_context(
         "plan_revision": "plan-r1",
         "plan_synth_contract_ref": "artifacts/contracts/plan-r1.json",
         "plan_synth_contract_digest": "a" * 64,
+        "reviewed_plan_candidate_digest": "a" * 64,
         "summary": "plan approved",
         "report": {
             "child_id": "synth",
