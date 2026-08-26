@@ -320,6 +320,9 @@ def specialize_skill_campaign(
             "Skill evaluator must freeze skill_treatment_spec_digest"
         )
     common_identity = {
+        "runtime_commit_digest": str(frozen.get("runtime_commit_digest") or ""),
+        "provider_digest": str(frozen.get("provider_capability_digest") or ""),
+        "model_digest": str(frozen.get("model_digest") or ""),
         "support_skill_inventory_digest": stable_digest(support_identity),
         "role_profile_digest": stable_digest(asdict(role)),
         "briefing_digest": str(deposition_ref.get("sha256") or ""),
@@ -336,6 +339,9 @@ def specialize_skill_campaign(
             if isinstance(row, Mapping)
         ]),
         "tool_policy_digest": str(frozen.get("sandbox_policy_digest") or ""),
+        "sandbox_policy_digest": str(frozen.get("sandbox_policy_digest") or ""),
+        "network_policy_digest": str(frozen.get("network_policy_digest") or ""),
+        "budget_digest": str(frozen.get("budget_digest") or ""),
         "eval_suite_generation_digest": str(suite.get("suite_digest") or ""),
     }
     spec = build_skill_trial_spec(

@@ -6,7 +6,6 @@ folds immutable facts into the next request or controlled action.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -32,7 +31,16 @@ from zf.runtime.evolution_skill_source import (
     build_skill_maintenance_proposal,
     build_skill_retain_proposal,
 )
+from zf.runtime.evolution_skill_optimizer_automation import (
+    is_skill_optimizer_intake,
+    materialize_skill_optimizer_intake,
+    reconcile_skill_optimizer_automation,
+)
 from zf.runtime.evolution_automation_support import (
+    CAMPAIGN_COMPLETED, CAMPAIGN_DECLINED, CAMPAIGN_MATERIALIZED,
+    CAMPAIGN_REQUESTED, CANARY_FAILED, CANARY_REQUESTED,
+    EvolutionAutomationResult, TRIAL_EXECUTION_COMPLETED,
+    TRIAL_EXECUTION_FAILED, TRIAL_REQUESTED,
     asset_for_attempt as _asset_for_attempt,
     campaign_terminal as _campaign_terminal,
     canary_failure_count as _canary_failure_count,
@@ -42,6 +50,8 @@ from zf.runtime.evolution_automation_support import (
     complete_campaign as _complete_campaign,
     controlled_outcome as _controlled_outcome,
     controlled_transition as _controlled_transition,
+    event_payload as _payload,
+    handled_evolution_sources as _handled_evolution_sources,
     hydrate_campaign as _hydrate_campaign,
     latest_campaigns as _latest_campaigns,
     next_asset_version as _next_asset_version,
@@ -58,52 +68,6 @@ from zf.runtime.evolution_intake import (
 from zf.runtime.run_archive import RunArchiveError
 from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
-
-
-CAMPAIGN_REQUESTED = "evolution.campaign.requested"
-CAMPAIGN_MATERIALIZED = "evolution.campaign.materialized"
-CAMPAIGN_DECLINED = "evolution.campaign.declined"
-CAMPAIGN_COMPLETED = "evolution.campaign.completed"
-TRIAL_REQUESTED = "evolution.trial.requested"
-TRIAL_EXECUTION_COMPLETED = "evolution.trial.execution.completed"
-TRIAL_EXECUTION_FAILED = "evolution.trial.execution.failed"
-CANARY_REQUESTED = "evolution.canary.requested"
-CANARY_FAILED = "evolution.canary.failed"
-
-@dataclass(frozen=True)
-class EvolutionAutomationResult:
-    intake_materialized: int = 0
-    intake_declined: int = 0
-    trials_requested: int = 0
-    comparisons_completed: int = 0
-    assets_proposed: int = 0
-    controlled_actions: int = 0
-    campaigns_completed: int = 0
-
-    @property
-    def changed(self) -> bool:
-        return any((
-            self.intake_materialized,
-            self.intake_declined,
-            self.trials_requested,
-            self.comparisons_completed,
-            self.assets_proposed,
-            self.controlled_actions,
-            self.campaigns_completed,
-        ))
-
-    @property
-    def action_count(self) -> int:
-        return sum((
-            self.intake_materialized,
-            self.intake_declined,
-            self.trials_requested,
-            self.comparisons_completed,
-            self.assets_proposed,
-            self.controlled_actions,
-            self.campaigns_completed,
-        ))
-
 
 def reconcile_evolution_automation(
     *,
@@ -132,6 +96,10 @@ def reconcile_evolution_automation(
         "assets_proposed": 0,
         "controlled_actions": 0,
         "campaigns_completed": 0,
+        "optimizer_requests": 0,
+        "optimizer_steps": 0,
+        "optimizer_exports": 0,
+        "optimizer_rejected": 0,
     }
 
     health_actions = reconcile_skill_overlay_health(
@@ -146,17 +114,22 @@ def reconcile_evolution_automation(
     if health_actions:
         events = writer.event_log.read_all()
 
-    handled_sources = {
-        str(_payload(event).get("source_event_id") or "")
-        for event in events
-        if event.type in {CAMPAIGN_MATERIALIZED, CAMPAIGN_DECLINED}
-    }
-    handled_deposition_digests = {
-        str(_payload(event).get("deposition_digest") or "")
-        for event in events
-        if event.type in {CAMPAIGN_MATERIALIZED, CAMPAIGN_DECLINED}
-        and str(_payload(event).get("deposition_digest") or "")
-    }
+    optimizer = reconcile_skill_optimizer_automation(
+        state_dir=state_dir,
+        writer=writer,
+        policy=policy,
+        events=events,
+        max_actions=remaining,
+    )
+    counts["optimizer_requests"] += optimizer.requests
+    counts["optimizer_steps"] += optimizer.steps
+    counts["optimizer_exports"] += optimizer.exports
+    counts["optimizer_rejected"] += optimizer.rejected
+    remaining -= optimizer.action_count
+    if optimizer.action_count:
+        events = writer.event_log.read_all()
+
+    handled_sources, handled_deposition_digests = _handled_evolution_sources(events)
     for event in events:
         if remaining <= 0:
             break
@@ -196,6 +169,23 @@ def reconcile_evolution_automation(
                 )
                 handled_sources.add(event.id)
                 counts["intake_declined"] += 1
+                remaining -= 1
+                continue
+            if is_skill_optimizer_intake(deposition):
+                materialized = materialize_skill_optimizer_intake(
+                    state_dir=state_dir,
+                    writer=writer,
+                    deposition=deposition,
+                    deposition_ref=deposition_ref,
+                    source_event=event,
+                    policy=policy,
+                )
+                counts["intake_materialized"] += 1
+                counts["optimizer_requests"] += int(
+                    bool(materialized["optimizer_request"]["created"])
+                )
+                handled_sources.add(event.id)
+                handled_deposition_digests.add(deposition_digest)
                 remaining -= 1
                 continue
             candidate = _validate_candidate(
@@ -751,6 +741,28 @@ def _materialize_campaign(
         * int(getattr(policy, "trial_repetitions", 2)) * 2,
         "max_tokens": float(getattr(policy, "max_tokens", 50_000)),
     }
+    project_environment = environment_capability.get("environment")
+    project_identity = (
+        project_environment.get("project")
+        if isinstance(project_environment, Mapping)
+        else {}
+    )
+    git_identity = (
+        project_identity.get("git")
+        if isinstance(project_identity, Mapping)
+        else {}
+    )
+    runtime_commit_digest = stable_digest(
+        dict(git_identity) if isinstance(git_identity, Mapping) else {}
+    )
+    model_digest = stable_digest({
+        "provider": str(getattr(policy, "backend", "")),
+        "model": str(getattr(policy, "model", "") or "provider-default"),
+        "reasoning_effort": str(
+            getattr(policy, "model_reasoning_effort", "") or ""
+        ),
+    })
+    budget_digest = stable_digest(budget)
     comparison_identity = {
         "scenario_set_digest": evaluator["scenario_set_digest"],
         "config_generation": config_snapshot["sha256"],
@@ -760,7 +772,7 @@ def _materialize_campaign(
         "sandbox_policy_digest": sandbox_snapshot["sha256"],
         "network_policy_digest": network_snapshot["sha256"],
         "credential_policy_digest": credential_snapshot["sha256"],
-        "budget_digest": stable_digest(budget),
+        "budget_digest": budget_digest,
         "seed_policy_digest": stable_digest({"seed": "provider-managed-counterbalanced"}),
         "task_family": task_family,
     }
@@ -841,6 +853,9 @@ def _materialize_campaign(
             "network_policy_digest": network_snapshot["sha256"],
             "credential_policy_ref": credential_snapshot["ref"],
             "credential_policy_digest": credential_snapshot["sha256"],
+            "runtime_commit_digest": runtime_commit_digest,
+            "model_digest": model_digest,
+            "budget_digest": budget_digest,
             "run_archive_manifest_ref": manifest_ref,
             "run_archive_manifest_digest": manifest_digest,
         },
@@ -968,10 +983,6 @@ def _materialize_campaign(
             deposition_ref=deposition_ref,
         )
     return campaign
-
-
-def _payload(event: ZfEvent) -> dict[str, Any]:
-    return event.payload if isinstance(event.payload, dict) else {}
 
 
 __all__ = [

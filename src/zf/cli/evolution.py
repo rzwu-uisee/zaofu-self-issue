@@ -374,6 +374,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     optimizer_export.add_argument("--state-ref-file", required=True)
     optimizer_export.set_defaults(func=_skill_opt_export)
 
+    optimizer_agent = commands.add_parser(
+        "skill-opt-agent-execute",
+        help="Execute one proposal-only Optimizer Agent request",
+    )
+    _state_arg(optimizer_agent)
+    optimizer_agent.add_argument("--request-event-id", required=True)
+    optimizer_agent.set_defaults(func=_skill_opt_agent_execute)
+
+    optimizer_selection = commands.add_parser(
+        "skill-opt-selection-submit",
+        help="Validate and publish one sealed optimizer Selection result",
+    )
+    _state_arg(optimizer_selection)
+    optimizer_selection.add_argument("--selection-request-event-id", required=True)
+    optimizer_selection.add_argument("--evaluation-file", required=True)
+    optimizer_selection.set_defaults(func=_skill_opt_selection_submit)
+
 
 def _state_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-dir")
@@ -832,6 +849,39 @@ def _skill_opt_export(args: argparse.Namespace) -> int:
     _print(_skill_optimizer(args).export_best(
         _load_json(args.state_ref_file),
     ))
+    return 0
+
+
+def _skill_opt_agent_execute(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_optimizer_agent import (
+        execute_skill_optimizer_proposal,
+    )
+
+    context = _context(args)
+    log = event_log_from_project(context.state_dir, config=context.config)
+    result = execute_skill_optimizer_proposal(
+        state_dir=context.state_dir,
+        request_event_id=args.request_event_id,
+        writer=EventWriter(log),
+    )
+    _print(result)
+    return 0 if bool(result.get("ok")) else 1
+
+
+def _skill_opt_selection_submit(args: argparse.Namespace) -> int:
+    from zf.runtime.evolution_skill_optimizer_automation import (
+        submit_skill_optimizer_selection,
+    )
+
+    context = _context(args)
+    log = event_log_from_project(context.state_dir, config=context.config)
+    result = submit_skill_optimizer_selection(
+        state_dir=context.state_dir,
+        writer=EventWriter(log),
+        selection_request_event_id=args.selection_request_event_id,
+        evaluation=_load_json(args.evaluation_file),
+    )
+    _print(result)
     return 0
 
 

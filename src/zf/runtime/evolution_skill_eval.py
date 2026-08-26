@@ -14,7 +14,8 @@ from zf.runtime.evolution_contracts import (
 
 
 SKILL_EVAL_SUITE_SCHEMA = "skill-eval-suite.v1"
-SKILL_TREATMENT_IDENTITY_SCHEMA = "skill-treatment-identity.v1"
+SKILL_TREATMENT_IDENTITY_SCHEMA = "skill-treatment-identity.v2"
+LEGACY_SKILL_TREATMENT_IDENTITY_SCHEMA = "skill-treatment-identity.v1"
 EVALUATION_PURPOSES = frozenset({
     "treatment_smoke",
     "content_lift",
@@ -32,13 +33,28 @@ CASE_KINDS = frozenset({
 TREATMENT_EXPECTATIONS = frozenset({"required", "optional", "forbidden"})
 TREATMENT_ARMS = frozenset({"raw", "current", "candidate"})
 _FORCED_PURPOSES = frozenset({"treatment_smoke", "content_lift"})
-_COMMON_IDENTITY_DIGESTS = (
+_LEGACY_COMMON_IDENTITY_DIGESTS = (
     "support_skill_inventory_digest",
     "role_profile_digest",
     "briefing_digest",
     "prompt_digest",
     "workspace_fixture_digest",
     "tool_policy_digest",
+    "eval_suite_generation_digest",
+)
+_COMMON_IDENTITY_DIGESTS = (
+    "runtime_commit_digest",
+    "provider_digest",
+    "model_digest",
+    "support_skill_inventory_digest",
+    "role_profile_digest",
+    "briefing_digest",
+    "prompt_digest",
+    "workspace_fixture_digest",
+    "tool_policy_digest",
+    "sandbox_policy_digest",
+    "network_policy_digest",
+    "budget_digest",
     "eval_suite_generation_digest",
 )
 
@@ -150,9 +166,13 @@ def validate_skill_treatment_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Freeze the single treatment while keeping common conditions comparable."""
 
     body = deepcopy(dict(raw))
-    if body.get("schema_version") != SKILL_TREATMENT_IDENTITY_SCHEMA:
+    schema_version = str(body.get("schema_version") or "")
+    if schema_version not in {
+        LEGACY_SKILL_TREATMENT_IDENTITY_SCHEMA,
+        SKILL_TREATMENT_IDENTITY_SCHEMA,
+    }:
         raise EvolutionContractError(
-            f"schema_version must be {SKILL_TREATMENT_IDENTITY_SCHEMA}"
+            "schema_version must be a supported Skill treatment identity"
         )
     arm = str(body.get("arm") or "").strip()
     if arm not in TREATMENT_ARMS:
@@ -193,10 +213,16 @@ def validate_skill_treatment_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
                 )
             normalized_target[key] = ""
     common: dict[str, str] = {}
-    for key in _COMMON_IDENTITY_DIGESTS:
+    common_fields = (
+        _LEGACY_COMMON_IDENTITY_DIGESTS
+        if schema_version == LEGACY_SKILL_TREATMENT_IDENTITY_SCHEMA
+        else _COMMON_IDENTITY_DIGESTS
+    )
+    for key in common_fields:
         common[key] = normalize_digest(body.get(key), field=key)
         body[key] = common[key]
     body.update(policy)
+    body["schema_version"] = schema_version
     body["arm"] = arm
     body["target_skill"] = normalized_target
     body["common_fingerprint"] = stable_digest(common)

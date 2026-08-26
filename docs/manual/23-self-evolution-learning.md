@@ -186,6 +186,48 @@ proposal，但 canonical `skills/` 的优化、替换、禁用或删除必须由
 source currentness，并同步 `.codex/skills/` 与 `.claude/skills/`。当前没有“Agent 自行卸载
 源码 Skill”的合法路径。
 
+### 5.2 纯因果 Skill 优化器
+
+正式 Skill 优化使用 `skill-treatment-identity.v2` 冻结 runtime commit、Provider、model、
+role/profile、prompt、支撑 Skill、workspace fixture、tool、sandbox、network、budget 和 evaluator
+generation。Raw、Current、Candidate 三臂只允许目标 Skill 的可用性、版本和 digest 不同；公共
+身份漂移时，本轮比较是 `incomparable`，不能形成提升结论。
+
+Provider case 同时产出两类相互独立的证据：
+
+```text
+最终输出 -> correctness / product gate
+Provider stream -> immutable normalized trajectory -> behavior verdict
+```
+
+因此，输出正确但未读取目标 Skill 时，correctness 可以通过而 behavior 仍为 `false`；没有显式
+可观察行为合同则为 `null`。轨迹正文保存在 sidecar，EventLog 只保存 ref、digest 与 verdict。
+
+Optimizer campaign 使用互斥的 Train、Selection、Test：
+
+- Optimizer Agent 只读取 current Skill、Train evidence、failure clusters 和 rejection buffer；
+- Selection evaluator 只用于逐步选择，并必须绑定精确 split、generation 和 case result refs；
+- Test 保持 sealed，只用于最终 179 adoption proof；best candidate 不会直接写入 `skills/`。
+
+生产闭环由 Autoresearch resident 执行 proposal-only Agent request，sealed evaluator 发布
+Selection，Run Manager 校验 currentness 并结算。常用恢复/运维入口：
+
+```bash
+uv run zf evolution skill-opt-agent-execute \
+  --state-dir "$STATE_DIR" \
+  --request-event-id <proposal-request-event-id>
+
+uv run zf evolution skill-opt-selection-submit \
+  --state-dir "$STATE_DIR" \
+  --selection-request-event-id <selection-request-event-id> \
+  --evaluation-file /path/to/sealed-selection-result.json
+```
+
+`skill-opt-init`、`skill-opt-prepare`、`skill-opt-settle` 和 `skill-opt-export` 仍是机械调试与
+恢复入口。只有带三个 immutable split descriptor 的 v2 campaign 能进入 Agent route；旧 v1
+campaign 仅用于历史恢复。完成的 best 仍进入 Design 179 的 test、routing、canary 和 owner retain
+流程。
+
 ## 6. 记忆：工作笔记与学习资产
 
 当前有两类跨 session 信息，不应混为一谈：

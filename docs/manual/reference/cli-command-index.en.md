@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **69** top-level families and **294** addressable command paths.
+The parser currently exposes **69** top-level families and **296** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -253,9 +253,11 @@ Manage evidence-bound self-evolution attempts and capabilities
 | `zf evolution evaluator-register` | Register public evaluator metadata and sealed cases |
 | `zf evolution opportunity-propose` | Materialize a proposal-only evolution opportunity |
 | `zf evolution skill-maintenance-propose` | Record an optimize/replace/merge/deactivate Skill proposal |
+| `zf evolution skill-opt-agent-execute` | Execute one proposal-only Optimizer Agent request |
 | `zf evolution skill-opt-export` | Export the completed optimizer best as a design-179 Skill candidate |
 | `zf evolution skill-opt-init` | Initialize one bounded, frozen single-Skill optimization campaign |
 | `zf evolution skill-opt-prepare` | Apply one bounded Agent-proposed Skill edit packet |
+| `zf evolution skill-opt-selection-submit` | Validate and publish one sealed optimizer Selection result |
 | `zf evolution skill-opt-settle` | Select one prepared Skill candidate against held-out evidence |
 | `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
 | `zf evolution skill-overlay-resolve` | Resolve scoped Skill canary overlays for a future dispatch |

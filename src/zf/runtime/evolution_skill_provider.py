@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -65,14 +66,30 @@ def skill_load_evidence(
     stderr: str,
     skill_name: str,
     target_path: str,
+    backend: str = "",
+    prompt: str = "",
 ) -> list[dict[str, str]]:
     if not skill_name or not target_path:
         return []
-    targets = {
-        str(Path(target_path).resolve(strict=False)),
-        str(Path(target_path).resolve(strict=False) / "SKILL.md"),
-    }
+    resolved_target = Path(target_path).resolve(strict=False)
+    targets = {str(resolved_target), str(resolved_target / "SKILL.md")}
     evidence: list[dict[str, str]] = []
+    if (
+        str(backend or "").strip() == "codex"
+        and (resolved_target / "SKILL.md").is_file()
+        and _has_explicit_skill_mention(prompt, skill_name)
+    ):
+        evidence.append({
+            "kind": "provider_skill_injected",
+            "skill": skill_name,
+            "line": "-1",
+            "digest": stable_digest({
+                "backend": "codex",
+                "invocation_type": "explicit",
+                "skill": skill_name,
+                "target_path": str(resolved_target),
+            }),
+        })
     for line_number, line in enumerate((stdout + "\n" + stderr).splitlines(), start=1):
         text = line.strip()
         if not text or not any(target in text for target in targets):
@@ -89,6 +106,13 @@ def skill_load_evidence(
             "digest": stable_digest(text),
         })
     return evidence
+
+
+def _has_explicit_skill_mention(prompt: str, skill_name: str) -> bool:
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_-])\${re.escape(skill_name)}(?![A-Za-z0-9_-])"
+    )
+    return bool(pattern.search(str(prompt or "")))
 
 
 def codex_skill_isolation_args(

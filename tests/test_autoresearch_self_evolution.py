@@ -684,6 +684,51 @@ def test_resident_executes_evolution_request_with_identity_and_terminal(
     assert len(calls) == 1
 
 
+def test_resident_executes_optimizer_agent_request_with_own_terminal_types(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / ".zf"
+    log = EventLog(state_dir / "events.jsonl")
+    log.append(ZfEvent(
+        id="evt-skill-optimizer-request",
+        type="evolution.skill_optimizer.proposal.requested",
+        actor="run-manager",
+        payload={
+            "campaign_id": "skillopt-1",
+            "request_key": "request-key-1",
+            "timeout_seconds": 30,
+        },
+    ))
+    calls: list[list[str]] = []
+
+    def _fake_runner(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    actions = run_resident_once(
+        state_dir=state_dir,
+        worktree_root=tmp_path / "worktrees",
+        output_root=tmp_path / "out",
+        execute=True,
+        env={"ZF_AUTORESEARCH_RESIDENT": "authorized"},
+        runner=_fake_runner,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].action == "run_skill_optimizer_agent"
+    assert "skill-opt-agent-execute" in calls[0]
+    events = log.read_all()
+    for event_type in (
+        "evolution.skill_optimizer.execution.accepted",
+        "evolution.skill_optimizer.execution.started",
+        "evolution.skill_optimizer.execution.completed",
+    ):
+        event = next(event for event in events if event.type == event_type)
+        assert event.payload["request_event_id"] == "evt-skill-optimizer-request"
+        assert event.payload["campaign_id"] == "skillopt-1"
+        assert event.payload["optimizer_request_key"] == "request-key-1"
+
+
 def test_resident_execute_respects_max_actions_per_tick(tmp_path):
     state_dir = tmp_path / ".zf"
     log = EventLog(state_dir / "events.jsonl")

@@ -212,6 +212,10 @@ def _run_skill_campaign(
             ),
             "required_concepts": [["method_candidate"], ["check_candidate"]],
             "minimum_score": 80,
+            "behavior_expectations": [
+                {"metric": "activation", "value": True},
+                {"metric": "security_clear", "value": True},
+            ],
         },
         {
             "case_id": "implicit-1",
@@ -223,6 +227,10 @@ def _run_skill_campaign(
             ),
             "required_concepts": [["method_candidate"], ["check_candidate"]],
             "minimum_score": 80,
+            "behavior_expectations": [
+                {"metric": "activation", "value": True},
+                {"metric": "security_clear", "value": True},
+            ],
         },
         {
             "case_id": "negative-1",
@@ -231,6 +239,10 @@ def _run_skill_campaign(
             "prompt": "negative task",
             "required_concepts": [["decline"]],
             "minimum_score": 80,
+            "behavior_expectations": [
+                {"metric": "activation", "value": False},
+                {"metric": "security_clear", "value": True},
+            ],
         },
     ]
     evaluator, evaluator_ref = authority.register_generation(
@@ -269,12 +281,18 @@ def _run_skill_campaign(
         common_identity={
             key: stable_digest({"routing": key})
             for key in (
+                "runtime_commit_digest",
+                "provider_digest",
+                "model_digest",
                 "support_skill_inventory_digest",
                 "role_profile_digest",
                 "briefing_digest",
                 "prompt_digest",
                 "workspace_fixture_digest",
                 "tool_policy_digest",
+                "sandbox_policy_digest",
+                "network_policy_digest",
+                "budget_digest",
                 "eval_suite_generation_digest",
             )
         },
@@ -464,6 +482,21 @@ def test_skill_campaign_uses_real_materialization_and_archive_admission(
     ]
     assert control_outputs
     assert all(not output["target_skill_loaded"] for output in control_outputs)
+    all_outputs = [
+        output
+        for result in proof["settled_results"]
+        for output in result["provider"]["outputs"]
+    ]
+    assert all(output["trajectory_ref"]["ref"] for output in all_outputs)
+    candidate_results = [
+        case
+        for result in proof["settled_results"]
+        if result["trial"]["arm"] == "candidate"
+        for case in result["provider"]["evaluation"]["case_results"]
+    ]
+    assert candidate_results
+    assert all(case["behavior_followed"] is True for case in candidate_results)
+    assert all(case["behavior_verdict_ref"]["ref"] for case in candidate_results)
     row = proof["registry"]["assets"]["demo-method-candidate@1"]
     assert row["state"] == "candidate"
     assert row["digest"] == _sha(proof["candidate"])

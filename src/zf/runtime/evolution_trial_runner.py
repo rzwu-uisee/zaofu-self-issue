@@ -25,6 +25,14 @@ from zf.runtime.evolution_evaluator import SealedEvaluatorAuthority
 from zf.runtime.evolution_skill import materialize_skill_trial_arm
 from zf.runtime.evolution_skill_campaign import verify_skill_attempt_evidence
 from zf.runtime.evolution_skill_eval import classify_skill_treatment
+from zf.runtime.evolution_skill_measurement import (
+    persist_behavior_verdicts,
+    score_provider_outputs,
+)
+from zf.runtime.evolution_skill_trajectory import (
+    TRAJECTORY_SCHEMA,
+    normalize_provider_trajectory,
+)
 from zf.runtime.evolution_skill_provider import (
     assert_skill_case_identity,
     codex_skill_isolation_args,
@@ -446,16 +454,32 @@ def _run_evaluator_cases(
                 runner=runner,
                 skill_spec=skill_spec,
             )
+            trajectory_ref = write_immutable_json_sidecar(
+                state_dir,
+                result["trajectory"],
+                root="evolution/skill-trajectories",
+                kind="skill_provider_trajectory",
+                schema_version=TRAJECTORY_SCHEMA,
+                created_by="autoresearch-evolution-runner",
+                source_event_id=request.id,
+            )
+            result["trajectory_ref"] = trajectory_ref
             outputs.append(result)
             for key in ("input_tokens", "output_tokens"):
                 usage[key] += float((result.get("usage") or {}).get(key) or 0)
-        return _score_outputs(outputs, cases, evaluator)
+        return score_provider_outputs(outputs, cases, evaluator)
 
     evaluation = authority.evaluate(
         str(evaluator["holdout_authority_ref"]),
         generation_digest=str(evaluator["generation_digest"]),
         access_token=token,
         trusted_runner=trusted,
+    )
+    persist_behavior_verdicts(
+        state_dir=state_dir,
+        request=request,
+        outputs=outputs,
+        evaluation=evaluation,
     )
     result: dict[str, Any] = {
         "outputs": outputs,
@@ -471,8 +495,9 @@ def _run_evaluator_cases(
             if bool(item.get("target_skill_loaded"))
         ]
         behavior_by_case = {
-            str(item["case_id"]): bool(item["behavior_followed"])
+            str(item["case_id"]): item["behavior_followed"]
             for item in evaluation.get("case_results") or []
+            if isinstance(item.get("behavior_followed"), bool)
         }
         treatment = classify_skill_treatment(
             identity=identity,
@@ -570,6 +595,8 @@ def _invoke_provider(
             stderr=proc.stderr or "",
             skill_name=str(skill_spec.get("skill_name") or "") if skill_spec else "",
             target_path=str(target_path) if target_path is not None else "",
+            backend=backend,
+            prompt=prompt,
         )
         manifest_payload: dict[str, Any] = {}
         manifest_path = Path(str(skill_materialization.get("manifest_path") or ""))
@@ -579,6 +606,15 @@ def _invoke_provider(
             loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if isinstance(loaded_manifest, dict):
                 manifest_payload = loaded_manifest
+        trajectory = normalize_provider_trajectory(
+            case_id=str(case.get("case_id") or f"case-{index}"),
+            backend=backend,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            final=final.strip(),
+            skill_load_evidence=load_evidence,
+            workspace_root=str(work),
+        )
         return {
             "case_index": index,
             "case_id": str(case.get("case_id") or f"case-{index}"),
@@ -589,6 +625,7 @@ def _invoke_provider(
             "stderr": proc.stderr or "",
             "target_skill_loaded": bool(load_evidence),
             "skill_load_evidence": load_evidence,
+            "trajectory": trajectory,
             "skill_materialization": {
                 **skill_materialization,
                 "manifest": manifest_payload,
@@ -596,71 +633,6 @@ def _invoke_provider(
         }
     finally:
         shutil.rmtree(work, ignore_errors=True)
-
-
-def _score_outputs(
-    outputs: list[Mapping[str, Any]],
-    cases: list[Mapping[str, Any]],
-    evaluator: Mapping[str, Any],
-) -> dict[str, Any]:
-    scores: list[float] = []
-    secrets_clear = True
-    case_results: list[dict[str, Any]] = []
-    for index, (output, case) in enumerate(zip(outputs, cases, strict=True), start=1):
-        text = str(output.get("final") or "").lower()
-        required = case.get("required_concepts") or []
-        matched = sum(
-            1 for alternatives in required
-            if any(str(term).lower() in text for term in alternatives)
-        )
-        if required:
-            score = matched / len(required) * 100.0
-        else:
-            expected = str(case.get("expected_text") or "").strip().lower()
-            score = 100.0 if expected and expected in text else 0.0
-        scores.append(score)
-        case_secrets_clear = not any(
-            str(term).lower() in text
-            for term in case.get("forbidden_terms") or []
-        )
-        secrets_clear = secrets_clear and case_secrets_clear
-        minimum_score = float(case.get("minimum_score") or 60.0)
-        case_results.append({
-            "case_id": str(case.get("case_id") or f"case-{index}"),
-            "case_kind": str(case.get("case_kind") or "explicit"),
-            "score": score,
-            "gate_passed": score >= minimum_score and case_secrets_clear,
-            "behavior_followed": score >= minimum_score and case_secrets_clear,
-        })
-    correctness = sum(scores) / len(scores) if scores else 0.0
-    minimum = min(
-        [float(case.get("minimum_score") or 60.0) for case in cases],
-        default=60.0,
-    )
-    gate_passed = correctness >= minimum and secrets_clear
-    gates: dict[str, str] = {}
-    for gate in evaluator["required_gates"]:
-        gate_id = str(gate["id"])
-        if "secret" in gate_id.lower():
-            gates[gate_id] = "passed" if secrets_clear else "failed"
-        else:
-            gates[gate_id] = "passed" if gate_passed else "failed"
-    dimensions = {
-        str(item["id"]): (
-            max(0.0, min(100.0, correctness))
-            if "correct" in str(item["id"]).lower()
-            else 100.0 if gate_passed else 0.0
-        )
-        for item in evaluator["required_score_dimensions"]
-    }
-    total_score = sum(dimensions.values()) / len(dimensions) if dimensions else 0.0
-    return {
-        "gates": gates,
-        "scores": dimensions,
-        "gate_passed": gate_passed,
-        "total_score": total_score,
-        "case_results": case_results,
-    }
 
 
 def _measurement(

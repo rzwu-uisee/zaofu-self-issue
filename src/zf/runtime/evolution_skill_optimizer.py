@@ -15,6 +15,7 @@ from zf.runtime.evolution_skill import validate_skill_candidate
 from zf.runtime.evolution_skill_optimizer_contracts import (
     CAMPAIGN_SCHEMA,
     EVALUATION_SCHEMA,
+    LEGACY_CAMPAIGN_SCHEMA,
     MATERIAL_SCHEMA,
     PROPOSAL_SCHEMA,
     STATE_SCHEMA,
@@ -42,16 +43,21 @@ class SkillOptimizationService:
         *,
         event_log: EventLog,
         event_writer: EventWriter,
+        actor: str = "zf-cli",
     ) -> None:
         self.state_dir = Path(state_dir)
         self.event_log = event_log
         self.event_writer = event_writer
+        self.actor = str(actor or "zf-cli")
 
     def initialize(
         self,
         campaign: Mapping[str, Any],
         *,
         baseline_evaluation: Mapping[str, Any],
+        source_event_id: str = "",
+        source_deposition_digest: str = "",
+        source_context_ref: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized, base_content = normalize_campaign(campaign)
         campaign_id = str(normalized["campaign_id"])
@@ -73,7 +79,7 @@ class SkillOptimizationService:
             normalized,
             root="evolution/skill-optimizer/campaigns",
             kind="skill_optimization_campaign",
-            schema_version=CAMPAIGN_SCHEMA,
+            schema_version=str(normalized["schema_version"]),
         )
         evaluation = normalize_evaluation(
             baseline_evaluation,
@@ -105,11 +111,13 @@ class SkillOptimizationService:
             "slow_meta_state": {},
             "slow_meta_revision": 0,
             "last_step_ref": {},
+            "source_context_ref": dict(source_context_ref or {}),
         }
         state_ref = self._write_state(state)
         event = self.event_writer.append(ZfEvent(
             type="evolution.skill_optimizer.started",
-            actor="zf-cli",
+            actor=self.actor,
+            causation_id=source_event_id,
             correlation_id=campaign_id,
             payload={
                 "schema_version": STATE_SCHEMA,
@@ -118,6 +126,9 @@ class SkillOptimizationService:
                 "state_ref": state_ref,
                 "best_content_digest": state["best_content_digest"],
                 "epoch": 0,
+                "source_event_id": source_event_id,
+                "source_deposition_digest": source_deposition_digest,
+                "source_context_ref": dict(source_context_ref or {}),
             },
         ))
         return {
@@ -204,7 +215,7 @@ class SkillOptimizationService:
         )
         event = self.event_writer.append(ZfEvent(
             type="evolution.skill_optimizer.step.prepared",
-            actor="zf-cli",
+            actor=self.actor,
             correlation_id=str(campaign["campaign_id"]),
             payload={
                 "schema_version": STEP_SCHEMA,
@@ -350,7 +361,7 @@ class SkillOptimizationService:
         state_ref = self._write_state(new_state)
         completed = self.event_writer.append(ZfEvent(
             type="evolution.skill_optimizer.step.completed",
-            actor="zf-cli",
+            actor=self.actor,
             correlation_id=str(campaign["campaign_id"]),
             payload={
                 "schema_version": STATE_SCHEMA,
@@ -370,7 +381,7 @@ class SkillOptimizationService:
         if status == "completed":
             self.event_writer.append(ZfEvent(
                 type="evolution.skill_optimizer.completed",
-                actor="zf-cli",
+                actor=self.actor,
                 causation_id=completed.id,
                 correlation_id=str(campaign["campaign_id"]),
                 payload={
@@ -419,6 +430,10 @@ class SkillOptimizationService:
                 "state_ref": dict(state_descriptor),
                 "accepted_step_count": state["accepted_step_count"],
                 "best_evaluation_ref": state["best_evaluation_ref"],
+                "dataset_split_digest": str(
+                    campaign.get("dataset_split_digest") or ""
+                ),
+                "test_split": _test_split_provenance(campaign),
             },
         })
         candidate_ref = _write_sidecar(
@@ -430,7 +445,7 @@ class SkillOptimizationService:
         )
         event = self.event_writer.append(ZfEvent(
             type="evolution.skill_optimizer.candidate.exported",
-            actor="zf-cli",
+            actor=self.actor,
             correlation_id=str(campaign["campaign_id"]),
             payload={
                 "schema_version": "skill-candidate.v1",
@@ -447,11 +462,77 @@ class SkillOptimizationService:
             "event_id": event.id,
         }
 
+    def agent_context(
+        self,
+        state_descriptor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return only Train-visible optimizer state for one proposal turn."""
+
+        state = self._current_state(state_descriptor)
+        campaign = self._campaign(state)
+        if campaign.get("schema_version") != CAMPAIGN_SCHEMA:
+            raise SkillOptimizerError(
+                "Optimizer Agent requires a train/selection/test isolated campaign"
+            )
+        material = _hydrate_payload(
+            self.state_dir,
+            state["best_material_ref"],
+            schema_version=MATERIAL_SCHEMA,
+        )
+        train = campaign["dataset_splits"]["train"]
+        return {
+            "campaign_id": campaign["campaign_id"],
+            "skill_name": campaign["skill_name"],
+            "epoch": state["epoch"],
+            "max_epochs": campaign["max_epochs"],
+            "max_edits_per_step": campaign["max_edits_per_step"],
+            "best_content": material["content"],
+            "best_content_digest": state["best_content_digest"],
+            "train_split": dict(train),
+            "rejection_buffer": deepcopy(list(state["rejection_buffer"])),
+            "slow_meta_state": deepcopy(dict(state["slow_meta_state"])),
+            "slow_meta_revision": state["slow_meta_revision"],
+        }
+
+    def selection_context(
+        self,
+        state_descriptor: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return the sealed Selection identity after an Agent proposal turn."""
+
+        state = self._current_state(state_descriptor)
+        campaign = self._campaign(state)
+        if campaign.get("schema_version") != CAMPAIGN_SCHEMA:
+            raise SkillOptimizerError(
+                "Optimizer selection requires an isolated campaign"
+            )
+        return {
+            "campaign_id": campaign["campaign_id"],
+            "selection_split": deepcopy(
+                dict(campaign["dataset_splits"]["selection"])
+            ),
+        }
+
+    def validate_selection_evaluation(
+        self,
+        state_descriptor: Mapping[str, Any],
+        *,
+        candidate_digest: str,
+        evaluation: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        state = self._current_state(state_descriptor)
+        campaign = self._campaign(state)
+        return normalize_evaluation(
+            evaluation,
+            campaign=campaign,
+            expected_candidate_digest=str(candidate_digest),
+        )
+
     def _campaign(self, state: Mapping[str, Any]) -> dict[str, Any]:
         return _hydrate_payload(
             self.state_dir,
             state["campaign_ref"],
-            schema_version=CAMPAIGN_SCHEMA,
+            schema_version={LEGACY_CAMPAIGN_SCHEMA, CAMPAIGN_SCHEMA},
         )
 
     def _current_state(
@@ -547,7 +628,7 @@ def _hydrate_payload(
     state_dir: Path,
     descriptor: Mapping[str, Any],
     *,
-    schema_version: str,
+    schema_version: str | set[str],
 ) -> dict[str, Any]:
     if not isinstance(descriptor, Mapping):
         raise SkillOptimizerError("Skill optimizer sidecar descriptor is invalid")
@@ -558,9 +639,25 @@ def _hydrate_payload(
         actor="zf-cli",
     )
     payload = hydrated.payload
-    if not isinstance(payload, Mapping) or payload.get("schema_version") != schema_version:
-        raise SkillOptimizerError(f"Skill optimizer sidecar must be {schema_version}")
+    accepted = {schema_version} if isinstance(schema_version, str) else schema_version
+    if not isinstance(payload, Mapping) or payload.get("schema_version") not in accepted:
+        raise SkillOptimizerError(
+            "Skill optimizer sidecar has an unsupported schema version"
+        )
     return deepcopy(dict(payload))
+
+
+def _test_split_provenance(campaign: Mapping[str, Any]) -> dict[str, str]:
+    splits = campaign.get("dataset_splits")
+    test = splits.get("test") if isinstance(splits, Mapping) else None
+    if not isinstance(test, Mapping):
+        return {}
+    return {
+        "ref": str(test.get("ref") or ""),
+        "digest": str(test.get("digest") or ""),
+        "descriptor_digest": str(test.get("descriptor_digest") or ""),
+        "generation_ref": str(test.get("generation_ref") or ""),
+    }
 
 
 def _same_ref(left: object, right: object) -> bool:

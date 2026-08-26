@@ -1,5 +1,5 @@
 schema_version: zf-manual-capability-coverage.v1
-last_verified: 2026-08-21
+last_verified: 2026-08-26
 capabilities:
   - id: project-bootstrap
     name: Project 初始化与 Bootstrap
@@ -437,15 +437,24 @@ capabilities:
       - src/zf/runtime/evolution_skill_automation.py
       - src/zf/runtime/evolution_skill_campaign.py
       - src/zf/runtime/evolution_skill_feedback.py
+      - src/zf/runtime/evolution_skill_measurement.py
       - src/zf/runtime/evolution_skill_overlay.py
+      - src/zf/runtime/evolution_skill_optimizer.py
+      - src/zf/runtime/evolution_skill_optimizer_agent.py
+      - src/zf/runtime/evolution_skill_optimizer_automation.py
+      - src/zf/runtime/evolution_skill_optimizer_contracts.py
       - src/zf/runtime/evolution_skill_provider.py
       - src/zf/runtime/evolution_skill_source.py
+      - src/zf/runtime/evolution_skill_trajectory.py
       - src/zf/runtime/evolution_trial_runner.py
     tests:
       - tests/test_evolution_runtime.py
       - tests/test_evolution_learning.py
       - tests/test_evolution_environment.py
       - tests/test_evolution_skill_overlay.py
+      - tests/test_evolution_skill_optimizer.py
+      - tests/test_evolution_skill_optimizer_closure.py
+      - tests/test_evolution_skill_trajectory.py
       - tests/test_evolution_skill_trust.py
       - tests/e2e/test_skill_evolution_production_e2e.py
       - tests/e2e/test_self_evolution_unattended_e2e.py

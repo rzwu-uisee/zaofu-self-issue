@@ -91,12 +91,18 @@ def _candidate(suite: dict) -> dict:
 
 def _common_identity(support_digest: str) -> dict[str, str]:
     return {
+        "runtime_commit_digest": SHA["7"],
+        "provider_digest": SHA["8"],
+        "model_digest": SHA["9"],
         "support_skill_inventory_digest": support_digest,
         "role_profile_digest": SHA["1"],
         "briefing_digest": SHA["2"],
         "prompt_digest": SHA["3"],
         "workspace_fixture_digest": SHA["4"],
         "tool_policy_digest": SHA["5"],
+        "sandbox_policy_digest": SHA["a"],
+        "network_policy_digest": SHA["b"],
+        "budget_digest": SHA["c"],
         "eval_suite_generation_digest": SHA["6"],
     }
 
@@ -988,12 +994,18 @@ def test_skill_trial_cli_is_a_real_entrypoint(tmp_path: Path, capsys) -> None:
         "common": {
             key: spec["treatment_identities"]["raw"][key]
             for key in (
+                "runtime_commit_digest",
+                "provider_digest",
+                "model_digest",
                 "support_skill_inventory_digest",
                 "role_profile_digest",
                 "briefing_digest",
                 "prompt_digest",
                 "workspace_fixture_digest",
                 "tool_policy_digest",
+                "sandbox_policy_digest",
+                "network_policy_digest",
+                "budget_digest",
                 "eval_suite_generation_digest",
             )
         },

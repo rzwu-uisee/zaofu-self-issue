@@ -16,7 +16,9 @@ from zf.runtime.evolution_contracts import (
 from zf.runtime.evolution_skill import validate_skill_candidate
 
 
-CAMPAIGN_SCHEMA = "skill-optimization-campaign.v1"
+CAMPAIGN_SCHEMA = "skill-optimization-campaign.v2"
+LEGACY_CAMPAIGN_SCHEMA = "skill-optimization-campaign.v1"
+DATASET_SPLIT_SCHEMA = "skill-eval-split.v1"
 EVALUATION_SCHEMA = "skill-optimization-evaluation.v1"
 MATERIAL_SCHEMA = "skill-optimization-material.v1"
 PROPOSAL_SCHEMA = "skill-edit-proposal.v1"
@@ -24,7 +26,7 @@ STATE_SCHEMA = "skill-optimizer-state.v1"
 STEP_SCHEMA = "skill-optimization-step.v1"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$")
-_FROZEN_IDENTITY_KEYS = frozenset({
+_LEGACY_FROZEN_IDENTITY_KEYS = frozenset({
     "eval_suite_digest",
     "grader_digest",
     "model_digest",
@@ -32,6 +34,16 @@ _FROZEN_IDENTITY_KEYS = frozenset({
     "provider_digest",
     "support_skill_inventory_digest",
     "workspace_fixture_digest",
+})
+_FROZEN_IDENTITY_KEYS = frozenset({
+    *_LEGACY_FROZEN_IDENTITY_KEYS,
+    "runtime_commit_digest",
+    "role_profile_digest",
+    "tool_policy_digest",
+    "sandbox_policy_digest",
+    "network_policy_digest",
+    "evaluator_generation_digest",
+    "budget_digest",
 })
 
 
@@ -41,8 +53,9 @@ class SkillOptimizerError(EvolutionContractError):
 
 def normalize_campaign(raw: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     body = deepcopy(dict(raw))
-    if body.get("schema_version") != CAMPAIGN_SCHEMA:
-        raise SkillOptimizerError(f"schema_version must be {CAMPAIGN_SCHEMA}")
+    schema_version = str(body.get("schema_version") or "")
+    if schema_version not in {LEGACY_CAMPAIGN_SCHEMA, CAMPAIGN_SCHEMA}:
+        raise SkillOptimizerError("Skill optimizer campaign schema_version is unsupported")
     campaign_id = str(body.get("campaign_id") or "").strip()
     if not _ID_RE.fullmatch(campaign_id):
         raise SkillOptimizerError("Skill optimizer campaign_id is invalid")
@@ -67,7 +80,12 @@ def normalize_campaign(raw: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         "content": base_content,
     })
     frozen = body.get("frozen_identity")
-    if not isinstance(frozen, Mapping) or set(frozen) != _FROZEN_IDENTITY_KEYS:
+    expected_frozen_keys = (
+        _FROZEN_IDENTITY_KEYS
+        if schema_version == CAMPAIGN_SCHEMA
+        else _LEGACY_FROZEN_IDENTITY_KEYS
+    )
+    if not isinstance(frozen, Mapping) or set(frozen) != expected_frozen_keys:
         raise SkillOptimizerError(
             "Skill optimizer frozen_identity must contain the exact required keys"
         )
@@ -81,9 +99,42 @@ def normalize_campaign(raw: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     )
     if normalized_frozen["eval_suite_digest"] != suite_digest:
         raise SkillOptimizerError("frozen eval suite digest drift")
-    if candidate["public_eval_suite_digest"] != suite_digest:
-        raise SkillOptimizerError("candidate metadata eval suite digest drift")
+    if schema_version == CAMPAIGN_SCHEMA:
+        splits = normalize_dataset_splits(body.get("dataset_splits"))
+        selection = splits["selection"]
+        test = splits["test"]
+        if selection["digest"] != suite_digest:
+            raise SkillOptimizerError("selection split and eval suite digest drift")
+        if candidate["public_eval_suite_digest"] != test["digest"]:
+            raise SkillOptimizerError("candidate metadata must bind the Test split digest")
+        sealed_test_generation_ref = str(
+            body.get("sealed_test_generation_ref") or ""
+        ).strip()
+        if not sealed_test_generation_ref.startswith(
+            "sealed-evaluator://generation/"
+        ):
+            raise SkillOptimizerError("sealed_test_generation_ref must be opaque")
+        if candidate["sealed_eval_generation_ref"] != sealed_test_generation_ref:
+            raise SkillOptimizerError("candidate metadata Test generation drift")
+        body.update({
+            "dataset_splits": splits,
+            "dataset_split_digest": stable_digest(splits),
+            "split_seed": _bounded_int(body.get("split_seed"), "split_seed", 0, 2**31 - 1),
+            "sealed_test_generation_ref": sealed_test_generation_ref,
+            "optimizer_protocol": "train-selection-test-isolated",
+        })
+    else:
+        if candidate["public_eval_suite_digest"] != suite_digest:
+            raise SkillOptimizerError("candidate metadata eval suite digest drift")
+        body.update({
+            "dataset_splits": {},
+            "dataset_split_digest": "",
+            "split_seed": 0,
+            "sealed_test_generation_ref": candidate["sealed_eval_generation_ref"],
+            "optimizer_protocol": "legacy-single-suite",
+        })
     body.update({
+        "schema_version": schema_version,
         "campaign_id": campaign_id,
         "skill_name": skill_name,
         "candidate_metadata": candidate_metadata,
@@ -197,11 +248,26 @@ def normalize_evaluation(
         "eval_suite_digest": str(campaign["eval_suite_digest"]),
         "frozen_identity_digest": str(campaign["frozen_identity_digest"]),
     }
+    if campaign.get("schema_version") == CAMPAIGN_SCHEMA:
+        selection = campaign["dataset_splits"]["selection"]
+        expected.update({
+            "split": "selection",
+            "split_ref": str(selection["ref"]),
+            "split_digest": str(selection["digest"]),
+            "split_descriptor_digest": str(selection["descriptor_digest"]),
+            "evaluator_generation_ref": str(selection["generation_ref"]),
+        })
     for key, value in expected.items():
-        actual = str(body.get(key) or "").removeprefix("sha256:")
-        if actual != value.removeprefix("sha256:"):
+        actual = str(body.get(key) or "")
+        normalized_actual = (
+            actual.removeprefix("sha256:") if key.endswith("digest") else actual
+        )
+        normalized_expected = (
+            value.removeprefix("sha256:") if key.endswith("digest") else value
+        )
+        if normalized_actual != normalized_expected:
             raise SkillOptimizerError(f"Skill optimization evaluation {key} drift")
-        body[key] = value.removeprefix("sha256:") if key.endswith("digest") else value
+        body[key] = normalized_expected
     score_input = body.get("scores")
     if not isinstance(score_input, Mapping):
         raise SkillOptimizerError("Skill optimization evaluation scores are required")
@@ -219,7 +285,12 @@ def normalize_evaluation(
         weighted += value * weight
         total_weight += weight
     evidence = body.get("case_result_refs")
-    if not isinstance(evidence, list) or not evidence:
+    if campaign.get("schema_version") == CAMPAIGN_SCHEMA:
+        evidence = _selection_case_result_refs(
+            evidence,
+            campaign["dataset_splits"]["selection"],
+        )
+    elif not isinstance(evidence, list) or not evidence:
         raise SkillOptimizerError("held-out evaluation requires case_result_refs")
     body.update({
         "scores": scores,
@@ -227,6 +298,112 @@ def normalize_evaluation(
         "case_result_refs": deepcopy(evidence),
     })
     return body
+
+
+def normalize_dataset_splits(value: object) -> dict[str, dict[str, Any]]:
+    """Validate immutable Train/Selection/Test descriptors and lineage isolation."""
+
+    if not isinstance(value, Mapping) or set(value) != {"train", "selection", "test"}:
+        raise SkillOptimizerError(
+            "dataset_splits must contain exact train/selection/test descriptors"
+        )
+    result = {
+        name: _normalize_split_descriptor(raw, expected_split=name)
+        for name, raw in value.items()
+    }
+    for field in ("case_ids", "fixture_digests", "lineage_refs"):
+        owners: dict[str, str] = {}
+        for split_name, descriptor in result.items():
+            for item in descriptor[field]:
+                prior = owners.setdefault(str(item), split_name)
+                if prior != split_name:
+                    raise SkillOptimizerError(
+                        f"dataset split {field} overlap: {item} in {prior}/{split_name}"
+                    )
+    return result
+
+
+def _normalize_split_descriptor(
+    raw: object,
+    *,
+    expected_split: str,
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise SkillOptimizerError(f"{expected_split} split descriptor is required")
+    body = deepcopy(dict(raw))
+    if body.get("schema_version") != DATASET_SPLIT_SCHEMA:
+        raise SkillOptimizerError(f"{expected_split} split schema is invalid")
+    if str(body.get("split") or "") != expected_split:
+        raise SkillOptimizerError(f"{expected_split} split identity drift")
+    ref = str(body.get("ref") or "").strip()
+    generation_ref = str(body.get("generation_ref") or "").strip()
+    if not ref or not generation_ref:
+        raise SkillOptimizerError(f"{expected_split} split ref/generation_ref are required")
+    digest = normalize_digest(body.get("digest"), field=f"{expected_split}.digest")
+    case_ids = _unique_strings(body.get("case_ids"), f"{expected_split}.case_ids")
+    fixture_digests = [
+        normalize_digest(item, field=f"{expected_split}.fixture_digests")
+        for item in _unique_strings(
+            body.get("fixture_digests"), f"{expected_split}.fixture_digests"
+        )
+    ]
+    lineage_refs = _unique_strings(
+        body.get("lineage_refs"), f"{expected_split}.lineage_refs"
+    )
+    normalized = {
+        "schema_version": DATASET_SPLIT_SCHEMA,
+        "split": expected_split,
+        "ref": ref,
+        "digest": digest,
+        "generation_ref": generation_ref,
+        "case_ids": case_ids,
+        "fixture_digests": fixture_digests,
+        "lineage_refs": lineage_refs,
+    }
+    supplied = str(body.get("descriptor_digest") or "").strip()
+    normalized["descriptor_digest"] = stable_digest(normalized)
+    if supplied and normalize_digest(
+        supplied, field=f"{expected_split}.descriptor_digest"
+    ) != normalized["descriptor_digest"]:
+        raise SkillOptimizerError(f"{expected_split} split descriptor digest drift")
+    return normalized
+
+
+def _selection_case_result_refs(
+    value: object,
+    selection: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise SkillOptimizerError("Selection evaluation requires case_result_refs")
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise SkillOptimizerError("Selection case_result_refs must be typed objects")
+        case_id = str(item.get("case_id") or "").strip()
+        ref = str(item.get("ref") or "").strip()
+        if not case_id or case_id in seen or not ref:
+            raise SkillOptimizerError("Selection case result identity is invalid")
+        seen.add(case_id)
+        rows.append({
+            "case_id": case_id,
+            "ref": ref,
+            "digest": normalize_digest(
+                item.get("digest"), field=f"Selection case {case_id} digest"
+            ),
+        })
+    if seen != set(selection["case_ids"]):
+        raise SkillOptimizerError("Selection case_result_refs must cover the exact split")
+    return rows
+
+
+def _unique_strings(value: object, field: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise SkillOptimizerError(f"{field} must be a non-empty list")
+    rows = [str(item or "").strip() for item in value]
+    if any(not item for item in rows) or len(set(rows)) != len(rows):
+        raise SkillOptimizerError(f"{field} must contain unique non-empty values")
+    return rows
 
 
 def _normalize_edit(raw: object, index: int) -> dict[str, str]:
@@ -305,7 +482,9 @@ def _finite_float(value: object, name: str) -> float:
 
 __all__ = [
     "CAMPAIGN_SCHEMA",
+    "DATASET_SPLIT_SCHEMA",
     "EVALUATION_SCHEMA",
+    "LEGACY_CAMPAIGN_SCHEMA",
     "MATERIAL_SCHEMA",
     "PROPOSAL_SCHEMA",
     "STATE_SCHEMA",
@@ -313,6 +492,7 @@ __all__ = [
     "SkillOptimizerError",
     "apply_edits",
     "normalize_campaign",
+    "normalize_dataset_splits",
     "normalize_evaluation",
     "normalize_proposal",
 ]

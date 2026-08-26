@@ -191,6 +191,56 @@ owner approval, exact source-currentness checks, and `.codex/skills/` plus
 `.claude/skills/` parity sync. There is no valid path for an Agent to autonomously
 uninstall a source Skill.
 
+### 5.2 Causal Skill Optimizer
+
+Formal Skill optimization uses `skill-treatment-identity.v2` to freeze the runtime
+commit, Provider, model, role/profile, prompt, support Skills, workspace fixture,
+tool, sandbox, network, budget, and evaluator generation. The Raw, Current, and
+Candidate arms may differ only in target-Skill availability, version, and digest.
+Any common-identity drift makes the comparison `incomparable`.
+
+Each Provider case produces two independent evidence paths:
+
+```text
+final output -> correctness / product gate
+Provider stream -> immutable normalized trajectory -> behavior verdict
+```
+
+An answer can therefore pass correctness while behavior remains `false` when the
+target Skill was not read. A case without an explicit observable behavior contract
+uses `null`. Trajectory bodies remain in sidecars; EventLog stores only refs,
+digests, and verdicts.
+
+An optimizer campaign uses disjoint Train, Selection, and Test splits:
+
+- the Optimizer Agent sees only the current Skill, Train evidence, failure clusters,
+  and the rejection buffer;
+- the Selection evaluator chooses steps and must bind the exact split, generation,
+  and case-result refs;
+- Test remains sealed for the final design-179 adoption proof, and the best candidate
+  never writes `skills/` directly.
+
+The production loop has the Autoresearch resident execute a proposal-only Agent
+request, a sealed evaluator publish Selection, and Run Manager verify currentness
+before settlement. Recovery and operations entrypoints are:
+
+```bash
+uv run zf evolution skill-opt-agent-execute \
+  --state-dir "$STATE_DIR" \
+  --request-event-id <proposal-request-event-id>
+
+uv run zf evolution skill-opt-selection-submit \
+  --state-dir "$STATE_DIR" \
+  --selection-request-event-id <selection-request-event-id> \
+  --evaluation-file /path/to/sealed-selection-result.json
+```
+
+`skill-opt-init`, `skill-opt-prepare`, `skill-opt-settle`, and `skill-opt-export`
+remain mechanical debugging and recovery commands. Only a v2 campaign with three
+immutable split descriptors can enter the Agent route; v1 campaigns remain
+recovery-only. A completed best candidate still proceeds through design 179 Test,
+routing, canary, and owner-retain gates.
+
 ## 6. Memory: Work Notes versus Learning Assets
 
 There are two kinds of cross-session information:

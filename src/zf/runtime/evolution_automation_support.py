@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +13,86 @@ from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 from zf.runtime.evolution_contracts import EvolutionContractError, stable_digest
 from zf.runtime.evolution_coordinator import EvolutionCoordinator
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+
+CAMPAIGN_REQUESTED = "evolution.campaign.requested"
+CAMPAIGN_MATERIALIZED = "evolution.campaign.materialized"
+CAMPAIGN_DECLINED = "evolution.campaign.declined"
+CAMPAIGN_COMPLETED = "evolution.campaign.completed"
+TRIAL_REQUESTED = "evolution.trial.requested"
+TRIAL_EXECUTION_COMPLETED = "evolution.trial.execution.completed"
+TRIAL_EXECUTION_FAILED = "evolution.trial.execution.failed"
+CANARY_REQUESTED = "evolution.canary.requested"
+CANARY_FAILED = "evolution.canary.failed"
+
+
+@dataclass(frozen=True)
+class EvolutionAutomationResult:
+    intake_materialized: int = 0
+    intake_declined: int = 0
+    trials_requested: int = 0
+    comparisons_completed: int = 0
+    assets_proposed: int = 0
+    controlled_actions: int = 0
+    campaigns_completed: int = 0
+    optimizer_requests: int = 0
+    optimizer_steps: int = 0
+    optimizer_exports: int = 0
+    optimizer_rejected: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return any((
+            self.intake_materialized,
+            self.intake_declined,
+            self.trials_requested,
+            self.comparisons_completed,
+            self.assets_proposed,
+            self.controlled_actions,
+            self.campaigns_completed,
+            self.optimizer_requests,
+            self.optimizer_steps,
+            self.optimizer_exports,
+            self.optimizer_rejected,
+        ))
+
+    @property
+    def action_count(self) -> int:
+        return sum((
+            self.intake_materialized,
+            self.intake_declined,
+            self.trials_requested,
+            self.comparisons_completed,
+            self.assets_proposed,
+            self.controlled_actions,
+            self.campaigns_completed,
+            self.optimizer_requests,
+            self.optimizer_steps,
+            self.optimizer_exports,
+            self.optimizer_rejected,
+        ))
+
+
+def handled_evolution_sources(
+    events: list[ZfEvent],
+) -> tuple[set[str], set[str]]:
+    handled_types = {
+        CAMPAIGN_MATERIALIZED,
+        CAMPAIGN_DECLINED,
+        "evolution.skill_optimizer.started",
+    }
+    source_ids = {
+        str(_payload(event).get("source_event_id") or "")
+        for event in events
+        if event.type in handled_types
+    }
+    deposition_digests = {
+        str(_payload(event).get("deposition_digest") or "")
+        for event in events
+        if event.type in handled_types
+        and str(_payload(event).get("deposition_digest") or "")
+    }
+    return source_ids, deposition_digests
 
 
 def skill_maintenance_decision(
@@ -365,7 +446,20 @@ def _payload(event: ZfEvent) -> dict[str, Any]:
     return event.payload if isinstance(event.payload, dict) else {}
 
 
+event_payload = _payload
+
+
 __all__ = [
+    "CAMPAIGN_COMPLETED",
+    "CAMPAIGN_DECLINED",
+    "CAMPAIGN_MATERIALIZED",
+    "CAMPAIGN_REQUESTED",
+    "CANARY_FAILED",
+    "CANARY_REQUESTED",
+    "EvolutionAutomationResult",
+    "TRIAL_EXECUTION_COMPLETED",
+    "TRIAL_EXECUTION_FAILED",
+    "TRIAL_REQUESTED",
     "asset_for_attempt",
     "campaign_terminal",
     "canary_failure_count",
@@ -375,6 +469,8 @@ __all__ = [
     "complete_campaign",
     "controlled_outcome",
     "controlled_transition",
+    "event_payload",
+    "handled_evolution_sources",
     "hydrate_campaign",
     "latest_campaigns",
     "next_asset_version",
