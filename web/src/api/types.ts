@@ -2657,6 +2657,71 @@ export interface WorkspaceProjectsPage {
   warning?: string;
 }
 
+export interface IssueTriageSyncState {
+  status: "never" | "syncing" | "fresh" | "failed" | "rate_limited" | string;
+  repository: string;
+  repository_id: string;
+  last_attempt_at: string;
+  last_success_at: string;
+  rate_limit_remaining: number | null;
+  rate_limit_reset_at: string;
+  error: string;
+}
+
+export interface IssueTriageItem {
+  issue_key: string;
+  provider: "github";
+  repository_id: string;
+  repository: string;
+  number: number;
+  node_id: string;
+  html_url: string;
+  title: string;
+  author_login: string;
+  github_state: "open" | "closed";
+  created_at: string;
+  updated_at: string;
+  closed_at: string;
+  labels: string[];
+  label_colors?: Record<string, string>;
+  assignees: string[];
+  comment_count: number;
+  milestone: string;
+  source: "self_issue" | "github_web" | "unknown" | string;
+  derived_group: "untriaged" | "triaged" | "closed";
+  last_seen_at: string;
+}
+
+export interface IssueTriagePageData {
+  schema_version: "issue-triage-page.v1";
+  repository: string;
+  items: IssueTriageItem[];
+  total: number;
+  cursor: number;
+  next_cursor: number | null;
+  sync: IssueTriageSyncState;
+}
+
+export interface IssueTriageSummary {
+  schema_version: "issue-triage-summary.v1";
+  repository: string;
+  repository_url: string;
+  new_issue_url: string;
+  total: number;
+  groups: Record<string, number>;
+  states: Record<string, number>;
+  labels: Record<string, number>;
+  authors: Record<string, number>;
+  sync: IssueTriageSyncState;
+}
+
+export interface IssueTriageDetail {
+  schema_version: "issue-triage-detail.v1";
+  issue: IssueTriageItem;
+  body: string;
+  trust: "untrusted_external_input";
+}
+
 export interface ChannelDetail extends ChannelSummary {
   empty?: boolean;
   schema_version?: string;

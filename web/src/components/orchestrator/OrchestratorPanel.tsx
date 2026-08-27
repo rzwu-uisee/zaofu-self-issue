@@ -5,6 +5,7 @@ import { getAgentSessionHistory, getKanbanPendingProposals } from "../../api/cli
 import type { PendingKanbanProposal } from "../../api/client";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
 import { ComposerSubmitButton } from "../../components/agent-session/ComposerSubmitButton";
+import { SelfIssueIntakeWizard } from "./SelfIssueIntakeWizard";
 import { actionPresentation } from "../../components/agent-session/actionPresentation";
 import { deriveComposerStatus } from "../../components/agent-session/workState";
 import { useWorkingTitle } from "../../components/agent-session/useWorkingTitle";
@@ -37,6 +38,7 @@ import { ChevronDown, Maximize2, MessageCircle, Minimize2, Minus, Plus, Send, Sh
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentPanelMode, OrchestratorContext, OperatorBackend } from "../../app/sharedTypes";
 import { actionFailed, actionFailureReason, agentConversationScrollSignature, recordValue, scrollElementToBottom, stringify, supportLabel, textValue } from "../../app/shared";
+import { selfIssueSlashAction } from "./selfIssue";
 
 
 interface OperatorBackendOption {
@@ -81,6 +83,8 @@ interface PermissionEscalation {
 
 function slashAction(message: string): { action: string; payload: Record<string, unknown> } | null {
   const trimmed = message.trim();
+  const selfIssue = selfIssueSlashAction(trimmed);
+  if (selfIssue) return selfIssue;
   if (!trimmed.startsWith("/action ")) return null;
   const body = trimmed.slice("/action ".length).trim();
   const match = /^([a-zA-Z0-9_-]+)(?:\s+([\s\S]+))?$/.exec(body);
@@ -454,6 +458,8 @@ export function OrchestratorPanel({
   const headlessThreadRef = useRef<HTMLDivElement | null>(null);
   const [headlessPinnedToBottom, setHeadlessPinnedToBottom] = useState(true);
   const [headlessHasNewBelow, setHeadlessHasNewBelow] = useState(false);
+  const [selfIssueIntake, setSelfIssueIntake] = useState<Record<string, unknown> | null>(null);
+  const [selfIssueBusy, setSelfIssueBusy] = useState(false);
 
   const allowedActions = snapshot?.runtime.actions?.allowed ?? [];
   const webSession = snapshot?.runtime.web_session;
@@ -837,6 +843,11 @@ export function OrchestratorPanel({
           setOperatorError(actionFailureReason(result));
           setHeadlessMessage(message);
           return;
+        }
+        if (directAction.action === "self-issue-capture") {
+          const envelope = recordValue(result);
+          const intake = recordValue(envelope?.intake);
+          if (intake) setSelfIssueIntake(intake);
         }
         setOperatorError("");
         return;
@@ -1337,6 +1348,18 @@ export function OrchestratorPanel({
     : taskRefOn && context.taskId
       ? `问关于 ${context.taskId} 的任何事(状态 / 合同 / 证据 / 时间线…)`
       : "Tell me what to do...";
+  const selfIssueAction = async (action: string, payload: Record<string, unknown>) => {
+    setSelfIssueBusy(true);
+    try {
+      const result = await Promise.resolve(onAction(action, payload));
+      const envelope = recordValue(result);
+      const intake = recordValue(envelope?.intake);
+      if (intake) setSelfIssueIntake(intake);
+      return envelope;
+    } finally {
+      setSelfIssueBusy(false);
+    }
+  };
 
   return (
     <section
@@ -1637,6 +1660,42 @@ export function OrchestratorPanel({
                 );
               })}
             </div>
+          ) : null}
+          {selfIssueIntake ? (
+            <SelfIssueIntakeWizard
+              intake={selfIssueIntake}
+              busy={selfIssueBusy}
+              onAddAttachment={async (file) => {
+                const data = await file.arrayBuffer();
+                const bytes = new Uint8Array(data);
+                let binary = "";
+                for (const byte of bytes) binary += String.fromCharCode(byte);
+                await selfIssueAction("self-issue-intake-attachment-add", {
+                  intake_id: textValue(selfIssueIntake.intake_id),
+                  filename: file.name,
+                  content_type: file.type || "application/octet-stream",
+                  body_base64: btoa(binary),
+                });
+              }}
+              onCancel={async () => {
+                await selfIssueAction("self-issue-intake-dismiss", { intake_id: textValue(selfIssueIntake.intake_id) });
+                setSelfIssueIntake(null);
+              }}
+              onRemoveAttachment={(attachmentId) => selfIssueAction("self-issue-intake-attachment-remove", {
+                intake_id: textValue(selfIssueIntake.intake_id), attachment_id: attachmentId,
+              }).then(() => undefined)}
+              onSave={(answers, currentStep) => selfIssueAction("self-issue-intake-save", {
+                intake_id: textValue(selfIssueIntake.intake_id), revision: Number(selfIssueIntake.revision || 0), answers, current_step: currentStep,
+              }).then(() => undefined)}
+              onSubmit={async (answers, attachmentDisclosureConfirmed) => {
+                const result = await selfIssueAction("self-issue-intake-submit", {
+                  intake_id: textValue(selfIssueIntake.intake_id), answers,
+                  attachment_disclosure_confirmed: attachmentDisclosureConfirmed,
+                });
+                if (result?.draft) setSelfIssueIntake(null);
+                return result as { missingQuestionId?: string; attachmentDisclosureRequired?: boolean };
+              }}
+            />
           ) : null}
           <div className="headless-composer">
             {context.taskId ? (

@@ -18,6 +18,9 @@ import type {
   OperationsObservability,
   EventsPage,
   FanoutDetail,
+  IssueTriageDetail,
+  IssueTriagePageData,
+  IssueTriageSummary,
   IntegrationQueueProjection,
   TaskPipelineProjection,
   LoopProjection,
@@ -457,6 +460,29 @@ export function getProjectHealth(projectId?: string): Promise<ProjectHealthSumma
 
 export function getSnapshotLight(projectId?: string): Promise<Snapshot> {
   return requestJson<Snapshot>(`${projectPrefix(projectId)}/snapshot/light`);
+}
+
+export function getIssueTriageSummary(projectId?: string): Promise<IssueTriageSummary> {
+  return requestJson<IssueTriageSummary>(`${projectPrefix(projectId)}/issue-triage/summary`);
+}
+
+export function getIssueTriage(projectId: string, filters: Record<string, string | number> = {}): Promise<IssueTriagePageData> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== "") params.set(key, String(value));
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return requestJson<IssueTriagePageData>(`${projectPrefix(projectId)}/issue-triage${suffix}`);
+}
+
+export function getIssueTriageDetail(projectId: string, issueNumber: number): Promise<IssueTriageDetail> {
+  return requestJson<IssueTriageDetail>(`${projectPrefix(projectId)}/issue-triage/${issueNumber}`);
+}
+
+export async function refreshIssueTriage(projectId: string): Promise<Record<string, unknown>> {
+  const response = await fetch(`${projectPrefix(projectId)}/issue-triage/refresh`, { method: "POST", headers: { Accept: "application/json" } });
+  const data = (await response.json()) as Record<string, unknown>;
+  clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
+  if (!response.ok) throw new Error(String(data.error || data.reason || `refresh failed: ${response.status}`));
+  return data;
 }
 
 export function getDeliveryFeatures(projectId?: string): Promise<DeliveryFeaturesPage> {

@@ -104,6 +104,22 @@ class AgentSessionRunRegistry:
         with self._lock:
             return bool(self._records.get(self._lookup(key)) and self._records[self._lookup(key)].cancel_requested)
 
+    def reset_cancellation(self, key: AgentSessionRunKey) -> bool:
+        """Clear a completed cancellation before resuming the same logical run."""
+        key = key.normalized()
+        if not key.run_id or not key.thread_id:
+            return False
+        with self._lock:
+            record = self._records.get(self._lookup(key))
+            if record is None:
+                return True
+            if record.process is not None and record.process.poll() is None:
+                return False
+            record.cancel_requested = False
+            record.cancelled_at = ""
+            record.pid = None
+            return True
+
     def cancel(self, key: AgentSessionRunKey) -> AgentSessionCancelResult:
         key = key.normalized()
         if not key.run_id or not key.thread_id:
@@ -201,6 +217,10 @@ def cancel_agent_session_run(key: AgentSessionRunKey) -> AgentSessionCancelResul
 
 def agent_session_run_cancelled(key: AgentSessionRunKey) -> bool:
     return _REGISTRY.is_cancelled(key)
+
+
+def reset_agent_session_cancellation(key: AgentSessionRunKey) -> bool:
+    return _REGISTRY.reset_cancellation(key)
 
 
 class agent_session_process:

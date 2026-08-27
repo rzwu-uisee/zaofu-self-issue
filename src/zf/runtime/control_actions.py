@@ -80,6 +80,7 @@ from zf.runtime.control_actions_workflow_request import (
     WorkflowRequestActionsMixin,
 )
 from zf.runtime.control_actions_run import RunControlActionsMixin
+from zf.runtime.control_actions_self_issue import SELF_ISSUE_ACTIONS, SelfIssueActionsMixin
 from zf.runtime.control_actions_helpers import (  # noqa: F401 — re-export moved helpers
     _approval_ref,
     _automation_output_summary,
@@ -129,6 +130,7 @@ class ControlledActionService(
     ActionEmitMixin,
     EvolutionActionsMixin,
     ExecutionRouteActionsMixin,
+    SelfIssueActionsMixin,
 ):
     """Execute deterministic action requests from trusted control surfaces."""
 
@@ -549,6 +551,11 @@ class ControlledActionService(
                 action=action,
                 requested_action=requested_action,
                 payload=payload,
+            )
+        if action in SELF_ISSUE_ACTIONS:
+            return self._self_issue_action(
+                requested=requested, action=action,
+                requested_action=requested_action, payload=payload,
             )
         extension = dispatch_extension_action(
             self, requested=requested, action=action,

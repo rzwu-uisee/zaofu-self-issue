@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **69** top-level families and **296** addressable command paths.
+The parser currently exposes **69** top-level families and **301** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -401,7 +401,12 @@ Validate or ingest an issue/bug candidate
 | Command | Parser description |
 |---|---|
 | `zf issue` | Validate or ingest an issue/bug candidate |
+| `zf issue answer` | Submit a Self-Issue Intake answer object from JSON |
+| `zf issue confirm` | Confirm an exact publication batch |
 | `zf issue ingest` | Ingest a candidate as a Kanban TaskContract |
+| `zf issue preview` | Create an immutable provider publication preview |
+| `zf issue publish` | Publish a confirmed provider batch |
+| `zf issue report` | Start the canonical eight-step Self-Issue intake |
 | `zf issue validate` | Validate a candidate without changing state |
 
 ## `zf kanban`

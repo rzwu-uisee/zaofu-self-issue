@@ -1873,6 +1873,36 @@ class SafetyConfig:
 
 
 @dataclass
+class SelfIssueTargetConfig:
+    """One centrally managed provider target for Self-Issue publication."""
+
+    provider: str = ""
+    authorization_domain: str = ""
+    project: str = ""
+    oauth_client_id: str = ""
+    oauth_redirect_uri: str = ""
+    auth_mode: str = ""
+
+
+@dataclass
+class SelfIssueConfig:
+    """Kernel-owned policy for report-only Self-Issue publication."""
+
+    enabled: bool = False
+    provider: str = "gitlab"
+    authorization_domain: str = "gitlab.com"
+    target_project: str = ""
+    target_locked: bool = False
+    oauth_client_id: str = ""
+    oauth_redirect_uri: str = ""
+    automatic_detection_enabled: bool = True
+    browser_capture_enabled: bool = True
+    browser_capture_base_url: str = ""
+    targets: dict[str, SelfIssueTargetConfig] = field(default_factory=dict)
+    default_publication_mode: str = "gitlab"
+
+
+@dataclass
 class GoalConfig:
     """133/G 批 goal 回路(灰度,默认全关 = 现行为零回归)。"""
 
@@ -1969,6 +1999,7 @@ class ZfConfig:
     quality_gates: dict[str, QualityGateConfig] = field(default_factory=dict)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    self_issue: SelfIssueConfig = field(default_factory=SelfIssueConfig)
     # LH-2: rule-based SemanticDiscriminator opt-in.
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)

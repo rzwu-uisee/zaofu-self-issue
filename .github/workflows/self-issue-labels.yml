@@ -1,0 +1,52 @@
+name: Self-Issue labels
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  apply-allowlisted-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels from a verified ZaoFu Self-Issue body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        shell: bash
+        run: |
+          python3 - <<'PY' > /tmp/zaofu-self-issue-labels.json
+          import json
+          import os
+          import re
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+              issue = json.load(handle)["issue"]
+          body = str(issue.get("body") or "")
+          marker = re.search(r"<!-- zf-self-issue:[0-9a-f]{64} -->", body)
+          classification = re.search(
+              r"^- \*\*Classification:\*\* (.+?)\s*$", body, re.MULTILINE,
+          )
+          severity = re.search(
+              r"^- \*\*Severity:\*\* (P[0-3])\s*$", body, re.MULTILINE,
+          )
+          allowed_classifications = {
+              "runtime", "kernel/state", "provider/integration", "web/ui",
+              "configuration", "security", "performance", "test/regression",
+              "unknown",
+          }
+          labels = []
+          if marker and classification and classification.group(1) in allowed_classifications:
+              labels.append(classification.group(1))
+          if marker and severity:
+              labels.append(severity.group(1).lower())
+          print(json.dumps({"labels": labels}))
+          PY
+          if [ "$(python3 -c 'import json; print(len(json.load(open("/tmp/zaofu-self-issue-labels.json"))["labels"]))')" -gt 0 ]; then
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}/labels" \
+              --input /tmp/zaofu-self-issue-labels.json
+          fi

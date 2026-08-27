@@ -9,6 +9,8 @@ validate: 只校验不写状态。
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import sys
 from pathlib import Path
 
@@ -17,9 +19,11 @@ import yaml
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
 from zf.core.events.writer import EventWriter
+from zf.core.security.redaction import redact_obj
 from zf.core.config.project_context import resolve_project_context
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
+from zf.runtime.control_actions import ControlledActionService
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -27,6 +31,43 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "issue", help="Validate or ingest an issue/bug candidate",
     )
     sub = parser.add_subparsers(dest="issue_cmd", required=True)
+    report = sub.add_parser("report", help="Start the canonical eight-step Self-Issue intake")
+    report.add_argument("description", nargs="?", default="", help="Optional title seed")
+    report.add_argument("--target-project", default="")
+    report.add_argument("--state-dir", default=None)
+    report.add_argument("--attachment", action="append", default=[], metavar="PATH")
+    report.add_argument(
+        "--non-interactive", action="store_true",
+        help="Return the Intake JSON instead of prompting",
+    )
+    report.set_defaults(func=_run_report)
+    answer = sub.add_parser(
+        "answer", help="Submit a Self-Issue Intake answer object from JSON",
+    )
+    answer.add_argument("intake_id")
+    answer.add_argument("--answers-file", required=True)
+    answer.add_argument("--state-dir", default=None)
+    answer.set_defaults(func=_run_answer)
+    preview = sub.add_parser(
+        "preview", help="Create an immutable provider publication preview",
+    )
+    preview.add_argument("draft_id")
+    preview.add_argument(
+        "--provider", dest="publication_mode",
+        choices=("gitlab", "github", "both"), default="gitlab",
+    )
+    preview.add_argument("--state-dir", default=None)
+    preview.set_defaults(func=_run_publication_action)
+    confirm = sub.add_parser("confirm", help="Confirm an exact publication batch")
+    confirm.add_argument("batch_id")
+    confirm.add_argument("--payload-digest", required=True)
+    confirm.add_argument("--state-dir", default=None)
+    confirm.set_defaults(func=_run_publication_action)
+    publish = sub.add_parser("publish", help="Publish a confirmed provider batch")
+    publish.add_argument("batch_id")
+    publish.add_argument("--confirmation-id", required=True)
+    publish.add_argument("--state-dir", default=None)
+    publish.set_defaults(func=_run_publication_action)
     for name, help_text in (
         ("validate", "Validate a candidate without changing state"),
         ("ingest", "Ingest a candidate as a Kanban TaskContract"),
@@ -35,6 +76,215 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         cmd.add_argument("path")
         cmd.add_argument("--state-dir", default=None)
         cmd.set_defaults(func=_run)
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    try:
+        ctx = resolve_project_context(
+            explicit_state_dir=getattr(args, "state_dir", None),
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    writer = EventWriter(event_log_from_project(ctx.state_dir, config=ctx.config))
+    payload = {
+        "description": str(args.description or ""),
+        "reporter_context": {
+            "discovered_by": "user", "reported_by": "user",
+            "collected_by": "kernel", "assessed_by": "orchestrator", "role": "user",
+        },
+        "target_binding": {
+            "provider": "gitlab",
+            "project": str(args.target_project or ""),
+        },
+    }
+    requested = writer.emit(
+        "control.action.requested", actor="operator", payload={
+            "action": "self-issue-capture", "request": redact_obj(payload),
+        },
+    )
+    result = ControlledActionService(
+        ctx.state_dir, writer, config=ctx.config,
+        project_root=ctx.project_root, actor="operator", source="cli", surface="cli",
+    ).execute(
+        action="self-issue-capture", requested_action="zf issue report",
+        payload=payload, requested=requested,
+    )
+    if (
+        result.get("ok")
+        and result.get("status") == "intake_collecting"
+        and not bool(args.non_interactive)
+        and sys.stdin.isatty()
+    ):
+        result = _interactive_intake_flow(
+            result=result,
+            ctx=ctx,
+            writer=writer,
+            attachment_paths=[Path(value) for value in args.attachment],
+        )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+def _run_answer(args: argparse.Namespace) -> int:
+    try:
+        ctx = resolve_project_context(
+            explicit_state_dir=getattr(args, "state_dir", None),
+        )
+        raw = json.loads(Path(args.answers_file).read_text(encoding="utf-8"))
+        answers = raw.get("answers") if isinstance(raw, dict) and "answers" in raw else raw
+        if not isinstance(answers, dict):
+            raise ValueError("answers file must contain a question-id keyed JSON object")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    writer = EventWriter(event_log_from_project(ctx.state_dir, config=ctx.config))
+    result = _execute_self_issue_action(
+        ctx=ctx,
+        writer=writer,
+        action="self-issue-intake-submit",
+        payload={
+            "intake_id": str(args.intake_id),
+            "answers": answers,
+        },
+        requested_action="zf issue answer",
+    )
+    if result.get("ok") and result.get("start_evidence"):
+        result = _request_cli_evidence(result=result, ctx=ctx, writer=writer)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+def _run_publication_action(args: argparse.Namespace) -> int:
+    try:
+        ctx = resolve_project_context(
+            explicit_state_dir=getattr(args, "state_dir", None),
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    action = {
+        "preview": "self-issue-preview",
+        "confirm": "self-issue-confirm",
+        "publish": "self-issue-publish",
+    }[str(args.issue_cmd)]
+    payload = {
+        key: value for key, value in {
+            "draft_id": getattr(args, "draft_id", ""),
+            "batch_id": getattr(args, "batch_id", ""),
+            "publication_mode": getattr(args, "publication_mode", ""),
+            "payload_digest": getattr(args, "payload_digest", ""),
+            "confirmation_id": getattr(args, "confirmation_id", ""),
+        }.items() if value
+    }
+    writer = EventWriter(event_log_from_project(ctx.state_dir, config=ctx.config))
+    result = _execute_self_issue_action(
+        ctx=ctx,
+        writer=writer,
+        action=action,
+        payload=payload,
+        requested_action=f"zf issue {args.issue_cmd}",
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result.get("ok") else 1
+
+
+def _interactive_intake_flow(*, result, ctx, writer, attachment_paths: list[Path]):
+    intake = result.get("intake") if isinstance(result.get("intake"), dict) else {}
+    questions = intake.get("questions") if isinstance(intake.get("questions"), list) else []
+    answers = dict(intake.get("answers") or {})
+    index = 0
+    while index < len(questions):
+        question = questions[index]
+        question_id = str(question.get("id") or "")
+        print(f"\n[{index + 1}/{len(questions)}] {question.get('title')}{' *' if question.get('required') else ''}")
+        if question.get("help_text"):
+            print(question["help_text"])
+        if question_id == "environment":
+            current = answers.get(question_id) if isinstance(answers.get(question_id), dict) else {}
+            os_name = input(f"OS [{current.get('os', '')}]: ").strip() or str(current.get("os") or "")
+            version = input(f"Version [{current.get('version', '')}]: ").strip() or str(current.get("version") or "")
+            answers[question_id] = {"os": os_name, "version": version}
+        elif question_id == "attachments_context":
+            answers[question_id] = input("Attachment context (optional): ").strip()
+        else:
+            current = str(answers.get(question_id) or "")
+            value = input(f"{question.get('placeholder')} [{current}]: ").strip() or current
+            if question.get("required") and not value:
+                print("This question can not be empty")
+                continue
+            if value == ":back" and index:
+                index -= 1
+                continue
+            answers[question_id] = value
+        index += 1
+    for path in attachment_paths:
+        content_type = _cli_content_type(path)
+        added = _execute_self_issue_action(
+            ctx=ctx, writer=writer, action="self-issue-intake-attachment-add",
+            payload={
+                "intake_id": str(intake.get("intake_id") or ""),
+                "filename": path.name, "content_type": content_type,
+                "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+                "video_disclosure_confirmed": content_type.startswith("video/"),
+            }, requested_action="zf issue attachment",
+        )
+        if not added.get("ok"):
+            return added
+    submitted = _execute_self_issue_action(
+        ctx=ctx, writer=writer, action="self-issue-intake-submit",
+        payload={"intake_id": str(intake.get("intake_id") or ""), "answers": answers},
+        requested_action="zf issue intake submit",
+    )
+    if submitted.get("ok") and submitted.get("start_evidence"):
+        return _request_cli_evidence(result=submitted, ctx=ctx, writer=writer)
+    return submitted
+
+
+def _request_cli_evidence(*, result, ctx, writer):
+    draft = result.get("draft") if isinstance(result.get("draft"), dict) else {}
+    start_result = _execute_self_issue_action(
+        ctx=ctx,
+        writer=writer,
+        action="self-issue-evidence-start",
+        payload={
+            "draft_id": str(draft.get("draft_id") or ""),
+            "revision": int(draft.get("revision") or 0),
+        },
+        requested_action="zf issue evidence start",
+    )
+    return start_result
+
+
+def _cli_content_type(path: Path) -> str:
+    return {
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm", ".txt": "text/plain", ".log": "text/plain",
+        ".json": "application/json",
+    }.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _execute_self_issue_action(*, ctx, writer, action: str, payload: dict, requested_action: str):
+    requested = writer.emit(
+        "control.action.requested",
+        actor="operator",
+        payload={"action": action, "request": redact_obj(payload)},
+    )
+    return ControlledActionService(
+        ctx.state_dir,
+        writer,
+        config=ctx.config,
+        project_root=ctx.project_root,
+        actor="operator",
+        source="cli",
+        surface="cli",
+    ).execute(
+        action=action,
+        requested_action=requested_action,
+        payload=payload,
+        requested=requested,
+    )
 
 
 def _extract_frontmatter(path: Path) -> dict:

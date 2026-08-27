@@ -14,6 +14,12 @@ import yaml
 
 from zf.core.config.loader import ConfigError
 from zf.core.config.backend_identity import canonical_backend_id
+from zf.core.config.project_context import resolve_project_context
+from zf.core.config.schema import SelfIssueConfig
+from zf.core.config.self_issue_policy import (
+    inject_self_issue_policy,
+    locked_self_issue_policy,
+)
 from zf.core.safety.path_guard import PathGuard, PathGuardError
 from zf.core.workspace.project_initializer import ProjectInitializer
 from zf.core.workspace.project_admission import normalize_new_project_metadata
@@ -197,6 +203,7 @@ def init_flow_project(
     workspace_register: bool | None = None,
     with_instruction_docs: bool = True,
     notes: str = "",
+    self_issue_policy: SelfIssueConfig | None = None,
 ) -> dict[str, Any]:
     """Single implementation of kind-based project init, shared by
     `zf project init` and the Web wizard (doc 125 §4/§8). Raises ValueError /
@@ -313,6 +320,7 @@ def init_flow_project(
             strictness=strictness,
             parity_scope=parity_scope,
         )
+    docs = inject_self_issue_policy(docs, self_issue_policy)
     yaml_path.write_text(
         yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
@@ -561,6 +569,8 @@ def _run_project_init(args: argparse.Namespace) -> int:
     elif args.workspace_register:
         workspace_register = True
     try:
+        source_context = resolve_project_context(cwd=Path.cwd())
+        inherited_self_issue = locked_self_issue_policy(source_context.config)
         payload = init_flow_project(
             kind=args.kind,
             name=args.name,
@@ -592,6 +602,7 @@ def _run_project_init(args: argparse.Namespace) -> int:
             workspace_register=workspace_register,
             with_instruction_docs=not bool(args.skip_instruction_docs),
             notes=str(getattr(args, "notes", "") or ""),
+            self_issue_policy=inherited_self_issue,
         )
     except (ValueError, PathGuardError, ConfigError, FileExistsError,
             subprocess.CalledProcessError) as exc:

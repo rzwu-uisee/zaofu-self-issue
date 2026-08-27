@@ -7,6 +7,7 @@ export const NAV_PAGES = [
   "board",
   "workflows",
   "triage",
+  "issue-triage",
   "observability",
   "events",
   "agents",

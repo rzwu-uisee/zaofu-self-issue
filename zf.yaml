@@ -29,6 +29,14 @@ spec:
   project:
     name: zaofu
     state_dir: .zf
+  # Self-Issue is opt-in; enable and configure a provider target per deployment.
+  self_issue:
+    enabled: false
+    provider: gitlab
+    authorization_domain: gitlab.com
+    target_locked: false
+    automatic_detection_enabled: true
+    browser_capture_enabled: true
   orchestrator: {backend: claude-code, wake_min_interval_s: 5}
   roles:
     - name: orchestrator

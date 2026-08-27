@@ -42,6 +42,7 @@ from zf.runtime.durable_hook_catchup import consume_durable_nonwake_hooks
 from zf.runtime.escalation import EscalationManager
 from zf.runtime.reader_child_task_resolution import resolve_reader_child_task_id
 from zf.runtime.refresh import RefreshPolicy
+from zf.runtime.self_issue_auto_trigger import safe_auto_trigger_from_event
 from zf.runtime.call_result_runtime import hydrate_runtime_call_result_event
 from zf.runtime.transport import (
     DispatchContext,
@@ -881,6 +882,14 @@ class WorkflowRuntimeCoordinator(
         decisions.extend(
             self._react_to_events(events, consumed_offset=consumed_offset)
         )
+        if events is None or any(
+            event.type == "self_issue.assessment.requested" for event in events
+        ):
+            from zf.runtime.self_issue_runtime import schedule_pending_self_issue_assessment
+            self._safe_housekeeping(
+                "self_issue_assessment",
+                lambda: schedule_pending_self_issue_assessment(self),
+            )
         if periodic_sweep:
             from zf.runtime.goal_terminal_reconciliation import (
                 reconcile_goal_terminal_task_settlement,
@@ -3025,6 +3034,9 @@ class WorkflowRuntimeCoordinator(
     def _apply_housekeeping(self, event: ZfEvent) -> None:
         """Layer 1 mechanical state writes — never decisions."""
         self._renew_task_attempt_lease(event)
+        safe_auto_trigger_from_event(
+            event, self.state_dir, self.event_writer, self.project_root, self.config,
+        )
         if event.type in {"run.goal.completed", "run.goal.blocked", "run.failed"}:
             try:
                 from zf.runtime.workflow_task_lifecycle import (

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ZaoFu Self-Issue Report"
+  short_description: "Collect and assess a ZaoFu issue without edits"
+  default_prompt: "Use $zf-self-issue-report to organize the reporter's facts, inspect only the isolated committed-source evidence workspace, and return a safe provider-neutral Self-Issue assessment without editing or publishing."

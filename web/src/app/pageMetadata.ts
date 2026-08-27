@@ -7,6 +7,7 @@ const PAGE_TITLES: Record<PageId, string> = {
   board: "Tasks",
   workflows: "Workflows",
   triage: "Triage",
+  "issue-triage": "Issue Triage",
   observability: "Observability",
   events: "Events",
   agents: "Agents",

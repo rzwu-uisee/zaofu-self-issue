@@ -123,6 +123,7 @@ import {
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { resolveWorkspaceProjectId } from "./workspaceProjectSelection";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
+import { IssueTriagePage } from "../pages/IssueTriagePage";
 import {
   canBootstrapScopedPageBeforeWorkspace,
   projectionPageQuery,
@@ -2280,6 +2281,13 @@ export function App() {
               onAction={(action, payload) => void submitAction(action, payload)}
               onOpenTask={openTask}
               tasks={snapshot ? allBoardTasks(snapshot) : []}
+            />
+          ) : page === "issue-triage" ? (
+            <IssueTriagePage
+              projectId={activeProjectId}
+              tab="issues"
+              onTabChange={() => undefined}
+              runtimeInterventions={null}
             />
           ) : page === "board" && !snapshot ? (
             /* P0-B: loading must not impersonate an empty board ("0 tasks" for
