@@ -15,6 +15,8 @@ _PRIVATE_KEY_RE = re.compile(
 )
 _JWT_RE = re.compile(r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
 _API_KEY_RE = re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}\b")
+_GITLAB_TOKEN_RE = re.compile(r"\bglpat-[A-Za-z0-9_-]{10,}\b", re.IGNORECASE)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;\"']+")
 _ENV_SECRET_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*)"
     r"(\s*[:=]\s*)"
@@ -64,6 +66,8 @@ def redact_text(text: str) -> str:
     redacted = _PRIVATE_KEY_RE.sub("[REDACTED_PRIVATE_KEY]", text)
     redacted = _JWT_RE.sub("[REDACTED_JWT]", redacted)
     redacted = _API_KEY_RE.sub("[REDACTED_API_KEY]", redacted)
+    redacted = _GITLAB_TOKEN_RE.sub("[REDACTED_GITLAB_TOKEN]", redacted)
+    redacted = _BEARER_RE.sub("Bearer [REDACTED_SECRET]", redacted)
     redacted = _ENV_SECRET_RE.sub(r"\1\2[REDACTED_SECRET]", redacted)
     return redacted
 

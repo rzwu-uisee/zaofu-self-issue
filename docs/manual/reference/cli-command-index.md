@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **69** 个顶层命令 family、**296** 条可寻址命令路径。
+当前共 **69** 个顶层命令 family、**301** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -401,7 +401,12 @@ Validate or ingest an issue/bug candidate
 | Command | Parser description |
 |---|---|
 | `zf issue` | Validate or ingest an issue/bug candidate |
+| `zf issue answer` | Submit a Self-Issue Intake answer object from JSON |
+| `zf issue confirm` | Confirm an exact publication batch |
 | `zf issue ingest` | Ingest a candidate as a Kanban TaskContract |
+| `zf issue preview` | Create an immutable provider publication preview |
+| `zf issue publish` | Publish a confirmed provider batch |
+| `zf issue report` | Start the canonical eight-step Self-Issue intake |
 | `zf issue validate` | Validate a candidate without changing state |
 
 ## `zf kanban`

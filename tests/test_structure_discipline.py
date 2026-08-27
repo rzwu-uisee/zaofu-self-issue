@@ -160,9 +160,10 @@ _OVERSIZED_FILE_CAPS = {
     # projection-seam merges pushed to 9052 past the frozen 8100. Freeze at clean
     # dev size; next server route must land in a projections/* sibling.
     # Reconciliation 2026-07-26: workflow request identity wiring merged with
-    # dev's Kanban collaboration routes at 9320 lines. Freeze at the merged
+    # v7's Kanban collaboration routes plus the additive Self-Issue/Triage
+    # routers and project action plumbing at 9360 lines.
     # branch size; subsequent route behavior still belongs in a sibling.
-    "src/zf/web/server.py": 9320,
+    "src/zf/web/server.py": 9360,
     # P3 (2026-06-12): 49 fanout/synth coordination methods moved to
     # FanoutCoordinationMixin (orchestrator_fanout.py); both files
     # frozen at new size +10% — the mixin is born oversized and is

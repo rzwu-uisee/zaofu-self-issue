@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 from zf.cli.flow import draft_flow_spec, draft_multi_kind_project_spec
 from zf.core.config.backend_identity import canonical_backend_id
+from zf.core.config.schema import SelfIssueConfig
+from zf.core.config.self_issue_policy import inject_self_issue_policy
 from zf.core.workflow.request_policy import default_lanes_for_kind
 from zf.core.workspace.onboarding import (
     normalize_primary_backend,
@@ -41,6 +43,7 @@ def draft_project_init_config(
     root: Path,
     flow_kind: str,
     inherit_onboarding: bool,
+    self_issue_policy: SelfIssueConfig | None = None,
 ) -> ProjectInitConfigDraft:
     """Validate admission inputs and produce typed config documents."""
 
@@ -137,6 +140,7 @@ def draft_project_init_config(
             ),
             **common,
         )
+    documents = inject_self_issue_policy(documents, self_issue_policy)
     return ProjectInitConfigDraft(
         flow_kind=flow_kind,
         project_name=project_name,

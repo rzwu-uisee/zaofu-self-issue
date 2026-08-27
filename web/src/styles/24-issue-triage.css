@@ -1,0 +1,280 @@
+.issue-triage-shell {
+  /* Keep this page independent from legacy spacing aliases that are not part
+     of the global token contract. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --surface-soft: var(--surface-2);
+  --text-muted: var(--muted-foreground);
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --text-xl: var(--text-20);
+  min-width: 0;
+}
+
+.issue-triage-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.issue-triage-tabs button {
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.issue-triage-tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.issue-triage-page {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.issue-triage-header,
+.issue-triage-detail > header,
+.issue-triage-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.issue-triage-header h2,
+.issue-triage-detail h3 {
+  margin: 0;
+}
+
+.issue-triage-sync {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.issue-triage-sync.stale {
+  border-color: var(--warn);
+}
+
+.issue-triage-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.issue-triage-metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.issue-triage-metric.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.issue-triage-metric strong {
+  font-size: var(--text-xl);
+}
+
+.issue-triage-filters {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) repeat(4, minmax(120px, auto));
+  gap: var(--space-2);
+}
+
+.issue-triage-filters form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.issue-triage-filters input,
+.issue-triage-filters select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.issue-triage-filters form input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+}
+
+.issue-triage-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  min-height: 480px;
+}
+
+.issue-triage-content.with-detail {
+  grid-template-columns: minmax(420px, 1.35fr) minmax(320px, 0.9fr);
+}
+
+.issue-triage-list,
+.issue-triage-detail {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.issue-triage-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.issue-triage-row:hover,
+.issue-triage-row.selected {
+  background: var(--surface-soft);
+}
+
+.issue-triage-row-main {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.issue-triage-row-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue-label-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.issue-label-badge {
+  border: 1px solid currentColor;
+  font-weight: 650;
+  text-shadow: none;
+}
+
+.issue-triage-detail-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.issue-state-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--ok);
+}
+
+.issue-state-dot.closed {
+  background: var(--muted);
+}
+
+.issue-group-badge {
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.issue-triage-pagination {
+  padding: var(--space-3);
+}
+
+.issue-triage-detail {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.issue-triage-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.issue-triage-meta div {
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.issue-triage-meta dt {
+  color: var(--text-muted);
+}
+
+.issue-triage-meta dd {
+  margin: var(--space-1) 0 0;
+}
+
+.issue-triage-body pre {
+  max-height: 460px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  color: var(--text);
+  font-family: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .issue-triage-content.with-detail,
+  .issue-triage-filters {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .issue-triage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .issue-triage-header,
+  .issue-triage-sync {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

@@ -88,6 +88,7 @@ from zf.runtime.run_archive import (
 from zf.runtime.kanban_proposals import PROPOSAL_EVENT
 from zf.autoresearch.projection import project_autoresearch_state
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.control_actions_self_issue import SELF_ISSUE_ACTIONS
 from zf.runtime.channel_contracts import (
     CHANNEL_DISCUSSION_MODES,
     normalize_permission_profile,
@@ -155,7 +156,13 @@ from zf.web.operator_contract import (
     kanban_agent_shared_context,
     kanban_agent_status_model,
 )
+from zf.web.self_issue_actions import (
+    build_self_issue_attachment_router,
+    prepare_self_issue_web_payload,
+    validate_self_issue_web_action,
+)
 from zf.web.project_init_policy import draft_project_init_config
+from zf.web import project_init_service
 from zf.web.project_init_service import (
     apply_project_profile_overlay,
     initialize_admitted_project,
@@ -653,6 +660,7 @@ _ACTION_ALIASES = {
 # Moved verbatim to operator_contract.CANONICAL_ACTIONS (kept import-aliased
 # so every existing _CANONICAL_ACTIONS reference keeps working).
 _CANONICAL_ACTIONS = CANONICAL_ACTIONS
+_ACTION_ALIASES.update(SELF_ISSUE_ACTIONS)
 _ALLOWED_WEB_ACTIONS = set(_ACTION_ALIASES)
 _CHANNEL_DISCUSSION_MODES = CHANNEL_DISCUSSION_MODES
 _OPERATOR_MANAGERS: dict[str, OperatorSessionManager] = {}
@@ -1262,6 +1270,7 @@ def create_app(
                     root=root,
                     flow_kind=flow_kind,
                     inherit_onboarding=implicit_admission,
+                    self_issue_policy=config.self_issue if config is not None else None,
                 )
             except ValueError as exc:
                 return JSONResponse({
@@ -1276,11 +1285,12 @@ def create_app(
             and generated_config is not None
             and admission_inspection is not None
         ):
-            body, status_code = initialize_admitted_project(
+            body, status_code = project_init_service.initialize_admitted_project(
                 payload=payload,
                 root=root,
                 generated_config=generated_config,
                 admission_inspection=admission_inspection,
+                self_issue_policy=config.self_issue if config is not None else None,
             )
             return JSONResponse(body, status_code=status_code)
         if generated_config is not None:
@@ -1300,7 +1310,10 @@ def create_app(
                 flow_text = read_flow_yaml(preset_arg)
                 if flow_text is not None:
                     root.mkdir(parents=True, exist_ok=True)
-                    (root / "zf.yaml").write_text(flow_text, encoding="utf-8")
+                    project_init_service.write_flow_config_with_self_issue(
+                        root / "zf.yaml", flow_text,
+                        config.self_issue if config is not None else None,
+                    )
                     # Controller flows reference sibling common/ profile+skill
                     # assets; copy them so profile_sources aren't dangling
                     # (CLI `zf profile bootstrap` does the same via this helper).
@@ -1341,6 +1354,12 @@ def create_app(
                 instruction_stack=str(payload.get("stack") or ""),
                 instruction_surface=str(payload.get("surface") or ""),
             )
+            if config is not None and (root / "zf.yaml").exists():
+                project_init_service.write_flow_config_with_self_issue(
+                    root / "zf.yaml",
+                    (root / "zf.yaml").read_text(encoding="utf-8"),
+                    config.self_issue,
+                )
         except Exception as exc:
             return JSONResponse({
                 "ok": False,
@@ -2611,6 +2630,7 @@ def create_app(
             config=context.config,
             project_root=context.project_root,
             project_id=project_id,
+            web_base_url=str(request.base_url),
             legacy_route=False,
         )
         status_code = int(result.pop("_status_code", 200))
@@ -2795,11 +2815,14 @@ def create_app(
             x_zf_web_token=x_zf_web_token,
             web_session_token=_web_session_cookie(request),
             x_idempotency_key=x_idempotency_key or envelope.get("idempotency_key"),
-            config=context.config,
+            config=project_init_service.inherit_workspace_self_issue_config(
+                context.config, config,
+            ),
             project_root=context.project_root,
             project_id=project_id,
             legacy_route=False,
             source_session_id=str(raw_payload.get("source_session_id") or ""),
+            web_base_url=str(request.base_url),
         )
         status_code = int(result.pop("_status_code", 200))
         return JSONResponse(result, status_code=status_code)
@@ -3401,6 +3424,7 @@ def create_app(
             config=config,
             project_root=project_root,
             project_id=default_project_id,
+            web_base_url=str(request.base_url),
             legacy_route=True,
         )
         status_code = int(result.pop("_status_code", 200))
@@ -3540,6 +3564,7 @@ def create_app(
             config=config,
             project_root=project_root,
             project_id=default_project_id,
+            web_base_url=str(request.base_url),
             legacy_route=True,
         )
         status_code = int(result.pop("_status_code", 200))
@@ -3681,6 +3706,10 @@ def create_app(
 
     app.include_router(terminal_routes.build_terminal_router(resolve_ctx=_delivery_trace_ctx, authorize_mutation=_web_mutation_auth_error, host_config=terminal_routes.terminal_host_config(config)))
 
+    app.include_router(build_self_issue_attachment_router(
+        resolve_ctx=_delivery_trace_ctx,
+    ))
+
     # Overview pulse bands (overview-pulse.v1) — same sibling-router pattern.
     from zf.web.overview_pulse import build_overview_pulse_router
 
@@ -3690,6 +3719,16 @@ def create_app(
     from zf.web.profile_routes import build_profile_router
 
     app.include_router(build_profile_router())
+
+    # Self-Issue's external Issue mirror is an additive read-side projection.
+    # Keep it in a sibling router so the existing Triage page and server routes
+    # remain untouched; mutations still flow through provider/runtime actions.
+    from zf.web.issue_triage_routes import build_issue_triage_router
+
+    app.include_router(build_issue_triage_router(
+        resolve_ctx=_delivery_trace_ctx,
+        workspace_config=config,
+    ))
 
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str) -> FileResponse:
@@ -5584,6 +5623,7 @@ def _web_action(
     config: ZfConfig | None = None,
     project_root: Path | None = None,
     project_id: str | None = None,
+    web_base_url: str = "",
     legacy_route: bool = False,
     source_session_id: str = "",
 ) -> dict:
@@ -5624,6 +5664,15 @@ def _web_action(
         payload,
         idempotency_key=x_idempotency_key,
     )
+    if canonical_action in SELF_ISSUE_ACTIONS:
+        prepare_self_issue_web_payload(
+            request_payload,
+            canonical_action,
+            web_session_token or supplied,
+            project_id,
+            project_root or state_dir.parent,
+            web_base_url=web_base_url,
+        )
     if canonical_action.startswith("workflow-"):
         request_payload = _action_payload(payload, preserve_request_id=True)
     payload_hash = _payload_hash(request_payload)
@@ -6417,6 +6466,8 @@ def _validate_action_payload(
     )
     if collaboration_error:
         return collaboration_error
+    if self_issue_error := validate_self_issue_web_action(action, payload):
+        return self_issue_error
     if action in {
         "dispatch-task",
         "request-verify",

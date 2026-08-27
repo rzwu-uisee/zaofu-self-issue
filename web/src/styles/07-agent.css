@@ -1744,3 +1744,90 @@
 }
 .headless-task-ref-action:hover { color: var(--text-primary); border-color: var(--brand, #47d); }
 .headless-task-ref-action:disabled { opacity: .45; cursor: default; }
+
+/* Self-Issue workspace, draft and evidence surfaces.  Keep this beside the
+   agent styles so the intake remains in the board while the agent is docked. */
+.self-issue-intake {
+  align-content: start;
+  display: grid;
+  gap: 16px;
+  box-sizing: border-box;
+  margin: 8px;
+  min-height: 360px;
+  max-height: min(680px, calc(100vh - 96px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface, var(--card));
+}
+.self-issue-intake-workspace {
+  position: absolute;
+  z-index: 24;
+  left: 50%;
+  bottom: 18px;
+  width: min(760px, calc(100% - 36px));
+  max-width: calc(100% - 36px);
+  max-height: calc(100% - 36px);
+  transform: translateX(-50%);
+}
+.self-issue-intake-workspace .self-issue-intake { width: 100%; margin: 0; }
+.board-panel { position: relative; }
+.board-panel.agent-docked .self-issue-intake-workspace {
+  left: 18px;
+  right: calc(min(660px, 44vw, calc(100vw - 32px)) + 36px);
+  width: auto;
+  max-width: none;
+  transform: none;
+}
+.board-panel.agent-docked .self-issue-intake-workspace .self-issue-intake {
+  max-width: 760px;
+  margin-inline: auto;
+}
+.self-issue-intake-header,
+.self-issue-intake-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.self-issue-intake-header > div:first-child { display: grid; gap: 4px; }
+.self-issue-intake-progress { color: var(--muted-foreground); font-variant-numeric: tabular-nums; font-weight: 650; }
+.self-issue-intake-question { display: grid; align-content: start; gap: 10px; min-width: 0; }
+.self-issue-intake-question > label { display: flex; align-items: center; font-weight: 700; }
+.self-issue-required { margin-left: auto; color: var(--err); }
+.self-issue-intake-question input,
+.self-issue-intake-question select,
+.self-issue-intake-question textarea { box-sizing: border-box; width: 100%; min-height: 42px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+.self-issue-intake-question textarea { min-height: 132px; resize: vertical; }
+.self-issue-intake-error { color: var(--err); font-size: var(--text-12); font-weight: 600; }
+.self-issue-intake-actions { padding-top: 12px; border-top: 1px solid var(--line); }
+.self-issue-intake-actions button,
+.self-issue-editor-tabs button { padding: 7px 13px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--text); cursor: pointer; }
+.self-issue-intake-actions span { flex: 1; color: var(--muted-foreground); font-size: var(--text-12); text-align: center; }
+.self-issue-attachment-picker { display: grid; gap: 10px; min-width: 0; }
+.self-issue-attachment-picker ul { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.self-issue-attachment-picker li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; border-radius: 5px; background: var(--panel-2); }
+.self-issue-draft-launcher { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; width: min(var(--headless-lane-width), 100%); max-width: 100%; min-height: 44px; margin: 0 auto 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+.self-issue-draft-launcher-main { display: grid; min-width: 0; text-align: left; }
+.self-issue-draft-launcher-main small { color: var(--muted-foreground); font-size: var(--text-10); text-transform: uppercase; }
+.self-issue-draft-launcher-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.self-issue-draft-launcher-status { color: var(--brand); font-size: var(--text-11); }
+.self-issue-draft-card { max-height: min(52vh, 620px); overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
+.self-issue-draft-card.expanded { position: fixed; z-index: 1000; inset: 24px; max-height: none; overflow-y: auto; box-sizing: border-box; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: 0 24px 72px var(--shadow); }
+.self-issue-card-header, .self-issue-card-controls, .self-issue-preview-heading { display: flex; align-items: center; }
+.self-issue-card-header { position: sticky; top: -16px; z-index: 1; justify-content: space-between; gap: 8px; padding-block: 4px; background: var(--card); }
+.self-issue-card-controls { gap: 3px; }
+.self-issue-card-control { display: inline-flex; align-items: center; justify-content: center; width: 27px; height: 27px; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted-foreground); cursor: pointer; }
+.self-issue-draft-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 24px; min-inline-size: 0; }
+.self-issue-draft-fields.hidden { display: none; }
+.self-issue-draft-side, .self-issue-draft-column { display: grid; align-content: start; gap: 9px; min-width: 0; }
+.self-issue-draft-column label { display: grid; gap: 5px; }
+.self-issue-draft-column .filter-input { box-sizing: border-box; width: 100%; }
+.self-issue-draft-column textarea.filter-input { min-height: 74px; resize: vertical; }
+.self-issue-markdown-preview, .self-issue-runtime-state, .self-issue-evidence-activity { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.self-issue-preview-heading { justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.self-issue-preview-heading > strong { font-size: var(--text-20); }
+.self-issue-runtime-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.self-issue-published-notice { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; }
+@media (max-width: 720px) {
+  .self-issue-draft-card.expanded { inset: 8px; padding: 10px; border-radius: 8px; }
+  .self-issue-card-header { top: -10px; }
+  .self-issue-draft-fields { grid-template-columns: minmax(0, 1fr); }
+}

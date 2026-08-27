@@ -5,6 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+import yaml
+
+from zf.core.config.schema import SelfIssueConfig
+from zf.core.config.self_issue_policy import (
+    inherit_workspace_self_issue_config,
+    inject_self_issue_policy,
+)
 from zf.core.workspace.registry import WorkspaceRegistry
 from zf.web.project_init_policy import ProjectInitConfigDraft
 from zf.web.projections.workspace import _workspace_project_payload
@@ -69,6 +76,7 @@ def initialize_admitted_project(
     root: Path,
     generated_config: ProjectInitConfigDraft,
     admission_inspection: Mapping[str, Any],
+    self_issue_policy: SelfIssueConfig | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Initialize an implicit Project through the canonical Python entrypoint."""
 
@@ -99,6 +107,7 @@ def initialize_admitted_project(
             workspace_register=True,
             with_instruction_docs=not bool(payload.get("skip_instruction_docs")),
             notes=str(payload.get("notes") or ""),
+            self_issue_policy=self_issue_policy,
         )
     except Exception as exc:
         return {
@@ -144,4 +153,24 @@ def _directory_is_empty(root: Path) -> bool:
         return False
 
 
-__all__ = ["apply_project_profile_overlay", "initialize_admitted_project"]
+def write_flow_config_with_self_issue(
+    path: Path,
+    flow_text: str,
+    policy: SelfIssueConfig | None,
+) -> None:
+    documents = inject_self_issue_policy(
+        list(yaml.safe_load_all(flow_text)),
+        policy,
+    )
+    path.write_text(
+        yaml.safe_dump_all(documents, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
+__all__ = [
+    "apply_project_profile_overlay",
+    "inherit_workspace_self_issue_config",
+    "initialize_admitted_project",
+    "write_flow_config_with_self_issue",
+]

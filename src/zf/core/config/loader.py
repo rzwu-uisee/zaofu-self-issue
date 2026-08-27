@@ -101,6 +101,8 @@ _ENV_SUB_RE = re.compile(
 
 from zf.core.config.schema import (  # noqa: E402
     GoalConfig,
+    SelfIssueConfig,
+    SelfIssueTargetConfig,
     ZfConfig,
     ProjectConfig,
     SessionConfig,
@@ -322,6 +324,17 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset({
     "budget_enforcement", "budget_enforcement_enabled",
     # P0-8 存量遗漏(与 attempt_lease_grace_s 同族白名单坑)+ 133/G 批
     "budget_fail_closed", "goal", "channel", "cost", "observability",
+    "self_issue",
+})
+_KNOWN_SELF_ISSUE_KEYS = frozenset({
+    "enabled", "provider", "authorization_domain", "target_project",
+    "target_locked", "oauth_client_id", "oauth_redirect_uri",
+    "automatic_detection_enabled", "browser_capture_enabled",
+    "browser_capture_base_url", "targets", "default_publication_mode",
+})
+_KNOWN_SELF_ISSUE_TARGET_KEYS = frozenset({
+    "authorization_domain", "project", "oauth_client_id",
+    "oauth_redirect_uri", "auth_mode",
 })
 _KNOWN_COST_KEYS = frozenset({
     "pricing_catalog_url",
@@ -2969,6 +2982,7 @@ def load_config(path: Path) -> ZfConfig:
         quality_gates=_build_quality_gates(raw.get("quality_gates")),
         security=_build_security(raw.get("security")),
         safety=_build_safety(raw.get("safety")),
+        self_issue=_build_self_issue(raw.get("self_issue")),
         verification=_build_verification(
             raw.get("verification"),
             contract_hardening_default=bool(
@@ -3250,6 +3264,116 @@ def _build_safety(data: dict | None) -> SafetyConfig:
     )
     return SafetyConfig(
         tool_closure_enabled=bool(tool_closure.get("enabled", True)),
+    )
+
+
+def _build_self_issue(data: dict | None) -> SelfIssueConfig:
+    """Parse the additive, disabled-by-default Self-Issue policy."""
+    if not data:
+        return SelfIssueConfig()
+    if not isinstance(data, dict):
+        raise ConfigError("self_issue must be a mapping")
+    _reject_unknown_keys(data, _KNOWN_SELF_ISSUE_KEYS, "self_issue")
+    enabled = _bool_value(data.get("enabled"), default=False)
+    target_locked = _bool_value(data.get("target_locked"), default=False)
+    provider = str(data.get("provider") or "gitlab").strip().lower()
+    authorization_domain = str(
+        data.get("authorization_domain") or "gitlab.com"
+    ).strip().lower()
+    target_project = str(data.get("target_project") or "").strip()
+    if target_locked and not enabled:
+        raise ConfigError("self_issue.target_locked requires self_issue.enabled")
+    if target_project and not _valid_self_issue_project(target_project):
+        raise ConfigError(
+            "self_issue.target_project must be a namespace/project path"
+        )
+    targets_raw = data.get("targets") or {}
+    if not isinstance(targets_raw, dict):
+        raise ConfigError("self_issue.targets must be a mapping")
+    if target_locked and not target_project and not targets_raw:
+        raise ConfigError(
+            "self_issue.target_project is required when target_locked is true"
+        )
+    targets: dict[str, SelfIssueTargetConfig] = {}
+    for raw_name, raw_target in targets_raw.items():
+        name = str(raw_name or "").strip().lower()
+        if name not in {"gitlab", "github"} or not isinstance(raw_target, dict):
+            raise ConfigError("self_issue.targets supports gitlab/github mappings only")
+        _reject_unknown_keys(
+            raw_target,
+            _KNOWN_SELF_ISSUE_TARGET_KEYS,
+            f"self_issue.targets.{name}",
+        )
+        domain = str(
+            raw_target.get("authorization_domain")
+            or ("gitlab.com" if name == "gitlab" else "github.com")
+        ).strip().lower()
+        project = str(raw_target.get("project") or "").strip()
+        if domain != f"{name}.com":
+            raise ConfigError(
+                f"self_issue.targets.{name} supports {name}.com only"
+            )
+        if not _valid_self_issue_project(project):
+            raise ConfigError(
+                f"self_issue.targets.{name}.project must be a namespace/project path"
+            )
+        expected_mode = "oauth_pkce" if name == "gitlab" else "device_flow"
+        auth_mode = str(
+            raw_target.get("auth_mode") or expected_mode
+        ).strip().lower()
+        if auth_mode != expected_mode:
+            raise ConfigError(
+                f"self_issue.targets.{name}.auth_mode must be {expected_mode}"
+            )
+        targets[name] = SelfIssueTargetConfig(
+            provider=name,
+            authorization_domain=domain,
+            project=project,
+            oauth_client_id=str(raw_target.get("oauth_client_id") or "").strip(),
+            oauth_redirect_uri=str(raw_target.get("oauth_redirect_uri") or "").strip(),
+            auth_mode=auth_mode,
+        )
+    default_mode = str(
+        data.get("default_publication_mode") or "gitlab"
+    ).strip().lower()
+    if default_mode not in {"gitlab", "github", "both"}:
+        raise ConfigError(
+            "self_issue.default_publication_mode must be gitlab, github, or both"
+        )
+    required_default = {"gitlab", "github"} if default_mode == "both" else {default_mode}
+    if targets and not required_default <= set(targets):
+        raise ConfigError(
+            "self_issue.default_publication_mode requires configured targets"
+        )
+    return SelfIssueConfig(
+        enabled=enabled,
+        provider=provider,
+        authorization_domain=authorization_domain,
+        target_project=target_project,
+        target_locked=target_locked,
+        oauth_client_id=str(data.get("oauth_client_id") or "").strip(),
+        oauth_redirect_uri=str(data.get("oauth_redirect_uri") or "").strip(),
+        automatic_detection_enabled=_bool_value(
+            data.get("automatic_detection_enabled"), default=True
+        ),
+        browser_capture_enabled=_bool_value(
+            data.get("browser_capture_enabled"), default=True
+        ),
+        browser_capture_base_url=str(
+            data.get("browser_capture_base_url") or ""
+        ).strip().rstrip("/"),
+        targets=targets,
+        default_publication_mode=default_mode,
+    )
+
+
+def _valid_self_issue_project(value: str) -> bool:
+    return bool(value) and not (
+        value.startswith("/")
+        or value.endswith("/")
+        or "/" not in value
+        or "://" in value
+        or any(char.isspace() for char in value)
     )
 
 
