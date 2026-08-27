@@ -2216,7 +2216,7 @@ export function App() {
           snapshot={snapshot}
         />
 
-        <section className="board-panel">
+        <section className="board-panel" id="self-issue-workspace-host">
           {!activeProjectId ? (
             <WorkspaceEmptyPanel onAddProject={() => openProjectWizard()} />
           ) : activeProject && !activeProjectReady ? (
