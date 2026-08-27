@@ -201,6 +201,19 @@ def terminal_session(session: str, mode: str, target: str) -> int:
             with_state(session, append)
             seq += 1
             terminal_frame(seq, data, full=False)
+        if kind == "terminal.scroll":
+            direction = str(command.get("direction") or "")
+            source = str(command.get("source") or "wheel")
+            lines = command.get("lines")
+            data = f"\r\n[Fake Herdr scroll {source} {direction} {lines}]\r\n$ "
+
+            def append_scroll(value: dict) -> None:
+                screens = value.setdefault("screens", {})
+                screens[target] = (str(screens.get(target) or "") + data)[-100_000:]
+
+            with_state(session, append_scroll)
+            seq += 1
+            terminal_frame(seq, data, full=False)
     return 0
 
 

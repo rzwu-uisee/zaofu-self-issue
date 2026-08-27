@@ -25,6 +25,10 @@ from zf.runtime.evolution_evaluator import (
 )
 from zf.runtime.evolution_store import CapabilityRegistry, EvolutionTrialStore
 from zf.runtime.evolution_projection import build_evolution_projection
+from zf.runtime.evolution_skill_campaign import (
+    verify_skill_attempt_evidence,
+    verify_skill_trial_settlement,
+)
 from zf.runtime.run_archive import RunArchiveError, verify_run_archive
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref, verify_sidecar_ref
 
@@ -71,6 +75,7 @@ class EvolutionCoordinator:
         actor: str = "evolution-coordinator",
     ) -> dict[str, Any]:
         attempt = validate_evolution_attempt(raw)
+        verify_skill_attempt_evidence(self.state_dir, attempt)
         descriptor = write_immutable_json_sidecar(
             self.state_dir,
             attempt,
@@ -216,6 +221,15 @@ class EvolutionCoordinator:
             normalized = validate_measurement(evaluator_generation, measurement)
             if str(normalized["trial_id"]) != trial_id:
                 raise EvolutionContractError("measurement trial_id mismatch")
+            attempt = self._attempt_body(str(trial_row["attempt_id"]))
+            verify_skill_trial_settlement(
+                self.state_dir,
+                attempt=attempt,
+                trial=trial_row,
+                measurement=normalized,
+                archive_path=archive_path,
+                archive_digest=normalized_archive_digest,
+            )
             descriptor = write_immutable_json_sidecar(
                 self.state_dir,
                 normalized,
@@ -301,7 +315,11 @@ class EvolutionCoordinator:
     ) -> dict[str, Any]:
         evaluator = validate_evaluator_generation(evaluator_generation)
         attempt = self._attempt_body(attempt_id)
+        verify_skill_attempt_evidence(self.state_dir, attempt)
         mutation = attempt.get("mutation") or {}
+        baseline: list[dict[str, Any]] = []
+        candidate: list[dict[str, Any]] = []
+        control: list[dict[str, Any]] = []
         if bool(mutation.get("tcb_affected")):
             comparison = incomparable_comparison(
                 evaluator,
@@ -310,12 +328,11 @@ class EvolutionCoordinator:
                     "evaluator/TCB mutation requires an independently admitted "
                     "evaluator generation N+1"
                 ),
+                attempt=attempt,
             )
         else:
             self._assert_evaluator_bound(attempt_id, evaluator)
             rows = self.trials.trials_for_attempt(attempt_id)
-            baseline: list[dict[str, Any]] = []
-            candidate: list[dict[str, Any]] = []
             for row in rows:
                 if row.get("status") != "settled" or row.get("outcome") == "semantic_failed":
                     continue
@@ -330,13 +347,21 @@ class EvolutionCoordinator:
                 )
                 if not isinstance(hydrated.payload, dict):
                     raise EvolutionContractError("trial measurement is not an object")
-                target = baseline if row.get("arm") == "baseline" else candidate
+                target = {
+                    "control": control,
+                    "baseline": baseline,
+                    "candidate": candidate,
+                }.get(str(row.get("arm") or ""))
+                if target is None:
+                    raise EvolutionContractError("trial has an unsupported arm")
                 target.append(dict(hydrated.payload))
             comparison = compare_repeated_trials(
                 evaluator,
                 attempt_id=attempt_id,
                 baseline=baseline,
                 candidate=candidate,
+                control=control,
+                attempt=attempt,
             )
         descriptor = write_immutable_json_sidecar(
             self.state_dir,
@@ -361,6 +386,9 @@ class EvolutionCoordinator:
                     "comparison_id": comparison["comparison_id"],
                     "status": comparison["status"],
                     "adoption_eligible": comparison["adoption_eligible"],
+                    "blocking_reasons": comparison.get("blocking_reasons", []),
+                    "claim_scope": comparison.get("claim_scope", ""),
+                    "object_kind": comparison.get("object_kind", ""),
                     "evaluator_generation_id": comparison[
                         "evaluator_generation_id"
                     ],
@@ -522,73 +550,25 @@ class EvolutionCoordinator:
         role_instance: str,
         outcome: str,
         cost: Mapping[str, Any],
+        feedback: Mapping[str, Any] | None = None,
         config: Any | None = None,
         project_root: Path | None = None,
     ) -> dict[str, Any]:
-        """Credit a skill asset only when invocation evidence is observable."""
+        from zf.runtime.evolution_skill_feedback import record_skill_outcome
 
-        from zf.runtime.skill_invocation_projection import project_skill_invocations
-
-        key = f"{asset_id}@{int(version)}"
-        asset = self.capabilities.load()["assets"].get(key)
-        if not isinstance(asset, dict) or asset.get("asset_kind") != "skill_prompt":
-            raise EvolutionContractError("skill outcome requires a skill_prompt asset")
-        hydrated = hydrate_sidecar_ref(
-            self.state_dir,
-            dict(asset["artifact_ref"]),
-            purpose="skill-evolution-outcome",
-            actor="evolution-observer",
-        )
-        body = hydrated.payload if isinstance(hydrated.payload, Mapping) else {}
-        declared = str(body.get("skill_name") or body.get("name") or "").strip()
-        if declared and declared != skill_name:
-            raise EvolutionContractError("skill asset name does not match invocation")
-        projection = project_skill_invocations(
-            self.state_dir,
-            config=config,
-            project_root=project_root or self.state_dir.parent,
-            task_id=task_id,
-            role_instance=role_instance,
-        )
-        invoked = [
-            row
-            for row in projection.get("skills") or []
-            if row.get("skill") == skill_name and bool(row.get("invoked"))
-        ]
-        if not invoked:
-            raise EvolutionContractError(
-                "skill outcome has no observed invocation evidence"
-            )
-        evidence_ids = sorted({
-            str(item.get("event_id") or "")
-            for row in invoked
-            for item in row.get("evidence") or []
-            if str(item.get("event_id") or "")
-        })
-        usage_ref = "skill-invocation://" + stable_digest({
-            "asset": key,
-            "skill": skill_name,
-            "task_id": task_id,
-            "role_instance": role_instance,
-            "evidence_ids": evidence_ids,
-        })
-        result = self.record_asset_outcome(
+        return record_skill_outcome(
+            self,
             asset_id=asset_id,
             version=version,
-            usage_ref=usage_ref,
-            matched=True,
+            skill_name=skill_name,
+            task_id=task_id,
+            role_instance=role_instance,
             outcome=outcome,
             cost=cost,
-            actor="skill-invocation-projector",
+            feedback=feedback,
+            config=config,
+            project_root=project_root,
         )
-        result["invocation"] = {
-            "skill": skill_name,
-            "task_id": task_id,
-            "role_instance": role_instance,
-            "evidence_event_ids": evidence_ids,
-            "usage_ref": usage_ref,
-        }
-        return result
 
     def materialize_challenge(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         from zf.runtime.evolution_learning import ChallengeBank
@@ -847,6 +827,15 @@ def _validate_learning_asset(
         raise EvolutionContractError(f"schema_version must be {LEARNING_ASSET_SCHEMA}")
     if str(body.get("asset_kind") or "") not in _ASSET_KINDS:
         raise EvolutionContractError("unsupported learning asset kind")
+    comparison_kind = str(comparison.get("object_kind") or "")
+    if body.get("asset_kind") == "skill_prompt" and comparison_kind != "skill_prompt":
+        raise EvolutionContractError(
+            "skill_prompt asset requires a Skill-scoped comparison"
+        )
+    if comparison_kind == "skill_prompt" and body.get("asset_kind") != "skill_prompt":
+        raise EvolutionContractError(
+            "Skill-scoped comparison can only propose a skill_prompt asset"
+        )
     if not str(body.get("asset_id") or "").strip() or int(body.get("version") or 0) < 1:
         raise EvolutionContractError("learning asset requires asset_id and version")
     body["digest"] = normalize_digest(body.get("digest"), field="learning asset digest")

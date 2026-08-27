@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **69** 个顶层命令 family、**282** 条可寻址命令路径。
+当前共 **69** 个顶层命令 family、**296** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -252,7 +252,21 @@ Manage evidence-bound self-evolution attempts and capabilities
 | `zf evolution economics` | Compute evidence-bound evolution economics without inventing values |
 | `zf evolution evaluator-register` | Register public evaluator metadata and sealed cases |
 | `zf evolution opportunity-propose` | Materialize a proposal-only evolution opportunity |
+| `zf evolution skill-maintenance-propose` | Record an optimize/replace/merge/deactivate Skill proposal |
+| `zf evolution skill-opt-agent-execute` | Execute one proposal-only Optimizer Agent request |
+| `zf evolution skill-opt-export` | Export the completed optimizer best as a design-179 Skill candidate |
+| `zf evolution skill-opt-init` | Initialize one bounded, frozen single-Skill optimization campaign |
+| `zf evolution skill-opt-prepare` | Apply one bounded Agent-proposed Skill edit packet |
+| `zf evolution skill-opt-selection-submit` | Validate and publish one sealed optimizer Selection result |
+| `zf evolution skill-opt-settle` | Select one prepared Skill candidate against held-out evidence |
 | `zf evolution skill-outcome` | Credit a skill only when current-dispatch invocation is observed |
+| `zf evolution skill-overlay-resolve` | Resolve scoped Skill canary overlays for a future dispatch |
+| `zf evolution skill-routing-report` | Build a routing-stress report from typed observation sidecars |
+| `zf evolution skill-source-apply` | Apply an exact Skill retain proposal and sync provider copies |
+| `zf evolution skill-source-propose` | Build an owner-approved source-retain proposal from a passed canary |
+| `zf evolution skill-treatment-compare` | Check that Skill treatment arms differ only by the target Skill |
+| `zf evolution skill-trial-materialize` | Materialize one frozen Skill trial arm through the normal resolver |
+| `zf evolution skill-trial-spec` | Build a frozen raw/current/candidate Skill trial specification |
 | `zf evolution status` | Show the read-only evolution projection |
 | `zf evolution trial-ensure` | Ensure a stable A/B trial row |
 | `zf evolution trial-execute` | Execute one resident-owned evolution trial/canary request |

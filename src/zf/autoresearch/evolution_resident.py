@@ -14,18 +14,28 @@ from zf.core.events.writer import EventWriter
 EVOLUTION_REQUEST_TYPES = frozenset({
     "evolution.trial.requested",
     "evolution.canary.requested",
+    "evolution.skill_optimizer.proposal.requested",
 })
 EVOLUTION_EXECUTION_ACCEPTED = "evolution.trial.execution.accepted"
 EVOLUTION_EXECUTION_STARTED = "evolution.trial.execution.started"
 EVOLUTION_EXECUTION_COMPLETED = "evolution.trial.execution.completed"
 EVOLUTION_EXECUTION_FAILED = "evolution.trial.execution.failed"
+OPTIMIZER_EXECUTION_ACCEPTED = "evolution.skill_optimizer.execution.accepted"
+OPTIMIZER_EXECUTION_STARTED = "evolution.skill_optimizer.execution.started"
+OPTIMIZER_EXECUTION_COMPLETED = "evolution.skill_optimizer.execution.completed"
+OPTIMIZER_EXECUTION_FAILED = "evolution.skill_optimizer.execution.failed"
 
 
 def pending_evolution_requests(events: list[ZfEvent]) -> list[ZfEvent]:
     terminal_request_ids = {
         str(_payload(event).get("request_event_id") or "")
         for event in events
-        if event.type in {EVOLUTION_EXECUTION_COMPLETED, EVOLUTION_EXECUTION_FAILED}
+        if event.type in {
+            EVOLUTION_EXECUTION_COMPLETED,
+            EVOLUTION_EXECUTION_FAILED,
+            OPTIMIZER_EXECUTION_COMPLETED,
+            OPTIMIZER_EXECUTION_FAILED,
+        }
     }
     return [
         event for event in events
@@ -37,7 +47,7 @@ def evolution_accepted_ids(events: list[ZfEvent]) -> set[str]:
     return {
         str(_payload(event).get("request_event_id") or "")
         for event in events
-        if event.type == EVOLUTION_EXECUTION_ACCEPTED
+        if event.type in {EVOLUTION_EXECUTION_ACCEPTED, OPTIMIZER_EXECUTION_ACCEPTED}
         and str(_payload(event).get("request_event_id") or "")
     }
 
@@ -51,14 +61,19 @@ def plan_evolution_actions(
     actions: list[Any] = []
     for event in pending_evolution_requests(events):
         payload = _payload(event)
+        optimizer = event.type == "evolution.skill_optimizer.proposal.requested"
         actions.append(action_factory(
             loop_request_id=event.id,
-            kind="evolution_trial",
-            action="run_evolution_trial",
+            kind="skill_optimizer" if optimizer else "evolution_trial",
+            action=("run_skill_optimizer_agent" if optimizer else "run_evolution_trial"),
             reason=f"execute {event.type}",
             command=[
                 sys.executable, "-m", "zf.cli.main", "evolution",
-                "trial-execute", "--state-dir", str(state_dir),
+                (
+                    "skill-opt-agent-execute"
+                    if optimizer else "trial-execute"
+                ),
+                "--state-dir", str(state_dir),
                 "--request-event-id", event.id,
             ],
             budget_cap={
@@ -75,9 +90,14 @@ def evolution_acceptance(
     *,
     events: list[ZfEvent],
 ) -> tuple[str, dict[str, Any]] | None:
-    if action.action != "run_evolution_trial":
+    if action.action not in {"run_evolution_trial", "run_skill_optimizer_agent"}:
         return None
-    return EVOLUTION_EXECUTION_ACCEPTED, {
+    event_type = (
+        OPTIMIZER_EXECUTION_ACCEPTED
+        if action.action == "run_skill_optimizer_agent"
+        else EVOLUTION_EXECUTION_ACCEPTED
+    )
+    return event_type, {
         **_identity_payload(action, events=events),
         "loop_request_id": action.loop_request_id,
         "queued": True,
@@ -96,13 +116,14 @@ def run_evolution_action(
 ) -> bool:
     """Execute an evolution action and return whether it was consumed."""
 
-    if action.action != "run_evolution_trial":
+    if action.action not in {"run_evolution_trial", "run_skill_optimizer_agent"}:
         return False
     if not enabled:
         return True
     identity = _identity_payload(action, events=events)
+    optimizer = action.action == "run_skill_optimizer_agent"
     writer.append(ZfEvent(
-        type=EVOLUTION_EXECUTION_STARTED,
+        type=OPTIMIZER_EXECUTION_STARTED if optimizer else EVOLUTION_EXECUTION_STARTED,
         actor="zf-autoresearch-resident",
         causation_id=action.loop_request_id,
         payload={**identity, "command": action.command},
@@ -124,8 +145,9 @@ def run_evolution_action(
         )
     writer.append(ZfEvent(
         type=(
-            EVOLUTION_EXECUTION_COMPLETED
-            if proc.returncode == 0 else EVOLUTION_EXECUTION_FAILED
+            (OPTIMIZER_EXECUTION_COMPLETED if optimizer else EVOLUTION_EXECUTION_COMPLETED)
+            if proc.returncode == 0
+            else (OPTIMIZER_EXECUTION_FAILED if optimizer else EVOLUTION_EXECUTION_FAILED)
         ),
         actor="zf-autoresearch-resident",
         causation_id=action.loop_request_id,
@@ -149,6 +171,7 @@ def _identity_payload(action: Any, *, events: list[ZfEvent]) -> dict[str, Any]:
         "trial_id": str(payload.get("trial_id") or ""),
         "asset_id": str(payload.get("asset_id") or ""),
         "version": int(payload.get("version") or 0),
+        "optimizer_request_key": str(payload.get("request_key") or ""),
     }
 
 

@@ -196,7 +196,17 @@ def plan_candidate_rework(
     """
     infra_failure_ids = _infra_only_candidate_failure_ids(events)
     budget_failure_ids = budget_candidate_failure_ids(events, CANDIDATE_FAIL_EVENTS)
-    no_attempt_ids = infra_failure_ids | budget_failure_ids
+    protocol_repair_ids = {
+        str(getattr(event, "id", "") or "")
+        for event in events
+        if isinstance(getattr(event, "payload", None), dict)
+        and (
+            str(event.payload.get("attempt_domain") or "")
+            == "protocol_repair"
+            or event.payload.get("semantic_rework_cost") == 0
+        )
+    }
+    no_attempt_ids = infra_failure_ids | budget_failure_ids | protocol_repair_ids
     handled_by_event: dict[str, set[str]] = {}
     attempts_by_pdd: dict[str, set[str]] = {}
     attempts_by_pdd_source: dict[tuple[str, str], set[str]] = {}

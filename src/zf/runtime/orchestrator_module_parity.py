@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.candidate_success_currentness import CandidateSuccessCurrentnessMixin
 from zf.runtime.candidate_rework_identity import (
     _candidate_rework_amended_identity_payload,
     _candidate_rework_identity_payload,
@@ -16,7 +17,7 @@ from zf.runtime.module_parity_identity import module_parity_identity_payload
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
-class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
+class ModuleParityBridgeMixin(CandidateSuccessCurrentnessMixin, GoalClosureBridgeMixin):
     """Deterministic verify -> parity scan -> gap amend bridge."""
 
     @staticmethod
@@ -134,6 +135,10 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
         bridge only records the requested profile and starts a reader fanout when
         the YAML declares one.
         """
+
+        stale = self._reject_stale_candidate_success(event)
+        if stale is not None:
+            return stale
 
         from zf.core.workflow.flow_metadata import flow_metadata_for
 
@@ -270,6 +275,9 @@ class ModuleParityBridgeMixin(GoalClosureBridgeMixin):
 
         if event.type != "verify.passed":
             return None
+        stale = self._reject_stale_candidate_success(event)
+        if stale is not None:
+            return stale
         if not self._has_fanout_reader_trigger("verify.parity_scan.requested"):
             return None
         if self._has_bridge_output(

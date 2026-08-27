@@ -466,7 +466,11 @@ def run_resident_once(
         finally:
             log.close()
         for action in actions:
-            if action.action not in {"run_loop", "run_evolution_trial"} or action.loop_request_id in accepted:
+            if action.action not in {
+                "run_loop",
+                "run_evolution_trial",
+                "run_skill_optimizer_agent",
+            } or action.loop_request_id in accepted:
                 continue
             acceptance = evolution_acceptance(action, events=resident_events)
             event_payload = {

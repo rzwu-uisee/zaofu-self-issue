@@ -6,8 +6,6 @@ folds immutable facts into the next request or controlled action.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,17 +22,43 @@ from zf.runtime.evolution_environment import (
     freeze_campaign_environment,
 )
 from zf.runtime.evolution_coordinator import EvolutionCoordinator
+from zf.runtime.evolution_skill_campaign import (
+    skill_trial_arm_order,
+    specialize_skill_campaign,
+)
+from zf.runtime.evolution_skill_automation import reconcile_skill_overlay_health
+from zf.runtime.evolution_skill_source import (
+    build_skill_maintenance_proposal,
+    build_skill_retain_proposal,
+)
+from zf.runtime.evolution_skill_optimizer_automation import (
+    is_skill_optimizer_intake,
+    materialize_skill_optimizer_intake,
+    reconcile_skill_optimizer_automation,
+)
 from zf.runtime.evolution_automation_support import (
+    CAMPAIGN_COMPLETED, CAMPAIGN_DECLINED, CAMPAIGN_MATERIALIZED,
+    CAMPAIGN_REQUESTED, CANARY_FAILED, CANARY_REQUESTED,
+    EvolutionAutomationResult, TRIAL_EXECUTION_COMPLETED,
+    TRIAL_EXECUTION_FAILED, TRIAL_REQUESTED,
     asset_for_attempt as _asset_for_attempt,
     campaign_terminal as _campaign_terminal,
     canary_failure_count as _canary_failure_count,
     canary_request_open as _canary_request_open,
     canary_terminal as _canary_terminal,
+    canary_terminal_outcome as _canary_terminal_outcome,
     complete_campaign as _complete_campaign,
     controlled_outcome as _controlled_outcome,
     controlled_transition as _controlled_transition,
+    event_payload as _payload,
+    handled_evolution_sources as _handled_evolution_sources,
     hydrate_campaign as _hydrate_campaign,
     latest_campaigns as _latest_campaigns,
+    next_asset_version as _next_asset_version,
+    skill_maintenance_decision as _skill_maintenance_decision,
+    snapshot as _snapshot,
+    terminal_trial_outcome as _terminal_trial_outcome,
+    trial_ready_for_request as _trial_ready_for_request,
     trial_request_open as _trial_request_open,
 )
 from zf.runtime.evolution_intake import (
@@ -43,52 +67,7 @@ from zf.runtime.evolution_intake import (
 )
 from zf.runtime.run_archive import RunArchiveError
 from zf.runtime.run_scope import event_run_id, run_aliases
-
-
-CAMPAIGN_REQUESTED = "evolution.campaign.requested"
-CAMPAIGN_MATERIALIZED = "evolution.campaign.materialized"
-CAMPAIGN_DECLINED = "evolution.campaign.declined"
-CAMPAIGN_COMPLETED = "evolution.campaign.completed"
-TRIAL_REQUESTED = "evolution.trial.requested"
-TRIAL_EXECUTION_COMPLETED = "evolution.trial.execution.completed"
-TRIAL_EXECUTION_FAILED = "evolution.trial.execution.failed"
-CANARY_REQUESTED = "evolution.canary.requested"
-CANARY_FAILED = "evolution.canary.failed"
-
-@dataclass(frozen=True)
-class EvolutionAutomationResult:
-    intake_materialized: int = 0
-    intake_declined: int = 0
-    trials_requested: int = 0
-    comparisons_completed: int = 0
-    assets_proposed: int = 0
-    controlled_actions: int = 0
-    campaigns_completed: int = 0
-
-    @property
-    def changed(self) -> bool:
-        return any((
-            self.intake_materialized,
-            self.intake_declined,
-            self.trials_requested,
-            self.comparisons_completed,
-            self.assets_proposed,
-            self.controlled_actions,
-            self.campaigns_completed,
-        ))
-
-    @property
-    def action_count(self) -> int:
-        return sum((
-            self.intake_materialized,
-            self.intake_declined,
-            self.trials_requested,
-            self.comparisons_completed,
-            self.assets_proposed,
-            self.controlled_actions,
-            self.campaigns_completed,
-        ))
-
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 
 def reconcile_evolution_automation(
     *,
@@ -117,19 +96,40 @@ def reconcile_evolution_automation(
         "assets_proposed": 0,
         "controlled_actions": 0,
         "campaigns_completed": 0,
+        "optimizer_requests": 0,
+        "optimizer_steps": 0,
+        "optimizer_exports": 0,
+        "optimizer_rejected": 0,
     }
 
-    handled_sources = {
-        str(_payload(event).get("source_event_id") or "")
-        for event in events
-        if event.type in {CAMPAIGN_MATERIALIZED, CAMPAIGN_DECLINED}
-    }
-    handled_deposition_digests = {
-        str(_payload(event).get("deposition_digest") or "")
-        for event in events
-        if event.type in {CAMPAIGN_MATERIALIZED, CAMPAIGN_DECLINED}
-        and str(_payload(event).get("deposition_digest") or "")
-    }
+    health_actions = reconcile_skill_overlay_health(
+        state_dir=state_dir,
+        project_root=project_root,
+        writer=writer,
+        config=config,
+        max_actions=remaining,
+    )
+    counts["controlled_actions"] += health_actions
+    remaining -= health_actions
+    if health_actions:
+        events = writer.event_log.read_all()
+
+    optimizer = reconcile_skill_optimizer_automation(
+        state_dir=state_dir,
+        writer=writer,
+        policy=policy,
+        events=events,
+        max_actions=remaining,
+    )
+    counts["optimizer_requests"] += optimizer.requests
+    counts["optimizer_steps"] += optimizer.steps
+    counts["optimizer_exports"] += optimizer.exports
+    counts["optimizer_rejected"] += optimizer.rejected
+    remaining -= optimizer.action_count
+    if optimizer.action_count:
+        events = writer.event_log.read_all()
+
+    handled_sources, handled_deposition_digests = _handled_evolution_sources(events)
     for event in events:
         if remaining <= 0:
             break
@@ -171,6 +171,23 @@ def reconcile_evolution_automation(
                 counts["intake_declined"] += 1
                 remaining -= 1
                 continue
+            if is_skill_optimizer_intake(deposition):
+                materialized = materialize_skill_optimizer_intake(
+                    state_dir=state_dir,
+                    writer=writer,
+                    deposition=deposition,
+                    deposition_ref=deposition_ref,
+                    source_event=event,
+                    policy=policy,
+                )
+                counts["intake_materialized"] += 1
+                counts["optimizer_requests"] += int(
+                    bool(materialized["optimizer_request"]["created"])
+                )
+                handled_sources.add(event.id)
+                handled_deposition_digests.add(deposition_digest)
+                remaining -= 1
+                continue
             candidate = _validate_candidate(
                 deposition,
                 state_dir=state_dir,
@@ -205,6 +222,7 @@ def reconcile_evolution_automation(
                 deposition=deposition,
                 deposition_ref=deposition_ref,
                 candidate=candidate,
+                config=config,
                 policy=policy,
                 environment_snapshotter=environment_snapshotter,
                 workflow_run_id=(
@@ -333,7 +351,7 @@ def _advance_campaign(
     repetitions = int(campaign["trial_repetitions"])
     trial_rows: list[dict[str, Any]] = []
     for replicate in range(1, repetitions + 1):
-        for arm in ("baseline", "candidate"):
+        for arm in skill_trial_arm_order(campaign, replicate):
             row = coordinator.ensure_trial(
                 attempt_id=attempt_id,
                 arm=arm,
@@ -387,6 +405,7 @@ def _advance_campaign(
         row for row in trial_state["comparisons"].values()
         if row.get("attempt_id") == attempt_id
     ), None)
+    comparison_ref: dict[str, Any] = {}
     if not isinstance(comparison, dict):
         result = coordinator.compare_attempt(
             attempt_id,
@@ -394,16 +413,53 @@ def _advance_campaign(
             actor="run-manager-evolution",
         )
         comparison = result["comparison"]
+        comparison_ref = dict(result["artifact_ref"])
         counts["comparisons_completed"] += 1
+    else:
+        descriptor = comparison.get("artifact_ref")
+        if isinstance(descriptor, Mapping):
+            hydrated = hydrate_sidecar_ref(
+                state_dir,
+                dict(descriptor),
+                purpose="evolution-skill-maintenance-comparison",
+                actor="run-manager",
+            )
+            if isinstance(hydrated.payload, Mapping):
+                comparison = dict(hydrated.payload)
+                comparison_ref = dict(descriptor)
 
-    if str(comparison.get("status")) != "candidate_better":
+    if str(comparison.get("status")) != "candidate_better" or not bool(
+        comparison.get("adoption_eligible")
+    ):
+        exploratory = (
+            str(comparison.get("status")) == "candidate_better"
+            and str(comparison.get("object_kind") or "") == "skill_prompt"
+        )
+        action_ref: dict[str, Any] = {}
+        human_action_required = False
+        if str(comparison.get("object_kind") or "") == "skill_prompt":
+            action, rationale = _skill_maintenance_decision(comparison)
+            proposal = build_skill_maintenance_proposal(
+                state_dir,
+                skill_name=str(campaign.get("skill_trial_spec", {}).get("skill_name") or ""),
+                action=action,
+                evidence_refs=[comparison_ref] if comparison_ref else [
+                    dict(_payload(campaign_event)["campaign_ref"])
+                ],
+                rationale=rationale,
+                writer=writer,
+            )
+            action_ref = dict(proposal["proposal_ref"])
+            human_action_required = True
         counts["campaigns_completed"] += _complete_campaign(
             writer,
             campaign_event,
             campaign,
             outcome=str(comparison.get("status") or "inconclusive"),
-            adoption="rejected",
+            adoption="exploratory" if exploratory else "rejected",
             comparison_id=str(comparison.get("comparison_id") or ""),
+            action_ref=action_ref,
+            human_action_required=human_action_required,
         )
         return counts
 
@@ -551,6 +607,26 @@ def _advance_campaign(
         )
         asset = outcome_result["asset"]
         counts["controlled_actions"] += int(bool(outcome_result.get("recorded")))
+        if asset["asset_kind"] == "skill_prompt" and outcome == "passed":
+            proposal = build_skill_retain_proposal(
+                state_dir,
+                project_root=project_root,
+                asset_id=str(asset["asset_id"]),
+                version=int(asset["version"]),
+                writer=writer,
+            )
+            counts["campaigns_completed"] += _complete_campaign(
+                writer,
+                campaign_event,
+                campaign,
+                outcome="canary_passed",
+                adoption="retain_proposed",
+                comparison_id=str(comparison["comparison_id"]),
+                asset=asset,
+                action_ref=proposal["proposal_ref"],
+                human_action_required=True,
+            )
+            return counts
         target = "active_retained" if outcome == "passed" else "revoked"
         transition = _controlled_transition(
             state_dir=state_dir,
@@ -575,24 +651,6 @@ def _advance_campaign(
     return counts
 
 
-def _trial_ready_for_request(row: Mapping[str, Any]) -> bool:
-    status = str(row.get("status") or "")
-    if status in {"prepared", "failed"}:
-        return True
-    if status != "running":
-        return False
-    expires = str(row.get("lease_expires_at") or "").strip()
-    if not expires:
-        return True
-    try:
-        parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-    except ValueError:
-        return True
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed <= datetime.now(timezone.utc)
-
-
 def _materialize_campaign(
     *,
     state_dir: Path,
@@ -602,6 +660,7 @@ def _materialize_campaign(
     deposition: Mapping[str, Any],
     deposition_ref: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    config: Any,
     policy: Any,
     environment_snapshotter: EnvironmentSnapshotter,
     workflow_run_id: str,
@@ -682,6 +741,28 @@ def _materialize_campaign(
         * int(getattr(policy, "trial_repetitions", 2)) * 2,
         "max_tokens": float(getattr(policy, "max_tokens", 50_000)),
     }
+    project_environment = environment_capability.get("environment")
+    project_identity = (
+        project_environment.get("project")
+        if isinstance(project_environment, Mapping)
+        else {}
+    )
+    git_identity = (
+        project_identity.get("git")
+        if isinstance(project_identity, Mapping)
+        else {}
+    )
+    runtime_commit_digest = stable_digest(
+        dict(git_identity) if isinstance(git_identity, Mapping) else {}
+    )
+    model_digest = stable_digest({
+        "provider": str(getattr(policy, "backend", "")),
+        "model": str(getattr(policy, "model", "") or "provider-default"),
+        "reasoning_effort": str(
+            getattr(policy, "model_reasoning_effort", "") or ""
+        ),
+    })
+    budget_digest = stable_digest(budget)
     comparison_identity = {
         "scenario_set_digest": evaluator["scenario_set_digest"],
         "config_generation": config_snapshot["sha256"],
@@ -691,7 +772,7 @@ def _materialize_campaign(
         "sandbox_policy_digest": sandbox_snapshot["sha256"],
         "network_policy_digest": network_snapshot["sha256"],
         "credential_policy_digest": credential_snapshot["sha256"],
-        "budget_digest": stable_digest(budget),
+        "budget_digest": budget_digest,
         "seed_policy_digest": stable_digest({"seed": "provider-managed-counterbalanced"}),
         "task_family": task_family,
     }
@@ -772,6 +853,9 @@ def _materialize_campaign(
             "network_policy_digest": network_snapshot["sha256"],
             "credential_policy_ref": credential_snapshot["ref"],
             "credential_policy_digest": credential_snapshot["sha256"],
+            "runtime_commit_digest": runtime_commit_digest,
+            "model_digest": model_digest,
+            "budget_digest": budget_digest,
             "run_archive_manifest_ref": manifest_ref,
             "run_archive_manifest_digest": manifest_digest,
         },
@@ -866,7 +950,7 @@ def _materialize_campaign(
             **dict(candidate.get("taint") or {}),
         },
     }
-    return {
+    campaign = {
         "schema_version": "evolution-campaign.v1",
         "campaign_id": campaign_id,
         "source_event_id": source_event.id,
@@ -888,58 +972,17 @@ def _materialize_campaign(
             "frozen_digests": environment_digests,
         },
     }
-
-
-def _snapshot(
-    state_dir: Path,
-    label: str,
-    body: Mapping[str, Any],
-    source_event_id: str,
-) -> dict[str, Any]:
-    return write_immutable_json_sidecar(
-        state_dir,
-        dict(body),
-        root=f"evolution/snapshots/{label}",
-        kind=f"evolution_{label}_snapshot",
-        schema_version=f"evolution-{label}-snapshot.v1",
-        created_by="run-manager",
-        source_event_id=source_event_id,
-    )
-
-
-def _terminal_trial_outcome(rows: list[Mapping[str, Any]]) -> str:
-    failure_classes = {
-        str(row.get("failure_class") or "")
-        for row in rows
-        if str(row.get("failure_class") or "")
-    }
-    if "evolution_environment_comparison_drift" in failure_classes:
-        return "environment_comparison_drift"
-    if any(value.startswith("evolution_environment_") for value in failure_classes):
-        return "environment_preflight_failed"
-    return "trial_attempts_exhausted"
-
-
-def _canary_terminal_outcome(payload: Mapping[str, Any]) -> str:
-    failure_class = str(payload.get("failure_class") or "")
-    if failure_class == "evolution_environment_comparison_drift":
-        return "environment_comparison_drift"
-    if failure_class.startswith("evolution_environment_"):
-        return "environment_preflight_failed"
-    return "canary_infrastructure_exhausted"
-
-
-def _next_asset_version(registry: Mapping[str, Any], asset_id: str) -> int:
-    versions = [
-        int(row.get("version") or 0)
-        for row in (registry.get("assets") or {}).values()
-        if isinstance(row, Mapping) and str(row.get("asset_id") or "") == asset_id
-    ]
-    return max(versions, default=0) + 1
-
-
-def _payload(event: ZfEvent) -> dict[str, Any]:
-    return event.payload if isinstance(event.payload, dict) else {}
+    if str(candidate.get("asset_kind") or "") == "skill_prompt":
+        campaign = specialize_skill_campaign(
+            campaign,
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+            candidate=candidate,
+            source_event_id=source_event.id,
+            deposition_ref=deposition_ref,
+        )
+    return campaign
 
 
 __all__ = [

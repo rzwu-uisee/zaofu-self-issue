@@ -2445,6 +2445,12 @@ class WorkflowRuntimeCoordinator(
                 self._processed_event_ids.add(event.id)
                 continue
 
+            stale_candidate_success = self._reject_stale_candidate_success(event)
+            if stale_candidate_success is not None:
+                decisions.append(stale_candidate_success)
+                self._processed_event_ids.add(event.id)
+                continue
+
             # avbs-r4 F8: reader child failures arrive agent-emitted without
             # task_id; resolve from the fanout manifest so rework triage and
             # same_lane backedges can fire (in-memory only, log untouched).

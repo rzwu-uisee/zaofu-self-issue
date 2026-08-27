@@ -23,6 +23,7 @@ TRIAL_STATUSES = frozenset({
     "settled",
     "dead_letter",
 })
+TRIAL_ARMS = frozenset({"control", "baseline", "candidate"})
 ASSET_STATES = frozenset({
     "candidate",
     "validated",
@@ -107,8 +108,10 @@ class EvolutionTrialStore:
         replicate: int,
         created_at: str,
     ) -> tuple[dict[str, Any], bool]:
-        if arm not in {"baseline", "candidate"}:
-            raise EvolutionStoreError("trial arm must be baseline or candidate")
+        if arm not in TRIAL_ARMS:
+            raise EvolutionStoreError(
+                "trial arm must be control, baseline, or candidate"
+            )
         if int(replicate) < 1:
             raise EvolutionStoreError("trial replicate must be positive")
         trial_id = "evotrial-" + stable_digest({
@@ -300,6 +303,16 @@ class EvolutionTrialStore:
             "attempt_id": str(comparison.get("attempt_id") or ""),
             "status": str(comparison.get("status") or ""),
             "adoption_eligible": bool(comparison.get("adoption_eligible")),
+            "blocking_reasons": [
+                str(item)
+                for item in comparison.get("blocking_reasons") or []
+                if str(item)
+            ],
+            "object_kind": str(comparison.get("object_kind") or ""),
+            "evaluation_purpose": str(
+                comparison.get("evaluation_purpose") or ""
+            ),
+            "claim_scope": str(comparison.get("claim_scope") or ""),
             "evaluator_generation_id": str(
                 comparison.get("evaluator_generation_id") or ""
             ),

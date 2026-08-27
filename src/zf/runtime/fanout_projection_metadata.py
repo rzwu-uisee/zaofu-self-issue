@@ -32,6 +32,7 @@ def apply_synth_handoff_metadata(synth: dict, payload: dict) -> None:
         "plan_revision",
         "plan_synth_contract_ref",
         "plan_synth_contract_digest",
+        "reviewed_plan_candidate_digest",
         "admitted_call_result_digest",
     ):
         value = _payload_str(payload, key)

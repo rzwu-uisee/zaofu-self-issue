@@ -261,7 +261,24 @@ def project_discussion_attention(
                 default="",
             ),
             "can_drain_replies": bool(active_replies),
-            "can_synthesize": state == "ready",
+            # A default conversation deliberately becomes quiet after its
+            # reply cycle settles. Quiet must not remove the explicit
+            # Finalize/Synthesize path: the operator may turn complete,
+            # question-free discussion into a PRD from Details.
+            "can_synthesize": (
+                state == "ready"
+                or (
+                    phase == "active"
+                    and bool(replies)
+                    and not active_replies
+                    and not failed_count
+                    and not owner_questions
+                    and not open_questions
+                    and not latest_synthesis_status
+                    and not syntheses
+                    and not consensus
+                )
+            ),
             "can_restart": state == "blocked",
             "can_review_questions": bool(owner_questions),
             "can_review_result": reason == "owner_confirmation_required",

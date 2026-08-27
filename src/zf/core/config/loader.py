@@ -78,10 +78,14 @@ _VALID_REPAIR_BACKENDS = ("codex", "claude-code")
 _VALID_FEISHU_INBOUND_MODES = ("bridge",)
 _VALID_FEISHU_PROJECTION_BACKENDS = ("lark-cli",)
 _VALID_EVOLUTION_MODES = ("evaluate_only", "auto_low_risk")
-_VALID_EVOLUTION_AUTO_ASSET_KINDS = (
+_DEFAULT_EVOLUTION_AUTO_ASSET_KINDS = (
     "memory_entry",
     "runbook",
     "regression_fixture",
+)
+_VALID_EVOLUTION_AUTO_ASSET_KINDS = (
+    *_DEFAULT_EVOLUTION_AUTO_ASSET_KINDS,
+    "skill_prompt",
 )
 _VALID_EXECUTION_ROUTE_TRIGGERS = (
     "provider_unavailable",
@@ -3967,14 +3971,14 @@ def _build_runtime(
         raise ConfigError("runtime.evolution numeric values must be > 0")
     evolution_auto_kinds = _string_list(
         evolution_raw.get("auto_asset_kinds"),
-        default=list(_VALID_EVOLUTION_AUTO_ASSET_KINDS),
+        default=list(_DEFAULT_EVOLUTION_AUTO_ASSET_KINDS),
     )
     unsupported_evolution_kinds = sorted(
         set(evolution_auto_kinds) - set(_VALID_EVOLUTION_AUTO_ASSET_KINDS)
     )
     if unsupported_evolution_kinds:
         raise ConfigError(
-            "runtime.evolution.auto_asset_kinds may only contain low-risk kinds; "
+            "runtime.evolution.auto_asset_kinds may only contain policy-authorized kinds; "
             f"unsupported: {unsupported_evolution_kinds}"
         )
     evolution_token_env = str(

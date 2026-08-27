@@ -165,6 +165,28 @@ def _plan_ports() -> list[dict]:
     ]
 
 
+def _product_acceptance_spec() -> dict:
+    return {
+        "assembly_owner": "product-assembly",
+        "entrypoints": [{
+            "entrypoint_id": "cli",
+            "start_command": "python -m command",
+            "health_check": "python -m command --help",
+            "owner": "product-assembly",
+        }],
+        "user_journeys": [{
+            "journey_id": "journey-cli",
+            "title": "Run the command",
+            "verification_tier": "runtime",
+            "assertions": [{
+                "assertion_id": "assert-cli-output",
+                "statement": "The command exits successfully.",
+                "observation_kind": "cli",
+            }],
+        }],
+    }
+
+
 def _matrix_metadata() -> dict:
     return {
         "flow_kind": "prd",
@@ -231,6 +253,60 @@ def test_plan_candidate_preflight_accepts_closed_plan_handoff(tmp_path) -> None:
 
     assert result["status"] == "passed"
     assert result["summary"] == {"error_count": 0, "task_count": 1}
+
+
+def test_plan_candidate_preflight_validates_product_acceptance_before_critic(
+    tmp_path,
+) -> None:
+    valid = _product_acceptance_spec()
+    invalid = _product_acceptance_spec()
+    invalid["entrypoints"][0].pop("health_check")
+
+    def evaluate(spec: dict) -> dict:
+        return evaluate_plan_candidate_preflight(
+            state_dir=tmp_path / ".zf",
+            project_root=tmp_path,
+            reports=[{"report": {
+                "task_map": _task_map(),
+                "source_index": _source_index(),
+                "source_index_ref": "inline:source-index",
+                "plan_md": "# Plan\n\nImplement TASK-1.",
+                "plan_ports": [{
+                    "logical_name": "product_acceptance_spec",
+                    "body": spec,
+                }],
+            }}],
+            manifest={
+                "fanout_id": "fanout-plan-product",
+                "stage_id": "prd-plan",
+                "workflow_run_id": "run-product",
+                "trigger_payload": {
+                    "flow_kind": "prd",
+                    "prd_ref": "docs/requirement.md",
+                },
+            },
+            metadata={
+                "flow_kind": "prd",
+                "artifact_package": {"required_ports": [
+                    "requirement_spec",
+                    "goal_claim_set",
+                    "task_map",
+                    "planning_result",
+                    "product_acceptance_spec",
+                ]},
+            },
+        )
+
+    failed = evaluate(invalid)
+    passed = evaluate(valid)
+
+    assert "product_acceptance_spec_invalid" in {
+        item["code"] for item in failed["errors"]
+    }
+    assert any(
+        "health_check" in item["message"] for item in failed["errors"]
+    )
+    assert passed["status"] == "passed"
 
 
 def test_plan_candidate_preflight_rejects_inherited_goal_contract_weakening(

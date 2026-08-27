@@ -179,6 +179,15 @@ def evaluate_plan_candidate_preflight(
             required_ports=required_with_source,
         ))
 
+    product_acceptance = port_bodies.get("product_acceptance_spec")
+    if isinstance(product_acceptance, Mapping):
+        errors.extend(_product_acceptance_spec_errors(
+            product_acceptance,
+            task_map=task_map,
+            manifest=manifest,
+            flow_kind=flow_kind,
+        ))
+
     if not _has_plan_markdown(
         candidates,
         state_dir=state_dir,
@@ -206,6 +215,87 @@ def evaluate_plan_candidate_preflight(
             "task_count": len(task_map.get("tasks", [])) if task_map else 0,
         },
     }
+
+
+def _product_acceptance_spec_errors(
+    raw_spec: Mapping[str, Any],
+    *,
+    task_map: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    flow_kind: str,
+) -> list[dict[str, str]]:
+    """Run the same structural Product Acceptance checks before submit.
+
+    Package admission pins the final run/revision/generation identity.  The
+    producer preflight mirrors that normalization so this check focuses on the
+    complete semantic body instead of requiring the producer to predict a
+    projected task-map ref.
+    """
+
+    from zf.runtime.product_acceptance import (
+        PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+        ProductAcceptanceError,
+        validate_product_acceptance_spec,
+    )
+
+    trigger = (
+        manifest.get("trigger_payload")
+        if isinstance(manifest.get("trigger_payload"), Mapping)
+        else {}
+    )
+    metadata = (
+        task_map.get("metadata")
+        if isinstance(task_map.get("metadata"), Mapping)
+        else {}
+    )
+    workflow_run_id = str(
+        manifest.get("workflow_run_id")
+        or manifest.get("trace_id")
+        or trigger.get("workflow_run_id")
+        or trigger.get("run_id")
+        or manifest.get("fanout_id")
+        or "plan-preflight"
+    )
+    plan_revision = str(
+        task_map.get("plan_revision")
+        or metadata.get("plan_revision")
+        or trigger.get("plan_revision")
+        or "plan-preflight"
+    )
+    generation = str(
+        task_map.get("task_map_generation")
+        or metadata.get("task_map_generation")
+        or trigger.get("task_map_generation")
+        or "task-map-preflight"
+    )
+    normalized = {
+        **dict(raw_spec),
+        "schema_version": PRODUCT_ACCEPTANCE_SPEC_SCHEMA,
+        "workflow_run_id": workflow_run_id,
+        "flow_kind": flow_kind,
+        "plan_revision": plan_revision,
+        "task_map_generation": generation,
+    }
+    try:
+        validate_product_acceptance_spec(
+            normalized,
+            expected={
+                "workflow_run_id": workflow_run_id,
+                "flow_kind": flow_kind,
+                "plan_revision": plan_revision,
+                "task_map_generation": generation,
+            },
+        )
+    except ProductAcceptanceError as exc:
+        rows: list[dict[str, str]] = []
+        _error(
+            rows,
+            "product_acceptance_spec_invalid",
+            "plan_ports.product_acceptance_spec",
+            str(exc),
+        )
+        return rows
+    return []
 
 
 def plan_candidate_writer_policy(config: Any) -> dict[str, Any]:

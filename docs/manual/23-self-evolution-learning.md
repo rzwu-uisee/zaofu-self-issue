@@ -75,7 +75,12 @@ runtime:
 - `sealed_root` 必填，且不得暴露给候选 Agent、Web 或普通 artifact 浏览器；
 - `access_token_env` 是环境变量名称，不是 token 值；
 - 只有 `mode: auto_low_risk` 可以无人干预推进显式 allowlist 中的 `memory_entry`、`runbook`、`regression_fixture`；
-- `framework_code`、`workflow_config`、`provider_route`、`tool_capability` 仍为 proposal-only，必须走对象特定的审批和 apply 路径。
+- `skill_prompt`、`framework_code`、`workflow_config`、`provider_route`、`tool_capability`
+  仍为 proposal-only；Skill Candidate 只能先成为 scoped overlay，写入 canonical source 仍须
+  owner action token 和对象特定 apply 路径。
+- `skill_prompt` 不在默认 `auto_asset_kinds` 中。只有显式加入 allowlist，才能自动推进到
+  scoped canary；无论是否在 allowlist，已激活 overlay 的 source drift、过期、预算越界或
+  negative transfer 都可由 Run Manager 经 Controlled Action 安全撤销。
 
 先验证配置，不启动真实 Provider：
 
@@ -134,6 +139,95 @@ runs/                                trial、canary 的可验证 Run Archive
 
 环境快照只证明执行依赖可比较，不能替代业务验收。Delivery、Task Gate 和终态 evidence 仍遵守原有 Workflow 合同。
 
+### 5.1 Skill 的评测、优化与停用
+
+Skill 使用 `raw/current/candidate` 三臂，而不是 generic asset 的 baseline/candidate 两臂。
+正式采纳要求冻结同一 model、workspace、prompt、支撑 Skill、evaluator generation 和 routing
+pool，并至少完成 policy 要求的 distinct cases 与 replicates。Candidate 必须通过正常 Codex
+或 Claude Code Skill 投影加载；把 Candidate 正文直接拼入 prompt 不算 Skill 评测。
+
+```text
+immutable Skill Candidate
+  -> 三臂 counterbalanced Provider trials
+  -> Run Archive + typed routing/feedback evidence
+  -> proposal_only learning asset
+  -> canary_active scoped overlay
+  -> negative outcome: automatic revoke for future dispatches
+  -> passed canary: exact source proposal
+  -> owner token apply + provider parity sync
+  -> active_retained
+```
+
+常用只读/受控入口：
+
+```bash
+uv run zf evolution skill-overlay-resolve \
+  --state-dir "$STATE_DIR" --role impl --task-family prd --cohort canary-a
+
+uv run zf evolution skill-source-propose \
+  --state-dir "$STATE_DIR" --asset-id <asset-id> --version <version>
+
+ZF_EVOLUTION_OWNER_TOKEN='<owner-token>' \
+uv run zf evolution skill-source-apply \
+  --state-dir "$STATE_DIR" \
+  --proposal-ref-file /path/to/proposal-ref.json \
+  --owner-token-file /path/to/supplied-token
+
+uv run zf evolution skill-maintenance-propose \
+  --state-dir "$STATE_DIR" --skill <skill-name> \
+  --action deactivate --evidence-refs-file /path/to/evidence-refs.json \
+  --rationale 'matched outcomes show sustained negative transfer'
+```
+
+自进化可以自动撤销 `canary_active` overlay，使后续 dispatch 不再加载 Candidate；role、
+task family 与 cohort 均须匹配，当前 dispatch 的 cohort 使用精确 Task ID。它不会
+修改已经启动的 Provider context。Autoresearch 可生成 `optimize/replace/merge/deactivate`
+proposal，但 canonical `skills/` 的优化、替换、禁用或删除必须由 owner 批准、校验精确
+source currentness，并同步 `.codex/skills/` 与 `.claude/skills/`。当前没有“Agent 自行卸载
+源码 Skill”的合法路径。
+
+### 5.2 纯因果 Skill 优化器
+
+正式 Skill 优化使用 `skill-treatment-identity.v2` 冻结 runtime commit、Provider、model、
+role/profile、prompt、支撑 Skill、workspace fixture、tool、sandbox、network、budget 和 evaluator
+generation。Raw、Current、Candidate 三臂只允许目标 Skill 的可用性、版本和 digest 不同；公共
+身份漂移时，本轮比较是 `incomparable`，不能形成提升结论。
+
+Provider case 同时产出两类相互独立的证据：
+
+```text
+最终输出 -> correctness / product gate
+Provider stream -> immutable normalized trajectory -> behavior verdict
+```
+
+因此，输出正确但未读取目标 Skill 时，correctness 可以通过而 behavior 仍为 `false`；没有显式
+可观察行为合同则为 `null`。轨迹正文保存在 sidecar，EventLog 只保存 ref、digest 与 verdict。
+
+Optimizer campaign 使用互斥的 Train、Selection、Test：
+
+- Optimizer Agent 只读取 current Skill、Train evidence、failure clusters 和 rejection buffer；
+- Selection evaluator 只用于逐步选择，并必须绑定精确 split、generation 和 case result refs；
+- Test 保持 sealed，只用于最终 179 adoption proof；best candidate 不会直接写入 `skills/`。
+
+生产闭环由 Autoresearch resident 执行 proposal-only Agent request，sealed evaluator 发布
+Selection，Run Manager 校验 currentness 并结算。常用恢复/运维入口：
+
+```bash
+uv run zf evolution skill-opt-agent-execute \
+  --state-dir "$STATE_DIR" \
+  --request-event-id <proposal-request-event-id>
+
+uv run zf evolution skill-opt-selection-submit \
+  --state-dir "$STATE_DIR" \
+  --selection-request-event-id <selection-request-event-id> \
+  --evaluation-file /path/to/sealed-selection-result.json
+```
+
+`skill-opt-init`、`skill-opt-prepare`、`skill-opt-settle` 和 `skill-opt-export` 仍是机械调试与
+恢复入口。只有带三个 immutable split descriptor 的 v2 campaign 能进入 Agent route；旧 v1
+campaign 仅用于历史恢复。完成的 best 仍进入 Design 179 的 test、routing、canary 和 owner retain
+流程。
+
 ## 6. 记忆：工作笔记与学习资产
 
 当前有两类跨 session 信息，不应混为一谈：
@@ -185,7 +279,9 @@ candidate -> validated -> approved -> canary_active -> active_retained
                   任一阶段可因证据不足、负迁移、冲突或 policy 变化 -> revoked
 ```
 
-Evolution Coordinator 不会直接编辑源码、`zf.yaml`、`skills/` 或普通 Memory。对象特定 apply owner 必须提供 immutable receipt，状态转换使用 revision/CAS 保护。
+Evolution Coordinator 不会自主编辑源码、`zf.yaml`、`skills/` 或普通 Memory。Skill retain
+只能通过显式 `skill-source-apply` owner action 写入 canonical source；对象特定 apply owner
+必须提供 immutable receipt，状态转换使用 revision/CAS 保护。
 
 回退：
 

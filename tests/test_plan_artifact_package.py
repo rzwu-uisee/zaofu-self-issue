@@ -186,6 +186,40 @@ def test_refactor_plan_synth_admits_package_before_bridge(monkeypatch) -> None:
     assert admitted[0]["goal_id"] == "refactor-run"
 
 
+def test_plan_package_rejects_critic_digest_from_another_candidate() -> None:
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(workflow=SimpleNamespace()),
+        _contract_failure_payload=lambda payload, message: {
+            **payload,
+            "contract_failure": message,
+        },
+    )
+
+    status, recommendation, payload = admit_synthesized_plan_package(
+        runtime,
+        event=ZfEvent(
+            type="fanout.synth.completed",
+            payload={
+                "plan_synth_contract_digest": "a" * 64,
+                "reviewed_plan_candidate_digest": "b" * 64,
+            },
+        ),
+        manifest={"pdd_id": "PRD-1"},
+        stage_id="prd-plan",
+        trace_id="run-plan-digest",
+        success_event="task_map.ready",
+        final_status="completed",
+        recommendation="approve",
+        artifact_payload={"task_map_ref": "artifacts/task-map.json"},
+    )
+
+    assert status == "failed"
+    assert recommendation == "reject"
+    assert payload["failure_class"] == "plan_candidate_review_identity"
+    assert payload["attempt_domain"] == "protocol_repair"
+    assert payload["semantic_rework_cost"] == 0
+
+
 def test_replan_synth_drops_inherited_package_identity_for_new_task_map(
     monkeypatch,
 ) -> None:

@@ -75,7 +75,14 @@ runtime:
 - `sealed_root` is required and must not be exposed to candidate Agents, Web, or ordinary artifact browsing;
 - `access_token_env` is an environment-variable name, never a token value;
 - only `mode: auto_low_risk` may automatically progress the `memory_entry`, `runbook`, and `regression_fixture` allowlist;
-- `framework_code`, `workflow_config`, `provider_route`, and `tool_capability` remain proposal-only and require their object-specific approval/apply path.
+- `skill_prompt`, `framework_code`, `workflow_config`, `provider_route`, and
+  `tool_capability` remain proposal-only. A Skill Candidate may first become a scoped
+  overlay, but writing canonical source still requires an owner action token and its
+  object-specific apply path.
+- `skill_prompt` is not in the default `auto_asset_kinds`. It must be explicitly
+  allowlisted to advance automatically into a scoped canary. Once active, source
+  drift, expiry, budget overrun, or negative transfer may revoke the overlay through
+  a Run Manager Controlled Action even when it is no longer allowlisted.
 
 Validate without starting a real Provider:
 
@@ -134,6 +141,106 @@ An improvement claim needs all of the following:
 
 An environment snapshot proves comparable execution dependencies, not product acceptance. Delivery, Task Gates, and terminal evidence remain governed by existing Workflow contracts.
 
+### 5.1 Skill Evaluation, Optimization, and Deactivation
+
+Skills use `raw/current/candidate` arms instead of the generic asset
+baseline/candidate pair. Adoption freezes the same model, workspace, prompt, support
+Skills, evaluator generation, and routing pool, and requires the policy's distinct
+cases and replicates. A Candidate must be loaded through the normal Codex or Claude
+Code Skill projection. Inlining its body into the prompt is not a Skill trial.
+
+```text
+immutable Skill Candidate
+  -> counterbalanced three-arm Provider trials
+  -> Run Archive + typed routing/feedback evidence
+  -> proposal_only learning asset
+  -> canary_active scoped overlay
+  -> negative outcome: automatic revoke for future dispatches
+  -> passed canary: exact source proposal
+  -> owner-token apply + Provider parity sync
+  -> active_retained
+```
+
+Common read and controlled-action entrypoints:
+
+```bash
+uv run zf evolution skill-overlay-resolve \
+  --state-dir "$STATE_DIR" --role impl --task-family prd --cohort canary-a
+
+uv run zf evolution skill-source-propose \
+  --state-dir "$STATE_DIR" --asset-id <asset-id> --version <version>
+
+ZF_EVOLUTION_OWNER_TOKEN='<owner-token>' \
+uv run zf evolution skill-source-apply \
+  --state-dir "$STATE_DIR" \
+  --proposal-ref-file /path/to/proposal-ref.json \
+  --owner-token-file /path/to/supplied-token
+
+uv run zf evolution skill-maintenance-propose \
+  --state-dir "$STATE_DIR" --skill <skill-name> \
+  --action deactivate --evidence-refs-file /path/to/evidence-refs.json \
+  --rationale 'matched outcomes show sustained negative transfer'
+```
+
+Self-evolution may automatically revoke a `canary_active` overlay so future
+dispatches stop loading the Candidate. Role, task family, and cohort must all match;
+the dispatch cohort currently uses the exact Task ID. It does not mutate an already-running Provider
+context. Autoresearch may propose `optimize`, `replace`, `merge`, or `deactivate`, but
+canonical `skills/` optimization, replacement, deactivation, or deletion requires
+owner approval, exact source-currentness checks, and `.codex/skills/` plus
+`.claude/skills/` parity sync. There is no valid path for an Agent to autonomously
+uninstall a source Skill.
+
+### 5.2 Causal Skill Optimizer
+
+Formal Skill optimization uses `skill-treatment-identity.v2` to freeze the runtime
+commit, Provider, model, role/profile, prompt, support Skills, workspace fixture,
+tool, sandbox, network, budget, and evaluator generation. The Raw, Current, and
+Candidate arms may differ only in target-Skill availability, version, and digest.
+Any common-identity drift makes the comparison `incomparable`.
+
+Each Provider case produces two independent evidence paths:
+
+```text
+final output -> correctness / product gate
+Provider stream -> immutable normalized trajectory -> behavior verdict
+```
+
+An answer can therefore pass correctness while behavior remains `false` when the
+target Skill was not read. A case without an explicit observable behavior contract
+uses `null`. Trajectory bodies remain in sidecars; EventLog stores only refs,
+digests, and verdicts.
+
+An optimizer campaign uses disjoint Train, Selection, and Test splits:
+
+- the Optimizer Agent sees only the current Skill, Train evidence, failure clusters,
+  and the rejection buffer;
+- the Selection evaluator chooses steps and must bind the exact split, generation,
+  and case-result refs;
+- Test remains sealed for the final design-179 adoption proof, and the best candidate
+  never writes `skills/` directly.
+
+The production loop has the Autoresearch resident execute a proposal-only Agent
+request, a sealed evaluator publish Selection, and Run Manager verify currentness
+before settlement. Recovery and operations entrypoints are:
+
+```bash
+uv run zf evolution skill-opt-agent-execute \
+  --state-dir "$STATE_DIR" \
+  --request-event-id <proposal-request-event-id>
+
+uv run zf evolution skill-opt-selection-submit \
+  --state-dir "$STATE_DIR" \
+  --selection-request-event-id <selection-request-event-id> \
+  --evaluation-file /path/to/sealed-selection-result.json
+```
+
+`skill-opt-init`, `skill-opt-prepare`, `skill-opt-settle`, and `skill-opt-export`
+remain mechanical debugging and recovery commands. Only a v2 campaign with three
+immutable split descriptors can enter the Agent route; v1 campaigns remain
+recovery-only. A completed best candidate still proceeds through design 179 Test,
+routing, canary, and owner-retain gates.
+
 ## 6. Memory: Work Notes versus Learning Assets
 
 There are two kinds of cross-session information:
@@ -181,7 +288,10 @@ candidate -> validated -> approved -> canary_active -> active_retained
                   negative transfer, conflict, or policy change
 ```
 
-Evolution Coordinator does not edit source, `zf.yaml`, `skills/`, or ordinary Memory directly. Object-specific apply owners must supply immutable receipts, and transitions use revision/CAS protection.
+Evolution Coordinator does not autonomously edit source, `zf.yaml`, `skills/`, or
+ordinary Memory. A Skill retain writes canonical source only through an explicit
+`skill-source-apply` owner action. Object-specific apply owners must supply immutable
+receipts, and transitions use revision/CAS protection.
 
 Rollback:
 

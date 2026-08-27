@@ -71,6 +71,9 @@ class EvolutionActionsMixin:
                 "expected_revision": revision,
                 "campaign_id": str(payload.get("campaign_id") or ""),
                 "policy_digest": str(payload.get("policy_digest") or ""),
+                "reason": str(payload.get("reason") or ""),
+                "previous_digest": str(payload.get("previous_digest") or ""),
+                "source_mutated": bool(payload.get("source_mutated", False)),
                 "requested_event_id": requested.id,
                 "actor": self.actor,
                 "source": self.source,
@@ -220,14 +223,30 @@ class EvolutionActionsMixin:
             return "unattended evolution actions require the Run Manager authority"
         if policy is None or not bool(getattr(policy, "enabled", False)):
             return "runtime.evolution is disabled"
-        if str(getattr(policy, "mode", "")) != "auto_low_risk":
-            return "runtime.evolution.mode does not permit automatic adoption"
         registry = EvolutionCoordinator(self.state_dir).capabilities.load()
         key = f"{str(payload.get('asset_id') or '')}@{int(payload.get('version') or 0)}"
         asset = registry["assets"].get(key)
         if not isinstance(asset, dict):
             return "learning asset is unavailable"
-        if str(asset.get("asset_kind") or "") not in set(
+        asset_kind = str(asset.get("asset_kind") or "")
+        target = str(payload.get("target_state") or "")
+        skill_revoke = bool(
+            transition and asset_kind == "skill_prompt" and target == "revoked"
+        )
+        if not skill_revoke and str(getattr(policy, "mode", "")) != "auto_low_risk":
+            return "runtime.evolution.mode does not permit automatic adoption"
+        if asset_kind == "skill_prompt":
+            if transition and target == "active_retained":
+                return (
+                    "skill_prompt retention requires an owner-approved source "
+                    "patch; unattended evolution may only activate or revoke "
+                    "the scoped overlay"
+                )
+            if transition and target not in {
+                "validated", "approved", "canary_active", "revoked"
+            }:
+                return "skill_prompt transition is outside the scoped overlay lifecycle"
+        if not skill_revoke and asset_kind not in set(
             getattr(policy, "auto_asset_kinds", []) or []
         ):
             return "learning asset kind is not authorized for unattended adoption"

@@ -7,6 +7,7 @@ import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from zf.core.config.schema import RoleConfig, ZfConfig
 from zf.core.skills.provenance import (
@@ -90,15 +91,26 @@ def materialize_role_skills(
     task_id: str | None = None,
     execution_project_root: Path | None = None,
     execution_runtime_root: Path | None = None,
+    skill_overrides: Mapping[str, Path] | None = None,
+    provider_skill_root: Path | None = None,
 ) -> SkillMaterializationResult | None:
-    if not role.skills:
+    overrides = {
+        str(name): Path(path)
+        for name, path in (skill_overrides or {}).items()
+        if str(name).strip()
+    }
+    if not role.skills and not overrides:
         return None
 
     mode = config.runtime.skills.materialize
-    target_root = _target_root_for_role(
-        state_dir,
-        role,
-        execution_project_root=execution_project_root,
+    target_root = (
+        Path(provider_skill_root)
+        if provider_skill_root is not None
+        else _target_root_for_role(
+            state_dir,
+            role,
+            execution_project_root=execution_project_root,
+        )
     )
     manifest_path = (
         (
@@ -118,14 +130,21 @@ def materialize_role_skills(
         project_root=project_root,
         state_dir=state_dir,
         role=role,
+        skill_overrides=overrides,
     ):
-        resolution = resolve_skill(
-            project_root=project_root,
-            state_dir=state_dir,
-            name=skill,
-            config=config,
+        override_path = overrides.get(skill)
+        resolution = (
+            None
+            if override_path is not None
+            else resolve_skill(
+                project_root=project_root,
+                state_dir=state_dir,
+                name=skill,
+                config=config,
+            )
         )
-        if resolution.path is None:
+        source_path = override_path or (resolution.path if resolution else None)
+        if source_path is None:
             materialized.append(MaterializedSkill(
                 name=skill,
                 source=None,
@@ -138,23 +157,35 @@ def materialize_role_skills(
             ))
             continue
 
-        metadata = read_skill_metadata(resolution.path, expected_name=skill)
-        collision_candidates = _format_collision_candidates(
-            resolution=resolution,
-            project_root=project_root,
+        metadata = read_skill_metadata(source_path, expected_name=skill)
+        collision_candidates = (
+            ()
+            if override_path is not None
+            else _format_collision_candidates(
+                resolution=resolution,
+                project_root=project_root,
+            )
         )
         dest = target_root / skill
         _replace_projection(
-            source_dir=resolution.path.parent,
+            source_dir=source_path.parent,
             dest_dir=dest,
             mode=mode,
         )
         materialized.append(MaterializedSkill(
             name=skill,
-            source=_display_path(resolution.path, project_root),
-            source_name=resolution.source_name,
+            source=(
+                f"evolution-overlay://{skill}"
+                if override_path is not None
+                else _display_path(source_path, project_root)
+            ),
+            source_name=(
+                "evolution-overlay"
+                if override_path is not None
+                else resolution.source_name
+            ),
             materialized_to=_display_path(dest, project_root),
-            sha256=_sha256(resolution.path),
+            sha256=_sha256(source_path),
             description=metadata.description or None,
             status="invalid" if metadata.warnings else "resolved",
             collision_candidates=collision_candidates,
@@ -192,6 +223,7 @@ def _expanded_role_skill_requests(
     project_root: Path,
     state_dir: Path,
     role: RoleConfig,
+    skill_overrides: Mapping[str, Path] | None = None,
 ) -> list[tuple[str, tuple[str, ...]]]:
     requests: list[tuple[str, tuple[str, ...]]] = []
     queue: list[tuple[str, tuple[str, ...]]] = [
@@ -199,6 +231,11 @@ def _expanded_role_skill_requests(
         for skill in role.skills
         if str(skill).strip()
     ]
+    queue.extend(
+        (_normalize_dependency_name(skill), ())
+        for skill in (skill_overrides or {})
+        if str(skill).strip()
+    )
     seen: set[str] = set()
     while queue:
         skill, dependency_of = queue.pop(0)
@@ -206,15 +243,23 @@ def _expanded_role_skill_requests(
             continue
         seen.add(skill)
         requests.append((skill, dependency_of))
-        resolution = resolve_skill(
-            project_root=project_root,
-            state_dir=state_dir,
-            name=skill,
-            config=config,
+        override_path = (skill_overrides or {}).get(skill)
+        resolution = (
+            None
+            if override_path is not None
+            else resolve_skill(
+                project_root=project_root,
+                state_dir=state_dir,
+                name=skill,
+                config=config,
+            )
         )
-        if resolution.path is None:
+        source_path = Path(override_path) if override_path is not None else (
+            resolution.path if resolution is not None else None
+        )
+        if source_path is None:
             continue
-        metadata = read_skill_metadata(resolution.path, expected_name=skill)
+        metadata = read_skill_metadata(source_path, expected_name=skill)
         for dependency in metadata.dependencies:
             queue.append((
                 _normalize_dependency_name(dependency),

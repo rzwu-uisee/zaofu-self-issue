@@ -43,6 +43,7 @@ _IDENTITY_KEYS = (
     "plan_revision",
     "plan_synth_contract_ref",
     "plan_synth_contract_digest",
+    "reviewed_plan_candidate_digest",
     "contract_authority_revision",
     "execution_owner",
     "workflow_request_id",
@@ -228,6 +229,10 @@ def normalize_call_result_envelope(
         "plan_revision": _text(payload, "plan_revision"),
         "plan_synth_contract_ref": _text(payload, "plan_synth_contract_ref"),
         "plan_synth_contract_digest": _text(payload, "plan_synth_contract_digest"),
+        "reviewed_plan_candidate_digest": _text(
+            payload,
+            "reviewed_plan_candidate_digest",
+        ),
         "contract_authority_revision": _text(
             payload,
             "contract_authority_revision",

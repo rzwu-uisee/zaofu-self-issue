@@ -21,6 +21,7 @@ from zf.runtime.call_result_adapters import (
     ControlResultAdapterRegistry,
 )
 from zf.runtime.call_result_admission import CallResultAdmissionService
+from zf.runtime.plan_candidate_submit_validation import validate_plan_candidate_semantic
 from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_operation import (
     WorkflowOperationService,
@@ -323,47 +324,15 @@ class SemanticResultSubmitService:
                 credential=credential,
             )
         )
-        validation = request.get("plan_candidate_validation")
-        if isinstance(validation, Mapping):
-            if profile_id != "workflow-read":
-                raise ResultSubmitError(
-                    "plan_candidate_profile_invalid",
-                    "Plan candidate validation requires the workflow-read profile",
-                )
-            manifest = validation.get("manifest")
-            if not isinstance(manifest, Mapping):
-                raise ResultSubmitError(
-                    "plan_candidate_context_invalid",
-                    "operation has no pinned Plan candidate manifest",
-                )
-            metadata = validation.get("metadata")
-            if metadata is not None and not isinstance(metadata, Mapping):
-                raise ResultSubmitError(
-                    "plan_candidate_context_invalid",
-                    "operation Plan candidate metadata must be an object",
-                )
-            writer_policy = validation.get("writer_policy")
-            if writer_policy is not None and not isinstance(writer_policy, Mapping):
-                raise ResultSubmitError(
-                    "plan_candidate_context_invalid",
-                    "operation Plan candidate writer policy must be an object",
-                )
-            from zf.runtime.plan_candidate_preflight import (
-                evaluate_plan_candidate_preflight,
-            )
-
-            return evaluate_plan_candidate_preflight(
-                state_dir=self.state_dir,
-                project_root=Path(project_root or Path.cwd()),
-                reports=[{"report": semantic}],
-                manifest=dict(manifest),
-                metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
-                writer_policy=(
-                    dict(writer_policy)
-                    if isinstance(writer_policy, Mapping)
-                    else None
-                ),
-            )
+        validation = validate_plan_candidate_semantic(
+            state_dir=self.state_dir,
+            request=request,
+            semantic=semantic,
+            profile_id=profile_id,
+            project_root=Path(project_root or Path.cwd()),
+        )
+        if validation is not None:
+            return validation
         if profile_id == _PLAN_SYNTH_PROFILE_ID:
             return self._validate_plan_synth_result(
                 operation=_operation,
@@ -512,6 +481,38 @@ class SemanticResultSubmitService:
             )
         )
         profile = self.registry.profile(profile_id, revision)
+        candidate_validation = validate_plan_candidate_semantic(
+            state_dir=self.state_dir,
+            request=request,
+            semantic=semantic,
+            profile_id=profile_id,
+            project_root=Path.cwd(),
+        )
+        if (
+            candidate_validation is not None
+            and candidate_validation.get("status") != "passed"
+        ):
+            errors = [
+                {
+                    **dict(item),
+                    "required_change": (
+                        "Patch the same result scratch/artifact set and rerun "
+                        "result validate before submitting."
+                    ),
+                }
+                for item in candidate_validation.get("errors", [])
+                if isinstance(item, Mapping)
+            ]
+            raise ResultSubmitError(
+                "plan_candidate_not_admitted",
+                "Plan candidate failed the pinned pre-submit evaluator",
+                details={
+                    "status": "repair_required",
+                    "attempt_domain": "protocol_repair",
+                    "semantic_rework_cost": 0,
+                    "issues": errors,
+                },
+            )
         event_type = self._canonical_event_type(request, semantic)
         task_pipeline_delivery = self._current_task_pipeline_delivery(
             operation,

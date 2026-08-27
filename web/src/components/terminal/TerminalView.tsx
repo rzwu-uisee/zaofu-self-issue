@@ -7,7 +7,14 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
 import type { ThemeMode } from "../../app/sharedTypes";
 import { issueTerminalAttachment, terminalWebSocketUrl } from "./api";
-import { acceptsTerminalFrame, terminalReconnectDelay } from "./terminalModel";
+import {
+  acceptsTerminalFrame,
+  terminalModifierBits,
+  terminalReconnectDelay,
+  terminalScrollFromRows,
+  terminalWheelDeltaRows,
+} from "./terminalModel";
+import { attachTerminalImeInputGuard } from "./terminalIme";
 import type {
   TerminalAttachmentMode,
   TerminalServerMessage,
@@ -120,6 +127,25 @@ function* terminalInputChunks(text: string): Generator<string> {
   }
 }
 
+function terminalCellAtPointer(
+  terminal: Terminal,
+  host: HTMLElement,
+  event: WheelEvent,
+): { column: number; row: number } {
+  const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen") ?? host;
+  const bounds = screen.getBoundingClientRect();
+  const width = Math.max(1, bounds.width);
+  const height = Math.max(1, bounds.height);
+  return {
+    column: Math.max(0, Math.min(terminal.cols - 1, Math.floor(
+      ((event.clientX - bounds.left) / width) * terminal.cols,
+    ))),
+    row: Math.max(0, Math.min(terminal.rows - 1, Math.floor(
+      ((event.clientY - bounds.top) / height) * terminal.rows,
+    ))),
+  };
+}
+
 export function TerminalView({
   expectedClose,
   mode,
@@ -176,14 +202,83 @@ export function TerminalView({
     terminalRef.current = terminal;
     fitRef.current = fit;
 
-    const input = terminal.onData((text) => {
+    const sendTerminalText = (text: string): void => {
       const socket = socketRef.current;
-      if (modeRef.current === "control" && socket?.readyState === WebSocket.OPEN) {
-        for (const chunk of terminalInputChunks(text)) {
-          if (socket.readyState !== WebSocket.OPEN) break;
-          socket.send(JSON.stringify({ type: "terminal.input", text: chunk }));
-        }
+      if (modeRef.current !== "control" || socket?.readyState !== WebSocket.OPEN) return;
+      for (const chunk of terminalInputChunks(text)) {
+        if (socket.readyState !== WebSocket.OPEN) break;
+        socket.send(JSON.stringify({ type: "terminal.input", text: chunk }));
       }
+    };
+    const textarea = terminal.textarea;
+    if (!textarea) throw new Error("xterm input textarea is unavailable");
+    const imeInput = attachTerminalImeInputGuard(textarea, sendTerminalText);
+
+    const sendScroll = (
+      rows: number,
+      source: "wheel" | "page_key",
+      metadata: Record<string, number> = {},
+    ): boolean => {
+      const socket = socketRef.current;
+      const command = terminalScrollFromRows(rows, source);
+      if (
+        !command
+        || modeRef.current !== "control"
+        || socket?.readyState !== WebSocket.OPEN
+      ) return false;
+      socket.send(JSON.stringify({ ...command, ...metadata }));
+      return true;
+    };
+
+    let pendingWheelRows = 0;
+    let pendingWheelMetadata: Record<string, number> = {};
+    let wheelAnimationFrame: number | null = null;
+    terminal.attachCustomWheelEventHandler((event) => {
+      const socket = socketRef.current;
+      if (
+        modeRef.current !== "control"
+        || socket?.readyState !== WebSocket.OPEN
+        || event.deltaY === 0
+        || Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ) return true;
+
+      pendingWheelRows += terminalWheelDeltaRows(event.deltaY, event.deltaMode, terminal.rows);
+      pendingWheelMetadata = {
+        ...terminalCellAtPointer(terminal, host, event),
+        modifiers: terminalModifierBits(event),
+      };
+      if (wheelAnimationFrame === null) {
+        wheelAnimationFrame = window.requestAnimationFrame(() => {
+          wheelAnimationFrame = null;
+          if (terminalScrollFromRows(pendingWheelRows, "wheel")) {
+            const rows = pendingWheelRows;
+            pendingWheelRows = 0;
+            sendScroll(rows, "wheel", pendingWheelMetadata);
+          }
+        });
+      }
+      event.preventDefault();
+      return false;
+    });
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (imeInput.shouldBypassXtermKeyEvent(event)) return false;
+      if (
+        event.type !== "keydown"
+        || event.altKey
+        || event.ctrlKey
+        || event.metaKey
+        || event.shiftKey
+        || (event.key !== "PageUp" && event.key !== "PageDown")
+      ) return true;
+      const rows = Math.max(1, terminal.rows - 1) * (event.key === "PageUp" ? -1 : 1);
+      if (!sendScroll(rows, "page_key")) return true;
+      event.preventDefault();
+      return false;
+    });
+
+    const input = terminal.onData((text) => {
+      imeInput.observeTerminalData(text);
+      sendTerminalText(text);
     });
     const binary = terminal.onBinary((value) => {
       const socket = socketRef.current;
@@ -210,8 +305,10 @@ export function TerminalView({
     });
     observer.observe(host);
     return () => {
+      if (wheelAnimationFrame !== null) window.cancelAnimationFrame(wheelAnimationFrame);
       if (resizeTimer !== null) window.clearTimeout(resizeTimer);
       observer.disconnect();
+      imeInput.dispose();
       input.dispose();
       binary.dispose();
       terminal.dispose();

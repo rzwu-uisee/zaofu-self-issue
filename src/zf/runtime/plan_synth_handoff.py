@@ -590,6 +590,9 @@ def build_plan_synth_call_payload(
         "plan_revision": plan_revision,
         "plan_synth_contract_ref": str(contract_ref.get("ref") or ""),
         "plan_synth_contract_digest": str(contract_ref.get("sha256") or ""),
+        "reviewed_plan_candidate_digest": str(
+            contract_ref.get("sha256") or ""
+        ),
         "input_refs": input_refs,
         "output_profile_id": PLAN_SYNTH_PROFILE_ID,
         "output_profile_revision": PLAN_SYNTH_PROFILE_REVISION,

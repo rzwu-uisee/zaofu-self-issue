@@ -5,8 +5,26 @@ export interface TerminalTabSnapshot {
   openIds: string[];
 }
 
+export type TerminalScrollSource = "wheel" | "page_key";
+
+export interface TerminalScrollCommand {
+  type: "terminal.scroll";
+  direction: "up" | "down";
+  lines: number;
+  source: TerminalScrollSource;
+}
+
+interface TerminalModifierState {
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
 const TERMINAL_TAB_SCHEMA = "terminal-tabs.v1";
 const MAX_PERSISTED_TABS = 32;
+const TERMINAL_SCROLL_MAX_LINES = 1_000;
+const TERMINAL_WHEEL_PIXELS_PER_ROW = 40;
 
 export function activeTerminalSessions(sessions: TerminalSession[]): TerminalSession[] {
   return sessions.filter((session) => session.state === "active");
@@ -69,6 +87,37 @@ export function serializeTerminalTabSnapshot(snapshot: TerminalTabSnapshot): str
 
 export function terminalReconnectDelay(attempt: number): number {
   return Math.min(5_000, 250 * (2 ** Math.max(0, Math.min(attempt, 5))));
+}
+
+export function terminalWheelDeltaRows(
+  deltaY: number,
+  deltaMode: number,
+  viewportRows: number,
+): number {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return 0;
+  if (deltaMode === 1) return deltaY;
+  if (deltaMode === 2) return deltaY * Math.max(1, Math.floor(viewportRows) - 1);
+  return deltaY / TERMINAL_WHEEL_PIXELS_PER_ROW;
+}
+
+export function terminalScrollFromRows(
+  rows: number,
+  source: TerminalScrollSource,
+): TerminalScrollCommand | null {
+  if (!Number.isFinite(rows) || Math.abs(rows) < 0.5) return null;
+  return {
+    type: "terminal.scroll",
+    direction: rows < 0 ? "up" : "down",
+    lines: Math.min(TERMINAL_SCROLL_MAX_LINES, Math.max(1, Math.round(Math.abs(rows)))),
+    source,
+  };
+}
+
+export function terminalModifierBits(modifiers: TerminalModifierState): number {
+  return (modifiers.shiftKey ? 1 : 0)
+    | (modifiers.ctrlKey ? 2 : 0)
+    | (modifiers.altKey ? 4 : 0)
+    | (modifiers.metaKey ? 8 : 0);
 }
 
 export function acceptsTerminalFrame(

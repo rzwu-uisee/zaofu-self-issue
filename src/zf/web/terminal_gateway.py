@@ -291,14 +291,48 @@ class HerdrNDJSONBridge:
             return {"type": kind, "cols": cols, "rows": rows}
         if kind == "terminal.scroll":
             direction, lines = value.get("direction"), value.get("lines")
+            source = value.get("source", "wheel")
+            column, row = value.get("column"), value.get("row")
+            modifiers = value.get("modifiers", 0)
             if (
                 direction not in {"up", "down"}
                 or not isinstance(lines, int)
                 or isinstance(lines, bool)
                 or not 1 <= lines <= 1000
+                or source not in {"wheel", "page_key"}
+                or (
+                    column is not None
+                    and (
+                        not isinstance(column, int)
+                        or isinstance(column, bool)
+                        or not 0 <= column < self.config.max_cols
+                    )
+                )
+                or (
+                    row is not None
+                    and (
+                        not isinstance(row, int)
+                        or isinstance(row, bool)
+                        or not 0 <= row < self.config.max_rows
+                    )
+                )
+                or not isinstance(modifiers, int)
+                or isinstance(modifiers, bool)
+                or not 0 <= modifiers <= 255
             ):
                 raise BridgeProtocolError("terminal.scroll is invalid")
-            return {"type": kind, "direction": direction, "lines": lines}
+            command: dict[str, object] = {
+                "type": kind,
+                "direction": direction,
+                "lines": lines,
+                "source": source,
+                "modifiers": modifiers,
+            }
+            if column is not None:
+                command["column"] = column
+            if row is not None:
+                command["row"] = row
+            return command
         if kind == "terminal.release":
             return {"type": kind}
         raise BridgeProtocolError(f"unsupported terminal command: {kind!r}")

@@ -298,7 +298,10 @@ class DurableCallFanoutMixin(WriterFanoutRetryMixin):
         ):
             return {"skip": True, "run_id": run_id}
         self._prepare_reader_contract_target(child)
-        skill_entries = self._record_skill_provenance(role=role)
+        skill_entries = self._record_skill_provenance(
+            role=role,
+            task_id=str(child.payload.get("task_id") or "") or None,
+        )
         child_success_event, child_failure_event = self._fanout_child_result_events(
             aggregate or {},
         )

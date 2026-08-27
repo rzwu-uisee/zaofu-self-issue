@@ -957,6 +957,7 @@ def test_plan_synth_semantic_result_preserves_ready_plan_ports(
             "plan_revision": "plan-r2",
             "plan_synth_contract_ref": "artifacts/contracts/plan-r2.json",
             "plan_synth_contract_digest": "a" * 64,
+            "reviewed_plan_candidate_digest": "a" * 64,
         },
         source_event_id="evt-plan-result",
         actor="plan-critic",

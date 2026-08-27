@@ -642,6 +642,7 @@ class CallResultAdmissionService(CallResultAuthorityMixin):
             "plan_revision",
             "plan_synth_contract_ref",
             "plan_synth_contract_digest",
+            "reviewed_plan_candidate_digest",
             "contract_authority_revision",
             "execution_owner",
             "workflow_request_id",

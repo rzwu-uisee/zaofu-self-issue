@@ -5459,6 +5459,7 @@ def test_refactor_plan_critic_submits_only_verdict_delta(tmp_path: Path):
             "plan_revision": "plan-r1",
             "plan_synth_contract_ref": "artifacts/plan-contract.json",
             "plan_synth_contract_digest": "digest-plan",
+            "reviewed_plan_candidate_digest": "digest-plan",
         },
         reports=[{
             "child_id": "refactor-plan-synth",

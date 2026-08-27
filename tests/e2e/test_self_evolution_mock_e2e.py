@@ -69,13 +69,13 @@ def _attempt(evaluator: dict) -> dict:
             "task_family": "long_horizon_provider_run",
         },
         "mutation": {
-            "object_kind": "skill_prompt",
+            "object_kind": "memory_entry",
             "identity_kind": "artifact_digest",
-            "object_ref": "artifact://skill/recovery-candidate",
-            "base_version": _sha("skill-base"),
-            "candidate_version": _sha("skill-candidate"),
+            "object_ref": "artifact://memory/recovery-candidate",
+            "base_version": _sha("memory-base"),
+            "candidate_version": _sha("memory-candidate"),
             "diff_ref": "artifact://diff/recovery",
-            "diff_digest": _sha("skill-diff"),
+            "diff_digest": _sha("memory-diff"),
             "hypothesis_ref": "artifact://hypothesis/recovery",
         },
         "source_identity": {
