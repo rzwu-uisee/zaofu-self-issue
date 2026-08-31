@@ -18,6 +18,7 @@ from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from zf.core.config.schema import ZfConfig
+from zf.core.config.self_issue_policy import inherit_workspace_self_issue_config
 from zf.core.events.factory import event_log_from_project
 from zf.core.events.model import ZfEvent
 from zf.core.issue_triage.models import IssueMirror
@@ -224,9 +225,16 @@ def build_issue_triage_router(
     )
     read_session_cookie = session_cookie or (lambda request: None)
 
+    def effective_config(ctx: Any) -> ZfConfig | None:
+        project_config = getattr(ctx, "config", None)
+        return (
+            inherit_workspace_self_issue_config(project_config, workspace_config)
+            or workspace_config
+        )
+
     def context(project_id: str) -> tuple[Any, str, IssueMirrorStore]:
         ctx = resolve_ctx(project_id)
-        repository = _repository(ctx.config) or _repository(workspace_config)
+        repository = _repository(effective_config(ctx))
         if not repository:
             raise ValueError("The centrally managed GitHub Self-Issue target is not configured")
         return ctx, repository, IssueMirrorStore(ctx.state_dir)
@@ -337,7 +345,7 @@ def build_issue_triage_router(
             sync = store.sync_state()
             events = event_log_from_project(
                 ctx.state_dir,
-                config=ctx.config or workspace_config,
+                config=effective_config(ctx),
             ).read_all()
         except ValueError as exc:
             return JSONResponse({"ok": False, "status": "unconfigured", "reason": str(exc)}, status_code=409)
@@ -436,11 +444,11 @@ def build_issue_triage_router(
             ctx, repository, _ = context(project_id)
         except ValueError as exc:
             return JSONResponse({"ok": False, "status": "unconfigured", "reason": str(exc)}, status_code=409)
-        effective_config = ctx.config or workspace_config
-        if effective_config is not None and effective_config.self_issue.ingress.enabled:
+        config = effective_config(ctx)
+        if config is not None and config.self_issue.ingress.enabled:
             service = ExternalIssueIngressService(
                 ctx.state_dir,
-                effective_config,
+                config,
                 project_root=getattr(ctx, "project_root", ctx.state_dir.parent),
                 reconciler=build_reconciler(ctx.state_dir, repository),
             )
@@ -482,8 +490,8 @@ def build_issue_triage_router(
                 "status": "invalid_issue_reference",
                 "reason": str(exc),
             }, status_code=422)
-        effective_config = ctx.config or workspace_config
-        if effective_config is None or not effective_config.self_issue.ingress.enabled:
+        config = effective_config(ctx)
+        if config is None or not config.self_issue.ingress.enabled:
             return JSONResponse({
                 "ok": False,
                 "status": "disabled",
@@ -491,7 +499,7 @@ def build_issue_triage_router(
             }, status_code=409)
         service = ExternalIssueIngressService(
             ctx.state_dir,
-            effective_config,
+            config,
             project_root=getattr(ctx, "project_root", ctx.state_dir.parent),
             reconciler=build_reconciler(ctx.state_dir, repository),
         )
@@ -509,7 +517,7 @@ def build_issue_triage_router(
         item = store.get(outcome.issue_number)
         events = event_log_from_project(
             ctx.state_dir,
-            config=effective_config,
+            config=config,
         ).read_all()
         return JSONResponse({
             "ok": True,

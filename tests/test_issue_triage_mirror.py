@@ -475,6 +475,47 @@ def test_manual_start_triage_admits_one_historical_issue(tmp_path: Path) -> None
     assert requested == [7, 7]
 
 
+def test_manual_start_triage_inherits_locked_workspace_ingress(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    ctx.state_dir.mkdir(parents=True)
+    (ctx.state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    workspace_config = configured_context(tmp_path / "workspace-state").config
+    workspace_config.self_issue.ingress = ExternalIssueIngressConfig(enabled=True)
+    mirror, body = normalize_github_issue(
+        issue_payload(),
+        repository="rzwu-uisee/zaofu-self-issue",
+        repository_id="123",
+        seen_at="2026-08-25T02:00:00+00:00",
+    )
+    IssueMirrorStore(ctx.state_dir).upsert(mirror, body)
+
+    class Reconciler:
+        def refresh_issue(self, issue_number: int) -> dict:
+            return {
+                "ok": True,
+                "status": "fresh",
+                "changed": 0,
+                "issue_number": issue_number,
+            }
+
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(
+        resolve_ctx=lambda project_id: ctx,
+        workspace_config=workspace_config,
+        reconciler_factory=lambda state_dir, repository: Reconciler(),  # type: ignore[arg-type]
+        mutation_auth_error=lambda *args, **kwargs: None,
+    ))
+
+    response = TestClient(app).post(
+        "/api/projects/test/issue-triage/start-triage",
+        json={"issue": "#7"},
+    )
+
+    assert ctx.config.self_issue.ingress.enabled is False
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+
+
 def test_manual_start_triage_requires_mutation_authorization(tmp_path: Path) -> None:
     ctx = configured_context(tmp_path / "state")
     app = FastAPI()
