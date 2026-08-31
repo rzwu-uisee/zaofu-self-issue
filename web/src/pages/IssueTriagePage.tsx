@@ -1,12 +1,13 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CircleCheck, ExternalLink, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CircleCheck, ExternalLink, Play, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
 import { MarkdownText } from "../components/agent-session/MarkdownText";
 import {
   getIssueTriage,
   getIssueTriageDetail,
   getIssueTriageSummary,
   refreshIssueTriage,
+  startIssueTriage,
 } from "../api/client";
 import type {
   IssueTriageDetail,
@@ -122,6 +123,11 @@ function IssuesTab({ projectId }: { projectId: string }) {
   const [cursor, setCursor] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [startDialogOpen, setStartDialogOpen] = useState(false);
+  const [startIssueReference, setStartIssueReference] = useState("");
+  const [startingTriage, setStartingTriage] = useState(false);
+  const [startError, setStartError] = useState("");
+  const [triageNotice, setTriageNotice] = useState("");
   const [error, setError] = useState("");
 
   const filters = useMemo(() => ({
@@ -205,6 +211,36 @@ function IssuesTab({ projectId }: { projectId: string }) {
     setDetail(null);
   };
 
+  const openStartDialog = () => {
+    setStartIssueReference(detail ? `#${detail.issue.number}` : "");
+    setStartError("");
+    setTriageNotice("");
+    setStartDialogOpen(true);
+  };
+
+  const submitManualTriage = async () => {
+    const reference = startIssueReference.trim();
+    if (!reference) {
+      setStartError("Enter a GitHub Issue URL or number.");
+      return;
+    }
+    setStartingTriage(true);
+    setStartError("");
+    try {
+      const result = await startIssueTriage(projectId, reference);
+      await load();
+      setDetail(await getIssueTriageDetail(projectId, result.issue_number));
+      setTriageNotice(result.queued
+        ? `Read-only Triage queued for GitHub Issue #${result.issue_number}.`
+        : `GitHub Issue #${result.issue_number} is already queued for this revision.`);
+      setStartDialogOpen(false);
+    } catch (cause) {
+      setStartError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setStartingTriage(false);
+    }
+  };
+
   return (
     <section className="issue-triage-page">
       <header className="issue-triage-header">
@@ -227,10 +263,15 @@ function IssuesTab({ projectId }: { projectId: string }) {
             <RefreshCw aria-hidden="true" className={refreshing ? "spinning" : ""} size={15} />
             {refreshing ? "Syncing…" : "Refresh"}
           </button>
+          <button className="icon-button primary" disabled={startingTriage} type="button" onClick={openStartDialog}>
+            <Play aria-hidden="true" size={15} />
+            Start Triage
+          </button>
         </div>
       </header>
 
       <SyncBanner summary={summary} error={error} />
+      {triageNotice ? <div className="issue-triage-action-notice" role="status">{triageNotice}</div> : null}
 
       <div className="issue-triage-metrics">
         <Metric label="Untriaged" value={summary?.groups.untriaged ?? 0} active={group === "untriaged"} onClick={() => resetCursor(setGroup, group === "untriaged" ? "" : "untriaged")} />
@@ -330,7 +371,84 @@ function IssuesTab({ projectId }: { projectId: string }) {
         </div>
         {detail ? <IssueDetail projectId={projectId} detail={detail} authorStates={summary?.author_states ?? {}} onClose={() => setDetail(null)} /> : null}
       </div>
+      {startDialogOpen ? (
+        <StartTriageDialog
+          error={startError}
+          issueReference={startIssueReference}
+          repository={summary?.repository ?? "configured GitHub repository"}
+          selectedIssue={detail?.issue}
+          starting={startingTriage}
+          onChange={setStartIssueReference}
+          onClose={() => { if (!startingTriage) setStartDialogOpen(false); }}
+          onSubmit={() => void submitManualTriage()}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function StartTriageDialog({
+  error,
+  issueReference,
+  repository,
+  selectedIssue,
+  starting,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  error: string;
+  issueReference: string;
+  repository: string;
+  selectedIssue?: IssueTriageDetail["issue"];
+  starting: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel issue-triage-start-modal" role="dialog" aria-modal="true" aria-labelledby="issue-triage-start-title">
+        <header className="section-heading">
+          <div>
+            <h2 id="issue-triage-start-title">Start Issue Triage</h2>
+            <span className="muted">Manually admit one Issue into the read-only Triage workflow.</span>
+          </div>
+          <button className="icon-button" disabled={starting} type="button" onClick={onClose}>Close</button>
+        </header>
+        <form className="modal-body issue-triage-start-body" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+          {selectedIssue ? (
+            <div className="issue-triage-start-selection">
+              <span className="muted">Selected Issue #{selectedIssue.number}</span>
+              <strong>{selectedIssue.title}</strong>
+            </div>
+          ) : null}
+          <label htmlFor="issue-triage-start-reference">GitHub Issue URL or number</label>
+          <input
+            autoFocus
+            className="filter-input"
+            id="issue-triage-start-reference"
+            placeholder={`https://github.com/${repository}/issues/123 or #123`}
+            value={issueReference}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          <p className="muted issue-triage-start-help">
+            Historical Issues are allowed. If the Issue is not mirrored yet, ZaoFu fetches only this Issue from {repository} before queueing Triage.
+          </p>
+          <div className="issue-triage-start-safety">
+            This starts read-only Triage only. It does not edit GitHub or automatically start a Fix workflow.
+          </div>
+          {error ? <div className="issue-triage-start-error" role="alert">{error}</div> : null}
+          <div className="button-row issue-triage-start-actions">
+            <button className="icon-button" disabled={starting} type="button" onClick={onClose}>Cancel</button>
+            <button className="icon-button primary" disabled={starting || !issueReference.trim()} type="submit">
+              <Play aria-hidden="true" size={15} />
+              {starting ? "Starting…" : "Start Triage"}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
   );
 }
 

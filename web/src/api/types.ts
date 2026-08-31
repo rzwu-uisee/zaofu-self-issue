@@ -2735,6 +2735,17 @@ export interface IssueTriageDetail {
   trust: "untrusted_external_input";
 }
 
+export interface IssueTriageStartResult {
+  ok: true;
+  status: "queued" | "already_queued" | string;
+  queued: boolean;
+  issue_number: number;
+  task_id: string;
+  workflow_run_id: string;
+  source_revision: string;
+  issue?: IssueTriageItem | null;
+}
+
 export interface IssueTriageComment {
   id: number;
   node_id: string;

@@ -20,6 +20,7 @@ import type {
   FanoutDetail,
   IssueTriageDetail,
   IssueTriagePageData,
+  IssueTriageStartResult,
   IssueTriageSummary,
   IntegrationQueueProjection,
   TaskPipelineProjection,
@@ -482,6 +483,22 @@ export async function refreshIssueTriage(projectId: string, force = false): Prom
   const data = (await response.json()) as Record<string, unknown>;
   clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
   if (!response.ok) throw new Error(String(data.error || data.reason || `refresh failed: ${response.status}`));
+  return data;
+}
+
+export async function startIssueTriage(projectId: string, issue: string): Promise<IssueTriageStartResult> {
+  const response = await fetch(`${projectPrefix(projectId)}/issue-triage/start-triage`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...webActionAuthHeaders(),
+    },
+    body: JSON.stringify({ issue }),
+  });
+  const data = (await response.json()) as IssueTriageStartResult & { reason?: string; error?: string };
+  clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
+  if (!response.ok) throw new Error(String(data.reason || data.error || `start triage failed: ${response.status}`));
   return data;
 }
 

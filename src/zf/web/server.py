@@ -3728,6 +3728,8 @@ def create_app(
     app.include_router(build_issue_triage_router(
         resolve_ctx=_delivery_trace_ctx,
         workspace_config=config,
+        mutation_auth_error=_web_mutation_auth_error,
+        session_cookie=_web_session_cookie,
     ))
 
     @app.get("/{full_path:path}")

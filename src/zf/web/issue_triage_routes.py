@@ -29,6 +29,8 @@ from zf.integrations.forge.github_issues import (
 from zf.runtime.external_issue_ingress import ExternalIssueIngressService
 
 ReconcilerFactory = Callable[[Any, str], GitHubIssueReconciler]
+MutationAuthorizer = Callable[..., dict[str, Any] | None]
+SessionCookieReader = Callable[[Request], str | None]
 
 _GITHUB_IMAGE_HOSTS = {
     "github.com",
@@ -79,6 +81,39 @@ def _repository(config: ZfConfig | None) -> str:
     if config.self_issue.provider == "github":
         return config.self_issue.target_project
     return ""
+
+
+def _parse_issue_reference(value: object, repository: str) -> int:
+    text = str(value or "").strip()
+    if text.startswith("#"):
+        text = text[1:].strip()
+    if text.isdigit():
+        number = int(text)
+    else:
+        if len(text) > 500:
+            raise ValueError("GitHub Issue reference is too long")
+        try:
+            parsed = urllib.parse.urlparse(text)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Enter a GitHub Issue URL or number") from exc
+        parts = [part for part in parsed.path.split("/") if part]
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "github.com"
+            or port not in {None, 443}
+            or parsed.username is not None
+            or parsed.password is not None
+            or len(parts) != 4
+            or parts[2] != "issues"
+            or not parts[3].isdigit()
+            or f"{parts[0]}/{parts[1]}".casefold() != repository.casefold()
+        ):
+            raise ValueError(f"Enter an Issue URL or number from {repository}")
+        number = int(parts[3])
+    if number < 1 or number > 2_147_483_647:
+        raise ValueError("GitHub Issue number is outside the supported range")
+    return number
 
 
 def _public(
@@ -171,6 +206,8 @@ def build_issue_triage_router(
     workspace_config: ZfConfig | None = None,
     reconciler_factory: ReconcilerFactory | None = None,
     webhook_secret: Callable[[], str] | None = None,
+    mutation_auth_error: MutationAuthorizer | None = None,
+    session_cookie: SessionCookieReader | None = None,
 ) -> APIRouter:
     router = APIRouter()
     build_reconciler = reconciler_factory or (
@@ -179,6 +216,7 @@ def build_issue_triage_router(
     read_webhook_secret = webhook_secret or (
         lambda: os.environ.get("ZF_GITHUB_TRIAGE_WEBHOOK_SECRET", "").strip()
     )
+    read_session_cookie = session_cookie or (lambda request: None)
 
     def context(project_id: str) -> tuple[Any, str, IssueMirrorStore]:
         ctx = resolve_ctx(project_id)
@@ -186,6 +224,29 @@ def build_issue_triage_router(
         if not repository:
             raise ValueError("The centrally managed GitHub Self-Issue target is not configured")
         return ctx, repository, IssueMirrorStore(ctx.state_dir)
+
+    def mutation_response(
+        request: Request,
+        authorization: str | None,
+        token: str | None,
+    ) -> JSONResponse | None:
+        if mutation_auth_error is None:
+            return JSONResponse({
+                "ok": False,
+                "status": "disabled",
+                "action": "issue-triage-start",
+                "reason": "Issue Triage mutation authorization is not configured",
+            }, status_code=503)
+        error = mutation_auth_error(
+            "issue-triage-start",
+            authorization=authorization,
+            x_zf_web_token=token,
+            web_session_token=read_session_cookie(request),
+        )
+        if error is None:
+            return None
+        body = dict(error)
+        return JSONResponse(body, status_code=int(body.pop("_status_code", 403)))
 
     @router.get("/api/projects/{project_id}/issue-triage/summary")
     def issue_triage_summary(project_id: str) -> JSONResponse:
@@ -392,6 +453,68 @@ def build_issue_triage_router(
                 force=force,
             )
         return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+
+    @router.post("/api/projects/{project_id}/issue-triage/start-triage")
+    async def issue_triage_start(
+        project_id: str,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_zf_web_token: str | None = Header(default=None),
+    ) -> JSONResponse:
+        denied = mutation_response(request, authorization, x_zf_web_token)
+        if denied is not None:
+            return denied
+        try:
+            ctx, repository, store = context(project_id)
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Request body must be an object")
+            issue_number = _parse_issue_reference(payload.get("issue"), repository)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse({
+                "ok": False,
+                "status": "invalid_issue_reference",
+                "reason": str(exc),
+            }, status_code=422)
+        effective_config = ctx.config or workspace_config
+        if effective_config is None or not effective_config.self_issue.ingress.enabled:
+            return JSONResponse({
+                "ok": False,
+                "status": "disabled",
+                "reason": "GitHub Issue ingress is disabled",
+            }, status_code=409)
+        service = ExternalIssueIngressService(
+            ctx.state_dir,
+            effective_config,
+            project_root=getattr(ctx, "project_root", ctx.state_dir.parent),
+            reconciler=build_reconciler(ctx.state_dir, repository),
+        )
+        outcome = await asyncio.to_thread(service.start_manual_triage, issue_number)
+        if not outcome.ok:
+            status_code = 404 if "not found" in outcome.error.casefold() else 502
+            if outcome.status in {"disabled", "syncing"}:
+                status_code = 409
+            return JSONResponse({
+                "ok": False,
+                "status": outcome.status,
+                "issue_number": outcome.issue_number,
+                "reason": outcome.error,
+            }, status_code=status_code)
+        item = store.get(outcome.issue_number)
+        events = event_log_from_project(
+            ctx.state_dir,
+            config=effective_config,
+        ).read_all()
+        return JSONResponse({
+            "ok": True,
+            "status": outcome.status,
+            "queued": outcome.queued,
+            "issue_number": outcome.issue_number,
+            "task_id": outcome.task_id,
+            "workflow_run_id": outcome.workflow_run_id,
+            "source_revision": outcome.source_revision,
+            "issue": _public(item, workflow=_workflow_projection(events, item)) if item else None,
+        })
 
     @router.post("/api/projects/{project_id}/issue-triage/github-webhook")
     async def issue_triage_webhook(

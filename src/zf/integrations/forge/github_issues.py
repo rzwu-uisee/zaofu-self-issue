@@ -205,6 +205,94 @@ class GitHubIssueReconciler:
         except TimeoutError:
             return {"ok": True, "status": "syncing", "changed": 0}
 
+    def refresh_issue(self, issue_number: int) -> dict[str, Any]:
+        """Fetch one configured-repository Issue for an explicit operator action."""
+        if issue_number < 1:
+            return {
+                "ok": False,
+                "status": "invalid_issue",
+                "changed": 0,
+                "error": "GitHub Issue number must be positive",
+            }
+        try:
+            with locked_path(self.store.refresh_lock_path, timeout_seconds=0.1):
+                return self._refresh_issue_locked(issue_number)
+        except TimeoutError:
+            return {"ok": False, "status": "syncing", "changed": 0, "error": "Issue sync is already running"}
+
+    def _refresh_issue_locked(self, issue_number: int) -> dict[str, Any]:
+        now = self.now()
+        previous = self.store.sync_state()
+        attempt_at = _iso(now)
+        self.store.save_sync_state(replace(
+            previous,
+            status="syncing",
+            repository=self.repository,
+            last_attempt_at=attempt_at,
+            error="",
+        ))
+        try:
+            repository_id, star_count = self._verify_repository()
+            if previous.repository_id and previous.repository_id != repository_id:
+                raise ValueError("GitHub repository identity changed")
+            url = (
+                f"{self.base_url}/repos/{urllib.parse.quote(self.owner)}/"
+                f"{urllib.parse.quote(self.repo)}/issues/{issue_number}"
+            )
+            status, raw, response_headers = self.transport("GET", url, self._headers())
+            normalized_headers = {
+                str(key).lower(): str(value) for key, value in response_headers.items()
+            }
+            if status == 404:
+                raise ValueError(f"GitHub Issue #{issue_number} was not found")
+            if status == 403 and _header_int(normalized_headers, "x-ratelimit-remaining") == 0:
+                raise ValueError("GitHub API rate limit reached")
+            if status != 200:
+                raise ValueError(f"GitHub Issue lookup failed: HTTP {status}")
+            payload = _object(raw, "invalid GitHub Issue response")
+            if "pull_request" in payload:
+                raise ValueError("GitHub pull requests cannot enter Issue Triage")
+            mirror, body = normalize_github_issue(
+                payload,
+                repository=self.repository,
+                repository_id=repository_id,
+                seen_at=attempt_at,
+            )
+            if mirror.number != issue_number:
+                raise ValueError("GitHub Issue identity mismatch")
+            saved, issue_changed = self.store.upsert(mirror, body)
+            comments = self._comments(issue_number) if saved.comment_count else []
+            _, comments_changed = self.store.write_comments(saved, comments)
+            changed = int(issue_changed) + int(comments_changed)
+            self.store.save_sync_state(SyncState(
+                status="fresh",
+                repository=self.repository,
+                repository_id=repository_id,
+                last_attempt_at=attempt_at,
+                last_success_at=attempt_at,
+                etag=previous.etag,
+                rate_limit_remaining=_header_int(normalized_headers, "x-ratelimit-remaining"),
+                rate_limit_reset_at=_rate_limit_reset(normalized_headers),
+                star_count=star_count,
+            ))
+            return {
+                "ok": True,
+                "status": "fresh",
+                "changed": changed,
+                "issue_number": issue_number,
+            }
+        except (ConnectionError, OSError, TimeoutError, ValueError) as exc:
+            message = str(exc)[:300] or type(exc).__name__
+            status = "rate_limited" if "rate limit" in message.casefold() else "failed"
+            self.store.save_sync_state(replace(
+                previous,
+                status=status,
+                repository=self.repository,
+                last_attempt_at=attempt_at,
+                error=message,
+            ))
+            return {"ok": False, "status": status, "changed": 0, "error": message}
+
     def _refresh_locked(self, *, force: bool) -> dict[str, Any]:
         now = self.now()
         previous = self.store.sync_state()

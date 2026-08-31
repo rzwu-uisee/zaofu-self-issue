@@ -30,6 +30,10 @@ class _Reconciler:
         self.calls.append(force)
         return dict(self.result)
 
+    def refresh_issue(self, issue_number: int) -> dict:
+        self.calls.append(True)
+        return {**self.result, "issue_number": issue_number}
+
 
 def _config(*, auto_triage_new_only: bool = True) -> ZfConfig:
     return ZfConfig(
@@ -141,6 +145,30 @@ def test_historical_issue_is_mirrored_but_not_auto_triaged(tmp_path: Path) -> No
     assert result.received == 0
     assert service.tasks.list_all() == []
     assert not (service.state_dir / "events.jsonl").exists()
+
+
+def test_operator_can_manually_queue_one_historical_issue_revision(tmp_path: Path) -> None:
+    service, reconciler = _service(
+        tmp_path,
+        _mirror(created_at="2026-08-30T00:00:00+00:00"),
+    )
+
+    first = service.start_manual_triage(8)
+    second = service.start_manual_triage(8)
+
+    assert first.ok is True
+    assert first.status == "queued"
+    assert first.queued is True
+    assert second.status == "already_queued"
+    assert second.queued is False
+    assert reconciler.calls == [True, True]
+    events = EventLog(service.state_dir / "events.jsonl").read_all()
+    received = next(event for event in events if event.type == "external_issue.received")
+    assert received.actor == "web-operator"
+    assert received.payload["admission_mode"] == "manual"
+    invokes = [event for event in events if event.type == "workflow.invoke.requested"]
+    assert len(invokes) == 1
+    assert invokes[0].payload["requested_by"] == "web-operator"
 
 
 def test_ready_label_is_only_an_approval_intent(tmp_path: Path) -> None:

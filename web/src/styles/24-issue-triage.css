@@ -126,6 +126,64 @@
   border-color: var(--warn);
 }
 
+.issue-triage-action-notice {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ok) 70%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface));
+  color: var(--text);
+  font-size: var(--text-13);
+  font-weight: 650;
+}
+
+.issue-triage-start-modal {
+  width: min(600px, 100%);
+}
+
+.issue-triage-start-body {
+  gap: 12px;
+  padding: 16px;
+}
+
+.issue-triage-start-body label {
+  font-size: var(--text-13);
+  font-weight: 700;
+}
+
+.issue-triage-start-selection {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+}
+
+.issue-triage-start-help {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.issue-triage-start-safety {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--ok) 70%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--ok) 8%, var(--surface));
+  font-size: var(--text-13);
+}
+
+.issue-triage-start-error {
+  padding: 9px 11px;
+  border: 1px solid #d1242f;
+  border-radius: var(--radius-md);
+  color: #d1242f;
+  font-size: var(--text-13);
+}
+
+.issue-triage-start-actions {
+  justify-content: flex-end;
+}
+
 .issue-triage-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

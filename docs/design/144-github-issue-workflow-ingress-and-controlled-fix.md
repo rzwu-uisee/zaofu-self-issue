@@ -118,11 +118,18 @@ writer lane 的整段 IssueFlow 后再临时暂停；自动 Run 与可写 Fix Ru
 | 移除批准标签 | 在 Fix 尚未点火时撤销待处理 intent | 杀死已运行 Run |
 | Issue 关闭 | 关闭未启动 intake/proposal；运行中交由受控取消策略 | 直接终止 provider 进程 |
 | 手动 Refresh | 对账并补发缺失 ingress revision | 每次刷新重复建 Task/Run |
+| 手动 Start Triage | 单独拉取并准入指定 Issue 的 current revision | 批量准入历史 Issue |
 
 轮询固定使用 `self_issue.targets.github.project`，首次成功同步记录 activation 时间；默认只有
 activation 之后创建的新 Issue 自动分诊，已有 open Issue 继续作为 Mirror 展示并允许人工处理。
 首版不要求公网域名、反向代理或固定 HTTPS 隧道。现有 webhook route 仅保留为可关闭的镜像
 兼容入口，不是 Workflow ingress；未来启用 webhook adapter 时必须复用同一 source/revision 合同。
+
+Triage 顶部工具栏提供 token-gated `Start Triage`。操作者可选择当前 Mirror Issue，或输入配置
+仓库内的 GitHub Issue URL/编号。后端固定校验 `github.com`、仓库 identity 和 Issue 编号，只拉取
+该 Issue 及其评论，然后以 `admission_mode=manual` 接纳 current revision。人工准入可以绕过
+activation 时间边界，但不能绕过仓库白名单、source revision 去重、只读 Triage route 或后续
+Fix proposal 审批；相同 revision 重复点击返回 `already_queued`，不创建第二个 Task/Run。
 
 ## 批准合同
 

@@ -57,6 +57,18 @@ class ExternalIssuePollResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ExternalIssueManualTriageResult:
+    ok: bool
+    status: str
+    issue_number: int
+    queued: bool = False
+    task_id: str = ""
+    workflow_run_id: str = ""
+    source_revision: str = ""
+    error: str = ""
+
+
 class ExternalIssueIngressService:
     """Reconcile one configured Forge repository into canonical intents.
 
@@ -187,6 +199,85 @@ class ExternalIssueIngressService:
             triage_queued=queued,
         )
 
+    def start_manual_triage(self, issue_number: int) -> ExternalIssueManualTriageResult:
+        """Fetch and explicitly admit one Issue, including historical revisions."""
+        if not self.policy.enabled:
+            return ExternalIssueManualTriageResult(
+                ok=False,
+                status="disabled",
+                issue_number=issue_number,
+                error="GitHub Issue ingress is disabled",
+            )
+        self._ensure_activation()
+        refreshed = self.reconciler.refresh_issue(issue_number)
+        if not refreshed.get("ok"):
+            return ExternalIssueManualTriageResult(
+                ok=False,
+                status=str(refreshed.get("status") or "failed"),
+                issue_number=issue_number,
+                error=str(refreshed.get("error") or "GitHub Issue lookup failed"),
+            )
+        mirror = self.mirrors.get(issue_number)
+        if mirror is None or mirror.repository.casefold() != self.repository.casefold():
+            return ExternalIssueManualTriageResult(
+                ok=False,
+                status="not_found",
+                issue_number=issue_number,
+                error=f"GitHub Issue #{issue_number} was not mirrored",
+            )
+        source, revision = self._source_revision(mirror)
+        descriptor = write_immutable_json_sidecar(
+            self.state_dir,
+            source,
+            root=f"external-issues/{mirror.provider}/{mirror.repository_id}/{mirror.number}",
+            kind="external_issue_source",
+            schema_version=SOURCE_SCHEMA_VERSION,
+            created_by="external-issue-ingress",
+        )
+        prior = self._received_revision(mirror.issue_key, revision)
+        if prior is None:
+            prior = self.writer.emit(
+                "external_issue.received",
+                actor="web-operator",
+                payload={
+                    "schema_version": SOURCE_SCHEMA_VERSION,
+                    "provider": mirror.provider,
+                    "source_key": mirror.issue_key,
+                    "source_revision": revision,
+                    "source_ref": descriptor["ref"],
+                    "source_digest": descriptor["sha256"],
+                    "repository": mirror.repository,
+                    "repository_id": mirror.repository_id,
+                    "issue_number": mirror.number,
+                    "action": "opened" if not self._was_admitted(mirror.issue_key) else "updated",
+                    "admission_mode": "manual",
+                    "project": self.config.project.name,
+                    "target_root": self.policy.target_root,
+                },
+                correlation_id=f"external-issue:{mirror.issue_key}",
+            )
+        queued = self._ensure_intake_and_triage(
+            mirror,
+            revision=revision,
+            source_ref=str(descriptor["ref"]),
+            source_digest=str(descriptor["sha256"]),
+            causation_id=prior.id,
+            requested_by="web-operator",
+            reason="人工选择 GitHub Issue 并启动只读 Triage",
+        )
+        run_id = "TRIAGE-" + hashlib.sha256(
+            f"{mirror.issue_key}:{revision}".encode("utf-8")
+        ).hexdigest()[:16].upper()
+        return ExternalIssueManualTriageResult(
+            ok=True,
+            status="queued" if queued else "already_queued",
+            issue_number=mirror.number,
+            queued=queued,
+            task_id=_task_id(mirror.issue_key),
+            workflow_run_id=run_id,
+            source_revision=revision,
+        )
+
     def _ensure_activation(self) -> dict[str, Any]:
         if self.state_path.exists():
             value = json.loads(self.state_path.read_text(encoding="utf-8") or "{}")
@@ -262,6 +353,8 @@ class ExternalIssueIngressService:
         source_ref: str,
         source_digest: str,
         causation_id: str,
+        requested_by: str = "external-issue-ingress",
+        reason: str = "自动只读分诊新的 External Issue revision",
     ) -> bool:
         task_id = _task_id(mirror.issue_key)
         task = self.tasks.get(task_id)
@@ -327,8 +420,8 @@ class ExternalIssueIngressService:
                 "task_id": task_id,
                 "pattern_id": TRIAGE_PATTERN_ID,
                 "workflow_run_id": run_id,
-                "requested_by": "external-issue-ingress",
-                "reason": "自动只读分诊新的 External Issue revision",
+                "requested_by": requested_by,
+                "reason": reason,
                 "source": "external_issue",
                 "source_refs": {"external_issue": source_ref},
                 "artifact_refs": [{"ref": source_ref, "sha256": source_digest}],
@@ -533,6 +626,7 @@ def _task_id(source_key: str) -> str:
 
 __all__ = [
     "ExternalIssueIngressService",
+    "ExternalIssueManualTriageResult",
     "ExternalIssuePollResult",
     "ExternalIssuePoller",
     "build_external_issue_poller",

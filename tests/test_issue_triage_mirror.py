@@ -11,7 +11,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from zf.core.config.schema import SelfIssueConfig, SelfIssueTargetConfig, ZfConfig
+from zf.core.config.schema import (
+    ExternalIssueIngressConfig,
+    SelfIssueConfig,
+    SelfIssueTargetConfig,
+    ZfConfig,
+)
 from zf.core.events import EventLog, EventWriter
 from zf.core.issue_triage.store import IssueMirrorStore
 from zf.integrations.forge.github_issues import (
@@ -185,6 +190,41 @@ def test_reconciler_verifies_repository_filters_pr_and_debounces(tmp_path: Path)
     assert len(calls) == 3
 
 
+def test_reconciler_can_fetch_one_unmirrored_issue(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def transport(method: str, url: str, headers: dict[str, str]):
+        del method, headers
+        calls.append(url)
+        if url.endswith("/repos/rzwu-uisee/zaofu-self-issue"):
+            return 200, json.dumps({
+                "id": 123,
+                "full_name": "rzwu-uisee/zaofu-self-issue",
+                "stargazers_count": 7,
+            }).encode(), {}
+        if "/comments?" in url:
+            return 200, json.dumps([comment_payload()]).encode(), {}
+        if url.endswith("/issues/7"):
+            return 200, json.dumps(issue_payload()).encode(), {
+                "X-RateLimit-Remaining": "58",
+            }
+        raise AssertionError(url)
+
+    reconciler = GitHubIssueReconciler(
+        tmp_path / "state",
+        "rzwu-uisee/zaofu-self-issue",
+        transport=transport,
+        now=lambda: datetime(2026, 8, 25, 2, tzinfo=timezone.utc),
+    )
+
+    result = reconciler.refresh_issue(7)
+
+    assert result == {"ok": True, "status": "fresh", "changed": 2, "issue_number": 7}
+    assert reconciler.store.get(7) is not None
+    assert reconciler.store.sync_state().rate_limit_remaining == 58
+    assert not any("/issues?" in url for url in calls)
+
+
 @dataclass
 class FakeContext:
     state_dir: Path
@@ -321,6 +361,7 @@ def test_create_app_registers_issue_triage_routes(tmp_path: Path) -> None:
     paths = {getattr(route, "path", "") for route in app.routes}
     assert "/api/projects/{project_id}/issue-triage" in paths
     assert "/api/projects/{project_id}/issue-triage/refresh" in paths
+    assert "/api/projects/{project_id}/issue-triage/start-triage" in paths
     assert "/api/projects/{project_id}/issue-triage/attachment" in paths
     assert "/api/projects/{project_id}/issue-triage/github-webhook" in paths
 
@@ -384,6 +425,68 @@ def test_manual_refresh_forces_repository_metadata_sync(tmp_path: Path) -> None:
         "/api/projects/test/issue-triage/refresh?force=true",
     ).status_code == 200
     assert force_values == [True]
+
+
+def test_manual_start_triage_admits_one_historical_issue(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    ctx.state_dir.mkdir(parents=True)
+    (ctx.state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    ctx.config.self_issue.ingress = ExternalIssueIngressConfig(enabled=True)
+    mirror, body = normalize_github_issue(
+        issue_payload(),
+        repository="rzwu-uisee/zaofu-self-issue",
+        repository_id="123",
+        seen_at="2026-08-25T02:00:00+00:00",
+    )
+    IssueMirrorStore(ctx.state_dir).upsert(mirror, body)
+    requested: list[int] = []
+
+    class Reconciler:
+        def refresh_issue(self, issue_number: int) -> dict:
+            requested.append(issue_number)
+            return {"ok": True, "status": "fresh", "changed": 0, "issue_number": issue_number}
+
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(
+        resolve_ctx=lambda project_id: ctx,
+        reconciler_factory=lambda state_dir, repository: Reconciler(),  # type: ignore[arg-type]
+        mutation_auth_error=lambda *args, **kwargs: None,
+    ))
+    client = TestClient(app)
+
+    wrong_repo = client.post(
+        "/api/projects/test/issue-triage/start-triage",
+        json={"issue": "https://github.com/another/project/issues/7"},
+    )
+    response = client.post(
+        "/api/projects/test/issue-triage/start-triage",
+        json={"issue": "#7"},
+    )
+    duplicate = client.post(
+        "/api/projects/test/issue-triage/start-triage",
+        json={"issue": mirror.html_url},
+    )
+
+    assert wrong_repo.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    assert response.json()["issue"]["workflow"]["state"] == "triage_queued"
+    assert duplicate.json()["status"] == "already_queued"
+    assert requested == [7, 7]
+
+
+def test_manual_start_triage_requires_mutation_authorization(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(resolve_ctx=lambda project_id: ctx))
+
+    response = TestClient(app).post(
+        "/api/projects/test/issue-triage/start-triage",
+        json={"issue": "#7"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "disabled"
 
 
 def test_list_and_detail_project_external_issue_workflow_state(tmp_path: Path) -> None:
