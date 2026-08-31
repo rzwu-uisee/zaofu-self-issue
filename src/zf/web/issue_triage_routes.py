@@ -175,6 +175,12 @@ def _workflow_projection(
             if str(payload.get("flow_kind") or "") == "issue":
                 state = "fix_queued"
                 run_id = str(payload.get("workflow_run_id") or run_id)
+        elif event.type == "run.cancelled" and same_task:
+            cancelled_run_id = str(
+                payload.get("workflow_run_id") or payload.get("run_id") or ""
+            )
+            if run_id and cancelled_run_id == run_id:
+                state = "triage_cancelled"
         elif (
             event.type in {"task.dispatched", "fanout.child.dispatched"}
             and same_task

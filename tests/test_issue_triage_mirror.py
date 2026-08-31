@@ -531,3 +531,16 @@ def test_list_and_detail_project_external_issue_workflow_state(tmp_path: Path) -
     assert item["workflow"]["state"] == "triage_queued"
     assert item["workflow"]["task_id"] == "ISSUE-123"
     assert item["workflow"]["source_revision"] == "sha256:revision"
+
+    writer.emit(
+        "run.cancelled",
+        actor="web",
+        task_id="ISSUE-123",
+        payload={
+            "run_id": "TRIAGE-123",
+            "workflow_run_id": "TRIAGE-123",
+            "reason": "operator cancelled queued triage",
+        },
+    )
+    cancelled = client.get("/api/projects/test/issue-triage/7").json()["issue"]
+    assert cancelled["workflow"]["state"] == "triage_cancelled"

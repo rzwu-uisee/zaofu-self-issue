@@ -196,6 +196,7 @@ Triage 页面统一投影以下生命周期：
 ```text
 mirrored
   -> triage_queued
+  -> triage_cancelled
   -> triaging
   -> needs_info | awaiting_fix_approval
   -> fix_queued
@@ -206,6 +207,9 @@ mirrored
 
 `closed` 是 External Issue provider state，不替代 Workflow lifecycle。页面应同时显示 provider
 state、Workflow state、Task id、current revision、proposal/run id 和最近 diagnostics。
+当选中 Issue 的状态为 `triage_queued` 时，顶部操作切换为 token-gated `Cancel Triage`，复用
+Kernel `run-cancel` ControlledAction。取消可在 runtime 离线时完成并阻止未来 admission；它只
+终止该 revision 的 Run，不删除 Mirror、Intake Task、source sidecar 或 append-only 审计事件。
 
 第一版不由 ZaoFu 自动添加 GitHub 状态标签、评论或创建 PR；GitHub 只提供 Issue source 和
 人工批准标签。状态回写可以在后续作为独立、可关闭的 controlled side effect 增加。

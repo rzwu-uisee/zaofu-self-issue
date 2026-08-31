@@ -1,11 +1,12 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CircleCheck, ExternalLink, Play, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CircleCheck, CircleX, ExternalLink, Play, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
 import { MarkdownText } from "../components/agent-session/MarkdownText";
 import {
   getIssueTriage,
   getIssueTriageDetail,
   getIssueTriageSummary,
+  postAction,
   refreshIssueTriage,
   startIssueTriage,
 } from "../api/client";
@@ -127,6 +128,9 @@ function IssuesTab({ projectId }: { projectId: string }) {
   const [startIssueReference, setStartIssueReference] = useState("");
   const [startingTriage, setStartingTriage] = useState(false);
   const [startError, setStartError] = useState("");
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [cancellingTriage, setCancellingTriage] = useState(false);
+  const [cancelError, setCancelError] = useState("");
   const [triageNotice, setTriageNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -241,6 +245,34 @@ function IssuesTab({ projectId }: { projectId: string }) {
     }
   };
 
+  const submitCancelTriage = async () => {
+    const issue = detail?.issue;
+    const runId = issue?.workflow?.run_id ?? "";
+    if (!issue || !runId || issue.workflow?.state !== "triage_queued") {
+      setCancelError("This Issue no longer has a queued Triage Run.");
+      return;
+    }
+    setCancellingTriage(true);
+    setCancelError("");
+    try {
+      const result = await postAction("run-cancel", {
+        run_id: runId,
+        reason: `Operator cancelled queued Triage for GitHub Issue #${issue.number}`,
+      }, projectId);
+      if (!result.ok) throw new Error(result.reason || "Unable to cancel queued Triage.");
+      await load();
+      setDetail(await getIssueTriageDetail(projectId, issue.number));
+      setTriageNotice(`Queued Triage cancelled for GitHub Issue #${issue.number}.`);
+      setCancelDialogOpen(false);
+    } catch (cause) {
+      setCancelError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCancellingTriage(false);
+    }
+  };
+
+  const selectedWorkflowState = detail?.issue.workflow?.state ?? "";
+
   return (
     <section className="issue-triage-page">
       <header className="issue-triage-header">
@@ -263,10 +295,27 @@ function IssuesTab({ projectId }: { projectId: string }) {
             <RefreshCw aria-hidden="true" className={refreshing ? "spinning" : ""} size={15} />
             {refreshing ? "Syncing…" : "Refresh"}
           </button>
-          <button className="icon-button primary" disabled={startingTriage} type="button" onClick={openStartDialog}>
-            <Play aria-hidden="true" size={15} />
-            Start Triage
-          </button>
+          {selectedWorkflowState === "triage_queued" ? (
+            <button
+              className="icon-button danger"
+              disabled={cancellingTriage}
+              type="button"
+              onClick={() => { setCancelError(""); setTriageNotice(""); setCancelDialogOpen(true); }}
+            >
+              <CircleX aria-hidden="true" size={15} />
+              Cancel Triage
+            </button>
+          ) : selectedWorkflowState === "triage_cancelled" ? (
+            <button className="icon-button" disabled type="button">
+              <CircleX aria-hidden="true" size={15} />
+              Triage Cancelled
+            </button>
+          ) : (
+            <button className="icon-button primary" disabled={startingTriage} type="button" onClick={openStartDialog}>
+              <Play aria-hidden="true" size={15} />
+              Start Triage
+            </button>
+          )}
         </div>
       </header>
 
@@ -383,7 +432,58 @@ function IssuesTab({ projectId }: { projectId: string }) {
           onSubmit={() => void submitManualTriage()}
         />
       ) : null}
+      {cancelDialogOpen && detail ? (
+        <CancelTriageDialog
+          error={cancelError}
+          issue={detail.issue}
+          cancelling={cancellingTriage}
+          onClose={() => { if (!cancellingTriage) setCancelDialogOpen(false); }}
+          onSubmit={() => void submitCancelTriage()}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function CancelTriageDialog({
+  error,
+  issue,
+  cancelling,
+  onClose,
+  onSubmit,
+}: {
+  error: string;
+  issue: IssueTriageDetail["issue"];
+  cancelling: boolean;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel issue-triage-start-modal" role="dialog" aria-modal="true" aria-labelledby="issue-triage-cancel-title">
+        <header className="section-heading">
+          <div>
+            <h2 id="issue-triage-cancel-title">Cancel queued Triage?</h2>
+            <span className="muted">GitHub Issue #{issue.number}</span>
+          </div>
+          <button className="icon-button" disabled={cancelling} type="button" onClick={onClose}>Close</button>
+        </header>
+        <div className="modal-body issue-triage-start-body">
+          <div className="issue-triage-start-selection"><strong>{issue.title}</strong></div>
+          <p className="muted issue-triage-start-help">
+            The queued Run will not execute when runtime starts. The Issue mirror, Intake Task, and audit history remain available.
+          </p>
+          {error ? <div className="issue-triage-start-error" role="alert">{error}</div> : null}
+          <div className="button-row issue-triage-start-actions">
+            <button className="icon-button" disabled={cancelling} type="button" onClick={onClose}>Keep queued</button>
+            <button className="icon-button danger" disabled={cancelling} type="button" onClick={onSubmit}>
+              <CircleX aria-hidden="true" size={15} />
+              {cancelling ? "Cancelling…" : "Cancel Triage"}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 

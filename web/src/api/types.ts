@@ -2694,7 +2694,7 @@ export interface IssueTriageItem {
   derived_group: "untriaged" | "triaged" | "closed";
   last_seen_at: string;
   workflow?: {
-    state: "mirrored" | "triage_queued" | "triaging" | "needs_info" | "awaiting_fix_approval" | "fix_queued" | "fixing" | "verifying" | "verified_candidate" | "blocked" | "failed" | string;
+    state: "mirrored" | "triage_queued" | "triaging" | "triage_cancelled" | "needs_info" | "awaiting_fix_approval" | "fix_queued" | "fixing" | "verifying" | "verified_candidate" | "blocked" | "failed" | string;
     task_id: string;
     source_revision: string;
     proposal_id: string;
