@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CircleCheck, CircleX, ExternalLink, Play, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
 import { MarkdownText } from "../components/agent-session/MarkdownText";
@@ -6,7 +6,6 @@ import {
   getIssueTriage,
   getIssueTriageDetail,
   getIssueTriageSummary,
-  postAction,
   refreshIssueTriage,
   startIssueTriage,
 } from "../api/client";
@@ -17,25 +16,16 @@ import type {
 } from "../api/types";
 import {
   ISSUE_TRIAGE_MIRROR_POLL_INTERVAL_MS,
+  canManageIssueRun,
   githubMarkdownForDisplay,
+  nextIssueLabelSelection,
   issueTriageSourceLabel,
 } from "./issueTriageModel";
+import { IssueCandidateDeliveryPanel } from "./IssueCandidateDeliveryPanel";
+import { IssueLabelList, githubLabelStyle } from "./IssueTriageLabels";
+import { IssueTriageRunDialog } from "./IssueTriageRunDialog";
 
 export type TriageTab = "github" | "gitlab" | "runtime";
-
-function githubLabelStyle(name: string, colors?: Record<string, string>): CSSProperties | undefined {
-  const color = String(colors?.[name] || "").replace(/^#/, "");
-  if (!/^[0-9a-f]{6}$/i.test(color)) return undefined;
-  const red = Number.parseInt(color.slice(0, 2), 16);
-  const green = Number.parseInt(color.slice(2, 4), 16);
-  const blue = Number.parseInt(color.slice(4, 6), 16);
-  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
-  return {
-    backgroundColor: `#${color}`,
-    borderColor: `#${color}`,
-    color: luminance > 0.62 ? "#172033" : "#ffffff",
-  };
-}
 
 function compactStat(value: number): string {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
@@ -128,9 +118,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
   const [startIssueReference, setStartIssueReference] = useState("");
   const [startingTriage, setStartingTriage] = useState(false);
   const [startError, setStartError] = useState("");
-  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
-  const [cancellingTriage, setCancellingTriage] = useState(false);
-  const [cancelError, setCancelError] = useState("");
+  const [manageRunOpen, setManageRunOpen] = useState(false);
   const [triageNotice, setTriageNotice] = useState("");
   const [error, setError] = useState("");
 
@@ -201,6 +189,10 @@ function IssuesTab({ projectId }: { projectId: string }) {
   }, [load]);
 
   const openDetail = async (issueNumber: number) => {
+    if (detail?.issue.number === issueNumber) {
+      setDetail(null);
+      return;
+    }
     setError("");
     try {
       setDetail(await getIssueTriageDetail(projectId, issueNumber));
@@ -213,6 +205,18 @@ function IssuesTab({ projectId }: { projectId: string }) {
     setter(value);
     setCursor(0);
     setDetail(null);
+  };
+
+  const selectLabel = (label: string) => {
+    setSelectedLabels((current) => nextIssueLabelSelection(current, label));
+    setCursor(0);
+    setDetail(null);
+  };
+
+  const refreshSelected = async (issueNumber: number, notice: string) => {
+    await load();
+    setDetail(await getIssueTriageDetail(projectId, issueNumber));
+    setTriageNotice(notice);
   };
 
   const openStartDialog = () => {
@@ -245,32 +249,6 @@ function IssuesTab({ projectId }: { projectId: string }) {
     }
   };
 
-  const submitCancelTriage = async () => {
-    const issue = detail?.issue;
-    const runId = issue?.workflow?.run_id ?? "";
-    if (!issue || !runId || issue.workflow?.state !== "triage_queued") {
-      setCancelError("This Issue no longer has a queued Triage Run.");
-      return;
-    }
-    setCancellingTriage(true);
-    setCancelError("");
-    try {
-      const result = await postAction("run-cancel", {
-        run_id: runId,
-        reason: `Operator cancelled queued Triage for GitHub Issue #${issue.number}`,
-      }, projectId);
-      if (!result.ok) throw new Error(result.reason || "Unable to cancel queued Triage.");
-      await load();
-      setDetail(await getIssueTriageDetail(projectId, issue.number));
-      setTriageNotice(`Queued Triage cancelled for GitHub Issue #${issue.number}.`);
-      setCancelDialogOpen(false);
-    } catch (cause) {
-      setCancelError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setCancellingTriage(false);
-    }
-  };
-
   const selectedWorkflowState = detail?.issue.workflow?.state ?? "";
 
   return (
@@ -291,27 +269,27 @@ function IssuesTab({ projectId }: { projectId: string }) {
               New issue <ExternalLink aria-hidden="true" size={14} />
             </a>
           ) : null}
-          <button className="icon-button" disabled={refreshing} type="button" onClick={() => void refresh()}>
+          <button className="icon-button issue-triage-tooltip" data-tooltip="Fetch the latest Issue metadata and comments from GitHub" disabled={refreshing} type="button" onClick={() => void refresh()}>
             <RefreshCw aria-hidden="true" className={refreshing ? "spinning" : ""} size={15} />
             {refreshing ? "Syncing…" : "Refresh"}
           </button>
-          {selectedWorkflowState === "triage_queued" ? (
+          {detail && canManageIssueRun(selectedWorkflowState) ? (
             <button
-              className="icon-button danger"
-              disabled={cancellingTriage}
+              className={`icon-button issue-triage-tooltip ${selectedWorkflowState.includes("queued") ? "danger" : ""}`}
+              data-tooltip={selectedWorkflowState.includes("queued") ? "Permanently cancel this queued Run" : "Pause, resume, or permanently cancel this Run"}
               type="button"
-              onClick={() => { setCancelError(""); setTriageNotice(""); setCancelDialogOpen(true); }}
+              onClick={() => { setTriageNotice(""); setManageRunOpen(true); }}
             >
-              <CircleX aria-hidden="true" size={15} />
-              Cancel Triage
+              {selectedWorkflowState.includes("queued") ? <CircleX aria-hidden="true" size={15} /> : <SlidersHorizontal aria-hidden="true" size={15} />}
+              {selectedWorkflowState === "triage_queued" ? "Cancel queued Triage" : selectedWorkflowState === "fix_queued" ? "Cancel queued Fix" : "Manage Run"}
             </button>
-          ) : selectedWorkflowState === "triage_cancelled" ? (
+          ) : selectedWorkflowState === "triage_cancelled" || selectedWorkflowState === "fix_cancelled" ? (
             <button className="icon-button" disabled type="button">
               <CircleX aria-hidden="true" size={15} />
-              Triage Cancelled
+              {selectedWorkflowState === "fix_cancelled" ? "Fix Cancelled" : "Triage Cancelled"}
             </button>
           ) : (
-            <button className="icon-button primary" disabled={startingTriage} type="button" onClick={openStartDialog}>
+            <button className="icon-button primary issue-triage-tooltip" data-tooltip="Manually queue the selected or specified GitHub Issue for read-only Triage" disabled={startingTriage} type="button" onClick={openStartDialog}>
               <Play aria-hidden="true" size={15} />
               Start Triage
             </button>
@@ -402,7 +380,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
                   />
                   <span>· {issueTriageSourceLabel(item.source)} · updated {new Date(item.updated_at).toLocaleString()}</span>
                 </span>
-                <span className="issue-label-row">{item.labels.map((itemLabel) => <span className="badge issue-label-badge" key={itemLabel} style={githubLabelStyle(itemLabel, item.label_colors)}>{itemLabel}</span>)}</span>
+                <IssueLabelList labels={item.labels} colors={item.label_colors} onSelect={selectLabel} />
               </span>
               <span
                 className="issue-group-badge issue-triage-tooltip"
@@ -418,7 +396,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
             <button className="icon-button" disabled={page?.next_cursor == null} type="button" onClick={() => { setCursor(page?.next_cursor ?? cursor); setDetail(null); }}>Next</button>
           </div>
         </div>
-        {detail ? <IssueDetail projectId={projectId} detail={detail} authorStates={summary?.author_states ?? {}} onClose={() => setDetail(null)} /> : null}
+        {detail ? <IssueDetail projectId={projectId} detail={detail} authorStates={summary?.author_states ?? {}} onClose={() => setDetail(null)} onLabelSelect={selectLabel} onUpdated={(notice) => refreshSelected(detail.issue.number, notice)} /> : null}
       </div>
       {startDialogOpen ? (
         <StartTriageDialog
@@ -432,58 +410,15 @@ function IssuesTab({ projectId }: { projectId: string }) {
           onSubmit={() => void submitManualTriage()}
         />
       ) : null}
-      {cancelDialogOpen && detail ? (
-        <CancelTriageDialog
-          error={cancelError}
+      {manageRunOpen && detail ? (
+        <IssueTriageRunDialog
+          projectId={projectId}
           issue={detail.issue}
-          cancelling={cancellingTriage}
-          onClose={() => { if (!cancellingTriage) setCancelDialogOpen(false); }}
-          onSubmit={() => void submitCancelTriage()}
+          onClose={() => setManageRunOpen(false)}
+          onUpdated={(notice) => refreshSelected(detail.issue.number, notice)}
         />
       ) : null}
     </section>
-  );
-}
-
-function CancelTriageDialog({
-  error,
-  issue,
-  cancelling,
-  onClose,
-  onSubmit,
-}: {
-  error: string;
-  issue: IssueTriageDetail["issue"];
-  cancelling: boolean;
-  onClose: () => void;
-  onSubmit: () => void;
-}) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal-panel issue-triage-start-modal" role="dialog" aria-modal="true" aria-labelledby="issue-triage-cancel-title">
-        <header className="section-heading">
-          <div>
-            <h2 id="issue-triage-cancel-title">Cancel queued Triage?</h2>
-            <span className="muted">GitHub Issue #{issue.number}</span>
-          </div>
-          <button className="icon-button" disabled={cancelling} type="button" onClick={onClose}>Close</button>
-        </header>
-        <div className="modal-body issue-triage-start-body">
-          <div className="issue-triage-start-selection"><strong>{issue.title}</strong></div>
-          <p className="muted issue-triage-start-help">
-            The queued Run will not execute when runtime starts. The Issue mirror, Intake Task, and audit history remain available.
-          </p>
-          {error ? <div className="issue-triage-start-error" role="alert">{error}</div> : null}
-          <div className="button-row issue-triage-start-actions">
-            <button className="icon-button" disabled={cancelling} type="button" onClick={onClose}>Keep queued</button>
-            <button className="icon-button danger" disabled={cancelling} type="button" onClick={onSubmit}>
-              <CircleX aria-hidden="true" size={15} />
-              {cancelling ? "Cancelling…" : "Cancel Triage"}
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
   );
 }
 
@@ -799,11 +734,15 @@ function IssueDetail({
   detail,
   authorStates,
   onClose,
+  onLabelSelect,
+  onUpdated,
 }: {
   projectId: string;
   detail: IssueTriageDetail;
   authorStates: Record<string, { open: number; closed: number }>;
   onClose: () => void;
+  onLabelSelect: (label: string) => void;
+  onUpdated: (notice: string) => Promise<void>;
 }) {
   const { issue } = detail;
   return (
@@ -845,11 +784,10 @@ function IssueDetail({
         <div><dt>Milestone</dt><dd>{issue.milestone || "None"}</dd></div>
         <div><dt>Comments</dt><dd>{issue.comment_count}</dd></div>
         <div className="issue-triage-label-field"><dt>Labels</dt><dd>{issue.labels.length ? (
-          <span className="issue-triage-detail-labels" aria-label="GitHub labels">
-            {issue.labels.map((itemLabel) => <span className="badge issue-label-badge" key={itemLabel} style={githubLabelStyle(itemLabel, issue.label_colors)}>{itemLabel}</span>)}
-          </span>
+          <IssueLabelList labels={issue.labels} colors={issue.label_colors} onSelect={onLabelSelect} />
         ) : "None"}</dd></div>
       </dl>
+      <IssueCandidateDeliveryPanel projectId={projectId} issueNumber={issue.number} delivery={detail.delivery} onUpdated={onUpdated} />
       <div className="issue-triage-body">
         <div className="issue-triage-section-heading"><h4>Issue body</h4><span className="muted">GitHub Markdown preview</span></div>
         <div className="issue-triage-markdown">

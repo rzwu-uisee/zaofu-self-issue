@@ -235,6 +235,16 @@ self_issue:
     mode: poll
     poll_interval_seconds: 300
     target_root: .
+  delivery:
+    enabled: true
+    provider: github
+    repository: rzwu-uisee/zaofu-self-issue
+    remote_url: https://github.com/rzwu-uisee/zaofu-self-issue.git
+    base_branch: dev
+    branch_prefix: review
+    merge_strategy: squash
+    pr_sync_mode: manual_refresh
+    auto_close_issue: false
 """,
         encoding="utf-8",
     )
@@ -245,6 +255,13 @@ self_issue:
     assert config.self_issue.default_publication_mode == "github"
     assert config.self_issue.ingress.poll_interval_seconds == 300
     assert config.self_issue.ingress.target_root == "."
+    assert config.self_issue.delivery.repository == "rzwu-uisee/zaofu-self-issue"
+    assert config.self_issue.delivery.remote_url == (
+        "https://github.com/rzwu-uisee/zaofu-self-issue.git"
+    )
+    assert config.self_issue.delivery.base_branch == "dev"
+    assert config.self_issue.delivery.merge_strategy == "squash"
+    assert config.self_issue.delivery.auto_close_issue is False
 
     text = config_path.read_text(encoding="utf-8").replace(
         "provider: github\n    mode: poll",

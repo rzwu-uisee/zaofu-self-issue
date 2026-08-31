@@ -1898,6 +1898,21 @@ class ExternalIssueIngressConfig:
 
 
 @dataclass
+class ExternalIssueDeliveryConfig:
+    """Provider-neutral policy for human-controlled candidate publication."""
+
+    enabled: bool = False
+    provider: str = "github"
+    repository: str = ""
+    remote_url: str = ""
+    base_branch: str = "dev"
+    branch_prefix: str = "review"
+    merge_strategy: str = "squash"
+    pr_sync_mode: str = "manual_refresh"
+    auto_close_issue: bool = False
+
+
+@dataclass
 class SelfIssueConfig:
     """Kernel-owned policy for report-only Self-Issue publication."""
 
@@ -1915,6 +1930,9 @@ class SelfIssueConfig:
     default_publication_mode: str = "gitlab"
     ingress: ExternalIssueIngressConfig = field(
         default_factory=ExternalIssueIngressConfig,
+    )
+    delivery: ExternalIssueDeliveryConfig = field(
+        default_factory=ExternalIssueDeliveryConfig,
     )
 
 

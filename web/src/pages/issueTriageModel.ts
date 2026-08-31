@@ -3,6 +3,23 @@ import type { IssueTriageSyncState } from "../api/types";
 export const ISSUE_TRIAGE_POLL_INTERVAL_MS = 300_000;
 export const ISSUE_TRIAGE_MIRROR_POLL_INTERVAL_MS = 10_000;
 
+const MANAGEABLE_RUN_STATES = new Set([
+  "triage_queued", "triaging", "triage_paused",
+  "fix_queued", "fixing", "fix_paused", "verifying",
+]);
+
+export function canManageIssueRun(state: string): boolean {
+  return MANAGEABLE_RUN_STATES.has(state);
+}
+
+export function nextIssueLabelSelection(current: string[] | null, label: string): string[] | null {
+  return current?.length === 1 && current[0] === label ? null : [label];
+}
+
+export function issueLabelFoldCount(labels: string[]): number {
+  return Math.max(0, labels.length - 3);
+}
+
 export function issueTriageNeedsRefresh(
   sync: IssueTriageSyncState | null | undefined,
   nowMs = Date.now(),

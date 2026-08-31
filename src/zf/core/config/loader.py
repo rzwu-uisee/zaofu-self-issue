@@ -138,6 +138,7 @@ from zf.core.config.schema import (  # noqa: E402
     QualityGateConfig,
     SecurityConfig,
     EventSigningConfig,
+    ExternalIssueDeliveryConfig,
     ExternalIssueIngressConfig,
     SafetyConfig,
     CostConfig,
@@ -332,11 +333,15 @@ _KNOWN_SELF_ISSUE_KEYS = frozenset({
     "target_locked", "oauth_client_id", "oauth_redirect_uri",
     "automatic_detection_enabled", "browser_capture_enabled",
     "browser_capture_base_url", "targets", "default_publication_mode",
-    "ingress",
+    "ingress", "delivery",
 })
 _KNOWN_EXTERNAL_ISSUE_INGRESS_KEYS = frozenset({
     "enabled", "provider", "mode", "poll_interval_seconds",
     "approval_label", "target_root", "auto_triage_new_only",
+})
+_KNOWN_EXTERNAL_ISSUE_DELIVERY_KEYS = frozenset({
+    "enabled", "provider", "repository", "remote_url", "base_branch",
+    "branch_prefix", "merge_strategy", "pr_sync_mode", "auto_close_issue",
 })
 _KNOWN_SELF_ISSUE_TARGET_KEYS = frozenset({
     "authorization_domain", "project", "oauth_client_id",
@@ -3398,6 +3403,66 @@ def _build_self_issue(data: dict | None) -> SelfIssueConfig:
         raise ConfigError(
             "self_issue.ingress.target_root must be a relative path within the project"
         )
+    delivery_raw = data.get("delivery") or {}
+    if not isinstance(delivery_raw, dict):
+        raise ConfigError("self_issue.delivery must be a mapping")
+    _reject_unknown_keys(
+        delivery_raw,
+        _KNOWN_EXTERNAL_ISSUE_DELIVERY_KEYS,
+        "self_issue.delivery",
+    )
+    delivery_enabled = _bool_value(delivery_raw.get("enabled"), default=False)
+    delivery_provider = str(
+        delivery_raw.get("provider") or "github"
+    ).strip().lower()
+    delivery_repository = str(delivery_raw.get("repository") or "").strip()
+    delivery_remote_url = str(delivery_raw.get("remote_url") or "").strip()
+    delivery_base_branch = str(
+        delivery_raw.get("base_branch") or "dev"
+    ).strip()
+    delivery_branch_prefix = str(
+        delivery_raw.get("branch_prefix") or "review"
+    ).strip().strip("/")
+    delivery_merge_strategy = str(
+        delivery_raw.get("merge_strategy") or "squash"
+    ).strip().lower()
+    delivery_sync_mode = str(
+        delivery_raw.get("pr_sync_mode") or "manual_refresh"
+    ).strip().lower()
+    if delivery_provider not in {"github", "gitlab"}:
+        raise ConfigError("self_issue.delivery.provider must be github or gitlab")
+    if delivery_enabled and delivery_provider != "github":
+        raise ConfigError(
+            "self_issue.delivery currently implements github only; keep gitlab disabled"
+        )
+    if delivery_enabled and not _valid_self_issue_project(delivery_repository):
+        raise ConfigError(
+            "enabled self_issue.delivery requires a namespace/project repository"
+        )
+    expected_remote = (
+        f"https://github.com/{delivery_repository}.git"
+        if delivery_provider == "github" and delivery_repository else ""
+    )
+    if delivery_enabled and delivery_remote_url != expected_remote:
+        raise ConfigError(
+            "self_issue.delivery.remote_url must exactly match the configured GitHub repository"
+        )
+    branch_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+    if (
+        not branch_re.fullmatch(delivery_base_branch)
+        or ".." in delivery_base_branch
+        or delivery_base_branch.endswith("/")
+    ):
+        raise ConfigError("self_issue.delivery.base_branch is invalid")
+    if (
+        not branch_re.fullmatch(delivery_branch_prefix)
+        or ".." in delivery_branch_prefix
+    ):
+        raise ConfigError("self_issue.delivery.branch_prefix is invalid")
+    if delivery_merge_strategy != "squash":
+        raise ConfigError("self_issue.delivery.merge_strategy currently supports squash only")
+    if delivery_sync_mode != "manual_refresh":
+        raise ConfigError("self_issue.delivery.pr_sync_mode currently supports manual_refresh only")
     return SelfIssueConfig(
         enabled=enabled,
         provider=provider,
@@ -3426,6 +3491,19 @@ def _build_self_issue(data: dict | None) -> SelfIssueConfig:
             target_root=target_root,
             auto_triage_new_only=_bool_value(
                 ingress_raw.get("auto_triage_new_only"), default=True
+            ),
+        ),
+        delivery=ExternalIssueDeliveryConfig(
+            enabled=delivery_enabled,
+            provider=delivery_provider,
+            repository=delivery_repository,
+            remote_url=delivery_remote_url,
+            base_branch=delivery_base_branch,
+            branch_prefix=delivery_branch_prefix,
+            merge_strategy=delivery_merge_strategy,
+            pr_sync_mode=delivery_sync_mode,
+            auto_close_issue=_bool_value(
+                delivery_raw.get("auto_close_issue"), default=False
             ),
         ),
     )

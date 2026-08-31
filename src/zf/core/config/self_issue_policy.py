@@ -65,6 +65,17 @@ def inject_self_issue_policy(
             "target_root": policy.ingress.target_root,
             "auto_triage_new_only": policy.ingress.auto_triage_new_only,
         },
+        "delivery": {
+            "enabled": policy.delivery.enabled,
+            "provider": policy.delivery.provider,
+            "repository": policy.delivery.repository,
+            "remote_url": policy.delivery.remote_url,
+            "base_branch": policy.delivery.base_branch,
+            "branch_prefix": policy.delivery.branch_prefix,
+            "merge_strategy": policy.delivery.merge_strategy,
+            "pr_sync_mode": policy.delivery.pr_sync_mode,
+            "auto_close_issue": policy.delivery.auto_close_issue,
+        },
     }
     if policy.oauth_client_id:
         value["oauth_client_id"] = policy.oauth_client_id

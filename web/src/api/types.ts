@@ -2694,7 +2694,7 @@ export interface IssueTriageItem {
   derived_group: "untriaged" | "triaged" | "closed";
   last_seen_at: string;
   workflow?: {
-    state: "mirrored" | "triage_queued" | "triaging" | "triage_cancelled" | "needs_info" | "awaiting_fix_approval" | "fix_queued" | "fixing" | "verifying" | "verified_candidate" | "blocked" | "failed" | string;
+    state: "mirrored" | "triage_queued" | "triaging" | "triage_paused" | "triage_cancelled" | "needs_info" | "awaiting_fix_approval" | "fix_queued" | "fixing" | "fix_paused" | "fix_cancelled" | "verifying" | "verified_candidate" | "approved_for_pr" | "owner_changes_requested" | "owner_rejected" | "publication_prepared" | "pr_open" | "pr_changes_requested" | "pr_approved" | "pr_closed_without_merge" | "merged" | "blocked" | "failed" | string;
     task_id: string;
     source_revision: string;
     proposal_id: string;
@@ -2732,7 +2732,56 @@ export interface IssueTriageDetail {
   issue: IssueTriageItem;
   body: string;
   comments?: IssueTriageComment[];
+  delivery?: IssueCandidateDeliveryProjection;
   trust: "untrusted_external_input";
+}
+
+export interface IssueCandidateDeliveryProjection {
+  enabled: boolean;
+  configured_repository: string;
+  configured_base_branch: string;
+  status: string;
+  stale_reason: string;
+  candidate: null | {
+    task_id: string;
+    workflow_run_id: string;
+    source_revision: string;
+    pdd_id: string;
+    candidate_ref: string;
+    candidate_base_sha: string;
+    candidate_head_sha: string;
+    diff_ref: string;
+    quality_status: string;
+    quality_gates_passed: string[];
+    quality_gates_failed: string[];
+    changed_paths: string[];
+    verification_commands: string[];
+    unresolved_risks: string[];
+  };
+  handoff: null | {
+    status: string;
+    review_branch?: string;
+    pr_body_ref?: string;
+    owner_review?: { verdict: string; reviewer: string; reason: string; reviewed_at: string };
+    human_commands?: { push?: string; create_pr?: string };
+    pull_request?: {
+      number: number;
+      url: string;
+      lifecycle: string;
+      review_status: string;
+      review_count: number;
+      head_sha: string;
+      base_sha: string;
+      merged_at: string;
+      synced_at: string;
+    };
+  };
+}
+
+export interface IssueCandidateDeliveryResult {
+  ok: boolean;
+  status: string;
+  reason?: string;
 }
 
 export interface IssueTriageStartResult {

@@ -28,10 +28,15 @@ from zf.integrations.forge.github_issues import (
     normalize_github_issue,
 )
 from zf.runtime.external_issue_ingress import ExternalIssueIngressService
+from zf.runtime.issue_candidate_delivery import (
+    CandidateDeliveryError,
+    IssueCandidateDeliveryService,
+)
 
 ReconcilerFactory = Callable[[Any, str], GitHubIssueReconciler]
 MutationAuthorizer = Callable[..., dict[str, Any] | None]
 SessionCookieReader = Callable[[Request], str | None]
+DeliveryServiceFactory = Callable[[Any, ZfConfig], IssueCandidateDeliveryService]
 
 _GITHUB_IMAGE_HOSTS = {
     "github.com",
@@ -137,6 +142,7 @@ def _workflow_projection(
     source_revision = ""
     proposal_id = ""
     run_id = ""
+    paused_from = ""
     seen = False
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -181,7 +187,33 @@ def _workflow_projection(
                 payload.get("workflow_run_id") or payload.get("run_id") or ""
             )
             if run_id and cancelled_run_id == run_id:
-                state = "triage_cancelled"
+                state = (
+                    "fix_cancelled"
+                    if state in {
+                        "fix_queued", "fixing", "verifying", "fix_paused",
+                    }
+                    else "triage_cancelled"
+                )
+        elif event.type == "run.paused" and same_task:
+            event_run = str(
+                payload.get("workflow_run_id") or payload.get("run_id") or ""
+            )
+            if run_id and event_run == run_id:
+                paused_from = state
+                state = (
+                    "fix_paused"
+                    if state in {"fix_queued", "fixing", "verifying"}
+                    else "triage_paused"
+                )
+        elif event.type == "run.resumed" and same_task:
+            event_run = str(
+                payload.get("workflow_run_id") or payload.get("run_id") or ""
+            )
+            if run_id and event_run == run_id:
+                state = paused_from or (
+                    "fixing" if state == "fix_paused" else "triaging"
+                )
+                paused_from = ""
         elif (
             event.type in {"task.dispatched", "fanout.child.dispatched"}
             and same_task
@@ -192,6 +224,18 @@ def _workflow_projection(
             state = "verifying"
         elif event.type == "judge.passed" and same_task:
             state = "verified_candidate"
+        elif event.type == "candidate.owner_review.approved" and same_task:
+            state = "approved_for_pr"
+        elif event.type == "candidate.owner_review.changes_requested" and same_task:
+            state = "owner_changes_requested"
+        elif event.type == "candidate.owner_review.declined" and same_task:
+            state = "owner_rejected"
+        elif event.type == "candidate.publication.prepared" and same_task:
+            state = "publication_prepared"
+        elif event.type in {"forge.pull_request.recorded", "forge.pull_request.synced"} and same_task:
+            state = str(payload.get("status") or "pr_open")
+        elif event.type == "delivery.merged" and same_task:
+            state = "merged"
         elif event.type.endswith(".blocked") and same_task:
             state = "blocked"
         elif event.type.endswith(".failed") and same_task:
@@ -215,6 +259,7 @@ def build_issue_triage_router(
     webhook_secret: Callable[[], str] | None = None,
     mutation_auth_error: MutationAuthorizer | None = None,
     session_cookie: SessionCookieReader | None = None,
+    delivery_service_factory: DeliveryServiceFactory | None = None,
 ) -> APIRouter:
     router = APIRouter()
     build_reconciler = reconciler_factory or (
@@ -224,6 +269,13 @@ def build_issue_triage_router(
         lambda: os.environ.get("ZF_GITHUB_TRIAGE_WEBHOOK_SECRET", "").strip()
     )
     read_session_cookie = session_cookie or (lambda request: None)
+    build_delivery_service = delivery_service_factory or (
+        lambda ctx, config: IssueCandidateDeliveryService(
+            state_dir=ctx.state_dir,
+            project_root=getattr(ctx, "project_root", ctx.state_dir.parent),
+            config=config,
+        )
+    )
 
     def effective_config(ctx: Any) -> ZfConfig | None:
         project_config = getattr(ctx, "config", None)
@@ -243,16 +295,18 @@ def build_issue_triage_router(
         request: Request,
         authorization: str | None,
         token: str | None,
+        *,
+        action: str = "issue-triage-start",
     ) -> JSONResponse | None:
         if mutation_auth_error is None:
             return JSONResponse({
                 "ok": False,
                 "status": "disabled",
-                "action": "issue-triage-start",
+                "action": action,
                 "reason": "Issue Triage mutation authorization is not configured",
             }, status_code=503)
         error = mutation_auth_error(
-            "issue-triage-start",
+            action,
             authorization=authorization,
             x_zf_web_token=token,
             web_session_token=read_session_cookie(request),
@@ -418,10 +472,15 @@ def build_issue_triage_router(
                 return JSONResponse({"ok": False, "status": "not_found"}, status_code=404)
             body = store.read_body(item)
             comments = store.read_comments(item)
+            config = effective_config(ctx)
             events = event_log_from_project(
                 ctx.state_dir,
-                config=ctx.config or workspace_config,
+                config=config,
             ).read_all()
+            delivery = (
+                build_delivery_service(ctx, config).projection(item)
+                if config is not None else None
+            )
         except ValueError as exc:
             return JSONResponse({"ok": False, "status": "invalid_mirror", "reason": str(exc)}, status_code=409)
         return JSONResponse({
@@ -432,6 +491,7 @@ def build_issue_triage_router(
             ),
             "body": body,
             "comments": [comment.to_dict() for comment in comments],
+            "delivery": delivery,
             "trust": "untrusted_external_input",
         })
 
@@ -529,6 +589,138 @@ def build_issue_triage_router(
             "source_revision": outcome.source_revision,
             "issue": _public(item, workflow=_workflow_projection(events, item)) if item else None,
         })
+
+    def delivery_context(project_id: str, issue_number: int):
+        ctx, _, store = context(project_id)
+        item = store.get(issue_number)
+        if item is None:
+            raise CandidateDeliveryError("GitHub Issue was not found in the mirror")
+        config = effective_config(ctx)
+        if config is None:
+            raise CandidateDeliveryError("Issue candidate delivery is not configured")
+        return item, build_delivery_service(ctx, config)
+
+    async def delivery_payload(request: Request) -> dict[str, Any]:
+        try:
+            value = await request.json()
+        except json.JSONDecodeError as exc:
+            raise CandidateDeliveryError("Request body must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise CandidateDeliveryError("Request body must be an object")
+        return value
+
+    @router.post("/api/projects/{project_id}/issue-triage/{issue_number}/candidate-review")
+    async def issue_candidate_review(
+        project_id: str,
+        issue_number: int,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_zf_web_token: str | None = Header(default=None),
+    ) -> JSONResponse:
+        denied = mutation_response(
+            request, authorization, x_zf_web_token,
+            action="issue-candidate-review",
+        )
+        if denied is not None:
+            return denied
+        try:
+            payload = await delivery_payload(request)
+            item, service = delivery_context(project_id, issue_number)
+            result = service.review(
+                item,
+                verdict=str(payload.get("verdict") or ""),
+                expected_candidate_sha=str(payload.get("candidate_sha") or ""),
+                expected_source_revision=str(payload.get("source_revision") or ""),
+                reason=str(payload.get("reason") or ""),
+            )
+        except CandidateDeliveryError as exc:
+            return JSONResponse(
+                {"ok": False, "status": "rejected", "reason": str(exc)},
+                status_code=409,
+            )
+        return JSONResponse(result)
+
+    @router.post("/api/projects/{project_id}/issue-triage/{issue_number}/prepare-publication")
+    async def issue_candidate_prepare_publication(
+        project_id: str,
+        issue_number: int,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_zf_web_token: str | None = Header(default=None),
+    ) -> JSONResponse:
+        denied = mutation_response(
+            request, authorization, x_zf_web_token,
+            action="issue-candidate-prepare-publication",
+        )
+        if denied is not None:
+            return denied
+        try:
+            payload = await delivery_payload(request)
+            item, service = delivery_context(project_id, issue_number)
+            result = service.prepare(
+                item,
+                expected_candidate_sha=str(payload.get("candidate_sha") or ""),
+                expected_source_revision=str(payload.get("source_revision") or ""),
+            )
+        except CandidateDeliveryError as exc:
+            return JSONResponse(
+                {"ok": False, "status": "rejected", "reason": str(exc)},
+                status_code=409,
+            )
+        return JSONResponse(result)
+
+    @router.post("/api/projects/{project_id}/issue-triage/{issue_number}/pull-request")
+    async def issue_candidate_record_pr(
+        project_id: str,
+        issue_number: int,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_zf_web_token: str | None = Header(default=None),
+    ) -> JSONResponse:
+        denied = mutation_response(
+            request, authorization, x_zf_web_token,
+            action="issue-candidate-record-pr",
+        )
+        if denied is not None:
+            return denied
+        try:
+            payload = await delivery_payload(request)
+            item, service = delivery_context(project_id, issue_number)
+            result = await asyncio.to_thread(
+                service.record_pr,
+                item,
+                url=str(payload.get("url") or ""),
+            )
+        except CandidateDeliveryError as exc:
+            return JSONResponse(
+                {"ok": False, "status": "rejected", "reason": str(exc)},
+                status_code=409,
+            )
+        return JSONResponse(result)
+
+    @router.post("/api/projects/{project_id}/issue-triage/{issue_number}/pull-request/refresh")
+    async def issue_candidate_refresh_pr(
+        project_id: str,
+        issue_number: int,
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_zf_web_token: str | None = Header(default=None),
+    ) -> JSONResponse:
+        denied = mutation_response(
+            request, authorization, x_zf_web_token,
+            action="issue-candidate-refresh-pr",
+        )
+        if denied is not None:
+            return denied
+        try:
+            item, service = delivery_context(project_id, issue_number)
+            result = await asyncio.to_thread(service.refresh_pr, item)
+        except CandidateDeliveryError as exc:
+            return JSONResponse(
+                {"ok": False, "status": "rejected", "reason": str(exc)},
+                status_code=409,
+            )
+        return JSONResponse(result)
 
     @router.post("/api/projects/{project_id}/issue-triage/github-webhook")
     async def issue_triage_webhook(

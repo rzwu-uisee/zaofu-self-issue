@@ -19,6 +19,7 @@ import type {
   EventsPage,
   FanoutDetail,
   IssueTriageDetail,
+  IssueCandidateDeliveryResult,
   IssueTriagePageData,
   IssueTriageStartResult,
   IssueTriageSummary,
@@ -500,6 +501,61 @@ export async function startIssueTriage(projectId: string, issue: string): Promis
   clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
   if (!response.ok) throw new Error(String(data.reason || data.error || `start triage failed: ${response.status}`));
   return data;
+}
+
+async function mutateIssueCandidate(
+  projectId: string,
+  issueNumber: number,
+  suffix: string,
+  payload: Record<string, unknown>,
+): Promise<IssueCandidateDeliveryResult> {
+  const base = `${projectPrefix(projectId)}/issue-triage/${issueNumber}`;
+  const response = await fetch(`${base}/${suffix}`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...webActionAuthHeaders(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await response.json()) as IssueCandidateDeliveryResult;
+  clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
+  if (!response.ok || !data.ok) {
+    throw new Error(data.reason || `candidate delivery action failed: ${response.status}`);
+  }
+  return data;
+}
+
+export function reviewIssueCandidate(
+  projectId: string,
+  issueNumber: number,
+  payload: { verdict: "approve" | "changes_requested" | "reject"; candidate_sha: string; source_revision: string; reason: string },
+): Promise<IssueCandidateDeliveryResult> {
+  return mutateIssueCandidate(projectId, issueNumber, "candidate-review", payload);
+}
+
+export function prepareIssueCandidatePublication(
+  projectId: string,
+  issueNumber: number,
+  payload: { candidate_sha: string; source_revision: string },
+): Promise<IssueCandidateDeliveryResult> {
+  return mutateIssueCandidate(projectId, issueNumber, "prepare-publication", payload);
+}
+
+export function recordIssueCandidatePullRequest(
+  projectId: string,
+  issueNumber: number,
+  url: string,
+): Promise<IssueCandidateDeliveryResult> {
+  return mutateIssueCandidate(projectId, issueNumber, "pull-request", { url });
+}
+
+export function refreshIssueCandidatePullRequest(
+  projectId: string,
+  issueNumber: number,
+): Promise<IssueCandidateDeliveryResult> {
+  return mutateIssueCandidate(projectId, issueNumber, "pull-request/refresh", {});
 }
 
 export function getDeliveryFeatures(projectId?: string): Promise<DeliveryFeaturesPage> {

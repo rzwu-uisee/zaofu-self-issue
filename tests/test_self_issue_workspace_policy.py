@@ -31,6 +31,16 @@ self_issue:
   oauth_client_id: public-client-id
   oauth_redirect_uri: http://127.0.0.1:8002/
   default_publication_mode: gitlab
+  delivery:
+    enabled: true
+    provider: github
+    repository: rzwu-uisee/zaofu-self-issue
+    remote_url: https://github.com/rzwu-uisee/zaofu-self-issue.git
+    base_branch: dev
+    branch_prefix: review
+    merge_strategy: squash
+    pr_sync_mode: manual_refresh
+    auto_close_issue: false
   targets:
     gitlab:
       authorization_domain: gitlab.com
@@ -166,6 +176,10 @@ def test_web_created_project_materializes_policy_for_its_cli(
     assert config.self_issue.target_project == "runze.wu/zaofu-selfissue"
     assert config.self_issue.automatic_detection_enabled is True
     assert config.self_issue.browser_capture_enabled is True
+    assert config.self_issue.delivery.enabled is True
+    assert config.self_issue.delivery.repository == "rzwu-uisee/zaofu-self-issue"
+    assert config.self_issue.delivery.base_branch == "dev"
+    assert config.self_issue.delivery.auto_close_issue is False
 
     preset_target = tmp_path / "preset-project"
     preset_initialized = client.post(
@@ -181,6 +195,9 @@ def test_web_created_project_materializes_policy_for_its_cli(
     preset_config = load_config(preset_target / "zf.yaml")
     assert preset_config.self_issue.target_locked is True
     assert preset_config.self_issue.target_project == "runze.wu/zaofu-selfissue"
+    assert preset_config.self_issue.delivery.repository == (
+        "rzwu-uisee/zaofu-self-issue"
+    )
 
     monkeypatch.chdir(target)
     assert main(["issue", "report", "Created project CLI failure"]) == 0

@@ -362,6 +362,10 @@ def test_create_app_registers_issue_triage_routes(tmp_path: Path) -> None:
     assert "/api/projects/{project_id}/issue-triage" in paths
     assert "/api/projects/{project_id}/issue-triage/refresh" in paths
     assert "/api/projects/{project_id}/issue-triage/start-triage" in paths
+    assert "/api/projects/{project_id}/issue-triage/{issue_number}/candidate-review" in paths
+    assert "/api/projects/{project_id}/issue-triage/{issue_number}/prepare-publication" in paths
+    assert "/api/projects/{project_id}/issue-triage/{issue_number}/pull-request" in paths
+    assert "/api/projects/{project_id}/issue-triage/{issue_number}/pull-request/refresh" in paths
     assert "/api/projects/{project_id}/issue-triage/attachment" in paths
     assert "/api/projects/{project_id}/issue-triage/github-webhook" in paths
 
@@ -530,6 +534,85 @@ def test_manual_start_triage_requires_mutation_authorization(tmp_path: Path) -> 
     assert response.json()["status"] == "disabled"
 
 
+def test_candidate_delivery_routes_use_token_gate_and_deterministic_service(
+    tmp_path: Path,
+) -> None:
+    ctx = configured_context(tmp_path / "state")
+    mirror, body = normalize_github_issue(
+        issue_payload(),
+        repository="rzwu-uisee/zaofu-self-issue",
+        repository_id="123",
+        seen_at="2026-08-25T02:00:00+00:00",
+    )
+    IssueMirrorStore(ctx.state_dir).upsert(mirror, body)
+    calls: list[tuple[str, object]] = []
+
+    class DeliveryService:
+        def projection(self, issue):
+            return {"enabled": True, "status": "verified_candidate"}
+
+        def review(self, issue, **payload):
+            calls.append(("review", payload))
+            return {"ok": True, "status": "approved_for_pr"}
+
+        def prepare(self, issue, **payload):
+            calls.append(("prepare", payload))
+            return {"ok": True, "status": "publication_prepared"}
+
+        def record_pr(self, issue, *, url):
+            calls.append(("record", url))
+            return {"ok": True, "status": "pr_open"}
+
+        def refresh_pr(self, issue):
+            calls.append(("refresh", issue.number))
+            return {"ok": True, "status": "merged"}
+
+    actions: list[str] = []
+
+    def authorize(action: str, **kwargs):
+        actions.append(action)
+        return None
+
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(
+        resolve_ctx=lambda project_id: ctx,
+        mutation_auth_error=authorize,
+        delivery_service_factory=lambda context, config: DeliveryService(),  # type: ignore[arg-type]
+    ))
+    client = TestClient(app)
+
+    detail = client.get("/api/projects/test/issue-triage/7")
+    review = client.post(
+        "/api/projects/test/issue-triage/7/candidate-review",
+        json={
+            "verdict": "approve", "candidate_sha": "a" * 40,
+            "source_revision": "sha256:source",
+        },
+    )
+    prepare = client.post(
+        "/api/projects/test/issue-triage/7/prepare-publication",
+        json={"candidate_sha": "a" * 40, "source_revision": "sha256:source"},
+    )
+    record = client.post(
+        "/api/projects/test/issue-triage/7/pull-request",
+        json={"url": "https://github.com/rzwu-uisee/zaofu-self-issue/pull/23"},
+    )
+    refresh = client.post(
+        "/api/projects/test/issue-triage/7/pull-request/refresh",
+        json={},
+    )
+
+    assert detail.json()["delivery"]["enabled"] is True
+    assert [response.status_code for response in (review, prepare, record, refresh)] == [200] * 4
+    assert actions == [
+        "issue-candidate-review",
+        "issue-candidate-prepare-publication",
+        "issue-candidate-record-pr",
+        "issue-candidate-refresh-pr",
+    ]
+    assert [name for name, _ in calls] == ["review", "prepare", "record", "refresh"]
+
+
 def test_list_and_detail_project_external_issue_workflow_state(tmp_path: Path) -> None:
     ctx = configured_context(tmp_path / "state")
     mirror, body = normalize_github_issue(
@@ -585,3 +668,118 @@ def test_list_and_detail_project_external_issue_workflow_state(tmp_path: Path) -
     )
     cancelled = client.get("/api/projects/test/issue-triage/7").json()["issue"]
     assert cancelled["workflow"]["state"] == "triage_cancelled"
+
+
+def test_workflow_projection_tracks_pause_resume_and_fix_cancellation(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    mirror, body = normalize_github_issue(
+        issue_payload(),
+        repository="rzwu-uisee/zaofu-self-issue",
+        repository_id="123",
+        seen_at="2026-08-25T02:00:00+00:00",
+    )
+    IssueMirrorStore(ctx.state_dir).upsert(mirror, body)
+    writer = EventWriter(EventLog(ctx.state_dir / "events.jsonl"))
+    writer.emit(
+        "external_issue.received", actor="github-poller",
+        payload={"source_key": mirror.issue_key, "source_revision": "sha256:revision"},
+    )
+    writer.emit(
+        "external_issue.triage.queued", actor="external-issue-intake",
+        task_id="ISSUE-123",
+        payload={
+            "source_key": mirror.issue_key,
+            "source_revision": "sha256:revision",
+            "workflow_run_id": "TRIAGE-123",
+        },
+    )
+    writer.emit(
+        "workflow.invoke.accepted", actor="zf-kernel", task_id="ISSUE-123",
+        payload={"workflow_run_id": "TRIAGE-123"},
+    )
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(resolve_ctx=lambda project_id: ctx))
+    client = TestClient(app)
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "triaging"
+
+    writer.emit(
+        "run.paused", actor="web", task_id="ISSUE-123",
+        payload={"run_id": "TRIAGE-123", "workflow_run_id": "TRIAGE-123"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "triage_paused"
+    writer.emit(
+        "run.resumed", actor="web", task_id="ISSUE-123",
+        payload={"run_id": "TRIAGE-123", "workflow_run_id": "TRIAGE-123"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "triaging"
+
+    writer.emit(
+        "workflow.invoke.requested", actor="web", task_id="ISSUE-123",
+        payload={"flow_kind": "issue", "workflow_run_id": "FIX-123"},
+    )
+    writer.emit(
+        "task.dispatched", actor="zf-kernel", task_id="ISSUE-123",
+        payload={"workflow_run_id": "FIX-123"},
+    )
+    writer.emit(
+        "run.paused", actor="web", task_id="ISSUE-123",
+        payload={"run_id": "FIX-123", "workflow_run_id": "FIX-123"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "fix_paused"
+    writer.emit(
+        "run.resumed", actor="web", task_id="ISSUE-123",
+        payload={"run_id": "FIX-123", "workflow_run_id": "FIX-123"},
+    )
+    writer.emit(
+        "candidate.ready", actor="zf-kernel", task_id="ISSUE-123",
+        payload={"workflow_run_id": "FIX-123"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "verifying"
+    writer.emit(
+        "run.cancelled", actor="web", task_id="ISSUE-123",
+        payload={"run_id": "FIX-123", "workflow_run_id": "FIX-123"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "fix_cancelled"
+
+
+def test_workflow_projection_tracks_candidate_delivery_lifecycle(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    mirror, body = normalize_github_issue(
+        issue_payload(),
+        repository="rzwu-uisee/zaofu-self-issue",
+        repository_id="123",
+        seen_at="2026-08-25T02:00:00+00:00",
+    )
+    IssueMirrorStore(ctx.state_dir).upsert(mirror, body)
+    writer = EventWriter(EventLog(ctx.state_dir / "events.jsonl"))
+    writer.emit(
+        "external_issue.received", actor="github-poller",
+        payload={"source_key": mirror.issue_key, "source_revision": "sha256:revision"},
+    )
+    writer.emit(
+        "external_issue.triage.queued", actor="external-issue-intake",
+        task_id="ISSUE-123",
+        payload={"source_key": mirror.issue_key, "workflow_run_id": "FIX-123"},
+    )
+    writer.emit("judge.passed", actor="judge", task_id="ISSUE-123", payload={})
+    writer.emit(
+        "candidate.owner_review.approved", actor="web-operator", task_id="ISSUE-123",
+        payload={"source_key": mirror.issue_key},
+    )
+    writer.emit(
+        "candidate.publication.prepared", actor="zf-kernel", task_id="ISSUE-123",
+        payload={"source_key": mirror.issue_key},
+    )
+    writer.emit(
+        "forge.pull_request.recorded", actor="web-operator", task_id="ISSUE-123",
+        payload={"source_key": mirror.issue_key, "status": "pr_open"},
+    )
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(resolve_ctx=lambda project_id: ctx))
+    client = TestClient(app)
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "pr_open"
+    writer.emit(
+        "delivery.merged", actor="github-pr-reader", task_id="ISSUE-123",
+        payload={"source_key": mirror.issue_key, "status": "merged"},
+    )
+    assert client.get("/api/projects/test/issue-triage/7").json()["issue"]["workflow"]["state"] == "merged"
