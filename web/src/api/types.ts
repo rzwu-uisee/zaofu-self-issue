@@ -2666,6 +2666,7 @@ export interface IssueTriageSyncState {
   rate_limit_remaining: number | null;
   rate_limit_reset_at: string;
   error: string;
+  star_count?: number;
 }
 
 export interface IssueTriageItem {
@@ -2678,6 +2679,7 @@ export interface IssueTriageItem {
   html_url: string;
   title: string;
   author_login: string;
+  author_avatar_url?: string;
   github_state: "open" | "closed";
   created_at: string;
   updated_at: string;
@@ -2685,11 +2687,19 @@ export interface IssueTriageItem {
   labels: string[];
   label_colors?: Record<string, string>;
   assignees: string[];
+  assignee_avatar_urls?: Record<string, string>;
   comment_count: number;
   milestone: string;
   source: "self_issue" | "github_web" | "unknown" | string;
   derived_group: "untriaged" | "triaged" | "closed";
   last_seen_at: string;
+  workflow?: {
+    state: "mirrored" | "triage_queued" | "triaging" | "needs_info" | "awaiting_fix_approval" | "fix_queued" | "fixing" | "verifying" | "verified_candidate" | "blocked" | "failed" | string;
+    task_id: string;
+    source_revision: string;
+    proposal_id: string;
+    run_id: string;
+  };
 }
 
 export interface IssueTriagePageData {
@@ -2711,7 +2721,9 @@ export interface IssueTriageSummary {
   groups: Record<string, number>;
   states: Record<string, number>;
   labels: Record<string, number>;
+  label_colors?: Record<string, string>;
   authors: Record<string, number>;
+  author_states?: Record<string, { open: number; closed: number }>;
   sync: IssueTriageSyncState;
 }
 
@@ -2719,7 +2731,20 @@ export interface IssueTriageDetail {
   schema_version: "issue-triage-detail.v1";
   issue: IssueTriageItem;
   body: string;
+  comments?: IssueTriageComment[];
   trust: "untrusted_external_input";
+}
+
+export interface IssueTriageComment {
+  id: number;
+  node_id: string;
+  html_url: string;
+  author_login: string;
+  author_avatar_url: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  author_association: string;
 }
 
 export interface ChannelDetail extends ChannelSummary {

@@ -142,13 +142,26 @@ def run(args: argparse.Namespace) -> int:
         f"zaofu dashboard -> http://{args.host}:{args.port}/"
         f"  (mode={mode}, state_dir={state_dir})"
     )
-    uvicorn.run(
-        app, host=args.host, port=args.port, log_level="warning",
-        reload=args.reload,
-        # Long-lived SSE streams never close on their own; without a bound,
-        # graceful shutdown waits on them forever and `zf web` shrugs off
-        # SIGTERM (needed SIGKILL twice on 2026-07-16). Five seconds drains
-        # normal requests, then open streams are forced shut.
-        timeout_graceful_shutdown=5,
+    from zf.runtime.external_issue_ingress import build_external_issue_poller
+
+    poller = build_external_issue_poller(
+        state_dir,
+        context.config,
+        project_root=context.project_root,
     )
+    if poller is not None:
+        poller.start()
+    try:
+        uvicorn.run(
+            app, host=args.host, port=args.port, log_level="warning",
+            reload=args.reload,
+            # Long-lived SSE streams never close on their own; without a bound,
+            # graceful shutdown waits on them forever and `zf web` shrugs off
+            # SIGTERM (needed SIGKILL twice on 2026-07-16). Five seconds drains
+            # normal requests, then open streams are forced shut.
+            timeout_graceful_shutdown=5,
+        )
+    finally:
+        if poller is not None:
+            poller.stop()
     return 0

@@ -477,8 +477,8 @@ export function getIssueTriageDetail(projectId: string, issueNumber: number): Pr
   return requestJson<IssueTriageDetail>(`${projectPrefix(projectId)}/issue-triage/${issueNumber}`);
 }
 
-export async function refreshIssueTriage(projectId: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${projectPrefix(projectId)}/issue-triage/refresh`, { method: "POST", headers: { Accept: "application/json" } });
+export async function refreshIssueTriage(projectId: string, force = false): Promise<Record<string, unknown>> {
+  const response = await fetch(`${projectPrefix(projectId)}/issue-triage/refresh${force ? "?force=true" : ""}`, { method: "POST", headers: { Accept: "application/json" } });
   const data = (await response.json()) as Record<string, unknown>;
   clearGetCache(`${projectPrefix(projectId)}/issue-triage`);
   if (!response.ok) throw new Error(String(data.error || data.reason || `refresh failed: ${response.status}`));

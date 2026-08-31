@@ -15,7 +15,8 @@ Events emitted (actor = instance_id, resolved up-front via registry):
   - assistant / tool_use   → agent.tool.use
   - assistant / text       → agent.text
   - user     / tool_result → agent.tool.result
-  - Codex task_complete    → provider.turn.closed
+  - Codex task_complete / turn_complete / turn_aborted
+                           → provider.turn.closed
 
 Messages we skip (CLI-internal bookkeeping):
   permission-mode, file-history-snapshot, attachment, last-prompt,
@@ -238,9 +239,9 @@ class CodexSessionTailer(_BaseSessionTailer):
 
     User messages and non-terminal event_msg entries (token_count /
     task_started / turn_context) are CLI bookkeeping and get skipped.
-    ``task_complete`` closes the provider turn even when Codex omits its
-    Stop hook, so it is projected as ``provider.turn.closed``. Cost
-    telemetry is handled by CodexSessionReader.
+    Terminal provider events close the turn even when Codex omits its Stop
+    hook, so they are projected as ``provider.turn.closed``. Cost telemetry
+    is handled by CodexSessionReader.
     """
 
     def _emit_from_line(self, instance_id: str, raw: str) -> None:
@@ -255,7 +256,11 @@ class CodexSessionTailer(_BaseSessionTailer):
             return
         if m.get("type") == "event_msg":
             provider_event = str(payload.get("type") or "")
-            if provider_event not in {"task_complete", "turn_complete"}:
+            if provider_event not in {
+                "task_complete",
+                "turn_complete",
+                "turn_aborted",
+            }:
                 return
             turn_id = str(payload.get("turn_id") or "").strip()
             if not turn_id:
@@ -267,10 +272,14 @@ class CodexSessionTailer(_BaseSessionTailer):
                     "schema_version": "provider.turn.closed.v1",
                     "backend": "codex",
                     "provider_event": provider_event,
-                    "provider_status": "completed",
+                    "provider_status": (
+                        "aborted" if provider_event == "turn_aborted"
+                        else "completed"
+                    ),
                     "turn_id": turn_id,
                     "completed_at": payload.get("completed_at"),
                     "duration_ms": payload.get("duration_ms"),
+                    "reason": payload.get("reason"),
                 },
             )
             return

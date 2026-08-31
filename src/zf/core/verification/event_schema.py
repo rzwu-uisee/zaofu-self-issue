@@ -1452,6 +1452,8 @@ def workflow_invoke_schema_rules() -> dict[str, dict[str, Any]]:
                 "run_contract_digest",
                 "restart_boundary",
                 "safe_resume_action",
+                "source_key",
+                "source_revision",
             ],
         },
         "workflow.invoke.accepted": {

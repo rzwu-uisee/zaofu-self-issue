@@ -827,6 +827,8 @@ def test_sanitized_runtime_evidence_is_uploaded_and_rendered_as_clickable_links(
         "self_issue_public_evidence_summary",
         "self_issue_public_evidence_screenshot",
     }
+    assert preparation["preview"]["title"]
+    assert preparation["preview"]["body"]
     confirmed = service.attachment_confirm({
         "preparation_id": preparation["preparation_id"],
         "manifest_digest": preparation["manifest_digest"],

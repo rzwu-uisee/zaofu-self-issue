@@ -296,9 +296,17 @@ export function withoutSelfIssueOAuthCallback(search: string): string {
 
 export function selfIssueOAuthSession(): string {
   const key = "zf.selfIssueOAuthSession";
-  const existing = window.sessionStorage.getItem(key);
+  // OAuth callbacks may complete in a newly opened tab.  sessionStorage is
+  // scoped to that tab, so the callback could not see the transaction created
+  // by the original ZaoFu page.  Keep only the opaque transaction id in
+  // localStorage; the provider state/code still validates the transaction.
+  const existing = window.localStorage.getItem(key);
   if (existing) return existing;
   const created = window.crypto?.randomUUID?.() ?? `oauth-${Date.now().toString(36)}`;
-  window.sessionStorage.setItem(key, created);
+  window.localStorage.setItem(key, created);
   return created;
+}
+
+export function selfIssueGithubTransactionStorageKey(projectId: string, draftId: string): string {
+  return `zf.selfIssueGithubTransaction:${encodeURIComponent(projectId)}:${encodeURIComponent(draftId)}`;
 }

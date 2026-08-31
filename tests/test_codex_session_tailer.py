@@ -183,6 +183,34 @@ class TestCodexEventMsgIgnored:
         finally:
             tailer.stop()
 
+    def test_turn_aborted_emits_provider_turn_closed(
+        self, tmp_path, event_log,
+    ):
+        f = tmp_path / "rollout.jsonl"
+        tailer = CodexSessionTailer(event_log)
+        tailer.tail("dev-1", f)
+        try:
+            _lines(f, [{
+                "type": "event_msg",
+                "payload": {
+                    "type": "turn_aborted",
+                    "turn_id": "turn-aborted-123",
+                    "reason": "interrupted",
+                },
+            }])
+            assert _wait_for(
+                lambda: any(
+                    e.type == "provider.turn.closed"
+                    and e.actor == "dev-1"
+                    and e.payload.get("turn_id") == "turn-aborted-123"
+                    and e.payload.get("provider_status") == "aborted"
+                    and e.payload.get("reason") == "interrupted"
+                    for e in event_log.read_all()
+                )
+            )
+        finally:
+            tailer.stop()
+
     def test_token_count_not_emitted_as_agent_event(
         self, tmp_path, event_log,
     ):

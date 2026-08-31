@@ -138,6 +138,7 @@ from zf.core.config.schema import (  # noqa: E402
     QualityGateConfig,
     SecurityConfig,
     EventSigningConfig,
+    ExternalIssueIngressConfig,
     SafetyConfig,
     CostConfig,
     ObservabilityConfig,
@@ -331,6 +332,11 @@ _KNOWN_SELF_ISSUE_KEYS = frozenset({
     "target_locked", "oauth_client_id", "oauth_redirect_uri",
     "automatic_detection_enabled", "browser_capture_enabled",
     "browser_capture_base_url", "targets", "default_publication_mode",
+    "ingress",
+})
+_KNOWN_EXTERNAL_ISSUE_INGRESS_KEYS = frozenset({
+    "enabled", "provider", "mode", "poll_interval_seconds",
+    "approval_label", "target_root", "auto_triage_new_only",
 })
 _KNOWN_SELF_ISSUE_TARGET_KEYS = frozenset({
     "authorization_domain", "project", "oauth_client_id",
@@ -3345,6 +3351,53 @@ def _build_self_issue(data: dict | None) -> SelfIssueConfig:
         raise ConfigError(
             "self_issue.default_publication_mode requires configured targets"
         )
+    ingress_raw = data.get("ingress") or {}
+    if not isinstance(ingress_raw, dict):
+        raise ConfigError("self_issue.ingress must be a mapping")
+    _reject_unknown_keys(
+        ingress_raw,
+        _KNOWN_EXTERNAL_ISSUE_INGRESS_KEYS,
+        "self_issue.ingress",
+    )
+    ingress_provider = str(
+        ingress_raw.get("provider") or "github"
+    ).strip().lower()
+    ingress_mode = str(ingress_raw.get("mode") or "poll").strip().lower()
+    ingress_enabled = _bool_value(ingress_raw.get("enabled"), default=False)
+    try:
+        poll_interval_seconds = int(
+            ingress_raw.get("poll_interval_seconds") or 300
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "self_issue.ingress.poll_interval_seconds must be an integer"
+        ) from exc
+    if not 60 <= poll_interval_seconds <= 86_400:
+        raise ConfigError(
+            "self_issue.ingress.poll_interval_seconds must be between 60 and 86400"
+        )
+    if ingress_provider not in {"github", "gitlab"}:
+        raise ConfigError("self_issue.ingress.provider must be github or gitlab")
+    if ingress_mode != "poll":
+        raise ConfigError("self_issue.ingress.mode currently supports poll only")
+    if ingress_enabled and ingress_provider != "github":
+        raise ConfigError(
+            "self_issue.ingress currently implements github only; keep gitlab disabled"
+        )
+    if ingress_enabled and "github" not in targets:
+        raise ConfigError(
+            "enabled GitHub issue ingress requires self_issue.targets.github"
+        )
+    approval_label = str(
+        ingress_raw.get("approval_label") or "zaofu:ready-to-fix"
+    ).strip()
+    if not approval_label or len(approval_label) > 100:
+        raise ConfigError("self_issue.ingress.approval_label is invalid")
+    target_root = str(ingress_raw.get("target_root") or ".").strip()
+    if not target_root or Path(target_root).is_absolute() or ".." in Path(target_root).parts:
+        raise ConfigError(
+            "self_issue.ingress.target_root must be a relative path within the project"
+        )
     return SelfIssueConfig(
         enabled=enabled,
         provider=provider,
@@ -3364,6 +3417,17 @@ def _build_self_issue(data: dict | None) -> SelfIssueConfig:
         ).strip().rstrip("/"),
         targets=targets,
         default_publication_mode=default_mode,
+        ingress=ExternalIssueIngressConfig(
+            enabled=ingress_enabled,
+            provider=ingress_provider,
+            mode=ingress_mode,
+            poll_interval_seconds=poll_interval_seconds,
+            approval_label=approval_label,
+            target_root=target_root,
+            auto_triage_new_only=_bool_value(
+                ingress_raw.get("auto_triage_new_only"), default=True
+            ),
+        ),
     )
 
 

@@ -31,6 +31,7 @@ import {
   selfIssueDismissCutoffStorageKey,
   selfIssueEvidenceControls,
   selfIssueEvidenceBlocksPreview,
+  selfIssueGithubTransactionStorageKey,
   selfIssueLocalAttachmentUrl,
   selfIssueOAuthSession,
   selfIssueOAuthContinuation,
@@ -519,6 +520,8 @@ export function OrchestratorPanel({
   const [headlessMessage, setHeadlessMessage] = useState("");
   const [selfIssueCard, setSelfIssueCard] = useState<Record<string, unknown> | null>(null);
   const [selfIssueIntake, setSelfIssueIntake] = useState<Record<string, unknown> | null>(null);
+  const [selfIssueIntakeExpanded, setSelfIssueIntakeExpanded] = useState(true);
+  const [selfIssueIntakeForeground, setSelfIssueIntakeForeground] = useState(true);
   const [selfIssueIntakeBusy, setSelfIssueIntakeBusy] = useState(false);
   const [selfIssueWorkspaceHost, setSelfIssueWorkspaceHost] = useState<HTMLElement | null>(null);
   const [selfIssuePreviewBusy, setSelfIssuePreviewBusy] = useState(false);
@@ -528,6 +531,7 @@ export function OrchestratorPanel({
   const [selfIssueCardClosing, setSelfIssueCardClosing] = useState(false);
   const [selfIssueEvidenceBusyAction, setSelfIssueEvidenceBusyAction] = useState("");
   const [selfIssueRuntimeActionNotice, setSelfIssueRuntimeActionNotice] = useState("");
+  const [selfIssueSuccessNotice, setSelfIssueSuccessNotice] = useState("");
   const [selfIssueSavePreviewBusy, setSelfIssueSavePreviewBusy] = useState(false);
   const [selfIssueAttachmentBusy, setSelfIssueAttachmentBusy] = useState(false);
   const [selfIssueConfirmationBusy, setSelfIssueConfirmationBusy] = useState(false);
@@ -571,6 +575,9 @@ export function OrchestratorPanel({
         ...(issue ? { issue } : {}),
       };
       setSelfIssueCard(connectedDraft);
+      if (["published", "partially_published"].includes(callbackStatus)) {
+        setSelfIssueSuccessNotice("Published successfully.");
+      }
       setSelfIssueCardExpanded(true);
       persistSelfIssueCardLayout(
         activeProjectId,
@@ -582,8 +589,17 @@ export function OrchestratorPanel({
     }
   }, [actionResult, activeProjectId]);
   const selfIssueDraftId = textValue(selfIssueCard?.draft_id);
+  const selfIssueIntakeId = textValue(selfIssueIntake?.intake_id);
+  useEffect(() => {
+    if (selfIssueIntakeId) {
+      setSelfIssueIntakeExpanded(true);
+      setSelfIssueIntakeForeground(true);
+    }
+  }, [selfIssueIntakeId]);
   const selfIssueEvidenceStatus = textValue(selfIssueCard?.evidence_status);
   const selfIssueRuntimeStatus = textValue(selfIssueCard?.runtime_status) || "unknown";
+  const selfIssueRuntimeLive = selfIssueRuntimeStatus === "live"
+    || selfIssueRuntimeActionNotice.startsWith("Runtime started");
   const selfIssueAssessmentStatus = textValue(selfIssueCard?.assessment_status) || "not_started";
   const evidenceControls = selfIssueEvidenceControls(selfIssueEvidenceStatus);
   useEffect(() => {
@@ -715,7 +731,18 @@ export function OrchestratorPanel({
       .then((result) => {
         if (selfIssueRestoreGenerationRef.current !== generation) return;
         const record = recordValue(result);
-        const draft = recordValue(record?.draft);
+        const serverDraft = recordValue(record?.draft);
+        const storedGithubTransaction = serverDraft
+          ? window.localStorage.getItem(selfIssueGithubTransactionStorageKey(
+            activeProjectId,
+            textValue(serverDraft.draft_id),
+          ))
+          : null;
+        const draft = serverDraft && storedGithubTransaction
+          && !textValue(serverDraft.transaction_id)
+          && ["authorization_required", "authorization_pending", "slow_down"].includes(textValue(serverDraft.status))
+          ? { ...serverDraft, transaction_id: storedGithubTransaction }
+          : serverDraft;
         const intake = recordValue(record?.intake);
         const dismissCutoff = selfIssueDismissCutoff(activeProjectId);
         const intakeIsNewer = Boolean(intake) && (
@@ -1143,6 +1170,7 @@ export function OrchestratorPanel({
             clearSelfIssueDismissCutoff(activeProjectId);
           }
           if (intake) {
+            setSelfIssueSuccessNotice("");
             setSelfIssueIntake(intake);
             setSelfIssueCard(null);
             setSelfIssueCardExpanded(true);
@@ -1150,6 +1178,7 @@ export function OrchestratorPanel({
             return;
           }
           const nextCard = draft ?? (actionRecord ? { ...actionRecord, preview } : null);
+          if (nextCard && textValue(nextCard.status) !== "published") setSelfIssueSuccessNotice("");
           setSelfIssueCard(nextCard);
           if (nextCard) {
             setSelfIssueCardExpanded(true);
@@ -1667,12 +1696,11 @@ export function OrchestratorPanel({
   const selfIssuePublicationMode = textValue(
     selfIssueCard?.selected_publication_mode
       ?? selfIssueCard?.publication_mode
-      ?? selfIssuePublicationBatch?.publication_mode
-      ?? selfIssueTargetPolicy?.default_mode,
-  ) || "gitlab";
+      ?? selfIssuePublicationBatch?.publication_mode,
+  ) || "github";
   const selfIssueAllowedModes = Array.isArray(selfIssueTargetPolicy?.allowed_modes)
     ? selfIssueTargetPolicy.allowed_modes.map((value) => textValue(value)).filter(Boolean)
-    : ["gitlab"];
+    : ["github"];
   const selfIssuePreviews = recordValue(
     selfIssueCard?.previews ?? selfIssuePublicationBatch?.previews,
   );
@@ -1694,6 +1722,8 @@ export function OrchestratorPanel({
   );
   const selfIssueGithubTransactionId = textValue(selfIssueCard?.transaction_id);
   const selfIssuePublished = selfIssuePublicationLocked(selfIssueCard);
+  const selfIssueAuthorizationPublishing = selfIssueRawStatus === "authorization_pending"
+    && selfIssueAuthorizationProvider !== "github";
   const selfIssuePreparationId = textValue(
     selfIssueCard?.preparation_id ?? selfIssueAttachmentPreparation?.preparation_id,
   );
@@ -1756,6 +1786,9 @@ export function OrchestratorPanel({
           ...(recordValue(record.draft) ?? {}),
           ...record,
         }));
+        if (record && ["published", "publish_failed"].includes(textValue(record.status))) {
+          window.localStorage.removeItem(selfIssueGithubTransactionStorageKey(activeProjectId, selfIssueDraftId));
+        }
       }).catch((error: unknown) => {
         if (!cancelled) setOperatorError(error instanceof Error ? error.message : String(error));
       });
@@ -1764,7 +1797,48 @@ export function OrchestratorPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [selfIssueCard?.interval, selfIssueCard?.retry_after, selfIssueGithubTransactionId, selfIssueRawStatus]);
+  }, [activeProjectId, selfIssueCard?.interval, selfIssueCard?.retry_after, selfIssueDraftId, selfIssueGithubTransactionId, selfIssueRawStatus]);
+
+  useEffect(() => {
+    const applyOAuthCompletion = (value: unknown) => {
+      const completion = recordValue(value);
+      if (textValue(completion?.type) !== "zf:self-issue-oauth-complete") return;
+      const result = recordValue(completion?.result);
+      if (!result) return;
+      if (actionFailed(result)) {
+        setOperatorError(actionFailureReason(result));
+        setSelfIssueCard((current) => current ? { ...current, status: "authorization_required" } : current);
+        return;
+      }
+      const payload = recordValue(result.result);
+      const draft = recordValue(result.draft) ?? recordValue(payload?.draft);
+      const callbackStatus = textValue(result.status) || textValue(payload?.status);
+      setOperatorError("");
+      setSelfIssueCard((current) => ({
+        ...(current ?? {}),
+        ...(draft ?? {}),
+        ...(payload ?? {}),
+        ...result,
+        ...(callbackStatus ? { status: callbackStatus } : {}),
+      }));
+      if (["published", "partially_published"].includes(callbackStatus)) {
+        setSelfIssueSuccessNotice("Published successfully.");
+      }
+    };
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin === window.location.origin) applyOAuthCompletion(event.data);
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== "zf.selfIssueOAuthCompleted" || !event.newValue) return;
+      try { applyOAuthCompletion(JSON.parse(event.newValue)); } catch { /* ignore malformed external state */ }
+    };
+    window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
 
   const openSelfIssuePreview = async (
     draftCard: Record<string, unknown> | null = selfIssueCard,
@@ -1916,8 +1990,8 @@ export function OrchestratorPanel({
           const status = textValue(actionPayload?.status || updatedDraft.runtime_status);
           setSelfIssueRuntimeActionNotice(
             status === "assessment_requested" || textValue(updatedDraft.runtime_status) === "live"
-              ? "Runtime is live. Live evidence collection and Orchestrator assessment are queued."
-              : `Runtime is ${textValue(updatedDraft.runtime_status) || "unknown"}. Static evidence remains saved locally.`,
+              ? "Runtime started. Live evidence collection and Orchestrator assessment are queued."
+              : "Runtime is stopped. Static evidence remains saved locally.",
           );
         } else if (action === "self-issue-limited-continue") {
           setSelfIssueRuntimeActionNotice(
@@ -1975,6 +2049,7 @@ export function OrchestratorPanel({
         };
         setOperatorError("");
         setSelfIssueCard(updated);
+        setSelfIssueSuccessNotice("GitLab attachments uploaded successfully.");
         await openSelfIssuePreview(updated);
       }
     } catch (error: unknown) {
@@ -2030,11 +2105,15 @@ export function OrchestratorPanel({
         setOperatorError(actionFailureReason(result));
       } else if (record) {
         setOperatorError("");
-        setSelfIssueCard({
+        const updated = {
           ...selfIssueCard,
           ...(recordValue(record.draft) ?? {}),
           ...record,
-        });
+        };
+        setSelfIssueCard(updated);
+        if (["published", "partially_published"].includes(textValue(record.status))) {
+          setSelfIssueSuccessNotice("Published successfully.");
+        }
       }
     } catch (error: unknown) {
       setOperatorError(error instanceof Error ? error.message : String(error));
@@ -2069,6 +2148,11 @@ export function OrchestratorPanel({
       role="dialog"
       aria-modal={fullscreen}
       aria-label="Kanban Agent"
+      onPointerDownCapture={(event) => {
+        if (!(event.target instanceof Element) || !event.target.closest(".self-issue-intake-workspace")) {
+          setSelfIssueIntakeForeground(false);
+        }
+      }}
     >
       <div className="agent-shell-header">
         <div className="agent-title-block">
@@ -2386,9 +2470,41 @@ export function OrchestratorPanel({
               <Maximize2 aria-hidden="true" size={15} />
             </button>
           ) : null}
+          {selfIssueIntake && !selfIssueIntakeExpanded ? (
+            <button
+              aria-label="Open Self-Issue questions"
+              className="self-issue-draft-launcher"
+              data-testid="self-issue-intake-launcher"
+              type="button"
+              onClick={() => {
+                setSelfIssueIntakeExpanded(true);
+                setSelfIssueIntakeForeground(true);
+              }}
+            >
+              <span className="self-issue-draft-launcher-main">
+                <small>Self-Issue Report</small>
+                <strong title={textValue(recordValue(selfIssueIntake.answers)?.title)}>
+                  {textValue(recordValue(selfIssueIntake.answers)?.title) || "Report a ZaoFu bug"}
+                </strong>
+              </span>
+              <span className="self-issue-draft-launcher-status">Saved locally</span>
+              <Maximize2 aria-hidden="true" size={15} />
+            </button>
+          ) : null}
           <div className="headless-composer">
-            {selfIssueIntake && selfIssueWorkspaceHost ? createPortal(
-              <div className="self-issue-intake-workspace" data-testid="self-issue-intake-workspace">
+            {selfIssueIntake && selfIssueIntakeExpanded && selfIssueWorkspaceHost ? createPortal(
+              <div
+                className={`self-issue-intake-workspace ${selfIssueIntakeForeground ? "foreground" : ""}`}
+                data-testid="self-issue-intake-workspace"
+                tabIndex={-1}
+                onPointerDown={(event) => {
+                  setSelfIssueIntakeForeground(true);
+                  const target = event.target as HTMLElement;
+                  if (!target.closest("input,textarea,select,button,a")) {
+                    event.currentTarget.focus();
+                  }
+                }}
+              >
                 {selfIssueRuntimeWarning ? (
                   <div className="self-issue-runtime-warning" role="status">
                     <strong>Runtime is stopped</strong>
@@ -2481,6 +2597,7 @@ export function OrchestratorPanel({
                     setSelfIssueIntakeBusy(false);
                   }
                 }}
+                onMinimize={() => setSelfIssueIntakeExpanded(false)}
                 onSubmit={async (answers, attachmentDisclosureConfirmed) => {
                   setSelfIssueIntakeBusy(true);
                   try {
@@ -2583,6 +2700,10 @@ export function OrchestratorPanel({
                             setOperatorError("");
                             markSelfIssueDismissed(activeProjectId);
                             clearSelfIssueCardLayout(activeProjectId, selfIssueDraftId);
+                            window.localStorage.removeItem(
+                              selfIssueGithubTransactionStorageKey(activeProjectId, selfIssueDraftId),
+                            );
+                            setSelfIssueSuccessNotice("");
                             setSelfIssueCard(null);
                             setSelfIssueCardExpanded(false);
                           }
@@ -2639,9 +2760,10 @@ export function OrchestratorPanel({
                   <select
                     className="filter-input"
                     value={selfIssuePublicationMode}
-                    onChange={(event) => setSelfIssueCard(
-                      selfIssueSelectDestination(selfIssueCard, event.target.value),
-                    )}
+                    onChange={(event) => {
+                      setSelfIssueSuccessNotice("");
+                      setSelfIssueCard(selfIssueSelectDestination(selfIssueCard, event.target.value));
+                    }}
                   >
                     {selfIssueAllowedModes.map((mode) => (
                       <option key={mode} value={mode}>
@@ -2748,8 +2870,15 @@ export function OrchestratorPanel({
                   }</div>
                   <div><strong>Orchestrator assessment:</strong> {selfIssueAssessmentStatus}</div>
                   {selfIssueEvidenceStatus === "waiting_for_runtime" ? (
-                    <div className="self-issue-runtime-waiting" role="status">
-                      <p><strong>Project runtime is {selfIssueRuntimeStatus}.</strong></p>
+                    <div
+                      className={`self-issue-runtime-waiting ${selfIssueRuntimeLive ? "live" : "stopped"}`}
+                      role="status"
+                    >
+                      <p><strong>
+                        {selfIssueRuntimeLive
+                          ? "Runtime is started."
+                          : "Runtime is stopped. Static evidence remains saved locally."}
+                      </strong></p>
                       <p>
                         Your report and static evidence were saved locally. Live runtime events,
                         current worker context, active logs, and dynamic reproduction have not been collected.
@@ -2757,7 +2886,10 @@ export function OrchestratorPanel({
                       <p>Start the runtime with:</p>
                       <code>cd /path_to_project &amp;&amp; zf start</code>
                       {selfIssueRuntimeActionNotice ? (
-                        <p className="self-issue-runtime-action-notice" role="status">
+                        <p
+                          className={`self-issue-runtime-action-notice ${selfIssueRuntimeLive ? "live" : "stopped"}`}
+                          role="status"
+                        >
                           {selfIssueRuntimeActionNotice}
                         </p>
                       ) : null}
@@ -2815,6 +2947,11 @@ export function OrchestratorPanel({
                 </div>
                 </fieldset>
                 <div className="headless-pending-item">
+                  {selfIssueSuccessNotice || selfIssuePublished ? (
+                    <div className="self-issue-success-notice" role="status">
+                      {selfIssueSuccessNotice || "Published successfully."}
+                    </div>
+                  ) : null}
                   <button
                     className="headless-pending-run"
                     disabled={
@@ -2886,14 +3023,14 @@ export function OrchestratorPanel({
                         Published on {selfIssueProviderLabel(provider)} &amp; View
                       </a>
                     ))
-                  ) : textValue(selfIssueCard.confirmation_id) || ["publishing", "outcome_unknown"].includes(textValue(selfIssueCard.status)) ? (
+                  ) : textValue(selfIssueCard.confirmation_id) || ["publishing", "outcome_unknown", "authorization_pending"].includes(textValue(selfIssueCard.status)) ? (
                     <button
                       className="headless-pending-run"
-                      disabled={selfIssuePublishBusy}
+                      disabled={selfIssuePublishBusy || selfIssueAuthorizationPublishing}
                       type="button"
                       onClick={() => void publishSelfIssue()}
                     >
-                      {selfIssuePublishBusy ? (
+                      {selfIssuePublishBusy || selfIssueAuthorizationPublishing ? (
                         <><LoaderCircle aria-hidden="true" className="self-issue-spinner" size={13} /> Publishing…</>
                       ) : ["publishing", "outcome_unknown"].includes(textValue(selfIssueCard.status))
                         ? "Recover outcome by marker"
@@ -2906,14 +3043,36 @@ export function OrchestratorPanel({
                         GitLab api scope grants broad read/write API access beyond issue creation.
                       </div>
                       <button className="headless-pending-run" type="button" onClick={() => void (async () => {
-                        const result = await Promise.resolve(onAction("self-issue-oauth-start", {
-                          draft_id: textValue(selfIssueCard.draft_id),
-                          session_id: selfIssueOAuthSession(),
-                          ...selfIssueOAuthContinuation(selfIssueCard),
-                        }));
-                        const record = recordValue(result);
-                        if (actionFailed(result)) setOperatorError(actionFailureReason(result));
-                        else if (textValue(record?.authorization_url)) window.location.assign(textValue(record?.authorization_url));
+                        // Open synchronously so popup blockers do not reject the
+                        // provider authorization tab after the API round trip.
+                        const authWindow = window.open("about:blank", "_blank");
+                        authWindow?.sessionStorage.setItem("zf.selfIssueOAuthPopup", "1");
+                        try {
+                          const result = await Promise.resolve(onAction("self-issue-oauth-start", {
+                            draft_id: textValue(selfIssueCard.draft_id),
+                            session_id: selfIssueOAuthSession(),
+                            ...selfIssueOAuthContinuation(selfIssueCard),
+                          }));
+                          const record = recordValue(result);
+                          if (actionFailed(result)) {
+                            authWindow?.close();
+                            setOperatorError(actionFailureReason(result));
+                          } else if (textValue(record?.authorization_url)) {
+                            const authorizationUrl = textValue(record?.authorization_url);
+                            setSelfIssueCard((current) => ({
+                              ...(current ?? selfIssueCard),
+                              provider: "gitlab",
+                              status: "authorization_pending",
+                            }));
+                            if (authWindow) authWindow.location.href = authorizationUrl;
+                            else window.open(authorizationUrl, "_blank");
+                          } else {
+                            authWindow?.close();
+                          }
+                        } catch (error: unknown) {
+                          authWindow?.close();
+                          setOperatorError(error instanceof Error ? error.message : String(error));
+                        }
                       })()}>
                         Connect GitLab.com (api scope)
                       </button>
@@ -2948,7 +3107,16 @@ export function OrchestratorPanel({
                           }));
                           const record = recordValue(result);
                           if (actionFailed(result)) setOperatorError(actionFailureReason(result));
-                          else if (record) setSelfIssueCard({ ...selfIssueCard, ...record });
+                          else if (record) {
+                            const transactionId = textValue(record.transaction_id);
+                            if (transactionId) {
+                              window.localStorage.setItem(
+                                selfIssueGithubTransactionStorageKey(activeProjectId, textValue(selfIssueCard.draft_id)),
+                                transactionId,
+                              );
+                            }
+                            setSelfIssueCard({ ...selfIssueCard, ...record });
+                          }
                         })()}>
                           Connect GitHub
                         </button>

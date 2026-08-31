@@ -8,6 +8,7 @@ export interface SelfIssueIntakeWizardProps {
   busy: boolean;
   onAddAttachment: (file: File, videoDisclosureConfirmed: boolean) => Promise<void>;
   onCancel: () => Promise<void>;
+  onMinimize: () => void;
   onRemoveAttachment: (attachmentId: string) => Promise<void>;
   onSave: (answers: UnknownRecord, currentStep: number) => Promise<void>;
   onSubmit: (
@@ -21,6 +22,7 @@ export function SelfIssueIntakeWizard({
   busy,
   onAddAttachment,
   onCancel,
+  onMinimize,
   onRemoveAttachment,
   onSave,
   onSubmit,
@@ -192,8 +194,15 @@ export function SelfIssueIntakeWizard({
               : "Answers are saved locally until you submit all eight questions."}
           </small>
         </div>
-        <div className="self-issue-intake-progress" aria-label={`Question ${step + 1} of ${questions.length}`}>
-          {step + 1}/{questions.length}
+        <div className="self-issue-intake-progress">
+          <span aria-label={`Question ${step + 1} of ${questions.length}`}>{step + 1}/{questions.length}</span>
+          <button
+            aria-label="Minimize Self-Issue questions"
+            className="self-issue-intake-minimize"
+            title="Minimize"
+            type="button"
+            onClick={onMinimize}
+          >−</button>
         </div>
       </header>
 

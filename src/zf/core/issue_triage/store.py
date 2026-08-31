@@ -7,7 +7,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from zf.core.issue_triage.models import IssueMirror, SyncState
+from zf.core.issue_triage.models import IssueComment, IssueMirror, SyncState
 from zf.core.state.atomic_io import atomic_write_text
 from zf.core.state.locks import locked_path
 
@@ -43,16 +43,38 @@ class IssueMirrorStore:
             raise ValueError("Issue body sidecar digest mismatch")
         return body
 
+    def read_comments(self, item: IssueMirror) -> list[IssueComment]:
+        if not item.comments_ref:
+            return []
+        path = (self.state_dir / item.comments_ref).resolve()
+        artifacts_root = (self.state_dir / "artifacts" / "issue-triage").resolve()
+        if artifacts_root not in path.parents or not path.is_file():
+            return []
+        raw = path.read_text(encoding="utf-8")
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if digest != item.comments_digest:
+            raise ValueError("Issue comments sidecar digest mismatch")
+        value = json.loads(raw or "[]")
+        if not isinstance(value, list):
+            raise ValueError("Issue comments sidecar must contain a list")
+        return [IssueComment.from_dict(dict(row)) for row in value if isinstance(row, dict)]
+
     def upsert(self, item: IssueMirror, body: str) -> tuple[IssueMirror, bool]:
         if len(body.encode("utf-8")) > 1_000_000:
             raise ValueError("GitHub Issue body exceeds safe limit")
         body_digest = "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
         body_ref = f"artifacts/issue-triage/github/{item.number}/body.md"
         current_item = replace(item, body_digest=body_digest, body_ref=body_ref)
-        current_item.validate()
         with locked_path(self.issues_path):
             rows = self.list()
             existing = next((row for row in rows if row.issue_key == item.issue_key), None)
+            if existing is not None and not current_item.comments_ref:
+                current_item = replace(
+                    current_item,
+                    comments_digest=existing.comments_digest,
+                    comments_ref=existing.comments_ref,
+                )
+            current_item.validate()
             if existing is not None and existing.updated_at > current_item.updated_at:
                 return existing, False
             existing_value = existing.to_dict() if existing is not None else {}
@@ -62,6 +84,52 @@ class IssueMirrorStore:
             if existing is not None and existing_value == current_value:
                 return existing, False
             atomic_write_text(self.state_dir / body_ref, body)
+            next_rows = [row for row in rows if row.issue_key != item.issue_key]
+            next_rows.append(current_item)
+            next_rows.sort(key=lambda row: (row.updated_at, row.number), reverse=True)
+            atomic_write_text(
+                self.issues_path,
+                json.dumps(
+                    [row.to_dict() for row in next_rows],
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ) + "\n",
+            )
+        return current_item, True
+
+    def write_comments(
+        self,
+        item: IssueMirror,
+        comments: list[IssueComment],
+    ) -> tuple[IssueMirror, bool]:
+        raw = json.dumps(
+            [comment.to_dict() for comment in comments],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        if len(raw.encode("utf-8")) > 5_000_000:
+            raise ValueError("GitHub comments sidecar exceeds safe limit")
+        digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        comments_ref = f"artifacts/issue-triage/github/{item.number}/comments.json"
+        current_item = replace(
+            item,
+            comments_digest=digest,
+            comments_ref=comments_ref,
+        )
+        current_item.validate()
+        with locked_path(self.issues_path):
+            rows = self.list()
+            existing = next((row for row in rows if row.issue_key == item.issue_key), None)
+            if existing is None:
+                raise ValueError("Issue must be mirrored before its comments")
+            if (
+                existing.comments_digest == digest
+                and existing.comments_ref == comments_ref
+            ):
+                return existing, False
+            atomic_write_text(self.state_dir / comments_ref, raw)
             next_rows = [row for row in rows if row.issue_key != item.issue_key]
             next_rows.append(current_item)
             next_rows.sort(key=lambda row: (row.updated_at, row.number), reverse=True)

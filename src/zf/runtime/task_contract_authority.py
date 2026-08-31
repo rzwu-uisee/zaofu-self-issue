@@ -93,8 +93,15 @@ def allowed_task_contract_change_actors(config: Any) -> set[str]:
     return {
         value
         for role in getattr(config, "roles", [])
-        if str(getattr(role, "name", "") or "")
-        in {"orchestrator", "planner", "synthesizer"}
+        if (
+            str(getattr(role, "name", "") or "")
+            in {"orchestrator", "planner", "synthesizer"}
+            or (
+                str(getattr(role, "role_kind", "") or "") == "reader"
+                and "task.contract.change.requested"
+                in set(getattr(role, "publishes", []) or [])
+            )
+        )
         for value in (
             str(getattr(role, "name", "") or ""),
             str(getattr(role, "instance_id", "") or ""),

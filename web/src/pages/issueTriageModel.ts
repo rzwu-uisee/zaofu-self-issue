@@ -17,3 +17,46 @@ export function issueTriageSourceLabel(source: string): string {
   if (source === "github_web") return "GitHub";
   return "Unknown";
 }
+
+export function githubMarkdownForDisplay(content: string, projectId: string): string {
+  const normalized = content.replace(/<img\b([^>]*)\/?\s*>/gi, (original, attributes: string) => {
+    const source = attributes.match(/\bsrc\s*=\s*(["'])(.*?)\1/i)?.[2]
+      ?.replaceAll("&amp;", "&");
+    if (!source) return original;
+    let url: URL;
+    try {
+      url = new URL(source);
+    } catch {
+      return original;
+    }
+    const allowed = (
+      url.protocol === "https:"
+      && (
+        (url.hostname === "github.com" && url.pathname.startsWith("/user-attachments/"))
+        || url.hostname === "user-images.githubusercontent.com"
+        || url.hostname === "camo.githubusercontent.com"
+      )
+    );
+    if (!allowed) return original;
+    const alt = (attributes.match(/\balt\s*=\s*(["'])(.*?)\1/i)?.[2] || "GitHub attachment")
+      .replace(/[\[\]]/g, "")
+      .replaceAll("&quot;", "\"");
+    return `![${alt}](${url.toString()})`;
+  });
+  return normalized.replace(/!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)/g, (original, alt: string, source: string) => {
+    let url: URL;
+    try {
+      url = new URL(source);
+    } catch {
+      return original;
+    }
+    const allowed = (
+      (url.hostname === "github.com" && url.pathname.startsWith("/user-attachments/"))
+      || url.hostname === "user-images.githubusercontent.com"
+      || url.hostname === "camo.githubusercontent.com"
+    );
+    if (!allowed) return original;
+    const proxy = `/api/projects/${encodeURIComponent(projectId)}/issue-triage/attachment?url=${encodeURIComponent(url.toString())}`;
+    return `[![${alt}](${proxy})](${url.toString()})`;
+  });
+}

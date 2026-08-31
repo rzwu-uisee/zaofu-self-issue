@@ -1228,8 +1228,8 @@ def test_role_permission_mode_invalid_value_rejected(tmp_path: Path):
         load_config(p)
 
 
-def test_load_real_zf_yaml_expands_thin_prd_controller():
-    """The repository config stays thin while profiles provide the runtime contract."""
+def test_load_real_zf_yaml_expands_thin_multi_flow_controller():
+    """The root stays thin while registering PRD, Issue, and Triage routes."""
     root = Path(__file__).parent.parent / "zf.yaml"
     cfg = load_config(root)
 
@@ -1251,16 +1251,21 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
     assert cfg.runtime.git.candidate_base_ref == "main"
     assert cfg.runtime.git.ship_target_branch == "main"
     assert {role.name for role in cfg.roles} == {
-        "product-scan",
-        "tech-scan",
-        "planner",
-        "plan-critic",
-        "flow-discovery",
+        "prd-product-scan",
+        "prd-tech-scan",
+        "prd-planner",
+        "prd-plan-critic",
+        "prd-flow-discovery",
         "judge-prd",
-        "dev-lane-0",
-        "dev-lane-1",
-        "verify-lane-0",
-        "verify-lane-1",
+        "prd-dev-lane-0",
+        "prd-dev-lane-1",
+        "prd-verify-lane-0",
+        "prd-verify-lane-1",
+        "issue-fix-lane-0",
+        "issue-verify-lane-0",
+        "judge-issue",
+        "external-issue-triage",
+        "external-issue-triage-verifier",
         "orchestrator",
         "research_root",
         "source_researcher",
@@ -1302,14 +1307,19 @@ def test_load_real_zf_yaml_expands_thin_prd_controller():
         "prd-scan",
         "prd-plan",
         "prd-post-verify-discovery",
+        "external-issue-triage",
+        "external-issue-triage-verify",
+        "issue-lanes-impl",
+        "issue-lanes-verify",
+        "issue-lanes-final",
         "prd-lanes-impl",
         "prd-lanes-verify",
         "prd-lanes-final",
     ]
     assert next(
         stage for stage in cfg.workflow.stages if stage.id == "prd-plan"
-    ).aggregate.synth_role == "plan-critic"
-    critic = next(role for role in cfg.roles if role.name == "plan-critic")
+    ).aggregate.synth_role == "prd-plan-critic"
+    critic = next(role for role in cfg.roles if role.name == "prd-plan-critic")
     assert "zf-yoke-critic-role-context" in critic.skills
 
 

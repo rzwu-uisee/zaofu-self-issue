@@ -55,8 +55,9 @@ ZaoFu 也会对少量明确的内部强异常自动创建本地 Intake 候选。
    **Preview** 不使用 Draft 双栏，而是按每个 Provider 的最终 Markdown payload 排版；
    GitLab 与 GitHub 各自显示的内容就是各自最终发送内容。
 10. 点击 **Confirm this exact preview**，再点击对应的 Publish 按钮。GitLab 未授权时进入
-    PKCE 登录；GitHub 未授权时显示 Device Flow code，点击链接在新标签页授权，当前页面
-    自动轮询并只续发这一个已确认批次。两者都成功后分别显示 **Published on GitLab &
+    PKCE 登录；授权固定在新标签页完成，原 ZaoFu 页面不跳转。回调成功后授权页自动关闭，
+    原页面显示 **Publishing…** 并只续发这一个已确认批次。GitHub 未授权时显示 Device
+    Flow code，点击链接在新标签页授权，当前页面自动轮询。两者都成功后分别显示 **Published on GitLab &
     View**、**Published on GitHub & View**，均在新标签页打开。
     发布后 Draft 进入只读，但 **Draft** 与 **Preview** 标签仍可无缝来回切换；Preview
     直接恢复实际发布的不可变 snapshot，不会再次 prepare。
@@ -65,6 +66,15 @@ ZaoFu 也会对少量明确的内部强异常自动创建本地 Intake 候选。
 Intake 中的答案会自动保存；Draft 编辑需点击 **Save draft**。右上角叉号会永久删除
 当前 Intake/Draft 及其本地受控附件；缩小只把卡片变成输入框上方的可见启动条。
 Intake 位于看板工作区而不是 Kanban Agent 对话框内，回答问题期间仍可继续使用聊天。
+
+独立 **Triage** 页面默认打开 GitHub Issue 镜像。Repository 与 star 数来自同一次 GitHub
+同步；手动 **Refresh** 会绕过短时节流并立即重新读取仓库元数据。列表可按多个 label、
+多个 contributor、state 和来源组合过滤；label 使用 GitHub 原始颜色，排序支持创建时间
+或名称的升/降序。选择某一 label 或 contributor 时只显示命中的 Issue。Issue 状态与分组
+提供悬停说明，作者头像/名称可悬停查看 GitHub 主页及该作者在当前镜像中的 open/closed
+Issue 数。详情同时镜像 GitHub comments；评论中的 GitHub 图片直接预览，附件链接在新标签
+打开或下载。GitHub 更新后点击 **Refresh** 会同时更新正文、评论、状态、label、头像与仓库
+star 元数据。
 
 如果 `/issue` 时 ZaoFu runtime 未运行，页面会说明仍可保存 Intake/Draft、检查 committed
 source，但新鲜事件、日志、Trace、失败截图和实时复现证据可能不可用，并提示执行：

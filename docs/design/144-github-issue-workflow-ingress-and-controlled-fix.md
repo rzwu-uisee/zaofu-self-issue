@@ -19,7 +19,8 @@ ZaoFu 首先打通 GitHub External Issue 到 Issue Workflow 的完整本地交�
   不得改变 Kernel 合同；
 - 新 Issue 自动触发只读 Triage，不自动获得源码写权限；
 - Fix Run 由当前 exact proposal 的独立授权点火；
-- webhook 接收面常驻，Agent runtime 可离线；请求必须可排队并在 `zf start` 后恢复；
+- 首版采用 `zf web` 进程拥有的单例 GitHub API 定时轮询，每 300 秒增量对账；Agent
+  runtime 可离线，请求必须可排队并在 `zf start` 后恢复；
 - 交付止于本地、已验证候选，不自动 push、创建 PR、merge、部署或重启。
 
 首版假定 `rzwu-uisee/zaofu-self-issue` 映射到当前 ZaoFu Project 的代码根
@@ -58,8 +59,8 @@ revision、refs、digests、因果关系和裁决，不内联大正文。
 
 ### Issue Mirror
 
-Issue Mirror 继续是可重建的只读 Web 投影，不是 Workflow truth。Webhook 和 Refresh 可以
-更新 Mirror，但必须通过同一 ingress service 发布 workflow intent；任何 integration route
+Issue Mirror 继续是可重建的只读 Web 投影，不是 Workflow truth。后台 Poller 和手动 Refresh
+可以更新 Mirror，但必须通过同一 ingress service 发布 workflow intent；任何 integration route
 都不得直接写 `kanban.json` 或其他 canonical business state。
 
 ### Issue Intake Task
@@ -84,8 +85,8 @@ Triage Run 输出并由 Kernel 校验：
 产品上是一条 Issue Workflow；Kernel 中是两个独立 admission 的 Run：
 
 ```text
-GitHub issues.opened / reconciliation
-  -> 验签、仓库身份校验、delivery 去重
+GitHub API incremental reconciliation
+  -> 固定仓库身份校验、ETag/since 对账、revision 去重
   -> 原子保存 external-issue-source.v1
   -> external_issue.received
   -> 唯一 Issue Intake Task
@@ -104,31 +105,37 @@ GitHub issues.opened / reconciliation
 writer lane 的整段 IssueFlow 后再临时暂停；自动 Run 与可写 Fix Run 必须在 admission 边界上
 分离。Fix Run 复用现有 `issue.requested` 入口和 active IssueFlow 能力。
 
-## GitHub 事件路由
+## GitHub 对账路由
 
 首版处理以下事件：
 
-| GitHub 事件 | Kernel 意图 | 不允许的隐式行为 |
+| GitHub revision 变化 | Kernel 意图 | 不允许的隐式行为 |
 |---|---|---|
-| `issues.opened` | 接纳 source revision、创建/恢复 Intake Task、排队 Triage | 直接启动 Fix |
-| `issues.edited` | 创建新 source revision，使旧 proposal stale，重新分诊 | 静默沿用旧批准 |
-| `issue_comment.created` | 更新当前上下文；按策略重新分诊 | 把评论命令当系统指令 |
-| `issues.labeled` | 对 `zaofu:ready-to-fix` 生成 approval intent | 标签本身绕过 exact proposal |
-| `issues.unlabeled` | 在 Fix 尚未点火时撤销待处理 intent | 杀死已运行 Run |
-| `issues.closed` | 关闭未启动 intake/proposal；运行中交由受控取消策略 | 直接终止 provider 进程 |
+| 新 Issue | 接纳 source revision、创建/恢复 Intake Task、排队 Triage | 直接启动 Fix |
+| title/body 更新 | 创建新 source revision，使旧 proposal stale，重新分诊 | 静默沿用旧批准 |
+| 评论/附件更新 | 更新当前上下文；按策略重新分诊 | 把评论命令当系统指令 |
+| 出现 `zaofu:ready-to-fix` | 对当前 revision 生成 approval intent | 标签本身绕过 exact proposal |
+| 移除批准标签 | 在 Fix 尚未点火时撤销待处理 intent | 杀死已运行 Run |
+| Issue 关闭 | 关闭未启动 intake/proposal；运行中交由受控取消策略 | 直接终止 provider 进程 |
 | 手动 Refresh | 对账并补发缺失 ingress revision | 每次刷新重复建 Task/Run |
 
-其他 GitHub event 返回 ignored。Webhook 必须继续校验 `X-Hub-Signature-256`、repository
-full name/id、payload 上限与 `X-GitHub-Delivery`。
+轮询固定使用 `self_issue.targets.github.project`，首次成功同步记录 activation 时间；默认只有
+activation 之后创建的新 Issue 自动分诊，已有 open Issue 继续作为 Mirror 展示并允许人工处理。
+首版不要求公网域名、反向代理或固定 HTTPS 隧道。现有 webhook route 仅保留为可关闭的镜像
+兼容入口，不是 Workflow ingress；未来启用 webhook adapter 时必须复用同一 source/revision 合同。
 
 ## 批准合同
 
-批准标签固定为 `zaofu:ready-to-fix`。首版允许两种等价入口：
+批准标签固定为 `zaofu:ready-to-fix`。产品合同允许两种批准入口：
 
 1. GitHub 中具备仓库写权限的人工操作者添加标签；
 2. ZaoFu Web 展示 current proposal 后，操作者点击独立 Approve/Start。
 
-标签只是 approval intent，不直接等于授权。Controlled Action 必须在 apply 前确认：
+标签只是 approval intent，不直接等于授权。当前无凭据的公共 API 轮询只能观察标签当前值，
+不能可靠证明“谁添加了标签、当时是否具备仓库写权限”，因此首个轮询实现会记录 intent 并将
+current exact proposal 展示到 ZaoFu Web，仍由 Web 独立批准点火。后续若配置了 GitHub
+authenticated actor audit 与明确 actor allowlist，才允许把标签 intent 升格为等价授权。
+Controlled Action 必须在 apply 前确认：
 
 - label event 来自允许的仓库和具备权限的人工 actor；自动化 actor 默认拒绝；
 - proposal 绑定当前 External Issue source revision、TaskContract digest 和 active route；
@@ -151,23 +158,28 @@ gitlab:<project_id>:<issue_iid>        # 仅合同预留，首版无 adapter
 
 必须同时满足：
 
-- delivery 去重键负责 webhook 重投；External Issue 稳定键负责跨 webhook、Refresh 和
+- source revision 去重负责 API 重叠窗口和重复 Refresh；External Issue 稳定键负责跨 Poll、Refresh 和
   `self_issue.published` 的业务去重；
 - 同一 External Issue 只有一个 Intake Task；更新产生 revision，不产生第二个 Task；
 - 同一 source revision 只有一个 current Triage Run 和一个 current Fix proposal；
 - 同一 Issue 同时最多一个 active Fix Run；重复标签、重复批准与 runtime 重启可安全重放；
 - Self-Issue publication 与随后到达的 GitHub webhook 通过远端 repository id/number 和稳定
   marker 收敛为同一 External Issue；先到者 claim identity，后到者只补证据；
-- webhook 丢失时，手动 Refresh 使用同一 claim/ingress service 补齐，不创建平行状态机。
+- 定时轮询中断时，手动 Refresh 使用同一 claim/ingress service 补齐，不创建平行状态机。
 
 ## Runtime 离线与恢复
 
-Webhook 接收面只负责安全持久化 sidecar 与事件，必须快速返回；它不等待 Provider。若
-`zf start` watcher 未运行，Web 显示 `queued_runtime_offline`，事件保持 pending。Watcher 启动
+`zf web` 的后台 Poller 只负责安全持久化 sidecar、Intake Task 与事件，它不等待 Agent Provider。
+若 `zf start` watcher 未运行，Web 显示 `queued_runtime_offline`，事件保持 pending。Watcher 启动
 后从 canonical ledger 消费；用户不需要重新加标签、重新发布 Issue 或再次批准 current
 proposal。
 
-恢复测试必须覆盖 webhook 已接纳但 runtime 未启动、Triage 中途重启、批准后点火前重启、
+浏览器不拥有 GitHub 轮询：Triage 页面每 10 秒只读取本地 Mirror，手动 Refresh 才显式请求
+立即对账。后台同步与 Refresh 共享文件锁；GitHub 网络等待在线程中执行，不占用 FastAPI event
+loop，因此不会阻塞 Triage 页面。若整个 `zf web` 进程也停止，停机期间的新 Issue 会在下次
+启动后的首次增量对账中补齐。
+
+恢复测试必须覆盖 Poll 已接纳但 runtime 未启动、Triage 中途重启、批准后点火前重启、
 以及 `workflow.invoke.requested` 已写入但尚未消费四种窗口。
 
 ## 用户可见状态
@@ -238,8 +250,9 @@ candidate 或 completion 状态。确定性 consumer 才能使用 canonical Stor
    verify：config loader/schema、Project init/inheritance 与默认发布 Web 测试。
 2. **Ingress contract**：增加 source sidecar、stable identity/claim store 与事件合同；
    verify：原子写入、digest/currentness、GitHub/GitLab identity fixture 和 known-event 测试。
-3. **GitHub producer**：复用现有 webhook 验签/镜像逻辑，并让 Refresh 进入同一 ingress service；
-   verify：opened/edited/comment/labeled/closed、重投、错仓库、坏签名和 reconciliation 测试。
+3. **GitHub producer**：以 `zf web` 单例 Poller 复用增量镜像逻辑，并让 Refresh 进入同一
+   ingress service；verify：opened/edited/comment/labeled/closed、重叠窗口、错仓库、限流和
+   reconciliation 测试。
 4. **Intake 与自动 Triage**：创建唯一 Intake Task，注册只读 route，runtime 离线可排队恢复；
    verify：Task/Event 因果链、无写权限、needs-info、重启/重放与 active route 测试。
 5. **Fix Admission**：生成 current proposal，把 Web 与 GitHub label intent 接到同一
@@ -252,7 +265,7 @@ candidate 或 completion 状态。确定性 consumer 才能使用 canonical Stor
 
 跨 EventLog、TaskStore、config、workflow admission、orchestrator 与 recovery 的批次必须执行
 impact-closure tests、`scripts/dev-premerge-gate.sh` 和相关 deterministic mock E2E。GitHub
-真实 webhook/provider 测试属于显式外部 tier，不能用普通单元测试结果冒充。
+真实 provider 测试属于显式外部 tier，不能用普通单元测试结果冒充。
 
 ## 明确排除
 

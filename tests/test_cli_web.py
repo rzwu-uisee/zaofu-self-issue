@@ -10,6 +10,8 @@ from unittest import mock
 import pytest
 
 from zf.cli import web as cli_web
+from zf.core.config.project_context import ProjectContext
+from zf.core.config.schema import ProjectConfig, ZfConfig
 
 
 @pytest.fixture(autouse=True)
@@ -199,3 +201,44 @@ def test_resolve_web_context_loads_config_for_explicit_state_dir(tmp_path, monke
     assert context.state_dir == state_dir
     assert context.config is not None
     assert context.config.roles[0].instance_id == "orchestrator"
+
+
+def test_run_owns_external_issue_poller_lifecycle(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    config_path = tmp_path / "zf.yaml"
+    config_path.write_text("version: '1.0'\nproject: {name: test}\n", encoding="utf-8")
+    config = ZfConfig(project=ProjectConfig(name="test", state_dir=".zf"))
+    context = ProjectContext(
+        project_root=tmp_path,
+        config_path=config_path,
+        config=config,
+        state_dir=state_dir,
+    )
+    calls: list[str] = []
+
+    class Poller:
+        def start(self) -> None:
+            calls.append("start")
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+    monkeypatch.setattr(cli_web, "_resolve_web_context", lambda args: context)
+    monkeypatch.setattr("zf.web.server.validate_trusted_session_host", lambda host: None)
+    monkeypatch.setattr("zf.web.server.create_app", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        "zf.runtime.external_issue_ingress.build_external_issue_poller",
+        lambda *args, **kwargs: Poller(),
+    )
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append("serve"))
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=8001,
+        state_dir=None,
+        reload=False,
+        workspace_only=False,
+    )
+
+    assert cli_web.run(args) == 0
+    assert calls == ["start", "serve", "stop"]

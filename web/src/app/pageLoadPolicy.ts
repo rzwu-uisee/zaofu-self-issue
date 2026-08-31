@@ -141,7 +141,7 @@ export function pageResourcePlanForPage(page: PageId): PageResourcePlan {
   if (page === "channels") foreground.push("channels.summary");
   // Other consumers either own a scoped history endpoint or only need events
   // arriving after the SSE connection.
-  if (page === "triage") foreground.push("events.recent");
+  if (page === "triage" || page === "issue-triage") foreground.push("events.recent");
   if (page === "inbox") foreground.push("operator.inbox");
   return { foreground };
 }

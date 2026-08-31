@@ -123,7 +123,12 @@ import {
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { resolveWorkspaceProjectId } from "./workspaceProjectSelection";
 import { ChannelRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
-import { IssueTriagePage } from "../pages/IssueTriagePage";
+import type { TriageTab } from "../pages/IssueTriagePage";
+import {
+  selfIssueOAuthCallback,
+  selfIssueOAuthSession,
+  withoutSelfIssueOAuthCallback,
+} from "../components/orchestrator/selfIssue";
 import {
   canBootstrapScopedPageBeforeWorkspace,
   projectionPageQuery,
@@ -264,6 +269,9 @@ interface NewChannelDraft {
 }
 
 const TerminalDrawer = lazy(() => import("../components/terminal/TerminalDrawer"));
+const IssueTriagePage = lazy(() => import("../pages/IssueTriagePage").then((module) => ({
+  default: module.IssueTriagePage,
+})));
 
 interface RuntimeActionState {
   actionReady: boolean;
@@ -614,6 +622,10 @@ function runtimeActionState(
 
 export function App() {
   const initial = useMemo(() => readInitialQuery(), []);
+  const initialSelfIssueOAuthCallback = useMemo(
+    () => selfIssueOAuthCallback(window.location.search),
+    [],
+  );
   const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>([]);
   // The project `zf web` was started with. It is re-injected into every
   // /api/workspace/projects response, so deleting it from the registry is a
@@ -653,6 +665,7 @@ export function App() {
   const [taskLoadError, setTaskLoadError] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("Summary");
   const [page, setPage] = useState<PageId>(initial.page);
+  const [issueTriageTab, setIssueTriageTab] = useState<TriageTab>("github");
   const [viewMode, setViewMode] = useState<ViewMode>(initial.view);
   const [statusFilter, setStatusFilter] = useState(initial.status);
   const [assigneeFilter, setAssigneeFilter] = useState("all");
@@ -669,6 +682,10 @@ export function App() {
   const [taskPipeline, setTaskPipeline] = useState<TaskPipelineProjection | null>(null);
   const [repairActions, setRepairActions] = useState<RepairActionProjection | null>(null);
   const [actionResult, setActionResult] = useState<ActionResponse | null>(null);
+  const [selfIssueOAuthCallbackPending, setSelfIssueOAuthCallbackPending] = useState(
+    Boolean(initialSelfIssueOAuthCallback),
+  );
+  const selfIssueOAuthCallbackStarted = useRef(false);
   const [webActionTokenPresent, setWebActionTokenPresent] = useState(() =>
     Boolean(storedWebActionToken()),
   );
@@ -691,6 +708,60 @@ export function App() {
   const [projectWizardBusy, setProjectWizardBusy] = useState(false);
   const [projectWizardError, setProjectWizardError] = useState("");
   const [showWelcome, setShowWelcome] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!initialSelfIssueOAuthCallback || selfIssueOAuthCallbackStarted.current) return;
+    selfIssueOAuthCallbackStarted.current = true;
+    const callbackIsPopup = window.sessionStorage.getItem("zf.selfIssueOAuthPopup") === "1"
+      || Boolean(window.opener && window.opener !== window);
+    void submitAction("self-issue-oauth-callback", {
+      ...initialSelfIssueOAuthCallback,
+      session_id: selfIssueOAuthSession(),
+    }).then((result) => {
+      setActionResult(result);
+      const completion = {
+        type: "zf:self-issue-oauth-complete",
+        completed_at: new Date().toISOString(),
+        result,
+      };
+      window.localStorage.setItem("zf.selfIssueOAuthCompleted", JSON.stringify(completion));
+      if (window.opener && window.opener !== window) {
+        window.opener.postMessage(completion, window.location.origin);
+      }
+    }).catch((error: unknown) => {
+      const failure = {
+        ok: false,
+        status: "self_issue_oauth_callback_failed",
+        action: "self-issue-oauth-callback",
+        requested_action: "self-issue-oauth-callback",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+      setActionResult(failure);
+      const completion = {
+        type: "zf:self-issue-oauth-complete",
+        completed_at: new Date().toISOString(),
+        result: failure,
+      };
+      window.localStorage.setItem("zf.selfIssueOAuthCompleted", JSON.stringify(completion));
+      if (window.opener && window.opener !== window) {
+        window.opener.postMessage(completion, window.location.origin);
+      }
+    }).finally(() => {
+      const suffix = withoutSelfIssueOAuthCallback(window.location.search);
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${suffix ? `?${suffix}` : ""}${window.location.hash}`,
+      );
+      setSelfIssueOAuthCallbackPending(false);
+      window.sessionStorage.removeItem("zf.selfIssueOAuthPopup");
+      if (callbackIsPopup) {
+        window.setTimeout(() => window.close(), 250);
+      } else {
+        setAgentPanelHasOpened(true);
+        setAgentPanelMode("docked");
+      }
+    });
+  }, [initialSelfIssueOAuthCallback]);
   useEffect(() => {
     let cancelled = false;
     getOnboarding()
@@ -955,12 +1026,22 @@ export function App() {
   // snapshot-readiness gate above so aged-out-but-pending proposals always
   // resurface their Accept entry point.
   useEffect(() => {
-    if (page !== "triage" || !activeProjectId) {
+    const triageQueueVisible = page === "triage"
+      || (page === "issue-triage" && issueTriageTab === "runtime");
+    if (!triageQueueVisible || !activeProjectId) {
       setKanbanPendingProposals([]);
       return;
     }
     void loadKanbanProposals();
-  }, [page, activeProjectId, loadKanbanProposals]);
+  }, [page, issueTriageTab, activeProjectId, loadKanbanProposals]);
+
+  // Issue Triage intentionally avoids the expensive Kanban snapshot on its
+  // Issues tab. Load the runtime snapshot only when the operator explicitly
+  // opens Runtime interventions, where the legacy intervention queue needs it.
+  useEffect(() => {
+    if (page !== "issue-triage" || issueTriageTab !== "runtime" || !activeProjectId || !activeProjectReady) return;
+    void loadSnapshot();
+  }, [activeProjectId, activeProjectReady, issueTriageTab, loadSnapshot, page]);
 
   useEffect(() => {
     refreshRef.current = refresh;
@@ -986,7 +1067,7 @@ export function App() {
       const eventType = event.type || "";
       const payload = asRecord(event.payload);
       if (
-        page === "triage"
+        (page === "triage" || (page === "issue-triage" && issueTriageTab === "runtime"))
         && (eventType === "kanban.agent.action.proposed"
           || eventType === "kanban.agent.proposal.resolved"
           || eventType === "operator.action.proposed"
@@ -1032,7 +1113,10 @@ export function App() {
         || eventType.startsWith("test.")
         || eventType.startsWith("judge.")
       ) {
-        if (BOARD_REFRESH_PAGES.has(page)) scheduleSlice("snapshot", () => void loadSnapshot());
+        if (BOARD_REFRESH_PAGES.has(page)
+          || (page === "issue-triage" && issueTriageTab === "runtime")) {
+          scheduleSlice("snapshot", () => void loadSnapshot());
+        }
         if (MEASURE_REFRESH_PAGES.has(page)) scheduleSlice("delivery", () => void loadDeliveryFeatures());
         return;
       }
@@ -1060,7 +1144,7 @@ export function App() {
         scheduleSlice("snapshot", () => void loadSnapshot());
       }
     };
-  }, [activeProjectId, loadChannels, loadDeliveryFeatures, loadKanbanProposals, loadSnapshot, page]);
+  }, [activeProjectId, issueTriageTab, loadChannels, loadDeliveryFeatures, loadKanbanProposals, loadSnapshot, page]);
 
   // Unified header source (doc116 §5/§11.1): cheap canonical health, never
   // the snapshot bundle — pages that skip the snapshot still get a truthful
@@ -2283,12 +2367,23 @@ export function App() {
               tasks={snapshot ? allBoardTasks(snapshot) : []}
             />
           ) : page === "issue-triage" ? (
-            <IssueTriagePage
-              projectId={activeProjectId}
-              tab="issues"
-              onTabChange={() => undefined}
-              runtimeInterventions={null}
-            />
+            <Suspense fallback={<section className="subsection"><p className="muted">Loading Issue Triage…</p></section>}>
+              <IssueTriagePage
+                projectId={activeProjectId}
+                tab={issueTriageTab}
+                onTabChange={setIssueTriageTab}
+                runtimeInterventions={(
+                  <TriagePage
+                    actionResult={actionResult}
+                    events={events}
+                    pendingProposals={kanbanPendingProposals}
+                    onAction={(action, payload) => void submitAction(action, payload)}
+                    onOpenTask={openTask}
+                    tasks={snapshot ? allBoardTasks(snapshot) : []}
+                  />
+                )}
+              />
+            </Suspense>
           ) : page === "board" && !snapshot ? (
             /* P0-B: loading must not impersonate an empty board ("0 tasks" for
                2s then 9 blocked appears — the trust-killer zero). */
@@ -3438,7 +3533,7 @@ function CommandPalette({
           />
           <div className="command-actions">
             <button className="icon-button" type="button" onClick={onOpenAgent}>Kanban Agent</button>
-            <button className="icon-button" type="button" onClick={() => onOpenPage("triage")}>Triage</button>
+            <button className="icon-button" type="button" onClick={() => onOpenPage("issue-triage")}>Triage</button>
             <button className="icon-button" type="button" onClick={() => onOpenPage("board")}>Board</button>
           </div>
           <div className="command-grid">

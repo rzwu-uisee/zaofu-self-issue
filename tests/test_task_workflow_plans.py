@@ -171,8 +171,8 @@ def test_builder_binds_routes_to_task_and_active_config() -> None:
     )
     assert delivery["submit_details"]["lane_count"] == 2
     assert delivery["submit_details"]["writer_roles"] == [
-        "dev-lane-0",
-        "dev-lane-1",
+        "prd-dev-lane-0",
+        "prd-dev-lane-1",
     ]
     assert request["options"][2]["submit_mode"] == "continue"
 

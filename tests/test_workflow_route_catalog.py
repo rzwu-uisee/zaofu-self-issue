@@ -31,10 +31,17 @@ def test_root_catalog_projects_delivery_and_registered_research_routes() -> None
     assert delivery["entry_pattern_id"] == "prd-scan"
     assert delivery["lane_count"] == 2
     assert delivery["topology"] == "multi_lane"
-    assert set(delivery["writer_roles"]) == {"dev-lane-0", "dev-lane-1"}
-    assert {"verify-lane-0", "verify-lane-1"} <= set(
+    assert set(delivery["writer_roles"]) == {"prd-dev-lane-0", "prd-dev-lane-1"}
+    assert {"prd-verify-lane-0", "prd-verify-lane-1"} <= set(
         delivery["verify_roles"]
     )
+    issue = routes["delivery:issue:default"]
+    assert issue["writer_roles"] == ["issue-fix-lane-0"]
+    assert issue["verify_roles"] == ["issue-verify-lane-0"]
+    assert "judge-issue" in issue["roles"]
+    triage = routes["general:external-issue-triage"]
+    assert triage["writer_roles"] == []
+    assert triage["entry_pattern_id"] == "external-issue-triage"
 
     research = routes["research:fixed"]
     assert research["topology"] == "fanout_reader"

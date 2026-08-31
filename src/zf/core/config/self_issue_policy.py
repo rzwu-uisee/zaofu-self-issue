@@ -56,6 +56,15 @@ def inject_self_issue_policy(
         "target_locked": True,
         "automatic_detection_enabled": policy.automatic_detection_enabled,
         "browser_capture_enabled": policy.browser_capture_enabled,
+        "ingress": {
+            "enabled": policy.ingress.enabled,
+            "provider": policy.ingress.provider,
+            "mode": policy.ingress.mode,
+            "poll_interval_seconds": policy.ingress.poll_interval_seconds,
+            "approval_label": policy.ingress.approval_label,
+            "target_root": policy.ingress.target_root,
+            "auto_triage_new_only": policy.ingress.auto_triage_new_only,
+        },
     }
     if policy.oauth_client_id:
         value["oauth_client_id"] = policy.oauth_client_id

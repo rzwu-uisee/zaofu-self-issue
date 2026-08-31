@@ -1,6 +1,6 @@
 // WorkspaceRail + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import type { ActionResponse, ChannelSummary, Snapshot, WorkspaceProject } from "../../api/types";
-import { Bot, CalendarClock, ChevronRight, Gauge, GitFork, Hash, Home, Inbox, ListTodo, Menu, MessageSquare, Plus, Radio, Route, Settings, Trash2, X } from "lucide-react";
+import { Bot, CalendarClock, ChevronRight, Gauge, GitFork, Home, Inbox, ListFilter, ListTodo, Menu, MessageSquare, Plus, Radio, Route, Settings, Trash2, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useState } from "react";
 import type { LiveState, PageId } from "../../app/sharedTypes";
@@ -100,9 +100,9 @@ export function WorkspaceRail({
   const workspaceNav: RailNavItem[] = [
     { id: "project", icon: Home, label: "Overview" },
     { id: "inbox", icon: Inbox, label: "Inbox", badge: inboxPendingCount },
+    { id: "issue-triage", icon: ListFilter, label: "Triage" },
     { id: "board", icon: ListTodo, label: "Tasks" },
     { id: "workflows", icon: GitFork, label: "Workflows" },
-    { id: "issue-triage", icon: Hash, label: "Issue Triage" },
     { id: "agents", icon: Bot, label: "Agents" },
     { id: "automations", icon: CalendarClock, label: "Automations" },
   ];

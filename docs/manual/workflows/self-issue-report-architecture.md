@@ -156,7 +156,9 @@ Action 裁决。Issue 发布仍使用稳定 marker 查询恢复，两个幂等�
 GitLab.com 使用 Authorization Code + PKCE S256、一次性 state、精确 redirect URI，
 并绑定 session、Draft、凭据主体和已确认的具体操作。若用户是在已确认的附件上传或
 Issue 发布步骤进入登录，OAuth 回调会只恢复该操作；普通连接成功不发布任何内容。
-token 只在 Kernel → Provider 边界短暂解封。
+token 只在 Kernel → Provider 边界短暂解封。Web 在独立授权标签页中完成该回调，通过
+同源消息或 localStorage 通知原页面后关闭授权页；原页面保持原工作上下文并等待 Kernel
+返回最终发布结果。
 
 GitHub.com 使用公开 GitHub App 的 Device Flow。App 固定安装到官方上报仓库，权限为
 Metadata read 与 Issues read/write；Client ID 可公开配置，不分发 client secret。Kernel

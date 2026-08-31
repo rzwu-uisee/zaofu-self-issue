@@ -108,6 +108,9 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "remediation.sm_stuck_observed",
     # User input
     "user.message", "user.intent.submitted",
+    # Provider-neutral External Issue ingress and controlled Fix admission.
+    "external_issue.received", "external_issue.triage.queued",
+    "external_issue.fix_approval.intent",
     # Observability for orphan user.message: emitted by orchestrator
     # _scan_inline_overrides when a human-actor user.message produced no
     # inline-override match AND no downstream task creation, so the

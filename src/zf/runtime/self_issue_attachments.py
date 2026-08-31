@@ -33,12 +33,28 @@ class SelfIssueAttachmentMixin:
                 "draft": self._draft_view(draft),
             }
         mode, providers = self._publication_selection(payload, draft=draft)
+        # Attachment preparation is a separate disclosure gate, but the
+        # operator should still be able to review the exact Markdown that will
+        # be published before uploading binaries.  Build provider previews
+        # without creating publication intents; the final publication preview
+        # is regenerated after preparation and therefore remains authoritative.
+        previews: dict[str, dict[str, Any]] = {}
+        for provider in providers:
+            marker = hashlib.sha256(
+                f"self-issue-preview:{draft.draft_id}:{draft.revision}:{provider}".encode(),
+            ).hexdigest()[:24]
+            preview, _redaction_digest, _disclosure_digest = self._publication_payload(
+                draft, marker=marker, provider=provider,
+            )
+            previews[provider] = preview
         if "gitlab" not in providers:
             return {
                 "ok": True,
                 "status": "attachments_omitted_for_github",
                 "publication_mode": mode,
                 "reason": "GitHub Issue binary attachment upload is not supported",
+                "previews": previews,
+                "preview": previews.get("github", {}),
                 "draft": self._draft_view(draft),
             }
         locked = self.attachments.locked_for_draft(draft.draft_id)
@@ -89,6 +105,9 @@ class SelfIssueAttachmentMixin:
             "attachments": self._local_attachment_views(
                 draft, reusable.attachment_manifest,
             ),
+            "publication_mode": mode,
+            "previews": previews,
+            "preview": previews.get("gitlab", {}),
             "confirmation_id": reusable.confirmation_id,
             "draft": self._draft_view(draft),
         }

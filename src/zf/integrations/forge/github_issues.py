@@ -11,7 +11,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from zf.core.issue_triage.models import IssueMirror, SyncState, derived_triage_group
+from zf.core.issue_triage.models import (
+    IssueComment,
+    IssueMirror,
+    SyncState,
+    derived_triage_group,
+)
 from zf.core.issue_triage.store import IssueMirrorStore
 from zf.core.state.locks import locked_path
 
@@ -97,11 +102,18 @@ def normalize_github_issue(
         if len(color) == 6 and all(char in "0123456789abcdefABCDEF" for char in color):
             label_colors[name] = color.upper()
     labels = tuple(label_values)
-    assignees = tuple(dict.fromkeys(
-        _text(item.get("login"), maximum=200)
-        for item in (payload.get("assignees") or [])
-        if isinstance(item, dict) and item.get("login")
-    ))
+    assignee_values: list[str] = []
+    assignee_avatar_urls: dict[str, str] = {}
+    for item in (payload.get("assignees") or []):
+        if not isinstance(item, dict) or not item.get("login"):
+            continue
+        login = _text(item.get("login"), maximum=200)
+        if login not in assignee_values:
+            assignee_values.append(login)
+        avatar_url = _text(item.get("avatar_url"), maximum=500)
+        if avatar_url:
+            assignee_avatar_urls[login] = avatar_url
+    assignees = tuple(assignee_values)
     body = str(payload.get("body") or "")
     source = "self_issue" if "<!-- zf-self-issue:" in body else "github_web"
     state = _text(payload.get("state"), maximum=20).lower()
@@ -122,14 +134,33 @@ def normalize_github_issue(
         labels=labels,
         label_colors=label_colors,
         assignees=assignees,
+        assignee_avatar_urls=assignee_avatar_urls,
         comment_count=int(payload.get("comments") or 0),
         milestone=_text(milestone_value.get("title"), maximum=500),
         source=source,
         derived_group=derived_triage_group(state, labels),
         last_seen_at=seen_at,
+        author_avatar_url=_text(author.get("avatar_url"), maximum=500),
     )
     mirror.validate()
     return mirror, body
+
+
+def normalize_github_comment(payload: Mapping[str, Any]) -> IssueComment:
+    author = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    comment = IssueComment(
+        id=int(payload.get("id") or 0),
+        node_id=_text(payload.get("node_id"), maximum=200),
+        html_url=_text(payload.get("html_url"), maximum=500),
+        author_login=_text(author.get("login"), maximum=200),
+        author_avatar_url=_text(author.get("avatar_url"), maximum=500),
+        body=str(payload.get("body") or ""),
+        created_at=_text(payload.get("created_at"), maximum=100),
+        updated_at=_text(payload.get("updated_at"), maximum=100),
+        author_association=_text(payload.get("author_association"), maximum=50),
+    )
+    comment.validate()
+    return comment
 
 
 class GitHubIssueReconciler:
@@ -192,13 +223,14 @@ class GitHubIssueReconciler:
             error="",
         ))
         try:
-            repository_id = self._verify_repository()
+            repository_id, star_count = self._verify_repository()
             if previous.repository_id and previous.repository_id != repository_id:
                 raise ValueError("GitHub repository identity changed")
             changed, etag, response_headers = self._sync_issues(
                 repository_id,
                 previous=previous,
                 seen_at=attempt_at,
+                force=force,
             )
             state = SyncState(
                 status="fresh",
@@ -209,6 +241,7 @@ class GitHubIssueReconciler:
                 etag=etag or previous.etag,
                 rate_limit_remaining=_header_int(response_headers, "x-ratelimit-remaining"),
                 rate_limit_reset_at=_rate_limit_reset(response_headers),
+                star_count=star_count,
             )
             self.store.save_sync_state(state)
             return {"ok": True, "status": "fresh", "changed": changed}
@@ -224,7 +257,7 @@ class GitHubIssueReconciler:
             ))
             return {"ok": False, "status": status, "changed": 0, "error": message}
 
-    def _verify_repository(self) -> str:
+    def _verify_repository(self) -> tuple[str, int]:
         url = (
             f"{self.base_url}/repos/{urllib.parse.quote(self.owner)}/"
             f"{urllib.parse.quote(self.repo)}"
@@ -239,7 +272,7 @@ class GitHubIssueReconciler:
         repository_id = str(value.get("id") or "")
         if full_name.casefold() != self.repository.casefold() or not repository_id:
             raise ValueError("GitHub repository identity mismatch")
-        return repository_id
+        return repository_id, max(0, int(value.get("stargazers_count") or 0))
 
     def _sync_issues(
         self,
@@ -247,13 +280,21 @@ class GitHubIssueReconciler:
         *,
         previous: SyncState,
         seen_at: str,
+        force: bool = False,
     ) -> tuple[int, str, ResponseHeaders]:
         changed = 0
         page = 1
         first_etag = ""
         last_headers: ResponseHeaders = {}
         since = ""
-        if previous.last_success_at:
+        needs_metadata_backfill = any(
+            not item.author_avatar_url
+            or set(item.label_colors) != set(item.labels)
+            or (item.assignees and set(item.assignee_avatar_urls) != set(item.assignees))
+            or (item.comment_count > 0 and not item.comments_ref)
+            for item in self.store.list()
+        )
+        if previous.last_success_at and not needs_metadata_backfill and not force:
             last_success = datetime.fromisoformat(
                 previous.last_success_at.replace("Z", "+00:00")
             ) - timedelta(seconds=2)
@@ -296,14 +337,42 @@ class GitHubIssueReconciler:
                     repository_id=repository_id,
                     seen_at=seen_at,
                 )
-                _, did_change = self.store.upsert(mirror, body)
+                saved, did_change = self.store.upsert(mirror, body)
                 changed += int(did_change)
+                comments = self._comments(mirror.number) if mirror.comment_count else []
+                _, comments_changed = self.store.write_comments(saved, comments)
+                changed += int(comments_changed)
             if len(values) < 100:
                 break
             page += 1
         if page > 100:
             raise ValueError("GitHub Issues pagination exceeds safe limit")
         return changed, first_etag, last_headers
+
+    def _comments(self, issue_number: int) -> list[IssueComment]:
+        comments: list[IssueComment] = []
+        page = 1
+        while page <= 100:
+            query = urllib.parse.urlencode({"per_page": "100", "page": str(page)})
+            url = (
+                f"{self.base_url}/repos/{urllib.parse.quote(self.owner)}/"
+                f"{urllib.parse.quote(self.repo)}/issues/{issue_number}/comments?{query}"
+            )
+            status, raw, headers = self.transport("GET", url, self._headers())
+            normalized_headers = {str(key).lower(): str(value) for key, value in headers.items()}
+            if status == 403 and _header_int(normalized_headers, "x-ratelimit-remaining") == 0:
+                raise ValueError("GitHub API rate limit reached")
+            if status != 200:
+                raise ValueError(f"GitHub Issue comments sync failed: HTTP {status}")
+            values = _array(raw, "invalid GitHub Issue comments response")
+            comments.extend(normalize_github_comment(value) for value in values)
+            if len(values) < 100:
+                break
+            page += 1
+        if page > 100:
+            raise ValueError("GitHub Issue comments pagination exceeds safe limit")
+        comments.sort(key=lambda item: (item.created_at, item.id))
+        return comments
 
 
 def _header_int(headers: ResponseHeaders, name: str) -> int | None:

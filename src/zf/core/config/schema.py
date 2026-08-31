@@ -1885,6 +1885,19 @@ class SelfIssueTargetConfig:
 
 
 @dataclass
+class ExternalIssueIngressConfig:
+    """Provider-neutral policy for receiving External Issue revisions."""
+
+    enabled: bool = False
+    provider: str = "github"
+    mode: str = "poll"
+    poll_interval_seconds: int = 300
+    approval_label: str = "zaofu:ready-to-fix"
+    target_root: str = "."
+    auto_triage_new_only: bool = True
+
+
+@dataclass
 class SelfIssueConfig:
     """Kernel-owned policy for report-only Self-Issue publication."""
 
@@ -1900,6 +1913,9 @@ class SelfIssueConfig:
     browser_capture_base_url: str = ""
     targets: dict[str, SelfIssueTargetConfig] = field(default_factory=dict)
     default_publication_mode: str = "gitlab"
+    ingress: ExternalIssueIngressConfig = field(
+        default_factory=ExternalIssueIngressConfig,
+    )
 
 
 @dataclass
