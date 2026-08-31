@@ -1,6 +1,8 @@
 # Issue Verified Candidate 人工交付与 Triage 控制批次
 
-> 状态: active
+> 状态: done
+
+> 实现提交: `3383337 feat: add verified issue candidate delivery controls`
 
 ## 已批准范围
 
