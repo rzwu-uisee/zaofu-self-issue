@@ -33,6 +33,8 @@ docs/*
 !docs/manual/**
 !docs/releases/
 !docs/releases/**
+!docs/design/
+!docs/design/**
 backlogs/
 tasks/
 prompt/
