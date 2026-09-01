@@ -1,11 +1,15 @@
 import {
   ISSUE_TRIAGE_POLL_INTERVAL_MS,
   ISSUE_TRIAGE_MIRROR_POLL_INTERVAL_MS,
+  ISSUE_STATE_FILTERS,
   canManageIssueRun,
+  filterIssueStateOptions,
   issueLabelFoldCount,
   issueTriageNeedsRefresh,
   issueTriageSourceLabel,
   nextIssueLabelSelection,
+  nextIssueStateSelectAll,
+  nextIssueStateSelection,
 } from "../src/pages/issueTriageModel.js";
 import { snapshotLoadKindForPage } from "../src/app/pageLoadPolicy.js";
 
@@ -37,3 +41,23 @@ assert(issueLabelFoldCount(["a", "b", "c"]) === 0, "three labels must remain vis
 assert(issueLabelFoldCount(["a", "b", "c", "d", "e"]) === 2, "labels after the first three must fold into a count");
 assert(canManageIssueRun("triaging") && canManageIssueRun("fix_paused"), "active and paused runs must expose Manage Run");
 assert(!canManageIssueRun("verified_candidate"), "completed verification must not expose Run controls");
+assert(
+  ISSUE_STATE_FILTERS.filter(([, label]) => label.startsWith("Queued:"))
+    .map(([value, label]) => `${value}=${label}`)
+    .join(",") === "triage_queued=Queued: triaged_queued,fix_queued=Queued: fix_queued",
+  "searching Queued must expose every queued workflow state without inventing an aggregate state",
+);
+assert(!ISSUE_STATE_FILTERS.some(([value]) => String(value) === "queued"), "Queued must be a searchable prefix, not a synthetic state");
+const queuedStates = filterIssueStateOptions("Queued").map(({ value }) => value);
+assert(queuedStates.join(",") === "triage_queued,fix_queued", "Queued search must return all queued states");
+assert(nextIssueStateSelection(null, "triage_queued").join(",") === "triage_queued", "a state click must start a single selection");
+assert(nextIssueStateSelection(["triage_queued"], "fix_queued").length === 2, "state selection must support multiple values");
+const selectedQueuedStates = nextIssueStateSelectAll(
+  null,
+  queuedStates,
+  ISSUE_STATE_FILTERS.map(([value]) => value),
+);
+assert(
+  selectedQueuedStates?.join(",") === "triage_queued,fix_queued",
+  "Select all after a Queued search must select only queued states",
+);

@@ -481,16 +481,57 @@
   cursor: pointer;
 }
 
-.issue-label-row.foldable .issue-label-overflow { display: none; }
-.issue-label-row.foldable:hover .issue-label-overflow,
-.issue-label-row.foldable:focus-within .issue-label-overflow { display: inline-flex; }
-.issue-label-row.foldable:hover .issue-label-more { display: none; }
-
 .issue-label-more {
   border: 1px dashed var(--border);
   background: var(--surface-soft);
   color: var(--text-muted);
   font-weight: 700;
+}
+
+.issue-label-overflow-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.issue-label-overflow-popover {
+  position: absolute;
+  z-index: 55;
+  top: calc(100% + 6px);
+  left: 0;
+  display: none;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
+}
+
+.issue-label-overflow-popover::before {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: 6px;
+  content: "";
+}
+
+.issue-label-overflow-menu:hover .issue-label-overflow-popover,
+.issue-label-overflow-menu:focus-within .issue-label-overflow-popover {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.issue-label-overflow-popover > strong {
+  font-size: var(--text-12);
+}
+
+.issue-label-overflow-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 .issue-label-badge {
@@ -621,6 +662,18 @@
 }
 .issue-triage-tooltip:hover::after,
 .issue-triage-tooltip:focus-visible::after { display: block; }
+.issue-triage-header .issue-triage-tooltip::after {
+  right: 0;
+  left: auto;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(220px, calc(100vw - 24px));
+  transform: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  text-align: left;
+}
 .issue-state-indicator.issue-triage-tooltip::after {
   left: 0;
   transform: none;

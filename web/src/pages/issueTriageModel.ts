@@ -2,6 +2,68 @@ import type { IssueTriageSyncState } from "../api/types";
 
 export const ISSUE_TRIAGE_POLL_INTERVAL_MS = 300_000;
 export const ISSUE_TRIAGE_MIRROR_POLL_INTERVAL_MS = 10_000;
+export const ISSUE_STATE_FILTERS = [
+  ["open", "Open"],
+  ["closed", "Closed"],
+  ["mirrored", "Mirrored"],
+  ["triage_queued", "Queued: triaged_queued"],
+  ["triaging", "Triaging"],
+  ["triage_paused", "Triage paused"],
+  ["triage_cancelled", "Triage cancelled"],
+  ["needs_info", "Needs info"],
+  ["awaiting_fix_approval", "Awaiting Fix approval"],
+  ["fix_queued", "Queued: fix_queued"],
+  ["fixing", "Fixing"],
+  ["fix_paused", "Fix paused"],
+  ["fix_cancelled", "Fix cancelled"],
+  ["verifying", "Verifying"],
+  ["verified_candidate", "Verified candidate"],
+  ["approved_for_pr", "Approved for PR"],
+  ["owner_changes_requested", "Owner changes requested"],
+  ["owner_rejected", "Owner rejected"],
+  ["publication_prepared", "Publication prepared"],
+  ["pr_open", "PR open"],
+  ["pr_changes_requested", "PR changes requested"],
+  ["pr_approved", "PR approved"],
+  ["pr_closed_without_merge", "PR closed without merge"],
+  ["merged", "Merged"],
+  ["blocked", "Blocked"],
+  ["failed", "Failed"],
+] as const;
+
+export function filterIssueStateOptions(search: string): Array<{ value: string; label: string }> {
+  const needle = search.trim().toLocaleLowerCase();
+  return ISSUE_STATE_FILTERS
+    .filter(([value, label]) => (
+      value.toLocaleLowerCase().includes(needle)
+      || label.toLocaleLowerCase().includes(needle)
+    ))
+    .map(([value, label]) => ({ value, label }));
+}
+
+export function nextIssueStateSelection(
+  selected: string[] | null,
+  state: string,
+): string[] {
+  const active = selected ?? [];
+  return active.includes(state)
+    ? active.filter((value) => value !== state)
+    : [...active, state];
+}
+
+export function nextIssueStateSelectAll(
+  selected: string[] | null,
+  visibleStates: string[],
+  allStates: string[],
+): string[] | null {
+  const filtered = visibleStates.length !== allStates.length;
+  if (!filtered) return selected === null ? [] : null;
+  const active = selected ?? [];
+  const visibleOnlySelected = active.length === visibleStates.length
+    && visibleStates.length > 0
+    && visibleStates.every((value) => active.includes(value));
+  return visibleOnlySelected ? [] : visibleStates;
+}
 
 const MANAGEABLE_RUN_STATES = new Set([
   "triage_queued", "triaging", "triage_paused",

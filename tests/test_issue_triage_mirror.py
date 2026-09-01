@@ -670,6 +670,71 @@ def test_list_and_detail_project_external_issue_workflow_state(tmp_path: Path) -
     assert cancelled["workflow"]["state"] == "triage_cancelled"
 
 
+def test_list_filters_all_queued_workflow_states(tmp_path: Path) -> None:
+    ctx = configured_context(tmp_path / "state")
+    store = IssueMirrorStore(ctx.state_dir)
+    mirrors = {}
+    for number in (7, 8, 9):
+        mirror, body = normalize_github_issue(
+            issue_payload(number),
+            repository="rzwu-uisee/zaofu-self-issue",
+            repository_id="123",
+            seen_at="2026-08-25T02:00:00+00:00",
+        )
+        store.upsert(mirror, body)
+        mirrors[number] = mirror
+
+    writer = EventWriter(EventLog(ctx.state_dir / "events.jsonl"))
+    for number in (7, 8):
+        task_id = f"ISSUE-{number}"
+        run_id = f"TRIAGE-{number}"
+        writer.emit(
+            "external_issue.received",
+            actor="github-poller",
+            payload={
+                "source_key": mirrors[number].issue_key,
+                "source_revision": f"sha256:revision-{number}",
+            },
+        )
+        writer.emit(
+            "external_issue.triage.queued",
+            actor="external-issue-intake",
+            task_id=task_id,
+            payload={
+                "source_key": mirrors[number].issue_key,
+                "source_revision": f"sha256:revision-{number}",
+                "workflow_run_id": run_id,
+            },
+        )
+    writer.emit(
+        "workflow.invoke.requested",
+        actor="web",
+        task_id="ISSUE-8",
+        payload={"flow_kind": "issue", "workflow_run_id": "FIX-8"},
+    )
+
+    app = FastAPI()
+    app.include_router(build_issue_triage_router(resolve_ctx=lambda project_id: ctx))
+    client = TestClient(app)
+
+    triage_queued = client.get(
+        "/api/projects/test/issue-triage",
+        params={"states": json.dumps(["triage_queued"])},
+    ).json()
+    fix_queued = client.get(
+        "/api/projects/test/issue-triage",
+        params={"states": json.dumps(["fix_queued"])},
+    ).json()
+    both_queued_states = client.get(
+        "/api/projects/test/issue-triage",
+        params={"states": json.dumps(["triage_queued", "fix_queued"])},
+    ).json()
+
+    assert [item["number"] for item in triage_queued["items"]] == [7]
+    assert [item["number"] for item in fix_queued["items"]] == [8]
+    assert {item["number"] for item in both_queued_states["items"]} == {7, 8}
+
+
 def test_workflow_projection_tracks_pause_resume_and_fix_cancellation(tmp_path: Path) -> None:
     ctx = configured_context(tmp_path / "state")
     mirror, body = normalize_github_issue(

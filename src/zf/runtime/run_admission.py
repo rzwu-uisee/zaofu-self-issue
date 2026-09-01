@@ -152,7 +152,8 @@ def build_run_admission_projection(
         if not run_id:
             continue
         relevant = (
-            event.type in RUN_ADMISSION_EVENT_TYPES
+            event.type == "workflow.invoke.requested"
+            or event.type in RUN_ADMISSION_EVENT_TYPES
             or event.type in RUN_TERMINAL_EVENT_TYPES
             or event.type in _LEGACY_RUNNING_EVENTS
             or event.type in {"run.paused", "run.resumed", "run.goal.updated"}
@@ -180,7 +181,14 @@ def build_run_admission_projection(
         if event.id:
             entry.event_ids.append(event.id)
 
-        if event.type == "run.admission.requested":
+        if event.type == "workflow.invoke.requested":
+            if not entry.terminal and entry.status not in {
+                "queued", "running", "paused",
+            }:
+                entry.status = "requested"
+                if not entry.request_id:
+                    entry.request_id = run_id
+        elif event.type == "run.admission.requested":
             if not entry.terminal:
                 # A dedicated admission request supersedes an earlier legacy
                 # goal anchor emitted during submit. The Run is not active

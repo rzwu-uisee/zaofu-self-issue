@@ -26,13 +26,14 @@ export function IssueLabelList({
 }) {
   const foldedCount = issueLabelFoldCount(labels);
   const folded = foldedCount > 0;
+  const visibleLabels = folded ? labels.slice(0, 3) : labels;
   const stop = (event: SyntheticEvent) => event.stopPropagation();
   return (
     <span className={`issue-label-row ${folded ? "foldable" : ""}`} aria-label="GitHub labels">
-      {labels.map((label, index) => (
+      {visibleLabels.map((label) => (
         <button
           aria-label={`Filter issues by label ${label}`}
-          className={`badge issue-label-badge issue-triage-tooltip ${index >= 3 ? "issue-label-overflow" : ""}`}
+          className="badge issue-label-badge issue-triage-tooltip"
           data-tooltip={`Show only issues labelled “${label}”`}
           key={label}
           style={githubLabelStyle(label, colors)}
@@ -44,16 +45,37 @@ export function IssueLabelList({
         </button>
       ))}
       {folded ? (
-        <button
-          aria-label={`Show ${foldedCount} more labels`}
-          className="badge issue-label-more issue-triage-tooltip"
-          data-tooltip="Hover or focus to show all labels"
-          type="button"
-          onClick={stop}
-          onKeyDown={stop}
-        >
-          +{foldedCount}
-        </button>
+        <span className="issue-label-overflow-menu">
+          <button
+            aria-haspopup="menu"
+            aria-label={`Show ${foldedCount} more labels`}
+            className="badge issue-label-more"
+            type="button"
+            onClick={stop}
+            onKeyDown={stop}
+          >
+            +{foldedCount}
+          </button>
+          <span className="issue-label-overflow-popover" role="menu" aria-label="Labels">
+            <strong>Labels</strong>
+            <span className="issue-label-overflow-options">
+              {labels.map((label) => (
+                <button
+                  aria-label={`Filter issues by label ${label}`}
+                  className="badge issue-label-badge"
+                  key={label}
+                  role="menuitem"
+                  style={githubLabelStyle(label, colors)}
+                  type="button"
+                  onClick={(event) => { stop(event); onSelect(label); }}
+                  onKeyDown={stop}
+                >
+                  {label}
+                </button>
+              ))}
+            </span>
+          </span>
+        </span>
       ) : null}
     </span>
   );

@@ -647,6 +647,32 @@ def test_pause_resume_cancel_are_idempotent_and_fence_late_result(
     )
 
 
+def test_pending_invoke_can_be_cancelled_before_runtime_admission(
+    tmp_path: Path,
+) -> None:
+    _state_dir, log, runtime = _runtime(tmp_path)
+    invoke = _invoke_event(runtime, run_id="RUN-A", task_id="TASK-A")
+
+    pending = build_run_admission_projection(log.read_all()).runs["RUN-A"]
+    assert pending.status == "requested"
+    assert pending.task_id == "TASK-A"
+
+    cancelled = _control(runtime, action="run-cancel", run_id="RUN-A")
+    cancelled_replay = _control(runtime, action="run-cancel", run_id="RUN-A")
+
+    assert cancelled["status"] == "cancelled"
+    assert cancelled_replay["idempotent_replay"] is True
+    assert sum(event.type == "run.cancelled" for event in log.read_all()) == 1
+
+    runtime.run_once(events=[invoke])
+
+    assert not any(
+        event.type in {"run.admission.admitted", "workflow.invoke.accepted"}
+        and event.payload.get("workflow_run_id") == "RUN-A"
+        for event in log.read_all()
+    )
+
+
 def test_terminal_run_dispatch_blocked_event_does_not_self_amplify(
     tmp_path: Path,
 ) -> None:

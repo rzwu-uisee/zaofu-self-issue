@@ -16,8 +16,12 @@ import type {
 } from "../api/types";
 import {
   ISSUE_TRIAGE_MIRROR_POLL_INTERVAL_MS,
+  ISSUE_STATE_FILTERS,
   canManageIssueRun,
+  filterIssueStateOptions,
   githubMarkdownForDisplay,
+  nextIssueStateSelectAll,
+  nextIssueStateSelection,
   nextIssueLabelSelection,
   issueTriageSourceLabel,
 } from "./issueTriageModel";
@@ -105,7 +109,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
   const [group, setGroup] = useState("");
-  const [state, setState] = useState("");
+  const [selectedStates, setSelectedStates] = useState<string[] | null>(null);
   const [selectedLabels, setSelectedLabels] = useState<string[] | null>(null);
   const [selectedAuthors, setSelectedAuthors] = useState<string[] | null>(null);
   const [source, setSource] = useState("");
@@ -125,7 +129,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
   const filters = useMemo(() => ({
     q: appliedQuery,
     group,
-    state,
+    states: selectedStates === null ? "" : JSON.stringify(selectedStates),
     label: selectedLabels?.length === 1 ? selectedLabels[0] : "",
     labels: selectedLabels === null ? "" : JSON.stringify(selectedLabels),
     author: selectedAuthors?.length === 1 ? selectedAuthors[0] : "",
@@ -135,7 +139,7 @@ function IssuesTab({ projectId }: { projectId: string }) {
     order_direction: orderDirection,
     cursor,
     limit: 50,
-  }), [appliedQuery, cursor, group, orderBy, orderDirection, selectedAuthors, selectedLabels, source, state]);
+  }), [appliedQuery, cursor, group, orderBy, orderDirection, selectedAuthors, selectedLabels, selectedStates, source]);
 
   const labelColors = useMemo(() => {
     const merged = { ...(summary?.label_colors ?? {}) };
@@ -318,9 +322,10 @@ function IssuesTab({ projectId }: { projectId: string }) {
           <Search aria-hidden="true" size={15} />
           <input aria-label="Search issues" placeholder="Search title, number, author, or label" value={query} onChange={(event) => setQuery(event.target.value)} />
         </form>
-        <select aria-label="GitHub state" value={state} onChange={(event) => resetCursor(setState, event.target.value)}>
-          <option value="">All states</option><option value="open">Open</option><option value="closed">Closed</option>
-        </select>
+        <StateFilter
+          selected={selectedStates}
+          onChange={(next) => { setSelectedStates(next); setCursor(0); setDetail(null); }}
+        />
         <LabelFilter
           colors={labelColors}
           counts={summary?.labels ?? {}}
@@ -551,6 +556,106 @@ function OrderFilter({
           </select>
         </div>
       </div> : null}
+    </div>
+  );
+}
+
+function StateFilter({
+  selected,
+  onChange,
+}: {
+  selected: string[] | null;
+  onChange: (states: string[] | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const options: Array<{ value: string; label: string }> = ISSUE_STATE_FILTERS.map(
+    ([value, label]) => ({ value, label }),
+  );
+  const optionValues = options.map(({ value }) => value);
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const visible = filterIssueStateOptions(search);
+  const active = selected?.filter((item) => optionValues.includes(item)) ?? [];
+  const visibleValues = visible.map(({ value }) => value);
+  const visibleOnlySelected = selected !== null
+    && active.length === visibleValues.length
+    && visibleValues.length > 0
+    && visibleValues.every((value) => active.includes(value));
+  const selectAllChecked = normalizedSearch
+    ? visibleOnlySelected
+    : selected === null;
+  const buttonLabel = selected === null
+    ? "All states"
+    : selected.length === 0
+      ? "No states"
+      : selected.length === 1
+        ? options.find(({ value }) => value === selected[0])?.label ?? selected[0]
+        : `${selected.length} states`;
+
+  const commitSelection = (next: string[]) => {
+    onChange(next.length === optionValues.length ? null : next);
+  };
+  const toggle = (value: string) => {
+    commitSelection(nextIssueStateSelection(selected, value));
+  };
+  const toggleVisible = () => {
+    onChange(nextIssueStateSelectAll(selected, visibleValues, optionValues));
+  };
+
+  return (
+    <div
+      className="issue-label-filter issue-state-filter"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="issue-label-filter-trigger"
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>{buttonLabel}</span>
+        {open ? <ChevronUp aria-hidden="true" size={14} /> : <ChevronDown aria-hidden="true" size={14} />}
+      </button>
+      {open ? (
+        <div className="issue-label-filter-menu" role="menu">
+          <input
+            aria-label="Filter states"
+            placeholder="Filter states…"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <button
+            aria-checked={selectAllChecked}
+            className="issue-label-filter-all"
+            disabled={!visibleValues.length}
+            role="menuitemcheckbox"
+            type="button"
+            onClick={toggleVisible}
+          >
+            <input checked={selectAllChecked} readOnly tabIndex={-1} type="checkbox" />
+            <strong>Select all</strong>
+          </button>
+          <div className="issue-label-filter-options">
+            {visible.map(({ value, label }) => (
+              <button
+                aria-checked={active.includes(value)}
+                className="issue-label-filter-option"
+                key={value}
+                role="menuitemcheckbox"
+                type="button"
+                onClick={() => toggle(value)}
+              >
+                <input checked={active.includes(value)} readOnly tabIndex={-1} type="checkbox" />
+                <span>{label}</span>
+              </button>
+            ))}
+            {!visible.length ? <span className="muted issue-label-filter-empty">No matching states</span> : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -251,6 +251,21 @@ def _workflow_projection(
     }
 
 
+def _matches_issue_states(
+    item: IssueMirror,
+    workflow: dict[str, Any] | None,
+    requested: set[str] | None,
+) -> bool:
+    if requested is None:
+        return True
+    if not requested:
+        return False
+    workflow_state = str(
+        (workflow or {}).get("state") or "mirrored"
+    ).casefold()
+    return bool(requested & {item.github_state.casefold(), workflow_state})
+
+
 def build_issue_triage_router(
     *,
     resolve_ctx: Callable[[str], Any],
@@ -383,6 +398,7 @@ def build_issue_triage_router(
         q: str = "",
         group: str = "",
         state: str = "",
+        states: str = "",
         label: str = "",
         labels: str = "",
         author: str = "",
@@ -405,6 +421,17 @@ def build_issue_triage_router(
             return JSONResponse({"ok": False, "status": "unconfigured", "reason": str(exc)}, status_code=409)
         needle = q.strip().casefold()[:200]
         requested_label = label.strip().casefold()
+        requested_states: set[str] | None = None
+        if states:
+            try:
+                raw_states = json.loads(states)
+            except json.JSONDecodeError:
+                raw_states = []
+            requested_states = {
+                str(value).strip().casefold()
+                for value in raw_states
+                if str(value).strip()
+            } if isinstance(raw_states, list) else set()
         requested_labels: set[str] | None = None
         if labels:
             try:
@@ -427,6 +454,14 @@ def build_issue_triage_router(
                 for value in raw_authors
                 if str(value).strip()
             } if isinstance(raw_authors, list) else set()
+        needs_workflow_state = bool(
+            requested_states
+            and requested_states - {"open", "closed"}
+        )
+        workflow_by_issue = {
+            item.issue_key: _workflow_projection(events, item)
+            for item in items
+        } if needs_workflow_state else {}
         filtered = [item for item in items if (
             (not group or item.derived_group == group)
             and (not state or item.github_state == state)
@@ -435,6 +470,11 @@ def build_issue_triage_router(
             and (not author or item.author_login.casefold() == author.casefold())
             and (requested_authors is None or item.author_login.casefold() in requested_authors)
             and (not source or item.source == source)
+            and _matches_issue_states(
+                item,
+                workflow_by_issue.get(item.issue_key),
+                requested_states,
+            )
             and (
                 not needle
                 or needle in item.title.casefold()
@@ -454,7 +494,14 @@ def build_issue_triage_router(
             "schema_version": "issue-triage-page.v1",
             "repository": repository,
             "items": [
-                _public(item, workflow=_workflow_projection(events, item))
+                _public(
+                    item,
+                    workflow=(
+                        workflow_by_issue.get(item.issue_key)
+                        if needs_workflow_state
+                        else _workflow_projection(events, item)
+                    ),
+                )
                 for item in page
             ],
             "total": len(filtered),
