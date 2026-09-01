@@ -1245,11 +1245,14 @@ def test_load_real_zf_yaml_expands_thin_multi_flow_controller():
     assert cfg.workflow.resume_packet.enabled is True
     assert cfg.runtime.run_manager.resident_agent.enabled is True
     assert cfg.runtime.run_manager.resident_agent.session_mode == "dedicated"
+    assert cfg.runtime.run_manager.backend == "codex"
     assert cfg.runtime.autoresearch_resident.enabled is True
     assert cfg.runtime.workdirs.enabled is True
     assert cfg.runtime.workdirs.mode == "worktree"
     assert cfg.runtime.git.candidate_base_ref == "main"
     assert cfg.runtime.git.ship_target_branch == "main"
+    assert cfg.orchestrator.backend == "codex"
+    assert {role.backend for role in cfg.roles} == {"codex"}
     assert {role.name for role in cfg.roles} == {
         "prd-product-scan",
         "prd-tech-scan",

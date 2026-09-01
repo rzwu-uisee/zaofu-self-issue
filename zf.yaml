@@ -15,12 +15,12 @@ spec:
 apiVersion: zaofu.dev/v1
 kind: IssueFlow
 metadata: {name: zaofu-issue/v3}
-spec: {topology: light, lanes: 1, backend: claude-code, issueRef: "${ZF_ISSUE_REF:-docs/issues/TODO.md}", targetRoot: ., qualityFloor: issue-regression, evidencePolicy: strict_refs, deliveryPolicy: ship_candidate}
+spec: {topology: light, lanes: 1, backend: codex, issueRef: "${ZF_ISSUE_REF:-docs/issues/TODO.md}", targetRoot: ., qualityFloor: issue-regression, evidencePolicy: strict_refs, deliveryPolicy: ship_candidate}
 ---
 apiVersion: zaofu.dev/v1
 kind: PrdFlow
 metadata: {name: zaofu-prd/v3}
-spec: {lanes: 2, backend: claude-code, prdRef: "${ZF_PRD_REF:-docs/prd/TODO.md}", targetRoot: ., qualityFloor: product-demo, evidencePolicy: strict_refs, deliveryPolicy: ship_candidate}
+spec: {lanes: 2, backend: codex, prdRef: "${ZF_PRD_REF:-docs/prd/TODO.md}", targetRoot: ., qualityFloor: product-demo, evidencePolicy: strict_refs, deliveryPolicy: ship_candidate}
 ---
 apiVersion: zaofu.dev/v1
 kind: ZfConfig
@@ -33,11 +33,17 @@ spec:
   project: {name: zaofu, state_dir: .zf}
   # Self-Issue publication targets shared with the source deployment.
   self_issue: {enabled: true, provider: github, authorization_domain: github.com, target_project: rzwu-uisee/zaofu-self-issue, target_locked: true, oauth_client_id: "${ZF_GITHUB_APP_CLIENT_ID:-Iv23li7B8j37FeLtqe8l}", default_publication_mode: github, ingress: {enabled: true, provider: github, mode: poll, poll_interval_seconds: 300, approval_label: "zaofu:ready-to-fix", target_root: ., auto_triage_new_only: true}, delivery: {enabled: true, provider: github, repository: rzwu-uisee/zaofu-self-issue, remote_url: "https://github.com/rzwu-uisee/zaofu-self-issue.git", base_branch: dev, branch_prefix: review, merge_strategy: squash, pr_sync_mode: manual_refresh, auto_close_issue: false}, targets: {gitlab: {authorization_domain: gitlab.com, project: runze.wu/zaofu-selfissue, oauth_client_id: "${ZF_GITLAB_OAUTH_CLIENT_ID:-3f1e402dc2b7de7b0c81e23ae9f9e001cc4007bbd07f0926cd1aa422f8b00ba5}", oauth_redirect_uri: "${ZF_GITLAB_OAUTH_REDIRECT_URI:-http://127.0.0.1:8001/}", auth_mode: oauth_pkce}, github: {authorization_domain: github.com, project: rzwu-uisee/zaofu-self-issue, oauth_client_id: "${ZF_GITHUB_APP_CLIENT_ID:-Iv23li7B8j37FeLtqe8l}", auth_mode: device_flow}}}
-  orchestrator: {backend: claude-code, wake_min_interval_s: 5}
+  orchestrator: {backend: codex, wake_min_interval_s: 5}
   roles:
-    - {name: external-issue-triage, instance_id: external-issue-triage, role_kind: reader, backend: claude-code, permission_mode: bypass, transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-harness-evidence-collection], publishes: [task.contract.change.requested]}
-    - {name: external-issue-triage-verifier, instance_id: external-issue-triage-verifier, role_kind: reader, backend: claude-code, permission_mode: bypass, transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-yoke-test-evaluator-role-context]}
-    - {name: orchestrator, instance_id: orchestrator, role_kind: reader, backend: claude-code, permission_mode: bypass, transport: tmux, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested], publishes: [orchestrator.rework.triage.recorded], skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]}
+    - {name: external-issue-triage, instance_id: external-issue-triage, role_kind: reader, backend: codex, permission_mode: bypass, transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-harness-evidence-collection], publishes: [task.contract.change.requested]}
+    - {name: external-issue-triage-verifier, instance_id: external-issue-triage-verifier, role_kind: reader, backend: codex, permission_mode: bypass, transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-yoke-test-evaluator-role-context]}
+    - {name: orchestrator, instance_id: orchestrator, role_kind: reader, backend: codex, permission_mode: bypass, transport: tmux, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, triggers: [dispatch.silent_stall, orchestrator.rework.triage.requested], publishes: [orchestrator.rework.triage.recorded], skills: [zf-yoke-orchestrator-role-context, zf-harness-state-sync]}
+    - {name: research_root, instance_id: research_root, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, Agent, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, budget_usd: 25, provider_session: {effort: high}, skills: [source-verification, zf-project-suggest, zf-research-adaptive-root]}
+    - {name: source_researcher, instance_id: source_researcher, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [source-verification, zf-project-suggest]}
+    - {name: product_analyst, instance_id: product_analyst, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-project-suggest]}
+    - {name: technical_analyst, instance_id: technical_analyst, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [source-verification, zf-cr]}
+    - {name: risk_critic, instance_id: risk_critic, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-yoke-critic-role-context]}
+    - {name: synthesizer, instance_id: synthesizer, role_kind: reader, backend: codex, permission_mode: allowlist, allowed_tools: [Read, Glob, Grep, WebSearch, WebFetch, "Bash(zf emit *)"], transport: tmux, lifecycle: {mode: on_demand}, stuck_threshold_seconds: 900, spawn_ready_timeout_seconds: 240, skills: [zf-project-suggest]}
   # Resolve the portable profile's named source from the repository root.
   skill_sources: [{name: zaofu-skills, path: skills, mode: readonly}]
   quality_gates:
@@ -45,7 +51,7 @@ spec:
   runtime:
     web_terminal: {enabled: true, provider_start_timeout_seconds: 90}
     workdirs: {provision_paths: [.venv, web/node_modules]}
-    run_manager: {backend: claude-code}
+    run_manager: {backend: codex}
     git: {candidate_base_ref: main, ship_target_branch: main, auto_ship_on_judge_passed: false}
   workflow:
     harness_profile: strict
