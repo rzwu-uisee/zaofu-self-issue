@@ -23,6 +23,7 @@ _LOOP_PROJECTION_FILES = (
     "stage_spine.json",
     "workflow_health.json",
 )
+_LOOP_TASK_FILES = ("kanban.json",)
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,13 @@ def loop_view_source_fingerprint(
     dependency_paths = list(
         (f"loop-projection:{name}", state_dir / "projections" / name)
         for name in _LOOP_PROJECTION_FILES
+    )
+    # ``build_measure_loop_projection`` derives status counters directly from
+    # the canonical task store. Include its atomic-write identity so a task
+    # status change invalidates cached measure-loop responses even when no
+    # corresponding EventLog entry was emitted.
+    dependency_paths.extend(
+        (f"loop-task:{name}", state_dir / name) for name in _LOOP_TASK_FILES
     )
     try:
         root = Path(project_root).resolve() if project_root is not None else None

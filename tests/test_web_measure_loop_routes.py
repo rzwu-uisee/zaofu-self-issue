@@ -85,6 +85,21 @@ def test_measure_loop_endpoint_is_read_only(client: TestClient, state_dir: Path)
     assert before == after
 
 
+def test_measure_loop_cache_invalidates_on_kanban_status_change(
+    client: TestClient,
+    state_dir: Path,
+) -> None:
+    """Task-store updates must invalidate measure counters without an event."""
+
+    before = client.get("/api/projects/default/measure/loops").json()
+    assert before["summary"]["done"] == 0
+
+    TaskStore(state_dir / "kanban.json").update("T1", status="done")
+
+    after = client.get("/api/projects/default/measure/loops").json()
+    assert after["summary"]["done"] == 1
+
+
 def test_loop_view_endpoint(client: TestClient) -> None:
     response = client.get("/api/projects/default/loop-view")
 
