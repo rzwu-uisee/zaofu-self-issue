@@ -731,9 +731,49 @@ def create_app(
     # per key. The dashboard's slow tail (light median 8.2s, worst 58s in the
     # timing log) was convoys of identical snapshot builds serializing on the
     # GIL; repeat pulls of an unchanged log now return in O(1).
-    project_snapshot_cache: dict[str, tuple[float, tuple[int, int], dict[str, Any]]] = {}
+    project_snapshot_cache: dict[str, tuple[float, tuple[int, ...], dict[str, Any]]] = {}
     project_snapshot_locks: dict[str, threading.Lock] = {}
     project_snapshot_guard = threading.Lock()
+    project_snapshot_refreshing: set[str] = set()
+
+    def _project_snapshot_fingerprint(
+        sd: Path,
+        *,
+        slice_name: str,
+        root: Path | None,
+    ) -> tuple[int, ...]:
+        """Return cheap metadata for every file that can affect a slice.
+
+        EventLog metadata alone is insufficient: task/feature, session and
+        projection sidecars are updated independently of events.  Including
+        their stat tuple keeps the fast cache truthful without reading large
+        JSON payloads on every poll.
+        """
+        from zf.web.projections.events import _event_log_fingerprint
+
+        values: list[int] = list(_event_log_fingerprint(sd))
+        paths = [
+            sd / "events",
+            sd / "kanban.json",
+            sd / "feature_list.json",
+            sd / "cost.jsonl",
+            sd / "role_sessions.yaml",
+            sd / "projections" / "task_attempts.json",
+            sd / "projections" / "stage_spine.json",
+            sd / "projections" / "workflow_health.json",
+        ]
+        if root is not None:
+            paths.append(Path(root) / "zf.yaml")
+        # Keep the path set stable across slices while retaining the slice in
+        # the cache key; this avoids accidentally serving a different slice.
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                values.extend((0, 0, 0))
+            else:
+                values.extend((int(stat.st_size), int(stat.st_mtime_ns), int(stat.st_ctime_ns)))
+        return tuple(values)
 
     def _with_session_overlay(data: dict[str, Any], token: str | None) -> dict[str, Any]:
         """Cached snapshots are token-agnostic; only runtime.web_session and
@@ -772,10 +812,8 @@ def create_app(
             return data
 
     def _cached_project_snapshot(sd: Path, *, slice_name: str, cfg, root, token) -> dict[str, Any]:
-        from zf.web.projections.events import _event_log_fingerprint
-
         key = f"{sd}::{slice_name}"
-        fingerprint = _event_log_fingerprint(sd)
+        fingerprint = _project_snapshot_fingerprint(sd, slice_name=slice_name, root=root)
         ttl = max(_snapshot_cache_seconds(), 5.0)
         entry = project_snapshot_cache.get(key)
         now = time.monotonic()
@@ -785,13 +823,31 @@ def create_app(
             # the background instead of making the request pay (this also lets
             # startup prewarm survive: a hard TTL evicted it before first use).
             if now - entry[0] > ttl:
-                threading.Thread(
-                    target=_build_project_snapshot,
-                    kwargs=dict(sd=sd, slice_name=slice_name, cfg=cfg, root=root,
-                                key=key, fingerprint=fingerprint),
-                    name="zf-snapshot-refresh",
-                    daemon=True,
-                ).start()
+                # A busy dashboard can issue several polls during one refresh
+                # interval.  Only one stale refresh may run for a key; without
+                # this guard each poll queued another full projection build
+                # behind the per-key lock and recreated the GIL convoy this
+                # cache is meant to avoid.
+                with project_snapshot_guard:
+                    already_refreshing = key in project_snapshot_refreshing
+                    if not already_refreshing:
+                        project_snapshot_refreshing.add(key)
+                if not already_refreshing:
+                    def _refresh() -> None:
+                        try:
+                            _build_project_snapshot(
+                                sd, slice_name=slice_name, cfg=cfg, root=root,
+                                key=key, fingerprint=fingerprint,
+                            )
+                        finally:
+                            with project_snapshot_guard:
+                                project_snapshot_refreshing.discard(key)
+
+                    threading.Thread(
+                        target=_refresh,
+                        name="zf-snapshot-refresh",
+                        daemon=True,
+                    ).start()
             return _with_session_overlay(entry[2], token)
         data = _build_project_snapshot(
             sd, slice_name=slice_name, cfg=cfg, root=root, key=key, fingerprint=fingerprint,
@@ -956,13 +1012,13 @@ def create_app(
                 ),
                 status_code=409,
             )
-        return JSONResponse(_snapshot_slice(
+        return _etag_json(_cached_project_snapshot(
             state_dir,
             slice_name="light",
-            config=config,
-            project_root=project_root,
-            web_session_token=_web_session_cookie(request),
-        ))
+            cfg=config,
+            root=project_root,
+            token=_web_session_cookie(request),
+        ), request)
 
     @app.get("/api/kanban-agent/summary")
     def kanban_agent_summary() -> JSONResponse:
@@ -1630,13 +1686,13 @@ def create_app(
             default_config=config,
             default_project_root=project_root,
         )
-        return JSONResponse(_snapshot_slice(
+        return _etag_json(_cached_project_snapshot(
             context.state_dir,
             slice_name="board",
-            config=context.config,
-            project_root=context.project_root,
-            web_session_token=_web_session_cookie(request),
-        ))
+            cfg=context.config,
+            root=context.project_root,
+            token=_web_session_cookie(request),
+        ), request)
 
     @app.get("/api/projects/{project_id}/snapshot/runtime")
     def project_snapshot_runtime(project_id: str, request: Request) -> JSONResponse:
@@ -1647,13 +1703,13 @@ def create_app(
             default_config=config,
             default_project_root=project_root,
         )
-        return JSONResponse(_snapshot_slice(
+        return _etag_json(_cached_project_snapshot(
             context.state_dir,
             slice_name="runtime",
-            config=context.config,
-            project_root=context.project_root,
-            web_session_token=_web_session_cookie(request),
-        ))
+            cfg=context.config,
+            root=context.project_root,
+            token=_web_session_cookie(request),
+        ), request)
 
     @app.get("/api/projects/{project_id}/snapshot/observability")
     def project_snapshot_observability(project_id: str, request: Request) -> JSONResponse:
@@ -1664,13 +1720,13 @@ def create_app(
             default_config=config,
             default_project_root=project_root,
         )
-        return JSONResponse(_snapshot_slice(
+        return _etag_json(_cached_project_snapshot(
             context.state_dir,
             slice_name="observability",
-            config=context.config,
-            project_root=context.project_root,
-            web_session_token=_web_session_cookie(request),
-        ))
+            cfg=context.config,
+            root=context.project_root,
+            token=_web_session_cookie(request),
+        ), request)
 
     @app.get("/api/projects/{project_id}/delivery-features")
     def project_delivery_features(project_id: str) -> JSONResponse:
